@@ -8,7 +8,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 
-use crate::gc::{trace_slots_by_types, Gc, GcRef};
+use crate::gc::{trace_slots_by_types, Gc, GcObjectScanChunk, GcRef, GcTraceCursor};
 #[cfg(test)]
 use crate::objects::string;
 use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
@@ -384,6 +384,283 @@ pub unsafe fn scan_object_with_context<'a, F>(
     });
 }
 
+/// Scan at most `limit_bytes` of one heap object's trace layout.
+///
+/// The cursor is owned by the collector and survives scheduler boundaries.
+/// One work unit is one source slot inspected. Composite array values are
+/// resolved by flat slot index, so deeply nested layouts require no temporary
+/// allocation or native recursion.
+pub unsafe fn scan_object_chunk_with_context<'a, F>(
+    gc: &mut Gc,
+    obj: GcRef,
+    context: GcScanContext<'_>,
+    func_closure_scan_layout: &F,
+    cursor: &mut GcTraceCursor,
+    limit_bytes: usize,
+) -> GcObjectScanChunk
+where
+    F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
+{
+    let slot_budget = limit_bytes / SLOT_BYTES;
+    if slot_budget == 0 {
+        return GcObjectScanChunk::pending(0);
+    }
+
+    let gc_header = unsafe { Gc::header(obj) };
+    if gc_header.is_value_slots_object() {
+        let slots =
+            unsafe { core::slice::from_raw_parts(obj as *const u64, gc_header.slots as usize) };
+        return scan_value_slots_chunk(
+            gc,
+            slots,
+            gc_header.value_meta(),
+            context,
+            cursor,
+            slot_budget,
+            "scan_value_slots_object",
+        );
+    }
+
+    match gc_header.kind() {
+        ValueKind::Array => {
+            assert!(
+                gc_header.slots == 0 || gc_header.slots >= array::HEADER_SLOTS as u16,
+                "scan_object_chunk: Array object {:p} has invalid slots={}",
+                obj,
+                gc_header.slots
+            );
+            unsafe { scan_array_chunk(gc, obj, context, cursor, slot_budget) }
+        }
+        ValueKind::String | ValueKind::Slice => {
+            if cursor.reference_index == 0 {
+                let owner = unsafe { slice::owner_ref(obj) };
+                if !owner.is_null() {
+                    gc.mark_gray(owner);
+                }
+                cursor.reference_index = 1;
+                GcObjectScanChunk::complete(SLOT_BYTES)
+            } else {
+                GcObjectScanChunk::complete(0)
+            }
+        }
+        ValueKind::Struct | ValueKind::Pointer => {
+            let meta_id = gc_header.meta_id() as usize;
+            let slot_types = &context
+                .struct_metas
+                .get(meta_id)
+                .unwrap_or_else(|| panic!("scan_struct: missing StructMeta id {meta_id}"))
+                .slot_types;
+            let slots = unsafe { core::slice::from_raw_parts(obj as *const u64, slot_types.len()) };
+            scan_slot_types_chunk(gc, slots, slot_types, cursor, slot_budget)
+        }
+        ValueKind::Closure => unsafe {
+            scan_closure_chunk(gc, obj, func_closure_scan_layout, cursor, slot_budget)
+        },
+        ValueKind::Map => {
+            assert!(
+                gc_header.slots == map::DATA_SLOTS,
+                "scan_object_chunk: Map object {:p} has slots={} != DATA_SLOTS={}",
+                obj,
+                gc_header.slots,
+                map::DATA_SLOTS
+            );
+            unsafe { scan_map_chunk(gc, obj, context, cursor, slot_budget) }
+        }
+        kind if kind.is_queue() => {
+            assert!(
+                gc_header.slots == queue_state::DATA_SLOTS,
+                "scan_object_chunk: Queue object {:p} has slots={} != DATA_SLOTS={}",
+                obj,
+                gc_header.slots,
+                queue_state::DATA_SLOTS
+            );
+            unsafe { scan_queue_chunk(gc, obj, context, cursor, slot_budget) }
+        }
+        _ => GcObjectScanChunk::complete(0),
+    }
+}
+
+fn scan_value_slots_chunk(
+    gc: &mut Gc,
+    slots: &[u64],
+    meta: ValueMeta,
+    context: GcScanContext<'_>,
+    cursor: &mut GcTraceCursor,
+    slot_budget: usize,
+    label: &str,
+) -> GcObjectScanChunk {
+    let start = cursor.reference_index.min(slots.len());
+    let end = start.saturating_add(slot_budget).min(slots.len());
+    for flat_index in start..end {
+        trace_flat_value_slot(slots, meta, context, flat_index, &mut |child| {
+            gc.mark_gray(child)
+        })
+        .unwrap_or_else(|err| panic!("{label}: {err}"));
+    }
+    cursor.reference_index = end;
+    let work_bytes = (end - start) * SLOT_BYTES;
+    if end == slots.len() {
+        GcObjectScanChunk::complete(work_bytes)
+    } else {
+        GcObjectScanChunk::pending(work_bytes)
+    }
+}
+
+fn scan_slot_types_chunk(
+    gc: &mut Gc,
+    slots: &[u64],
+    slot_types: &[SlotType],
+    cursor: &mut GcTraceCursor,
+    slot_budget: usize,
+) -> GcObjectScanChunk {
+    assert_eq!(
+        slots.len(),
+        slot_types.len(),
+        "scan_slot_types_chunk: slots length {} != slot_types length {}",
+        slots.len(),
+        slot_types.len()
+    );
+    let start = cursor.reference_index.min(slots.len());
+    let end = start.saturating_add(slot_budget).min(slots.len());
+    for index in start..end {
+        trace_flat_slot_by_types(slots, slot_types, index, &mut |child| gc.mark_gray(child));
+    }
+    cursor.reference_index = end;
+    let work_bytes = (end - start) * SLOT_BYTES;
+    if end == slots.len() {
+        GcObjectScanChunk::complete(work_bytes)
+    } else {
+        GcObjectScanChunk::pending(work_bytes)
+    }
+}
+
+fn trace_flat_slot_by_types<V>(slots: &[u64], slot_types: &[SlotType], index: usize, visit: &mut V)
+where
+    V: FnMut(GcRef),
+{
+    match slot_types.get(index).copied() {
+        Some(SlotType::GcRef) if slots[index] != 0 => visit(slots[index] as GcRef),
+        Some(SlotType::Interface1)
+            if index > 0
+                && slot_types[index - 1] == SlotType::Interface0
+                && interface::data_is_gc_ref(slots[index - 1])
+                && slots[index] != 0 =>
+        {
+            visit(slots[index] as GcRef)
+        }
+        _ => {}
+    }
+}
+
+fn trace_flat_value_slot<V>(
+    mut slots: &[u64],
+    mut meta: ValueMeta,
+    context: GcScanContext<'_>,
+    mut flat_index: usize,
+    visit: &mut V,
+) -> Result<(), TypedWriteBarrierByMetaError>
+where
+    V: FnMut(GcRef),
+{
+    loop {
+        match meta.value_kind() {
+            ValueKind::Array => {
+                if !context.has_runtime_types() {
+                    return Ok(());
+                }
+                let resolver = RuntimeTypeResolver::new(
+                    context.struct_metas,
+                    context.named_type_metas,
+                    context.runtime_types,
+                );
+                let array_rttid = ValueRttid::new(meta.meta_id(), ValueKind::Array);
+                let Some((_, RuntimeType::Array { len, elem })) =
+                    resolver.resolve_value_rttid(array_rttid)
+                else {
+                    return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
+                        rttid: array_rttid.rttid(),
+                    });
+                };
+                let expected = resolver
+                    .slot_count_for_value_rttid(array_rttid)
+                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                if slots.len() != expected {
+                    return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                        expected,
+                        actual: slots.len(),
+                    });
+                }
+                let len = usize::try_from(*len)
+                    .map_err(|_| TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                if len == 0 {
+                    return Ok(());
+                }
+                let elem_slots = slots.len() / len;
+                if elem_slots == 0 || !slots.len().is_multiple_of(len) {
+                    return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                        expected: len,
+                        actual: slots.len(),
+                    });
+                }
+                let element_index = flat_index / elem_slots;
+                if element_index >= len {
+                    return Ok(());
+                }
+                let start = element_index
+                    .checked_mul(elem_slots)
+                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+                slots = &slots[start..start + elem_slots];
+                flat_index %= elem_slots;
+                meta = resolver.canonical_value_meta_for_value_rttid(*elem).ok_or(
+                    TypedWriteBarrierByMetaError::MissingRuntimeType {
+                        rttid: elem.rttid(),
+                    },
+                )?;
+            }
+            ValueKind::Struct => {
+                let meta_id = meta.meta_id() as usize;
+                let slot_types = &context
+                    .struct_metas
+                    .get(meta_id)
+                    .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
+                    .slot_types;
+                if slots.len() != slot_types.len() {
+                    return Err(TypedWriteBarrierByMetaError::SlotWidthMismatch {
+                        vals: slots.len(),
+                        slot_types: slot_types.len(),
+                    });
+                }
+                trace_flat_slot_by_types(slots, slot_types, flat_index, visit);
+                return Ok(());
+            }
+            ValueKind::Interface => {
+                if flat_index == 1
+                    && slots.len() >= 2
+                    && interface::data_is_gc_ref(slots[0])
+                    && slots[1] != 0
+                {
+                    visit(slots[1] as GcRef);
+                }
+                return Ok(());
+            }
+            ValueKind::String
+            | ValueKind::Slice
+            | ValueKind::Map
+            | ValueKind::Channel
+            | ValueKind::Closure
+            | ValueKind::Pointer
+            | ValueKind::Port
+            | ValueKind::Island => {
+                if flat_index == 0 && slots.first().copied().unwrap_or(0) != 0 {
+                    visit(slots[0] as GcRef);
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
 /// Visit a GC object's children through the same precise metadata rules used by collection.
 pub unsafe fn trace_object_children<'a, F, V>(
     obj: GcRef,
@@ -541,6 +818,246 @@ where
     );
 }
 
+unsafe fn scan_closure_chunk<'a, F>(
+    gc: &mut Gc,
+    obj: GcRef,
+    func_capture_slot_types: &F,
+    cursor: &mut GcTraceCursor,
+    slot_budget: usize,
+) -> GcObjectScanChunk
+where
+    F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
+{
+    let func_id = unsafe { closure::func_id(obj) };
+    let cap_count = unsafe { closure::capture_count(obj) };
+    if cap_count == 0 {
+        return GcObjectScanChunk::complete(0);
+    }
+    let capture_slots = unsafe {
+        core::slice::from_raw_parts((obj as *const u64).add(closure::HEADER_SLOTS), cap_count)
+    };
+    let layout = func_capture_slot_types(func_id);
+    let capture_types = if !layout.capture_slot_types.is_empty() {
+        layout.capture_slot_types
+    } else if layout.runtime_capture_slot_types.len() == cap_count {
+        layout.runtime_capture_slot_types
+    } else {
+        panic!(
+            "scan_closure_chunk: func_id={} has {} captures and no matching capture layout",
+            func_id, cap_count
+        );
+    };
+    scan_slot_types_chunk(gc, capture_slots, capture_types, cursor, slot_budget)
+}
+
+unsafe fn scan_array_chunk(
+    gc: &mut Gc,
+    obj: GcRef,
+    context: GcScanContext<'_>,
+    cursor: &mut GcTraceCursor,
+    slot_budget: usize,
+) -> GcObjectScanChunk {
+    let elem_meta = unsafe { array::elem_meta(obj) };
+    if !elem_meta.value_kind().may_contain_gc_refs() {
+        return GcObjectScanChunk::complete(0);
+    }
+    let len = unsafe { array::len(obj) };
+    let elem_bytes = unsafe { array::elem_bytes(obj) };
+    assert!(
+        elem_bytes.is_multiple_of(SLOT_BYTES),
+        "scan_array_chunk: GC-containing element has non-slot-aligned elem_bytes={elem_bytes}"
+    );
+    let elem_slots = elem_bytes / SLOT_BYTES;
+    if elem_slots == 0 {
+        return GcObjectScanChunk::complete(0);
+    }
+    let total_slots = len
+        .checked_mul(elem_slots)
+        .expect("scan_array_chunk: element slot count overflow");
+    let start = cursor.reference_index.min(total_slots);
+    let end = start.saturating_add(slot_budget).min(total_slots);
+    let base_off = byte_offset_for_slots(array::HEADER_SLOTS);
+    for flat in start..end {
+        let element_index = flat / elem_slots;
+        let element_slot = flat % elem_slots;
+        let elem_ptr =
+            unsafe { (obj as *const u8).add(base_off + element_index * elem_bytes) as *const u64 };
+        let slots = unsafe { core::slice::from_raw_parts(elem_ptr, elem_slots) };
+        trace_flat_value_slot(slots, elem_meta, context, element_slot, &mut |child| {
+            gc.mark_gray(child)
+        })
+        .unwrap_or_else(|err| panic!("scan_array_chunk: {err}"));
+    }
+    cursor.reference_index = end;
+    let work_bytes = (end - start) * SLOT_BYTES;
+    if end == total_slots {
+        GcObjectScanChunk::complete(work_bytes)
+    } else {
+        GcObjectScanChunk::pending(work_bytes)
+    }
+}
+
+unsafe fn scan_map_chunk(
+    gc: &mut Gc,
+    obj: GcRef,
+    context: GcScanContext<'_>,
+    cursor: &mut GcTraceCursor,
+    slot_budget: usize,
+) -> GcObjectScanChunk {
+    let key_meta = unsafe { map::key_meta(obj) };
+    let val_meta = unsafe { map::val_meta(obj) };
+    let backing = unsafe { map::backing_ref(obj) };
+    if backing.is_null() {
+        return GcObjectScanChunk::complete(0);
+    }
+
+    let mut work_slots = 0usize;
+    if cursor.auxiliary == 0 && work_slots < slot_budget {
+        gc.mark_gray(backing);
+        cursor.auxiliary = 1;
+        work_slots += 1;
+    }
+    while work_slots < slot_budget {
+        let mut empty = false;
+        let mut total_slots = 0usize;
+        let mut traced_reference = false;
+        let bucket = unsafe {
+            map::with_bucket_at(obj, cursor.element_index, |entry| {
+                if let Some((key, val)) = entry {
+                    total_slots = key.len().saturating_add(val.len());
+                    if cursor.reference_index > 0 {
+                        let reference_index = cursor.reference_index - 1;
+                        if reference_index < key.len() {
+                            trace_flat_value_slot(
+                                key,
+                                key_meta,
+                                context,
+                                reference_index,
+                                &mut |child| gc.mark_gray(child),
+                            )
+                            .unwrap_or_else(|err| panic!("scan_map_chunk key: {err}"));
+                        } else {
+                            trace_flat_value_slot(
+                                val,
+                                val_meta,
+                                context,
+                                reference_index - key.len(),
+                                &mut |child| gc.mark_gray(child),
+                            )
+                            .unwrap_or_else(|err| panic!("scan_map_chunk value: {err}"));
+                        }
+                        traced_reference = true;
+                    }
+                    true
+                } else {
+                    empty = true;
+                    false
+                }
+            })
+        };
+        let Some(occupied) = bucket else {
+            break;
+        };
+        if cursor.reference_index == 0 {
+            cursor.reference_index = 1;
+            work_slots += 1;
+            if empty {
+                cursor.element_index += 1;
+                cursor.reference_index = 0;
+                continue;
+            }
+            if !occupied || total_slots == 0 {
+                cursor.element_index += 1;
+                cursor.reference_index = 0;
+                continue;
+            }
+            continue;
+        }
+        assert!(
+            traced_reference,
+            "scan_map_chunk must inspect one occupied key/value slot per work unit"
+        );
+        cursor.reference_index += 1;
+        work_slots += 1;
+        if cursor.reference_index - 1 == total_slots {
+            cursor.element_index += 1;
+            cursor.reference_index = 0;
+        }
+    }
+    if unsafe { map::with_bucket_at(obj, cursor.element_index, |_| ()) }.is_none() {
+        GcObjectScanChunk::complete(work_slots * SLOT_BYTES)
+    } else {
+        GcObjectScanChunk::pending(work_slots * SLOT_BYTES)
+    }
+}
+
+unsafe fn scan_queue_chunk(
+    gc: &mut Gc,
+    obj: GcRef,
+    context: GcScanContext<'_>,
+    cursor: &mut GcTraceCursor,
+    slot_budget: usize,
+) -> GcObjectScanChunk {
+    if unsafe { queue::is_remote(obj) } {
+        return GcObjectScanChunk::complete(0);
+    }
+    let elem_meta = unsafe { queue_state::elem_meta(obj) };
+    let elem_rttid = unsafe { queue_state::elem_rttid(obj) };
+    let scan_meta = if elem_meta.value_kind() == ValueKind::Array && elem_meta.meta_id() == 0 {
+        ValueMeta::new(elem_rttid.rttid(), ValueKind::Array)
+    } else {
+        elem_meta
+    };
+    let state = unsafe { queue::local_state_ref(obj) };
+    let mut work_slots = 0usize;
+
+    while work_slots < slot_budget {
+        let message = match cursor.auxiliary {
+            0 => state.buffer.get(cursor.element_index),
+            1 => state
+                .waiting_senders
+                .get(cursor.element_index)
+                .map(|(_, message)| message),
+            _ => return GcObjectScanChunk::complete(work_slots * SLOT_BYTES),
+        };
+        let Some(message) = message else {
+            if cursor.auxiliary == 0 {
+                cursor.auxiliary = 1;
+                cursor.element_index = 0;
+                cursor.reference_index = 0;
+                continue;
+            }
+            return GcObjectScanChunk::complete(work_slots * SLOT_BYTES);
+        };
+        if cursor.reference_index == 0 {
+            if let Some(backing) = message.backing_ref() {
+                gc.mark_gray(backing);
+            }
+            cursor.reference_index = 1;
+            work_slots += 1;
+            if work_slots >= slot_budget {
+                continue;
+            }
+        }
+        let payload_index = cursor.reference_index - 1;
+        if payload_index >= message.len() {
+            cursor.element_index += 1;
+            cursor.reference_index = 0;
+            continue;
+        }
+        if elem_meta.value_kind().may_contain_gc_refs() {
+            trace_flat_value_slot(message, scan_meta, context, payload_index, &mut |child| {
+                gc.mark_gray(child)
+            })
+            .unwrap_or_else(|err| panic!("scan_queue_chunk: {err}"));
+        }
+        cursor.reference_index += 1;
+        work_slots += 1;
+    }
+
+    GcObjectScanChunk::pending(work_slots * SLOT_BYTES)
+}
+
 unsafe fn trace_array_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
     V: FnMut(GcRef),
@@ -598,29 +1115,34 @@ where
     }
 
     let elem_meta = queue_state::elem_meta(obj);
-    let elem_kind = elem_meta.value_kind();
-    if !elem_kind.may_contain_gc_refs() {
-        return;
-    }
-
     let state = unsafe { queue::local_state(obj) };
-    for elem in state.iter_buffer() {
-        trace_queue_elem(
-            elem,
-            elem_meta,
-            queue_state::elem_rttid(obj),
-            context,
-            visit,
-        );
+    for message in state.buffer.iter() {
+        if let Some(backing) = message.backing_ref() {
+            visit(backing);
+        }
+        if elem_meta.value_kind().may_contain_gc_refs() {
+            trace_queue_elem(
+                message,
+                elem_meta,
+                queue_state::elem_rttid(obj),
+                context,
+                visit,
+            );
+        }
     }
-    for elem in state.iter_waiting_values() {
-        trace_queue_elem(
-            elem,
-            elem_meta,
-            queue_state::elem_rttid(obj),
-            context,
-            visit,
-        );
+    for (_, message) in state.waiting_senders.iter() {
+        if let Some(backing) = message.backing_ref() {
+            visit(backing);
+        }
+        if elem_meta.value_kind().may_contain_gc_refs() {
+            trace_queue_elem(
+                message,
+                elem_meta,
+                queue_state::elem_rttid(obj),
+                context,
+                visit,
+            );
+        }
     }
 }
 
@@ -697,167 +1219,13 @@ fn trace_array_value_slots<V>(
 where
     V: FnMut(GcRef),
 {
-    // Runtime-only GC tests can call the scanner without a Module. In VM paths
-    // the context is always module-backed, so arrays with reference elements are
-    // scanned from their rttid with an explicit work stack instead of falling
-    // back to all-GcRef.
+    // Runtime-only GC tests can call the scanner without a Module. VM paths
+    // always provide the module-backed layout.
     if !context.has_runtime_types() {
         return Ok(());
     }
-
-    enum TraceWork<'a> {
-        Value {
-            slots: &'a [u64],
-            meta: ValueMeta,
-            layout_validated: bool,
-        },
-        ArrayElements {
-            slots: &'a [u64],
-            index: usize,
-            len: usize,
-            elem_slots: usize,
-            elem_meta: ValueMeta,
-        },
-    }
-
-    let resolver = RuntimeTypeResolver::new(
-        context.struct_metas,
-        context.named_type_metas,
-        context.runtime_types,
-    );
-    let mut pending = vec![TraceWork::Value {
-        slots,
-        meta,
-        layout_validated: false,
-    }];
-    while let Some(work) = pending.pop() {
-        match work {
-            TraceWork::Value {
-                slots,
-                meta,
-                layout_validated,
-            } => match meta.value_kind() {
-                ValueKind::Struct => {
-                    let meta_id = meta.meta_id() as usize;
-                    let slot_types = &context
-                        .struct_metas
-                        .get(meta_id)
-                        .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
-                        .slot_types;
-                    trace_slots_by_types(slots, slot_types, &mut *visit);
-                }
-                ValueKind::Array => {
-                    let array_rttid = ValueRttid::new(meta.meta_id(), ValueKind::Array);
-                    let Some((_, RuntimeType::Array { len, elem })) =
-                        resolver.resolve_value_rttid(array_rttid)
-                    else {
-                        return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
-                            rttid: array_rttid.rttid(),
-                        });
-                    };
-                    if !layout_validated {
-                        let expected = resolver
-                            .slot_count_for_value_rttid(array_rttid)
-                            .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                        if slots.len() != expected {
-                            return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-                                expected,
-                                actual: slots.len(),
-                            });
-                        }
-                    }
-                    let elem_meta = resolver.canonical_value_meta_for_value_rttid(*elem).ok_or(
-                        TypedWriteBarrierByMetaError::MissingRuntimeType {
-                            rttid: elem.rttid(),
-                        },
-                    )?;
-                    let len = usize::try_from(*len)
-                        .map_err(|_| TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                    let elem_slots = if len == 0 {
-                        if !slots.is_empty() {
-                            return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-                                expected: 0,
-                                actual: slots.len(),
-                            });
-                        }
-                        0
-                    } else {
-                        if !slots.len().is_multiple_of(len) {
-                            return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-                                expected: len,
-                                actual: slots.len(),
-                            });
-                        }
-                        slots.len() / len
-                    };
-                    if elem_slots == 0 {
-                        continue;
-                    }
-                    pending.push(TraceWork::ArrayElements {
-                        slots,
-                        index: 0,
-                        len,
-                        elem_slots,
-                        elem_meta,
-                    });
-                }
-                ValueKind::Interface => {
-                    if slots.len() >= 2 && interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
-                        visit(slots[1] as GcRef);
-                    }
-                }
-                ValueKind::String
-                | ValueKind::Slice
-                | ValueKind::Map
-                | ValueKind::Channel
-                | ValueKind::Closure
-                | ValueKind::Pointer
-                | ValueKind::Port
-                | ValueKind::Island => {
-                    if let Some(&slot) = slots.first() {
-                        if slot != 0 {
-                            visit(slot as GcRef);
-                        }
-                    }
-                }
-                _ => {}
-            },
-            TraceWork::ArrayElements {
-                slots,
-                index,
-                len,
-                elem_slots,
-                elem_meta,
-            } => {
-                if index >= len {
-                    continue;
-                }
-                let start = index
-                    .checked_mul(elem_slots)
-                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                let end = start
-                    .checked_add(elem_slots)
-                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                let elem = slots.get(start..end).ok_or(
-                    TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-                        expected: end,
-                        actual: slots.len(),
-                    },
-                )?;
-                pending.push(TraceWork::ArrayElements {
-                    slots,
-                    index: index + 1,
-                    len,
-                    elem_slots,
-                    elem_meta,
-                });
-                pending.push(TraceWork::Value {
-                    slots: elem,
-                    meta: elem_meta,
-                    layout_validated: true,
-                });
-            }
-        }
+    for flat_index in 0..slots.len() {
+        trace_flat_value_slot(slots, meta, context, flat_index, visit)?;
     }
     Ok(())
 }
@@ -866,6 +1234,10 @@ unsafe fn trace_map_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &
 where
     V: FnMut(GcRef),
 {
+    let backing = map::backing_ref(obj);
+    if !backing.is_null() {
+        visit(backing);
+    }
     let key_meta = map::key_meta(obj);
     let val_meta = map::val_meta(obj);
     let key_kind = key_meta.value_kind();
@@ -1060,6 +1432,81 @@ mod tests {
     }
 
     #[test]
+    fn gc_queue_managed_payload_keeps_runtime_backing_visible() {
+        let mut gc = Gc::new();
+        let ch = queue::create(
+            &mut gc,
+            queue_state::QueueKind::Chan,
+            ValueMeta::new(0, ValueKind::Uint64),
+            ValueRttid::new(0, ValueKind::Uint64),
+            1,
+            1,
+        );
+        let message = queue_state::QueueMessage::managed(&mut gc, &[41])
+            .expect("managed queue payload allocation");
+        let backing = message.backing_ref().expect("managed payload backing");
+        match queue::try_send(ch, message) {
+            queue::SendResult::Buffered => {}
+            other => panic!("expected buffered managed payload, got {other:?}"),
+        }
+
+        let mut visited = Vec::new();
+        trace_object_children_with_context(
+            ch,
+            GcScanContext::from_module_parts(&[], &[], &[]),
+            &|_| ClosureScanLayout::default(),
+            |child| visited.push(child),
+        );
+
+        assert!(visited.contains(&backing));
+        assert!(gc.memory_stats().runtime_backing_bytes > 0);
+    }
+
+    #[test]
+    fn gc_queue_managed_payload_scan_is_resumable_per_work_unit() {
+        let mut gc = Gc::new();
+        let ch = queue::create(
+            &mut gc,
+            queue_state::QueueKind::Chan,
+            ValueMeta::new(0, ValueKind::Uint64),
+            ValueRttid::new(0, ValueKind::Uint64),
+            1,
+            1,
+        );
+        let message = queue_state::QueueMessage::managed(&mut gc, &[1, 2, 3])
+            .expect("managed queue payload allocation");
+        let backing = message.backing_ref().expect("managed payload backing");
+        match queue::try_send(ch, message) {
+            queue::SendResult::Buffered => {}
+            other => panic!("expected buffered managed payload, got {other:?}"),
+        }
+
+        let mut cursor = GcTraceCursor::default();
+        let mut calls = 0usize;
+        loop {
+            let chunk = unsafe {
+                scan_object_chunk_with_context(
+                    &mut gc,
+                    ch,
+                    GcScanContext::from_module_parts(&[], &[], &[]),
+                    &|_| ClosureScanLayout::default(),
+                    &mut cursor,
+                    SLOT_BYTES,
+                )
+            };
+            assert!(chunk.work_bytes <= SLOT_BYTES);
+            calls += 1;
+            if chunk.done {
+                break;
+            }
+            assert!(calls < 16, "bounded queue scan did not converge");
+        }
+
+        assert!(calls >= 4);
+        assert!(unsafe { Gc::header(backing) }.is_gray());
+    }
+
+    #[test]
     fn vm_gc_queue_payload_root_003_buffered_array_payload_roots_survive_scan() {
         let mut gc = Gc::new();
         let left = string::create(&mut gc, b"left");
@@ -1161,7 +1608,7 @@ mod tests {
             0,
         );
         unsafe {
-            map::set_checked(map_ref, &[key as u64], &[value as u64], None)
+            map::set_checked(&mut gc, map_ref, &[key as u64], &[value as u64], None)
                 .expect("string map entry should be hashable");
         }
 
@@ -1176,6 +1623,51 @@ mod tests {
         assert!(ValueKind::String.may_contain_gc_refs());
         assert!(visited.contains(&key), "string map key must be traced");
         assert!(visited.contains(&value), "string map value must be traced");
+    }
+
+    #[test]
+    fn gc_map_backing_and_empty_buckets_scan_one_work_unit_at_a_time() {
+        let mut gc = Gc::new();
+        let key = string::create(&mut gc, b"bounded-key");
+        let value = string::create(&mut gc, b"bounded-value");
+        let map_ref = map::create(
+            &mut gc,
+            ValueMeta::new(0, ValueKind::String),
+            ValueMeta::new(0, ValueKind::String),
+            1,
+            1,
+            0,
+        );
+        unsafe {
+            map::set_checked(&mut gc, map_ref, &[key as u64], &[value as u64], None)
+                .expect("string map entry");
+        }
+        let backing = unsafe { map::backing_ref(map_ref) };
+        let mut cursor = GcTraceCursor::default();
+        let mut calls = 0usize;
+        loop {
+            let chunk = unsafe {
+                scan_object_chunk_with_context(
+                    &mut gc,
+                    map_ref,
+                    GcScanContext::from_module_parts(&[], &[], &[]),
+                    &|_| ClosureScanLayout::default(),
+                    &mut cursor,
+                    SLOT_BYTES,
+                )
+            };
+            assert!(chunk.work_bytes <= SLOT_BYTES);
+            calls += 1;
+            if chunk.done {
+                break;
+            }
+            assert!(calls < 64, "bounded map scan did not converge");
+        }
+
+        assert!(calls > 8, "empty buckets must remain visible work units");
+        assert!(unsafe { Gc::header(backing) }.is_gray());
+        assert!(unsafe { Gc::header(key) }.is_gray());
+        assert!(unsafe { Gc::header(value) }.is_gray());
     }
 
     #[test]

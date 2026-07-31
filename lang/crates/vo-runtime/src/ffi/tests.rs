@@ -41,7 +41,7 @@ fn native_abi_fingerprint_covers_entry_and_table_layouts_independently() {
 #[cfg(feature = "std")]
 #[test]
 fn linkme_table_validation_builds_a_unique_canonical_index() {
-    extern "C" fn linkme_dummy(_ctx: *mut ExtAbiContextV9) -> u32 {
+    extern "C" fn linkme_dummy(_ctx: *mut ExtAbiContextV10) -> u32 {
         ext_abi::RESULT_OK
     }
 
@@ -336,7 +336,7 @@ fn provider_name_policy_allows_short_names_only_for_vm_builtins() {
 #[cfg(feature = "std")]
 #[test]
 fn direct_native_registration_rejects_legacy_and_vm_internal_names() {
-    extern "C" fn provider(_ctx: *mut ExtAbiContextV9) -> u32 {
+    extern "C" fn provider(_ctx: *mut ExtAbiContextV10) -> u32 {
         ext_abi::RESULT_OK
     }
 
@@ -1182,7 +1182,7 @@ fn call_extension_with_state(
         func,
         ExternEffects::UNKNOWN_CONTROL,
     );
-    let module = Module::new("ffi-extension-v9-test".to_string());
+    let module = Module::new("ffi-extension-v10-test".to_string());
     let mut itab_cache = ItabCache::new();
     let program_args = Vec::new();
     let output = crate::output::CaptureSink::new();
@@ -1204,7 +1204,7 @@ fn call_extension_with_state(
 }
 
 #[cfg(feature = "std")]
-extern "C" fn exit_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn exit_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     // Safety: extension entry points receive the active call context from the
     // registry and retain it only for this call.
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
@@ -1215,12 +1215,12 @@ extern "C" fn exit_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn exit_extension_without_payload(_ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn exit_extension_without_payload(_ctx: *mut ExtAbiContextV10) -> u32 {
     ext_abi::RESULT_EXIT
 }
 
 #[cfg(feature = "std")]
-extern "C" fn flat_bytes_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn flat_bytes_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1237,7 +1237,7 @@ extern "C" fn flat_bytes_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn gc_proxy_string_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn gc_proxy_string_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1247,7 +1247,7 @@ extern "C" fn gc_proxy_string_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn gc_proxy_bytes_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn gc_proxy_bytes_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
             return ext_abi::RESULT_ABI_ERROR;
@@ -1259,7 +1259,7 @@ extern "C" fn gc_proxy_bytes_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn gc_proxy_value_slots_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn gc_proxy_value_slots_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1274,7 +1274,26 @@ extern "C" fn gc_proxy_value_slots_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn invalid_gc_metadata_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn gc_lease_extension(ctx: *mut ExtAbiContextV10) -> u32 {
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let object = call.arg_ref(0);
+    let Ok(lease) = call.gc_lease(object) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    if call.gc_lease_root(lease) != Ok(object) {
+        return ext_abi::RESULT_ABI_ERROR;
+    }
+    if call.gc_release_lease(lease).is_err() {
+        return ext_abi::RESULT_ABI_ERROR;
+    }
+    call.set_host_output([lease.index.to_le_bytes(), lease.generation.to_le_bytes()].concat());
+    ext_abi::RESULT_OK
+}
+
+#[cfg(feature = "std")]
+extern "C" fn invalid_gc_metadata_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1287,7 +1306,7 @@ extern "C" fn invalid_gc_metadata_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn forged_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn forged_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let frame = unsafe { &mut *ctx };
     let ops = unsafe { &*frame.ops };
     let value = unsafe {
@@ -1307,7 +1326,7 @@ extern "C" fn forged_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV9) -> 
 }
 
 #[cfg(feature = "std")]
-extern "C" fn mismatched_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn mismatched_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1320,7 +1339,7 @@ extern "C" fn mismatched_gc_allocation_kind_extension(ctx: *mut ExtAbiContextV9)
 }
 
 #[cfg(feature = "std")]
-extern "C" fn zero_width_array_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn zero_width_array_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1335,7 +1354,7 @@ extern "C" fn zero_width_array_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn gc_proxy_clone_value_slots_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn gc_proxy_clone_value_slots_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1355,7 +1374,7 @@ extern "C" fn gc_proxy_clone_value_slots_extension(ctx: *mut ExtAbiContextV9) ->
 }
 
 #[cfg(feature = "std")]
-extern "C" fn owned_payload_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn owned_payload_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1364,7 +1383,7 @@ extern "C" fn owned_payload_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn panic_payload_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn panic_payload_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1373,7 +1392,7 @@ extern "C" fn panic_payload_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn resume_data_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn resume_data_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1386,7 +1405,7 @@ extern "C" fn resume_data_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn invalid_slot_window_helpers_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn invalid_slot_window_helpers_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1399,7 +1418,7 @@ extern "C" fn invalid_slot_window_helpers_extension(ctx: *mut ExtAbiContextV9) -
 }
 
 #[cfg(feature = "std")]
-extern "C" fn valid_ret_any_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn valid_ret_any_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1414,7 +1433,7 @@ extern "C" fn valid_ret_any_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn rejected_map_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn rejected_map_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1433,7 +1452,7 @@ extern "C" fn rejected_map_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn callback_panic_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn callback_panic_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let frame = unsafe { &mut *ctx };
     let ops = unsafe { &*frame.ops };
     unsafe {
@@ -1444,12 +1463,12 @@ extern "C" fn callback_panic_extension(ctx: *mut ExtAbiContextV9) -> u32 {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn abi_error_extension(_ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn abi_error_extension(_ctx: *mut ExtAbiContextV10) -> u32 {
     ext_abi::RESULT_ABI_ERROR
 }
 
 #[cfg(feature = "std")]
-extern "C" fn host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn host_services_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
     };
@@ -1545,7 +1564,7 @@ impl crate::host_services_v2::HostServicesV2 for PanickingHostServices {
 }
 
 #[cfg(feature = "std")]
-extern "C" fn panicking_host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn panicking_host_services_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let frame = unsafe { *ctx };
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
@@ -1570,7 +1589,7 @@ extern "C" fn panicking_host_services_extension(ctx: *mut ExtAbiContextV9) -> u3
 }
 
 #[cfg(feature = "std")]
-extern "C" fn forged_caller_host_services_extension(ctx: *mut ExtAbiContextV9) -> u32 {
+extern "C" fn forged_caller_host_services_extension(ctx: *mut ExtAbiContextV10) -> u32 {
     let frame = unsafe { *ctx };
     let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
         return ext_abi::RESULT_ABI_ERROR;
@@ -1596,10 +1615,10 @@ extern "C" fn forged_caller_host_services_extension(ctx: *mut ExtAbiContextV9) -
 }
 
 #[cfg(feature = "std")]
-fn test_abi_frame(ops: *const ExtHostOpsV9) -> ExtAbiContextV9 {
-    ExtAbiContextV9 {
+fn test_abi_frame(ops: *const ExtHostOpsV10) -> ExtAbiContextV10 {
+    ExtAbiContextV10 {
         version: EXTENSION_ABI_VERSION,
-        size: core::mem::size_of::<ExtAbiContextV9>() as u32,
+        size: core::mem::size_of::<ExtAbiContextV10>() as u32,
         host: core::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
         ops,
         stack: core::ptr::NonNull::<u64>::dangling().as_ptr(),
@@ -1767,7 +1786,7 @@ fn native_extension_cannot_forge_the_bound_v2_caller() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_frame_validation_reads_only_the_available_header() {
+fn extension_v10_frame_validation_reads_only_the_available_header() {
     let mut short_frame = [
         EXTENSION_ABI_VERSION,
         core::mem::size_of_val(&[0_u32; 2]) as u32,
@@ -1794,9 +1813,9 @@ fn extension_v9_frame_validation_reads_only_the_available_header() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_frame_validation_rejects_invalid_stack_windows() {
+fn extension_v10_frame_validation_rejects_invalid_stack_windows() {
     let mut stack = [0_u64; 1];
-    let mut frame = test_abi_frame(&native_abi_v9::OPS);
+    let mut frame = test_abi_frame(&native_abi_v10::OPS);
     frame.stack = stack.as_mut_ptr();
     frame.stack_len = stack.len();
     frame.bp = 1;
@@ -1811,9 +1830,9 @@ fn extension_v9_frame_validation_rejects_invalid_stack_windows() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_frame_validation_rejects_unaddressable_u16_slot_windows() {
+fn extension_v10_frame_validation_rejects_unaddressable_u16_slot_windows() {
     let mut stack = vec![0_u64; usize::from(u16::MAX) + 2];
-    let mut frame = test_abi_frame(&native_abi_v9::OPS);
+    let mut frame = test_abi_frame(&native_abi_v10::OPS);
     frame.stack = stack.as_mut_ptr();
     frame.stack_len = stack.len();
     frame.arg_start = u16::MAX;
@@ -1837,11 +1856,11 @@ fn extension_v9_frame_validation_rejects_unaddressable_u16_slot_windows() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_helpers_accept_the_last_u16_slot_and_reject_the_next_slot() {
+fn extension_v10_helpers_accept_the_last_u16_slot_and_reject_the_next_slot() {
     let mut stack = vec![0_u64; usize::from(u16::MAX) + 1];
     stack[usize::from(u16::MAX)] = 0xaabb_ccdd;
     let mut capture = ContractErrorCapture::default();
-    let mut ops = native_abi_v9::OPS;
+    let mut ops = native_abi_v10::OPS;
     ops.record_contract_error = Some(capture_contract_error);
     let mut frame = test_abi_frame(&ops);
     frame.host = (&mut capture as *mut ContractErrorCapture).cast();
@@ -1874,7 +1893,7 @@ fn extension_v9_helpers_accept_the_last_u16_slot_and_reject_the_next_slot() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_arg_and_return_helpers_fail_closed_without_panicking() {
+fn extension_v10_arg_and_return_helpers_fail_closed_without_panicking() {
     let error = call_registered_extension(invalid_slot_window_helpers_extension)
         .expect_err("out-of-window helpers must reject the extension call");
     assert!(error.message().contains("outside declared arg_slots 0"));
@@ -1882,7 +1901,7 @@ fn extension_v9_arg_and_return_helpers_fail_closed_without_panicking() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_ret_any_writes_two_slots_through_the_facade() {
+fn extension_v10_ret_any_writes_two_slots_through_the_facade() {
     let mut gc = Gc::new();
     let mut stack = [0_u64; 2];
     let invoke = ExternInvoke {
@@ -1909,8 +1928,8 @@ fn extension_v9_ret_any_writes_two_slots_through_the_facade() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_frame_validation_rejects_incompatible_host_service_tables() {
-    let mut ops = native_abi_v9::OPS;
+fn extension_v10_frame_validation_rejects_incompatible_host_service_tables() {
+    let mut ops = native_abi_v10::OPS;
     ops.host_services_v2.abi_major = crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR + 1;
     let mut frame = test_abi_frame(&ops);
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
@@ -1921,7 +1940,7 @@ fn extension_v9_frame_validation_rejects_incompatible_host_service_tables() {
         )) if found == crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR + 1
     ));
 
-    ops = native_abi_v9::OPS;
+    ops = native_abi_v10::OPS;
     ops.host_services_v2.struct_size = 8;
     frame.ops = &ops;
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
@@ -1935,8 +1954,8 @@ fn extension_v9_frame_validation_rejects_incompatible_host_service_tables() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_frame_validation_rejects_null_required_callbacks() {
-    let mut ops = native_abi_v9::OPS;
+fn extension_v10_frame_validation_rejects_null_required_callbacks() {
+    let mut ops = native_abi_v10::OPS;
     ops.gc_alloc = None;
     let mut frame = test_abi_frame(&ops);
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
@@ -1945,7 +1964,7 @@ fn extension_v9_frame_validation_rejects_null_required_callbacks() {
         Err(ExtensionAbiInitError::MissingOpsCallback { name: "gc_alloc" })
     ));
 
-    ops = native_abi_v9::OPS;
+    ops = native_abi_v10::OPS;
     ops.host_services_v2.wake_registration = None;
     frame.ops = &ops;
     let result = unsafe { ExternCallContext::try_from_extension_abi(&mut frame) };
@@ -1961,7 +1980,7 @@ fn extension_v9_frame_validation_rejects_null_required_callbacks() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_abi_error_code_is_a_contract_failure() {
+fn extension_v10_abi_error_code_is_a_contract_failure() {
     let error = call_registered_extension(abi_error_extension)
         .expect_err("trampoline ABI errors must fail the call");
     assert!(error
@@ -1999,7 +2018,7 @@ fn extension_exit_result_requires_explicit_payload() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_materializes_flat_bytes_in_host_owned_stable_slots() {
+fn extension_v10_materializes_flat_bytes_in_host_owned_stable_slots() {
     let mut gc = Gc::new();
     let owner = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 4);
     for (index, byte) in [0x11_u64, 0x80, 0xff, 0x42].into_iter().enumerate() {
@@ -2046,7 +2065,7 @@ fn extension_v9_materializes_flat_bytes_in_host_owned_stable_slots() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_allocates_string_in_host_collector() {
+fn extension_v10_gc_proxy_allocates_string_in_host_collector() {
     let mut gc = Gc::new();
     let mut stack = [0u64; 1];
     let invoke = ExternInvoke {
@@ -2077,7 +2096,38 @@ fn extension_v9_gc_proxy_allocates_string_in_host_collector() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_allocates_byte_slice_in_host_collector() {
+fn extension_v10_gc_lease_callbacks_use_host_owned_root_table() {
+    let mut gc = Gc::new();
+    let object = crate::objects::string::from_rust_str(&mut gc, "leased");
+    let mut stack = [object as u64];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 1,
+        ret_start: 1,
+        ret_slots: 0,
+    };
+    let mut output = None;
+    let outcome = call_extension_with_state(
+        gc_lease_extension,
+        &mut stack,
+        invoke,
+        &mut gc,
+        fiber_inputs(None, None),
+        &mut output,
+    );
+
+    assert!(matches!(outcome, Ok(ExternResult::Ok)));
+    assert_eq!(gc.memory_stats().active_leases, 0);
+    let encoded = output.expect("encoded lease");
+    assert_eq!(encoded.len(), 8);
+    assert_ne!(u32::from_le_bytes(encoded[4..8].try_into().unwrap()), 0);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v10_gc_proxy_allocates_byte_slice_in_host_collector() {
     let mut gc = Gc::new();
     let mut stack = [0u64; 1];
     let invoke = ExternInvoke {
@@ -2119,7 +2169,7 @@ fn extension_v9_gc_proxy_allocates_byte_slice_in_host_collector() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_value_slot_boxes_are_tagged_by_the_host_allocator() {
+fn extension_v10_value_slot_boxes_are_tagged_by_the_host_allocator() {
     let mut gc = Gc::new();
     let mut stack = [0_u64; 1];
     let invoke = ExternInvoke {
@@ -2147,7 +2197,7 @@ fn extension_v9_value_slot_boxes_are_tagged_by_the_host_allocator() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_rejects_missing_module_metadata() {
+fn extension_v10_gc_proxy_rejects_missing_module_metadata() {
     let error = call_registered_extension(invalid_gc_metadata_extension)
         .expect_err("host allocator must reject extension-supplied metadata drift");
     assert!(error.message().contains("missing struct metadata id 7"));
@@ -2155,7 +2205,7 @@ fn extension_v9_gc_proxy_rejects_missing_module_metadata() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_rejects_forged_allocation_kinds() {
+fn extension_v10_gc_proxy_rejects_forged_allocation_kinds() {
     let error = call_registered_extension(forged_gc_allocation_kind_extension)
         .expect_err("host allocator must reject unknown allocation kinds");
     assert!(error.message().contains("unknown allocation kind 255"));
@@ -2163,7 +2213,7 @@ fn extension_v9_gc_proxy_rejects_forged_allocation_kinds() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_rejects_kind_and_metadata_mismatch() {
+fn extension_v10_gc_proxy_rejects_kind_and_metadata_mismatch() {
     let error = call_registered_extension(mismatched_gc_allocation_kind_extension)
         .expect_err("host allocator must reject array mode for scalar metadata");
     assert!(error
@@ -2173,7 +2223,7 @@ fn extension_v9_gc_proxy_rejects_kind_and_metadata_mismatch() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_rejects_zero_width_canonical_arrays() {
+fn extension_v10_gc_proxy_rejects_zero_width_canonical_arrays() {
     let error = call_registered_extension(zero_width_array_extension)
         .expect_err("canonical arrays must contain their descriptor header");
     assert!(error.message().contains("smaller than its 2-slot header"));
@@ -2181,7 +2231,7 @@ fn extension_v9_gc_proxy_rejects_zero_width_canonical_arrays() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_gc_proxy_clone_survives_and_reclaims_in_host_collector() {
+fn extension_v10_gc_proxy_clone_survives_and_reclaims_in_host_collector() {
     fn complete_cycle(gc: &mut Gc, root: Option<GcRef>) {
         for _ in 0..64 {
             unsafe {
@@ -2235,7 +2285,7 @@ fn extension_v9_gc_proxy_clone_survives_and_reclaims_in_host_collector() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_copies_call_closure_payload_into_host_storage() {
+fn extension_v10_copies_call_closure_payload_into_host_storage() {
     let result = call_registered_extension_with_effects(
         owned_payload_extension,
         ExternEffects::MAY_CALL_CLOSURE_REPLAY,
@@ -2249,7 +2299,7 @@ fn extension_v9_copies_call_closure_payload_into_host_storage() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_copies_panic_payload_into_host_storage() {
+fn extension_v10_copies_panic_payload_into_host_storage() {
     let result = call_registered_extension(panic_payload_extension)
         .expect("allocator-neutral panic payload must decode");
     assert!(matches!(
@@ -2260,7 +2310,7 @@ fn extension_v9_copies_panic_payload_into_host_storage() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_copies_host_resume_data_in_both_directions() {
+fn extension_v10_copies_host_resume_data_in_both_directions() {
     let mut gc = Gc::new();
     let mut stack = [];
     let invoke = ExternInvoke {
@@ -2286,7 +2336,7 @@ fn extension_v9_copies_host_resume_data_in_both_directions() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_rejects_allocator_specific_map_access() {
+fn extension_v10_rejects_allocator_specific_map_access() {
     let error = call_registered_extension(rejected_map_extension)
         .expect_err("map allocation must remain host-image-only");
     assert!(error.message().contains("does not expose map allocation"));
@@ -2294,7 +2344,7 @@ fn extension_v9_rejects_allocator_specific_map_access() {
 
 #[cfg(feature = "std")]
 #[test]
-fn extension_v9_catches_host_callback_panics_before_c_boundary() {
+fn extension_v10_catches_host_callback_panics_before_c_boundary() {
     let error = call_registered_extension(callback_panic_extension)
         .expect_err("callback panic must become a contract error");
     assert_eq!(

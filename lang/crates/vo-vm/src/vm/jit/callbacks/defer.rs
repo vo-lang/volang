@@ -119,6 +119,9 @@ pub extern "C" fn jit_defer_push(
 
     let args: GcRef = if arg_slots > 0 {
         let args_ref = gc.alloc(ValueMeta::new(0, ValueKind::Void), arg_slots);
+        if args_ref.is_null() {
+            return JitResult::JitError;
+        }
         for i in 0..arg_slots {
             let val = unsafe { *args_ptr.add(i as usize) };
             unsafe { Gc::write_slot(args_ref, i as usize, val) };

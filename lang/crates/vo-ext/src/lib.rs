@@ -149,7 +149,7 @@ pub use vo_runtime::ffi::{
 // Extension ABI types (native only - require dylib boundary support)
 #[cfg(feature = "native")]
 pub use vo_runtime::ffi::{ExtensionTable, ExternEntry, ExternModuleOwnerEntry};
-pub use vo_runtime::gc::GcRef;
+pub use vo_runtime::gc::{GcLease, GcRef, MemoryError};
 
 // Native platform: re-export linkme registration through the public SDK so
 // downstream crates do not need the implementation dependency directly.
@@ -311,9 +311,11 @@ pub mod prelude {
     pub use crate::wasm_extension_export_key;
     pub use crate::ExternCallContext;
     pub use crate::ExternResult;
+    pub use crate::GcLease;
     pub use crate::GcRef;
     pub use crate::HostEventReplaySource;
     pub use crate::InterfaceSlot;
+    pub use crate::MemoryError;
     // Extension ABI types
     pub use crate::{ext_abi, ExternFnPtr};
     // Container accessors
@@ -327,8 +329,8 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn extension_sdk_exports_runtime_abi_v9() {
-        assert_eq!(super::ABI_VERSION, 9);
+    fn extension_sdk_exports_runtime_abi_v10() {
+        assert_eq!(super::ABI_VERSION, 10);
     }
 
     #[test]

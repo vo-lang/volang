@@ -1117,8 +1117,10 @@ fn validate_map_transfer_layout(
         vo_runtime::objects::map::DATA_SLOTS as usize,
         context,
     )?;
-    if unsafe { vo_runtime::objects::map::MapData::as_ref(map_ref) }.inner == 0 {
-        return Err(format!("{context} Map layout is missing backing storage"));
+    if !unsafe { vo_runtime::objects::map::has_valid_managed_backing_layout(gc, map_ref) } {
+        return Err(format!(
+            "{context} Map layout has invalid managed backing storage"
+        ));
     }
     Ok(map_ref)
 }

@@ -1,6 +1,6 @@
 # Vogui/Voplay 全量重写实施状态
 
-更新时间：2026-07-26
+更新时间：2026-07-30
 
 当前主里程碑：冻结计划首版全量实现与第 20 章验收已经收口。
 
@@ -29,6 +29,7 @@
 
 ## 已取得的本地验证
 
+- Volang 全局内存架构基线已落地：每 Island 64KiB block/size-class SpanHeap、稳定地址 incremental/generational GC、bounded root/object/card/remark/sweep/reclaim、managed map/queue payload backing、sticky Island OOM、ABI v10 `GcLease`、`runtime/mem` telemetry、WASM admission 和 Studio 64MiB/256MiB no-growth profile。Voplay `GameEngine` 已持有并复用 stage systems 与 `GameStageBuffers`，endpoint event append 保留 capacity，无 resource op 时跳过资源表事务 clone。规范见 `docs/game-memory-architecture.md` 与 `lang/docs/spec/runtime-memory.md`。
 - `cargo check -p vo-dev --locked`：通过。
 - `cargo test -p vo-dev rewrite_traceability --locked`：1 passed。
 - `cargo run -q -p vo-dev --locked -- lint traceability`：通过；24 REQ、24 TEST、86 ACC 双向一致。
@@ -53,7 +54,7 @@
 - `AppHostServicesV2` 使用 nonblocking `try_lock`、有界 Request/Wake lane 与有界 bulk source catalog，ABI callback panic 转结构化 internal status；query/time/begin/cancel/completion/bulk/wake 共用 Session/CallerEndpoint identity。terminal completion 在持锁状态预留 Wake lane 容量，校验对应 wake registration 后产生 generation-aware `HostWakeSignal`。`cargo test -p vo-app-runtime --features std host_services_v2 --locked -- --test-threads=1 --nocapture`：4 passed。
 - `vo_ext::host::install/clear` 的 same-thread mutable fallback 已删除；仓库无外部调用点，脱离 VM/ABI call context 的 helper fail-closed inert。`cargo test -p vo-ext host::tests --locked`：2 passed。
 - `BulkBufferRegistry` 和 `WakeRegistrationRegistry` 由 SessionKernel 持有，均使用 CallerEndpoint 绑定的 generation handle 与 hard quota；bulk 同时限制单 buffer/总字节，读取按 chunk 执行，release/endpoint close/session close 后旧 handle fail-closed。`SessionCloseReport` 记录 terminal request、bulk、wake 与 endpoint 的归零数量。
-- native extension ABI v9 已删除 `ExtHostServicesV1` C table，改为每个 extern call 自有的 HostServices V2 proxy table；interpreter/JIT `ExternWorld` 传递同一 validated binding，ABI frame 携带 host-authored caller 副本，proxy 在 provider dispatch 前执行 exact caller equality。伪造 endpoint epoch 的 native extension 定向测试返回 `DENIED`；V2 major/size/callback early-reject 与 provider panic→structured internal status 定向测试通过。
+- native extension ABI v10 已删除 `ExtHostServicesV1` C table，改为每个 extern call 自有的 HostServices V2 proxy table；interpreter/JIT `ExternWorld` 传递同一 validated binding，ABI frame 携带 host-authored caller 副本，proxy 在 provider dispatch 前执行 exact caller equality。伪造 endpoint epoch 的 native extension 定向测试返回 `DENIED`；V2 major/size/callback early-reject 与 provider panic→structured internal status 定向测试通过。
 - `vo-ext::host::v2` 已公开 query/request/cancel/packet/pulse/time/bulk/wake 通用原语，caller identity 对 extension SDK 隐藏；runtime wrapper 资源 handle 定向测试通过。`cargo test -p vo-ffi-macro --locked`：66 unit passed；doc-test 4 passed、11 ignored。
 - `cargo test -p vo-app-runtime --locked`：54 passed；新增 EndpointRegistry、Caller-owned request、bulk/wake generation resource 与 SessionCloseReport 覆盖。`cargo check -p vo-app-runtime --no-default-features --locked` 再次通过。
 - `TimerWheel<T>` 已进入 `vo-app-runtime` 的 alloc-only SessionKernel：固定容量、CallerEndpoint ownership、generation handle、fake monotonic clock、稳定 deadline/sequence 顺序、interval missed-period coalescing、Closing 与显式全量释放均有定向测试。`cargo test -p vo-app-runtime --lib timer_wheel --locked -- --test-threads=1 --nocapture`：3 passed。

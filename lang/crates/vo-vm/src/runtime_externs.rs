@@ -1,12 +1,16 @@
 //! VM-owned providers for the public `runtime` package.
 
 use crate::fiber::CallFrame;
+use crate::vm::Vm;
 use vo_common_core::bytecode::{ExternDef, Module};
 use vo_common_core::debug_info::SourceLoc;
 use vo_runtime::builtins::RUNTIME_CALLER_EXTERN_NAME;
 use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, ExternResult};
 
 const CALLER_EXTERN: &str = RUNTIME_CALLER_EXTERN_NAME;
+const MEM_READ_STATS_EXTERN: &str = vo_runtime::vo_extern_name!("runtime/mem", "ReadStats");
+const MEM_GC_STEP_EXTERN: &str = vo_runtime::vo_extern_name!("runtime/mem", "GCStep");
+const MEM_GC_COLLECT_EXTERN: &str = vo_runtime::vo_extern_name!("runtime/mem", "GCCollect");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CallerLocation {
@@ -90,20 +94,101 @@ fn runtime_caller(call: &mut ExternCallContext<'_>) -> ExternResult {
     ExternResult::Ok
 }
 
+fn runtime_mem_read_stats(call: &mut ExternCallContext<'_>) -> ExternResult {
+    let stats = call.gc().memory_stats();
+    let values = [
+        stats.managed_reserved_bytes as u64,
+        stats.managed_committed_bytes as u64,
+        stats.managed_live_bytes as u64,
+        stats.young_live_bytes as u64,
+        stats.old_live_bytes as u64,
+        stats.large_live_bytes as u64,
+        stats.runtime_backing_bytes as u64,
+        stats.external_reported_bytes as u64,
+        stats.unknown_external_provider_count as u64,
+        stats.free_blocks as u64,
+        stats.partial_span_bytes as u64,
+        stats.fragmentation_bytes as u64,
+        stats.allocation_bytes_total,
+        stats.allocation_failures,
+        stats.cycle_id,
+        stats.minor_cycles,
+        stats.major_cycles,
+        stats.work_units_total,
+        stats.last_step_work_units as u64,
+        stats.max_step_work_units as u64,
+        stats.dirty_cards as u64,
+        stats.dirty_root_domains as u64,
+        stats.remark_rounds,
+        stats.reclaim_backlog_bytes as u64,
+        stats.active_leases as u64,
+        u64::from(stats.growth_allowed),
+        u64::from(stats.allocation_allowed),
+        stats.hard_limit_bytes.unwrap_or_default() as u64,
+        u64::from(stats.hard_limit_bytes.is_some()),
+        stats.gc_mode as u8 as u64,
+        stats.gc_state as u8 as u64,
+        u64::from(stats.automatic_gc),
+        stats.wasm_current_pages,
+        stats.wasm_maximum_pages.unwrap_or_default(),
+        u64::from(stats.wasm_maximum_pages.is_some()),
+    ];
+    for (index, value) in values.into_iter().enumerate() {
+        call.ret_u64(index as u16, value);
+    }
+    ExternResult::Ok
+}
+
+fn runtime_mem_gc_step(call: &mut ExternCallContext<'_>) -> ExternResult {
+    let vm = call.vm_ptr().cast::<Vm>();
+    if vm.is_null() {
+        call.ret_bool(0, false);
+        return ExternResult::Ok;
+    }
+    let work_units = usize::try_from(call.arg_u64(0)).unwrap_or(usize::MAX);
+    // Safety: the call context borrows `VmState::gc`; this raw write targets a
+    // disjoint scalar request field. The scheduler consumes it only after the
+    // extern call and active fiber have returned to a safe boundary.
+    unsafe {
+        let pending = core::ptr::addr_of_mut!((*vm).state.pending_explicit_gc_work_units);
+        *pending = (*pending).max(work_units);
+    }
+    call.ret_bool(0, true);
+    ExternResult::Ok
+}
+
+fn runtime_mem_gc_collect(call: &mut ExternCallContext<'_>) -> ExternResult {
+    let vm = call.vm_ptr().cast::<Vm>();
+    if vm.is_null() {
+        call.ret_bool(0, false);
+        return ExternResult::Ok;
+    }
+    // Safety: see runtime_mem_gc_step; this is a disjoint safe-boundary flag.
+    unsafe {
+        *core::ptr::addr_of_mut!((*vm).state.pending_explicit_gc_collect) = true;
+    }
+    call.ret_bool(0, true);
+    ExternResult::Ok
+}
+
 pub(crate) fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), ExternContractError> {
     for (id, def) in externs.iter().enumerate() {
-        if def.name == CALLER_EXTERN {
-            registry.try_register_vm_materialized_provider_with_effects(
-                id as u32,
-                CALLER_EXTERN,
-                runtime_caller,
-                vo_common_core::bytecode::ExternEffects::NONE,
-            )?;
-            break;
-        }
+        let provider = match def.name.as_str() {
+            CALLER_EXTERN => runtime_caller,
+            MEM_READ_STATS_EXTERN => runtime_mem_read_stats,
+            MEM_GC_STEP_EXTERN => runtime_mem_gc_step,
+            MEM_GC_COLLECT_EXTERN => runtime_mem_gc_collect,
+            _ => continue,
+        };
+        registry.try_register_vm_materialized_provider_with_effects(
+            id as u32,
+            &def.name,
+            provider,
+            vo_common_core::bytecode::ExternEffects::NONE,
+        )?;
     }
     Ok(())
 }

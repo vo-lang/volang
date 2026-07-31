@@ -2540,6 +2540,9 @@ pub extern "C" fn vo_map_get(
         Err(map::MapKeyError::MissingModule) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
         }
+        Err(map::MapKeyError::AllocationFailed(_)) => {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
+        }
     };
     ok as u64
 }
@@ -2624,7 +2627,7 @@ pub extern "C" fn vo_map_set(
     }
     let set_result = unsafe {
         // SAFETY: vo_map_set validated the map handle/layout and applied key/value barriers above.
-        map::set_checked(m_ref, key, val, module)
+        map::set_checked(gc, m_ref, key, val, module)
     };
     match set_result {
         Ok(()) => {}
@@ -2633,6 +2636,9 @@ pub extern "C" fn vo_map_set(
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
         }
         Err(map::MapKeyError::MissingModule) => {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+        }
+        Err(map::MapKeyError::AllocationFailed(_)) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
         }
     }
@@ -2691,6 +2697,9 @@ pub extern "C" fn vo_map_delete(
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
         }
         Err(map::MapKeyError::MissingModule) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
+        }
+        Err(map::MapKeyError::AllocationFailed(_)) => {
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
         }
     }
@@ -2814,6 +2823,9 @@ pub extern "C" fn vo_map_iter_next(
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
         Err(map::MapKeyError::MissingModule) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
+        }
+        Err(map::MapKeyError::AllocationFailed(_)) => {
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
     }

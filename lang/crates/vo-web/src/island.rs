@@ -30,6 +30,28 @@ pub struct VoVm {
 
 #[wasm_bindgen(js_class = "VoVmIsland")]
 impl VoVm {
+    fn memory_admission(
+        reserve_bytes: u64,
+        hard_limit_bytes: u64,
+        maximum_pages: u32,
+        growth_allowed: bool,
+    ) -> crate::vm::WasmMemoryAdmission {
+        crate::vm::WasmMemoryAdmission {
+            reserve_bytes,
+            hard_limit_bytes: (hard_limit_bytes != 0).then_some(hard_limit_bytes),
+            maximum_pages: (maximum_pages != 0).then_some(u64::from(maximum_pages)),
+            growth_allowed,
+            allocation_allowed: true,
+            gc_mode: vo_runtime::gc::GcMode::Generational,
+            automatic_gc: true,
+            oom_policy: if growth_allowed {
+                vo_runtime::gc::OomPolicy::CollectThenTerminateIsland
+            } else {
+                vo_runtime::gc::OomPolicy::TerminateIsland
+            },
+        }
+    }
+
     /// Create a new VM from bytecode with stdlib + wasm platform externs.
     /// Does NOT run initialization — call `run` after setup.
     #[wasm_bindgen(constructor)]
@@ -46,6 +68,51 @@ impl VoVm {
         let vm =
             crate::vm::create_loaded_vm(bytecode, crate::vm::ext_bridge::register_wasm_ext_bridges)
                 .map_err(|e| JsValue::from_str(&e))?;
+        Ok(VoVm { inner: vm })
+    }
+
+    /// Create a VM after validating and pre-growing WebAssembly linear memory.
+    /// A zero hard limit or maximum means that bound was not supplied.
+    #[wasm_bindgen(js_name = "withMemory")]
+    pub fn with_memory(
+        bytecode: &[u8],
+        reserve_bytes: u64,
+        hard_limit_bytes: u64,
+        maximum_pages: u32,
+        growth_allowed: bool,
+    ) -> Result<VoVm, JsValue> {
+        let admission = Self::memory_admission(
+            reserve_bytes,
+            hard_limit_bytes,
+            maximum_pages,
+            growth_allowed,
+        );
+        let vm = crate::vm::create_loaded_vm_with_memory(bytecode, |_, _| Ok(()), admission)
+            .map_err(|error| JsValue::from_str(&error))?;
+        Ok(VoVm { inner: vm })
+    }
+
+    /// Memory-admitted constructor with generic WASM extension bridges.
+    #[wasm_bindgen(js_name = "withExternsAndMemory")]
+    pub fn with_externs_and_memory(
+        bytecode: &[u8],
+        reserve_bytes: u64,
+        hard_limit_bytes: u64,
+        maximum_pages: u32,
+        growth_allowed: bool,
+    ) -> Result<VoVm, JsValue> {
+        let admission = Self::memory_admission(
+            reserve_bytes,
+            hard_limit_bytes,
+            maximum_pages,
+            growth_allowed,
+        );
+        let vm = crate::vm::create_loaded_vm_with_memory(
+            bytecode,
+            crate::vm::ext_bridge::register_wasm_ext_bridges,
+            admission,
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
         Ok(VoVm { inner: vm })
     }
 

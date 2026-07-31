@@ -1,6 +1,6 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, Value};
-use vo_runtime::jit_api::JitRuntimeTrapKind;
+use vo_runtime::jit_api::{JitResult, JitRuntimeTrapKind};
 
 use crate::translator::{FlowFacts, TrapEmitter};
 
@@ -21,6 +21,31 @@ pub(in crate::translate) fn emit_runtime_trap_if<'a>(
 
 pub(in crate::translate) fn mark_runtime_trap_pc<'a>(e: &mut impl TrapEmitter<'a>) {
     crate::contract::mark_runtime_trap_pc(e);
+}
+
+/// Stop generated execution before a null allocation result can be consumed.
+///
+/// The VM inspects the collector's pending `MemoryError` when this JIT result
+/// reaches the scheduler and converts it into a terminal Island memory error.
+pub(in crate::translate) fn emit_jit_error_if_zero<'a>(e: &mut impl TrapEmitter<'a>, value: Value) {
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let failed = e.builder().ins().icmp(IntCC::Equal, value, zero);
+    let fail_block = e.builder().create_block();
+    let ok_block = e.builder().create_block();
+    e.builder()
+        .ins()
+        .brif(failed, fail_block, &[], ok_block, &[]);
+
+    e.builder().switch_to_block(fail_block);
+    e.builder().seal_block(fail_block);
+    let result = e
+        .builder()
+        .ins()
+        .iconst(types::I32, JitResult::JitError as i64);
+    e.builder().ins().return_(&[result]);
+
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
 }
 
 /// Emit nil check for pointer. Panics if ptr is nil.

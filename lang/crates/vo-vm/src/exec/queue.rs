@@ -6,7 +6,6 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
-    boxed::Box,
     format,
     string::{String, ToString},
     vec,
@@ -14,7 +13,6 @@ use alloc::{
 };
 #[cfg(feature = "std")]
 use std::{
-    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
@@ -22,7 +20,7 @@ use std::{
 use vo_common_core::bytecode::{Module, StructMeta};
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_common_core::RuntimeType;
-use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::gc::{Gc, GcRef, MemoryError};
 use vo_runtime::objects::queue::{self, BlockingRecvResult};
 use vo_runtime::objects::queue_state::{
     self, QueueKind, QueueMessage, QueueWaiter, SelectWaitKind,
@@ -377,7 +375,7 @@ pub type QueueExecResult = QueueAction;
 #[derive(Debug)]
 pub enum QueueRecvCoreResult {
     Success {
-        data: Box<[u64]>,
+        data: QueueMessage,
         wake_sender: Option<QueueWaiter>,
     },
     WouldBlock {
@@ -430,7 +428,7 @@ pub fn decode_remote_queue_recv_response(
     named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[RuntimeType],
     endpoint_registry: &mut crate::vm::EndpointRegistry,
-) -> Result<Option<Box<[u64]>>, super::transport::QueueHandleValidationError> {
+) -> Result<Option<QueueMessage>, super::transport::QueueHandleValidationError> {
     if response.rejected {
         Err(super::transport::QueueHandleValidationError::EndpointRecvRejected)
     } else if response.closed {
@@ -554,10 +552,10 @@ impl QueueSendPayload<'_> {
     }
 
     #[inline]
-    fn into_owned(self) -> QueueMessage {
+    fn into_managed(self, gc: &mut Gc) -> Result<QueueMessage, MemoryError> {
         match self {
-            Self::Borrowed(value) => value.into(),
-            Self::Owned(value) => value,
+            Self::Borrowed(value) => QueueMessage::managed(gc, value),
+            Self::Owned(value) => value.promote(gc),
         }
     }
 }
@@ -793,7 +791,17 @@ fn queue_send_payload_core(
         return result;
     }
 
-    let value = payload.into_owned();
+    let value = match payload.into_managed(&mut state.gc) {
+        Ok(value) => value,
+        Err(error) => {
+            return QueueExecResult::Malformed(format!(
+                "QueueSend Island allocation failed: {error}"
+            ))
+        }
+    };
+    if let Some(backing) = value.backing_ref() {
+        state.gc.write_barrier(ch, backing);
+    }
 
     // Write barrier: type-aware to avoid UB on mixed-slot types.
     // Must be done before send_or_block because the value is moved into the buffer.

@@ -11,7 +11,7 @@ use crate::vm::jit::test_support::function;
 use crate::vm::jit_mgr::JitSideExitReason;
 use crate::vm::{ExecResult, GcRootEffect, JitConfig, Vm};
 use vo_runtime::island::{EndpointRequestKind, IslandCommand};
-use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter, SelectWaitKind};
+use vo_runtime::objects::queue_state::{QueueKind, QueueMessage, QueueWaiter, SelectWaitKind};
 use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
 fn empty_module() -> Module {
@@ -160,7 +160,11 @@ fn vm_jit_waitqueue_materialize_006_cleans_simple_and_remote_wait_state_on_failu
     let ch = local_int_queue(&mut vm);
     let fiber_key = fiber.wake_key_packed();
     let waiter = QueueWaiter::simple_queue(0, fiber_key, ch as u64, SelectWaitKind::Send);
-    queue::register_sender(ch, waiter.clone(), vec![7].into_boxed_slice());
+    queue::register_sender(
+        ch,
+        waiter.clone(),
+        QueueMessage::Owned(vec![7].into_boxed_slice()),
+    );
     fiber.queue_wait_state = Some(QueueWaitState {
         queue_ref: ch,
         kind: SelectWaitKind::Send,

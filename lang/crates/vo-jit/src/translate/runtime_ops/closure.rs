@@ -1,7 +1,7 @@
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use vo_runtime::instruction::Instruction;
 
-use crate::translate::require_helper;
+use crate::translate::{emit_jit_error_if_zero, require_helper};
 use crate::translator::{emit_funcref_call, RuntimeOpsEmitter};
 use crate::JitError;
 
@@ -17,6 +17,7 @@ pub(in crate::translate) fn closure_new<'a>(
     let capture_count_i32 = e.builder().ins().iconst(types::I32, capture_count as i64);
     let call = emit_funcref_call(e, func, &[gc_ptr, func_id_i32, capture_count_i32]);
     let result = e.builder().inst_results(call)[0];
+    emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
     Ok(())
 }

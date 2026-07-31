@@ -83,6 +83,19 @@ fn direct_method_function(slot_types: Vec<SlotType>) -> FunctionDef {
 }
 
 #[test]
+fn queue_transfer_accepts_empty_map_without_allocated_buckets() {
+    let mut state = crate::vm::VmState::new();
+    let int_meta = ValueMeta::new(0, ValueKind::Int64);
+    let map_ref = vo_runtime::objects::map::create(&mut state.gc, int_meta, int_meta, 1, 1, 0);
+
+    let validated = validate_map_transfer_layout(&state.gc, map_ref, "queue transfer empty map")
+        .expect("an empty map has a valid lazy backing layout");
+
+    assert_eq!(validated, map_ref);
+    assert!(unsafe { vo_runtime::objects::map::backing_ref(map_ref) }.is_null());
+}
+
+#[test]
 fn missing_nested_struct_runtime_type_does_not_guess_meta_zero() {
     let mut state = crate::vm::VmState::new();
     state.external_island_transport = true;

@@ -145,7 +145,7 @@ fn pack_failure_transaction_restores_local_queue_and_nested_endpoint_transfer() 
     );
     let mut mutation = LocalQueueMutation::snapshot(&state, ch);
     assert!(matches!(
-        queue::try_send(ch, vec![payload_port as u64].into_boxed_slice()),
+        queue::try_send(ch, vec![payload_port as u64].into_boxed_slice().into()),
         queue_state::SendResult::Buffered
     ));
     let mut effects = Vec::new();
@@ -218,7 +218,7 @@ fn exec_queue_recv_rejects_element_width_drift_before_stack_write_035() {
         1,
     );
     assert!(matches!(
-        queue::try_send(ch, vec![11, 22].into_boxed_slice()),
+        queue::try_send(ch, vec![11, 22].into_boxed_slice().into()),
         queue_state::SendResult::Buffered
     ));
     let inst = Instruction::with_flags(crate::instruction::Opcode::QueueRecv, 2, 0, 1, 0);
@@ -287,7 +287,7 @@ fn exec_queue_recv_rejects_element_layout_drift_before_stack_write_035() {
         1,
     );
     assert!(matches!(
-        queue::try_send(ch, vec![0].into_boxed_slice()),
+        queue::try_send(ch, vec![0].into_boxed_slice().into()),
         queue_state::SendResult::Buffered
     ));
     let inst = Instruction::with_flags(crate::instruction::Opcode::QueueRecv, 2, 0, 1, 0);
@@ -1114,7 +1114,11 @@ fn queue_close_core_splits_receiver_and_sender_waiters() {
         0,
     );
     queue::register_receiver(ch, QueueWaiter::simple(0, 10));
-    queue::register_sender(ch, QueueWaiter::simple(0, 20), vec![7].into_boxed_slice());
+    queue::register_sender(
+        ch,
+        QueueWaiter::simple(0, 20),
+        vec![7].into_boxed_slice().into(),
+    );
 
     match queue_close_core(&state, ch) {
         QueueExecResult::Close {
@@ -1542,7 +1546,7 @@ fn vm_wake_remote_endpoint_002_queue_recv_missing_home_info_preserves_waiting_se
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![99, 0, ch as u64];
     let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
@@ -1595,7 +1599,7 @@ fn vm_endpoint_sender_preflight_012_same_island_queue_recv_missing_home_info_pre
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(state.current_island_id, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![99, 0, ch as u64];
     let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
@@ -1701,7 +1705,7 @@ fn vm_queue_route_preflight_058_recv_missing_sender_route_preserves_queue_state(
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![99, 0, ch as u64];
     let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
@@ -1777,7 +1781,7 @@ fn vm_queue_close_endpoint_waiter_missing_home_info_preserves_waiters() {
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(8, 0x0000_0004_0000_0005, 12),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
 
     let action = queue_close_core(&state, ch);
@@ -1815,7 +1819,7 @@ fn vm_wake_remote_endpoint_001_local_recv_acks_remote_endpoint_sender() {
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![0, 0, ch as u64];
     let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
@@ -1871,7 +1875,7 @@ fn same_island_endpoint_sender_recv_acks_through_endpoint_response_path() {
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(state.current_island_id, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![0, 0, ch as u64];
     let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);

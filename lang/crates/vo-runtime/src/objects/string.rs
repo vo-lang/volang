@@ -18,6 +18,9 @@ pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
         return core::ptr::null_mut();
     }
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len());
+    if arr.is_null() {
+        return arr;
+    }
     // Safety: `arr` is the live array allocated immediately above.
     let arr_data_ptr = unsafe { array::data_ptr_bytes(arr) };
     unsafe {
@@ -29,6 +32,9 @@ pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
 #[inline]
 fn alloc_string(gc: &mut Gc, arr: GcRef, data_ptr: *mut u8, len: usize) -> GcRef {
     let s = gc.alloc(ValueMeta::new(0, ValueKind::String), slice::DATA_SLOTS);
+    if s.is_null() {
+        return s;
+    }
     // Safety: `s` is freshly allocated and will be marked for scanning before collection.
     let data = unsafe { SliceData::as_mut(s) };
     data.owner = ptr_to_slot(arr);

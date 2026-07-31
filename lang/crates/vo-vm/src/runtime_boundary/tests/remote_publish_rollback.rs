@@ -25,7 +25,7 @@ fn vm_queue_close_endpoint_late_reservation_failure_rolls_back_local_state_059()
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(peer, 0x0000_0004_0000_0005, 12),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
 
     crate::exec::preflight_queue_close_routes(&vm.state, ch)

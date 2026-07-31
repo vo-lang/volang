@@ -1447,7 +1447,7 @@ fn vm_endpoint_sender_preflight_012_jit_same_island_recv_missing_home_info_prese
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
+    use vo_runtime::objects::queue_state::{QueueKind, QueueMessage, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
     let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
@@ -1463,7 +1463,7 @@ fn vm_endpoint_sender_preflight_012_jit_same_island_recv_missing_home_info_prese
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(vm.state.current_island_id, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        QueueMessage::Owned(vec![123].into_boxed_slice()),
     );
     let module = Module::new("jit-same-island-endpoint-sender-missing-home".to_string());
     let mut fiber = Fiber::new(0);

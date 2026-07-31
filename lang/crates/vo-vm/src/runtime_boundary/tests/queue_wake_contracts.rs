@@ -267,7 +267,7 @@ fn vm_runtime_transition_preflights_same_island_endpoint_request_before_block_05
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(7, 0x0000_0007_0000_0009, 12),
-        vec![0; 8].into_boxed_slice(),
+        vec![0; 8].into_boxed_slice().into(),
     );
 
     let mut transition = RuntimeTransition::new(
@@ -518,7 +518,7 @@ fn vm_select_closed_sender_wake_061_rejects_open_queue_before_wake() {
         ch as u64,
         SelectWaitKind::Send,
     );
-    queue::register_sender(ch, waiter.clone(), vec![0].into_boxed_slice());
+    queue::register_sender(ch, waiter.clone(), vec![0].into_boxed_slice().into());
     assert_eq!(vm.scheduler.schedule_next(), Some(sender));
     vm.scheduler.block_for_queue();
     let current = vm.scheduler.spawn(Fiber::new(1));

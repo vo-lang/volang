@@ -130,6 +130,11 @@ impl RuntimeError {
                 lookup(loc),
                 RuntimeErrorKind::Panic,
             ),
+            VmError::IslandMemory(error) => (
+                format!("Island managed-memory failure: {error}"),
+                None,
+                RuntimeErrorKind::Other,
+            ),
             VmError::Deadlock(msg) => (msg.clone(), None, RuntimeErrorKind::Deadlock),
             VmError::Jit(msg) => (msg.clone(), None, RuntimeErrorKind::Other),
             _ => (format!("{:?}", e), None, RuntimeErrorKind::Other),
@@ -185,8 +190,32 @@ pub fn run_with_byte_args(
     mode: RunMode,
     args: Vec<Vec<u8>>,
 ) -> Result<(), RunError> {
-    run_with_output_interruptible_observed_bytes(compiled, mode, args, Arc::new(StdoutSink), None)
-        .map(|_| ())
+    run_with_output_interruptible_observed_bytes(
+        compiled,
+        mode,
+        args,
+        Arc::new(StdoutSink),
+        None,
+        vo_vm::VmMemoryConfig::default(),
+    )
+    .map(|_| ())
+}
+
+pub fn run_with_byte_args_and_memory(
+    compiled: CompileOutput,
+    mode: RunMode,
+    args: Vec<Vec<u8>>,
+    memory_config: vo_vm::VmMemoryConfig,
+) -> Result<(), RunError> {
+    run_with_output_interruptible_observed_bytes(
+        compiled,
+        mode,
+        args,
+        Arc::new(StdoutSink),
+        None,
+        memory_config,
+    )
+    .map(|_| ())
 }
 
 /// Run a compiled module with a custom output sink.
@@ -234,6 +263,7 @@ pub fn run_with_output_interruptible_observed(
         args.into_iter().map(String::into_bytes).collect(),
         sink,
         interrupt_flag,
+        vo_vm::VmMemoryConfig::default(),
     )
 }
 
@@ -243,6 +273,7 @@ fn run_with_output_interruptible_observed_bytes(
     args: Vec<Vec<u8>>,
     sink: Arc<dyn OutputSink>,
     interrupt_flag: Option<Arc<AtomicBool>>,
+    memory_config: vo_vm::VmMemoryConfig,
 ) -> Result<RunObservation, RunError> {
     ensure_toolchain_host_installed();
     let CompileOutput {
@@ -255,7 +286,7 @@ fn run_with_output_interruptible_observed_bytes(
 
     #[cfg(feature = "jit")]
     let mut vm = match mode {
-        RunMode::Vm => Vm::try_new().map_err(|err| {
+        RunMode::Vm => Vm::try_with_memory_config(memory_config).map_err(|err| {
             RunError::Runtime(RuntimeError {
                 message: format!("VM initialization failed: {err}"),
                 location: None,
@@ -274,7 +305,7 @@ fn run_with_output_interruptible_observed_bytes(
                 loop_threshold,
                 debug_ir,
             };
-            Vm::try_with_jit_config(config).map_err(|err| {
+            Vm::try_with_jit_and_memory_config(config, memory_config).map_err(|err| {
                 RunError::Runtime(RuntimeError {
                     message: format!("JIT initialization failed: {err}"),
                     location: None,
@@ -294,7 +325,7 @@ fn run_with_output_interruptible_observed_bytes(
                 kind: RuntimeErrorKind::Other,
             }));
         }
-        Vm::try_new().map_err(|err| {
+        Vm::try_with_memory_config(memory_config).map_err(|err| {
             RunError::Runtime(RuntimeError {
                 message: format!("VM initialization failed: {err}"),
                 location: None,
@@ -380,7 +411,15 @@ fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
 /// native extensions, create a VM with external island transport enabled,
 /// and load the module with extensions.
 pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
-    build_gui_vm_with_island_transport(compiled, true)
+    build_gui_vm_with_memory(compiled, vo_vm::VmMemoryConfig::default())
+}
+
+/// Build a GUI VM with an explicit per-Island managed-memory admission policy.
+pub fn build_gui_vm_with_memory(
+    compiled: CompileOutput,
+    memory_config: vo_vm::VmMemoryConfig,
+) -> Result<Vm, String> {
+    build_gui_vm_with_island_transport(compiled, true, memory_config)
 }
 
 /// Build a native GUI VM whose child islands execute inside the current
@@ -388,16 +427,26 @@ pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
 /// surface and extension host APIs directly instead of forwarding island
 /// frames to a browser or another process.
 pub fn build_native_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
-    build_gui_vm_with_island_transport(compiled, false)
+    build_native_gui_vm_with_memory(compiled, vo_vm::VmMemoryConfig::default())
+}
+
+/// Build an in-process GUI VM with an explicit per-Island memory policy.
+pub fn build_native_gui_vm_with_memory(
+    compiled: CompileOutput,
+    memory_config: vo_vm::VmMemoryConfig,
+) -> Result<Vm, String> {
+    build_gui_vm_with_island_transport(compiled, false, memory_config)
 }
 
 fn build_gui_vm_with_island_transport(
     compiled: CompileOutput,
     external_island_transport: bool,
+    memory_config: vo_vm::VmMemoryConfig,
 ) -> Result<Vm, String> {
     ensure_toolchain_host_installed();
     let ext_loader = load_extensions(&compiled.extensions).map_err(|e| e.to_string())?;
-    let mut vm = Vm::try_new().map_err(|error| format!("failed to initialize VM: {error}"))?;
+    let mut vm = Vm::try_with_memory_config(memory_config)
+        .map_err(|error| format!("failed to initialize VM: {error}"))?;
     if external_island_transport {
         vm.enable_external_island_transport();
     }
@@ -457,6 +506,58 @@ mod terminal_outcome_tests {
         assert!(matches!(error, RunError::Exited(7)));
         assert!(error.to_string().contains("status 7"));
     }
+
+    #[test]
+    fn interpreter_surfaces_managed_allocation_failure_as_island_memory_error() {
+        let compiled = crate::compile_string(
+            r#"
+package main
+
+func main() {
+	value := "managed allocation"
+	println(len(value))
+}
+"#,
+        )
+        .expect("memory failure fixture should compile");
+        assert!(
+            compiled
+                .module
+                .functions
+                .iter()
+                .flat_map(|function| function.code.iter())
+                .any(|instruction| {
+                    instruction.opcode() == vo_runtime::instruction::Opcode::StrNew
+                }),
+            "fixture must execute a managed allocation"
+        );
+
+        let error = run_with_byte_args_and_memory(
+            compiled,
+            RunMode::Vm,
+            Vec::new(),
+            vo_vm::VmMemoryConfig {
+                allocation_allowed: false,
+                oom_policy: vo_vm::OomPolicy::TerminateIsland,
+                ..vo_vm::VmMemoryConfig::default()
+            },
+        )
+        .expect_err("disabled allocation must terminate the current Island");
+
+        let RunError::Runtime(runtime) = error else {
+            panic!("expected structured runtime memory error, got {error:?}");
+        };
+        assert!(
+            runtime.message.contains("Island managed-memory failure"),
+            "{}",
+            runtime.message
+        );
+        assert!(
+            runtime.message.contains("managed allocation is disabled"),
+            "{}",
+            runtime.message
+        );
+    }
 }
 
 #[cfg(all(test, feature = "jit"))]
@@ -480,6 +581,51 @@ mod tests {
     // Leave ample headroom for debug builds while retaining a real hard bound:
     // the parent can terminate a child even if it is blocked in `JoinHandle::join`.
     const GUEST_EXIT_SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    #[test]
+    fn jit_stops_before_consuming_a_null_managed_allocation() {
+        let compiled = crate::compile_string(
+            r#"
+package main
+
+func allocate() string {
+	return "managed allocation"
+}
+
+func main() {
+	_ = allocate()
+}
+"#,
+        )
+        .expect("JIT memory failure fixture should compile");
+        let mut vm = Vm::try_with_jit_and_memory_config(
+            vo_vm::JitConfig {
+                call_threshold: 1,
+                loop_threshold: 1,
+                debug_ir: false,
+            },
+            vo_vm::VmMemoryConfig {
+                allocation_allowed: false,
+                oom_policy: vo_vm::OomPolicy::TerminateIsland,
+                ..vo_vm::VmMemoryConfig::default()
+            },
+        )
+        .expect("JIT VM should initialize");
+        vm.load(compiled.module)
+            .expect("JIT memory failure fixture should load");
+
+        let error = vm
+            .run()
+            .expect_err("JIT allocation failure must terminate the current Island");
+        assert!(matches!(
+            error,
+            VmError::IslandMemory(vo_runtime::gc::MemoryError::AllocationForbidden)
+        ));
+        assert!(
+            vm.jit_execution_stats().executed_jit_code(),
+            "fixture must execute generated code before the memory failure"
+        );
+    }
 
     fn run_guest_exit_subprocess(test_name: &str, scenario: impl FnOnce()) {
         if std::env::var_os(GUEST_EXIT_SUBPROCESS_ENV).is_some() {

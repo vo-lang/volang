@@ -27,7 +27,7 @@ fn vm_endpoint_request_route_preflight_058_close_missing_peer_route_preserves_qu
     queue::register_sender(
         ch,
         QueueWaiter::simple_queue(3, 42, ch as u64, SelectWaitKind::Send),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
 
     let err = handle_endpoint_request_command(
@@ -252,7 +252,7 @@ fn vm_endpoint_request_owner_019_unauthorized_recv_rejects_source_pending_wait()
         .endpoint_registry
         .register_live(endpoint_id, home_ch);
     queue::with_local_state(home_ch, |state| {
-        state.buffer.push_back(vec![7].into_boxed_slice());
+        state.buffer.push_back(vec![7].into_boxed_slice().into());
     });
 
     let mut source = Vm::new();
@@ -388,7 +388,7 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_buffer_on_transfer
     );
     queue::install_home_info(ch, endpoint_id, vm_state.current_island_id);
     queue::with_local_state(ch, |state| {
-        state.buffer.push_back(vec![0].into_boxed_slice());
+        state.buffer.push_back(vec![0].into_boxed_slice().into());
     });
     let mut responses = Vec::new();
     let mut local_wakes = Vec::new();
@@ -492,7 +492,7 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_waiting_sender_on_
     queue::with_local_state(ch, |state| {
         state.waiting_senders.push_back((
             QueueWaiter::endpoint(5, 0x0000_0001_0000_0002, 3),
-            vec![0].into_boxed_slice(),
+            vec![0].into_boxed_slice().into(),
         ));
     });
     let mut responses = Vec::new();
@@ -569,7 +569,7 @@ fn vm_endpoint_recv_pack_preflight_012_same_island_buffered_port_prepares_before
     queue::with_local_state(ch, |state| {
         state
             .buffer
-            .push_back(vec![payload_port as u64].into_boxed_slice());
+            .push_back(vec![payload_port as u64].into_boxed_slice().into());
     });
     let mut responses = Vec::new();
     let mut local_wakes = Vec::new();
@@ -649,7 +649,7 @@ fn vm_endpoint_recv_pack_preflight_012_same_island_waiting_sender_error_preserve
     queue::with_local_state(ch, |state| {
         state.waiting_senders.push_back((
             QueueWaiter::endpoint(vm_state.current_island_id, 0x11, 2),
-            vec![0].into_boxed_slice(),
+            vec![0].into_boxed_slice().into(),
         ));
     });
     let mut responses = Vec::new();

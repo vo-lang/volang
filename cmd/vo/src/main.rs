@@ -25,7 +25,8 @@ use std::process;
 
 use vo_engine::{
     compile_path_with_auto_install, compile_path_with_generated_sources_and_auto_install,
-    format_text, run, run_with_byte_args, CompileOutput, Module, RunError, RunMode,
+    format_text, run, run_with_byte_args_and_memory, CompileOutput, GcMode, Module, OomPolicy,
+    RunError, RunMode, VmMemoryConfig,
 };
 use vo_release::{ArtifactInput, StageReleaseOptions};
 use vo_syntax::format_source;
@@ -183,7 +184,34 @@ fn parse_run_mode(value: &str) -> Result<RunMode, String> {
 }
 
 fn print_run_usage() {
-    println!("usage: vo run <file|dir> [--mode=vm|jit] [--codegen] [-- args...]");
+    println!(
+        "usage: vo run <file|dir> [--mode=vm|jit] [--memory-reserve=BYTES] \
+         [--memory-limit=BYTES] [--gc-mode=generational|incremental] \
+         [--no-memory-growth] [--codegen] [-- args...]"
+    );
+}
+
+fn parse_memory_bytes(value: &str) -> Result<usize, String> {
+    let (digits, multiplier) = [
+        ("KiB", 1024usize),
+        ("MiB", 1024usize * 1024),
+        ("GiB", 1024usize * 1024 * 1024),
+        ("KB", 1000usize),
+        ("MB", 1000usize * 1000),
+        ("GB", 1000usize * 1000 * 1000),
+    ]
+    .into_iter()
+    .find_map(|(suffix, multiplier)| {
+        value
+            .strip_suffix(suffix)
+            .map(|digits| (digits, multiplier))
+    })
+    .unwrap_or((value, 1));
+    let base = digits
+        .parse::<usize>()
+        .map_err(|_| format!("invalid byte size {value:?}"))?;
+    base.checked_mul(multiplier)
+        .ok_or_else(|| format!("byte size {value:?} exceeds this platform"))
 }
 
 fn print_build_usage() {
@@ -250,6 +278,7 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     };
     let mut mode = RunMode::Vm;
     let mut print_codegen = false;
+    let mut memory_config = VmMemoryConfig::default();
     let mut program_args: Vec<Vec<u8>> = Vec::new();
     let mut saw_dashdash = false;
 
@@ -285,6 +314,60 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
             return 1;
         } else if arg == OsStr::new("--codegen") {
             print_codegen = true;
+        } else if arg.as_encoded_bytes().starts_with(b"--memory-reserve=") {
+            let option = match utf8_arg(arg, "memory reserve") {
+                Ok(option) => option,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 1;
+                }
+            };
+            memory_config.initial_reserve_bytes =
+                match parse_memory_bytes(option.trim_start_matches("--memory-reserve=")) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return 1;
+                    }
+                };
+        } else if arg.as_encoded_bytes().starts_with(b"--memory-limit=") {
+            let option = match utf8_arg(arg, "memory hard limit") {
+                Ok(option) => option,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 1;
+                }
+            };
+            memory_config.hard_limit_bytes =
+                match parse_memory_bytes(option.trim_start_matches("--memory-limit=")) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        eprintln!("{error}");
+                        return 1;
+                    }
+                };
+        } else if arg.as_encoded_bytes().starts_with(b"--gc-mode=") {
+            let option = match utf8_arg(arg, "GC mode") {
+                Ok(option) => option.trim_start_matches("--gc-mode="),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 1;
+                }
+            };
+            memory_config.gc_mode = match option {
+                "generational" => GcMode::Generational,
+                "incremental" => GcMode::Incremental,
+                _ => {
+                    eprintln!("invalid GC mode {option:?} (expected generational or incremental)");
+                    return 1;
+                }
+            };
+        } else if arg == OsStr::new("--no-memory-growth") {
+            memory_config.growth_allowed = false;
+        } else if arg == OsStr::new("--gc-stop") {
+            memory_config.automatic_gc = false;
+        } else if arg == OsStr::new("--oom-terminate") {
+            memory_config.oom_policy = OomPolicy::TerminateIsland;
         } else if starts_with_dash(arg) {
             report_unknown_option("run", arg);
             return 1;
@@ -312,7 +395,7 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
         return 0;
     }
 
-    match run_with_byte_args(output, mode, program_args) {
+    match run_with_byte_args_and_memory(output, mode, program_args, memory_config) {
         Ok(()) => 0,
         Err(RunError::Exited(code)) => code,
         Err(error) => {

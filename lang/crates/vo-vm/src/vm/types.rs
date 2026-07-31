@@ -9,7 +9,9 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use vo_runtime::gc::{Gc, GcRef, GcRootScanKind, GcStepStats};
+use vo_runtime::gc::{
+    Gc, GcCycleKind, GcRef, GcRootScanKind, GcStepStats, MemoryError, MemoryStats, VmMemoryConfig,
+};
 use vo_runtime::output::{default_sink, OutputSink};
 use vo_runtime::SentinelErrorCache;
 
@@ -375,6 +377,8 @@ pub enum VmError {
         msg: Option<String>,
         loc: Option<ErrorLocation>,
     },
+    /// The current Island reached a terminal managed-memory failure.
+    IslandMemory(MemoryError),
     Deadlock(String),
     Jit(String),
 }
@@ -385,6 +389,7 @@ pub enum VmConstructionError {
     Io(std::io::Error),
     #[cfg(feature = "jit")]
     Jit(vo_jit::JitError),
+    Memory(MemoryError),
     /// Keeps the error type explicitly uninhabited when VM state construction
     /// is infallible in `no_std` builds.
     #[cfg(not(feature = "std"))]
@@ -434,6 +439,7 @@ impl core::fmt::Display for VmConstructionError {
             Self::Io(error) => write!(_f, "VM I/O runtime initialization failed: {error}"),
             #[cfg(feature = "jit")]
             Self::Jit(error) => write!(_f, "VM JIT initialization failed: {error}"),
+            Self::Memory(error) => write!(_f, "VM memory initialization failed: {error:?}"),
             #[cfg(not(feature = "std"))]
             Self::Infallible(error) => match *error {},
         }
@@ -447,6 +453,7 @@ impl std::error::Error for VmConstructionError {
             Self::Io(error) => Some(error),
             #[cfg(feature = "jit")]
             Self::Jit(error) => Some(error),
+            Self::Memory(_) => None,
         }
     }
 }
@@ -605,6 +612,9 @@ pub struct VmState {
     pub gc_root_scan: Option<VmRootScanSnapshot>,
     pub last_gc_step_stats: VmGcStepStats,
     pub gc_verify_after_step: bool,
+    /// Safe-boundary requests issued by the public runtime/mem package.
+    pub(crate) pending_explicit_gc_work_units: usize,
+    pub(crate) pending_explicit_gc_collect: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +684,24 @@ pub struct VmGcStepStats {
     pub stable_roots_skipped: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VmGcStepReport {
+    pub requested_work_units: usize,
+    pub completed_work_units: usize,
+    pub stats: VmGcStepStats,
+    pub memory: MemoryStats,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VmGcCycleReport {
+    pub cycle_id: u64,
+    pub cycle_kind: GcCycleKind,
+    pub steps: usize,
+    pub completed_work_units: u64,
+    pub reclaimed_live_bytes: usize,
+    pub memory: MemoryStats,
+}
+
 #[cfg(feature = "std")]
 fn select_rng_seed() -> u64 {
     fastrand::u64(..)
@@ -700,6 +728,19 @@ impl VmState {
 
     pub fn new() -> Self {
         Self::try_new().expect("VM I/O runtime initialization failed")
+    }
+
+    #[cfg(feature = "std")]
+    pub fn try_new_with_memory_config(config: VmMemoryConfig) -> Result<Self, VmConstructionError> {
+        let io = vo_runtime::io::IoRuntime::new().map_err(VmConstructionError::Io)?;
+        let gc = Gc::with_memory_config(config).map_err(VmConstructionError::Memory)?;
+        Ok(Self::from_runtime_parts_with_gc(io, gc))
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn try_new_with_memory_config(config: VmMemoryConfig) -> Result<Self, VmConstructionError> {
+        let gc = Gc::with_memory_config(config).map_err(VmConstructionError::Memory)?;
+        Ok(Self::from_runtime_parts_with_gc(gc))
     }
 
     /// Stop and join every island thread owned by this VM.
@@ -744,8 +785,19 @@ impl VmState {
     }
 
     fn from_runtime_parts(#[cfg(feature = "std")] io: vo_runtime::io::IoRuntime) -> Self {
+        Self::from_runtime_parts_with_gc(
+            #[cfg(feature = "std")]
+            io,
+            Gc::new(),
+        )
+    }
+
+    fn from_runtime_parts_with_gc(
+        #[cfg(feature = "std")] io: vo_runtime::io::IoRuntime,
+        gc: Gc,
+    ) -> Self {
         Self {
-            gc: Gc::new(),
+            gc,
             select_rng: fastrand::Rng::with_seed(select_rng_seed()),
             globals: Vec::new(),
             itab_cache: ItabCache::new(),
@@ -791,6 +843,8 @@ impl VmState {
             gc_root_scan: None,
             last_gc_step_stats: VmGcStepStats::default(),
             gc_verify_after_step: false,
+            pending_explicit_gc_work_units: 0,
+            pending_explicit_gc_collect: false,
         }
     }
 
@@ -883,6 +937,7 @@ impl VmState {
     #[inline]
     pub fn mark_gc_all_roots_dirty(&mut self) {
         if self.gc_root_scan.is_some() || !self.gc_roots_dirty_all {
+            self.gc.roots_changed();
             self.bump_gc_dirty_epoch_or_restart_scan();
         }
         self.gc_roots_dirty_all = true;

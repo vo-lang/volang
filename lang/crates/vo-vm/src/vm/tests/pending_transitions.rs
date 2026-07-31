@@ -48,7 +48,7 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
 
     let mut rollback = crate::runtime_boundary::RuntimeRollback::local_queue(&vm.state, ch);
     rollback.push_stack_slot(0, vm.scheduler.get_fiber(current).stack[0]);
-    match test_queue::try_send(ch, vec![123].into_boxed_slice()) {
+    match test_queue::try_send(ch, QueueMessage::Owned(vec![123].into_boxed_slice())) {
         vo_runtime::objects::queue_state::SendResult::DirectSend { .. } => {}
         other => panic!("expected send to consume waiting endpoint receiver, got {other:?}"),
     }

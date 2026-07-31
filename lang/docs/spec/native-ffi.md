@@ -192,10 +192,10 @@ manual, and test providers cannot register a compact helper name. Runtime
 builtins may register only a canonical name or an exact member of the VM
 whitelist, so provider APIs cannot revive legacy flattened identities.
 
-### 3.3 ABI-v9 Call Boundary
+### 3.3 ABI-v10 Call Boundary
 
 Every native entry has the C signature
-`extern "C" fn(*mut ExtAbiContextV9) -> u32`. `ExtAbiContextV9` contains a
+`extern "C" fn(*mut ExtAbiContextV10) -> u32`. `ExtAbiContextV10` contains a
 version/size header, an opaque host pointer, a versioned host-operation table,
 the primitive slot window, and call metadata. The extension must treat the host
 pointer as opaque.
@@ -239,6 +239,14 @@ canonical array, or bare value-slot box. The host validates that intent against
 the value kind, canonical module metadata, header width, and total physical
 width before allocating.
 
+ABI 10 also adds `gc_lease_create`, `gc_lease_resolve`, and
+`gc_lease_release`. A `GcLease { index, generation }` is a host-owned precise
+root for an object retained across calls or safe points. A dynamic extension
+must resolve the lease immediately before use and must release it when
+finished. Stale generations, foreign indices, null objects, and exhausted
+lease capacity fail closed. Retaining an unleased raw `GcRef` across a safe
+point violates the ABI.
+
 Typed container access splits readable `VoElem` from mutable
 `VoWritableElem`. `VoStringElem` is read-only, while VM-owned string handles can
 be written through `GcRef`. Boolean elements occupy one logical slot and one
@@ -248,7 +256,7 @@ declared storage stride. Slice and array cursors implement `Iterator` and
 
 ### 3.4 VM-scoped Host Services
 
-`ExtHostOpsV9` embeds an independently versioned `ExtHostServicesV1` C callback
+`ExtHostOpsV10` embeds an independently versioned `ExtHostServicesV2` C callback
 table. It contains capability, timeout, interval, and tick-loop operations.
 The callbacks accept the opaque call-frame host pointer, borrowed byte ranges,
 and scalar values only. Rust trait objects, their vtables, provider collections,
@@ -264,7 +272,7 @@ preserving one immutable generation for the complete VM execution and island
 tree. Dropping the VM first stops and joins its child threads, then releases
 the final service owners.
 
-The generated ABI-v9 trampoline installs the callback table in a thread-local
+The generated ABI-v10 trampoline installs the callback table in a thread-local
 scope for exactly one provider invocation. Scopes are nestable and an RAII
 guard restores the previous scope during normal return and panic unwinding.
 Provider panics are caught inside the host callback and turn the native call

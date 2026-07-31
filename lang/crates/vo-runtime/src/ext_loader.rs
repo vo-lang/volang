@@ -813,7 +813,7 @@ mod tests {
 
     const OWNER: &str = "github.com/acme/demo";
 
-    extern "C" fn dummy_ext(_ctx: *mut crate::ffi::ExtAbiContextV9) -> u32 {
+    extern "C" fn dummy_ext(_ctx: *mut crate::ffi::ExtAbiContextV10) -> u32 {
         crate::ffi::ext_abi::RESULT_OK
     }
 

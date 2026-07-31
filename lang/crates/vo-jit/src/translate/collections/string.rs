@@ -3,7 +3,7 @@ use cranelift_codegen::ir::{types, InstBuilder};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
-use crate::translate::{emit_runtime_trap_if, require_helper};
+use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if, require_helper};
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, CollectionEmitter, HelperCallEffect,
 };
@@ -58,6 +58,16 @@ pub(in crate::translate) fn str_concat<'a>(
     let b = e.read_var(inst.c);
     let call = emit_funcref_call(e, func, &[gc_ptr, a, b]);
     let result = e.builder().inst_results(call)[0];
+    let a_len = emit_nil_guarded_load(e, a, SLICE_FIELD_LEN);
+    let b_len = emit_nil_guarded_load(e, b, SLICE_FIELD_LEN);
+    let total_len = e.builder().ins().iadd(a_len, b_len);
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let result_is_zero = e.builder().ins().icmp(IntCC::Equal, result, zero);
+    let total_is_nonzero = e.builder().ins().icmp(IntCC::NotEqual, total_len, zero);
+    let failed = e.builder().ins().band(result_is_zero, total_is_nonzero);
+    let failed_as_i64 = e.builder().ins().uextend(types::I64, failed);
+    let allocation_ok = e.builder().ins().bxor_imm(failed_as_i64, 1);
+    emit_jit_error_if_zero(e, allocation_ok);
     e.write_var(inst.a, result);
     Ok(())
 }

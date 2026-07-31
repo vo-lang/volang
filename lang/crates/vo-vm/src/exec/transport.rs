@@ -307,7 +307,7 @@ pub fn unpack_transport_message(
             endpoint_registry.restore(registry_snapshot);
             Err(err)
         }
-        None => Ok(dst.into_boxed_slice()),
+        None => Ok(dst.into()),
     }
 }
 

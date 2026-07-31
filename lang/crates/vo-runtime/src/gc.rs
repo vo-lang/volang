@@ -1,15 +1,14 @@
 //! Garbage collector core.
 #![allow(clippy::items_after_test_module)]
 
+mod heap;
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use core::{cell::Cell, mem};
+use core::cell::Cell;
 
-#[cfg(not(feature = "std"))]
-use alloc::alloc as heap_alloc;
-#[cfg(feature = "std")]
-use std::alloc as heap_alloc;
+use heap::{HeapError, HeapStats, SpanHeap};
 
 use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -79,6 +78,7 @@ pub(crate) const WHITE1_BIT: u8 = 1 << 4; // bit 4
 pub(crate) const BLACK_BIT: u8 = 1 << 5; // bit 5
 pub(crate) const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
 pub(crate) const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
+pub(crate) const RUNTIME_BACKING_OBJECT_BIT: u8 = 1 << 1;
 
 // Age values (for generational GC)
 pub const G_YOUNG: u8 = 0;
@@ -86,14 +86,214 @@ pub const G_SURVIVAL: u8 = 1;
 pub const G_OLD: u8 = 2;
 pub const G_TOUCHED: u8 = 3;
 
+/// Collector scheduling policy. Both modes use the same heap, object layout,
+/// barrier ABI, and resumable mark/sweep engine.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcMode {
+    Generational = 0,
+    Incremental = 1,
+}
+
+/// Kind of the cycle currently running or most recently completed.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcCycleKind {
+    Minor = 0,
+    Major = 1,
+}
+
+/// Allocation-failure behavior selected by the Island host.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OomPolicy {
+    CollectThenTerminateIsland = 0,
+    TerminateIsland = 1,
+}
+
+/// Memory configuration applied when an Island collector is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmMemoryConfig {
+    pub initial_reserve_bytes: usize,
+    pub hard_limit_bytes: Option<usize>,
+    pub gc_mode: GcMode,
+    pub automatic_gc: bool,
+    pub oom_policy: OomPolicy,
+    pub growth_allowed: bool,
+    pub allocation_allowed: bool,
+    pub max_objects: Option<usize>,
+    pub max_leases: Option<usize>,
+}
+
+impl Default for VmMemoryConfig {
+    fn default() -> Self {
+        Self {
+            initial_reserve_bytes: 0,
+            hard_limit_bytes: None,
+            gc_mode: GcMode::Generational,
+            automatic_gc: true,
+            oom_policy: OomPolicy::CollectThenTerminateIsland,
+            growth_allowed: true,
+            allocation_allowed: true,
+            max_objects: None,
+            max_leases: None,
+        }
+    }
+}
+
+/// Stable host root for a GC object retained across FFI calls.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GcLease {
+    pub index: u32,
+    pub generation: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GcLeaseEntry {
+    root: GcRef,
+    generation: u32,
+    retired: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryError {
+    AllocationForbidden,
+    GrowthDisabled,
+    HardLimitExceeded,
+    MetadataExhausted,
+    SystemAllocationFailed,
+    InvalidPointer,
+    CollectorBusy,
+}
+
+impl core::fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let message = match self {
+            Self::AllocationForbidden => "managed allocation is disabled",
+            Self::GrowthDisabled => "Island heap growth is disabled",
+            Self::HardLimitExceeded => "Island memory hard limit exceeded",
+            Self::MetadataExhausted => "reserved Island heap metadata exhausted",
+            Self::SystemAllocationFailed => "system allocation failed",
+            Self::InvalidPointer => "pointer does not belong to the Island heap",
+            Self::CollectorBusy => "collector state does not allow this operation",
+        };
+        f.write_str(message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for MemoryError {}
+
+impl From<HeapError> for MemoryError {
+    fn from(value: HeapError) -> Self {
+        match value {
+            HeapError::AllocationForbidden => Self::AllocationForbidden,
+            HeapError::GrowthDisabled => Self::GrowthDisabled,
+            HeapError::HardLimitExceeded => Self::HardLimitExceeded,
+            HeapError::SystemAllocationFailed => Self::SystemAllocationFailed,
+            HeapError::InvalidPointer => Self::InvalidPointer,
+        }
+    }
+}
+
+/// Platform-independent Island memory counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryStats {
+    pub managed_reserved_bytes: usize,
+    pub managed_committed_bytes: usize,
+    pub managed_live_bytes: usize,
+    pub allocated_span_bytes: usize,
+    pub pending_reclaim_bytes: usize,
+    pub segment_count: usize,
+    pub block_count: usize,
+    pub free_blocks: usize,
+    pub object_count: usize,
+    pub young_live_bytes: usize,
+    pub old_live_bytes: usize,
+    pub large_live_bytes: usize,
+    pub runtime_backing_bytes: usize,
+    pub external_reported_bytes: usize,
+    pub unknown_external_provider_count: usize,
+    pub partial_span_bytes: usize,
+    pub fragmentation_bytes: usize,
+    pub wasm_current_pages: u64,
+    pub wasm_maximum_pages: Option<u64>,
+    pub allocation_bytes_total: u64,
+    pub allocation_failures: u64,
+    pub cycle_id: u64,
+    pub minor_cycles: u64,
+    pub major_cycles: u64,
+    pub work_units_total: u64,
+    pub last_step_work_units: usize,
+    pub max_step_work_units: usize,
+    pub dirty_cards: usize,
+    pub dirty_root_domains: usize,
+    pub remark_rounds: u64,
+    pub active_leases: usize,
+    pub reclaim_backlog_bytes: usize,
+    pub growth_allowed: bool,
+    pub allocation_allowed: bool,
+    pub hard_limit_bytes: Option<usize>,
+    pub gc_mode: GcMode,
+    pub automatic_gc: bool,
+    pub gc_state: GcState,
+}
+
+impl Default for MemoryStats {
+    fn default() -> Self {
+        Self {
+            managed_reserved_bytes: 0,
+            managed_committed_bytes: 0,
+            managed_live_bytes: 0,
+            allocated_span_bytes: 0,
+            pending_reclaim_bytes: 0,
+            segment_count: 0,
+            block_count: 0,
+            free_blocks: 0,
+            object_count: 0,
+            young_live_bytes: 0,
+            old_live_bytes: 0,
+            large_live_bytes: 0,
+            runtime_backing_bytes: 0,
+            external_reported_bytes: 0,
+            unknown_external_provider_count: 0,
+            partial_span_bytes: 0,
+            fragmentation_bytes: 0,
+            wasm_current_pages: 0,
+            wasm_maximum_pages: None,
+            allocation_bytes_total: 0,
+            allocation_failures: 0,
+            cycle_id: 0,
+            minor_cycles: 0,
+            major_cycles: 0,
+            work_units_total: 0,
+            last_step_work_units: 0,
+            max_step_work_units: 0,
+            dirty_cards: 0,
+            dirty_root_domains: 0,
+            remark_rounds: 0,
+            active_leases: 0,
+            reclaim_backlog_bytes: 0,
+            growth_allowed: true,
+            allocation_allowed: true,
+            hard_limit_bytes: None,
+            gc_mode: GcMode::Generational,
+            automatic_gc: true,
+            gc_state: GcState::Pause,
+        }
+    }
+}
+
 /// GC state machine states.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcState {
     Pause = 0,     // Idle, waiting for trigger
     Propagate = 1, // Incremental marking (interruptible)
-    Atomic = 2,    // Atomic marking (not interruptible)
+    Atomic = 2,    // Resumable remark/fixed-point marking
     Sweep = 3,     // Sweeping dead objects
+    Reclaim = 4,   // Incrementally publishing reclaimed large-span blocks
 }
 
 /// Caller-provided root-set freshness for one incremental GC step.
@@ -127,6 +327,39 @@ pub struct GcRootScanChunk {
     pub work_bytes: usize,
 }
 
+/// Persistent cursor for one heap object's generated trace layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcTraceCursor {
+    pub element_index: usize,
+    pub reference_index: usize,
+    pub auxiliary: usize,
+}
+
+/// Result of one bounded heap-object scan chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcObjectScanChunk {
+    pub done: bool,
+    pub work_bytes: usize,
+}
+
+impl GcObjectScanChunk {
+    #[inline]
+    pub fn complete(work_bytes: usize) -> Self {
+        Self {
+            done: true,
+            work_bytes,
+        }
+    }
+
+    #[inline]
+    pub fn pending(work_bytes: usize) -> Self {
+        Self {
+            done: false,
+            work_bytes,
+        }
+    }
+}
+
 impl GcRootScanChunk {
     #[inline]
     pub fn complete(work_bytes: usize) -> Self {
@@ -154,6 +387,7 @@ impl GcRootScanChunk {
 pub struct GcStepStats {
     pub phase_before: GcState,
     pub phase_after: GcState,
+    pub cycle_kind: GcCycleKind,
     pub root_state: GcRootState,
     pub root_scan_calls: usize,
     pub root_scan_skips: usize,
@@ -181,6 +415,7 @@ impl Default for GcStepStats {
         Self {
             phase_before: GcState::Pause,
             phase_after: GcState::Pause,
+            cycle_kind: GcCycleKind::Major,
             root_state: GcRootState::MayHaveChanged,
             root_scan_calls: 0,
             root_scan_skips: 0,
@@ -296,18 +531,20 @@ impl GcHeader {
     pub fn set_value_slots_object(&mut self) {
         self._reserved |= VALUE_SLOTS_OBJECT_BIT;
     }
+
+    #[inline]
+    pub fn is_runtime_backing_object(&self) -> bool {
+        (self._reserved & RUNTIME_BACKING_OBJECT_BIT) != 0
+    }
+
+    #[inline]
+    fn set_runtime_backing_object(&mut self) {
+        self._reserved |= RUNTIME_BACKING_OBJECT_BIT;
+    }
 }
 
 /// GC reference - pointer to GcObject data (after header).
 pub type GcRef = *mut Slot;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct RangeEntry {
-    page: usize,
-    base: usize,
-    next: usize,
-}
 
 /// Garbage collector.
 #[repr(C)]
@@ -316,21 +553,39 @@ pub struct Gc {
     /// extension trampoline. Host collectors always keep this as `None`.
     owner_dispatch: Option<GcOwnerDispatch>,
 
+    // ========== Island Heap ==========
+    heap: SpanHeap,
+    initial_reserve_bytes: usize,
+    gc_mode: GcMode,
+    automatic_gc: bool,
+    oom_policy: OomPolicy,
+    max_objects: Option<usize>,
+    max_objects_explicit: bool,
+    max_leases: Option<usize>,
+    max_leases_explicit: bool,
+    allocation_failures: u64,
+    last_memory_error: Option<MemoryError>,
+    allocation_bytes_total: u64,
+    external_reported_bytes: usize,
+    unknown_external_provider_count: usize,
+    wasm_current_pages: u64,
+    wasm_maximum_pages: Option<u64>,
+
     // ========== Object Storage ==========
     all_objects: Vec<GcRef>,
     all_object_data_sizes: Vec<usize>,
-    base_index: Vec<usize>,
-    base_index_items: Cell<usize>,
-    base_index_tombstones: Cell<usize>,
-    range_buckets: Vec<usize>,
-    range_entries: Vec<RangeEntry>,
-    range_tombstones: Cell<usize>,
+    allocation_extents: hashbrown::HashMap<usize, usize>,
+    leases: Vec<GcLeaseEntry>,
     object_index: core::cell::RefCell<Vec<GcRef>>,
     object_index_dirty: Cell<bool>,
 
     // ========== Mark Queues ==========
     gray: Vec<GcRef>,      // To be scanned
     grayagain: Vec<GcRef>, // Re-scan (barrier triggered)
+    pending_object_scan: Option<GcRef>,
+    pending_trace_cursor: GcTraceCursor,
+    remembered_scan_pos: usize,
+    remembered_scan_end: usize,
 
     // ========== State ==========
     state: GcState,
@@ -355,6 +610,19 @@ pub struct Gc {
     sweep_budget: usize,
     /// In-progress root scan for callers that provide a bounded root scanner.
     pending_root_scan: Option<GcRootScanKind>,
+    root_lease_scan_kind: Option<GcRootScanKind>,
+    root_lease_scan_cursor: usize,
+    atomic_root_scan_complete: bool,
+    sweep_root_scan_complete: bool,
+    cycle_kind: GcCycleKind,
+    force_major_cycle: bool,
+    minor_cycles_since_major: u8,
+    cycle_id: u64,
+    minor_cycles: u64,
+    major_cycles: u64,
+    remark_rounds: u64,
+    work_units_total: u64,
+    max_step_work_units: usize,
 
     // ========== Diagnostics ==========
     /// Stress mode for GC correctness testing. When enabled, every scheduler
@@ -365,36 +633,91 @@ pub struct Gc {
 }
 
 impl Gc {
-    const BASE_INDEX_EMPTY: usize = 0;
-    const BASE_INDEX_DELETED: usize = usize::MAX;
-    const RANGE_INDEX_EMPTY: usize = 0;
-    const RANGE_PAGE_SHIFT: usize = 12;
-    const NEARBY_BASE_SCAN_SLOTS: usize = 64;
-    #[cfg(target_pointer_width = "64")]
-    const HASH_MULT: usize = 0x9e37_79b9_7f4a_7c15;
-    #[cfg(target_pointer_width = "32")]
-    const HASH_MULT: usize = 0x9e37_79b9;
-
     // Default parameters
     const DEFAULT_PAUSE: u16 = 200; // Trigger at 2x estimated live size
     const DEFAULT_STEPMUL: u16 = 100; // Work multiplier
     const DEFAULT_STEPSIZE: usize = 8192; // 8KB per step
 
     pub fn new() -> Self {
-        Self {
+        Self::with_memory_config(VmMemoryConfig::default())
+            .expect("default GC memory configuration must be constructible")
+    }
+
+    pub fn with_memory_config(config: VmMemoryConfig) -> Result<Self, MemoryError> {
+        let mut heap = SpanHeap::new(config.hard_limit_bytes);
+        if config.initial_reserve_bytes > 0 {
+            heap.reserve(config.initial_reserve_bytes)?;
+        }
+        heap.set_growth_allowed(config.growth_allowed);
+        heap.set_allocation_allowed(config.allocation_allowed);
+        let max_objects = config
+            .max_objects
+            .or_else(|| (!config.growth_allowed).then(|| config.initial_reserve_bytes / 64));
+        let max_leases = config.max_leases.or_else(|| {
+            (!config.growth_allowed)
+                .then(|| (config.initial_reserve_bytes / (64 * 1024)).saturating_mul(64))
+        });
+        let mut all_objects = Vec::new();
+        let mut all_object_data_sizes = Vec::new();
+        let mut allocation_extents = hashbrown::HashMap::new();
+        let mut leases = Vec::new();
+        let mut object_index = Vec::new();
+        let mut gray = Vec::new();
+        let mut grayagain = Vec::new();
+        if let Some(max_objects) = max_objects {
+            all_objects
+                .try_reserve_exact(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            all_object_data_sizes
+                .try_reserve_exact(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            allocation_extents
+                .try_reserve(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            object_index
+                .try_reserve_exact(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            gray.try_reserve_exact(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            grayagain
+                .try_reserve_exact(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+        }
+        if let Some(max_leases) = max_leases {
+            leases
+                .try_reserve_exact(max_leases)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+        }
+        Ok(Self {
             owner_dispatch: None,
-            all_objects: Vec::new(),
-            all_object_data_sizes: Vec::new(),
-            base_index: Vec::new(),
-            base_index_items: Cell::new(0),
-            base_index_tombstones: Cell::new(0),
-            range_buckets: Vec::new(),
-            range_entries: Vec::new(),
-            range_tombstones: Cell::new(0),
-            object_index: core::cell::RefCell::new(Vec::new()),
+            heap,
+            initial_reserve_bytes: config.initial_reserve_bytes,
+            gc_mode: config.gc_mode,
+            automatic_gc: config.automatic_gc,
+            oom_policy: config.oom_policy,
+            max_objects,
+            max_objects_explicit: config.max_objects.is_some(),
+            max_leases,
+            max_leases_explicit: config.max_leases.is_some(),
+            allocation_failures: 0,
+            last_memory_error: None,
+            allocation_bytes_total: 0,
+            external_reported_bytes: 0,
+            unknown_external_provider_count: 0,
+            wasm_current_pages: 0,
+            wasm_maximum_pages: None,
+            all_objects,
+            all_object_data_sizes,
+            allocation_extents,
+            leases,
+            object_index: core::cell::RefCell::new(object_index),
             object_index_dirty: Cell::new(false),
-            gray: Vec::new(),
-            grayagain: Vec::new(),
+            gray,
+            grayagain,
+            pending_object_scan: None,
+            pending_trace_cursor: GcTraceCursor::default(),
+            remembered_scan_pos: 0,
+            remembered_scan_end: 0,
             state: GcState::Pause,
             current_white: WHITE0_BIT,
             sweep_pos: 0,
@@ -407,12 +730,25 @@ impl Gc {
             stepsize: Self::DEFAULT_STEPSIZE,
             sweep_budget: 0,
             pending_root_scan: None,
+            root_lease_scan_kind: None,
+            root_lease_scan_cursor: 0,
+            atomic_root_scan_complete: false,
+            sweep_root_scan_complete: false,
+            cycle_kind: GcCycleKind::Major,
+            force_major_cycle: false,
+            minor_cycles_since_major: 0,
+            cycle_id: 0,
+            minor_cycles: 0,
+            major_cycles: 0,
+            remark_rounds: 0,
+            work_units_total: 0,
+            max_step_work_units: 0,
             stress_every_step: false,
             last_step_stats: GcStepStats::default(),
-        }
+        })
     }
 
-    /// Construct the lightweight collector facade used by ABI-v9 extensions.
+    /// Construct the lightweight collector facade used by ABI-v10 extensions.
     ///
     /// The facade owns no VM allocations. Its empty Rust collections remain
     /// extension-local, while all collector mutations dispatch to the host.
@@ -436,6 +772,400 @@ impl Gc {
     pub fn state(&self) -> GcState {
         self.reject_owner_proxy_api("state");
         self.state
+    }
+
+    pub fn memory_reserve(&mut self, bytes: usize) -> Result<MemoryStats, MemoryError> {
+        self.reject_owner_proxy_api("memory_reserve");
+        self.heap.reserve(bytes)?;
+        if let Some(max_objects) = self.max_objects {
+            let object_remaining = max_objects.saturating_sub(self.all_objects.capacity());
+            if object_remaining > 0 {
+                self.all_objects
+                    .try_reserve_exact(object_remaining)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            let size_remaining = max_objects.saturating_sub(self.all_object_data_sizes.capacity());
+            if size_remaining > 0 {
+                self.all_object_data_sizes
+                    .try_reserve_exact(size_remaining)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            let extent_remaining = max_objects.saturating_sub(self.allocation_extents.len());
+            if extent_remaining > 0 {
+                self.allocation_extents
+                    .try_reserve(extent_remaining)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+        }
+        if let Some(max_leases) = self.max_leases {
+            let remaining = max_leases.saturating_sub(self.leases.capacity());
+            if remaining > 0 {
+                self.leases
+                    .try_reserve_exact(remaining)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+        }
+        Ok(self.memory_stats())
+    }
+
+    #[inline]
+    pub fn memory_set_growth_allowed(&mut self, allowed: bool) -> Result<(), MemoryError> {
+        self.reject_owner_proxy_api("memory_set_growth_allowed");
+        if !allowed && self.heap.growth_allowed() {
+            let max_objects = self
+                .max_objects
+                .unwrap_or_else(|| self.heap.stats().committed_bytes / 64);
+            let object_additional = max_objects.saturating_sub(self.all_objects.capacity());
+            if object_additional > 0 {
+                self.all_objects
+                    .try_reserve_exact(object_additional)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            let size_additional = max_objects.saturating_sub(self.all_object_data_sizes.capacity());
+            if size_additional > 0 {
+                self.all_object_data_sizes
+                    .try_reserve_exact(size_additional)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            let extent_additional = max_objects.saturating_sub(self.allocation_extents.len());
+            if extent_additional > 0 {
+                self.allocation_extents
+                    .try_reserve(extent_additional)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            {
+                let mut index = self.object_index.borrow_mut();
+                let additional = max_objects.saturating_sub(index.capacity());
+                if additional > 0 {
+                    index
+                        .try_reserve_exact(additional)
+                        .map_err(|_| MemoryError::SystemAllocationFailed)?;
+                }
+            }
+            for queue in [&mut self.gray, &mut self.grayagain] {
+                let additional = max_objects.saturating_sub(queue.capacity());
+                if additional > 0 {
+                    queue
+                        .try_reserve_exact(additional)
+                        .map_err(|_| MemoryError::SystemAllocationFailed)?;
+                }
+            }
+            self.max_objects = Some(max_objects);
+
+            let max_leases = self.max_leases.unwrap_or_else(|| {
+                (self.heap.stats().committed_bytes / heap::HEAP_BLOCK_SIZE).saturating_mul(64)
+            });
+            let additional = max_leases.saturating_sub(self.leases.capacity());
+            if additional > 0 {
+                self.leases
+                    .try_reserve_exact(additional)
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            self.max_leases = Some(max_leases);
+        } else if allowed && !self.heap.growth_allowed() {
+            if !self.max_objects_explicit {
+                self.max_objects = None;
+            }
+            if !self.max_leases_explicit {
+                self.max_leases = None;
+            }
+        }
+        self.heap.set_growth_allowed(allowed);
+        Ok(())
+    }
+
+    #[inline]
+    pub fn memory_set_allocation_allowed(&mut self, allowed: bool) {
+        self.reject_owner_proxy_api("memory_set_allocation_allowed");
+        self.heap.set_allocation_allowed(allowed);
+    }
+
+    pub fn memory_set_hard_limit_bytes(&mut self, limit: Option<usize>) -> Result<(), MemoryError> {
+        self.reject_owner_proxy_api("memory_set_hard_limit_bytes");
+        self.heap.set_hard_limit_bytes(limit)?;
+        Ok(())
+    }
+
+    /// Publish host/provider memory counters alongside managed-heap telemetry.
+    pub fn memory_set_external_reported(&mut self, bytes: usize, unknown_provider_count: usize) {
+        self.reject_owner_proxy_api("memory_set_external_reported");
+        self.external_reported_bytes = bytes;
+        self.unknown_external_provider_count = unknown_provider_count;
+    }
+
+    /// Publish WebAssembly linear-memory admission state for unified telemetry.
+    pub fn memory_set_wasm_pages(&mut self, current: u64, maximum: Option<u64>) {
+        self.reject_owner_proxy_api("memory_set_wasm_pages");
+        self.wasm_current_pages = current;
+        self.wasm_maximum_pages = maximum;
+    }
+
+    pub fn gc_set_mode(&mut self, mode: GcMode) -> Result<(), MemoryError> {
+        self.reject_owner_proxy_api("gc_set_mode");
+        if self.state != GcState::Pause {
+            return Err(MemoryError::CollectorBusy);
+        }
+        self.gc_mode = mode;
+        if mode == GcMode::Incremental {
+            self.force_major_cycle = true;
+        }
+        Ok(())
+    }
+
+    /// Request that the next cycle trace and sweep every generation.
+    #[inline]
+    pub fn gc_request_major(&mut self) {
+        self.reject_owner_proxy_api("gc_request_major");
+        self.force_major_cycle = true;
+        self.debt = self.debt.max(1);
+    }
+
+    /// Request ordinary cycle scheduling without changing the selected mode.
+    #[inline]
+    pub fn gc_request_cycle(&mut self) {
+        self.reject_owner_proxy_api("gc_request_cycle");
+        self.debt = self.debt.max(1);
+    }
+
+    /// Notify the collector that a root changed after a completed remark or
+    /// sweep-rescue scan.
+    #[inline]
+    pub fn roots_changed(&mut self) {
+        self.reject_owner_proxy_api("roots_changed");
+        match self.state {
+            GcState::Atomic => self.atomic_root_scan_complete = false,
+            GcState::Sweep => self.sweep_root_scan_complete = false,
+            _ => {}
+        }
+    }
+
+    #[inline]
+    pub fn gc_mode(&self) -> GcMode {
+        self.reject_owner_proxy_api("gc_mode");
+        self.gc_mode
+    }
+
+    #[inline]
+    pub fn gc_stop(&mut self) {
+        self.reject_owner_proxy_api("gc_stop");
+        self.automatic_gc = false;
+    }
+
+    #[inline]
+    pub fn gc_restart(&mut self) {
+        self.reject_owner_proxy_api("gc_restart");
+        self.automatic_gc = true;
+    }
+
+    #[inline]
+    pub fn automatic_gc(&self) -> bool {
+        self.reject_owner_proxy_api("automatic_gc");
+        self.automatic_gc
+    }
+
+    #[inline]
+    pub fn oom_policy(&self) -> OomPolicy {
+        self.reject_owner_proxy_api("oom_policy");
+        self.oom_policy
+    }
+
+    /// Snapshot the policy inherited by a newly-created child Island.
+    ///
+    /// Runtime telemetry and live heap occupancy stay Island-local. The
+    /// snapshot carries only admission and collector policy.
+    pub fn memory_config_snapshot(&self) -> VmMemoryConfig {
+        self.reject_owner_proxy_api("memory_config_snapshot");
+        VmMemoryConfig {
+            initial_reserve_bytes: self.initial_reserve_bytes,
+            hard_limit_bytes: self.heap.hard_limit_bytes(),
+            gc_mode: self.gc_mode,
+            automatic_gc: self.automatic_gc,
+            oom_policy: self.oom_policy,
+            growth_allowed: self.heap.growth_allowed(),
+            allocation_allowed: self.heap.allocation_allowed(),
+            max_objects: self
+                .max_objects_explicit
+                .then_some(self.max_objects)
+                .flatten(),
+            max_leases: self
+                .max_leases_explicit
+                .then_some(self.max_leases)
+                .flatten(),
+        }
+    }
+
+    #[inline]
+    pub fn last_memory_error(&self) -> Option<MemoryError> {
+        self.reject_owner_proxy_api("last_memory_error");
+        self.last_memory_error
+    }
+
+    #[inline]
+    pub fn take_last_memory_error(&mut self) -> Option<MemoryError> {
+        self.reject_owner_proxy_api("take_last_memory_error");
+        self.last_memory_error.take()
+    }
+
+    pub fn gc_lease(&mut self, obj: GcRef) -> Result<GcLease, MemoryError> {
+        self.reject_owner_proxy_api("gc_lease");
+        let obj = self
+            .canonicalize_ref(obj)
+            .filter(|obj| !obj.is_null())
+            .ok_or(MemoryError::InvalidPointer)?;
+        if let Some((index, entry)) = self
+            .leases
+            .iter_mut()
+            .enumerate()
+            .find(|(_, entry)| entry.root.is_null() && !entry.retired)
+        {
+            entry.root = obj;
+            let generation = entry.generation;
+            self.mark_gray(obj);
+            self.roots_changed();
+            return Ok(GcLease {
+                index: index as u32,
+                generation,
+            });
+        }
+        if self
+            .max_leases
+            .is_some_and(|max_leases| self.leases.len() >= max_leases)
+        {
+            return Err(MemoryError::MetadataExhausted);
+        }
+        if self.leases.len() == self.leases.capacity() {
+            if !self.heap.growth_allowed() {
+                return Err(MemoryError::MetadataExhausted);
+            }
+            self.leases
+                .try_reserve(1)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+        }
+        let index = self.leases.len();
+        self.leases.push(GcLeaseEntry {
+            root: obj,
+            generation: 1,
+            retired: false,
+        });
+        self.mark_gray(obj);
+        self.roots_changed();
+        Ok(GcLease {
+            index: index as u32,
+            generation: 1,
+        })
+    }
+
+    pub fn gc_lease_root(&self, lease: GcLease) -> Result<GcRef, MemoryError> {
+        self.reject_owner_proxy_api("gc_lease_root");
+        let entry = self
+            .leases
+            .get(lease.index as usize)
+            .filter(|entry| {
+                !entry.retired && !entry.root.is_null() && entry.generation == lease.generation
+            })
+            .ok_or(MemoryError::InvalidPointer)?;
+        Ok(entry.root)
+    }
+
+    pub fn gc_release_lease(&mut self, lease: GcLease) -> Result<(), MemoryError> {
+        self.reject_owner_proxy_api("gc_release_lease");
+        let entry = self
+            .leases
+            .get_mut(lease.index as usize)
+            .filter(|entry| {
+                !entry.retired && !entry.root.is_null() && entry.generation == lease.generation
+            })
+            .ok_or(MemoryError::InvalidPointer)?;
+        entry.root = core::ptr::null_mut();
+        if let Some(next) = entry.generation.checked_add(1) {
+            entry.generation = next;
+        } else {
+            entry.retired = true;
+        }
+        Ok(())
+    }
+
+    pub fn memory_stats(&self) -> MemoryStats {
+        self.reject_owner_proxy_api("memory_stats");
+        let HeapStats {
+            committed_bytes,
+            allocated_span_bytes,
+            pending_reclaim_bytes,
+            segment_count,
+            block_count,
+            free_blocks,
+            dirty_cards,
+        } = self.heap.stats();
+        let mut young_live_bytes = 0usize;
+        let mut old_live_bytes = 0usize;
+        let mut large_live_bytes = 0usize;
+        let mut runtime_backing_bytes = 0usize;
+        for (index, &obj) in self.all_objects.iter().enumerate() {
+            if obj.is_null() {
+                continue;
+            }
+            let size = GcHeader::SIZE + self.all_object_data_sizes[index];
+            if unsafe { Self::header(obj) }.age() >= G_OLD {
+                old_live_bytes = old_live_bytes.saturating_add(size);
+            } else {
+                young_live_bytes = young_live_bytes.saturating_add(size);
+            }
+            if size > (1usize << 15) {
+                large_live_bytes = large_live_bytes.saturating_add(size);
+            }
+            if unsafe { Self::header(obj) }.is_runtime_backing_object() {
+                runtime_backing_bytes = runtime_backing_bytes.saturating_add(size);
+            }
+        }
+        let fragmentation_bytes = allocated_span_bytes.saturating_sub(self.total_bytes);
+        MemoryStats {
+            managed_reserved_bytes: committed_bytes,
+            managed_committed_bytes: committed_bytes,
+            managed_live_bytes: self.total_bytes,
+            allocated_span_bytes,
+            pending_reclaim_bytes,
+            segment_count,
+            block_count,
+            free_blocks,
+            object_count: self.object_count(),
+            young_live_bytes,
+            old_live_bytes,
+            large_live_bytes,
+            runtime_backing_bytes,
+            external_reported_bytes: self.external_reported_bytes,
+            unknown_external_provider_count: self.unknown_external_provider_count,
+            partial_span_bytes: fragmentation_bytes,
+            fragmentation_bytes,
+            wasm_current_pages: self.wasm_current_pages,
+            wasm_maximum_pages: self.wasm_maximum_pages,
+            allocation_bytes_total: self.allocation_bytes_total,
+            allocation_failures: self.allocation_failures,
+            cycle_id: self.cycle_id,
+            minor_cycles: self.minor_cycles,
+            major_cycles: self.major_cycles,
+            work_units_total: self.work_units_total,
+            last_step_work_units: self.last_step_stats.total_work_bytes / SLOT_BYTES,
+            max_step_work_units: self.max_step_work_units,
+            dirty_cards,
+            dirty_root_domains: usize::from(
+                self.pending_root_scan.is_some()
+                    || !self.atomic_root_scan_complete
+                    || !self.sweep_root_scan_complete,
+            ),
+            remark_rounds: self.remark_rounds,
+            active_leases: self
+                .leases
+                .iter()
+                .filter(|entry| !entry.root.is_null())
+                .count(),
+            reclaim_backlog_bytes: pending_reclaim_bytes,
+            growth_allowed: self.heap.growth_allowed(),
+            allocation_allowed: self.heap.allocation_allowed(),
+            hard_limit_bytes: self.heap.hard_limit_bytes(),
+            gc_mode: self.gc_mode,
+            automatic_gc: self.automatic_gc,
+            gc_state: self.state,
+        }
     }
 
     /// Get current white bit for new allocations.
@@ -508,6 +1238,20 @@ impl Gc {
         self.alloc_inner(value_meta, GC_OWNER_ALLOC_ARRAY, header_slots, total_slots)
     }
 
+    /// Allocate scalar runtime-container backing inside the Island heap.
+    ///
+    /// The allocation participates in the ordinary object table, hard limit,
+    /// no-growth policy, incremental sweep, and telemetry. Container scanners
+    /// retain it explicitly and trace any logical child references using the
+    /// container's element metadata.
+    pub fn alloc_runtime_backing(&mut self, total_slots: usize) -> GcRef {
+        let backing = self.alloc_array(ValueMeta::new(0, ValueKind::Uint64), total_slots);
+        if !backing.is_null() {
+            unsafe { Self::header_mut(backing) }.set_runtime_backing_object();
+        }
+        backing
+    }
+
     fn alloc_inner(
         &mut self,
         value_meta: ValueMeta,
@@ -562,24 +1306,39 @@ impl Gc {
             }
         };
 
-        let layout = match core::alloc::Layout::from_size_align(total_size, SLOT_BYTES) {
-            Ok(l) => l,
-            Err(_) => {
-                #[cfg(feature = "std")]
-                eprintln!(
-                    "GC allocation layout error: total_size={}, align={}",
-                    total_size, SLOT_BYTES
-                );
+        if self
+            .max_objects
+            .is_some_and(|max_objects| self.all_objects.len() >= max_objects)
+        {
+            self.record_allocation_failure(MemoryError::MetadataExhausted);
+            return core::ptr::null_mut();
+        }
+        if self.all_objects.len() == self.all_objects.capacity()
+            || self.all_object_data_sizes.len() == self.all_object_data_sizes.capacity()
+            || self.allocation_extents.len() == self.allocation_extents.capacity()
+        {
+            if !self.heap.growth_allowed() {
+                self.record_allocation_failure(MemoryError::MetadataExhausted);
+                return core::ptr::null_mut();
+            }
+            if self.all_objects.try_reserve(1).is_err()
+                || self.all_object_data_sizes.try_reserve(1).is_err()
+                || self.allocation_extents.try_reserve(1).is_err()
+            {
+                self.record_allocation_failure(MemoryError::SystemAllocationFailed);
+                return core::ptr::null_mut();
+            }
+        }
+
+        let allocation = match self.heap.allocate(total_size) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                self.record_allocation_failure(error.into());
                 return core::ptr::null_mut();
             }
         };
-        let ptr = unsafe { heap_alloc::alloc_zeroed(layout) };
-
-        if ptr.is_null() {
-            #[cfg(feature = "std")]
-            eprintln!("GC allocation failed: out of memory");
-            return core::ptr::null_mut();
-        }
+        debug_assert!(allocation.capacity >= total_size);
+        let ptr = allocation.raw;
 
         // New object gets current white color. During marking, queue it gray so
         // its initialized slots are scanned before the cycle reaches sweep.
@@ -592,10 +1351,16 @@ impl Gc {
 
         self.all_objects.push(data_ptr);
         self.all_object_data_sizes.push(data_size);
-        self.insert_base_index(data_ptr);
-        self.insert_range_index(data_ptr, data_size);
+        let replaced_extent = self.allocation_extents.insert(data_ptr as usize, data_size);
+        assert!(
+            replaced_extent.is_none(),
+            "new allocation must not replace a live allocation extent"
+        );
         self.object_index_dirty.set(true);
         self.total_bytes += total_size;
+        self.allocation_bytes_total = self
+            .allocation_bytes_total
+            .saturating_add(total_size as u64);
         self.debt += total_size as i64;
         if matches!(self.state, GcState::Propagate | GcState::Atomic) {
             unsafe { Self::header_mut(data_ptr) }.set_gray();
@@ -606,6 +1371,12 @@ impl Gc {
         crate::gc_debug::on_alloc(data_ptr);
 
         data_ptr
+    }
+
+    #[inline]
+    fn record_allocation_failure(&mut self, error: MemoryError) {
+        self.allocation_failures = self.allocation_failures.saturating_add(1);
+        self.last_memory_error = Some(error);
     }
 
     /// Read a slot from a GC object.
@@ -664,10 +1435,7 @@ impl Gc {
     }
 
     fn allocated_data_size_bytes_for_base(&self, obj: GcRef) -> Option<usize> {
-        self.all_objects
-            .iter()
-            .zip(self.all_object_data_sizes.iter())
-            .find_map(|(&candidate, &data_size)| (candidate == obj).then_some(data_size))
+        self.allocation_extents.get(&(obj as usize)).copied()
     }
 
     pub fn allocated_data_size_bytes(&self, obj: GcRef) -> Option<usize> {
@@ -707,295 +1475,11 @@ impl Gc {
             self.all_objects
                 .iter()
                 .copied()
-                .filter(|obj| !obj.is_null()),
+                .filter(|object| !object.is_null()),
         );
-        index.sort_unstable_by_key(|&obj| obj as usize);
+        index.sort_unstable_by_key(|&object| object as usize);
         index.dedup();
         self.object_index_dirty.set(false);
-    }
-
-    #[inline]
-    fn hash_base_addr(addr: usize) -> usize {
-        (addr >> 3).wrapping_mul(Self::HASH_MULT)
-    }
-
-    fn resize_base_index(&mut self, min_items: usize) {
-        let mut new_len = 16usize;
-        while new_len.saturating_mul(3) / 4 < min_items.max(1) {
-            new_len = new_len.saturating_mul(2);
-        }
-
-        let old = mem::take(&mut self.base_index);
-        self.base_index.resize(new_len, Self::BASE_INDEX_EMPTY);
-
-        let mut items = 0usize;
-        for addr in old {
-            if addr != Self::BASE_INDEX_EMPTY && addr != Self::BASE_INDEX_DELETED {
-                Self::insert_base_index_raw(&mut self.base_index, addr);
-                items += 1;
-            }
-        }
-        self.base_index_items.set(items);
-        self.base_index_tombstones.set(0);
-    }
-
-    fn insert_base_index_raw(table: &mut [usize], addr: usize) {
-        debug_assert!(addr != Self::BASE_INDEX_EMPTY && addr != Self::BASE_INDEX_DELETED);
-        let mask = table.len() - 1;
-        let mut idx = Self::hash_base_addr(addr) & mask;
-        loop {
-            match table[idx] {
-                Self::BASE_INDEX_EMPTY | Self::BASE_INDEX_DELETED => {
-                    table[idx] = addr;
-                    return;
-                }
-                existing if existing == addr => return,
-                _ => idx = (idx + 1) & mask,
-            }
-        }
-    }
-
-    fn insert_base_index(&mut self, obj: GcRef) {
-        let addr = obj as usize;
-        let len = self.base_index.len();
-        let used = self.base_index_items.get() + self.base_index_tombstones.get() + 1;
-        if len == 0 || used.saturating_mul(4) >= len.saturating_mul(3) {
-            self.resize_base_index(self.base_index_items.get() + 1);
-        }
-
-        let table = &mut self.base_index;
-        let mask = table.len() - 1;
-        let mut idx = Self::hash_base_addr(addr) & mask;
-        let mut first_deleted = None;
-        loop {
-            match table[idx] {
-                Self::BASE_INDEX_EMPTY => {
-                    let insert_at = first_deleted.unwrap_or(idx);
-                    if first_deleted.is_some() {
-                        self.base_index_tombstones
-                            .set(self.base_index_tombstones.get().saturating_sub(1));
-                    }
-                    table[insert_at] = addr;
-                    self.base_index_items.set(self.base_index_items.get() + 1);
-                    return;
-                }
-                Self::BASE_INDEX_DELETED => {
-                    first_deleted.get_or_insert(idx);
-                }
-                existing if existing == addr => return,
-                _ => {}
-            }
-            idx = (idx + 1) & mask;
-        }
-    }
-
-    fn remove_base_index(&mut self, obj: GcRef) {
-        let addr = obj as usize;
-        let table = &mut self.base_index;
-        if table.is_empty() {
-            return;
-        }
-
-        let mask = table.len() - 1;
-        let mut idx = Self::hash_base_addr(addr) & mask;
-        loop {
-            match table[idx] {
-                Self::BASE_INDEX_EMPTY => return,
-                existing if existing == addr => {
-                    table[idx] = Self::BASE_INDEX_DELETED;
-                    self.base_index_items
-                        .set(self.base_index_items.get().saturating_sub(1));
-                    self.base_index_tombstones
-                        .set(self.base_index_tombstones.get() + 1);
-                    break;
-                }
-                _ => idx = (idx + 1) & mask,
-            }
-        }
-
-        if self.base_index_tombstones.get() > self.base_index_items.get()
-            && self.base_index.len() > 16
-        {
-            self.resize_base_index(self.base_index_items.get());
-        }
-    }
-
-    fn base_index_contains(&self, addr: usize) -> bool {
-        let table = &self.base_index;
-        if table.is_empty() {
-            return false;
-        }
-
-        let mask = table.len() - 1;
-        let mut idx = Self::hash_base_addr(addr) & mask;
-        loop {
-            match table[idx] {
-                Self::BASE_INDEX_EMPTY => return false,
-                existing if existing == addr => return true,
-                _ => idx = (idx + 1) & mask,
-            }
-        }
-    }
-
-    #[inline]
-    fn object_page(addr: usize) -> usize {
-        addr >> Self::RANGE_PAGE_SHIFT
-    }
-
-    #[inline]
-    fn hash_page(page: usize) -> usize {
-        page.wrapping_mul(Self::HASH_MULT)
-    }
-
-    fn insert_range_entry_raw(
-        buckets: &mut [usize],
-        entries: &mut Vec<RangeEntry>,
-        page: usize,
-        base: usize,
-    ) {
-        let bucket = Self::hash_page(page) & (buckets.len() - 1);
-        let next = buckets[bucket];
-        entries.push(RangeEntry { page, base, next });
-        buckets[bucket] = entries.len();
-    }
-
-    fn resize_range_index(&mut self, min_entries: usize) {
-        let mut new_len = 16usize;
-        while new_len < min_entries.max(1).saturating_mul(2) {
-            new_len = new_len.saturating_mul(2);
-        }
-
-        let old_entries = mem::take(&mut self.range_entries);
-        let mut new_buckets = Vec::new();
-        new_buckets.resize(new_len, Self::RANGE_INDEX_EMPTY);
-        let mut new_entries = Vec::new();
-
-        for entry in old_entries {
-            if entry.base != 0 && self.base_index_contains(entry.base) {
-                Self::insert_range_entry_raw(
-                    &mut new_buckets,
-                    &mut new_entries,
-                    entry.page,
-                    entry.base,
-                );
-            }
-        }
-
-        self.range_buckets = new_buckets;
-        self.range_entries = new_entries;
-        self.range_tombstones.set(0);
-    }
-
-    fn insert_range_index(&mut self, obj: GcRef, data_size: usize) {
-        if data_size <= SLOT_BYTES {
-            return;
-        }
-
-        let base = obj as usize;
-        let start_page = Self::object_page(base);
-        let end_page = Self::object_page(base + data_size - 1);
-        let page_count = end_page - start_page + 1;
-
-        let bucket_len = self.range_buckets.len();
-        let entry_count = self.range_entries.len();
-        if bucket_len == 0 || (entry_count + page_count).saturating_mul(2) >= bucket_len {
-            self.resize_range_index(entry_count + page_count);
-        }
-
-        for page in start_page..=end_page {
-            Self::insert_range_entry_raw(
-                &mut self.range_buckets,
-                &mut self.range_entries,
-                page,
-                base,
-            );
-        }
-    }
-
-    fn remove_range_index(&mut self, obj: GcRef, data_size: usize) {
-        if data_size <= SLOT_BYTES {
-            return;
-        }
-
-        let base = obj as usize;
-        let start_page = Self::object_page(base);
-        let end_page = Self::object_page(base + data_size - 1);
-        let mut removed = 0usize;
-
-        {
-            let buckets = &mut self.range_buckets;
-            let entries = &mut self.range_entries;
-            if buckets.is_empty() {
-                return;
-            }
-
-            for page in start_page..=end_page {
-                let bucket = Self::hash_page(page) & (buckets.len() - 1);
-                let mut link = buckets[bucket];
-                while link != Self::RANGE_INDEX_EMPTY {
-                    let entry = &mut entries[link - 1];
-                    if entry.page == page && entry.base == base {
-                        entry.base = 0;
-                        removed += 1;
-                    }
-                    link = entry.next;
-                }
-            }
-        }
-
-        if removed == 0 {
-            return;
-        }
-        self.range_tombstones
-            .set(self.range_tombstones.get() + removed);
-
-        let entry_count = self.range_entries.len();
-        if entry_count > 32 && self.range_tombstones.get().saturating_mul(2) > entry_count {
-            self.resize_range_index(entry_count - self.range_tombstones.get());
-        }
-    }
-
-    fn range_index_lookup(&self, addr: usize) -> Option<GcRef> {
-        let buckets = &self.range_buckets;
-        if buckets.is_empty() {
-            return None;
-        }
-        let entries = &self.range_entries;
-        let page = Self::object_page(addr);
-        let bucket = Self::hash_page(page) & (buckets.len() - 1);
-        let mut link = buckets[bucket];
-        while link != Self::RANGE_INDEX_EMPTY {
-            let entry = entries[link - 1];
-            if entry.page == page && entry.base != 0 {
-                let base = entry.base as GcRef;
-                let base_addr = entry.base;
-                let data_end = base_addr + self.allocated_data_size_bytes_for_base(base)?;
-                if addr >= base_addr && addr < data_end {
-                    return Some(base);
-                }
-            }
-            link = entry.next;
-        }
-        None
-    }
-
-    fn nearby_base_lookup(&self, addr: usize) -> Option<GcRef> {
-        let lower_bound =
-            addr.saturating_sub(Self::NEARBY_BASE_SCAN_SLOTS.saturating_mul(SLOT_BYTES));
-        let mut candidate = addr.saturating_sub(SLOT_BYTES);
-
-        while candidate >= lower_bound {
-            if self.base_index_contains(candidate) {
-                let base = candidate as GcRef;
-                let data_end = candidate + self.allocated_data_size_bytes_for_base(base)?;
-                return (addr < data_end).then_some(base);
-            }
-            if candidate < SLOT_BYTES {
-                break;
-            }
-            candidate -= SLOT_BYTES;
-        }
-        None
     }
 
     // The owner-dispatch callback receives an opaque handle. It validates the
@@ -1019,20 +1503,19 @@ impl Gc {
             return None;
         }
 
-        if self.base_index_contains(addr) {
-            return Some(obj);
+        let located = self.heap.locate(addr, GcHeader::SIZE)?;
+        let base = unsafe { located.raw.add(GcHeader::SIZE) as GcRef };
+        let data_size = self.allocated_data_size_bytes_for_base(base)?;
+        if GcHeader::SIZE.saturating_add(data_size) > located.capacity {
+            return None;
         }
-
-        if let Some(base) = self.nearby_base_lookup(addr) {
-            return Some(base);
-        }
-
-        self.range_index_lookup(addr)
+        let data_end = (base as usize).checked_add(data_size)?;
+        (addr == base as usize || addr < data_end).then_some(base)
     }
 
     pub fn debug_ref_membership(&self, obj: GcRef) -> (bool, bool, usize) {
         self.reject_owner_proxy_api("debug_ref_membership");
-        let in_all_objects = self.base_index_contains(obj as usize);
+        let in_all_objects = self.canonicalize_ref(obj) == Some(obj);
         self.refresh_object_index();
         let index = self.object_index.borrow();
         let in_object_index = index
@@ -1117,8 +1600,12 @@ impl Gc {
         );
     }
 
-    /// Write barrier for incremental GC (backward barrier).
-    /// Called when a black object writes a white reference.
+    /// Typed new-value barrier shared by the interpreter, JIT, stdlib, and FFI.
+    ///
+    /// The barrier shades a newly stored white child when the parent has
+    /// already been scanned. In generational mode it also remembers an
+    /// old-to-young edge. Callers invoke this before publishing the store so a
+    /// validation failure cannot leave a partially-mutated object.
     #[track_caller]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn write_barrier(&mut self, parent: GcRef, child: GcRef) {
@@ -1129,9 +1616,6 @@ impl Gc {
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_barrier(parent, 0, child as u64);
 
-        if !matches!(self.state, GcState::Propagate | GcState::Sweep) {
-            return;
-        }
         if parent.is_null() || child.is_null() {
             return;
         }
@@ -1141,13 +1625,22 @@ impl Gc {
         let Some(child) = self.canonicalize_ref(child) else {
             return;
         };
+
+        let parent_age = unsafe { Self::header(parent) }.age();
+        let child_age = unsafe { Self::header(child) }.age();
+        if self.gc_mode == GcMode::Generational && parent_age >= G_OLD && child_age < G_OLD {
+            self.heap
+                .dirty_card_for_store(parent as usize, parent as usize);
+        }
+
         match self.state {
-            GcState::Propagate => {
+            GcState::Propagate | GcState::Atomic => {
                 let p_header = unsafe { Self::header(parent) };
                 let c_header = unsafe { Self::header(child) };
-                // Backward barrier: black parent writes white child -> parent becomes gray.
-                if p_header.is_black() && c_header.is_white() {
-                    self.barrier_back(parent);
+                // Incremental-update barrier: preserve the strong tri-color
+                // invariant by shading the new child.
+                if (p_header.is_black() || p_header.is_gray()) && c_header.is_white() {
+                    self.mark_gray(child);
                 }
             }
             GcState::Sweep => {
@@ -1158,7 +1651,7 @@ impl Gc {
                 self.mark_dead_white_gray(parent);
                 self.mark_dead_white_gray(child);
             }
-            GcState::Pause | GcState::Atomic => {}
+            GcState::Pause | GcState::Reclaim => {}
         }
     }
 
@@ -1201,13 +1694,6 @@ impl Gc {
             .unwrap_or(false)
     }
 
-    /// Backward barrier: turn black object back to gray for re-scan.
-    fn barrier_back(&mut self, obj: GcRef) {
-        let header = unsafe { Self::header_mut(obj) };
-        header.set_white(self.current_white);
-        self.grayagain.push(obj);
-    }
-
     /// Enable or disable GC stress mode.
     #[inline]
     pub fn set_stress_every_step(&mut self, enabled: bool) {
@@ -1231,7 +1717,8 @@ impl Gc {
     #[inline]
     pub fn should_step(&self) -> bool {
         self.reject_owner_proxy_api("should_step");
-        self.stress_every_step || self.debt > 0 || self.state != GcState::Pause
+        self.stress_every_step
+            || (self.automatic_gc && (self.debt > 0 || self.state != GcState::Pause))
     }
 
     /// Incremental GC step. Returns work done (bytes processed).
@@ -1300,7 +1787,37 @@ impl Gc {
         }
     }
 
-    /// Incremental GC step with a bounded root scanner.
+    /// Incremental GC step with a bounded root scanner and an atomic
+    /// heap-object scanner retained for compatibility.
+    ///
+    /// Production hosts should use [`Gc::step_with_scanners`] so large objects
+    /// can pause at reference-slot boundaries.
+    pub unsafe fn step_with_root_scanner<R, S, F>(
+        &mut self,
+        root_state: GcRootState,
+        scan_roots: R,
+        mut scan_object: S,
+        finalize_object: F,
+    ) -> usize
+    where
+        R: FnMut(&mut Gc, GcRootScanKind, usize) -> GcRootScanChunk,
+        S: FnMut(&mut Gc, GcRef),
+        F: FnMut(GcRef),
+    {
+        unsafe {
+            self.step_with_scanners(
+                root_state,
+                scan_roots,
+                |gc, obj, _cursor, limit| {
+                    scan_object(gc, obj);
+                    GcObjectScanChunk::complete(Self::object_size_bytes(obj).min(limit))
+                },
+                finalize_object,
+            )
+        }
+    }
+
+    /// Incremental GC step with bounded root and heap-object scanners.
     ///
     /// This API is for hosts with very large root sets. The scanner may process
     /// up to `limit_bytes` worth of root work and return `pending`; the collector
@@ -1316,23 +1833,57 @@ impl Gc {
     /// The caller must prove root-set stability or dirty-restart ownership for
     /// pending chunked scans, and the callbacks must remain valid while the
     /// collector advances through mark/sweep work.
-    pub unsafe fn step_with_root_scanner<R, S, F>(
+    pub unsafe fn step_with_scanners<R, S, F>(
         &mut self,
         root_state: GcRootState,
+        scan_roots: R,
+        scan_object: S,
+        finalize_object: F,
+    ) -> usize
+    where
+        R: FnMut(&mut Gc, GcRootScanKind, usize) -> GcRootScanChunk,
+        S: FnMut(&mut Gc, GcRef, &mut GcTraceCursor, usize) -> GcObjectScanChunk,
+        F: FnMut(GcRef),
+    {
+        unsafe {
+            self.step_with_scanners_budget(
+                root_state,
+                usize::MAX / SLOT_BYTES,
+                scan_roots,
+                scan_object,
+                finalize_object,
+            )
+        }
+    }
+
+    /// Variant of [`Gc::step_with_scanners`] with a strict work-unit ceiling.
+    ///
+    /// A work unit is one root slot, trace slot, object-table entry, swept
+    /// allocation, or reclaimed heap block. A zero budget observes no heap
+    /// state and performs no collector transition.
+    pub unsafe fn step_with_scanners_budget<R, S, F>(
+        &mut self,
+        root_state: GcRootState,
+        work_unit_limit: usize,
         mut scan_roots: R,
         mut scan_object: S,
         mut finalize_object: F,
     ) -> usize
     where
         R: FnMut(&mut Gc, GcRootScanKind, usize) -> GcRootScanChunk,
-        S: FnMut(&mut Gc, GcRef),
+        S: FnMut(&mut Gc, GcRef, &mut GcTraceCursor, usize) -> GcObjectScanChunk,
         F: FnMut(GcRef),
     {
-        self.reject_owner_proxy_api("step_with_root_scanner");
+        self.reject_owner_proxy_api("step_with_scanners");
+        if work_unit_limit == 0 {
+            return 0;
+        }
         let mut work = 0usize;
+        let requested_limit = work_unit_limit.saturating_mul(SLOT_BYTES);
         let base = self.stepsize * self.stepmul as usize / 100;
         let mut stats = GcStepStats {
             phase_before: self.state,
+            cycle_kind: self.cycle_kind,
             root_state,
             heap_bytes_before: self.total_bytes,
             debt_before: self.debt,
@@ -1358,15 +1909,37 @@ impl Gc {
         const TARGET_PHASE_FRAMES: usize = 128;
         const MAX_PHASE_STEP_BYTES: usize = 1024 * 1024;
 
-        let mut completed_atomic_root_scan = false;
-        let mut completed_sweep_root_scan = false;
         loop {
             let phase_limit = (self.total_bytes / TARGET_PHASE_FRAMES)
                 .max(base)
-                .min(MAX_PHASE_STEP_BYTES);
+                .min(MAX_PHASE_STEP_BYTES)
+                .min(requested_limit);
+            // Scanner work is accounted in whole slots. A heap-derived phase
+            // budget can have a 1..SLOT_BYTES-1 remainder; returning that
+            // remainder to the next scheduler boundary prevents a zero-work
+            // spin in Propagate or Sweep.
+            if phase_limit.saturating_sub(work) < SLOT_BYTES {
+                break;
+            }
 
             if let Some(kind) = self.pending_root_scan {
-                let limit = phase_limit.saturating_sub(work).max(SLOT_BYTES);
+                if self.root_lease_scan_kind != Some(kind) {
+                    self.root_lease_scan_kind = Some(kind);
+                    self.root_lease_scan_cursor = 0;
+                }
+                while self.root_lease_scan_cursor < self.leases.len() && work < phase_limit {
+                    let root = self.leases[self.root_lease_scan_cursor].root;
+                    self.root_lease_scan_cursor += 1;
+                    work += SLOT_BYTES;
+                    stats.root_scan_work_bytes += SLOT_BYTES;
+                    if !root.is_null() {
+                        self.mark_gray(root);
+                    }
+                }
+                if self.root_lease_scan_cursor < self.leases.len() || work >= phase_limit {
+                    break;
+                }
+                let limit = phase_limit - work;
                 stats.root_scan_calls += 1;
                 let chunk = scan_roots(self, kind, limit);
                 debug_assert!(
@@ -1381,13 +1954,16 @@ impl Gc {
                 }
 
                 self.pending_root_scan = None;
+                self.root_lease_scan_kind = None;
+                self.root_lease_scan_cursor = 0;
                 if kind == GcRootScanKind::Atomic {
-                    completed_atomic_root_scan = true;
+                    self.atomic_root_scan_complete = true;
+                    self.remark_rounds = self.remark_rounds.saturating_add(1);
                 }
                 if kind == GcRootScanKind::Sweep {
-                    completed_sweep_root_scan = true;
+                    self.sweep_root_scan_complete = true;
                 }
-                if kind == GcRootScanKind::StartCycle && work >= phase_limit {
+                if work >= phase_limit {
                     break;
                 }
             }
@@ -1396,7 +1972,27 @@ impl Gc {
                 GcState::Pause => {
                     // Start new cycle
                     stats.cycle_started = true;
+                    const MINOR_CYCLES_PER_MAJOR: u8 = 8;
+                    self.cycle_kind = if self.gc_mode == GcMode::Generational
+                        && !self.force_major_cycle
+                        && self.minor_cycles_since_major < MINOR_CYCLES_PER_MAJOR
+                    {
+                        GcCycleKind::Minor
+                    } else {
+                        GcCycleKind::Major
+                    };
+                    stats.cycle_kind = self.cycle_kind;
+                    self.force_major_cycle = false;
+                    self.cycle_id = self.cycle_id.saturating_add(1);
                     self.current_white ^= WHITE_BITS;
+                    self.remembered_scan_pos = 0;
+                    // A minor cycle only needs remembered parents that already
+                    // existed at cycle start. Objects allocated while marking
+                    // are young, so extending this frontier would make the
+                    // remembered pass chase a growing object table forever.
+                    self.remembered_scan_end = self.all_objects.len();
+                    self.atomic_root_scan_complete = false;
+                    self.sweep_root_scan_complete = false;
                     self.pending_root_scan = Some(GcRootScanKind::StartCycle);
                     self.state = GcState::Propagate;
                 }
@@ -1407,11 +2003,25 @@ impl Gc {
                     // so this is stable/increasing across steps — no convergence issue.
                     // Use .max(base) NOT .max(work_limit) to avoid first-cycle spikes
                     // where debt = total_bytes would make phase_limit = entire heap.
+                    let remembered_work = if self.cycle_kind == GcCycleKind::Minor {
+                        self.remembered_step(phase_limit.saturating_sub(work))
+                    } else {
+                        self.remembered_scan_pos = self.remembered_scan_end;
+                        0
+                    };
+                    stats.propagate_work_bytes += remembered_work;
+                    work += remembered_work;
+                    if work >= phase_limit {
+                        break;
+                    }
                     let propagate_work = {
-                        let mut counted_scan_object = |gc: &mut Gc, obj: GcRef| {
-                            stats.object_scans += 1;
-                            scan_object(gc, obj);
-                        };
+                        let mut counted_scan_object =
+                            |gc: &mut Gc, obj: GcRef, cursor: &mut GcTraceCursor, limit: usize| {
+                                if *cursor == GcTraceCursor::default() {
+                                    stats.object_scans += 1;
+                                }
+                                scan_object(gc, obj, cursor, limit)
+                            };
                         self.propagate_step(
                             &mut counted_scan_object,
                             phase_limit.saturating_sub(work),
@@ -1420,7 +2030,10 @@ impl Gc {
                     stats.propagate_work_bytes += propagate_work;
                     work += propagate_work;
 
-                    if self.gray.is_empty() {
+                    if self.gray.is_empty()
+                        && self.pending_object_scan.is_none()
+                        && self.remembered_scan_pos >= self.remembered_scan_end
+                    {
                         self.state = GcState::Atomic;
                         break;
                     } else if work >= phase_limit {
@@ -1433,16 +2046,27 @@ impl Gc {
                     // can start pointing at an old-white object after start_cycle() has
                     // already scanned roots, so rescan roots at the atomic boundary before
                     // finalizing the mark set.
-                    if !completed_atomic_root_scan {
+                    if !self.atomic_root_scan_complete {
                         self.pending_root_scan = Some(GcRootScanKind::Atomic);
                         continue;
                     }
-                    {
-                        let mut counted_scan_object = |gc: &mut Gc, obj: GcRef| {
-                            stats.object_scans += 1;
-                            scan_object(gc, obj);
-                        };
-                        self.atomic_phase(&mut counted_scan_object);
+                    let propagate_work = {
+                        let mut counted_scan_object =
+                            |gc: &mut Gc, obj: GcRef, cursor: &mut GcTraceCursor, limit: usize| {
+                                if *cursor == GcTraceCursor::default() {
+                                    stats.object_scans += 1;
+                                }
+                                scan_object(gc, obj, cursor, limit)
+                            };
+                        self.propagate_step(
+                            &mut counted_scan_object,
+                            phase_limit.saturating_sub(work),
+                        )
+                    };
+                    stats.propagate_work_bytes += propagate_work;
+                    work += propagate_work;
+                    if !self.gray.is_empty() || self.pending_object_scan.is_some() {
+                        break;
                     }
                     self.state = GcState::Sweep;
                     self.sweep_pos = 0;
@@ -1460,40 +2084,71 @@ impl Gc {
                 }
 
                 GcState::Sweep => {
+                    let sweep_limit = self.sweep_budget.min(phase_limit);
                     // Mutator roots can change while sweep is incremental. Rescue
                     // any newly reachable old-white graph before sweeping the next
                     // chunk; mark_gray() is sweep-aware and ignores current-white
                     // objects that have already survived this cycle.
                     if root_state == GcRootState::MayHaveChanged {
-                        if !completed_sweep_root_scan {
+                        if !self.sweep_root_scan_complete {
                             self.pending_root_scan = Some(GcRootScanKind::Sweep);
                             continue;
                         }
-                    } else if !completed_sweep_root_scan {
+                    } else if !self.sweep_root_scan_complete {
                         stats.root_scan_skips += 1;
                     }
-                    {
-                        let mut counted_scan_object = |gc: &mut Gc, obj: GcRef| {
-                            stats.object_scans += 1;
-                            scan_object(gc, obj);
-                        };
-                        self.atomic_phase(&mut counted_scan_object);
+                    let rescue_work = {
+                        let mut counted_scan_object =
+                            |gc: &mut Gc, obj: GcRef, cursor: &mut GcTraceCursor, limit: usize| {
+                                if *cursor == GcTraceCursor::default() {
+                                    stats.object_scans += 1;
+                                }
+                                scan_object(gc, obj, cursor, limit)
+                            };
+                        self.propagate_step(
+                            &mut counted_scan_object,
+                            sweep_limit.saturating_sub(work),
+                        )
+                    };
+                    stats.propagate_work_bytes += rescue_work;
+                    work += rescue_work;
+                    if !self.gray.is_empty() || self.pending_object_scan.is_some() {
+                        break;
                     }
                     let sweep_work = self.sweep_step_counted(
                         &mut finalize_object,
-                        self.sweep_budget.saturating_sub(work),
+                        sweep_limit.saturating_sub(work),
                         &mut stats,
                     );
                     stats.sweep_work_bytes += sweep_work;
                     work += sweep_work;
+                    self.sweep_root_scan_complete = false;
 
                     if self.sweep_pos >= self.all_objects.len() {
-                        self.finish_cycle();
-                        stats.cycle_finished = true;
+                        if self.heap.stats().pending_reclaim_bytes == 0 {
+                            self.finish_cycle();
+                            stats.cycle_finished = true;
+                        } else {
+                            self.state = GcState::Reclaim;
+                        }
                         break;
-                    } else if work >= self.sweep_budget {
+                    } else if work >= sweep_limit {
                         break;
                     }
+                }
+
+                GcState::Reclaim => {
+                    let remaining = phase_limit.saturating_sub(work);
+                    let block_budget = remaining / SLOT_BYTES;
+                    let (blocks, done) = self.heap.reclaim_step(block_budget);
+                    let reclaim_work = blocks.saturating_mul(SLOT_BYTES);
+                    stats.sweep_work_bytes = stats.sweep_work_bytes.saturating_add(reclaim_work);
+                    work = work.saturating_add(reclaim_work);
+                    if done {
+                        self.finish_cycle();
+                        stats.cycle_finished = true;
+                    }
+                    break;
                 }
             }
         }
@@ -1508,58 +2163,119 @@ impl Gc {
         stats.debt_after = self.debt;
         stats.gray_len_after = self.gray.len();
         stats.grayagain_len_after = self.grayagain.len();
+        let step_units = work.div_ceil(SLOT_BYTES);
+        self.work_units_total = self.work_units_total.saturating_add(step_units as u64);
+        self.max_step_work_units = self.max_step_work_units.max(step_units);
         self.last_step_stats = stats;
         work
     }
 
+    /// Discover old objects whose remembered card may contain a young edge.
+    ///
+    /// Card clearing is deliberately conservative: a dirty card remains dirty
+    /// until its block is reclaimed. This avoids an extra post-scan pass to
+    /// prove that every old-to-young edge disappeared, while keeping discovery
+    /// bounded to one object-table entry per work unit.
+    fn remembered_step(&mut self, limit: usize) -> usize {
+        let entry_budget = limit / SLOT_BYTES;
+        if entry_budget == 0 {
+            return 0;
+        }
+        let start = self.remembered_scan_pos;
+        let end = self
+            .remembered_scan_pos
+            .saturating_add(entry_budget)
+            .min(self.remembered_scan_end);
+        while self.remembered_scan_pos < end {
+            let obj = self.all_objects[self.remembered_scan_pos];
+            self.remembered_scan_pos += 1;
+            if obj.is_null() {
+                continue;
+            }
+            let header = unsafe { Self::header(obj) };
+            if header.age() >= G_OLD
+                && self.heap.allocation_has_dirty_cards(obj as usize)
+                && header.is_white()
+            {
+                unsafe { Self::header_mut(obj) }.set_gray();
+                self.gray.push(obj);
+            }
+        }
+        (end - start) * SLOT_BYTES
+    }
+
     /// Propagate marking incrementally. Returns work done.
-    fn propagate_step<S: FnMut(&mut Gc, GcRef)>(
+    fn propagate_step<S: FnMut(&mut Gc, GcRef, &mut GcTraceCursor, usize) -> GcObjectScanChunk>(
         &mut self,
         scan_object: &mut S,
         limit: usize,
     ) -> usize {
-        let mut work = 0;
+        let mut work = 0usize;
 
-        while let Some(obj) = self.gray.pop() {
-            // Validate gray object before processing
+        while work < limit {
+            let obj = if let Some(obj) = self.pending_object_scan {
+                obj
+            } else {
+                let Some(obj) = self.gray.pop() else {
+                    break;
+                };
+                self.pending_trace_cursor = GcTraceCursor::default();
+                self.pending_object_scan = Some(obj);
+                obj
+            };
+
             debug_assert!(
                 !obj.is_null() && (obj as usize) & (SLOT_BYTES - 1) == 0 && (obj as usize) >= 4096,
                 "propagate_step: invalid GcRef {:p} in gray queue",
                 obj
             );
-            let header = unsafe { Self::header_mut(obj) };
-            if !header.is_black() {
-                header.set_black();
-                scan_object(self, obj);
-                work += Self::object_size_bytes(obj);
+            if unsafe { Self::header(obj) }.is_black() {
+                self.pending_object_scan = None;
+                self.pending_trace_cursor = GcTraceCursor::default();
+                continue;
+            }
 
-                if work >= limit {
-                    break;
-                }
+            let remaining = limit.saturating_sub(work);
+            if remaining < SLOT_BYTES {
+                break;
+            }
+            let mut cursor = self.pending_trace_cursor;
+            let chunk = scan_object(self, obj, &mut cursor, remaining);
+            debug_assert!(
+                chunk.done || chunk.work_bytes > 0,
+                "bounded GC object scanner returned pending without progress"
+            );
+            debug_assert!(
+                chunk.work_bytes <= remaining,
+                "bounded GC object scanner exceeded its work limit"
+            );
+            self.pending_trace_cursor = cursor;
+            work = work.saturating_add(chunk.work_bytes);
+            if chunk.done {
+                unsafe { Self::header_mut(obj) }.set_black();
+                self.pending_object_scan = None;
+                self.pending_trace_cursor = GcTraceCursor::default();
+            } else {
+                break;
             }
         }
 
         work
     }
 
-    /// Atomic phase: process grayagain and finalize marking.
+    #[cfg(test)]
     fn atomic_phase<S: FnMut(&mut Gc, GcRef)>(&mut self, scan_object: &mut S) {
-        // Process grayagain (objects modified during propagate)
         while let Some(obj) = self.grayagain.pop() {
-            let header = unsafe { Self::header_mut(obj) };
-            if !header.is_black() {
-                header.set_black();
-                scan_object(self, obj);
-            }
+            self.mark_gray(obj);
         }
-
-        // Process any new gray objects added during grayagain processing
-        while let Some(obj) = self.gray.pop() {
-            let header = unsafe { Self::header_mut(obj) };
-            if !header.is_black() {
-                header.set_black();
-                scan_object(self, obj);
-            }
+        let mut atomic_scanner =
+            |gc: &mut Gc, obj: GcRef, _cursor: &mut GcTraceCursor, limit: usize| {
+                scan_object(gc, obj);
+                GcObjectScanChunk::complete(Self::object_size_bytes(obj).min(limit))
+            };
+        while self.pending_object_scan.is_some() || !self.gray.is_empty() {
+            let work = self.propagate_step(&mut atomic_scanner, usize::MAX);
+            assert!(work > 0, "test atomic drain must make progress");
         }
     }
 
@@ -1584,6 +2300,7 @@ impl Gc {
             let obj = self.all_objects[self.sweep_pos];
             let header = unsafe { Self::header(obj) };
             let obj_white = header.marked & WHITE_BITS;
+            let age = header.age();
             let data_size = self.all_object_data_sizes[self.sweep_pos];
 
             // Gray objects should never exist during sweep — atomic phase processes all of them.
@@ -1597,16 +2314,25 @@ impl Gc {
             // Compute size once — both alive and dead branches need it for work accounting.
             let size_bytes = GcHeader::SIZE + data_size;
 
-            if header.is_black() || obj_white == self.current_white {
+            let retained_old = self.cycle_kind == GcCycleKind::Minor && age >= G_OLD;
+            if header.is_black() || obj_white == self.current_white || retained_old {
                 // Alive: reset to current white
-                unsafe { Self::header_mut(obj) }.set_white(self.current_white);
+                let mut promoted_to_old = false;
+                let header = unsafe { Self::header_mut(obj) };
+                if self.gc_mode == GcMode::Generational && age < G_OLD {
+                    let next_age = if age == G_YOUNG { G_SURVIVAL } else { G_OLD };
+                    header.set_age(next_age);
+                    promoted_to_old = next_age >= G_OLD;
+                }
+                header.set_white(self.current_white);
+                if promoted_to_old {
+                    self.heap.dirty_card_for_store(obj as usize, obj as usize);
+                }
                 self.all_objects[self.sweep_write_pos] = obj;
                 self.all_object_data_sizes[self.sweep_write_pos] = data_size;
                 self.sweep_write_pos += 1;
-                // Count alive objects toward work budget. Without this, a mostly-alive
-                // heap (e.g. 99% alive) would have work ≈ 0 and the loop would process
-                // the entire heap in one call — a 500MB heap causes a 625ms latency spike.
-                work += size_bytes;
+                // Sweeping one allocation is one bounded metadata operation.
+                work += SLOT_BYTES;
             } else if obj_white == dead_white {
                 // Dead: free it
                 #[cfg(feature = "gc-debug")]
@@ -1615,17 +2341,22 @@ impl Gc {
                 finalize_object(obj);
                 stats.finalized_objects += 1;
                 stats.sweep_freed_bytes += size_bytes;
-                self.remove_base_index(obj);
-                self.remove_range_index(obj, data_size);
                 self.all_objects[self.sweep_pos] = core::ptr::null_mut();
                 self.all_object_data_sizes[self.sweep_pos] = 0;
                 self.object_index_dirty.set(true);
                 self.total_bytes -= size_bytes;
-                work += size_bytes;
+                work += SLOT_BYTES;
 
+                let removed_extent = self.allocation_extents.remove(&(obj as usize));
+                assert_eq!(
+                    removed_extent,
+                    Some(data_size),
+                    "sweep must remove the exact allocation extent for every live object record"
+                );
                 let raw_ptr = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
-                let layout = core::alloc::Layout::from_size_align(size_bytes, 8).unwrap();
-                unsafe { heap_alloc::dealloc(raw_ptr, layout) };
+                self.heap
+                    .free(raw_ptr)
+                    .expect("sweep must release an allocation owned by the Island heap");
             }
 
             self.sweep_pos += 1;
@@ -1643,6 +2374,16 @@ impl Gc {
 
     /// Finish GC cycle.
     fn finish_cycle(&mut self) {
+        match self.cycle_kind {
+            GcCycleKind::Minor => {
+                self.minor_cycles = self.minor_cycles.saturating_add(1);
+                self.minor_cycles_since_major = self.minor_cycles_since_major.saturating_add(1);
+            }
+            GcCycleKind::Major => {
+                self.major_cycles = self.major_cycles.saturating_add(1);
+                self.minor_cycles_since_major = 0;
+            }
+        }
         self.estimate = self.total_bytes;
         self.state = GcState::Pause;
         self.pending_root_scan = None;

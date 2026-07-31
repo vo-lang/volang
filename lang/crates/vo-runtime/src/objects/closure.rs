@@ -66,9 +66,7 @@ pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
             capture_count,
             max_capture_slots,
         } => panic!("closure capture count {capture_count} exceeds maximum {max_capture_slots}"),
-        ClosureCreateError::AllocationFailed { total_slots } => {
-            panic!("closure allocation failed for {total_slots} slots")
-        }
+        ClosureCreateError::AllocationFailed { .. } => core::ptr::null_mut(),
     })
 }
 

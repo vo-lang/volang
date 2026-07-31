@@ -27,7 +27,7 @@ use std::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashSet;
 
-use crate::gc::GcRef;
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::slot::{slot_to_usize, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
@@ -198,7 +198,145 @@ pub unsafe fn is_port(q: GcRef) -> bool {
 // Type aliases for channel states
 // =============================================================================
 
-pub type QueueMessage = Box<[u64]>;
+/// Queue payload storage.
+///
+/// Guest sends use `Managed`: payload slots live in a runtime-backing object
+/// owned and charged by the Island heap. `Owned` remains available at
+/// transport/test boundaries where bytes arrive before a destination Island
+/// is selected; production queue insertion promotes it before persistence.
+#[derive(Debug)]
+pub enum QueueMessage {
+    Managed { backing: GcRef, len: usize },
+    Owned(Box<[u64]>),
+}
+
+impl QueueMessage {
+    pub fn managed(gc: &mut Gc, slots: &[u64]) -> Result<Self, MemoryError> {
+        if slots.is_empty() {
+            return Ok(Self::Managed {
+                backing: core::ptr::null_mut(),
+                len: 0,
+            });
+        }
+        let backing = gc.alloc_runtime_backing(slots.len());
+        if backing.is_null() {
+            return Err(gc
+                .last_memory_error()
+                .unwrap_or(MemoryError::SystemAllocationFailed));
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(slots.as_ptr(), backing, slots.len());
+        }
+        Ok(Self::Managed {
+            backing,
+            len: slots.len(),
+        })
+    }
+
+    #[inline]
+    pub fn backing_ref(&self) -> Option<GcRef> {
+        match self {
+            Self::Managed { backing, .. } if !backing.is_null() => Some(*backing),
+            Self::Managed { .. } | Self::Owned(_) => None,
+        }
+    }
+
+    #[inline]
+    pub fn is_managed(&self) -> bool {
+        matches!(self, Self::Managed { .. })
+    }
+
+    pub fn promote(self, gc: &mut Gc) -> Result<Self, MemoryError> {
+        match self {
+            Self::Managed { .. } => Ok(self),
+            Self::Owned(slots) => Self::managed(gc, &slots),
+        }
+    }
+
+    pub fn into_vec(self) -> Vec<u64> {
+        self.as_ref().to_vec()
+    }
+
+    pub fn into_boxed_slice(self) -> Box<[u64]> {
+        match self {
+            Self::Owned(slots) => slots,
+            Self::Managed { backing, len } => {
+                if len == 0 {
+                    Box::new([])
+                } else {
+                    unsafe { core::slice::from_raw_parts(backing, len) }.into()
+                }
+            }
+        }
+    }
+}
+
+impl Clone for QueueMessage {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Managed { backing, len } => Self::Managed {
+                backing: *backing,
+                len: *len,
+            },
+            Self::Owned(slots) => Self::Owned(slots.clone()),
+        }
+    }
+}
+
+impl PartialEq for QueueMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for QueueMessage {}
+
+impl AsRef<[u64]> for QueueMessage {
+    fn as_ref(&self) -> &[u64] {
+        match self {
+            Self::Managed { backing, len } => {
+                if *len == 0 {
+                    &[]
+                } else {
+                    unsafe { core::slice::from_raw_parts(*backing, *len) }
+                }
+            }
+            Self::Owned(slots) => slots,
+        }
+    }
+}
+
+impl core::ops::Deref for QueueMessage {
+    type Target = [u64];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl From<Box<[u64]>> for QueueMessage {
+    fn from(value: Box<[u64]>) -> Self {
+        Self::Owned(value)
+    }
+}
+
+impl From<Vec<u64>> for QueueMessage {
+    fn from(value: Vec<u64>) -> Self {
+        Self::Owned(value.into_boxed_slice())
+    }
+}
+
+impl From<&[u64]> for QueueMessage {
+    fn from(value: &[u64]) -> Self {
+        Self::Owned(value.into())
+    }
+}
+
+impl core::iter::FromIterator<u64> for QueueMessage {
+    fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {
+        Self::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectInfo {
@@ -878,7 +1016,7 @@ mod tests {
         q.register_receiver(QueueWaiter::simple(9, 99));
 
         match q.send_or_block_resolved(
-            vec![42u64].into_boxed_slice(),
+            vec![42u64].into_boxed_slice().into(),
             0,
             QueueWaiter::simple(7, 1),
             7,
@@ -899,7 +1037,7 @@ mod tests {
         q.register_receiver(QueueWaiter::endpoint(7, 99, 11));
 
         match q.send_or_block_resolved(
-            vec![42u64].into_boxed_slice(),
+            vec![42u64].into_boxed_slice().into(),
             0,
             QueueWaiter::simple(7, 1),
             7,

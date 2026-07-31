@@ -14,6 +14,18 @@ pub const HTTP_REQUEST: ExternEffects =
 
 pub const EFFECT_MANIFEST: &[ExternEffectManifestEntry] = &[
     ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("runtime/mem", "ReadStats"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("runtime/mem", "GCStep"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
+        vo_runtime::vo_extern_name!("runtime/mem", "GCCollect"),
+        ExternEffects::NONE,
+    ),
+    ExternEffectManifestEntry::new(
         vo_runtime::vo_extern_name!("os", "blocking_fileRead"),
         WAIT_IO,
     ),

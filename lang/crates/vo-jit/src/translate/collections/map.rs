@@ -7,7 +7,9 @@ use crate::translator::{emit_funcref_call, CollectionEmitter};
 use crate::JitError;
 
 use super::emit_return_if_u64_jit_error;
-use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
+use crate::translate::{
+    emit_jit_error_if_zero, emit_runtime_trap_if, mark_runtime_trap_pc, require_helper,
+};
 
 pub(in crate::translate) fn map_new<'a>(
     e: &mut impl CollectionEmitter<'a>,
@@ -47,6 +49,7 @@ pub(in crate::translate) fn map_new<'a>(
         ],
     );
     let result = e.builder().inst_results(call)[0];
+    emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
     Ok(())
 }

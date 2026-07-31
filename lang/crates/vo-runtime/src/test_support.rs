@@ -108,15 +108,18 @@ pub(crate) mod queue {
     pub fn remote_proxy(value: GcRef) -> &'static RemoteProxy {
         unsafe { raw::remote_proxy(value) }
     }
-    pub fn try_send(value: GcRef, message: QueueMessage) -> SendResult<QueueWaiter, QueueMessage> {
-        unsafe { raw::try_send(value, message) }
+    pub fn try_send(
+        value: GcRef,
+        message: impl Into<QueueMessage>,
+    ) -> SendResult<QueueWaiter, QueueMessage> {
+        unsafe { raw::try_send(value, message.into()) }
     }
     pub fn send_or_block(
         value: GcRef,
-        message: QueueMessage,
+        message: impl Into<QueueMessage>,
         waiter: QueueWaiter,
     ) -> BlockingSendResult<QueueWaiter, QueueMessage> {
-        unsafe { raw::send_or_block(value, message, waiter) }
+        unsafe { raw::send_or_block(value, message.into(), waiter) }
     }
 }
 

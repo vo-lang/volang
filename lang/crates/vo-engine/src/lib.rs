@@ -22,7 +22,8 @@ pub use compile::{
 };
 pub use format::format_text;
 pub use run::{
-    build_gui_vm, build_native_gui_vm, run, run_with_byte_args, run_with_output,
+    build_gui_vm, build_gui_vm_with_memory, build_native_gui_vm, build_native_gui_vm_with_memory,
+    run, run_with_byte_args, run_with_byte_args_and_memory, run_with_output,
     run_with_output_interruptible, run_with_output_interruptible_observed,
     run_with_output_observed, RunError, RunMode, RunObservation, RuntimeError, RuntimeErrorKind,
 };
@@ -30,3 +31,4 @@ pub use scan::scan_external_imports;
 pub use toolchain::ensure_toolchain_host_installed;
 pub use vo_runtime::output::CaptureSink;
 pub use vo_vm::bytecode::Module;
+pub use vo_vm::{GcMode, OomPolicy, VmMemoryConfig};

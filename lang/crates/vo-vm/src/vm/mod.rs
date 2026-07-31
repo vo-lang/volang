@@ -25,7 +25,7 @@ use std::sync::Arc;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::gc::{Gc, GcRef, MemoryError, OomPolicy};
 use vo_runtime::objects::{array, interface, string};
 use vo_runtime::output::OutputSink;
 
@@ -49,8 +49,9 @@ pub(crate) use types::EndpointRegistrySnapshot;
 pub use types::{EntryIslandEvent, IslandThread};
 pub use types::{
     ErrorLocation, ExecResult, GcRootEffect, HostServicesUpdateError, RuntimeTrapKind,
-    SchedulingOutcome, VmConstructionError, VmError, VmFiberRootScanStage, VmGcStepStats,
-    VmIdentityExhausted, VmRootScanMode, VmRootScanSnapshot, VmRootScanStage, VmState, TIME_SLICE,
+    SchedulingOutcome, VmConstructionError, VmError, VmFiberRootScanStage, VmGcCycleReport,
+    VmGcStepReport, VmGcStepStats, VmIdentityExhausted, VmRootScanMode, VmRootScanSnapshot,
+    VmRootScanStage, VmState, TIME_SLICE,
 };
 
 use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
@@ -354,6 +355,7 @@ pub struct Vm {
     pub(crate) state: VmState,
     exit_code: Option<i32>,
     pending_exit_code: Option<i32>,
+    terminal_memory_error: Option<MemoryError>,
     /// Remains true after the first fiber begins execution, including after
     /// every scheduler slot has reached a terminal state.
     execution_started: bool,
@@ -646,6 +648,19 @@ impl Vm {
         Ok(Self::from_state(state))
     }
 
+    /// Construct a VM with an Island memory policy fixed before any guest code
+    /// or runtime container can allocate.
+    pub fn try_with_memory_config(
+        config: vo_runtime::gc::VmMemoryConfig,
+    ) -> Result<Self, VmConstructionError> {
+        let state = VmState::try_new_with_memory_config(config)?;
+        Ok(Self::from_state(state))
+    }
+
+    pub fn with_memory_config(config: vo_runtime::gc::VmMemoryConfig) -> Self {
+        Self::try_with_memory_config(config).expect("VM memory configuration failed")
+    }
+
     #[cfg(feature = "std")]
     fn try_new_with_state_factory(
         factory: impl FnOnce() -> std::io::Result<VmState>,
@@ -667,6 +682,7 @@ impl Vm {
             state,
             exit_code: None,
             pending_exit_code: None,
+            terminal_memory_error: None,
             execution_started: false,
         };
         vm.apply_gc_environment();
@@ -767,6 +783,18 @@ impl Vm {
         let mut vm = Self::try_new()?;
         vm.jit
             .set_strict(JitManager::with_config(config).map_err(VmConstructionError::Jit)?);
+        Ok(vm)
+    }
+
+    #[cfg(feature = "jit")]
+    #[allow(clippy::result_large_err)]
+    pub fn try_with_jit_and_memory_config(
+        jit_config: JitConfig,
+        memory_config: vo_runtime::gc::VmMemoryConfig,
+    ) -> Result<Self, VmConstructionError> {
+        let mut vm = Self::try_with_memory_config(memory_config)?;
+        vm.jit
+            .set_strict(JitManager::with_config(jit_config).map_err(VmConstructionError::Jit)?);
         Ok(vm)
     }
 
@@ -912,6 +940,11 @@ impl Vm {
         self.exit_code.or(self.pending_exit_code)
     }
 
+    /// Terminal managed-memory failure retained for every later host poll.
+    pub fn terminal_memory_error(&self) -> Option<MemoryError> {
+        self.terminal_memory_error
+    }
+
     #[cfg(feature = "std")]
     fn request_guest_exit(&mut self, code: i32) {
         if self.exit_code.is_none() && self.pending_exit_code.is_none() {
@@ -936,7 +969,10 @@ impl Vm {
         }
         self.exit_code = Some(code);
         self.pending_exit_code = None;
+        self.discard_guest_execution_state();
+    }
 
+    fn discard_guest_execution_state(&mut self) {
         #[cfg(feature = "std")]
         self.state.shutdown_island_threads();
 
@@ -956,6 +992,29 @@ impl Vm {
 
         #[cfg(feature = "std")]
         self.state.io.shutdown();
+    }
+
+    fn terminate_island_for_memory_error(&mut self, error: MemoryError) -> VmError {
+        if let Some(existing) = self.terminal_memory_error {
+            return VmError::IslandMemory(existing);
+        }
+
+        #[cfg(feature = "jit")]
+        let collector_boundary_is_clean = self.state.pending_runtime_transitions.is_empty();
+        #[cfg(not(feature = "jit"))]
+        let collector_boundary_is_clean = true;
+        if self.state.gc.oom_policy() == OomPolicy::CollectThenTerminateIsland
+            && collector_boundary_is_clean
+        {
+            // The fiber has been reattached at this scheduler boundary, so a
+            // final major collection can safely reclaim everything it can and
+            // leave accurate terminal telemetry. The failed instruction is
+            // not replayed because it may already have published effects.
+            let _ = self.gc_collect();
+        }
+        self.terminal_memory_error = Some(error);
+        self.discard_guest_execution_state();
+        VmError::IslandMemory(error)
     }
 
     /// Borrow the extern registry during the VM configuration phase.
@@ -1487,6 +1546,7 @@ impl Vm {
         let extension_specs = self.extension_specs.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
         let jit_config = self.jit.manager().map(|mgr| mgr.config().clone());
+        let child_memory_config = self.state.gc.memory_config_snapshot();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let startup_interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let child_interrupt = startup_interrupt.clone();
@@ -1502,6 +1562,7 @@ impl Vm {
                 extension_specs,
                 host_services_v2,
                 jit_config,
+                child_memory_config,
                 child_interrupt,
                 event_waker,
                 &event_tx,
@@ -1514,6 +1575,7 @@ impl Vm {
                 registry_clone,
                 extension_specs,
                 host_services_v2,
+                child_memory_config,
                 child_interrupt,
                 event_waker,
                 &event_tx,
@@ -1874,6 +1936,12 @@ impl Vm {
         let mut iterations = 0;
 
         loop {
+            if let Some(error) = self.terminal_memory_error {
+                return Err(VmError::IslandMemory(error));
+            }
+            if let Some(error) = self.state.gc.take_last_memory_error() {
+                return Err(self.terminate_island_for_memory_error(error));
+            }
             if let Some(outcome) = self.terminal_outcome() {
                 return Ok(outcome);
             }
@@ -1896,6 +1964,9 @@ impl Vm {
             }
 
             self.process_island_commands()?;
+            if let Some(error) = self.state.gc.take_last_memory_error() {
+                return Err(self.terminate_island_for_memory_error(error));
+            }
             if let Some(outcome) = self.terminal_outcome() {
                 return Ok(outcome);
             }
@@ -1948,7 +2019,12 @@ impl Vm {
                     Some(fiber_id),
                     RuntimeTransition::continue_with_gc_roots(gc_root_effect),
                 )?;
-                if gc_after_boundary {
+                let explicit_gc = self
+                    .service_pending_runtime_mem_requests()
+                    .map_err(|error| {
+                        VmError::Jit(format!("runtime/mem request failed: {error}"))
+                    })?;
+                if gc_after_boundary && !explicit_gc {
                     self.gc_step_after_fiber(None);
                 }
             }
@@ -2429,6 +2505,10 @@ impl Vm {
         result: ExecResult,
         is_bounded: bool,
     ) -> Option<Result<SchedulingOutcome, VmError>> {
+        if let Some(error) = self.state.gc.take_last_memory_error() {
+            drop(result);
+            return Some(Err(self.terminate_island_for_memory_error(error)));
+        }
         if let Some(code) = self.pending_exit_code.take() {
             self.terminate_guest(code);
             return Some(Ok(SchedulingOutcome::Exited(code)));
@@ -2971,6 +3051,9 @@ impl Vm {
             if self.interrupt_requested() {
                 return ExecResult::Interrupted;
             }
+            if self.state.gc.last_memory_error().is_some() {
+                return ExecResult::JitError("Island managed-memory allocation failed".to_string());
+            }
 
             #[cfg(feature = "jit")]
             {
@@ -3008,6 +3091,11 @@ impl Vm {
                     if let Some(jit_func) = jit_func {
                         let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
                         stack = fiber.stack_ptr();
+                        if self.state.gc.last_memory_error().is_some() {
+                            return ExecResult::JitError(
+                                "Island managed-memory allocation failed".to_string(),
+                            );
+                        }
                         match result {
                             ExecResult::FrameChanged => {
                                 if !self.state.pending_runtime_transitions.is_empty() {

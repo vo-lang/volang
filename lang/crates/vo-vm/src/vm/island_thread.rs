@@ -20,14 +20,18 @@ pub(crate) enum IslandThreadOutcome {
 #[allow(clippy::result_large_err)]
 fn create_island_vm_with_initializer<F>(
     jit_config: Option<super::JitConfig>,
+    memory_config: vo_runtime::gc::VmMemoryConfig,
     init_jit_vm: F,
 ) -> Result<Vm, super::VmConstructionError>
 where
-    F: FnOnce(super::JitConfig) -> Result<Vm, super::VmConstructionError>,
+    F: FnOnce(
+        super::JitConfig,
+        vo_runtime::gc::VmMemoryConfig,
+    ) -> Result<Vm, super::VmConstructionError>,
 {
     match jit_config {
-        Some(config) => init_jit_vm(config),
-        None => Vm::try_new(),
+        Some(config) => init_jit_vm(config, memory_config),
+        None => Vm::try_with_memory_config(memory_config),
     }
 }
 
@@ -35,8 +39,13 @@ where
 #[allow(clippy::result_large_err)]
 fn create_island_vm(
     jit_config: Option<super::JitConfig>,
+    memory_config: vo_runtime::gc::VmMemoryConfig,
 ) -> Result<Vm, super::VmConstructionError> {
-    create_island_vm_with_initializer(jit_config, Vm::try_with_jit_config)
+    create_island_vm_with_initializer(
+        jit_config,
+        memory_config,
+        Vm::try_with_jit_and_memory_config,
+    )
 }
 
 /// Run an island thread - processes commands and executes fibers.
@@ -49,11 +58,12 @@ pub(crate) fn run_island_thread(
     extension_specs: Vec<NativeExtensionSpec>,
     host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
     jit_config: Option<super::JitConfig>,
+    memory_config: vo_runtime::gc::VmMemoryConfig,
     interrupt_flag: Arc<AtomicBool>,
     event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     events: &Sender<IslandThreadEvent>,
 ) -> Result<IslandThreadOutcome, String> {
-    let mut vm = create_island_vm(jit_config)
+    let mut vm = create_island_vm(jit_config, memory_config)
         .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
     run_island_vm(
         island_id,
@@ -77,11 +87,12 @@ pub(crate) fn run_island_thread(
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
     host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
+    memory_config: vo_runtime::gc::VmMemoryConfig,
     interrupt_flag: Arc<AtomicBool>,
     event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     events: &Sender<IslandThreadEvent>,
 ) -> Result<IslandThreadOutcome, String> {
-    let mut vm = Vm::try_new()
+    let mut vm = Vm::try_with_memory_config(memory_config)
         .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
     run_island_vm(
         island_id,
@@ -395,12 +406,15 @@ mod tests {
     #[test]
     #[allow(clippy::result_large_err)]
     fn island_jit_config_init_error_is_propagated() {
-        let result =
-            create_island_vm_with_initializer(Some(super::super::JitConfig::default()), |_| {
+        let result = create_island_vm_with_initializer(
+            Some(super::super::JitConfig::default()),
+            vo_runtime::gc::VmMemoryConfig::default(),
+            |_, _| {
                 Err(super::super::VmConstructionError::Jit(
                     vo_jit::JitError::Internal("forced island init failure".into()),
                 ))
-            });
+            },
+        );
         let err = match result {
             Err(err) => err,
             Ok(_) => panic!("island JIT init error should propagate to caller"),

@@ -223,7 +223,7 @@ fn select_recv_rejects_queue_element_width_drift_before_stack_write_035() {
     let (meta, rttid) = int_meta();
     let ch = queue::create(&mut vm_state.gc, QueueKind::Chan, meta, rttid, 2, 1);
     assert!(matches!(
-        queue::try_send(ch, vec![11, 22].into_boxed_slice()),
+        queue::try_send(ch, vec![11, 22].into_boxed_slice().into()),
         vo_runtime::objects::queue_state::SendResult::Buffered
     ));
     let mut stack = vec![ch as u64, 99, 88, 0];
@@ -336,7 +336,7 @@ fn select_recv_rejects_queue_element_layout_drift_before_stack_write_035() {
         1,
     );
     assert!(matches!(
-        queue::try_send(ch, vec![0].into_boxed_slice()),
+        queue::try_send(ch, vec![0].into_boxed_slice().into()),
         vo_runtime::objects::queue_state::SendResult::Buffered
     ));
     let mut stack = vec![ch as u64, 99, 0];
@@ -572,7 +572,7 @@ fn vm_select_woken_closed_send_003_cancels_other_registered_waiters() {
             other as u64,
             queue_state::SelectWaitKind::Send,
         ),
-        vec![777].into_boxed_slice(),
+        vec![777].into_boxed_slice().into(),
     );
     let mut stack = vec![closed as u64, 123, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Send);
@@ -1038,7 +1038,7 @@ fn vm_wake_remote_endpoint_002_select_recv_missing_home_info_preserves_waiting_s
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![ch as u64, 99, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Recv);
@@ -1087,7 +1087,7 @@ fn vm_endpoint_sender_preflight_012_same_island_select_recv_missing_home_info_pr
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![ch as u64, 99, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Recv);
@@ -1187,7 +1187,7 @@ fn vm_wake_remote_endpoint_001_select_recv_acks_remote_sender() {
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(8, 0x0000_0004_0000_0005, 12),
-        vec![77].into_boxed_slice(),
+        vec![77].into_boxed_slice().into(),
     );
     let mut stack = vec![ch as u64, 0, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Recv);

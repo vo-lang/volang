@@ -964,6 +964,9 @@ pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<Gc
     let stride = storage_stride(s);
     let new_data_ptr = unsafe { data_ptr(s).add(lo * stride) };
     let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
+    if new_s.is_null() {
+        return None;
+    }
     // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
     let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.owner = data.owner;
@@ -997,6 +1000,9 @@ pub unsafe fn slice_of_with_cap(
     let stride = storage_stride(s);
     let new_data_ptr = unsafe { data_ptr(s).add(lo * stride) };
     let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
+    if new_s.is_null() {
+        return None;
+    }
     // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
     let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.owner = data.owner;
@@ -1022,6 +1028,9 @@ pub unsafe fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
         "slice length exceeds capacity"
     );
     let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
+    if new_s.is_null() {
+        return new_s;
+    }
     // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
     let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.owner = data.owner;

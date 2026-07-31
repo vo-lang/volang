@@ -81,7 +81,7 @@ pub use containers::{
 // Public re-export for extension developers
 #[cfg(feature = "std")]
 use crate::distributed_slice;
-use crate::gc::{Gc, GcOwnerDispatch, GcRef};
+use crate::gc::{Gc, GcLease, GcOwnerDispatch, GcRef, MemoryError};
 #[cfg(feature = "std")]
 use crate::io::{IoRuntime, IoToken};
 use crate::itab::ItabCache;
@@ -380,7 +380,7 @@ impl ExternResult {
 
 // ==================== Extension ABI (dylib boundary) ====================
 
-pub const EXTENSION_ABI_VERSION: u32 = 9;
+pub const EXTENSION_ABI_VERSION: u32 = 10;
 
 /// Extension ABI result codes returned across dylib boundary.
 pub mod ext_abi {
@@ -440,47 +440,52 @@ const fn extension_abi_fingerprint() -> u64 {
     let words = [
         EXTENSION_ABI_VERSION as u64,
         vo_common_core::extern_key::EXTERN_NAME_CODEC_VERSION as u64,
-        core::mem::size_of::<ExtAbiContextV9>() as u64,
-        core::mem::align_of::<ExtAbiContextV9>() as u64,
-        core::mem::offset_of!(ExtAbiContextV9, version) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, size) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, host) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, ops) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, stack) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, stack_len) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, bp) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, arg_start) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, arg_slots) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, ret_start) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, ret_slots) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, extern_id) as u64,
-        core::mem::offset_of!(ExtAbiContextV9, caller_endpoint) as u64,
+        core::mem::size_of::<ExtAbiContextV10>() as u64,
+        core::mem::align_of::<ExtAbiContextV10>() as u64,
+        core::mem::offset_of!(ExtAbiContextV10, version) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, size) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, host) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, ops) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, stack) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, stack_len) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, bp) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, arg_start) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, arg_slots) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, ret_start) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, ret_slots) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, extern_id) as u64,
+        core::mem::offset_of!(ExtAbiContextV10, caller_endpoint) as u64,
         core::mem::size_of::<crate::host_services_v2::CallerEndpointHandle>() as u64,
-        core::mem::size_of::<ExtHostOpsV9>() as u64,
-        core::mem::align_of::<ExtHostOpsV9>() as u64,
-        core::mem::offset_of!(ExtHostOpsV9, version) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, size) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, borrow_arg_string) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, borrow_arg_bytes) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, write_output) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, set_host_output) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, take_resume_host_event_token) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, borrow_resume_host_event_data) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, next_host_event_token) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, borrow_replay_result) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, set_panic) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, set_exit) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, set_wait_io) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, set_call_closure) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, set_host_event_wait) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, record_contract_error) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, write_error) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, gc_alloc) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, gc_canonicalize) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, gc_mark_gray) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, gc_mark_allocated_for_scan) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, gc_write_barrier) as u64,
-        core::mem::offset_of!(ExtHostOpsV9, host_services_v2) as u64,
+        core::mem::size_of::<ExtHostOpsV10>() as u64,
+        core::mem::align_of::<ExtHostOpsV10>() as u64,
+        core::mem::offset_of!(ExtHostOpsV10, version) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, size) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, borrow_arg_string) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, borrow_arg_bytes) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, write_output) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, set_host_output) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, take_resume_host_event_token) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, borrow_resume_host_event_data) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, next_host_event_token) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, borrow_replay_result) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, set_panic) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, set_exit) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, set_wait_io) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, set_call_closure) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, set_host_event_wait) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, record_contract_error) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, write_error) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_alloc) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_canonicalize) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_mark_gray) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_mark_allocated_for_scan) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_write_barrier) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, host_services_v2) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_lease_create) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_lease_resolve) as u64,
+        core::mem::offset_of!(ExtHostOpsV10, gc_lease_release) as u64,
+        core::mem::size_of::<GcLease>() as u64,
+        core::mem::align_of::<GcLease>() as u64,
         core::mem::size_of::<crate::host_services_v2::VoHostServicesV2>() as u64,
         core::mem::align_of::<crate::host_services_v2::VoHostServicesV2>() as u64,
         crate::host_services_v2::HOST_SERVICES_V2_ABI_MAJOR as u64,
@@ -642,7 +647,7 @@ const EXT_ABI_STATUS_ERROR: u32 = 2;
 const EXT_ABI_CALL_CLOSURE_USIZE_HANDLE: u64 = 1;
 const EXT_ABI_CALLBACK_FIELDS_ARE_NULLABLE: u64 = 1;
 
-/// Borrowed bytes returned by an ABI-v9 host callback.
+/// Borrowed bytes returned by an ABI-v10 host callback.
 ///
 /// The host owns the allocation and keeps it alive until the native call
 /// returns. Extensions may read the range and must never free or mutate it.
@@ -660,7 +665,7 @@ impl ExtAbiBytes {
     };
 }
 
-/// Host operations callable by a native ABI-v9 extension.
+/// Host operations callable by a native ABI-v10 extension.
 ///
 /// Every callback executes inside the host image. Owned Rust values never
 /// cross this table: byte strings and slot arrays are borrowed for the call
@@ -704,10 +709,16 @@ pub type ExtGcCanonicalizeFn =
 pub type ExtGcVisitFn = unsafe extern "C" fn(host: *mut core::ffi::c_void, obj: GcRef);
 pub type ExtGcBarrierFn =
     unsafe extern "C" fn(host: *mut core::ffi::c_void, parent: GcRef, child: GcRef);
+pub type ExtGcLeaseCreateFn =
+    unsafe extern "C" fn(host: *mut core::ffi::c_void, obj: GcRef, out_lease: *mut GcLease) -> u32;
+pub type ExtGcLeaseResolveFn =
+    unsafe extern "C" fn(host: *mut core::ffi::c_void, lease: GcLease, out_obj: *mut GcRef) -> u32;
+pub type ExtGcLeaseReleaseFn =
+    unsafe extern "C" fn(host: *mut core::ffi::c_void, lease: GcLease) -> u32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ExtHostOpsV9 {
+pub struct ExtHostOpsV10 {
     pub version: u32,
     pub size: u32,
     pub borrow_arg_string: Option<ExtBorrowArgumentFn>,
@@ -734,10 +745,13 @@ pub struct ExtHostOpsV9 {
     /// table keeps static ownership explicit and avoids a cross-image pointer
     /// to another operation table.
     pub host_services_v2: crate::host_services_v2::VoHostServicesV2,
+    pub gc_lease_create: Option<ExtGcLeaseCreateFn>,
+    pub gc_lease_resolve: Option<ExtGcLeaseResolveFn>,
+    pub gc_lease_release: Option<ExtGcLeaseReleaseFn>,
 }
 
 #[derive(Clone, Copy)]
-struct ValidatedExtHostOpsV9 {
+struct ValidatedExtHostOpsV10 {
     borrow_arg_string: ExtBorrowArgumentFn,
     borrow_arg_bytes: ExtBorrowArgumentFn,
     write_output: ExtWriteOutputFn,
@@ -759,14 +773,17 @@ struct ValidatedExtHostOpsV9 {
     gc_mark_gray: ExtGcVisitFn,
     gc_mark_allocated_for_scan: ExtGcVisitFn,
     gc_write_barrier: ExtGcBarrierFn,
+    gc_lease_create: ExtGcLeaseCreateFn,
+    gc_lease_resolve: ExtGcLeaseResolveFn,
+    gc_lease_release: ExtGcLeaseReleaseFn,
 }
 
-impl ExtHostOpsV9 {
-    fn validate(self) -> Result<ValidatedExtHostOpsV9, &'static str> {
+impl ExtHostOpsV10 {
+    fn validate(self) -> Result<ValidatedExtHostOpsV10, &'static str> {
         let set_wait_io = self.set_wait_io.ok_or("set_wait_io")?;
         #[cfg(not(feature = "std"))]
         let _ = set_wait_io;
-        Ok(ValidatedExtHostOpsV9 {
+        Ok(ValidatedExtHostOpsV10 {
             borrow_arg_string: self.borrow_arg_string.ok_or("borrow_arg_string")?,
             borrow_arg_bytes: self.borrow_arg_bytes.ok_or("borrow_arg_bytes")?,
             write_output: self.write_output.ok_or("write_output")?,
@@ -794,22 +811,25 @@ impl ExtHostOpsV9 {
                 .gc_mark_allocated_for_scan
                 .ok_or("gc_mark_allocated_for_scan")?,
             gc_write_barrier: self.gc_write_barrier.ok_or("gc_write_barrier")?,
+            gc_lease_create: self.gc_lease_create.ok_or("gc_lease_create")?,
+            gc_lease_resolve: self.gc_lease_resolve.ok_or("gc_lease_resolve")?,
+            gc_lease_release: self.gc_lease_release.ok_or("gc_lease_release")?,
         })
     }
 }
 
-/// Opaque native-extension call frame for ABI v9.
+/// Opaque native-extension call frame for ABI v10.
 ///
 /// The `host` pointer is never dereferenced by an extension. Primitive stack
 /// access stays direct through the C-layout frame, while all owner-sensitive
 /// operations use `ops`.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ExtAbiContextV9 {
+pub struct ExtAbiContextV10 {
     pub version: u32,
     pub size: u32,
     pub host: *mut core::ffi::c_void,
-    pub ops: *const ExtHostOpsV9,
+    pub ops: *const ExtHostOpsV10,
     pub stack: *mut u64,
     pub stack_len: usize,
     pub bp: usize,
@@ -826,7 +846,7 @@ pub struct ExtAbiContextV9 {
 ///
 /// The full Rust call context remains host-private. Native trampolines build a
 /// local `ExternCallContext` facade around this C-layout frame.
-pub type ExternFnPtr = extern "C" fn(ctx: *mut ExtAbiContextV9) -> u32;
+pub type ExternFnPtr = extern "C" fn(ctx: *mut ExtAbiContextV10) -> u32;
 
 /// C-layout extension table entry with stable types across the dylib boundary.
 #[cfg(feature = "std")]
@@ -1348,13 +1368,13 @@ pub struct HostExternCallContext<'a> {
     /// Per-call native operation table so its V2 context points at this call
     /// facade without exposing a process-global mutable table.
     #[cfg(feature = "std")]
-    native_ops: ExtHostOpsV9,
+    native_ops: ExtHostOpsV10,
     /// Host event token that woke this fiber. Present on the PC re-execution path
     /// after `HostEventWaitAndReplay`. Extern must consume via `take_resume_host_event_token()`.
     resume_host_event_token: Option<u64>,
     /// Opaque data attached by host when waking via `wake_host_event_with_data`.
     resume_host_event_data: Option<Vec<u8>>,
-    /// ABI-v9 extensions borrow replay data and copy it into extension-owned
+    /// ABI-v10 extensions borrow replay data and copy it into extension-owned
     /// storage. Keep the host allocation alive while recording one-shot use.
     resume_host_event_data_borrowed: bool,
     /// Cached closure results from previous CallClosure suspends.
@@ -1392,8 +1412,8 @@ pub struct HostExternCallContext<'a> {
 }
 
 struct ExtensionExternCallContext {
-    frame: ExtAbiContextV9,
-    ops: ValidatedExtHostOpsV9,
+    frame: ExtAbiContextV10,
+    ops: ValidatedExtHostOpsV10,
     host_services_v2: crate::host_services_v2::ValidatedVoHostServicesV2,
     gc_proxy: Gc,
     #[cfg(feature = "std")]
@@ -1436,7 +1456,7 @@ enum ExternCallBackend<'a> {
 /// extensions.
 ///
 /// The host variant owns the complete runtime borrow graph. Native extensions
-/// hold only an ABI-v9 frame plus an owner-dispatch GC facade.
+/// hold only an ABI-v10 frame plus an owner-dispatch GC facade.
 pub struct ExternCallContext<'a> {
     backend: ExternCallBackend<'a>,
 }
@@ -1505,7 +1525,7 @@ impl<'a> ExternCallContext<'a> {
                 host_output: world.host_output,
                 host_services_v2: world.host_services_v2,
                 #[cfg(feature = "std")]
-                native_ops: native_abi_v9::OPS,
+                native_ops: native_abi_v10::OPS,
                 #[cfg(feature = "std")]
                 io: world.io,
                 #[cfg(feature = "std")]
@@ -1532,22 +1552,22 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
-    /// Validate a host-provided ABI-v9 frame and build an extension-local facade.
+    /// Validate a host-provided ABI-v10 frame and build an extension-local facade.
     ///
     /// The fixed two-word version/size header is read first. No later field is
-    /// read until the advertised size covers the complete v9 structure. The
+    /// read until the advertised size covers the complete v10 structure. The
     /// validated frame and operation table are copied into extension-owned
     /// storage so provider code cannot invalidate the facade by mutating the
     /// original frame during the call.
     ///
     /// # Safety
     /// A non-null `abi` must point to at least the C-layout version/size header.
-    /// If the header advertises a complete v9 frame, that complete byte range
+    /// If the header advertises a complete v10 frame, that complete byte range
     /// must be readable for this constructor call. The same rule applies to the
     /// operation-table pointer found in a validated frame.
     #[doc(hidden)]
     pub unsafe fn try_from_extension_abi(
-        abi: *mut ExtAbiContextV9,
+        abi: *mut ExtAbiContextV10,
     ) -> Result<Self, ExtensionAbiInitError> {
         #[repr(C)]
         #[derive(Clone, Copy)]
@@ -1565,12 +1585,12 @@ impl<'a> ExternCallContext<'a> {
                 found: frame_header.version,
             });
         }
-        if (frame_header.size as usize) < core::mem::size_of::<ExtAbiContextV9>() {
+        if (frame_header.size as usize) < core::mem::size_of::<ExtAbiContextV10>() {
             return Err(ExtensionAbiInitError::ContextTooSmall {
                 found: frame_header.size,
             });
         }
-        if !(abi as *const ExtAbiContextV9).is_aligned() {
+        if !(abi as *const ExtAbiContextV10).is_aligned() {
             return Err(ExtensionAbiInitError::MisalignedContext);
         }
 
@@ -1588,7 +1608,7 @@ impl<'a> ExternCallContext<'a> {
                 found: ops_header.version,
             });
         }
-        if (ops_header.size as usize) < core::mem::size_of::<ExtHostOpsV9>() {
+        if (ops_header.size as usize) < core::mem::size_of::<ExtHostOpsV10>() {
             return Err(ExtensionAbiInitError::OpsTooSmall {
                 found: ops_header.size,
             });
@@ -1670,18 +1690,18 @@ impl<'a> ExternCallContext<'a> {
     }
 
     #[inline]
-    fn extension_frame(&self) -> Option<&ExtAbiContextV9> {
+    fn extension_frame(&self) -> Option<&ExtAbiContextV10> {
         self.extension().map(|extension| &extension.frame)
     }
 
     #[inline]
-    fn extension_ops(&self) -> Option<(&ExtAbiContextV9, &ValidatedExtHostOpsV9)> {
+    fn extension_ops(&self) -> Option<(&ExtAbiContextV10, &ValidatedExtHostOpsV10)> {
         self.extension()
             .map(|extension| (&extension.frame, &extension.ops))
     }
 
     #[cfg(feature = "std")]
-    fn native_abi_frame(&mut self) -> ExtAbiContextV9 {
+    fn native_abi_frame(&mut self) -> ExtAbiContextV10 {
         let opaque = self as *mut ExternCallContext<'a> as *mut core::ffi::c_void;
         let (
             ops,
@@ -1703,7 +1723,7 @@ impl<'a> ExternCallContext<'a> {
             };
             host.native_ops.host_services_v2.context = opaque;
             (
-                &host.native_ops as *const ExtHostOpsV9,
+                &host.native_ops as *const ExtHostOpsV10,
                 host.stack.as_mut_ptr(),
                 host.stack.len(),
                 host.bp,
@@ -1717,9 +1737,9 @@ impl<'a> ExternCallContext<'a> {
                     .unwrap_or(crate::host_services_v2::CallerEndpointHandle::INVALID),
             )
         };
-        ExtAbiContextV9 {
+        ExtAbiContextV10 {
             version: EXTENSION_ABI_VERSION,
-            size: core::mem::size_of::<ExtAbiContextV9>() as u32,
+            size: core::mem::size_of::<ExtAbiContextV10>() as u32,
             host: opaque,
             ops,
             stack,
@@ -2454,6 +2474,61 @@ impl<'a> ExternCallContext<'a> {
         match &mut self.backend {
             ExternCallBackend::Host(host) => host.gc,
             ExternCallBackend::Extension(extension) => &mut extension.gc_proxy,
+        }
+    }
+
+    /// Retain a managed object across native calls.
+    pub fn gc_lease(&mut self, obj: GcRef) -> Result<GcLease, MemoryError> {
+        match &mut self.backend {
+            ExternCallBackend::Host(host) => host.gc.gc_lease(obj),
+            ExternCallBackend::Extension(extension) => {
+                let mut lease = GcLease {
+                    index: 0,
+                    generation: 0,
+                };
+                let status = unsafe {
+                    (extension.ops.gc_lease_create)(extension.frame.host, obj, &mut lease)
+                };
+                if status == EXT_ABI_STATUS_OK {
+                    Ok(lease)
+                } else {
+                    Err(MemoryError::InvalidPointer)
+                }
+            }
+        }
+    }
+
+    /// Resolve a lease to its canonical live base object.
+    pub fn gc_lease_root(&mut self, lease: GcLease) -> Result<GcRef, MemoryError> {
+        match &mut self.backend {
+            ExternCallBackend::Host(host) => host.gc.gc_lease_root(lease),
+            ExternCallBackend::Extension(extension) => {
+                let mut obj = core::ptr::null_mut();
+                let status = unsafe {
+                    (extension.ops.gc_lease_resolve)(extension.frame.host, lease, &mut obj)
+                };
+                if status == EXT_ABI_STATUS_OK {
+                    Ok(obj)
+                } else {
+                    Err(MemoryError::InvalidPointer)
+                }
+            }
+        }
+    }
+
+    /// Release one persistent native root without forcing collection.
+    pub fn gc_release_lease(&mut self, lease: GcLease) -> Result<(), MemoryError> {
+        match &mut self.backend {
+            ExternCallBackend::Host(host) => host.gc.gc_release_lease(lease),
+            ExternCallBackend::Extension(extension) => {
+                let status =
+                    unsafe { (extension.ops.gc_lease_release)(extension.frame.host, lease) };
+                if status == EXT_ABI_STATUS_OK {
+                    Ok(())
+                } else {
+                    Err(MemoryError::InvalidPointer)
+                }
+            }
         }
     }
 
@@ -3269,7 +3344,7 @@ impl<'a> ExternCallContext<'a> {
     ) -> GcRef {
         if self.extension().is_some() {
             self.record_contract_error(
-                "native extension ABI v9 does not expose map allocation; use an allocator-neutral host capability",
+                "native extension ABI v10 does not expose map allocation; use an allocator-neutral host capability",
             );
             return core::ptr::null_mut();
         }
@@ -3292,7 +3367,7 @@ impl<'a> ExternCallContext<'a> {
     pub unsafe fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
         if self.extension().is_some() {
             self.record_contract_error(
-                "native extension ABI v9 does not expose map mutation; use an allocator-neutral host capability",
+                "native extension ABI v10 does not expose map mutation; use an allocator-neutral host capability",
             );
             return;
         }
@@ -3315,7 +3390,7 @@ impl<'a> ExternCallContext<'a> {
         }
         unsafe {
             // SAFETY: ExternCallContext barriers key/value roots before publishing this map entry.
-            crate::objects::map::set_checked(m, &key_data, val, None)
+            crate::objects::map::set_checked(self.gc(), m, &key_data, val, None)
         }
         .expect("ExternCallContext::map_set_string_key key must be hashable");
     }
@@ -4289,7 +4364,7 @@ impl<'a> ExternCallContext<'a> {
 }
 
 #[cfg(feature = "std")]
-mod native_abi_v9 {
+mod native_abi_v10 {
     use super::*;
 
     unsafe fn call_context<'a>(host: *mut core::ffi::c_void) -> &'a mut ExternCallContext<'a> {
@@ -5184,6 +5259,61 @@ mod native_abi_v9 {
             .write_barrier(parent, child);
     }
 
+    unsafe fn gc_lease_create_impl(
+        opaque: *mut core::ffi::c_void,
+        obj: GcRef,
+        out_lease: *mut GcLease,
+    ) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        if out_lease.is_null() {
+            record_error(host, "native ABI lease create received null output");
+            return EXT_ABI_STATUS_ERROR;
+        }
+        match host.gc.gc_lease(obj) {
+            Ok(lease) => {
+                unsafe { *out_lease = lease };
+                EXT_ABI_STATUS_OK
+            }
+            Err(error) => {
+                record_error(host, format!("native ABI lease create failed: {error}"));
+                EXT_ABI_STATUS_ERROR
+            }
+        }
+    }
+
+    unsafe fn gc_lease_resolve_impl(
+        opaque: *mut core::ffi::c_void,
+        lease: GcLease,
+        out_obj: *mut GcRef,
+    ) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        if out_obj.is_null() {
+            record_error(host, "native ABI lease resolve received null output");
+            return EXT_ABI_STATUS_ERROR;
+        }
+        match host.gc.gc_lease_root(lease) {
+            Ok(obj) => {
+                unsafe { *out_obj = obj };
+                EXT_ABI_STATUS_OK
+            }
+            Err(error) => {
+                record_error(host, format!("native ABI lease resolve failed: {error}"));
+                EXT_ABI_STATUS_ERROR
+            }
+        }
+    }
+
+    unsafe fn gc_lease_release_impl(opaque: *mut core::ffi::c_void, lease: GcLease) -> u32 {
+        let host = unsafe { host_context(opaque) };
+        match host.gc.gc_release_lease(lease) {
+            Ok(()) => EXT_ABI_STATUS_OK,
+            Err(error) => {
+                record_error(host, format!("native ABI lease release failed: {error}"));
+                EXT_ABI_STATUS_ERROR
+            }
+        }
+    }
+
     unsafe fn flag_callback_panic(opaque: *mut core::ffi::c_void) {
         if !opaque.is_null() {
             let call = unsafe { &*(opaque as *const ExternCallContext<'static>) };
@@ -5368,6 +5498,29 @@ mod native_abi_v9 {
         fallback ()
     );
     guarded_callback!(
+        gc_lease_create(
+            opaque: *mut core::ffi::c_void,
+            obj: GcRef,
+            out_lease: *mut GcLease,
+        ) -> u32 = gc_lease_create_impl;
+        fallback EXT_ABI_STATUS_ERROR
+    );
+    guarded_callback!(
+        gc_lease_resolve(
+            opaque: *mut core::ffi::c_void,
+            lease: GcLease,
+            out_obj: *mut GcRef,
+        ) -> u32 = gc_lease_resolve_impl;
+        fallback EXT_ABI_STATUS_ERROR
+    );
+    guarded_callback!(
+        gc_lease_release(
+            opaque: *mut core::ffi::c_void,
+            lease: GcLease,
+        ) -> u32 = gc_lease_release_impl;
+        fallback EXT_ABI_STATUS_ERROR
+    );
+    guarded_callback!(
         query_capability_v2(
             opaque: *mut core::ffi::c_void,
             caller: crate::host_services_v2::CallerEndpointHandle,
@@ -5492,9 +5645,9 @@ mod native_abi_v9 {
             release_wake_registration: Some(release_wake_registration_v2),
         };
 
-    pub(super) static OPS: ExtHostOpsV9 = ExtHostOpsV9 {
+    pub(super) static OPS: ExtHostOpsV10 = ExtHostOpsV10 {
         version: EXTENSION_ABI_VERSION,
-        size: core::mem::size_of::<ExtHostOpsV9>() as u32,
+        size: core::mem::size_of::<ExtHostOpsV10>() as u32,
         borrow_arg_string: Some(borrow_arg_string),
         borrow_arg_bytes: Some(borrow_arg_bytes),
         write_output: Some(write_output),
@@ -5516,6 +5669,9 @@ mod native_abi_v9 {
         gc_mark_allocated_for_scan: Some(gc_mark_allocated_for_scan),
         gc_write_barrier: Some(gc_write_barrier),
         host_services_v2: HOST_SERVICES_V2,
+        gc_lease_create: Some(gc_lease_create),
+        gc_lease_resolve: Some(gc_lease_resolve),
+        gc_lease_release: Some(gc_lease_release),
     };
 }
 
@@ -6944,7 +7100,7 @@ impl ExternRegistry {
                     #[cfg(feature = "std")]
                     RegisteredFn::Extension(f) => {
                         let mut abi = ctx.native_abi_frame();
-                        let code = f(&mut abi as *mut ExtAbiContextV9);
+                        let code = f(&mut abi as *mut ExtAbiContextV10);
                         ctx.decode_ext_result(code)
                     }
                 };

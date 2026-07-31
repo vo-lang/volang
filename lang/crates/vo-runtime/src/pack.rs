@@ -664,6 +664,9 @@ where
         &mut pointer_cache,
         &mut resolve_queue_handle,
     );
+    if gc.last_memory_error().is_some() {
+        return Err(PackedLayoutError);
+    }
     debug_assert_eq!(cursor, data.len());
     Ok(())
 }
@@ -3564,16 +3567,24 @@ unsafe fn unpack_value<F>(
                 });
             }
             UnpackTask::MapCommit(mut state) => {
-                map::set_checked(
+                let result = map::set_checked(
+                    gc,
                     state.map_ref,
                     &state.key_buf,
                     &state.val_buf,
                     state.key_context_module.as_ref(),
-                )
-                .expect("packed map keys must be hashable");
+                );
+                match result {
+                    Ok(()) => {}
+                    Err(map::MapKeyError::AllocationFailed(_)) => return,
+                    Err(_) => panic!("packed map keys must be hashable"),
+                }
                 state.remaining -= 1;
                 tasks.push(UnpackTask::MapKey(state));
             }
+        }
+        if gc.last_memory_error().is_some() {
+            return;
         }
     }
 }
@@ -3655,6 +3666,9 @@ unsafe fn unpacked_slice_view(
         view.storage_stride,
         view.flat_storage,
     );
+    if slice_ref.is_null() && gc.last_memory_error().is_some() {
+        return slice_ref;
+    }
     assert!(
         !slice_ref.is_null(),
         "pack: validated slice view could not be reconstructed"
@@ -3853,6 +3867,9 @@ unsafe fn unpack_slice(
             tasks,
             layout_cache,
         );
+        if backing.is_null() && gc.last_memory_error().is_some() {
+            return;
+        }
         let backing_len = array::len(backing);
         assert!(
             start <= backing_len && capacity <= backing_len - start,
@@ -3932,6 +3949,9 @@ unsafe fn unpack_slice(
             let slots_u16 = u16::try_from(slots)
                 .expect("unpack_slice: owner allocation slot count exceeds u16::MAX");
             let allocation = gc.alloc(allocation_meta, slots_u16);
+            if allocation.is_null() {
+                return;
+            }
             let data_bytes = gc
                 .allocated_data_size_bytes(allocation)
                 .expect("unpacked slice owner allocation size");
@@ -4005,6 +4025,9 @@ unsafe fn unpack_array_allocation_payload(
     validate_sequence_elem_layout(elem_meta, elem_bytes, context, layout_cache);
 
     let backing = array::create(gc, elem_meta, elem_bytes, backing_len);
+    if backing.is_null() {
+        return backing;
+    }
     let data_bytes = gc
         .allocated_data_size_bytes(backing)
         .expect("unpacked array allocation size");
@@ -4113,6 +4136,9 @@ unsafe fn unpack_array(
     validate_sequence_elem_layout(elem_meta, elem_bytes, context, layout_cache);
 
     let new_arr = array::create(gc, elem_meta, elem_bytes, length);
+    if new_arr.is_null() {
+        return;
+    }
     schedule_unpack_sequence(
         data,
         cursor,
@@ -4253,6 +4279,9 @@ unsafe fn unpack_pointer(
                 let slots_u16 = u16::try_from(slots)
                     .expect("unpack_pointer: allocation slot count exceeds u16::MAX");
                 let new_obj = gc.alloc(allocation_meta, slots_u16);
+                if new_obj.is_null() {
+                    return;
+                }
                 let data_bytes = gc
                     .allocated_data_size_bytes(new_obj)
                     .expect("unpacked pointer allocation size");
@@ -4382,6 +4411,9 @@ unsafe fn unpack_map(
 
     // Create new map
     let new_map = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
+    if new_map.is_null() {
+        return;
+    }
     pointer_cache.maps.insert(object_id, new_map);
 
     tasks.push(UnpackTask::MapKey(Box::new(UnpackMapState {

@@ -312,7 +312,7 @@ fn generate_ext_trampoline(
     quote! {
         #[doc(hidden)]
         pub extern "C" fn #trampoline_name(
-            ctx: *mut vo_runtime::ffi::ExtAbiContextV9,
+            ctx: *mut vo_runtime::ffi::ExtAbiContextV10,
         ) -> u32 {
             let boundary_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut call = match unsafe {

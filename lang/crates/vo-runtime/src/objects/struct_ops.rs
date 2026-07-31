@@ -53,9 +53,7 @@ pub fn create(gc: &mut Gc, meta_id: u32, size_slots: usize) -> GcRef {
         StructCreateError::SizeTooLarge { size_slots } => {
             panic!("struct slot count {size_slots} exceeds u16::MAX")
         }
-        StructCreateError::AllocationFailed { size_slots } => {
-            panic!("struct allocation failed for {size_slots} slots")
-        }
+        StructCreateError::AllocationFailed { .. } => core::ptr::null_mut(),
     })
 }
 

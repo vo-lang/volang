@@ -21,6 +21,33 @@ fn handle_exec_result_propagates_interrupted_error() {
 }
 
 #[test]
+fn managed_allocation_failure_terminates_only_the_vm_island_and_is_sticky() {
+    let mut vm = Vm::with_memory_config(vo_runtime::gc::VmMemoryConfig {
+        allocation_allowed: false,
+        oom_policy: OomPolicy::TerminateIsland,
+        ..vo_runtime::gc::VmMemoryConfig::default()
+    });
+    let failed = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+    assert!(failed.is_null());
+
+    let result = vm.handle_exec_result(ExecResult::TimesliceExpired, false);
+    assert!(matches!(
+        result,
+        Some(Err(VmError::IslandMemory(MemoryError::AllocationForbidden)))
+    ));
+    assert_eq!(
+        vm.terminal_memory_error(),
+        Some(MemoryError::AllocationForbidden)
+    );
+    assert!(vm.scheduler.fibers.is_empty());
+
+    assert!(matches!(
+        vm.run_scheduled(),
+        Err(VmError::IslandMemory(MemoryError::AllocationForbidden))
+    ));
+}
+
+#[test]
 fn blocked_exec_results_return_to_host_before_gc() {
     assert!(!exec_result_allows_gc_step(&ExecResult::Block(
         crate::fiber::BlockReason::Queue,

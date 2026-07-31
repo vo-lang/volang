@@ -17,7 +17,7 @@ use vo_runtime::island::{EndpointResponseKind, IslandCommand};
 use vo_runtime::objects::interface;
 use vo_runtime::objects::queue_state::SelectWaitKind;
 #[cfg(all(feature = "jit", feature = "std"))]
-use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
+use vo_runtime::objects::queue_state::{QueueKind, QueueMessage, QueueWaiter};
 #[cfg(all(feature = "jit", feature = "std"))]
 use vo_runtime::ValueRttid;
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta};

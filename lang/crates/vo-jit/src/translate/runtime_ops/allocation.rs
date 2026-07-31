@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind};
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::Instruction;
 
-use crate::translate::require_helper;
+use crate::translate::{emit_jit_error_if_zero, require_helper};
 use crate::translator::{emit_funcref_call, RuntimeOpsEmitter};
 use crate::JitError;
 
@@ -17,6 +17,7 @@ pub(in crate::translate) fn ptr_new<'a>(
     let slots_i32 = e.builder().ins().iconst(types::I32, inst.c as i64);
     let call = emit_funcref_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
     let result = e.builder().inst_results(call)[0];
+    emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -63,6 +64,7 @@ pub(in crate::translate) fn str_new<'a>(
         let len_val = e.builder().ins().iconst(types::I64, len as i64);
         let call = emit_funcref_call(e, func, &[gc_ptr, data_ptr, len_val]);
         let result = e.builder().inst_results(call)[0];
+        emit_jit_error_if_zero(e, result);
         e.write_var(inst.a, result);
     }
     Ok(())

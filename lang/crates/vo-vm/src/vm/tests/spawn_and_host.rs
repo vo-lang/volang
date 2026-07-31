@@ -21,7 +21,6 @@ fn vm_try_new_propagates_io_runtime_initialization_failure() {
                 .to_string()
                 .contains("forced I/O driver allocation failure"));
         }
-        #[cfg(feature = "jit")]
         Err(other) => panic!("unexpected VM construction error: {other}"),
         Ok(_) => panic!("injected I/O runtime failure must reject VM construction"),
     }

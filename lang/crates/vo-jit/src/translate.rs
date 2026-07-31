@@ -19,7 +19,7 @@ pub(crate) use dispatch::translate_dispatch_lowering_owner;
 pub use dispatch::translate_inst;
 pub use forloop::emit_forloop_step;
 pub(in crate::translate) use traps::{
-    emit_nil_ptr_check_for_slot, emit_runtime_trap_if, mark_runtime_trap_pc,
+    emit_jit_error_if_zero, emit_nil_ptr_check_for_slot, emit_runtime_trap_if, mark_runtime_trap_pc,
 };
 
 pub(crate) fn require_helper(

@@ -1,0 +1,53 @@
+// Package mem exposes Island memory telemetry and safe GC requests.
+package mem
+
+// Stats is a platform-independent snapshot. Byte and work counters use uint64
+// so Native and WASM report the same public layout.
+type Stats struct {
+	ManagedReservedBytes uint64
+	ManagedCommittedBytes uint64
+	ManagedLiveBytes uint64
+	YoungLiveBytes uint64
+	OldLiveBytes uint64
+	LargeLiveBytes uint64
+	RuntimeBackingBytes uint64
+	ExternalReportedBytes uint64
+	UnknownExternalProviderCount uint64
+	FreeBlocks uint64
+	PartialSpanBytes uint64
+	FragmentationBytes uint64
+	AllocationBytesTotal uint64
+	AllocationFailures uint64
+	CycleID uint64
+	MinorCycles uint64
+	MajorCycles uint64
+	WorkUnitsTotal uint64
+	LastStepWorkUnits uint64
+	MaxStepWorkUnits uint64
+	DirtyCards uint64
+	DirtyRootDomains uint64
+	RemarkRounds uint64
+	ReclaimBacklogBytes uint64
+	ActiveLeases uint64
+	GrowthAllowed bool
+	AllocationAllowed bool
+	HardLimitBytes uint64
+	HardLimitSet bool
+	GCMode uint8
+	GCState uint8
+	AutomaticGC bool
+	WasmCurrentPages uint64
+	WasmMaximumPages uint64
+	WasmMaximumSet bool
+}
+
+// ReadStats returns the current Island memory snapshot.
+func ReadStats() Stats
+
+// GCStep requests at most workUnits collector units at the next safe scheduler
+// boundary. It returns false when no VM owner is available.
+func GCStep(workUnits uint64) bool
+
+// GCCollect requests a complete major cycle at the next safe scheduler
+// boundary. It returns false when no VM owner is available.
+func GCCollect() bool

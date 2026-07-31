@@ -64,12 +64,283 @@ fn gc_step_boundary_062_step_apis_are_unsafe() {
         "pub unsafe fn step<",
         "pub unsafe fn step_with_root_state<",
         "pub unsafe fn step_with_root_scanner<",
+        "pub unsafe fn step_with_scanners_budget<",
     ] {
         assert!(
             src.contains(signature),
             "GC collector advancement must require an explicit VM/test boundary: {signature}"
         );
     }
+}
+
+#[test]
+fn bounded_step_never_exceeds_requested_work_units() {
+    let mut gc = Gc::new();
+    let root = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 128);
+    gc.gc_request_cycle();
+
+    let mut calls = 0usize;
+    while gc.state() != GcState::Pause || gc.memory_stats().cycle_id == 0 {
+        let work = unsafe {
+            gc.step_with_scanners_budget(
+                GcRootState::MayHaveChanged,
+                1,
+                |gc, _, limit| {
+                    assert_eq!(limit, SLOT_BYTES);
+                    gc.mark_gray(root);
+                    GcRootScanChunk::complete(SLOT_BYTES)
+                },
+                |_, _, cursor, limit| {
+                    assert_eq!(limit, SLOT_BYTES);
+                    cursor.reference_index += 1;
+                    if cursor.reference_index == 128 {
+                        GcObjectScanChunk::complete(SLOT_BYTES)
+                    } else {
+                        GcObjectScanChunk::pending(SLOT_BYTES)
+                    }
+                },
+                |_| {},
+            )
+        };
+        assert!(work <= SLOT_BYTES);
+        calls += 1;
+        assert!(
+            calls < 1024,
+            "bounded collection did not converge: state={:?} stats={:?}",
+            gc.state(),
+            gc.last_step_stats()
+        );
+    }
+    assert!(
+        calls > 128,
+        "large object scan should span many bounded calls"
+    );
+}
+
+#[test]
+fn generational_minor_uses_dirty_old_cards_and_major_reclaims_old() {
+    fn run_cycle(gc: &mut Gc, root: Option<GcRef>, major: bool) {
+        let before = gc.memory_stats();
+        if major {
+            gc.gc_request_major();
+        } else {
+            gc.gc_request_cycle();
+        }
+        for _ in 0..1024 {
+            gc_step(
+                gc,
+                |gc| {
+                    if let Some(root) = root {
+                        gc.mark_gray(root);
+                    }
+                },
+                |gc, obj| {
+                    if unsafe { Gc::header(obj) }.slots > 0 {
+                        let child = unsafe { Gc::read_slot(obj, 0) } as GcRef;
+                        if !child.is_null() {
+                            gc.mark_gray(child);
+                        }
+                    }
+                },
+                |_| {},
+            );
+            let after = gc.memory_stats();
+            if after.gc_state == GcState::Pause
+                && after.minor_cycles + after.major_cycles
+                    > before.minor_cycles + before.major_cycles
+            {
+                return;
+            }
+        }
+        panic!("generation test cycle did not converge");
+    }
+
+    let mut gc = Gc::new();
+    let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+    run_cycle(&mut gc, Some(parent), false);
+    assert_eq!(test_header(parent).age(), G_SURVIVAL);
+    run_cycle(&mut gc, Some(parent), false);
+    assert_eq!(test_header(parent).age(), G_OLD);
+
+    let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    unsafe {
+        Gc::write_slot(parent, 0, child as u64);
+    }
+    gc.write_barrier(parent, child);
+    assert!(gc.memory_stats().dirty_cards > 0);
+
+    run_cycle(&mut gc, None, false);
+    assert_eq!(gc.canonicalize_ref(parent), Some(parent));
+    assert_eq!(gc.canonicalize_ref(child), Some(child));
+
+    run_cycle(&mut gc, None, true);
+    assert_eq!(gc.canonicalize_ref(parent), None);
+    assert_eq!(gc.canonicalize_ref(child), None);
+}
+
+#[test]
+fn minor_remembered_scan_frontier_does_not_chase_new_allocations() {
+    let mut gc = Gc::new();
+    for _ in 0..32 {
+        assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    }
+    gc.gc_request_cycle();
+
+    let step_one = |gc: &mut Gc| unsafe {
+        gc.step_with_scanners_budget(
+            GcRootState::MayHaveChanged,
+            1,
+            |_, _, _| GcRootScanChunk::complete(0),
+            |_, _, _, _| GcObjectScanChunk::complete(SLOT_BYTES),
+            |_| {},
+        )
+    };
+    step_one(&mut gc);
+    assert_eq!(gc.cycle_kind, GcCycleKind::Minor);
+    assert_eq!(gc.remembered_scan_end, 32);
+
+    for _ in 0..64 {
+        assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    }
+    assert_eq!(gc.all_objects.len(), 96);
+    assert_eq!(gc.remembered_scan_end, 32);
+
+    for _ in 0..64 {
+        if gc.remembered_scan_pos == gc.remembered_scan_end {
+            break;
+        }
+        step_one(&mut gc);
+    }
+    assert_eq!(gc.remembered_scan_pos, 32);
+    assert_eq!(gc.remembered_scan_end, 32);
+}
+
+#[test]
+fn incremental_step_returns_with_a_sub_slot_phase_budget_remainder() {
+    let mut gc = Gc::new();
+    for _ in 0..2 {
+        assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    }
+    gc.stepsize = SLOT_BYTES + 1;
+    gc.gc_request_cycle();
+
+    let work = unsafe {
+        gc.step_with_scanners_budget(
+            GcRootState::MayHaveChanged,
+            usize::MAX / SLOT_BYTES,
+            |_, _, _| GcRootScanChunk::complete(0),
+            |_, _, _, _| GcObjectScanChunk::complete(SLOT_BYTES),
+            |_| {},
+        )
+    };
+
+    assert_eq!(work, SLOT_BYTES);
+    assert_eq!(gc.state(), GcState::Propagate);
+    assert_eq!(gc.remembered_scan_pos, 1);
+    assert_eq!(gc.remembered_scan_end, 2);
+}
+
+#[test]
+fn gc_lease_keeps_object_alive_and_rejects_stale_generation() {
+    fn run_major(gc: &mut Gc) {
+        let completed = gc.memory_stats().major_cycles;
+        gc.gc_request_major();
+        for _ in 0..1024 {
+            gc_step(gc, |_| {}, |_, _| {}, |_| {});
+            if gc.state() == GcState::Pause && gc.memory_stats().major_cycles > completed {
+                return;
+            }
+        }
+        panic!("lease test major cycle did not converge");
+    }
+
+    let mut gc = Gc::new();
+    let object = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    let lease = gc.gc_lease(object).expect("create lease");
+
+    run_major(&mut gc);
+    assert_eq!(gc.canonicalize_ref(object), Some(object));
+    assert_eq!(gc.gc_lease_root(lease), Ok(object));
+
+    gc.gc_release_lease(lease).expect("release lease");
+    assert_eq!(gc.gc_lease_root(lease), Err(MemoryError::InvalidPointer));
+    run_major(&mut gc);
+    assert_eq!(gc.canonicalize_ref(object), None);
+}
+
+#[test]
+fn gc_lease_obeys_reserved_metadata_limit_without_growth() {
+    let config = VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        growth_allowed: false,
+        max_objects: Some(2),
+        max_leases: Some(1),
+        ..VmMemoryConfig::default()
+    };
+    let mut gc = Gc::with_memory_config(config).expect("reserved collector");
+    let first = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    let second = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    let first_lease = gc.gc_lease(first).expect("first lease");
+
+    assert_eq!(gc.gc_lease(second), Err(MemoryError::MetadataExhausted));
+    gc.gc_release_lease(first_lease).expect("release lease");
+    let reused = gc.gc_lease(second).expect("reuse lease slot");
+    assert_eq!(reused.index, first_lease.index);
+    assert_ne!(reused.generation, first_lease.generation);
+    assert_eq!(
+        gc.gc_release_lease(first_lease),
+        Err(MemoryError::InvalidPointer)
+    );
+}
+
+#[test]
+fn memory_config_snapshot_preserves_child_island_admission_policy() {
+    let config = VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        hard_limit_bytes: Some(heap::HEAP_BLOCK_SIZE * 2),
+        gc_mode: GcMode::Incremental,
+        automatic_gc: false,
+        oom_policy: OomPolicy::TerminateIsland,
+        growth_allowed: false,
+        allocation_allowed: true,
+        max_objects: Some(37),
+        max_leases: Some(11),
+    };
+    let mut gc = Gc::with_memory_config(config).expect("configured collector");
+    gc.memory_set_allocation_allowed(false);
+
+    assert_eq!(
+        gc.memory_config_snapshot(),
+        VmMemoryConfig {
+            allocation_allowed: false,
+            ..config
+        }
+    );
+}
+
+#[test]
+fn disabling_growth_preallocates_all_collector_object_worklists() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        ..VmMemoryConfig::default()
+    })
+    .expect("reserved collector");
+
+    gc.memory_set_growth_allowed(false)
+        .expect("metadata admission before no-growth");
+    let max_objects = gc.max_objects.expect("no-growth object bound");
+
+    assert!(gc.all_objects.capacity() >= max_objects);
+    assert!(gc.all_object_data_sizes.capacity() >= max_objects);
+    assert!(gc.allocation_extents.capacity() >= max_objects);
+    assert!(gc.object_index.borrow().capacity() >= max_objects);
+    assert!(gc.gray.capacity() >= max_objects);
+    assert!(gc.grayagain.capacity() >= max_objects);
+
+    gc.memory_set_growth_allowed(true)
+        .expect("re-enable growth");
+    assert_eq!(gc.max_objects, None);
+    assert_eq!(gc.max_leases, None);
 }
 
 #[test]
@@ -219,7 +490,9 @@ fn test_canonicalize_ref_forgets_freed_object_during_partial_sweep() {
     let dead_size = Gc::object_size_bytes(dead);
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), dead_size);
 
-    assert!(work >= dead_size);
+    assert!(work >= SLOT_BYTES);
+    assert!(work <= dead_size);
+    assert_eq!(work % SLOT_BYTES, 0);
     assert_eq!(finalized, vec![dead]);
     assert_eq!(gc.state(), GcState::Sweep);
     assert_eq!(gc.canonicalize_ref(dead_interior), None);
@@ -395,6 +668,19 @@ fn test_sweep_write_barrier_rescues_old_white_child() {
     );
     assert_eq!(gc.object_count(), 2);
     assert_eq!(gc.canonicalize_ref(child), Some(child));
+}
+
+#[test]
+fn allocation_extent_uses_collector_metadata_when_object_header_is_corrupted() {
+    let mut gc = Gc::new();
+    let object = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    assert_eq!(gc.allocated_data_size_bytes(object), Some(0));
+
+    unsafe { Gc::header_mut(object) }.slots = 4;
+
+    assert_eq!(gc.allocated_data_size_bytes(object), Some(0));
+    assert_eq!(gc.canonicalize_ref(object), Some(object));
+    assert_eq!(gc.canonicalize_ref(unsafe { object.add(1) }), None);
 }
 
 #[test]
@@ -848,7 +1134,7 @@ fn test_sweep_initialized_map_scans_copied_old_child() {
     let new_map = crate::objects::map::create(&mut gc, str_meta, str_meta, 1, 1, 0);
     unsafe {
         // SAFETY: test fills a freshly allocated map and marks it for scan before exposing it.
-        crate::objects::map::set_checked(new_map, &[key as u64], &[child as u64], None)
+        crate::objects::map::set_checked(&mut gc, new_map, &[key as u64], &[child as u64], None)
     }
     .expect("GC map root test string key must be hashable");
     gc.mark_allocated_for_scan(new_map);

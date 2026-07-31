@@ -121,6 +121,9 @@ fn push_defer_entry(
 
     let args = if arg_slots > 0 {
         let args_ref = gc.alloc(ValueMeta::new(0, ValueKind::Void), arg_slots);
+        if args_ref.is_null() {
+            return Err("DeferPush Island allocation failed".to_string());
+        }
         for i in 0..arg_slots {
             let val = stack_get(stack, bp + arg_start as usize + i as usize);
             unsafe { Gc::write_slot(args_ref, i as usize, val) };

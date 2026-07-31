@@ -18,6 +18,7 @@ pub use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry
 pub use vo_runtime::gc::GcRef;
 pub use vo_vm::bytecode::{ExternDef, Module};
 pub use vo_vm::vm::Vm;
+pub use vo_vm::{GcMode, OomPolicy, VmMemoryConfig};
 
 /// Generic WASM extension bridge. Use this to load ext modules and auto-register
 /// their externs without any per-module hardcoding.
@@ -25,6 +26,122 @@ pub use vo_web_runtime_wasm::ext_bridge;
 
 /// Type alias for extern registration function.
 pub type ExternRegistrar = fn(&mut ExternRegistry, &[ExternDef]) -> Result<(), ExternContractError>;
+
+pub const WASM_PAGE_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmMemoryAdmission {
+    pub reserve_bytes: u64,
+    pub hard_limit_bytes: Option<u64>,
+    pub maximum_pages: Option<u64>,
+    pub growth_allowed: bool,
+    pub allocation_allowed: bool,
+    pub gc_mode: GcMode,
+    pub automatic_gc: bool,
+    pub oom_policy: OomPolicy,
+}
+
+impl Default for WasmMemoryAdmission {
+    fn default() -> Self {
+        Self {
+            reserve_bytes: 0,
+            hard_limit_bytes: None,
+            maximum_pages: None,
+            growth_allowed: true,
+            allocation_allowed: true,
+            gc_mode: GcMode::Generational,
+            automatic_gc: true,
+            oom_policy: OomPolicy::CollectThenTerminateIsland,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmMemoryAdmissionReport {
+    pub initial_pages: u64,
+    pub admitted_pages: u64,
+    pub maximum_pages: Option<u64>,
+}
+
+fn bytes_to_wasm_pages(bytes: u64) -> Result<u64, String> {
+    bytes
+        .checked_add(WASM_PAGE_BYTES - 1)
+        .map(|value| value / WASM_PAGE_BYTES)
+        .ok_or_else(|| "WASM memory admission byte count overflow".to_string())
+}
+
+pub fn admit_wasm_memory(
+    admission: WasmMemoryAdmission,
+    current_pages: u64,
+    mut grow: impl FnMut(u64) -> bool,
+) -> Result<WasmMemoryAdmissionReport, String> {
+    let reserve_pages = bytes_to_wasm_pages(admission.reserve_bytes)?;
+    let hard_limit_pages = admission
+        .hard_limit_bytes
+        .map(bytes_to_wasm_pages)
+        .transpose()?;
+    if admission
+        .hard_limit_bytes
+        .is_some_and(|limit| admission.reserve_bytes > limit)
+    {
+        return Err("WASM reserve exceeds the Island hard limit".to_string());
+    }
+    if admission
+        .maximum_pages
+        .is_some_and(|maximum| current_pages > maximum)
+    {
+        return Err("current WASM memory exceeds module maximum pages".to_string());
+    }
+    if let (Some(limit), Some(maximum)) = (hard_limit_pages, admission.maximum_pages) {
+        let required_pages = current_pages
+            .checked_add(limit)
+            .ok_or_else(|| "WASM hard-limit admission page count overflow".to_string())?;
+        if required_pages > maximum {
+            return Err(format!(
+                "WASM Island hard limit requires {required_pages} total pages, above module maximum {maximum}"
+            ));
+        }
+    }
+    let admitted_pages = current_pages
+        .checked_add(reserve_pages)
+        .ok_or_else(|| "WASM reserve admission page count overflow".to_string())?;
+    if admission
+        .maximum_pages
+        .is_some_and(|maximum| admitted_pages > maximum)
+    {
+        return Err("WASM reserve admission exceeds module maximum pages".to_string());
+    }
+    if reserve_pages > 0 && !grow(reserve_pages) {
+        return Err(format!(
+            "WASM memory pre-growth to {admitted_pages} pages failed"
+        ));
+    }
+    Ok(WasmMemoryAdmissionReport {
+        initial_pages: current_pages,
+        admitted_pages,
+        maximum_pages: admission.maximum_pages,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn admit_current_wasm_memory(
+    admission: WasmMemoryAdmission,
+) -> Result<WasmMemoryAdmissionReport, String> {
+    let current = core::arch::wasm32::memory_size(0) as u64;
+    admit_wasm_memory(admission, current, |delta| {
+        let Ok(delta) = usize::try_from(delta) else {
+            return false;
+        };
+        core::arch::wasm32::memory_grow(0, delta) != usize::MAX
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn admit_current_wasm_memory(
+    admission: WasmMemoryAdmission,
+) -> Result<WasmMemoryAdmissionReport, String> {
+    admit_wasm_memory(admission, 0, |_| true)
+}
 
 // ── Extern registration ─────────────────────────────────────────────────────
 
@@ -124,17 +241,59 @@ fn run_loaded_vm(mut vm: Vm) -> Result<Vm, String> {
 }
 
 pub fn create_loaded_vm(bytecode: &[u8], register_externs: ExternRegistrar) -> Result<Vm, String> {
+    create_loaded_vm_with_memory(bytecode, register_externs, WasmMemoryAdmission::default())
+}
+
+pub fn create_loaded_vm_with_memory(
+    bytecode: &[u8],
+    register_externs: ExternRegistrar,
+    admission: WasmMemoryAdmission,
+) -> Result<Vm, String> {
     let module = decode_bytecode_module(bytecode)?;
-    create_loaded_vm_from_module(module, register_externs)
+    create_loaded_vm_from_module_with_memory(module, register_externs, admission)
 }
 
 pub fn create_loaded_vm_from_module(
     module: Module,
     register_externs: ExternRegistrar,
 ) -> Result<Vm, String> {
+    create_loaded_vm_from_module_with_memory(
+        module,
+        register_externs,
+        WasmMemoryAdmission::default(),
+    )
+}
+
+pub fn create_loaded_vm_from_module_with_memory(
+    module: Module,
+    register_externs: ExternRegistrar,
+    admission: WasmMemoryAdmission,
+) -> Result<Vm, String> {
     init_output();
 
-    let mut vm = Vm::try_new().map_err(|error| format!("Failed to initialize VM: {error}"))?;
+    let report = admit_current_wasm_memory(admission)?;
+    let memory = VmMemoryConfig {
+        initial_reserve_bytes: usize::try_from(admission.reserve_bytes)
+            .map_err(|_| "WASM reserve does not fit target usize".to_string())?,
+        hard_limit_bytes: admission
+            .hard_limit_bytes
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| "WASM hard limit does not fit target usize".to_string())?,
+        gc_mode: admission.gc_mode,
+        automatic_gc: admission.automatic_gc,
+        oom_policy: admission.oom_policy,
+        growth_allowed: admission.growth_allowed,
+        allocation_allowed: admission.allocation_allowed,
+        ..VmMemoryConfig::default()
+    };
+    let mut vm = Vm::try_with_memory_config(memory)
+        .map_err(|error| format!("Failed to initialize VM: {error}"))?;
+    #[cfg(target_arch = "wasm32")]
+    let current_pages = core::arch::wasm32::memory_size(0) as u64;
+    #[cfg(not(target_arch = "wasm32"))]
+    let current_pages = report.admitted_pages;
+    vm.memory_set_wasm_pages(current_pages, report.maximum_pages);
     let exts = &module.externs;
     let reg = vm
         .extern_registry_mut()
@@ -311,9 +470,64 @@ mod tests {
     #[cfg(feature = "compiler")]
     use super::run;
     use super::{
-        decode_bytecode_module, register_wasm_runtime_externs, validate_external_bytecode_size,
-        voplay_perf_report_payload,
+        admit_wasm_memory, decode_bytecode_module, register_wasm_runtime_externs,
+        validate_external_bytecode_size, voplay_perf_report_payload, WasmMemoryAdmission,
+        WASM_PAGE_BYTES,
     };
+
+    #[test]
+    fn wasm_memory_admission_rejects_inconsistent_limits() {
+        let reserve_above_limit = WasmMemoryAdmission {
+            reserve_bytes: 2 * WASM_PAGE_BYTES,
+            hard_limit_bytes: Some(WASM_PAGE_BYTES),
+            ..WasmMemoryAdmission::default()
+        };
+        assert!(admit_wasm_memory(reserve_above_limit, 0, |_| true).is_err());
+
+        let limit_above_module_maximum = WasmMemoryAdmission {
+            hard_limit_bytes: Some(3 * WASM_PAGE_BYTES),
+            maximum_pages: Some(2),
+            ..WasmMemoryAdmission::default()
+        };
+        assert!(admit_wasm_memory(limit_above_module_maximum, 0, |_| true).is_err());
+
+        let current_plus_limit_above_maximum = WasmMemoryAdmission {
+            hard_limit_bytes: Some(8 * WASM_PAGE_BYTES),
+            maximum_pages: Some(8),
+            ..WasmMemoryAdmission::default()
+        };
+        assert!(admit_wasm_memory(current_plus_limit_above_maximum, 2, |_| true).is_err());
+    }
+
+    #[test]
+    fn wasm_memory_admission_pre_grows_exact_page_delta() {
+        let admission = WasmMemoryAdmission {
+            reserve_bytes: 5 * WASM_PAGE_BYTES - 1,
+            hard_limit_bytes: Some(8 * WASM_PAGE_BYTES),
+            maximum_pages: Some(10),
+            ..WasmMemoryAdmission::default()
+        };
+        let mut requested_delta = None;
+        let report = admit_wasm_memory(admission, 2, |delta| {
+            requested_delta = Some(delta);
+            true
+        })
+        .expect("valid reserve should be admitted");
+
+        assert_eq!(requested_delta, Some(5));
+        assert_eq!(report.initial_pages, 2);
+        assert_eq!(report.admitted_pages, 7);
+        assert_eq!(report.maximum_pages, Some(10));
+    }
+
+    #[test]
+    fn wasm_memory_admission_fails_when_pre_growth_fails() {
+        let admission = WasmMemoryAdmission {
+            reserve_bytes: 2 * WASM_PAGE_BYTES,
+            ..WasmMemoryAdmission::default()
+        };
+        assert!(admit_wasm_memory(admission, 1, |_| false).is_err());
+    }
 
     #[test]
     fn combined_wasm_registration_has_one_provider_per_extern() {
@@ -421,6 +635,38 @@ mod tests {
         assert_eq!(result.status, "exited", "stderr: {}", result.stderr);
         assert_eq!(result.exit_code, Some(37));
         assert_eq!(result.stdout, "before\n");
+        assert!(result.stderr.is_empty());
+    }
+
+    #[cfg(feature = "compiler")]
+    #[test]
+    fn runtime_mem_package_compiles_and_services_safe_boundary_requests() {
+        let source = r#"
+            package main
+
+            import (
+                "fmt"
+                "runtime/mem"
+            )
+
+            func main() {
+                stats := mem.ReadStats()
+                fmt.Println(stats.ManagedCommittedBytes >= stats.ManagedLiveBytes)
+                fmt.Println(mem.GCStep(1))
+                fmt.Println(mem.GCCollect())
+            }
+        "#;
+        let bytecode = crate::compile::compile_source_with_std_fs(
+            source,
+            "main.vo",
+            crate::compile::build_stdlib_fs(),
+        )
+        .expect("runtime/mem fixture should compile");
+
+        let result = run(&bytecode);
+
+        assert_eq!(result.status, "ok", "stderr: {}", result.stderr);
+        assert_eq!(result.stdout, "true\ntrue\ntrue\n");
         assert!(result.stderr.is_empty());
     }
 }

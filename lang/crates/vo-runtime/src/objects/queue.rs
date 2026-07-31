@@ -77,6 +77,9 @@ fn create_with_state(
     state: Box<LocalQueueState>,
 ) -> GcRef {
     let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
+    if chan.is_null() {
+        return chan;
+    }
     // Safety: `chan` is freshly allocated and not visible to the collector yet.
     let data = unsafe { QueueData::as_mut(chan) };
     data.state = ptr_to_slot(Box::into_raw(state));
@@ -141,6 +144,9 @@ pub fn create_remote_proxy_with_closed(
 ) -> GcRef {
     let kind = QueueKind::Port;
     let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
+    if chan.is_null() {
+        return chan;
+    }
     let proxy = Box::new(RemoteProxy {
         endpoint_id,
         home_island,
@@ -509,9 +515,12 @@ pub unsafe fn recv_ready(chan: GcRef) -> bool {
 }
 
 #[inline]
-pub unsafe fn try_send(chan: GcRef, value: QueueMessage) -> SendResult<QueueWaiter, QueueMessage> {
+pub unsafe fn try_send(
+    chan: GcRef,
+    value: impl Into<QueueMessage>,
+) -> SendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
-    with_local_state(chan, |s| s.try_send(value, cap))
+    with_local_state(chan, |s| s.try_send(value.into(), cap))
 }
 
 #[inline]
@@ -520,8 +529,8 @@ pub unsafe fn try_recv(chan: GcRef) -> RecvResult<QueueWaiter, QueueMessage> {
 }
 
 #[inline]
-pub unsafe fn register_sender(chan: GcRef, waiter: QueueWaiter, value: QueueMessage) {
-    with_local_state(chan, |s| s.register_sender(waiter, value))
+pub unsafe fn register_sender(chan: GcRef, waiter: QueueWaiter, value: impl Into<QueueMessage>) {
+    with_local_state(chan, |s| s.register_sender(waiter, value.into()))
 }
 
 #[inline]
@@ -546,11 +555,11 @@ pub unsafe fn cancel_simple_waiter(
 /// Atomic send: try to send, if would block, register waiter in same operation.
 pub unsafe fn send_or_block(
     chan: GcRef,
-    value: QueueMessage,
+    value: impl Into<QueueMessage>,
     waiter: QueueWaiter,
 ) -> BlockingSendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
-    with_local_state(chan, |s| s.send_or_block(value, cap, waiter))
+    with_local_state(chan, |s| s.send_or_block(value.into(), cap, waiter))
 }
 
 #[inline]

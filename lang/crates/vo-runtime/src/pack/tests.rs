@@ -1,5 +1,5 @@
 use super::*;
-use crate::gc::GcState;
+use crate::gc::{GcState, MemoryError, VmMemoryConfig};
 use crate::objects::queue_state::QueueKind;
 use crate::test_support::{
     array,
@@ -163,6 +163,56 @@ fn test_pack_unpack_string() {
     );
     // Verify it's a different GcRef (deep copy)
     assert_ne!(str_ref, unpacked_str);
+}
+
+#[test]
+fn validated_unpack_reports_destination_allocation_failure_without_panicking() {
+    let mut source_gc = Gc::new();
+    let string_ref = string::create(&mut source_gc, b"cross-island");
+    let meta = ValueMeta::new(0, ValueKind::String);
+    let rttid = ValueRttid::new(0, ValueKind::String);
+    let runtime_types = [RuntimeType::Basic(ValueKind::String)];
+    let packed = pack_slots(&source_gc, &[string_ref as u64], meta, &[], &runtime_types);
+    let mut control_gc = Gc::new();
+    let mut control_destination = [0_u64];
+    assert_eq!(
+        validate_and_unpack_slots_expected_with_named_type_metas(
+            &mut control_gc,
+            packed.data(),
+            &mut control_destination,
+            meta,
+            rttid,
+            &[],
+            &[],
+            &runtime_types,
+        ),
+        Ok(())
+    );
+    let mut destination_gc = Gc::with_memory_config(VmMemoryConfig {
+        allocation_allowed: false,
+        ..VmMemoryConfig::default()
+    })
+    .unwrap();
+    let mut destination = [0_u64];
+
+    assert_eq!(
+        validate_and_unpack_slots_expected_with_named_type_metas(
+            &mut destination_gc,
+            packed.data(),
+            &mut destination,
+            meta,
+            rttid,
+            &[],
+            &[],
+            &runtime_types,
+        ),
+        Err(PackedLayoutError)
+    );
+    assert_eq!(destination, [0]);
+    assert_eq!(
+        destination_gc.last_memory_error(),
+        Some(MemoryError::AllocationForbidden)
+    );
 }
 
 #[test]
@@ -1347,7 +1397,7 @@ fn unpack_struct_key_map_uses_checked_key_context_050() {
     );
     unsafe {
         // SAFETY: test initializes a fresh int-only map before publication.
-        map::set_checked(map_ref, &[42], &[99], Some(&module))
+        map::set_checked(&mut src_gc, map_ref, &[42], &[99], Some(&module))
     }
     .expect("test struct map key should be hashable");
 
@@ -1741,9 +1791,9 @@ fn deep_map_values_preserve_key_value_order_shared_slice_backing_and_sweep_marks
 
     let payload = map::create(&mut src_gc, int_meta, slice_meta, 1, 1, int_rttid.rttid());
     unsafe {
-        map::set_checked(payload, &[1], &[left as u64], None)
+        map::set_checked(&mut src_gc, payload, &[1], &[left as u64], None)
             .expect("integer key must be hashable");
-        map::set_checked(payload, &[2], &[right as u64], None)
+        map::set_checked(&mut src_gc, payload, &[2], &[right as u64], None)
             .expect("integer key must be hashable");
     }
 

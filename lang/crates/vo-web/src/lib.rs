@@ -53,9 +53,11 @@ pub use vo_vm::scheduler::HostWaitKey;
 // ── Public re-exports: VM ───────────────────────────────────────────────────
 
 pub use vm::{
-    call_closure, create_loaded_vm, create_loaded_vm_from_module, create_vm, ext_bridge, run,
-    run_with_args, take_output, ExternCallContext, ExternDef, ExternRegistrar, ExternRegistry,
-    ExternResult, GcRef, Module, Vm,
+    admit_wasm_memory, call_closure, create_loaded_vm, create_loaded_vm_from_module,
+    create_loaded_vm_from_module_with_memory, create_loaded_vm_with_memory, create_vm, ext_bridge,
+    run, run_with_args, take_output, ExternCallContext, ExternDef, ExternRegistrar, ExternRegistry,
+    ExternResult, GcRef, Module, Vm, WasmMemoryAdmission, WasmMemoryAdmissionReport,
+    WASM_PAGE_BYTES,
 };
 
 // ── Public re-exports: async runner ─────────────────────────────────────────

@@ -50,7 +50,7 @@ exports: `vo_ext_get_abi_version`, `vo_ext_get_abi_fingerprint`, and
 registrations. An extension owner may publish an explicitly namespaced product
 C API from the same library; those symbols remain outside the Volang ABI and
 the runtime never resolves or guarantees them. Host services travel through
-the per-call ABI-v9 callback table; there are no process-wide bridge setter or
+the per-call ABI-v10 callback table; there are no process-wide bridge setter or
 clearer exports.
 
 The loader validates every raw entry as a canonical length-prefixed extern key.
@@ -189,7 +189,7 @@ which helpers are valid across a dynamic-library boundary.
 
 ## Dynamic-library Helper Contract
 
-ABI-v9 dynamic extensions may use these `ExternCallContext` groups:
+ABI-v10 dynamic extensions may use these `ExternCallContext` groups:
 
 | Group | Supported helpers |
 |---|---|
@@ -197,13 +197,20 @@ ABI-v9 dynamic extensions may use these `ExternCallContext` groups:
 | Typed arguments | scalar `arg_*`, `arg_ref`, `arg_str`/`try_arg_str`, arbitrary-byte string and byte-slice readers, `arg_any`, `arg_error`, and `arg_any_as_*` |
 | Typed returns | scalar `ret_*`, `ret_ref`, `ret_nil`, string/byte helpers, `ret_any`, `ret_error`, `ret_interface_pair`, `ret_nil_error`, and `ret_error_msg` |
 | Replay and result payloads | host-event token/data helpers, `resume_closure_result`, `set_host_output`, and the `set_ext_*` helpers used by generated trampolines |
-| Allocator-neutral GC | `gc`, string/byte/slice allocation, string-slice allocation, `gc_alloc_raw`, `alloc_and_copy_slots`, and the typed container accessors described below |
+| Allocator-neutral GC | `gc`, string/byte/slice allocation, string-slice allocation, `gc_alloc_raw`, `alloc_and_copy_slots`, `gc_lease`, `gc_lease_root`, `gc_release_lease`, and the typed container accessors described below |
 
 Low-level GC allocation must use canonical `ValueMeta`, the exact host module
 metadata id, and the exact physical slot width. The host validates allocation
 intent (`object`, canonical array, or bare value slots), value kind, metadata,
 and width before allocating. Forged kinds, missing metadata, zero-width
 canonical arrays, and allocator-specific payloads fail the call.
+
+Any managed object retained across a native call or GC safe point must use a
+`GcLease`. `gc_lease` creates a host root, `gc_lease_root` resolves its current
+object, and `gc_release_lease` releases it. The lease carries an index and
+generation; stale or foreign leases fail without exposing a pointer. A raw
+`GcRef` remains valid only while the extension's current call contract keeps
+it rooted.
 
 These APIs remain same-image runtime facilities and are rejected for a loaded
 dynamic extension:
@@ -333,7 +340,7 @@ fn len(ctx: &mut ExternCallContext) -> ExternResult {
   nested module.
 - The extension ABI version and fingerprint live in `vo-runtime` and are
   exported by `vo-ext`.
-- ABI-v9 owns all Rust allocations in the image that created them. Cross-image
+- ABI-v10 owns all Rust allocations in the image that created them. Cross-image
   data uses scalars, borrowed pointer/length pairs, opaque handles, or host
   callbacks that copy into owner storage.
 - If an example needs a helper outside the dynamic-library contract above,

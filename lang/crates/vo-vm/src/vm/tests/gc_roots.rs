@@ -65,6 +65,7 @@ fn gc_root_matrix_scans_async_io_write_back_targets_until_completion_consumption
     for _ in 0..4096 {
         alloc_gc_test_object(&mut vm);
     }
+    vm.state.gc.gc_request_major();
     run_gc_until_pause(&mut vm);
     assert_eq!(vm.state.gc.canonicalize_ref(target), None);
 }
@@ -407,9 +408,19 @@ fn gc_root_dirty_fiber_scan_rescues_late_sweep_root() {
 
     let root = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0);
 
-    vm.gc_step();
+    for _ in 0..10_000 {
+        vm.gc_step();
+        if vm.state.gc.state() == vo_runtime::gc::GcState::Atomic {
+            break;
+        }
+    }
     assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Atomic);
-    vm.gc_step();
+    for _ in 0..10_000 {
+        vm.gc_step();
+        if vm.state.gc.state() == vo_runtime::gc::GcState::Sweep {
+            break;
+        }
+    }
     assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Sweep);
     assert!(!vm.state.gc_roots_dirty_all);
 
@@ -436,9 +447,19 @@ fn gc_verify_rejects_dead_white_root_during_sweep_before_free() {
     }
     let late_root = vm.state.gc.alloc(meta, 0);
 
-    vm.gc_step();
+    for _ in 0..10_000 {
+        vm.gc_step();
+        if vm.state.gc.state() == vo_runtime::gc::GcState::Atomic {
+            break;
+        }
+    }
     assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Atomic);
-    vm.gc_step();
+    for _ in 0..10_000 {
+        vm.gc_step();
+        if vm.state.gc.state() == vo_runtime::gc::GcState::Sweep {
+            break;
+        }
+    }
     assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Sweep);
     assert!(!vm.state.gc_roots_dirty_all);
     assert_eq!(vm.state.gc.canonicalize_ref(late_root), Some(late_root));

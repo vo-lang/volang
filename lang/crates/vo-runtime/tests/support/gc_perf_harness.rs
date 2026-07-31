@@ -348,7 +348,7 @@ fn count_phase(report: &mut GcPerfReport, state: GcState) {
         GcState::Pause => report.pause_steps += 1,
         GcState::Propagate => report.propagate_steps += 1,
         GcState::Atomic => report.atomic_steps += 1,
-        GcState::Sweep => report.sweep_steps += 1,
+        GcState::Sweep | GcState::Reclaim => report.sweep_steps += 1,
     }
 }
 

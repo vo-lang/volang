@@ -958,15 +958,19 @@ unsafe fn set_map_string_key(
     if val_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
+    let module = call.module() as *const Module;
     unsafe {
         // SAFETY: dynamic map writes applied key/value barriers above using map metadata.
-        map::set_checked(base_ref, &key_data, &val_data, Some(call.module()))
+        map::set_checked(call.gc(), base_ref, &key_data, &val_data, Some(&*module))
     }
     .map_err(|err| match err {
         map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadField, "map key is not hashable"),
         map::MapKeyError::SlotCountMismatch => (DynErr::TypeMismatch, "map entry layout mismatch"),
         map::MapKeyError::MissingModule => {
             (DynErr::TypeMismatch, "map type metadata is unavailable")
+        }
+        map::MapKeyError::AllocationFailed(_) => {
+            (DynErr::BadField, "map backing allocation failed")
         }
     })?;
     Ok(())
@@ -1075,15 +1079,19 @@ unsafe fn set_map_index(
     if val_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
+    let module = call.module() as *const Module;
     unsafe {
         // SAFETY: dynamic map index writes applied key/value barriers above using map metadata.
-        map::set_checked(base_ref, &key_data, &val_data, Some(call.module()))
+        map::set_checked(call.gc(), base_ref, &key_data, &val_data, Some(&*module))
     }
     .map_err(|err| match err {
         map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadIndex, "map key is not hashable"),
         map::MapKeyError::SlotCountMismatch => (DynErr::TypeMismatch, "map entry layout mismatch"),
         map::MapKeyError::MissingModule => {
             (DynErr::TypeMismatch, "map type metadata is unavailable")
+        }
+        map::MapKeyError::AllocationFailed(_) => {
+            (DynErr::BadIndex, "map backing allocation failed")
         }
     })?;
     Ok(())

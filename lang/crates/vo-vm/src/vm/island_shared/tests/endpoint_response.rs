@@ -477,7 +477,7 @@ fn vm_endpoint_recv_gc_payload_marks_roots_dirty_061() {
     queue::with_local_state(ch, |state| {
         state
             .buffer
-            .push_back(vec![payload_port as u64].into_boxed_slice());
+            .push_back(vec![payload_port as u64].into_boxed_slice().into());
     });
 
     let fid = vm.scheduler.spawn(Fiber::new(0));

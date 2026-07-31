@@ -264,7 +264,17 @@ pub fn run_gui(
     spawn_native_gui(
         move || {
             with_compile_log_sink(make_studio_log_sink(build_app.clone(), session_id), || {
-                vo_engine::build_gui_vm(output)
+                vo_engine::build_gui_vm_with_memory(
+                    output,
+                    vo_engine::VmMemoryConfig {
+                        initial_reserve_bytes: 64 * 1024 * 1024,
+                        hard_limit_bytes: Some(256 * 1024 * 1024),
+                        gc_mode: vo_engine::GcMode::Generational,
+                        oom_policy: vo_engine::OomPolicy::TerminateIsland,
+                        growth_allowed: false,
+                        ..vo_engine::VmMemoryConfig::default()
+                    },
+                )
             })
         },
         config,

@@ -513,7 +513,7 @@ mod same_image_map_accessors {
             }
             unsafe {
                 // SAFETY: VoMap::set_raw barriers key/value roots through the extern context above.
-                map::set_checked(self.ptr, &key, &val, None)
+                map::set_checked(ctx.gc(), self.ptr, &key, &val, None)
             }
             .expect("VoMap::set_raw string key must be hashable");
         }

@@ -18,11 +18,9 @@ use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use std::boxed::Box;
 
-use super::vo_map::VoMap;
-
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::objects::string;
-use crate::slot::{ptr_to_slot, slot_to_ptr, Slot, SLOT_BYTES};
+use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::bytecode::Module;
 pub use vo_common_core::bytecode::{MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
@@ -32,37 +30,25 @@ use super::compare::{
     iface_hash_checked, UnhashableType,
 };
 
-type SingleKeyMap = VoMap<u64, Box<[u64]>>;
-type MultiKeyMap = VoMap<Box<[u64]>, Box<[u64]>>;
-type StringKeyMap = VoMap<Box<[u8]>, (GcRef, Box<[u64]>)>;
-
-pub struct StructKeyEntry {
-    pub key: Box<[u64]>,
-    pub val: Box<[u64]>,
-}
-
-type StructKeyMap = VoMap<u64, StructKeyEntry>;
-
-pub struct InterfaceKeyEntry {
-    pub key: [u64; 2],
-    pub val: Box<[u64]>,
-}
-
-type InterfaceKeyMap = VoMap<u64, InterfaceKeyEntry>;
-
-pub enum MapInner {
-    SingleKey(SingleKeyMap),
-    MultiKey(MultiKeyMap),
-    StringKey(StringKeyMap),
-    StructKey(StructKeyMap),
-    InterfaceKey(InterfaceKeyMap),
-}
+const BACKING_HEADER_SLOTS: usize = 4;
+const BACKING_CAPACITY_SLOT: usize = 0;
+const BACKING_LEN_SLOT: usize = 1;
+const BACKING_USED_SLOT: usize = 2;
+const BACKING_GENERATION_SLOT: usize = 3;
+const BUCKET_PREFIX_SLOTS: usize = 2;
+const BUCKET_STATE_EMPTY: u64 = 0;
+const BUCKET_STATE_TOMBSTONE: u64 = 1;
+const BUCKET_STATE_OCCUPIED: u64 = 2;
+const MIN_CAPACITY: usize = 8;
+const LOAD_FACTOR_NUM: usize = 3;
+const LOAD_FACTOR_DEN: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapKeyError {
     UnhashableInterfaceKey,
     SlotCountMismatch,
     MissingModule,
+    AllocationFailed(MemoryError),
 }
 
 pub type OwnedMapValue = Box<[u64]>;
@@ -100,24 +86,12 @@ pub fn create(
     key_rttid: u32,
 ) -> GcRef {
     let m = gc.alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS);
-    let key_vk = key_meta.value_kind();
-    let inner = if key_vk == ValueKind::String {
-        MapInner::StringKey(StringKeyMap::new())
-    } else if matches!(
-        key_vk,
-        ValueKind::Struct | ValueKind::Array | ValueKind::Float32 | ValueKind::Float64
-    ) {
-        MapInner::StructKey(StructKeyMap::new())
-    } else if key_vk == ValueKind::Interface {
-        MapInner::InterfaceKey(InterfaceKeyMap::new())
-    } else if key_slots == 1 {
-        MapInner::SingleKey(SingleKeyMap::new())
-    } else {
-        MapInner::MultiKey(MultiKeyMap::new())
-    };
+    if m.is_null() {
+        return m;
+    }
     // Safety: `m` is freshly allocated and not visible to the collector yet.
     let data = unsafe { MapData::as_mut(m) };
-    data.inner = ptr_to_slot(Box::into_raw(Box::new(inner)));
+    data.inner = 0;
     data.key_meta = key_meta;
     data.val_meta = val_meta;
     data.key_slots = key_slots;
@@ -156,23 +130,153 @@ pub unsafe fn val_slots(m: GcRef) -> u16 {
 }
 
 #[inline]
-unsafe fn inner_ref<'a>(m: GcRef) -> &'a MapInner {
-    unsafe { &*slot_to_ptr(MapData::as_ref(m).inner) }
+pub unsafe fn backing_ref(m: GcRef) -> GcRef {
+    unsafe { MapData::as_ref(m) }.inner as GcRef
+}
+
+/// Validate the managed bucket allocation owned by a canonical live map.
+///
+/// A null backing is the valid representation of an empty map. Callers use
+/// this before traversing untrusted or cross-Island map state.
+pub unsafe fn has_valid_managed_backing_layout(gc: &Gc, m: GcRef) -> bool {
+    let backing = unsafe { backing_ref(m) };
+    if backing.is_null() {
+        return true;
+    }
+    if gc.canonicalize_ref(backing) != Some(backing) {
+        return false;
+    }
+    let header = unsafe { Gc::header(backing) };
+    if !header.is_runtime_backing_object() {
+        return false;
+    }
+    let Some(data_bytes) = gc.allocated_data_size_bytes(backing) else {
+        return false;
+    };
+    if !data_bytes.is_multiple_of(SLOT_BYTES) {
+        return false;
+    }
+    let allocated_slots = data_bytes / SLOT_BYTES;
+    if allocated_slots < BACKING_HEADER_SLOTS {
+        return false;
+    }
+
+    let capacity = unsafe { backing_capacity(backing) };
+    if capacity < MIN_CAPACITY || !capacity.is_power_of_two() {
+        return false;
+    }
+    let Some(expected_slots) = capacity
+        .checked_mul(bucket_stride(m))
+        .and_then(|slots| slots.checked_add(BACKING_HEADER_SLOTS))
+    else {
+        return false;
+    };
+    if allocated_slots != expected_slots {
+        return false;
+    }
+
+    let len = unsafe { backing_len(backing) };
+    let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize };
+    if len > used || used > capacity {
+        return false;
+    }
+    let mut occupied = 0usize;
+    let mut non_empty = 0usize;
+    for index in 0..capacity {
+        match unsafe { bucket_state(m, backing, index) } {
+            BUCKET_STATE_EMPTY => {}
+            BUCKET_STATE_TOMBSTONE => {
+                non_empty += 1;
+            }
+            BUCKET_STATE_OCCUPIED => {
+                occupied += 1;
+                non_empty += 1;
+            }
+            _ => return false,
+        }
+    }
+    occupied == len && non_empty == used
 }
 
 #[inline]
-unsafe fn inner_mut<'a>(m: GcRef) -> &'a mut MapInner {
-    unsafe { &mut *slot_to_ptr(MapData::as_ref(m).inner) }
+fn bucket_stride(m: GcRef) -> usize {
+    BUCKET_PREFIX_SLOTS + unsafe { key_slots(m) as usize } + unsafe { val_slots(m) as usize }
+}
+
+#[inline]
+unsafe fn backing_slot(backing: GcRef, index: usize) -> u64 {
+    unsafe { Gc::read_slot(backing, index) }
+}
+
+#[inline]
+unsafe fn set_backing_slot(backing: GcRef, index: usize, value: u64) {
+    unsafe { Gc::write_slot(backing, index, value) };
+}
+
+#[inline]
+unsafe fn backing_capacity(backing: GcRef) -> usize {
+    if backing.is_null() {
+        0
+    } else {
+        unsafe { backing_slot(backing, BACKING_CAPACITY_SLOT) as usize }
+    }
+}
+
+#[inline]
+unsafe fn backing_len(backing: GcRef) -> usize {
+    if backing.is_null() {
+        0
+    } else {
+        unsafe { backing_slot(backing, BACKING_LEN_SLOT) as usize }
+    }
+}
+
+#[inline]
+unsafe fn bucket_offset(m: GcRef, index: usize) -> usize {
+    BACKING_HEADER_SLOTS + index * bucket_stride(m)
+}
+
+#[inline]
+unsafe fn bucket_state(m: GcRef, backing: GcRef, index: usize) -> u64 {
+    unsafe { backing_slot(backing, bucket_offset(m, index)) }
+}
+
+#[inline]
+unsafe fn bucket_hash(m: GcRef, backing: GcRef, index: usize) -> u64 {
+    unsafe { backing_slot(backing, bucket_offset(m, index) + 1) }
+}
+
+#[inline]
+unsafe fn bucket_key<'a>(m: GcRef, backing: GcRef, index: usize) -> &'a [u64] {
+    let start = unsafe { bucket_offset(m, index) } + BUCKET_PREFIX_SLOTS;
+    unsafe { core::slice::from_raw_parts(backing.add(start), key_slots(m) as usize) }
+}
+
+#[inline]
+unsafe fn bucket_value<'a>(m: GcRef, backing: GcRef, index: usize) -> &'a [u64] {
+    let start = unsafe { bucket_offset(m, index) } + BUCKET_PREFIX_SLOTS + key_slots(m) as usize;
+    unsafe { core::slice::from_raw_parts(backing.add(start), val_slots(m) as usize) }
+}
+
+#[inline]
+unsafe fn bucket_key_mut<'a>(m: GcRef, backing: GcRef, index: usize) -> &'a mut [u64] {
+    let start = unsafe { bucket_offset(m, index) } + BUCKET_PREFIX_SLOTS;
+    unsafe { core::slice::from_raw_parts_mut(backing.add(start), key_slots(m) as usize) }
+}
+
+#[inline]
+unsafe fn bucket_value_mut<'a>(m: GcRef, backing: GcRef, index: usize) -> &'a mut [u64] {
+    let start = unsafe { bucket_offset(m, index) } + BUCKET_PREFIX_SLOTS + key_slots(m) as usize;
+    unsafe { core::slice::from_raw_parts_mut(backing.add(start), val_slots(m) as usize) }
 }
 
 #[inline]
 pub unsafe fn generation(m: GcRef) -> u32 {
-    match inner_ref(m) {
-        MapInner::SingleKey(map) => map.generation(),
-        MapInner::MultiKey(map) => map.generation(),
-        MapInner::StringKey(map) => map.generation(),
-        MapInner::StructKey(map) => map.generation(),
-        MapInner::InterfaceKey(map) => map.generation(),
+    let backing = unsafe { backing_ref(m) };
+    if backing.is_null() {
+        0
+    } else {
+        unsafe { backing_slot(backing, BACKING_GENERATION_SLOT) as u32 }
     }
 }
 
@@ -207,13 +311,197 @@ unsafe fn semantic_key_eq(m: GcRef, a: &[u64], b: &[u64], module: Option<&Module
 }
 
 pub unsafe fn len(m: GcRef) -> usize {
-    match inner_ref(m) {
-        MapInner::SingleKey(map) => map.len(),
-        MapInner::MultiKey(map) => map.len(),
-        MapInner::StringKey(map) => map.len(),
-        MapInner::StructKey(map) => map.len(),
-        MapInner::InterfaceKey(map) => map.len(),
+    unsafe { backing_len(backing_ref(m)) }
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
     }
+    hash
+}
+
+fn hash_slots(slots: &[u64]) -> u64 {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(slots.as_ptr().cast::<u8>(), core::mem::size_of_val(slots))
+    };
+    hash_bytes(bytes)
+}
+
+unsafe fn key_hash_checked(
+    m: GcRef,
+    key: &[u64],
+    module: Option<&Module>,
+) -> Result<u64, MapKeyError> {
+    match unsafe { key_kind(m) } {
+        ValueKind::String => {
+            let string_ref = key.first().copied().ok_or(MapKeyError::SlotCountMismatch)? as GcRef;
+            Ok(hash_bytes(unsafe { string::bytes_unchecked(string_ref) }))
+        }
+        ValueKind::Struct | ValueKind::Array | ValueKind::Float32 | ValueKind::Float64 => unsafe {
+            semantic_key_hash_checked(m, key, module)
+        },
+        ValueKind::Interface => {
+            let module = module.ok_or(MapKeyError::MissingModule)?;
+            let [slot0, slot1] =
+                <[u64; 2]>::try_from(key).map_err(|_| MapKeyError::SlotCountMismatch)?;
+            iface_hash_checked(slot0, slot1, module).map_err(Into::into)
+        }
+        _ => Ok(hash_slots(key)),
+    }
+}
+
+unsafe fn key_eq(m: GcRef, left: &[u64], right: &[u64], module: Option<&Module>) -> bool {
+    match unsafe { key_kind(m) } {
+        ValueKind::String => {
+            let Some((&left, &right)) = left.first().zip(right.first()) else {
+                return false;
+            };
+            unsafe {
+                string::bytes_unchecked(left as GcRef) == string::bytes_unchecked(right as GcRef)
+            }
+        }
+        ValueKind::Struct | ValueKind::Array | ValueKind::Float32 | ValueKind::Float64 => unsafe {
+            semantic_key_eq(m, left, right, module)
+        },
+        ValueKind::Interface => {
+            let Some(module) = module else {
+                return false;
+            };
+            left.len() == 2
+                && right.len() == 2
+                && iface_eq(left[0], left[1], right[0], right[1], module) == 1
+        }
+        _ => left == right,
+    }
+}
+
+unsafe fn find_bucket(
+    m: GcRef,
+    backing: GcRef,
+    key: &[u64],
+    hash: u64,
+    module: Option<&Module>,
+) -> (Option<usize>, usize) {
+    let capacity = unsafe { backing_capacity(backing) };
+    let mut index = hash as usize & (capacity - 1);
+    let mut tombstone = None;
+    for _ in 0..capacity {
+        match unsafe { bucket_state(m, backing, index) } {
+            BUCKET_STATE_EMPTY => return (None, tombstone.unwrap_or(index)),
+            BUCKET_STATE_TOMBSTONE => {
+                tombstone.get_or_insert(index);
+            }
+            BUCKET_STATE_OCCUPIED => {
+                if unsafe { bucket_hash(m, backing, index) } == hash
+                    && unsafe { key_eq(m, key, bucket_key(m, backing, index), module) }
+                {
+                    return (Some(index), index);
+                }
+            }
+            state => panic!("invalid Island map bucket state {state}"),
+        }
+        index = (index + 1) & (capacity - 1);
+    }
+    (
+        None,
+        tombstone.expect("map table must retain an insertion slot"),
+    )
+}
+
+unsafe fn allocate_backing(
+    gc: &mut Gc,
+    m: GcRef,
+    capacity: usize,
+    generation: u32,
+) -> Result<GcRef, MapKeyError> {
+    let total_slots = capacity
+        .checked_mul(bucket_stride(m))
+        .and_then(|slots| slots.checked_add(BACKING_HEADER_SLOTS))
+        .ok_or(MapKeyError::AllocationFailed(
+            MemoryError::HardLimitExceeded,
+        ))?;
+    let backing = gc.alloc_runtime_backing(total_slots);
+    if backing.is_null() {
+        return Err(MapKeyError::AllocationFailed(
+            gc.last_memory_error()
+                .unwrap_or(MemoryError::SystemAllocationFailed),
+        ));
+    }
+    for index in 0..total_slots {
+        unsafe { set_backing_slot(backing, index, 0) };
+    }
+    unsafe {
+        set_backing_slot(backing, BACKING_CAPACITY_SLOT, capacity as u64);
+        set_backing_slot(backing, BACKING_GENERATION_SLOT, u64::from(generation));
+    }
+    Ok(backing)
+}
+
+unsafe fn write_bucket(
+    m: GcRef,
+    backing: GcRef,
+    index: usize,
+    hash: u64,
+    key: &[u64],
+    val: &[u64],
+) {
+    let offset = unsafe { bucket_offset(m, index) };
+    unsafe {
+        set_backing_slot(backing, offset, BUCKET_STATE_OCCUPIED);
+        set_backing_slot(backing, offset + 1, hash);
+        bucket_key_mut(m, backing, index).copy_from_slice(key);
+        bucket_value_mut(m, backing, index).copy_from_slice(val);
+    }
+}
+
+unsafe fn resize(
+    gc: &mut Gc,
+    m: GcRef,
+    new_capacity: usize,
+    module: Option<&Module>,
+) -> Result<GcRef, MapKeyError> {
+    let old = unsafe { backing_ref(m) };
+    let generation = unsafe { generation(m) }
+        .checked_add(1)
+        .expect("Island map generation exhausted");
+    let new = unsafe { allocate_backing(gc, m, new_capacity, generation)? };
+    if !old.is_null() {
+        for old_index in 0..unsafe { backing_capacity(old) } {
+            if unsafe { bucket_state(m, old, old_index) } != BUCKET_STATE_OCCUPIED {
+                continue;
+            }
+            let key = unsafe { bucket_key(m, old, old_index) };
+            let val = unsafe { bucket_value(m, old, old_index) };
+            crate::gc_types::typed_write_barrier_by_meta(
+                gc,
+                m,
+                key,
+                unsafe { key_meta(m) },
+                module,
+            );
+            crate::gc_types::typed_write_barrier_by_meta(
+                gc,
+                m,
+                val,
+                unsafe { val_meta(m) },
+                module,
+            );
+            let hash = unsafe { bucket_hash(m, old, old_index) };
+            let (_, new_index) = unsafe { find_bucket(m, new, key, hash, module) };
+            unsafe { write_bucket(m, new, new_index, hash, key, val) };
+            let len = unsafe { backing_len(new) } + 1;
+            unsafe {
+                set_backing_slot(new, BACKING_LEN_SLOT, len as u64);
+                set_backing_slot(new, BACKING_USED_SLOT, len as u64);
+            }
+        }
+    }
+    gc.write_barrier(m, new);
+    unsafe { MapData::as_mut(m) }.inner = new as Slot;
+    Ok(new)
 }
 
 unsafe fn with_value_checked<R>(
@@ -225,36 +513,15 @@ unsafe fn with_value_checked<R>(
     if key.len() != key_slots(m) as usize {
         return Err(MapKeyError::SlotCountMismatch);
     }
-    match inner_ref(m) {
-        MapInner::SingleKey(map) => Ok(consume(map.get(&key[0]).map(AsRef::as_ref))),
-        MapInner::MultiKey(map) => Ok(consume(map.get_borrowed(key).map(AsRef::as_ref))),
-        MapInner::StringKey(map) => {
-            let str_ref = key[0] as GcRef;
-            // Safety: string keys are live while the owning map operation runs.
-            let str_bytes = unsafe { string::bytes_unchecked(str_ref) };
-            Ok(consume(
-                map.get_borrowed(str_bytes).map(|(_, value)| value.as_ref()),
-            ))
-        }
-        MapInner::StructKey(map) => {
-            let hash = semantic_key_hash_checked(m, key, module)?;
-            Ok(consume(
-                map.find_by(hash, |_, entry| semantic_key_eq(m, key, &entry.key, module))
-                    .map(|entry| entry.val.as_ref()),
-            ))
-        }
-        MapInner::InterfaceKey(map) => {
-            let module = module.ok_or(MapKeyError::MissingModule)?;
-            let (slot0, slot1) = (key[0], key[1]);
-            let hash = iface_hash_checked(slot0, slot1, module)?;
-            Ok(consume(
-                map.find_by(hash, |_, entry| {
-                    iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1
-                })
-                .map(|entry| entry.val.as_ref()),
-            ))
-        }
+    let hash = unsafe { key_hash_checked(m, key, module)? };
+    let backing = unsafe { backing_ref(m) };
+    if backing.is_null() {
+        return Ok(consume(None));
     }
+    let (found, _) = unsafe { find_bucket(m, backing, key, hash, module) };
+    Ok(consume(
+        found.map(|index| unsafe { bucket_value(m, backing, index) }),
+    ))
 }
 
 pub unsafe fn get_checked(
@@ -319,49 +586,44 @@ pub unsafe fn validate_entry_slot_counts(
 /// before calling this raw mutator. Initialization-only callers must arrange for
 /// the new map to be scanned before it can be swept.
 pub unsafe fn set_checked(
+    gc: &mut Gc,
     m: GcRef,
     key: &[u64],
     val: &[u64],
     module: Option<&Module>,
 ) -> Result<(), MapKeyError> {
     validate_entry_slot_counts(m, key.len(), val.len())?;
-    let val_box: Box<[u64]> = val.into();
-    match inner_mut(m) {
-        MapInner::SingleKey(map) => {
-            map.insert(key[0], val_box);
-        }
-        MapInner::MultiKey(map) => {
-            map.insert(key.into(), val_box);
-        }
-        MapInner::StringKey(map) => {
-            let str_ref = key[0] as GcRef;
-            // Safety: string keys are live while the owning map operation runs.
-            let str_bytes: Box<[u8]> = unsafe { string::to_bytes(str_ref) }.into();
-            map.insert(str_bytes, (str_ref, val_box));
-        }
-        MapInner::StructKey(map) => {
-            let hash = semantic_key_hash_checked(m, key, module)?;
-            map.insert_by(
-                hash,
-                StructKeyEntry {
-                    key: key.into(),
-                    val: val_box,
-                },
-                |_, entry| semantic_key_eq(m, key, &entry.key, module),
-            );
-        }
-        MapInner::InterfaceKey(map) => {
-            let module = module.ok_or(MapKeyError::MissingModule)?;
-            let (slot0, slot1) = (key[0], key[1]);
-            let hash = iface_hash_checked(slot0, slot1, module)?;
-            map.insert_by(
-                hash,
-                InterfaceKeyEntry {
-                    key: [slot0, slot1],
-                    val: val_box,
-                },
-                |_, entry| iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1,
-            );
+    let hash = unsafe { key_hash_checked(m, key, module)? };
+    let mut backing = unsafe { backing_ref(m) };
+    let mut capacity = unsafe { backing_capacity(backing) };
+    let used = if backing.is_null() {
+        0
+    } else {
+        unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize }
+    };
+    if capacity == 0
+        || (used + 1).saturating_mul(LOAD_FACTOR_DEN) > capacity.saturating_mul(LOAD_FACTOR_NUM)
+    {
+        capacity = if capacity == 0 {
+            MIN_CAPACITY
+        } else {
+            capacity
+                .checked_mul(2)
+                .ok_or(MapKeyError::AllocationFailed(
+                    MemoryError::HardLimitExceeded,
+                ))?
+        };
+        backing = unsafe { resize(gc, m, capacity, module)? };
+    }
+    let (found, insertion) = unsafe { find_bucket(m, backing, key, hash, module) };
+    let previous_state = unsafe { bucket_state(m, backing, insertion) };
+    unsafe { write_bucket(m, backing, insertion, hash, key, val) };
+    if found.is_none() {
+        let len = unsafe { backing_len(backing) } + 1;
+        unsafe { set_backing_slot(backing, BACKING_LEN_SLOT, len as u64) };
+        if previous_state == BUCKET_STATE_EMPTY {
+            let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize } + 1;
+            unsafe { set_backing_slot(backing, BACKING_USED_SLOT, used as u64) };
         }
     }
     Ok(())
@@ -372,30 +634,26 @@ pub unsafe fn delete_checked(
     key: &[u64],
     module: Option<&Module>,
 ) -> Result<(), MapKeyError> {
-    match inner_mut(m) {
-        MapInner::SingleKey(map) => {
-            map.remove(&key[0]);
-        }
-        MapInner::MultiKey(map) => {
-            map.remove_borrowed(key);
-        }
-        MapInner::StringKey(map) => {
-            let str_ref = key[0] as GcRef;
-            // Safety: string keys are live while the owning map operation runs.
-            let str_bytes = unsafe { string::bytes_unchecked(str_ref) };
-            map.remove_borrowed(str_bytes);
-        }
-        MapInner::StructKey(map) => {
-            let hash = semantic_key_hash_checked(m, key, module)?;
-            map.remove_by(hash, |_, entry| semantic_key_eq(m, key, &entry.key, module));
-        }
-        MapInner::InterfaceKey(map) => {
-            let module = module.ok_or(MapKeyError::MissingModule)?;
-            let (slot0, slot1) = (key[0], key[1]);
-            let hash = iface_hash_checked(slot0, slot1, module)?;
-            map.remove_by(hash, |_, entry| {
-                iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1
-            });
+    if key.len() != unsafe { key_slots(m) as usize } {
+        return Err(MapKeyError::SlotCountMismatch);
+    }
+    let hash = unsafe { key_hash_checked(m, key, module)? };
+    let backing = unsafe { backing_ref(m) };
+    if backing.is_null() {
+        return Ok(());
+    }
+    let (found, _) = unsafe { find_bucket(m, backing, key, hash, module) };
+    if let Some(index) = found {
+        let offset = unsafe { bucket_offset(m, index) };
+        unsafe {
+            set_backing_slot(backing, offset, BUCKET_STATE_TOMBSTONE);
+            bucket_key_mut(m, backing, index).fill(0);
+            bucket_value_mut(m, backing, index).fill(0);
+            set_backing_slot(
+                backing,
+                BACKING_LEN_SLOT,
+                backing_len(backing).saturating_sub(1) as u64,
+            );
         }
     }
     Ok(())
@@ -418,11 +676,7 @@ pub struct MapIterator {
 const _: () = assert!(core::mem::size_of::<MapIterator>() == MAP_ITER_SLOTS * SLOT_BYTES);
 const _: () = assert!(MAP_ITER_SLOTS == 7);
 
-const TAG_SINGLE_KEY: u8 = 0;
-const TAG_MULTI_KEY: u8 = 1;
-const TAG_STRING_KEY: u8 = 2;
-const TAG_STRUCT_KEY: u8 = 3;
-const TAG_INTERFACE_KEY: u8 = 4;
+const TAG_ACTIVE: u8 = 0;
 const TAG_EXHAUSTED: u8 = 255;
 
 pub unsafe fn iter_init(m: GcRef) -> MapIterator {
@@ -437,16 +691,8 @@ pub unsafe fn iter_init(m: GcRef) -> MapIterator {
         };
     }
 
-    let tag = match inner_ref(m) {
-        MapInner::SingleKey(_) => TAG_SINGLE_KEY,
-        MapInner::MultiKey(_) => TAG_MULTI_KEY,
-        MapInner::StringKey(_) => TAG_STRING_KEY,
-        MapInner::StructKey(_) => TAG_STRUCT_KEY,
-        MapInner::InterfaceKey(_) => TAG_INTERFACE_KEY,
-    };
-
     MapIterator {
-        tag,
+        tag: TAG_ACTIVE,
         _pad: [0; 3],
         init_generation: generation(m),
         current_index: 0,
@@ -489,58 +735,49 @@ pub unsafe fn with_next<R>(
         // Continue from current index - may skip or repeat elements, which is Go-like behavior
     }
 
-    let idx = iter.current_index as usize;
+    let backing = unsafe { backing_ref(m) };
+    let capacity = unsafe { backing_capacity(backing) };
+    let mut index = iter.current_index as usize;
+    while index < capacity {
+        iter.current_index = (index + 1) as u64;
+        if unsafe { bucket_state(m, backing, index) } == BUCKET_STATE_OCCUPIED {
+            return consume(Some(unsafe {
+                (
+                    bucket_key(m, backing, index),
+                    bucket_value(m, backing, index),
+                )
+            }));
+        }
+        index += 1;
+    }
+    iter.tag = TAG_EXHAUSTED;
+    consume(None)
+}
 
-    match inner_ref(m) {
-        MapInner::SingleKey(map) => {
-            if let Some((new_idx, k, v)) = map.iter_from_index(idx) {
-                iter.current_index = (new_idx + 1) as u64;
-                let key = [*k];
-                consume(Some((&key, v)))
-            } else {
-                iter.tag = TAG_EXHAUSTED;
-                consume(None)
-            }
-        }
-        MapInner::MultiKey(map) => {
-            if let Some((new_idx, k, v)) = map.iter_from_index(idx) {
-                iter.current_index = (new_idx + 1) as u64;
-                consume(Some((k, v)))
-            } else {
-                iter.tag = TAG_EXHAUSTED;
-                consume(None)
-            }
-        }
-        MapInner::StringKey(map) => {
-            if let Some((new_idx, _, (str_ref, v))) = map.iter_from_index(idx) {
-                iter.current_index = (new_idx + 1) as u64;
-                let raw = ptr_to_slot(*str_ref);
-                iter._reserved[0] = raw;
-                let key = [raw];
-                consume(Some((&key, v)))
-            } else {
-                iter.tag = TAG_EXHAUSTED;
-                consume(None)
-            }
-        }
-        MapInner::StructKey(map) => {
-            if let Some((new_idx, _, entry)) = map.iter_from_index(idx) {
-                iter.current_index = (new_idx + 1) as u64;
-                consume(Some((&entry.key, &entry.val)))
-            } else {
-                iter.tag = TAG_EXHAUSTED;
-                consume(None)
-            }
-        }
-        MapInner::InterfaceKey(map) => {
-            if let Some((new_idx, _, entry)) = map.iter_from_index(idx) {
-                iter.current_index = (new_idx + 1) as u64;
-                consume(Some((&entry.key, &entry.val)))
-            } else {
-                iter.tag = TAG_EXHAUSTED;
-                consume(None)
-            }
-        }
+/// Visit exactly one backing bucket without probing past it.
+///
+/// The outer `Option` is `None` once `index` reaches capacity. The callback
+/// receives `None` for an empty/tombstone bucket and an entry for an occupied
+/// bucket. GC uses this primitive so every bucket inspection is one bounded
+/// work unit.
+pub unsafe fn with_bucket_at<R>(
+    m: GcRef,
+    index: usize,
+    consume: impl FnOnce(Option<(&[u64], &[u64])>) -> R,
+) -> Option<R> {
+    let backing = unsafe { backing_ref(m) };
+    if backing.is_null() || index >= unsafe { backing_capacity(backing) } {
+        return None;
+    }
+    if unsafe { bucket_state(m, backing, index) } == BUCKET_STATE_OCCUPIED {
+        Some(consume(Some(unsafe {
+            (
+                bucket_key(m, backing, index),
+                bucket_value(m, backing, index),
+            )
+        })))
+    } else {
+        Some(consume(None))
     }
 }
 
@@ -589,18 +826,27 @@ pub unsafe fn iter_next_into(
 /// # Safety
 /// Caller must ensure `m` is a valid `GcRef` pointing to a live map object.
 pub unsafe fn drop_inner(m: GcRef) {
-    // Safety: `m` is a valid map object owned by the GC finalization path.
-    let data = unsafe { MapData::as_mut(m) };
-    if data.inner != 0 {
-        drop(Box::from_raw(slot_to_ptr::<MapInner>(data.inner)));
-        data.inner = 0;
-    }
+    // Map backing is a managed Island allocation and is reclaimed by GC.
+    unsafe { MapData::as_mut(m) }.inner = 0;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{gc::Gc, objects::string, RuntimeType, ValueKind, ValueMeta, ValueRttid};
+
+    #[test]
+    fn empty_map_has_valid_lazy_managed_backing_layout() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let map_ref = create(&mut gc, int_meta, int_meta, 1, 1, 0);
+        assert!(!map_ref.is_null());
+        assert!(unsafe { has_valid_managed_backing_layout(&gc, map_ref) });
+
+        let forged = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        unsafe { MapData::as_mut(map_ref) }.inner = forged as Slot;
+        assert!(!unsafe { has_valid_managed_backing_layout(&gc, map_ref) });
+    }
 
     #[test]
     fn raw_map_set_checked_is_unsafe_public_primitive_058() {
@@ -623,11 +869,11 @@ mod tests {
         let m = create(&mut gc, int_meta, int_meta, 1, 2, 0);
 
         assert!(
-            unsafe { set_checked(m, &[7], &[11], None) }.is_err(),
+            unsafe { set_checked(&mut gc, m, &[7], &[11], None) }.is_err(),
             "raw map publication must reject values shorter than map value slots"
         );
         assert!(
-            unsafe { set_checked(m, &[7, 8], &[11, 22], None) }.is_err(),
+            unsafe { set_checked(&mut gc, m, &[7, 8], &[11, 22], None) }.is_err(),
             "raw map publication must reject keys wider than map key slots"
         );
         assert!(
@@ -646,7 +892,7 @@ mod tests {
         let m = create(&mut gc, struct_meta, int_meta, 1, 1, 7);
 
         assert_eq!(
-            unsafe { set_checked(m, &[1], &[2], None) },
+            unsafe { set_checked(&mut gc, m, &[1], &[2], None) },
             Err(MapKeyError::MissingModule)
         );
         assert_eq!(
@@ -669,18 +915,18 @@ mod tests {
         let negative_zero = (-0.0_f64).to_bits();
         let nan = f64::NAN.to_bits();
 
-        unsafe { set_checked(m, &[positive_zero], &[11], None) }.unwrap();
+        unsafe { set_checked(&mut gc, m, &[positive_zero], &[11], None) }.unwrap();
         assert_eq!(
             unsafe { get_checked(m, &[negative_zero], None) }
                 .unwrap()
                 .as_deref(),
             Some(&[11][..])
         );
-        unsafe { set_checked(m, &[negative_zero], &[22], None) }.unwrap();
+        unsafe { set_checked(&mut gc, m, &[negative_zero], &[22], None) }.unwrap();
         assert_eq!(unsafe { len(m) }, 1);
 
-        unsafe { set_checked(m, &[nan], &[31], None) }.unwrap();
-        unsafe { set_checked(m, &[nan], &[32], None) }.unwrap();
+        unsafe { set_checked(&mut gc, m, &[nan], &[31], None) }.unwrap();
+        unsafe { set_checked(&mut gc, m, &[nan], &[32], None) }.unwrap();
         assert_eq!(unsafe { len(m) }, 3);
         assert!(unsafe { get_checked(m, &[nan], None) }.unwrap().is_none());
     }
@@ -722,7 +968,7 @@ mod tests {
             u64::from((-0.0_f32).to_bits()),
             u64::from(1.0_f32.to_bits()),
         ];
-        unsafe { set_checked(float_map, &positive, &[7], Some(&module)) }.unwrap();
+        unsafe { set_checked(&mut gc, float_map, &positive, &[7], Some(&module)) }.unwrap();
         assert_eq!(
             unsafe { get_checked(float_map, &negative, Some(&module)) }
                 .unwrap()
@@ -731,8 +977,8 @@ mod tests {
         );
 
         let nan = [u64::from(f32::NAN.to_bits()), u64::from(1.0_f32.to_bits())];
-        unsafe { set_checked(float_map, &nan, &[8], Some(&module)) }.unwrap();
-        unsafe { set_checked(float_map, &nan, &[9], Some(&module)) }.unwrap();
+        unsafe { set_checked(&mut gc, float_map, &nan, &[8], Some(&module)) }.unwrap();
+        unsafe { set_checked(&mut gc, float_map, &nan, &[9], Some(&module)) }.unwrap();
         assert_eq!(unsafe { len(float_map) }, 3);
         assert!(unsafe { get_checked(float_map, &nan, Some(&module)) }
             .unwrap()
@@ -748,7 +994,7 @@ mod tests {
             1,
             string_array_rttid,
         );
-        unsafe { set_checked(string_map, &[first as u64], &[13], Some(&module)) }.unwrap();
+        unsafe { set_checked(&mut gc, string_map, &[first as u64], &[13], Some(&module)) }.unwrap();
         assert_eq!(
             unsafe { get_checked(string_map, &[second as u64], Some(&module)) }
                 .unwrap()

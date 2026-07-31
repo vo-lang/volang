@@ -123,6 +123,9 @@ pub enum EndpointResponseKind {
 /// Note: Command channels are managed by VM, not stored here.
 pub fn create(gc: &mut Gc, island_id: u32) -> GcRef {
     let handle = gc.alloc(ValueMeta::new(0, ValueKind::Island), DATA_SLOTS);
+    if handle.is_null() {
+        return handle;
+    }
     // Safety: `handle` is freshly allocated and not visible to the collector yet.
     let data = unsafe { IslandData::as_mut(handle) };
     data.id = island_id;

@@ -45,6 +45,9 @@ pub mod vm;
 
 // Re-export runtime bytecode modules
 pub use vo_runtime::bytecode;
+pub use vo_runtime::gc::{
+    GcCycleKind, GcMode, MemoryError, MemoryStats, OomPolicy, VmMemoryConfig,
+};
 pub use vo_runtime::instruction;
 pub use vo_runtime::serialize;
 

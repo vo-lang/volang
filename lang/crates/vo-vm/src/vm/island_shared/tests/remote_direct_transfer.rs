@@ -126,7 +126,7 @@ fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
     vm.scheduler.block_for_queue();
 
     queue::register_receiver(ch, receiver_waiter);
-    queue::register_sender(ch, sender_waiter, vec![7].into_boxed_slice());
+    queue::register_sender(ch, sender_waiter, vec![7].into_boxed_slice().into());
 
     handle_endpoint_request_command(&mut vm, endpoint_id, EndpointRequestKind::Close, 9, 0, 0)
         .expect("endpoint close request should apply");
@@ -206,7 +206,7 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_close() {
     queue::add_home_peer(ch, 2);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
     queue::with_local_state(ch, |state| {
-        state.buffer.push_back(vec![7].into_boxed_slice());
+        state.buffer.push_back(vec![7].into_boxed_slice().into());
     });
 
     handle_endpoint_request_command(&mut vm, endpoint_id, EndpointRequestKind::Close, 99, 0, 0)
@@ -815,7 +815,7 @@ fn vm_endpoint_recv_transfer_txn_061_late_response_failure_rolls_back_payload_ho
         1,
         1,
     );
-    match queue::try_send(ch, vec![payload_port as u64].into_boxed_slice()) {
+    match queue::try_send(ch, vec![payload_port as u64].into_boxed_slice().into()) {
         vo_runtime::objects::queue_state::SendResult::Buffered => {}
         other => panic!("expected buffered setup send, got {other:?}"),
     }
@@ -880,7 +880,7 @@ fn vm_queue_recv_remote_ack_reservation_failure_rolls_back_sender_and_stack_058(
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(sender_island, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     vm.state
         .island_senders
@@ -984,7 +984,7 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
     queue::register_sender(
         ch,
         QueueWaiter::endpoint(sender_island, 0x0000_0002_0000_0003, 11),
-        vec![123].into_boxed_slice(),
+        vec![123].into_boxed_slice().into(),
     );
     vm.state
         .island_senders

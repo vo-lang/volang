@@ -5,7 +5,8 @@ use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use vo_runtime::ffi::SentinelErrorCache;
 use vo_runtime::gc::{
-    trace_slots_by_types, Gc, GcRef, GcRootScanChunk, GcRootScanKind, GcRootState, GcState,
+    trace_slots_by_types, Gc, GcMode, GcRef, GcRootScanChunk, GcRootScanKind, GcRootState, GcState,
+    MemoryError, MemoryStats,
 };
 use vo_runtime::slot::SLOT_BYTES;
 
@@ -13,8 +14,8 @@ use crate::bytecode::{FunctionDef, GlobalDef, Module};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
 use crate::scheduler::FiberId;
 use crate::vm::{
-    EndpointRegistry, Vm, VmFiberRootScanStage, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot,
-    VmRootScanStage,
+    EndpointRegistry, Vm, VmFiberRootScanStage, VmGcCycleReport, VmGcStepReport, VmGcStepStats,
+    VmRootScanMode, VmRootScanSnapshot, VmRootScanStage,
 };
 
 #[inline]
@@ -982,6 +983,7 @@ impl Vm {
         let already_dirty =
             self.state.gc_roots_dirty_all || self.state.gc_dirty_fibers.contains(&raw);
         if self.state.gc_root_scan.is_some() || !already_dirty {
+            self.state.gc.roots_changed();
             self.state.bump_gc_dirty_epoch_or_restart_scan();
         }
         if self.state.gc_roots_dirty_all {
@@ -1023,6 +1025,136 @@ impl Vm {
         self.gc_step_after_fiber(None);
     }
 
+    /// Explicitly advance collection by at most `work_units`.
+    ///
+    /// This starts a cycle even when automatic collection is stopped or the
+    /// allocation debt threshold has not been reached.
+    pub fn gc_step_units(&mut self, work_units: usize) -> VmGcStepReport {
+        if work_units == 0 {
+            return VmGcStepReport {
+                requested_work_units: 0,
+                completed_work_units: 0,
+                stats: self.state.last_gc_step_stats,
+                memory: self.state.gc.memory_stats(),
+            };
+        }
+        self.state.gc.gc_request_cycle();
+        self.gc_step_after_fiber_with_budget(None, Some(work_units), true);
+        VmGcStepReport {
+            requested_work_units: work_units,
+            completed_work_units: self.state.last_gc_step_stats.gc.total_work_bytes / SLOT_BYTES,
+            stats: self.state.last_gc_step_stats,
+            memory: self.state.gc.memory_stats(),
+        }
+    }
+
+    #[inline]
+    pub fn memory_reserve(&mut self, bytes: usize) -> Result<MemoryStats, MemoryError> {
+        self.state.gc.memory_reserve(bytes)
+    }
+
+    #[inline]
+    pub fn memory_set_growth_allowed(&mut self, allowed: bool) -> Result<(), MemoryError> {
+        self.state.gc.memory_set_growth_allowed(allowed)
+    }
+
+    #[inline]
+    pub fn memory_set_allocation_allowed(&mut self, allowed: bool) {
+        self.state.gc.memory_set_allocation_allowed(allowed);
+    }
+
+    #[inline]
+    pub fn memory_set_hard_limit_bytes(&mut self, limit: Option<usize>) -> Result<(), MemoryError> {
+        self.state.gc.memory_set_hard_limit_bytes(limit)
+    }
+
+    #[inline]
+    pub fn memory_set_external_reported(&mut self, bytes: usize, unknown_provider_count: usize) {
+        self.state
+            .gc
+            .memory_set_external_reported(bytes, unknown_provider_count);
+    }
+
+    #[inline]
+    pub fn memory_set_wasm_pages(&mut self, current: u64, maximum: Option<u64>) {
+        self.state.gc.memory_set_wasm_pages(current, maximum);
+    }
+
+    #[inline]
+    pub fn memory_stats(&self) -> MemoryStats {
+        self.state.gc.memory_stats()
+    }
+
+    #[inline]
+    pub fn gc_set_mode(&mut self, mode: GcMode) -> Result<(), MemoryError> {
+        self.state.gc.gc_set_mode(mode)
+    }
+
+    #[inline]
+    pub fn gc_stop(&mut self) {
+        self.state.gc.gc_stop();
+    }
+
+    #[inline]
+    pub fn gc_restart(&mut self) {
+        self.state.gc.gc_restart();
+    }
+
+    /// Complete a major cycle while the VM is at a host-controlled boundary.
+    pub fn gc_collect(&mut self) -> Result<VmGcCycleReport, MemoryError> {
+        if self.module.is_none() {
+            if self.state.gc.object_count() != 0 {
+                return Err(MemoryError::CollectorBusy);
+            }
+            let memory = self.state.gc.memory_stats();
+            return Ok(VmGcCycleReport {
+                cycle_id: memory.cycle_id,
+                cycle_kind: vo_runtime::gc::GcCycleKind::Major,
+                steps: 0,
+                completed_work_units: 0,
+                reclaimed_live_bytes: 0,
+                memory,
+            });
+        }
+        let before = self.state.gc.memory_stats();
+        self.state.gc.gc_request_major();
+        let mut steps = 0usize;
+        let mut completed_work_units = 0u64;
+        loop {
+            let report = self.gc_step_units(128 * 1024);
+            steps = steps.saturating_add(1);
+            completed_work_units =
+                completed_work_units.saturating_add(report.completed_work_units as u64);
+            let memory = report.memory;
+            if memory.major_cycles > before.major_cycles && memory.gc_state == GcState::Pause {
+                return Ok(VmGcCycleReport {
+                    cycle_id: memory.cycle_id,
+                    cycle_kind: report.stats.gc.cycle_kind,
+                    steps,
+                    completed_work_units,
+                    reclaimed_live_bytes: before
+                        .managed_live_bytes
+                        .saturating_sub(memory.managed_live_bytes),
+                    memory,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn service_pending_runtime_mem_requests(&mut self) -> Result<bool, MemoryError> {
+        let collect = core::mem::take(&mut self.state.pending_explicit_gc_collect);
+        let work_units = core::mem::take(&mut self.state.pending_explicit_gc_work_units);
+        if collect {
+            self.gc_collect()?;
+            return Ok(true);
+        }
+        if work_units > 0 {
+            self.gc_step_units(work_units);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Telemetry for the most recent VM-triggered incremental GC step.
     #[inline]
     pub fn last_gc_step_stats(&self) -> VmGcStepStats {
@@ -1030,8 +1162,17 @@ impl Vm {
     }
 
     pub(crate) fn gc_step_after_fiber(&mut self, mutated_fiber: Option<FiberId>) {
+        self.gc_step_after_fiber_with_budget(mutated_fiber, None, false);
+    }
+
+    fn gc_step_after_fiber_with_budget(
+        &mut self,
+        mutated_fiber: Option<FiberId>,
+        work_unit_limit: Option<usize>,
+        explicit: bool,
+    ) {
         self.assert_no_pending_runtime_transitions_for_gc();
-        if !self.state.gc.should_step() {
+        if !explicit && !self.state.gc.should_step() {
             return;
         }
         if let Some(fiber_id) = mutated_fiber {
@@ -1104,8 +1245,9 @@ impl Vm {
             };
 
         unsafe {
-            (&mut *gc_ptr).step_with_root_scanner(
+            (&mut *gc_ptr).step_with_scanners_budget(
                 root_state,
+                work_unit_limit.unwrap_or(usize::MAX / SLOT_BYTES),
                 |gc, kind, limit| {
                     scan_vm_root_snapshot_chunk(
                         gc,
@@ -1125,8 +1267,8 @@ impl Vm {
                         &mut completed_root_scan,
                     )
                 },
-                |gc, obj| {
-                    vo_runtime::gc_types::scan_object_with_context(
+                |gc, obj, cursor, limit| {
+                    vo_runtime::gc_types::scan_object_chunk_with_context(
                         gc,
                         obj,
                         vo_runtime::gc_types::GcScanContext::from_module_parts(
@@ -1135,7 +1277,9 @@ impl Vm {
                             &module_ref.runtime_types,
                         ),
                         &func_closure_scan_layout,
-                    );
+                        cursor,
+                        limit,
+                    )
                 },
                 |obj| {
                     vo_runtime::gc_types::finalize_object(obj);
@@ -1221,7 +1365,7 @@ impl Vm {
                 ));
             };
             let dangling_white = match self.state.gc.state() {
-                GcState::Pause => false,
+                GcState::Pause | GcState::Reclaim => false,
                 GcState::Sweep => self.state.gc.is_dead_white(canonical_root),
                 _ => self.state.gc.is_white(canonical_root),
             };

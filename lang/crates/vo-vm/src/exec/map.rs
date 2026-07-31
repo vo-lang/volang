@@ -329,6 +329,9 @@ pub fn exec_map_get_with_layout_using_scratch(
         Err(map::MapKeyError::MissingModule) => {
             return Err("MapGet requires loaded module metadata for this key type".to_string())
         }
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            return Err(format!("MapGet backing error: {error}"))
+        }
     };
     for (i, &value) in val.iter().enumerate() {
         stack_set(stack, dst_start + i, value);
@@ -438,7 +441,7 @@ pub fn exec_map_set_with_layout_using_scratch(
     }
     let set_result = unsafe {
         // SAFETY: VM MapSet validated the map handle and applied precise key/value barriers above.
-        map::set_checked(m, key, val, module)
+        map::set_checked(gc, m, key, val, module)
     };
     match set_result {
         Ok(()) => {}
@@ -448,6 +451,9 @@ pub fn exec_map_set_with_layout_using_scratch(
         }
         Err(map::MapKeyError::MissingModule) => {
             return Err("MapSet requires loaded module metadata for this key type".to_string())
+        }
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            return Err(format!("MapSet allocation failed: {error}"))
         }
     }
     Ok(true)
@@ -539,6 +545,9 @@ pub fn exec_map_delete_with_layout_using_scratch(
         }
         Err(map::MapKeyError::MissingModule) => {
             Err("MapDelete requires loaded module metadata for this key type".to_string())
+        }
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            Err(format!("MapDelete backing error: {error}"))
         }
     }
 }
@@ -655,6 +664,9 @@ pub fn exec_map_iter_next_with_layout(
         Err(map::MapKeyError::MissingModule) => {
             return Err("MapIterNext requires loaded module metadata".to_string())
         }
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            return Err(format!("MapIterNext backing error: {error}"))
+        }
     }
     Ok(())
 }
@@ -691,7 +703,7 @@ mod tests {
         let mut gc = Gc::new();
         let int_meta = ValueMeta::new(0, ValueKind::Int64);
         let m = map::create(&mut gc, int_meta, int_meta, 1, 1, 0);
-        unsafe { map::set_checked(m, &[7], &[42], None) }.expect("seed map");
+        unsafe { map::set_checked(&mut gc, m, &[7], &[42], None) }.expect("seed map");
         let meta = (1 << 16) | (1 << 1);
         let mut stack = vec![m as u64, meta, 7];
         let inst = Instruction::new(crate::instruction::Opcode::MapGet, 2, 0, 1);
@@ -736,7 +748,7 @@ mod tests {
         let m = map::create(&mut gc, int_meta, int_meta, 1, 2, 0);
         unsafe {
             // SAFETY: test seeds a valid int-only map before exposing it to GC.
-            map::set_checked(m, &[7], &[11, 22], None)
+            map::set_checked(&mut gc, m, &[7], &[11, 22], None)
         }
         .expect("seed map");
         let meta = (1 << 16) | (1 << 1);
