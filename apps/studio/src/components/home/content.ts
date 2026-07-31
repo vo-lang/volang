@@ -15,7 +15,7 @@ export type StarterAccent = 'blue' | 'violet' | 'mint' | 'amber';
 export type BlockKartAction = 'play' | 'source';
 
 export const BLOCKKART_GITHUB_URL = 'https://github.com/vo-lang/BlockKart';
-export const BLOCKKART_PLAY_URL = '/quickplay/blockkart-eb43eb83afb3fe4ee8833f3557a7ad3ba5580674.tar.gz';
+export const BLOCKKART_PLAY_URL = '/quickplay/blockkart-59cd3c14e297926c9eeb15b8f55e76a3268316d2.tar.gz';
 
 export interface StarterCategory {
   id: StarterCategoryId;
