@@ -14,9 +14,21 @@ pub use format::{
 };
 
 pub const RUNTIME_CALLER_EXTERN_NAME: &str = crate::vo_extern_name!("runtime", "Caller");
+pub const RUNTIME_MEM_READ_STATS_EXTERN_NAME: &str =
+    crate::vo_extern_name!("runtime/mem", "ReadStats");
+pub const RUNTIME_MEM_GC_STEP_EXTERN_NAME: &str = crate::vo_extern_name!("runtime/mem", "GCStep");
+pub const RUNTIME_MEM_GC_COLLECT_EXTERN_NAME: &str =
+    crate::vo_extern_name!("runtime/mem", "GCCollect");
+
+const VM_MATERIALIZED_EXTERN_NAMES: &[&str] = &[
+    RUNTIME_CALLER_EXTERN_NAME,
+    RUNTIME_MEM_READ_STATS_EXTERN_NAME,
+    RUNTIME_MEM_GC_STEP_EXTERN_NAME,
+    RUNTIME_MEM_GC_COLLECT_EXTERN_NAME,
+];
 
 pub fn known_extern_allowed_effects(name: &str) -> Option<crate::bytecode::ExternEffects> {
-    if name == RUNTIME_CALLER_EXTERN_NAME {
+    if VM_MATERIALIZED_EXTERN_NAMES.contains(&name) {
         return Some(crate::bytecode::ExternEffects::NONE);
     }
     builtin::known_extern_allowed_effects(name)
@@ -41,6 +53,34 @@ mod tests {
             known_extern_allowed_effects(concat!("runtime_", "Caller")),
             None
         );
+    }
+
+    #[test]
+    fn runtime_memory_uses_canonical_public_extern_identities() {
+        let expected = [
+            (
+                RUNTIME_MEM_READ_STATS_EXTERN_NAME,
+                vo_common_core::extern_key::ExternKeyRef::new("runtime/mem", "ReadStats"),
+            ),
+            (
+                RUNTIME_MEM_GC_STEP_EXTERN_NAME,
+                vo_common_core::extern_key::ExternKeyRef::new("runtime/mem", "GCStep"),
+            ),
+            (
+                RUNTIME_MEM_GC_COLLECT_EXTERN_NAME,
+                vo_common_core::extern_key::ExternKeyRef::new("runtime/mem", "GCCollect"),
+            ),
+        ];
+        for (name, key) in expected {
+            assert_eq!(
+                vo_common_core::extern_key::decode_extern_name(name).unwrap(),
+                key
+            );
+            assert_eq!(
+                known_extern_allowed_effects(name),
+                Some(crate::bytecode::ExternEffects::NONE)
+            );
+        }
     }
 
     #[test]

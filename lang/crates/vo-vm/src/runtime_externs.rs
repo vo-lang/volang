@@ -4,13 +4,16 @@ use crate::fiber::CallFrame;
 use crate::vm::Vm;
 use vo_common_core::bytecode::{ExternDef, Module};
 use vo_common_core::debug_info::SourceLoc;
-use vo_runtime::builtins::RUNTIME_CALLER_EXTERN_NAME;
+use vo_runtime::builtins::{
+    RUNTIME_CALLER_EXTERN_NAME, RUNTIME_MEM_GC_COLLECT_EXTERN_NAME,
+    RUNTIME_MEM_GC_STEP_EXTERN_NAME, RUNTIME_MEM_READ_STATS_EXTERN_NAME,
+};
 use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, ExternResult};
 
 const CALLER_EXTERN: &str = RUNTIME_CALLER_EXTERN_NAME;
-const MEM_READ_STATS_EXTERN: &str = vo_runtime::vo_extern_name!("runtime/mem", "ReadStats");
-const MEM_GC_STEP_EXTERN: &str = vo_runtime::vo_extern_name!("runtime/mem", "GCStep");
-const MEM_GC_COLLECT_EXTERN: &str = vo_runtime::vo_extern_name!("runtime/mem", "GCCollect");
+const MEM_READ_STATS_EXTERN: &str = RUNTIME_MEM_READ_STATS_EXTERN_NAME;
+const MEM_GC_STEP_EXTERN: &str = RUNTIME_MEM_GC_STEP_EXTERN_NAME;
+const MEM_GC_COLLECT_EXTERN: &str = RUNTIME_MEM_GC_COLLECT_EXTERN_NAME;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CallerLocation {
