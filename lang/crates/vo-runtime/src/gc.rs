@@ -652,7 +652,7 @@ impl Gc {
         heap.set_allocation_allowed(config.allocation_allowed);
         let max_objects = config
             .max_objects
-            .or_else(|| (!config.growth_allowed).then(|| config.initial_reserve_bytes / 64));
+            .or_else(|| (!config.growth_allowed).then_some(config.initial_reserve_bytes / 64));
         let max_leases = config.max_leases.or_else(|| {
             (!config.growth_allowed)
                 .then(|| (config.initial_reserve_bytes / (64 * 1024)).saturating_mul(64))
@@ -1792,6 +1792,12 @@ impl Gc {
     ///
     /// Production hosts should use [`Gc::step_with_scanners`] so large objects
     /// can pause at reference-slot boundaries.
+    ///
+    /// # Safety
+    ///
+    /// The caller must control the freshness of `root_state`; `scan_roots`
+    /// must cover every live root, and `scan_object` must trace every managed
+    /// reference in each object it receives.
     pub unsafe fn step_with_root_scanner<R, S, F>(
         &mut self,
         root_state: GcRootState,
@@ -1861,6 +1867,12 @@ impl Gc {
     /// A work unit is one root slot, trace slot, object-table entry, swept
     /// allocation, or reclaimed heap block. A zero budget observes no heap
     /// state and performs no collector transition.
+    ///
+    /// # Safety
+    ///
+    /// The caller must preserve the root-set and object-scanner ownership
+    /// requirements of [`Gc::step_with_scanners`] for every bounded call and
+    /// across every resumed cursor.
     pub unsafe fn step_with_scanners_budget<R, S, F>(
         &mut self,
         root_state: GcRootState,

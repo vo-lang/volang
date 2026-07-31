@@ -122,7 +122,7 @@ impl SmallBlock {
 #[derive(Clone)]
 enum BlockState {
     Free,
-    Small(SmallBlock),
+    Small(Box<SmallBlock>),
     LargeHead {
         blocks: u32,
         pending_reclaim: bool,
@@ -337,7 +337,7 @@ impl SpanHeap {
 
         let (segment_index, block_index) = self.acquire_free_run(1)?;
         self.segments[segment_index].blocks[block_index] =
-            BlockState::Small(SmallBlock::new(class_index));
+            BlockState::Small(Box::new(SmallBlock::new(class_index)));
         self.active_small[class_index] = Some((segment_index, block_index));
         Ok((segment_index, block_index))
     }

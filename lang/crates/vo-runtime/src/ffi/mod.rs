@@ -2478,6 +2478,10 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Retain a managed object across native calls.
+    ///
+    /// `GcRef` is an opaque managed handle at this boundary. Both backends
+    /// validate it against their owning collector before creating the lease.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn gc_lease(&mut self, obj: GcRef) -> Result<GcLease, MemoryError> {
         match &mut self.backend {
             ExternCallBackend::Host(host) => host.gc.gc_lease(obj),
