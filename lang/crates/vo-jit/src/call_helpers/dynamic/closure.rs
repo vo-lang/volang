@@ -1,7 +1,8 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitContextField;
+use vo_runtime::objects::closure::ClosureHeader;
 
 use crate::translator::IrEmitter;
 
@@ -12,9 +13,10 @@ use super::DynamicCallLowering;
 ///
 /// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
 ///
-/// The prepare callback owns closure object validation, canonicalization, call
-/// shape validation, frame push, and arg layout. Closure calls deliberately do
-/// not populate the interface-only IC hit path.
+/// The first call owns closure object validation, canonicalization, call shape
+/// validation, frame push, and argument layout in the prepare callback. An
+/// ordinary closure whose callee permits frame elision then publishes a
+/// monomorphic `func_id` entry. Captured state remains in slot 0 on every hit.
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
@@ -48,8 +50,28 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
 
-    let lowering = DynamicCallLowering::new(emitter, inst, ctx, false)?;
-    let merge_block = emitter.builder().create_block();
+    // A verified CallClosure operand is a rooted canonical closure reference.
+    // The miss callback repeats full runtime validation before publication.
+    let func_id_i32 = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        closure_ref,
+        ClosureHeader::OFFSET_FUNC_ID,
+    );
+    let func_id_key = emitter.builder().ins().uextend(types::I64, func_id_i32);
+
+    let lowering = DynamicCallLowering::new(emitter, inst, ctx, true)?;
+    let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
+        lowering.branch_on_ic_key_hit(emitter, func_id_key, zero);
+
+    emitter.builder().switch_to_block(ic_hit_block);
+    emitter.builder().seal_block(ic_hit_block);
+    let hit_fields = lowering.load_hit_fields(emitter);
+    lowering.emit_hit_slot0(emitter, closure_ref);
+    lowering.emit_hit_call(emitter, ic_jit_ptr, hit_fields, merge_block, ic_miss_block)?;
+
+    emitter.builder().switch_to_block(ic_miss_block);
+    emitter.builder().seal_block(ic_miss_block);
     let miss = lowering.begin_miss(emitter);
 
     lowering.emit_prepare_callback(
@@ -60,7 +82,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         &miss,
     )?;
 
-    lowering.finish_miss(emitter, miss, merge_block, None)?;
+    lowering.finish_miss(emitter, miss, merge_block, Some(func_id_key))?;
     lowering.copy_returns(emitter);
     Ok(())
 }

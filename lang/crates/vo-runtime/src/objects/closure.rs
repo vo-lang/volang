@@ -19,6 +19,12 @@ pub struct ClosureHeader {
     pub capture_count: u32,
 }
 
+impl ClosureHeader {
+    pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(ClosureHeader, func_id) as i32;
+    pub const OFFSET_CAPTURE_COUNT: i32 =
+        core::mem::offset_of!(ClosureHeader, capture_count) as i32;
+}
+
 pub const HEADER_SLOTS: usize = vo_common_core::bytecode::CLOSURE_HEADER_SLOTS;
 pub const MAX_CAPTURE_SLOTS: usize = vo_common_core::bytecode::MAX_CLOSURE_CAPTURE_SLOTS;
 const _: () = assert!(core::mem::size_of::<ClosureHeader>() == HEADER_SLOTS * SLOT_BYTES);

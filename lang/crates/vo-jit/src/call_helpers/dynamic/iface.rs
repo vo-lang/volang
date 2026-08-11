@@ -52,13 +52,13 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let lowering = DynamicCallLowering::new(emitter, inst, ctx, true)?;
 
     let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
-        lowering.branch_on_iface_ic_hit(emitter, slot0, zero);
+        lowering.branch_on_ic_key_hit(emitter, slot0, zero);
 
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
 
     let hit_fields = lowering.load_hit_fields(emitter);
-    lowering.emit_iface_hit_slot0(emitter, slot1);
+    lowering.emit_hit_slot0(emitter, slot1);
 
     lowering.emit_hit_call(emitter, ic_jit_ptr, hit_fields, merge_block, ic_miss_block)?;
 

@@ -99,6 +99,20 @@ pub struct JitExecutionStats {
     pub side_exit_reasons: JitSideExitReasonStats,
     pub low_progress_function_disables: u64,
     pub low_progress_loop_disables: u64,
+    /// Valid closure prepare callbacks reached after native IC misses.
+    pub closure_prepare_callbacks: u64,
+    /// Valid interface prepare callbacks reached after native IC misses.
+    pub iface_prepare_callbacks: u64,
+    /// Fiber stack windows reserved by dynamic-call prepare callbacks.
+    pub prepared_frame_reservations: u64,
+    /// Sum of callee local slots reserved by dynamic-call prepare callbacks.
+    pub prepared_frame_slots_reserved: u64,
+    /// Prepared misses dispatched directly to an already compiled callee.
+    pub prepared_jit_dispatches: u64,
+    /// Prepared misses handed to the VM because no eligible native entry exists.
+    pub prepared_vm_dispatches: u64,
+    /// Dynamic-call misses that published an eligible native IC entry.
+    pub dynamic_ic_publications: u64,
 }
 
 impl JitExecutionStats {

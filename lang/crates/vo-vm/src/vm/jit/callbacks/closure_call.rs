@@ -13,8 +13,8 @@ use vo_runtime::objects::closure;
 use vo_runtime::SlotType;
 
 use crate::exec::{
-    resolve_iface_call_target, validate_call_iface_itab_for_callsite,
-    validate_iface_receiver_layout,
+    iface_call_target_is_direct_pointer_receiver, resolve_iface_call_target,
+    validate_call_iface_itab_for_callsite, validate_iface_receiver_layout,
 };
 use crate::fiber::Fiber;
 use crate::frame_call::{
@@ -23,7 +23,9 @@ use crate::frame_call::{
     validate_function_callsite_layout, ValidClosureTarget,
 };
 
-use super::helpers::{record_runtime_trap, validate_callback_context};
+use super::helpers::{
+    record_prepared_dynamic_call_if_available, record_runtime_trap, validate_callback_context,
+};
 
 /// Look up an eligible function in the shared JIT table.
 ///
@@ -263,6 +265,7 @@ pub extern "C" fn jit_prepare_closure_call(
     user_arg_count: u32,
     out: *mut PreparedCall,
 ) -> JitResult {
+    let ctx_ptr = ctx;
     if let Err(result) = validate_callback_context(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -341,12 +344,21 @@ pub extern "C" fn jit_prepare_closure_call(
 
     // 2. The callback prepares a complete callee stack window below. A non-OK
     // result materializes its CallFrame before VM-owned handling resumes.
+    let eligibility = vo_jit::jit_frame_entry_eligibility(func_def);
     let jit_func_ptr = lookup_jit_ptr(
         ctx.jit_func_table,
         ctx.jit_func_count,
         func_id,
-        vo_jit::can_enter_prepared_shadow_frame_for_jit(func_def),
+        eligibility.prepared_shadow,
     );
+    let ic_jit_func_ptr = if layout.arg_offset == 1
+        && layout.receiver_capture_count == 0
+        && eligibility.prepared_shadow
+    {
+        jit_func_ptr
+    } else {
+        core::ptr::null()
+    };
 
     // 3. push_frame: always allocate callee frame on fiber.stack.
     //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
@@ -387,11 +399,18 @@ pub extern "C" fn jit_prepare_closure_call(
         *out = PreparedCall {
             jit_func_ptr,
             callee_args_ptr,
-            ic_jit_func_ptr: core::ptr::null(),
+            ic_jit_func_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
         };
     }
+    record_prepared_dynamic_call_if_available(
+        ctx_ptr,
+        true,
+        local_slots,
+        !jit_func_ptr.is_null(),
+        !ic_jit_func_ptr.is_null(),
+    );
     JitResult::Ok
 }
 
@@ -550,8 +569,9 @@ pub extern "C" fn jit_prepare_iface_call(
         return result;
     }
 
-    // 2. The prepared miss owns a shadow stack window. IC hits do not, so they
-    // receive a separate pointer gated by the stricter frame-elision contract.
+    // 2. The prepared miss owns a shadow stack window. An IC hit can recreate
+    // that window in native scratch for an ordinary one-slot pointer receiver;
+    // boxed value-receiver wrappers stay on the miss path.
     let eligibility = vo_jit::jit_frame_entry_eligibility(func_def);
     let jit_func_ptr = lookup_jit_ptr(
         ctx_ref.jit_func_table,
@@ -559,7 +579,11 @@ pub extern "C" fn jit_prepare_iface_call(
         func_id,
         eligibility.frame_elided || eligibility.prepared_shadow,
     );
-    let ic_jit_func_ptr = if eligibility.frame_elided {
+    let direct_pointer_receiver =
+        iface_call_target_is_direct_pointer_receiver(module, iface_slot0, func_id);
+    let ic_jit_func_ptr = if eligibility.frame_elided
+        || (eligibility.prepared_shadow && recv_slots == 1 && direct_pointer_receiver)
+    {
         jit_func_ptr
     } else {
         core::ptr::null()
@@ -600,6 +624,13 @@ pub extern "C" fn jit_prepare_iface_call(
             func_id,
         };
     }
+    record_prepared_dynamic_call_if_available(
+        ctx,
+        false,
+        local_slots,
+        !jit_func_ptr.is_null(),
+        !ic_jit_func_ptr.is_null(),
+    );
     JitResult::Ok
 }
 

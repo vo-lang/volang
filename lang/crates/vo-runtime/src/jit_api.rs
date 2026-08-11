@@ -137,8 +137,10 @@ pub struct PreparedCall {
     /// Pointer to the prepared callee args in fiber.stack. Generated code reads
     /// it only when `jit_func_ptr` is non-null.
     pub callee_args_ptr: *mut u64,
-    /// Stricter frame-elided pointer eligible for interface IC publication.
-    /// Closure calls and non-cacheable interface callees leave this null.
+    /// Native pointer eligible for dynamic-call IC publication. Interface
+    /// calls admit frame-elided entries plus prepared-shadow ordinary pointer
+    /// receivers; ordinary closures may also use a prepared shadow window.
+    /// Non-cacheable callees leave this null.
     pub ic_jit_func_ptr: *const u8,
     /// Callee local-slot count used when publishing an interface IC entry.
     pub callee_local_slots: u32,
@@ -1280,13 +1282,7 @@ pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: 
         return;
     }
     let gc = unsafe { &mut *gc };
-    let Some(parent) = gc.canonicalize_ref(obj as GcRef) else {
-        return;
-    };
-    let Some(child) = gc.canonicalize_ref(val as GcRef) else {
-        return;
-    };
-    gc.write_barrier(parent, child);
+    gc.write_barrier_if_valid(obj as GcRef, val as GcRef);
 }
 
 /// Type-safe write barrier for JIT writes whose element metadata is known only

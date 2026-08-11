@@ -25,6 +25,7 @@ pub(super) const MAX_IC_NATIVE_SLOTS: usize = 64;
 pub(super) struct IcHitParams {
     pub(super) ctx: Value,
     pub(super) ic_jit_ptr: Value,
+    pub(super) ic_args_slot: StackSlot,
     pub(super) ic_args_ptr: Value,
     pub(super) ic_local_slots: Value,
     pub(super) ic_func_id: Value,
@@ -158,7 +159,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
             ret_reg_val: ic_ret_reg_val,
             ret_slots_val: ic_ret_slots_val,
             caller_resume_pc_val: ic_resume_pc_val,
-            copy_args: None,
+            copy_args: Some((p.ic_args_slot, p.arg_slots + 1)),
         },
     )?;
     Ok(())
@@ -288,7 +289,7 @@ pub(super) fn dynamic_ic_entry<'a, E: IrEmitter<'a>>(emitter: &mut E, callsite_p
     let ic_table = emitter.load_context_field(types::I64, JitContextField::InlineCacheTable);
     let ic_index = emitter
         .dynamic_callsite_index(callsite_pc)
-        .expect("verified CallIface must have a dense callsite index");
+        .expect("verified dynamic call must have a dense callsite index");
     let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
     emitter
         .builder()

@@ -858,7 +858,82 @@ fn vm_jit_closure_canon_002_prepared_frame_enters_compiled_closure_and_stores_ca
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(out.jit_func_ptr, entry);
-    assert!(out.ic_jit_func_ptr.is_null());
+    assert_eq!(out.ic_jit_func_ptr, entry);
+    assert_eq!(stack[0], closure_ref as u64);
+}
+
+#[test]
+fn vm_jit_closure_ic_061_frame_elided_closure_publishes_native_entry() {
+    let mut module = Module::new("jit-closure-ic-publication".to_string());
+    let mut callee = func(false, false, false);
+    callee.is_closure = true;
+    callee.param_slots = 1;
+    callee.local_slots = 1;
+    callee.slot_types = vec![SlotType::GcRef];
+    callee.capture_slot_types = vec![SlotType::GcRef];
+    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
+    callee.borrowed_scan_slots_prefix =
+        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
+    callee.code = vec![vo_runtime::instruction::Instruction::new(
+        vo_runtime::instruction::Opcode::Return,
+        0,
+        0,
+        0,
+    )];
+    assert!(vo_jit::can_elide_frame_for_direct_jit(&callee));
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    };
+    module.functions.push(callee);
+
+    let mut gc = Gc::new();
+    let closure_ref = closure::create(&mut gc, 0, 1);
+    let mut itab_cache = ItabCache::new();
+    let mut panic_flag = false;
+    let mut is_user_panic = false;
+    let mut panic_msg = InterfaceSlot::nil();
+    let program_args = Vec::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let output = CaptureSink::new();
+    let mut host_output = None;
+    let mut stack = [0_u64; 16];
+    let mut ctx = test_context(
+        &mut gc,
+        &module,
+        &mut itab_cache,
+        &mut stack,
+        &mut panic_flag,
+        &mut is_user_panic,
+        &mut panic_msg,
+        &program_args,
+        &mut sentinel_errors,
+        &output,
+        &mut host_output,
+    );
+    let mut fiber = Fiber::new(0);
+    attach_current_frame(&mut ctx, &mut fiber, 0);
+    let entry = 1_usize as *const u8;
+    let jit_table = [entry];
+    ctx.jit_func_table = jit_table.as_ptr();
+    ctx.jit_func_count = jit_table.len() as u32;
+    let mut out = PreparedCall::default();
+
+    let result = jit_prepare_closure_call(
+        &mut ctx,
+        closure_ref as u64,
+        0,
+        0,
+        10,
+        core::ptr::null(),
+        0,
+        &mut out,
+    );
+
+    assert_eq!(result, JitResult::Ok);
+    assert_eq!(out.jit_func_ptr, entry);
+    assert_eq!(out.ic_jit_func_ptr, entry);
     assert_eq!(stack[0], closure_ref as u64);
 }
 
@@ -1064,6 +1139,151 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
     assert_eq!(ctx.runtime_trap_kind, JitRuntimeTrapKind::None as u8);
     assert!(!unsafe { *ctx.panic_flag });
     assert_trapped_prepared_call(&out);
+}
+
+#[test]
+fn vm_jit_iface_pointer_receiver_prepared_shadow_publishes_ic_entry() {
+    let mut module = Module::new("jit-iface-pointer-shadow-ic".to_string());
+    let mut caller = func(false, false, false);
+    caller.instruction_metadata = vec![InstructionMetadata::CallIfaceLayout {
+        iface_meta_id: 0,
+        method_idx: 0,
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    }];
+    module.functions.push(caller);
+
+    let mut target = func(false, false, false);
+    target.param_slots = 1;
+    target.recv_slots = 1;
+    target.local_slots = 1;
+    target.gc_scan_slots = 1;
+    target.slot_types = vec![SlotType::GcRef];
+    target.borrowed_scan_slots_prefix =
+        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
+    target.code = vec![
+        vo_runtime::instruction::Instruction::new(vo_runtime::instruction::Opcode::PtrGet, 0, 0, 0),
+        vo_runtime::instruction::Instruction::new(vo_runtime::instruction::Opcode::Return, 0, 0, 0),
+    ];
+    assert!(!vo_jit::can_elide_frame_for_direct_jit(&target));
+    assert!(vo_jit::can_enter_prepared_shadow_frame_for_jit(&target));
+    module.functions.push(target);
+
+    module.struct_metas.push(vo_runtime::bytecode::StructMeta {
+        slot_types: vec![SlotType::Value],
+        fields: Vec::new(),
+        field_index: Default::default(),
+    });
+    module.runtime_types.push(vo_runtime::RuntimeType::Struct {
+        fields: Vec::new(),
+        meta_id: 0,
+    });
+    module.runtime_types.push(vo_runtime::RuntimeType::Named {
+        id: 0,
+        struct_meta_id: None,
+    });
+    module.runtime_types.push(vo_runtime::RuntimeType::Pointer(
+        vo_runtime::ValueRttid::new(1, ValueKind::Struct),
+    ));
+    module.runtime_types.push(vo_runtime::RuntimeType::Func {
+        params: Vec::new(),
+        results: Vec::new(),
+        variadic: false,
+    });
+    let mut methods = std::collections::BTreeMap::new();
+    methods.insert(
+        "m".to_string(),
+        MethodInfo {
+            func_id: 1,
+            is_pointer_receiver: true,
+            receiver_is_iface_boxed: false,
+            signature_rttid: 3,
+        },
+    );
+    module.named_type_metas.push(NamedTypeMeta {
+        name: "T".to_string(),
+        underlying_meta: vo_runtime::ValueMeta::new(0, ValueKind::Struct),
+        underlying_rttid: vo_runtime::ValueRttid::new(0, ValueKind::Struct),
+        methods,
+    });
+
+    let mut gc = Gc::new();
+    let mut itab_cache = ItabCache::from_module_itabs(vec![Itab {
+        iface_meta_id: 0,
+        methods: vec![1],
+    }]);
+    let mut panic_flag = false;
+    let mut is_user_panic = false;
+    let mut panic_msg = InterfaceSlot::nil();
+    let program_args = Vec::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let output = CaptureSink::new();
+    let mut host_output = None;
+    let mut stack = [0_u64; 16];
+    let mut ctx = test_context(
+        &mut gc,
+        &module,
+        &mut itab_cache,
+        &mut stack,
+        &mut panic_flag,
+        &mut is_user_panic,
+        &mut panic_msg,
+        &program_args,
+        &mut sentinel_errors,
+        &output,
+        &mut host_output,
+    );
+    let mut fiber = Fiber::new(0);
+    attach_current_frame(&mut ctx, &mut fiber, 0);
+    let entry = 1_usize as *const u8;
+    let jit_table = [core::ptr::null(), entry];
+    ctx.jit_func_table = jit_table.as_ptr();
+    ctx.jit_func_count = jit_table.len() as u32;
+    let slot0 = interface::pack_slot0(0, 2, ValueKind::Pointer);
+    assert!(
+        crate::exec::validate_iface_receiver_layout(
+            &module,
+            slot0,
+            &module.functions[1],
+            1,
+            "test",
+        )
+        .is_ok(),
+        "{:?}",
+        crate::exec::validate_iface_receiver_layout(
+            &module,
+            slot0,
+            &module.functions[1],
+            1,
+            "test",
+        )
+    );
+    let mut out = PreparedCall::default();
+
+    let result = jit_prepare_iface_call(
+        &mut ctx,
+        slot0,
+        123,
+        0,
+        0,
+        0,
+        1,
+        core::ptr::null(),
+        0,
+        &mut out,
+    );
+
+    assert_eq!(
+        result,
+        JitResult::Ok,
+        "trap kind={:?} arg0={:#x} arg1={:#x}",
+        ctx.runtime_trap_kind,
+        ctx.runtime_trap_arg0,
+        ctx.runtime_trap_arg1
+    );
+    assert_eq!(out.jit_func_ptr, entry);
+    assert_eq!(out.ic_jit_func_ptr, entry);
+    assert_eq!(stack[0], 123);
 }
 
 #[test]

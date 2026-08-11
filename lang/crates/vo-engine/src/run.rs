@@ -85,6 +85,13 @@ pub fn render_run_observation_json(
         "side_exits": side_exits,
         "low_progress_function_disables": observation.low_progress_function_disables,
         "low_progress_loop_disables": observation.low_progress_loop_disables,
+        "closure_prepare_callbacks": observation.closure_prepare_callbacks,
+        "iface_prepare_callbacks": observation.iface_prepare_callbacks,
+        "prepared_frame_reservations": observation.prepared_frame_reservations,
+        "prepared_frame_slots_reserved": observation.prepared_frame_slots_reserved,
+        "prepared_jit_dispatches": observation.prepared_jit_dispatches,
+        "prepared_vm_dispatches": observation.prepared_vm_dispatches,
+        "dynamic_ic_publications": observation.dynamic_ic_publications,
     }))
 }
 
@@ -496,6 +503,13 @@ mod terminal_outcome_tests {
         assert_eq!(value["loop_entries"], 5);
         assert_eq!(value["low_progress_function_disables"], 1);
         assert_eq!(value["low_progress_loop_disables"], 2);
+        assert_eq!(value["closure_prepare_callbacks"], 0);
+        assert_eq!(value["iface_prepare_callbacks"], 0);
+        assert_eq!(value["prepared_frame_reservations"], 0);
+        assert_eq!(value["prepared_frame_slots_reserved"], 0);
+        assert_eq!(value["prepared_jit_dispatches"], 0);
+        assert_eq!(value["prepared_vm_dispatches"], 0);
+        assert_eq!(value["dynamic_ic_publications"], 0);
         for reason in vo_vm::JitSideExitReason::ALL {
             assert_eq!(value["side_exits"][reason.as_str()], 0);
         }

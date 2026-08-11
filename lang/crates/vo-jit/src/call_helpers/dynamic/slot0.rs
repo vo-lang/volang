@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{types, InstBuilder, StackSlot, Value};
 
 use crate::translator::IrEmitter;
 
-pub(super) fn emit_iface_hit_slot0<'a, E: IrEmitter<'a>>(
+pub(super) fn emit_hit_slot0<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     ic_args_slot: StackSlot,
     receiver: Value,

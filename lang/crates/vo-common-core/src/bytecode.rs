@@ -2140,8 +2140,8 @@ pub struct LoadedModule {
 
 #[derive(Debug, Clone, Default)]
 pub struct DynamicCallsiteMap {
-    /// Sorted `CallIface` PCs per function.  The global callsite id is the
-    /// function base plus the position in this sparse list.
+    /// Sorted closure/interface call PCs per function. The global callsite id
+    /// is the function base plus the position in this sparse list.
     callsite_pcs: Vec<Vec<u32>>,
     function_bases: Vec<u32>,
     len: usize,
@@ -2158,7 +2158,13 @@ impl DynamicCallsiteMap {
                 .code
                 .iter()
                 .enumerate()
-                .filter(|(_, inst)| inst.opcode() == crate::instruction::Opcode::CallIface)
+                .filter(|(_, inst)| {
+                    matches!(
+                        inst.opcode(),
+                        crate::instruction::Opcode::CallClosure
+                            | crate::instruction::Opcode::CallIface
+                    )
+                })
                 .map(|(pc, _)| {
                     next = next
                         .checked_add(1)
@@ -2949,7 +2955,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_callsite_map_assigns_dense_exact_iface_indices() {
+    fn dynamic_callsite_map_assigns_dense_exact_dynamic_indices() {
         let mut module = Module::new("dynamic-callsites".to_string());
         let mut first = function_with_slot_types(Vec::new());
         first.code = vec![
@@ -2967,11 +2973,11 @@ mod tests {
         module.functions.extend([first, second]);
 
         let map = DynamicCallsiteMap::for_module(&module);
-        assert_eq!(map.len(), 3);
+        assert_eq!(map.len(), 4);
         assert_eq!(map.index(0, 0), Some(0));
-        assert_eq!(map.index(0, 1), None);
-        assert_eq!(map.index(0, 2), Some(1));
-        assert_eq!(map.index(1, 0), Some(2));
+        assert_eq!(map.index(0, 1), Some(1));
+        assert_eq!(map.index(0, 2), Some(2));
+        assert_eq!(map.index(1, 0), Some(3));
         assert_eq!(map.index(2, 0), None);
     }
 

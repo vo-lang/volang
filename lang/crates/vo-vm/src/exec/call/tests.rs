@@ -128,6 +128,55 @@ fn shared_iface_ic_keeps_interpreter_and_jit_views_coherent() {
 }
 
 #[test]
+fn jit_iface_prepared_ic_admission_is_limited_to_direct_pointer_receivers() {
+    let mut module = Module::new("jit-iface-pointer-ic-admission".to_string());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Int64));
+    module.runtime_types.push(RuntimeType::Named {
+        id: 0,
+        struct_meta_id: None,
+    });
+    module
+        .runtime_types
+        .push(RuntimeType::Pointer(ValueRttid::new(1, ValueKind::Int64)));
+    let mut methods = BTreeMap::new();
+    methods.insert(
+        "M".to_string(),
+        MethodInfo {
+            func_id: 7,
+            is_pointer_receiver: true,
+            receiver_is_iface_boxed: false,
+            signature_rttid: 0,
+        },
+    );
+    module.named_type_metas.push(NamedTypeMeta {
+        name: "T".to_string(),
+        underlying_meta: ValueMeta::new(0, ValueKind::Int64),
+        underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
+        methods,
+    });
+
+    let pointer_slot0 = interface::pack_slot0(0, 2, ValueKind::Pointer);
+    assert!(iface_call_target_is_direct_pointer_receiver(
+        &module,
+        pointer_slot0,
+        7
+    ));
+
+    module.named_type_metas[0]
+        .methods
+        .get_mut("M")
+        .unwrap()
+        .receiver_is_iface_boxed = true;
+    assert!(!iface_call_target_is_direct_pointer_receiver(
+        &module,
+        pointer_slot0,
+        7
+    ));
+}
+
+#[test]
 fn call_iface_missing_itab_is_jit_error_instead_of_raw_panic() {
     let mut module = Module::new("missing-itab-test".to_string());
     let mut caller = function(4);

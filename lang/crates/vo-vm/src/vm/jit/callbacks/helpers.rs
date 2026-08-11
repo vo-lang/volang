@@ -53,6 +53,33 @@ pub(super) unsafe fn extract_vm<'a>(ctx: *mut JitContext) -> JitCallbackVm<'a> {
     }
 }
 
+/// Record optional telemetry for prepared dynamic calls. Prepared-call ABI
+/// tests intentionally use callback contexts without an owning VM, so the
+/// accounting path stays observational and never changes callback validity.
+pub(super) fn record_prepared_dynamic_call_if_available(
+    ctx: *mut JitContext,
+    is_closure: bool,
+    local_slots: usize,
+    has_jit_dispatch: bool,
+    published_ic: bool,
+) {
+    let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
+        return;
+    };
+    if ctx_ref.callback_state.is_null() {
+        return;
+    }
+    let vm = unsafe { &mut *(ctx_ref.callback_state as *mut Vm) };
+    if let Some(manager) = vm.jit.manager_mut() {
+        manager.record_prepared_dynamic_call(
+            is_closure,
+            local_slots,
+            has_jit_dispatch,
+            published_ic,
+        );
+    }
+}
+
 /// Decode the detached fiber carried by a JIT callback context.
 ///
 /// # Safety

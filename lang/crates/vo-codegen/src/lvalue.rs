@@ -114,9 +114,30 @@ enum ResolveMode {
     /// Assignment targets freeze their operands and defer every bounds check
     /// until the eventual store commits.
     Place,
-    /// Value-consuming operations check each completed indexing step before
-    /// evaluating the following step.
-    Read,
+    /// The final value-consuming access. Its concrete load/address opcode owns
+    /// the bounds check, avoiding an adjacent duplicate `IndexCheck`.
+    ReadFinal,
+    /// An outer access in a nested expression. It must trap before evaluation
+    /// advances to the next index expression.
+    ReadNested,
+}
+
+impl ResolveMode {
+    fn is_read(self) -> bool {
+        self != Self::Place
+    }
+
+    fn requires_early_check(self) -> bool {
+        self == Self::ReadNested
+    }
+
+    fn nested(self) -> Self {
+        if self.is_read() {
+            Self::ReadNested
+        } else {
+            Self::Place
+        }
+    }
 }
 
 /// Info about a nested stack array indexing chain like a[i][j][k].
@@ -339,7 +360,7 @@ pub(crate) fn resolve_lvalue_for_read(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<LValue, CodegenError> {
-    resolve_lvalue_with_mode(expr, ResolveMode::Read, ctx, func, info)
+    resolve_lvalue_with_mode(expr, ResolveMode::ReadFinal, ctx, func, info)
 }
 
 fn resolve_lvalue_with_mode(
@@ -516,7 +537,7 @@ fn resolve_index_lvalue(
     // Check for nested stack array FIRST (before compiling any index)
     // This handles a[i][j][k]... with arbitrary nesting depth
     // Note: try_resolve_nested_stack_array correctly evaluates in left-to-right order
-    if mode == ResolveMode::Read && info.is_array(container_type) {
+    if mode.is_read() && info.is_array(container_type) {
         if let Some(nested_info) = try_resolve_nested_stack_array(expr, ctx, func, info)? {
             let elem_type = info.array_elem_type(container_type);
             let inner_elem_slots = info.type_slot_count(elem_type);
@@ -542,7 +563,7 @@ fn resolve_index_lvalue(
         let container_reg = snapshot_gcref_slot(container_value, func);
         let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
         let index_reg = snapshot_value_slot(index_value, func);
-        if mode == ResolveMode::Read {
+        if mode.requires_early_check() {
             let len_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::SliceLen, len_reg, container_reg, 0);
             func.emit_op(Opcode::IndexCheck, index_reg, len_reg, 0);
@@ -622,7 +643,7 @@ fn resolve_index_field_lvalue(
     let container_type = info.expr_type(idx.expr.id);
 
     if info.is_slice(container_type) {
-        if mode == ResolveMode::Read {
+        if mode.is_read() {
             let elem_addr_reg = compile_index_addr_to_reg(&idx.expr, &idx.index, ctx, func, info)?;
             return Ok(Some(LValue::Deref {
                 ptr_reg: elem_addr_reg,
@@ -662,10 +683,12 @@ fn resolve_index_field_lvalue(
                 elem_slots,
                 len,
                 ..
-            }) if mode == ResolveMode::Read => {
+            }) if mode.is_read() => {
                 let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 let index_reg = snapshot_value_slot(index_value, func);
-                func.emit_stack_array_index_check(index_reg, len, ctx)?;
+                if mode.requires_early_check() {
+                    func.emit_stack_array_index_check(index_reg, len, ctx)?;
+                }
                 let elem_type = info.array_elem_type(container_type);
                 let elem_slot_types = info.type_slot_types(elem_type);
                 return Ok(Some(LValue::StackArrayField {
@@ -835,7 +858,7 @@ fn resolve_array_place_index(
     info: &TypeInfoWrapper,
 ) -> Result<LValue, CodegenError> {
     let elem_type = info.array_elem_type(array_type);
-    if mode == ResolveMode::Read {
+    if mode.is_read() {
         let elem_slots = info.type_slot_count(elem_type);
         let flat_elem_bytes = usize::from(elem_slots) * std::mem::size_of::<u64>();
         // Interior pointer arithmetic is valid only when the selected array's
@@ -915,7 +938,7 @@ fn resolve_array_index_lvalue(
     // Resolve and consume the outer lvalue first, then index the flattened
     // inner value through its stable interior pointer.
     if is_index_expression(&idx.expr) && info.expr_is_addressable(idx.expr.id) {
-        let outer = resolve_lvalue_with_mode(&idx.expr, mode, ctx, func, info)?;
+        let outer = resolve_lvalue_with_mode(&idx.expr, mode.nested(), ctx, func, info)?;
         return resolve_array_place_index(outer, idx, container_type, mode, ctx, func, info);
     }
 
@@ -929,7 +952,7 @@ fn resolve_array_index_lvalue(
         }) => {
             let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
             let index_reg = snapshot_value_slot(index_value, func);
-            if mode == ResolveMode::Read {
+            if mode.requires_early_check() {
                 func.emit_stack_array_index_check(index_reg, len, ctx)?;
             }
             let elem_slot_types = func.stack_array_elem_slot_types(base_slot, es);
@@ -958,7 +981,7 @@ fn resolve_array_index_lvalue(
         crate::func::ExprSource::Location(StorageKind::HeapArray { gcref_slot, .. }) => {
             let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
             let index_reg = snapshot_value_slot(index_value, func);
-            if mode == ResolveMode::Read {
+            if mode.requires_early_check() {
                 func.emit_stack_array_index_check(index_reg, info.array_len(container_type), ctx)?;
             }
             Ok(LValue::Index {
@@ -979,7 +1002,7 @@ fn resolve_array_index_lvalue(
             let elem_slots = info.type_slot_count(elem_type);
             let elem_slot_types = info.type_slot_types(elem_type);
             let len = info.array_len(container_type);
-            if mode == ResolveMode::Read {
+            if mode.requires_early_check() {
                 func.emit_stack_array_index_check(index_reg, len, ctx)?;
             }
             Ok(LValue::Index {
@@ -1000,7 +1023,7 @@ fn resolve_array_index_lvalue(
             let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
             let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
             let index_reg = snapshot_value_slot(index_value, func);
-            if mode == ResolveMode::Read {
+            if mode.requires_early_check() {
                 func.emit_stack_array_index_check(index_reg, info.array_len(container_type), ctx)?;
             }
             Ok(LValue::Index {
@@ -1018,7 +1041,7 @@ fn resolve_array_index_lvalue(
             if let Some(gcref_slot) = compile_captured_array_ref(&idx.expr, func) {
                 let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 let index_reg = snapshot_value_slot(index_value, func);
-                if mode == ResolveMode::Read {
+                if mode.requires_early_check() {
                     func.emit_stack_array_index_check(
                         index_reg,
                         info.array_len(container_type),
@@ -1040,7 +1063,7 @@ fn resolve_array_index_lvalue(
             // represented as a recursive flattened place. Reads and writes
             // preserve the parent aggregate through precise RMW lowering.
             if info.expr_is_addressable(idx.expr.id) {
-                let array = resolve_lvalue_with_mode(&idx.expr, mode, ctx, func, info)?;
+                let array = resolve_lvalue_with_mode(&idx.expr, mode.nested(), ctx, func, info)?;
                 return resolve_array_place_index(
                     array,
                     idx,
@@ -1063,7 +1086,7 @@ fn resolve_array_index_lvalue(
                 crate::expr::compile_expr_to(&idx.expr, base_slot, ctx, func, info)?;
                 let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 let index_reg = snapshot_value_slot(index_value, func);
-                if mode == ResolveMode::Read {
+                if mode.requires_early_check() {
                     func.emit_stack_array_index_check(index_reg, len, ctx)?;
                 }
                 return Ok(LValue::Index {
@@ -1092,7 +1115,7 @@ fn resolve_array_index_lvalue(
             )?;
             let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
             let index_reg = snapshot_value_slot(index_value, func);
-            if mode == ResolveMode::Read {
+            if mode.requires_early_check() {
                 func.emit_stack_array_index_check(index_reg, info.array_len(container_type), ctx)?;
             }
             Ok(LValue::Index {
@@ -1681,8 +1704,14 @@ pub fn compile_index_addr(
             expr: container_expr.clone(),
             index: index_expr.clone(),
         };
-        let lv =
-            resolve_array_index_lvalue(&idx, container_type, ResolveMode::Read, ctx, func, info)?;
+        let lv = resolve_array_index_lvalue(
+            &idx,
+            container_type,
+            ResolveMode::ReadFinal,
+            ctx,
+            func,
+            info,
+        )?;
         let addr = emit_address_of_array_lvalue(&lv, ctx, func)?.ok_or_else(|| {
             CodegenError::Internal(
                 "addressable array element did not resolve to stable storage".to_string(),

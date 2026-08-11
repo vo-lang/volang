@@ -5,11 +5,13 @@
 //! these helpers instead of returning a bare `JitResult::Panic`.
 
 use cranelift_codegen::ir::{types, InstBuilder, Value};
-use vo_runtime::bytecode::FunctionDef;
+use std::collections::VecDeque;
+use vo_runtime::bytecode::{ExternJitRoute, FunctionDef, Module};
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitContextField, JitResult, JitRuntimeTrapKind};
 
 use crate::translator::{emit_runtime_helper_call, HelperKind, SlotAccess, TrapEmitter};
+use crate::JitCompileEnv;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EffectContract {
@@ -125,6 +127,320 @@ pub fn function_contract(func: &FunctionDef) -> EffectContract {
     contract
 }
 
+/// Compute the entry contract using the same resolved extern routes and
+/// register constants consumed by native lowering.
+///
+/// The bytecode-level contract remains the conservative public fallback used
+/// by VM-owned dynamic dispatch. Static JIT call planning can use this refined
+/// form because its compilation scope already freezes the resolved extern
+/// table and module constants.
+#[cfg(test)]
+pub(crate) fn function_contract_in_env(
+    func: &FunctionDef,
+    module: &Module,
+    env: JitCompileEnv<'_>,
+) -> EffectContract {
+    let reg_const_facts = crate::translator::try_compute_reg_const_facts_with_context(
+        &func.code,
+        &func.instruction_metadata,
+        &module.constants,
+        &module.functions,
+        &module.externs,
+        0,
+        func.code.len(),
+        crate::MAX_JIT_ANALYSIS_BYTES,
+    )
+    .ok();
+
+    let mut contract = EffectContract::PURE;
+    if func.has_defer {
+        contract = contract.union(EffectContract {
+            may_unwind: true,
+            may_observe_frame: true,
+            needs_frame: true,
+            ..EffectContract::PURE
+        });
+    }
+
+    let has_non_intrinsic_extern = func.code.iter().any(|inst| {
+        inst.opcode() == Opcode::CallExtern
+            && !env
+                .externs
+                .get(inst.b as u32)
+                .is_some_and(|resolved| resolved.jit_route == ExternJitRoute::Intrinsic)
+    });
+    if func.has_calls || has_non_intrinsic_extern {
+        contract = contract.union(EffectContract {
+            may_gc: true,
+            may_alloc: true,
+            may_panic: true,
+            may_unwind: true,
+            may_call: true,
+            may_schedule: has_non_intrinsic_extern,
+            may_observe_frame: true,
+            needs_frame: true,
+            needs_slot_metadata: true,
+            ..EffectContract::PURE
+        });
+    }
+
+    for (pc, inst) in func.code.iter().enumerate() {
+        if inst.opcode() == Opcode::CallExtern
+            && env
+                .externs
+                .get(inst.b as u32)
+                .is_some_and(|resolved| resolved.jit_route == ExternJitRoute::Intrinsic)
+        {
+            continue;
+        }
+
+        let divisor_is_known_nonzero = matches!(
+            inst.opcode(),
+            Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
+        ) && reg_const_facts
+            .as_ref()
+            .and_then(|(facts, _)| facts.get(pc))
+            .and_then(|facts| {
+                facts
+                    .iter()
+                    .find_map(|(reg, value)| (*reg == inst.c).then_some(*value))
+            })
+            .is_some_and(|value| value != 0);
+        if divisor_is_known_nonzero {
+            continue;
+        }
+
+        contract = contract.union(opcode_contract(inst.opcode()));
+    }
+    contract
+}
+
+/// Compute call-entry eligibility for the complete immutable module image.
+///
+/// Static calls are lowered by the JIT call boundary itself, but treating every
+/// call as locally unsafe prevents pure recursion from ever using that path.
+/// Ignore only calls that stay inside a genuinely recursive SCC. Calls outside
+/// that SCC retain the conservative bytecode contract, so this optimization
+/// does not broaden native entry to unrelated acyclic multi-function chains.
+/// An unsafe member is propagated back through the reverse call graph and
+/// disqualifies the complete recursive component.
+pub(crate) fn module_frame_entry_eligibility(
+    module: &Module,
+    env: JitCompileEnv<'_>,
+) -> Vec<crate::JitFrameEntryEligibility> {
+    let function_count = module.functions.len();
+    let mut callers = vec![Vec::<usize>::new(); function_count];
+    let mut callees = vec![Vec::<usize>::new(); function_count];
+
+    for (caller_id, func) in module.functions.iter().enumerate() {
+        for inst in &func.code {
+            if inst.opcode() != Opcode::Call {
+                continue;
+            }
+            let callee_id = inst.static_call_func_id() as usize;
+            if let Some(callee_callers) = callers.get_mut(callee_id) {
+                callee_callers.push(caller_id);
+                callees[caller_id].push(callee_id);
+            }
+        }
+    }
+    let (component_ids, recursive_components) = recursive_call_components(&callees, &callers);
+    let mut eligibility = module
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(func_id, func)| {
+            crate::jit_frame_entry_eligibility_for_contract(
+                func,
+                local_function_contract_in_env(
+                    func,
+                    func_id,
+                    module,
+                    env,
+                    &component_ids,
+                    &recursive_components,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    propagate_ineligible_callers(
+        &callers,
+        &mut eligibility,
+        |entry| entry.frame_elided,
+        |entry| {
+            entry.frame_elided = false;
+        },
+    );
+    propagate_ineligible_callers(
+        &callers,
+        &mut eligibility,
+        |entry| entry.prepared_shadow,
+        |entry| entry.prepared_shadow = false,
+    );
+    eligibility
+}
+
+fn recursive_call_components(
+    callees: &[Vec<usize>],
+    callers: &[Vec<usize>],
+) -> (Vec<usize>, Vec<bool>) {
+    let function_count = callees.len();
+    let mut visited = vec![false; function_count];
+    let mut finish_order = Vec::with_capacity(function_count);
+
+    for start in 0..function_count {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![(start, 0usize)];
+        while let Some((node, next_edge)) = stack.last_mut() {
+            if let Some(&callee) = callees[*node].get(*next_edge) {
+                *next_edge += 1;
+                if !visited[callee] {
+                    visited[callee] = true;
+                    stack.push((callee, 0));
+                }
+            } else {
+                finish_order.push(*node);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut component_ids = vec![usize::MAX; function_count];
+    let mut component_sizes = Vec::new();
+    for &start in finish_order.iter().rev() {
+        if component_ids[start] != usize::MAX {
+            continue;
+        }
+        let component_id = component_sizes.len();
+        let mut size = 0usize;
+        let mut stack = vec![start];
+        component_ids[start] = component_id;
+        while let Some(node) = stack.pop() {
+            size += 1;
+            for &caller in &callers[node] {
+                if component_ids[caller] == usize::MAX {
+                    component_ids[caller] = component_id;
+                    stack.push(caller);
+                }
+            }
+        }
+        component_sizes.push(size);
+    }
+
+    let mut recursive_components = component_sizes
+        .iter()
+        .map(|size| *size > 1)
+        .collect::<Vec<_>>();
+    for (caller, targets) in callees.iter().enumerate() {
+        if targets.iter().any(|callee| *callee == caller) {
+            recursive_components[component_ids[caller]] = true;
+        }
+    }
+    (component_ids, recursive_components)
+}
+
+fn propagate_ineligible_callers(
+    callers: &[Vec<usize>],
+    eligibility: &mut [crate::JitFrameEntryEligibility],
+    is_eligible: impl Fn(crate::JitFrameEntryEligibility) -> bool,
+    mark_ineligible: impl Fn(&mut crate::JitFrameEntryEligibility),
+) {
+    let mut queue = eligibility
+        .iter()
+        .enumerate()
+        .filter_map(|(func_id, entry)| (!is_eligible(*entry)).then_some(func_id))
+        .collect::<VecDeque<_>>();
+    while let Some(callee_id) = queue.pop_front() {
+        for &caller_id in &callers[callee_id] {
+            if is_eligible(eligibility[caller_id]) {
+                mark_ineligible(&mut eligibility[caller_id]);
+                queue.push_back(caller_id);
+            }
+        }
+    }
+}
+
+fn local_function_contract_in_env(
+    func: &FunctionDef,
+    func_id: usize,
+    module: &Module,
+    env: JitCompileEnv<'_>,
+    component_ids: &[usize],
+    recursive_components: &[bool],
+) -> EffectContract {
+    let reg_const_facts = crate::translator::try_compute_reg_const_facts_with_context(
+        &func.code,
+        &func.instruction_metadata,
+        &module.constants,
+        &module.functions,
+        &module.externs,
+        0,
+        func.code.len(),
+        crate::MAX_JIT_ANALYSIS_BYTES,
+    )
+    .ok();
+
+    let mut contract = EffectContract::PURE;
+    if func.has_defer {
+        contract = contract.union(EffectContract {
+            may_unwind: true,
+            may_observe_frame: true,
+            needs_frame: true,
+            ..EffectContract::PURE
+        });
+    }
+
+    for (pc, inst) in func.code.iter().enumerate() {
+        if inst.opcode() == Opcode::Call {
+            let callee_id = inst.static_call_func_id() as usize;
+            let same_recursive_component = component_ids
+                .get(callee_id)
+                .zip(component_ids.get(func_id))
+                .is_some_and(|(callee_component, caller_component)| {
+                    callee_component == caller_component
+                        && recursive_components
+                            .get(*caller_component)
+                            .copied()
+                            .unwrap_or(false)
+                });
+            if same_recursive_component {
+                continue;
+            }
+        }
+        if inst.opcode() == Opcode::CallExtern
+            && env
+                .externs
+                .get(inst.b as u32)
+                .is_some_and(|resolved| resolved.jit_route == ExternJitRoute::Intrinsic)
+        {
+            continue;
+        }
+
+        let divisor_is_known_nonzero = matches!(
+            inst.opcode(),
+            Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
+        ) && reg_const_facts
+            .as_ref()
+            .and_then(|(facts, _)| facts.get(pc))
+            .and_then(|facts| {
+                facts
+                    .iter()
+                    .find_map(|(reg, value)| (*reg == inst.c).then_some(*value))
+            })
+            .is_some_and(|value| value != 0);
+        if divisor_is_known_nonzero {
+            continue;
+        }
+
+        contract = contract.union(opcode_contract(inst.opcode()));
+    }
+    contract
+}
+
 pub fn emit_runtime_trap_return<'a>(
     e: &mut impl TrapEmitter<'a>,
     kind: JitRuntimeTrapKind,
@@ -199,4 +515,112 @@ pub fn mark_runtime_trap_pc<'a>(e: &mut impl TrapEmitter<'a>) {
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
     e.store_context_field(pc_val, JitContextField::RuntimeTrapPc);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::function_with_sig;
+    use vo_runtime::bytecode::ResolvedExternTable;
+    use vo_runtime::instruction::Instruction;
+
+    fn env(externs: &ResolvedExternTable) -> JitCompileEnv<'_> {
+        JitCompileEnv {
+            externs,
+            backend_caps: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pure_recursive_scc_keeps_direct_entry_eligibility() {
+        let mut module = Module::new("pure-recursive-scc".to_string());
+        module.functions = vec![
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::Call, 1, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::Call, 0, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+        ];
+        let externs = ResolvedExternTable::empty();
+
+        let eligibility = module_frame_entry_eligibility(&module, env(&externs));
+
+        assert!(eligibility.iter().all(|entry| entry.frame_elided));
+        assert!(eligibility.iter().all(|entry| entry.prepared_shadow));
+    }
+
+    #[test]
+    fn acyclic_static_call_chain_keeps_conservative_entry_contract() {
+        let mut module = Module::new("acyclic-static-call".to_string());
+        module.functions = vec![
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::Call, 1, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+            function_with_sig(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1, 1, 2, 1),
+        ];
+        let externs = ResolvedExternTable::empty();
+
+        let eligibility = module_frame_entry_eligibility(&module, env(&externs));
+
+        assert!(!eligibility[0].frame_elided);
+        assert!(!eligibility[0].prepared_shadow);
+        assert!(eligibility[1].frame_elided);
+        assert!(eligibility[1].prepared_shadow);
+    }
+
+    #[test]
+    fn unsafe_member_disqualifies_its_recursive_callers() {
+        let mut module = Module::new("unsafe-recursive-scc".to_string());
+        module.functions = vec![
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::Call, 1, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::PtrNew, 1, 0, 1),
+                    Instruction::new(Opcode::Call, 0, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+        ];
+        let externs = ResolvedExternTable::empty();
+
+        let eligibility = module_frame_entry_eligibility(&module, env(&externs));
+
+        assert!(eligibility.iter().all(|entry| !entry.frame_elided));
+        assert!(eligibility.iter().all(|entry| !entry.prepared_shadow));
+    }
 }

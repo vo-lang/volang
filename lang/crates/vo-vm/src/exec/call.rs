@@ -44,6 +44,22 @@ fn iface_method_info_for_target(
         .find(|method| method.func_id == target_id)
 }
 
+/// Whether a validated interface call targets an ordinary pointer-receiver
+/// method. Value-receiver `$iface` wrappers deliberately stay on the prepared
+/// miss path until their boxed-receiver behavior has its own IC proof.
+pub(crate) fn iface_call_target_is_direct_pointer_receiver(
+    module: &Module,
+    iface_slot0: u64,
+    target_id: u32,
+) -> bool {
+    if interface::unpack_value_kind(iface_slot0) != vo_runtime::ValueKind::Pointer {
+        return false;
+    }
+    let rttid = interface::unpack_rttid(iface_slot0);
+    iface_method_info_for_target(module, rttid, target_id)
+        .is_some_and(|method| method.is_pointer_receiver && !method.receiver_is_iface_boxed)
+}
+
 pub(crate) fn validate_iface_receiver_layout(
     module: &Module,
     iface_slot0: u64,

@@ -44,6 +44,7 @@ impl<'a> FunctionCompiler<'a> {
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
         env: JitCompileEnv<'a>,
+        entry_eligibility: &'a [crate::JitFrameEntryEligibility],
         mut helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
     ) -> Self {
@@ -66,6 +67,7 @@ impl<'a> FunctionCompiler<'a> {
                 func_def,
                 vo_module,
                 env,
+                entry_eligibility,
                 entry_block,
                 helpers,
                 analysis,
@@ -597,10 +599,34 @@ impl<'a> FunctionCompiler<'a> {
             .functions
             .get(target_func_id as usize)
             .ok_or(JitError::FunctionNotFound(target_func_id))?;
-        let call_plan = crate::call_helpers::CallPlan::new(target_func_id, arg_start, target_func);
+        let eligibility = self
+            .core
+            .entry_eligibility
+            .get(target_func_id as usize)
+            .copied()
+            .ok_or(JitError::FunctionNotFound(target_func_id))?;
+        let call_plan = crate::call_helpers::CallPlan::with_eligibility(
+            target_func_id,
+            arg_start,
+            target_func,
+            eligibility,
+        );
+        if let Some(inline) = crate::call_helpers::SmallPureLeafInline::analyze(
+            target_func,
+            &self.core.vo_module.constants,
+        ) {
+            if self.core.reserve_leaf_inline_instructions(inline.cost()) {
+                inline.emit_guarded(self, call_plan, self.core.current_pc + 1)?;
+                return Ok(false);
+            }
+        }
 
         match call_plan.route_for_full_function(self.core.func_id) {
             crate::call_helpers::CallRoute::DynamicJitTable => {
+                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
+                Ok(false)
+            }
+            crate::call_helpers::CallRoute::PreparedJitTable => {
                 crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
                 Ok(false)
             }

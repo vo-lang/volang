@@ -15,6 +15,7 @@ use crate::translator::IrEmitter;
 mod callback_abi;
 mod dynamic;
 mod externs;
+mod leaf_inline;
 mod plan;
 mod prepared;
 mod result_flow;
@@ -29,6 +30,7 @@ pub use callback_abi::{
 };
 pub use dynamic::{emit_call_closure, emit_call_iface};
 pub use externs::{emit_call_extern, CallExternConfig};
+pub(crate) use leaf_inline::{SmallPureLeafInline, SMALL_LEAF_INLINE_BUDGET};
 pub use plan::{CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan};
 pub use result_flow::{
     check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
@@ -185,7 +187,7 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::FunctionDef;
+    use vo_runtime::bytecode::{FunctionDef, Module, ResolvedExternTable};
     use vo_runtime::instruction::Instruction;
 
     fn func(local_slots: u16, has_defer: bool) -> FunctionDef {
@@ -262,6 +264,45 @@ mod tests {
             CallRoute::VmCallMaterialization,
             "allocating callees may still JIT, but must use a materialized VM frame"
         );
+
+        let mut trapping = func(8, false);
+        trapping.code = vec![Instruction::new(
+            vo_runtime::instruction::Opcode::IndexCheck,
+            0,
+            1,
+            0,
+        )];
+        let trapping_plan = CallPlan::new(8, 2, &trapping);
+        assert_eq!(
+            trapping_plan.route_for_full_function(7),
+            CallRoute::PreparedJitTable,
+            "runtime traps use the prepared shadow route"
+        );
+    }
+
+    #[test]
+    fn static_call_plan_refines_known_nonzero_division_to_frame_elided_route() {
+        let mut callee = func(3, false);
+        callee.code = vec![
+            Instruction::new(vo_runtime::instruction::Opcode::LoadInt, 2, 2, 0),
+            Instruction::new(vo_runtime::instruction::Opcode::DivI, 0, 1, 2),
+            Instruction::new(vo_runtime::instruction::Opcode::Return, 0, 0, 0),
+        ];
+        let mut module = Module::new("known-divisor-route".to_string());
+        module.functions.push(callee.clone());
+        let externs = ResolvedExternTable::empty();
+        let plan = CallPlan::new_in_env(
+            0,
+            0,
+            &callee,
+            &module,
+            crate::JitCompileEnv {
+                externs: &externs,
+                backend_caps: Default::default(),
+            },
+        );
+
+        assert_eq!(plan.route_for_full_function(1), CallRoute::DynamicJitTable);
     }
 
     #[test]

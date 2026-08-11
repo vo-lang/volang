@@ -1700,13 +1700,6 @@ impl Gc {
     #[track_caller]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn write_barrier(&mut self, parent: GcRef, child: GcRef) {
-        if let Some(dispatch) = self.owner_dispatch {
-            unsafe { (dispatch.write_barrier)(dispatch.state, parent, child) };
-            return;
-        }
-        #[cfg(feature = "gc-debug")]
-        crate::gc_debug::on_barrier(parent, 0, child as u64);
-
         if parent.is_null() || child.is_null() {
             return;
         }
@@ -1716,6 +1709,32 @@ impl Gc {
         let Some(child) = self.canonicalize_ref(child) else {
             return;
         };
+        self.write_barrier_canonicalized(parent, child);
+    }
+
+    /// Fail-closed barrier entry for runtime ABIs that cannot surface an
+    /// invalid-parent panic. Both references are canonicalized exactly once in
+    /// the owning collector's common case.
+    pub(crate) fn write_barrier_if_valid(&mut self, parent: GcRef, child: GcRef) {
+        if parent.is_null() || child.is_null() {
+            return;
+        }
+        let Some(parent) = self.canonicalize_ref(parent) else {
+            return;
+        };
+        let Some(child) = self.canonicalize_ref(child) else {
+            return;
+        };
+        self.write_barrier_canonicalized(parent, child);
+    }
+
+    fn write_barrier_canonicalized(&mut self, parent: GcRef, child: GcRef) {
+        if let Some(dispatch) = self.owner_dispatch {
+            unsafe { (dispatch.write_barrier)(dispatch.state, parent, child) };
+            return;
+        }
+        #[cfg(feature = "gc-debug")]
+        crate::gc_debug::on_barrier(parent, 0, child as u64);
 
         let parent_age = unsafe { Self::header(parent) }.age();
         let child_age = unsafe { Self::header(child) }.age();

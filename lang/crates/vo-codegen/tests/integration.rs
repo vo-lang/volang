@@ -1516,6 +1516,89 @@ func main() {}
 }
 
 #[test]
+fn slice_index_read_uses_one_owning_bounds_check() {
+    let module = compile_source(
+        r#"
+package main
+
+func read(xs []int, i int) int {
+    return xs[i]
+}
+
+func main() {}
+"#,
+    );
+    let func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "read")
+        .expect("read function");
+
+    assert_eq!(
+        func.code
+            .iter()
+            .filter(|inst| inst.opcode() == Opcode::SliceGet)
+            .count(),
+        1
+    );
+    assert_eq!(
+        func.code
+            .iter()
+            .filter(|inst| inst.opcode() == Opcode::IndexCheck)
+            .count(),
+        0,
+        "SliceGet owns the final bounds check"
+    );
+}
+
+#[test]
+fn slice_struct_field_read_projects_through_element_address() {
+    let module = compile_source(
+        r#"
+package main
+
+type Pair struct {
+    left int
+    right int
+}
+
+func readRight(xs []Pair, i int) int {
+    return xs[i].right
+}
+
+func main() {}
+"#,
+    );
+    let func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "readRight")
+        .expect("readRight function");
+    let opcodes = func
+        .code
+        .iter()
+        .map(|inst| inst.opcode())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|opcode| **opcode == Opcode::SliceAddr)
+            .count(),
+        1
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|opcode| **opcode == Opcode::PtrGet)
+            .count(),
+        1
+    );
+    assert!(!opcodes.contains(&Opcode::SliceGet));
+    assert!(!opcodes.contains(&Opcode::IndexCheck));
+}
+
+#[test]
 fn escaped_array_index_preserves_large_element_byte_width_028() {
     let source = r#"
 package main

@@ -416,6 +416,33 @@ impl JitManager {
         self.execution_stats.side_exit_reasons.increment(reason);
     }
 
+    pub(super) fn record_prepared_dynamic_call(
+        &mut self,
+        is_closure: bool,
+        local_slots: usize,
+        has_jit_dispatch: bool,
+        published_ic: bool,
+    ) {
+        let stats = &mut self.execution_stats;
+        if is_closure {
+            stats.closure_prepare_callbacks = stats.closure_prepare_callbacks.saturating_add(1);
+        } else {
+            stats.iface_prepare_callbacks = stats.iface_prepare_callbacks.saturating_add(1);
+        }
+        stats.prepared_frame_reservations = stats.prepared_frame_reservations.saturating_add(1);
+        stats.prepared_frame_slots_reserved = stats
+            .prepared_frame_slots_reserved
+            .saturating_add(local_slots as u64);
+        if has_jit_dispatch {
+            stats.prepared_jit_dispatches = stats.prepared_jit_dispatches.saturating_add(1);
+        } else {
+            stats.prepared_vm_dispatches = stats.prepared_vm_dispatches.saturating_add(1);
+        }
+        if published_ic {
+            stats.dynamic_ic_publications = stats.dynamic_ic_publications.saturating_add(1);
+        }
+    }
+
     /// Feed one completed full-function invocation back into dispatch policy.
     ///
     /// The native body stays in the compiler cache. Repeated cooperative exits

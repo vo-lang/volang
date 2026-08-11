@@ -7,7 +7,7 @@ use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::analysis::FunctionAnalysis;
 use crate::translator::{HelperRefs, JitMemoryFlags, NativeScratchSlots};
-use crate::{JitCompileEnv, JitError};
+use crate::{JitCompileEnv, JitError, JitFrameEntryEligibility};
 
 /// State shared by full-function and loop-OSR compilation.
 pub(crate) struct CompilerCore<'a> {
@@ -15,6 +15,7 @@ pub(crate) struct CompilerCore<'a> {
     pub(crate) func_def: &'a FunctionDef,
     pub(crate) vo_module: &'a Module,
     pub(crate) env: JitCompileEnv<'a>,
+    pub(crate) entry_eligibility: &'a [JitFrameEntryEligibility],
     pub(crate) vars: Vec<Variable>,
     pub(crate) blocks: HashMap<usize, Block>,
     pub(crate) entry_block: Block,
@@ -28,6 +29,7 @@ pub(crate) struct CompilerCore<'a> {
     pub(crate) native_scratch_slots: NativeScratchSlots,
     pub(crate) jit_memory_flags: JitMemoryFlags,
     pub(crate) analysis: &'a FunctionAnalysis,
+    leaf_inline_instructions_remaining: usize,
 }
 
 impl<'a> CompilerCore<'a> {
@@ -37,6 +39,7 @@ impl<'a> CompilerCore<'a> {
         func_def: &'a FunctionDef,
         vo_module: &'a Module,
         env: JitCompileEnv<'a>,
+        entry_eligibility: &'a [JitFrameEntryEligibility],
         entry_block: Block,
         helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
@@ -48,6 +51,7 @@ impl<'a> CompilerCore<'a> {
             func_def,
             vo_module,
             env,
+            entry_eligibility,
             vars: Vec::new(),
             blocks: HashMap::new(),
             entry_block,
@@ -61,7 +65,16 @@ impl<'a> CompilerCore<'a> {
             native_scratch_slots: NativeScratchSlots::default(),
             jit_memory_flags,
             analysis,
+            leaf_inline_instructions_remaining: crate::call_helpers::SMALL_LEAF_INLINE_BUDGET,
         }
+    }
+
+    pub(crate) fn reserve_leaf_inline_instructions(&mut self, cost: usize) -> bool {
+        let Some(remaining) = self.leaf_inline_instructions_remaining.checked_sub(cost) else {
+            return false;
+        };
+        self.leaf_inline_instructions_remaining = remaining;
+        true
     }
 
     pub(crate) fn declare_variables(&mut self, builder: &mut FunctionBuilder<'_>) {

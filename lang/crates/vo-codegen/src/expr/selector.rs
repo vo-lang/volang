@@ -81,6 +81,14 @@ pub fn compile_selector(
         return Ok(());
     }
 
+    // Preserve an addressable indexed receiver through field selection. This
+    // lets slices and heap arrays lower `container[i].field` to one checked
+    // element-address operation followed by a narrow field load.
+    if matches!(sel.expr.kind, ExprKind::Index(_)) {
+        let lv = crate::lvalue::resolve_lvalue_for_read(expr, ctx, func, info)?;
+        return crate::lvalue::emit_lvalue_load(&lv, dst, ctx, func);
+    }
+
     let base_reg = compile_expr(&sel.expr, ctx, func, info)?;
     let (offset, slots) = info.selector_field_offset(expr.id, recv_type, field_name);
     func.emit_copy(dst, base_reg + offset, slots);

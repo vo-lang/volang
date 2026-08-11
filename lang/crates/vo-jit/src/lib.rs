@@ -648,6 +648,7 @@ pub struct JitCompiler {
     loaded_module: Option<Arc<LoadedModule>>,
     verified_env: Option<JitCompileEnvScope>,
     dynamic_callsites: Option<Arc<DynamicCallsiteMap>>,
+    entry_eligibility: Option<Arc<[JitFrameEntryEligibility]>>,
     debug_ir: bool,
 }
 
@@ -712,6 +713,7 @@ impl JitCompiler {
             loaded_module: None,
             verified_env: None,
             dynamic_callsites: None,
+            entry_eligibility: None,
             debug_ir,
         })
     }
@@ -763,6 +765,18 @@ impl JitCompiler {
         }
         self.verified_env = Some(JitCompileEnvScope::from_env(env));
         Ok(())
+    }
+
+    fn entry_eligibility(
+        &mut self,
+        vo_module: &VoModule,
+        env: JitCompileEnv<'_>,
+    ) -> Arc<[JitFrameEntryEligibility]> {
+        Arc::clone(self.entry_eligibility.get_or_insert_with(|| {
+            Arc::from(crate::contract::module_frame_entry_eligibility(
+                vo_module, env,
+            ))
+        }))
     }
 
     #[cfg(test)]
@@ -907,6 +921,7 @@ impl JitCompiler {
         env: JitCompileEnv<'_>,
     ) -> Result<(), JitError> {
         self.verify_env_once(env)?;
+        let entry_eligibility = self.entry_eligibility(vo_module, env);
 
         if self.cache.contains(func_id) {
             return Ok(());
@@ -953,6 +968,7 @@ impl JitCompiler {
                 func,
                 vo_module,
                 env,
+                &entry_eligibility,
                 helpers,
                 &analysis,
             );
@@ -1058,6 +1074,7 @@ impl JitCompiler {
         validate_loop_bounds(func, loop_info)?;
         let begin_pc = loop_info.begin_pc;
         self.verify_env_once(env)?;
+        let entry_eligibility = self.entry_eligibility(vo_module, env);
 
         if let Some(cached_loop) = self.cache.get_loop(func_id, begin_pc) {
             if cached_loop.loop_info != *loop_info {
@@ -1111,6 +1128,7 @@ impl JitCompiler {
                 func,
                 vo_module,
                 env,
+                &entry_eligibility,
                 loop_info,
                 helpers,
                 &analysis,
@@ -1216,11 +1234,30 @@ pub fn jit_frame_entry_eligibility(
     func: &vo_runtime::bytecode::FunctionDef,
 ) -> JitFrameEntryEligibility {
     let contract = crate::contract::function_contract(func);
+    jit_frame_entry_eligibility_for_contract(func, contract)
+}
+
+pub(crate) fn jit_frame_entry_eligibility_for_contract(
+    func: &vo_runtime::bytecode::FunctionDef,
+    contract: crate::contract::EffectContract,
+) -> JitFrameEntryEligibility {
     let has_direct_returns = func.heap_ret_gcref_count == 0;
     JitFrameEntryEligibility {
         frame_elided: has_direct_returns && contract.permits_frame_elision(),
         prepared_shadow: has_direct_returns && contract.permits_prepared_shadow_frame(),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn jit_frame_entry_eligibility_in_env(
+    func: &vo_runtime::bytecode::FunctionDef,
+    module: &vo_runtime::bytecode::Module,
+    env: JitCompileEnv<'_>,
+) -> JitFrameEntryEligibility {
+    jit_frame_entry_eligibility_for_contract(
+        func,
+        crate::contract::function_contract_in_env(func, module, env),
+    )
 }
 
 pub fn can_elide_frame_for_direct_jit(func: &vo_runtime::bytecode::FunctionDef) -> bool {

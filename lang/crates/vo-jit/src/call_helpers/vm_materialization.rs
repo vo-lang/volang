@@ -242,7 +242,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             ret_reg_val,
             ret_slots_val,
             caller_resume_pc_val,
-            copy_args: None,
+            copy_args: Some((args_slot, plan.arg_slots)),
         },
     )?;
 

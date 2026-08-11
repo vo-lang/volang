@@ -1,7 +1,12 @@
 use vo_runtime::bytecode::FunctionDef;
+#[cfg(test)]
+use vo_runtime::bytecode::Module;
 use vo_runtime::instruction::Instruction;
 
 use super::MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS;
+#[cfg(test)]
+use crate::JitCompileEnv;
+use crate::JitFrameEntryEligibility;
 
 /// Configuration for call via VM.
 pub struct CallViaVmConfig {
@@ -17,6 +22,9 @@ pub struct CallViaVmConfig {
 pub enum CallRoute {
     /// Callee may be compiled at runtime; generated code checks jit_func_table.
     DynamicJitTable,
+    /// Callee runs in an unmaterialized shadow window and may materialize it
+    /// on a trap or another supported non-OK exit.
+    PreparedJitTable,
     /// Return JitResult::Call so the VM owns frame setup and dispatch.
     VmCallMaterialization,
 }
@@ -30,11 +38,42 @@ pub struct CallPlan {
     pub ret_reg: usize,
     pub call_ret_slots: usize,
     pub callee_local_slots: usize,
-    pub can_elide_frame: bool,
+    pub eligibility: JitFrameEntryEligibility,
 }
 
 impl CallPlan {
+    #[cfg(test)]
     pub fn new(func_id: u32, arg_start: usize, target_func: &FunctionDef) -> Self {
+        Self::with_eligibility(
+            func_id,
+            arg_start,
+            target_func,
+            crate::jit_frame_entry_eligibility(target_func),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn new_in_env(
+        func_id: u32,
+        arg_start: usize,
+        target_func: &FunctionDef,
+        module: &Module,
+        env: JitCompileEnv<'_>,
+    ) -> Self {
+        Self::with_eligibility(
+            func_id,
+            arg_start,
+            target_func,
+            crate::jit_frame_entry_eligibility_in_env(target_func, module, env),
+        )
+    }
+
+    pub(crate) fn with_eligibility(
+        func_id: u32,
+        arg_start: usize,
+        target_func: &FunctionDef,
+        eligibility: JitFrameEntryEligibility,
+    ) -> Self {
         let arg_slots = target_func.param_slots as usize;
         let call_ret_slots = target_func.ret_slots as usize;
         Self {
@@ -44,7 +83,7 @@ impl CallPlan {
             ret_reg: arg_start + arg_slots,
             call_ret_slots,
             callee_local_slots: target_func.local_slots as usize,
-            can_elide_frame: crate::can_elide_frame_for_direct_jit(target_func),
+            eligibility,
         }
     }
 
@@ -53,7 +92,11 @@ impl CallPlan {
     }
 
     pub fn can_use_direct_jit(self) -> bool {
-        self.can_elide_frame && self.fits_direct_native_frame()
+        self.eligibility.frame_elided && self.fits_direct_native_frame()
+    }
+
+    pub fn can_use_prepared_jit(self) -> bool {
+        self.eligibility.prepared_shadow && self.fits_direct_native_frame()
     }
 
     pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
@@ -67,7 +110,11 @@ impl CallPlan {
 
     fn route_non_recursive(self) -> CallRoute {
         if !self.can_use_direct_jit() {
-            return CallRoute::VmCallMaterialization;
+            return if self.can_use_prepared_jit() {
+                CallRoute::PreparedJitTable
+            } else {
+                CallRoute::VmCallMaterialization
+            };
         }
         CallRoute::DynamicJitTable
     }

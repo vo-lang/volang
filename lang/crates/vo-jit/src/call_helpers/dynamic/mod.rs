@@ -129,7 +129,7 @@ impl DynamicCallLowering {
     fn ic(&self) -> &DynamicIcState {
         self.ic
             .as_ref()
-            .expect("interface call lowering must initialize IC state")
+            .expect("dynamic call lowering must initialize IC state")
     }
 
     fn branch_on_ic_hit<'a, E: IrEmitter<'a>>(
@@ -144,7 +144,7 @@ impl DynamicCallLowering {
         (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block)
     }
 
-    fn branch_on_iface_ic_hit<'a, E: IrEmitter<'a>>(
+    fn branch_on_ic_key_hit<'a, E: IrEmitter<'a>>(
         &self,
         emitter: &mut E,
         receiver_slot0: Value,
@@ -159,8 +159,8 @@ impl DynamicCallLowering {
         load_hit_fields(emitter, self.ic().entry)
     }
 
-    fn emit_iface_hit_slot0<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, receiver: Value) {
-        slot0::emit_iface_hit_slot0(emitter, self.ic().args_slot, receiver);
+    fn emit_hit_slot0<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, slot0: Value) {
+        slot0::emit_hit_slot0(emitter, self.ic().args_slot, slot0);
     }
 
     fn emit_hit_call<'a, E: IrEmitter<'a>>(
@@ -176,6 +176,7 @@ impl DynamicCallLowering {
             IcHitParams {
                 ctx: self.ctx,
                 ic_jit_ptr,
+                ic_args_slot: self.ic().args_slot,
                 ic_args_ptr: self.ic().args_ptr,
                 ic_local_slots: fields.local_slots,
                 ic_func_id: fields.func_id,
