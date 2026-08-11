@@ -137,6 +137,7 @@ fn fill_call_iface_ic(
 ) {
     if entry.receiver_slot0 != receiver_slot0 || entry.func_id != target.func_id {
         entry.jit_func_ptr = 0;
+        entry.jit_may_gc = 0;
     }
     entry.receiver_slot0 = receiver_slot0;
     entry.local_slots = u32::from(target.local_slots);

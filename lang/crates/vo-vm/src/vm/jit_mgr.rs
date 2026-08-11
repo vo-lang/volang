@@ -15,12 +15,15 @@ use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::bytecode::LoadedModule;
 #[cfg(test)]
 use vo_runtime::bytecode::Module as VoModule;
-use vo_runtime::jit_api::JitResult;
+use vo_runtime::jit_api::{JitContext, JitNativeFrame, JitResult};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use vo_jit::{JitCompileEnv, JitCompiler, JitError, JitFailureKind, JitFunc, LoopFunc, LoopInfo};
+use vo_jit::{
+    JitArtifactMetadata, JitCompileEnv, JitCompiler, JitError, JitFailureKind, JitFunc, LoopFunc,
+    LoopInfo,
+};
 
 use super::{JitExecutionStats, JitSideExitReason};
 
@@ -41,7 +44,8 @@ fn update_low_progress_streak(
         | JitResult::WaitQueue
         | JitResult::Replay
         | JitResult::ExternSuspend
-        | JitResult::RuntimeTransition => match budget_before.checked_sub(budget_after) {
+        | JitResult::RuntimeTransition
+        | JitResult::GcSafepoint => match budget_before.checked_sub(budget_after) {
             Some(delta) if delta <= LOW_PROGRESS_BUDGET_DELTA => *streak = streak.saturating_add(1),
             _ => *streak = 0,
         },
@@ -67,6 +71,8 @@ pub struct JitConfig {
     pub code_memory_limit_bytes: usize,
     /// Maximum reusable analysis bytes retained by one Island family.
     pub analysis_memory_limit_bytes: usize,
+    /// Maximum precise safepoint metadata bytes retained by one Island family.
+    pub metadata_memory_limit_bytes: usize,
 }
 
 impl Default for JitConfig {
@@ -77,6 +83,7 @@ impl Default for JitConfig {
             debug_ir: false,
             code_memory_limit_bytes: vo_jit::DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES,
             analysis_memory_limit_bytes: vo_jit::MAX_JIT_ANALYSIS_BYTES,
+            metadata_memory_limit_bytes: vo_jit::MAX_JIT_METADATA_BYTES,
         }
     }
 }
@@ -102,6 +109,7 @@ struct LoopJitState {
     low_progress_exit_streak: u8,
     failure: Option<JitFailureKind>,
     entry: Option<LoopFunc>,
+    metadata: Option<Arc<JitArtifactMetadata>>,
 }
 
 // =============================================================================
@@ -124,6 +132,9 @@ struct FunctionJitInfo {
 
     /// Consecutive low-progress boundaries, or the disabled sentinel.
     full_low_progress_exit_streak: u8,
+
+    /// Lock-free metadata handle used while native code is paused in a callback.
+    metadata: Option<Arc<JitArtifactMetadata>>,
 }
 
 impl FunctionJitInfo {
@@ -134,8 +145,17 @@ impl FunctionJitInfo {
             loop_states: HashMap::new(),
             compile_error: None,
             full_low_progress_exit_streak: 0,
+            metadata: None,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NativeRootScanStats {
+    pub frames: usize,
+    pub roots: usize,
+    pub conditional_frames: usize,
+    pub complete: bool,
 }
 
 // =============================================================================
@@ -162,10 +182,11 @@ unsafe impl Sync for SharedJitCode {}
 impl SharedJitCode {
     fn new(config: &JitConfig) -> Result<Self, JitError> {
         Ok(Self {
-            compiler: Mutex::new(JitCompiler::with_resource_limits(
+            compiler: Mutex::new(JitCompiler::with_all_resource_limits(
                 config.debug_ir,
                 config.code_memory_limit_bytes,
                 config.analysis_memory_limit_bytes,
+                config.metadata_memory_limit_bytes,
             )?),
             module: OnceLock::new(),
         })
@@ -247,6 +268,13 @@ impl SharedJitCode {
         }
     }
 
+    fn metadata_memory_stats(&self) -> vo_jit::JitMetadataMemoryStats {
+        match self.compiler.lock() {
+            Ok(compiler) => compiler.metadata_memory_stats(),
+            Err(poisoned) => poisoned.into_inner().metadata_memory_stats(),
+        }
+    }
+
     fn analyzed_loops(
         &self,
         verified: VerifiedModule<'_>,
@@ -297,6 +325,7 @@ impl JitManager {
     pub(super) fn with_shared_code(mut config: JitConfig, shared_code: Arc<SharedJitCode>) -> Self {
         config.code_memory_limit_bytes = shared_code.code_memory_stats().limit_bytes;
         config.analysis_memory_limit_bytes = shared_code.analysis_memory_stats().limit_bytes;
+        config.metadata_memory_limit_bytes = shared_code.metadata_memory_stats().limit_bytes;
         Self {
             funcs: Vec::new(),
             func_table: Vec::new(),
@@ -363,6 +392,106 @@ impl JitManager {
     #[inline]
     pub fn analysis_memory_stats(&self) -> vo_jit::JitAnalysisMemoryStats {
         self.shared_code.analysis_memory_stats()
+    }
+
+    #[inline]
+    pub fn metadata_memory_stats(&self) -> vo_jit::JitMetadataMemoryStats {
+        self.shared_code.metadata_memory_stats()
+    }
+
+    /// Walk the exact root slots described by every paused native JIT frame.
+    ///
+    /// This path deliberately uses artifact-owned `Arc` handles cached at
+    /// publication time. A GC callback therefore never contends with another
+    /// Island compiling through the shared Cranelift mutex.
+    ///
+    /// # Safety
+    ///
+    /// `frame` must be the live native-frame head from `expected_ctx`. Native
+    /// execution must remain paused for the duration of this call, and the
+    /// visitor must not retain root-slot pointers after returning.
+    pub(crate) unsafe fn visit_native_roots<F>(
+        &self,
+        mut frame: *mut JitNativeFrame,
+        expected_ctx: *mut JitContext,
+        max_frames: usize,
+        max_roots: usize,
+        mut visit: F,
+    ) -> Result<NativeRootScanStats, JitError>
+    where
+        F: FnMut(*mut u64),
+    {
+        let mut stats = NativeRootScanStats::default();
+        while !frame.is_null() {
+            if stats.frames >= max_frames {
+                return Ok(stats);
+            }
+            let record = unsafe { &*frame };
+            if record.ctx != expected_ctx {
+                return Err(JitError::Internal(
+                    "native frame belongs to a different JIT context".to_string(),
+                ));
+            }
+            if record.safepoint_id == JitNativeFrame::INACTIVE_SAFEPOINT {
+                return Err(JitError::Internal(format!(
+                    "native frame for function {} is inactive during a GC callback",
+                    record.func_id
+                )));
+            }
+            let metadata = match record.artifact_kind {
+                JitNativeFrame::ARTIFACT_FUNCTION => self
+                    .funcs
+                    .get(record.func_id as usize)
+                    .and_then(|info| info.metadata.as_deref()),
+                JitNativeFrame::ARTIFACT_OSR_LOOP => self
+                    .funcs
+                    .get(record.func_id as usize)
+                    .and_then(|info| info.loop_states.get(&(record.osr_pc as usize)))
+                    .and_then(|state| state.metadata.as_deref()),
+                kind => {
+                    return Err(JitError::Internal(format!(
+                        "unknown native JIT artifact kind {kind}"
+                    )))
+                }
+            }
+            .ok_or_else(|| {
+                JitError::Internal(format!(
+                    "native metadata is unavailable for function {} at OSR pc {}",
+                    record.func_id, record.osr_pc
+                ))
+            })?;
+            let map = metadata
+                .map_for_safepoint_id(record.safepoint_id)
+                .ok_or_else(|| {
+                    JitError::Internal(format!(
+                        "native safepoint {} is unavailable for function {}",
+                        record.safepoint_id, record.func_id
+                    ))
+                })?;
+            if map.requires_frame_materialization {
+                stats.conditional_frames = stats.conditional_frames.saturating_add(1);
+            }
+            if map.roots.len() > max_roots.saturating_sub(stats.roots) {
+                return Ok(stats);
+            }
+            let anchor = frame as usize;
+            let stack_pointer = anchor
+                .checked_sub(map.anchor_sp_offset as usize)
+                .ok_or_else(|| JitError::Internal("native frame anchor underflow".to_string()))?;
+            for root in &map.roots {
+                let root_address = stack_pointer
+                    .checked_add(root.sp_offset as usize)
+                    .ok_or_else(|| {
+                        JitError::Internal("native root address overflow".to_string())
+                    })?;
+                visit(root_address as *mut u64);
+                stats.roots += 1;
+            }
+            stats.frames += 1;
+            frame = record.prev;
+        }
+        stats.complete = true;
+        Ok(stats)
     }
 
     pub fn unsupported_function_count(&self) -> usize {
@@ -440,6 +569,22 @@ impl JitManager {
         }
         if published_ic {
             stats.dynamic_ic_publications = stats.dynamic_ic_publications.saturating_add(1);
+        }
+    }
+
+    pub(super) fn record_native_root_scan(&mut self, scan: NativeRootScanStats) {
+        let stats = &mut self.execution_stats;
+        stats.gc_safepoint_callbacks = stats.gc_safepoint_callbacks.saturating_add(1);
+        stats.native_root_frames_scanned = stats
+            .native_root_frames_scanned
+            .saturating_add(scan.frames as u64);
+        stats.native_roots_scanned = stats.native_roots_scanned.saturating_add(scan.roots as u64);
+        stats.native_root_conditional_frames = stats
+            .native_root_conditional_frames
+            .saturating_add(scan.conditional_frames as u64);
+        if !scan.complete {
+            stats.native_root_scan_budget_exhaustions =
+                stats.native_root_scan_budget_exhaustions.saturating_add(1);
         }
     }
 
@@ -659,11 +804,15 @@ impl JitManager {
         let compile_result = (|| {
             let mut compiler = self.shared_code.lock_verified(verified)?;
             compiler.compile_loaded(func_id, env)?;
-            unsafe { compiler.get_func_ptr(func_id) }
-                .ok_or_else(|| JitError::Internal("compiled but no pointer".into()))
+            let ptr = unsafe { compiler.get_func_ptr(func_id) }
+                .ok_or_else(|| JitError::Internal("compiled but no pointer".into()))?;
+            let metadata = compiler.function_metadata_handle(func_id).ok_or_else(|| {
+                JitError::Internal("compiled function has no native metadata".into())
+            })?;
+            Ok::<_, JitError>((ptr, metadata))
         })();
-        let ptr = match compile_result {
-            Ok(ptr) => ptr,
+        let (ptr, metadata) = match compile_result {
+            Ok(compiled) => compiled,
             Err(e) => {
                 if let Some(info) = self.funcs.get_mut(idx) {
                     info.state = CompileState::Failed(e.failure_kind());
@@ -678,6 +827,7 @@ impl JitManager {
             info.state = CompileState::FullyCompiled;
             info.compile_error = None;
             info.full_low_progress_exit_streak = 0;
+            info.metadata = Some(metadata);
         }
         self.func_table[idx] = ptr as *const u8;
 
@@ -773,20 +923,24 @@ impl JitManager {
                         loop_info.begin_pc
                     ))
                 })?;
-            Ok::<LoopFunc, JitError>(loop_func)
+            let metadata = compiler
+                .loop_metadata_handle(func_id, loop_info.begin_pc)
+                .ok_or_else(|| JitError::Internal("compiled loop has no native metadata".into()))?;
+            Ok::<_, JitError>((loop_func, metadata))
         })();
-        let loop_func = match compile_result {
-            Ok(loop_func) => loop_func,
+        let (loop_func, metadata) = match compile_result {
+            Ok(compiled) => compiled,
             Err(error) => {
                 self.mark_loop_failed(func_id, loop_info.begin_pc, error.failure_kind())?;
                 return Err(error);
             }
         };
-        self.funcs[func_id as usize]
+        let loop_state = self.funcs[func_id as usize]
             .loop_states
             .entry(loop_info.begin_pc)
-            .or_default()
-            .entry = Some(loop_func);
+            .or_default();
+        loop_state.entry = Some(loop_func);
+        loop_state.metadata = Some(metadata);
         Ok(loop_func)
     }
 
@@ -862,6 +1016,25 @@ mod tests {
         func.borrowed_scan_slots_prefix =
             FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         (func.has_calls, func.has_call_extern) = FunctionDef::compute_call_flags(&func.code);
+        func
+    }
+
+    fn string_slice_func(name: &str, code: Vec<Instruction>) -> FunctionDef {
+        let mut func = valid_jit_func(name, code);
+        func.param_count = 3;
+        func.param_slots = 3;
+        func.local_slots = 4;
+        func.gc_scan_slots = 4;
+        func.ret_slots = 1;
+        func.ret_slot_types = vec![vo_runtime::SlotType::GcRef];
+        func.slot_types = vec![
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::Value,
+            vo_runtime::SlotType::Value,
+            vo_runtime::SlotType::GcRef,
+        ];
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         func
     }
 
@@ -1014,6 +1187,152 @@ mod tests {
         assert_eq!(ctx.call_func_id(), 1);
         assert_eq!(ctx.call_resume_pc(), 1);
         assert_eq!(ret, [0xfeed]);
+    }
+
+    #[test]
+    fn allocating_jit_helper_validates_native_roots_before_gc_side_exit() {
+        let func = string_slice_func(
+            "allocating",
+            vec![
+                Instruction::new(Opcode::StrSlice, 3, 0, 1),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+        );
+        let mut module = VoModule::new("jit-native-root-callback".to_string());
+        module.functions.push(func);
+
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit VM");
+        vm.load(module).expect("load stack-map probe");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let entry = {
+            let manager = vm.jit.manager_mut().expect("jit manager");
+            manager
+                .compile_full(
+                    0,
+                    loaded.verified_module(),
+                    JitCompileEnv {
+                        externs: &externs,
+                        backend_caps: Default::default(),
+                    },
+                )
+                .expect("compile allocating function");
+            manager.get_entry(0).expect("compiled entry")
+        };
+
+        let source = vo_runtime::objects::string::create(&mut vm.state.gc, b"root");
+        vm.state.gc.gc_request_cycle();
+        let mut fiber = Fiber::new(1);
+        fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
+        let bp = fiber.push_frame(0, 4, 4, 0, 1);
+        fiber.stack[bp] = source as u64;
+        fiber.stack[bp + 1] = 0;
+        fiber.stack[bp + 2] = 4;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+        let args = unsafe { fiber.stack.as_mut_ptr().add(bp) };
+        let mut ret = [0_u64; 1];
+
+        let result = entry(ctx.as_ptr(), args, ret.as_mut_ptr());
+
+        assert_eq!(result, JitResult::GcSafepoint);
+        assert_eq!(ctx.call_resume_pc(), 0);
+        assert!(ctx.ctx.native_frame.is_null());
+        assert_eq!(ret, [0]);
+        let stats = vm.jit.manager().expect("jit manager").execution_stats();
+        assert_eq!(stats.gc_safepoint_callbacks, 1);
+        assert_eq!(stats.native_root_frames_scanned, 1);
+        assert!(stats.native_roots_scanned >= 1);
+        assert_eq!(stats.native_root_scan_budget_exhaustions, 0);
+
+        ret[0] = 0;
+        let fast_result = entry(ctx.as_ptr(), args, ret.as_mut_ptr());
+        assert_eq!(fast_result, JitResult::Ok);
+        assert_eq!(ret, [source as u64]);
+        assert_eq!(ctx.ctx.gc_poll_resume_armed, 0);
+        assert_eq!(
+            vm.jit
+                .manager()
+                .expect("jit manager")
+                .execution_stats()
+                .gc_safepoint_callbacks,
+            1,
+            "the exact resumed allocation must consume its credential even while GC debt remains"
+        );
+
+        ret[0] = 0;
+        let next_result = entry(ctx.as_ptr(), args, ret.as_mut_ptr());
+        assert_eq!(next_result, JitResult::GcSafepoint);
+        assert_eq!(ret, [0]);
+        assert_eq!(
+            vm.jit
+                .manager()
+                .expect("jit manager")
+                .execution_stats()
+                .gc_safepoint_callbacks,
+            2,
+            "the credential must permit exactly one allocation retry before polling debt again"
+        );
+    }
+
+    #[test]
+    fn allocating_direct_callee_exposes_complete_native_frame_chain() {
+        let caller = string_slice_func(
+            "caller",
+            vec![
+                Instruction::new(Opcode::Call, 1, 0, 0),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+        );
+        let callee = string_slice_func(
+            "callee",
+            vec![
+                Instruction::new(Opcode::StrSlice, 3, 0, 1),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+        );
+        let mut module = VoModule::new("jit-native-root-direct-call".to_string());
+        module.functions = vec![caller, callee];
+
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit VM");
+        vm.load(module).expect("load direct allocating call");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let entry = {
+            let manager = vm.jit.manager_mut().expect("jit manager");
+            let env = JitCompileEnv {
+                externs: &externs,
+                backend_caps: Default::default(),
+            };
+            manager
+                .compile_full(1, loaded.verified_module(), env)
+                .expect("compile allocating callee");
+            manager
+                .compile_full(0, loaded.verified_module(), env)
+                .expect("compile direct caller");
+            manager.get_entry(0).expect("compiled caller")
+        };
+
+        let source = vo_runtime::objects::string::create(&mut vm.state.gc, b"chain");
+        vm.state.gc.gc_request_cycle();
+        let mut fiber = Fiber::new(1);
+        fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
+        let bp = fiber.push_frame(0, 4, 4, 0, 1);
+        fiber.stack[bp] = source as u64;
+        fiber.stack[bp + 1] = 0;
+        fiber.stack[bp + 2] = 5;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+        let args = unsafe { fiber.stack.as_mut_ptr().add(bp) };
+        let mut ret = [0_u64; 1];
+
+        let result = entry(ctx.as_ptr(), args, ret.as_mut_ptr());
+
+        assert_eq!(result, JitResult::GcSafepoint);
+        assert!(ctx.ctx.native_frame.is_null());
+        let stats = vm.jit.manager().expect("jit manager").execution_stats();
+        assert_eq!(stats.gc_safepoint_callbacks, 1);
+        assert_eq!(stats.native_root_frames_scanned, 2);
+        assert!(stats.native_roots_scanned >= 2);
+        assert_eq!(stats.native_root_scan_budget_exhaustions, 0);
     }
 
     #[test]
@@ -1192,6 +1511,7 @@ mod tests {
         let child_config = JitConfig {
             code_memory_limit_bytes: 0,
             analysis_memory_limit_bytes: 0,
+            metadata_memory_limit_bytes: 0,
             ..Default::default()
         };
         let mut child = JitManager::with_shared_code(child_config, shared_code.clone());
@@ -1204,6 +1524,11 @@ mod tests {
             child.config().analysis_memory_limit_bytes,
             vo_jit::MAX_JIT_ANALYSIS_BYTES,
             "a related manager must report the shared family analysis budget"
+        );
+        assert_eq!(
+            child.config().metadata_memory_limit_bytes,
+            vo_jit::MAX_JIT_METADATA_BYTES,
+            "a related manager must report the shared family metadata budget"
         );
         child.init_verified(&loaded).expect("bind child module");
 

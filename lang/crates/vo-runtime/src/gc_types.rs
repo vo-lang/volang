@@ -1102,9 +1102,15 @@ unsafe fn scan_map_chunk(
     }
 
     let mut work_slots = 0usize;
-    if cursor.auxiliary == 0 && work_slots < slot_budget {
+    let generation = unsafe { map::generation(obj) as usize };
+    if cursor.auxiliary != generation && work_slots < slot_budget {
+        // Resizing replaces and rehashes the managed backing. Restart the
+        // bounded cursor against the new generation so a partially scanned
+        // bucket cannot be mistaken for the corresponding new bucket.
+        cursor.element_index = 0;
+        cursor.reference_index = 0;
         gc.mark_gray(backing);
-        cursor.auxiliary = 1;
+        cursor.auxiliary = generation;
         work_slots += 1;
     }
     while work_slots < slot_budget {
@@ -1809,6 +1815,69 @@ mod tests {
         assert!(unsafe { Gc::header(backing) }.is_gray());
         assert!(unsafe { Gc::header(key) }.is_gray());
         assert!(unsafe { Gc::header(value) }.is_gray());
+    }
+
+    #[test]
+    fn gc_map_chunk_restarts_when_resize_rehashes_backing() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let map_ref = map::create(&mut gc, int_meta, int_meta, 1, 1, 0);
+        unsafe { map::set_checked(&mut gc, map_ref, &[0], &[0], None) }.expect("first entry");
+
+        let old_generation = unsafe { map::generation(map_ref) };
+        let mut cursor = GcTraceCursor::default();
+        while cursor.reference_index == 0 {
+            let chunk = unsafe {
+                scan_object_chunk_with_context(
+                    &mut gc,
+                    map_ref,
+                    GcScanContext::new(&[]),
+                    &|_| ClosureScanLayout::default(),
+                    &mut cursor,
+                    SLOT_BYTES,
+                )
+            };
+            assert!(!chunk.done);
+        }
+
+        for key in 1..8 {
+            unsafe { map::set_checked(&mut gc, map_ref, &[key], &[key], None) }
+                .expect("resize entry");
+        }
+        let new_generation = unsafe { map::generation(map_ref) };
+        assert!(new_generation > old_generation);
+
+        let restarted = unsafe {
+            scan_object_chunk_with_context(
+                &mut gc,
+                map_ref,
+                GcScanContext::new(&[]),
+                &|_| ClosureScanLayout::default(),
+                &mut cursor,
+                SLOT_BYTES,
+            )
+        };
+        assert!(!restarted.done);
+        assert_eq!(cursor.auxiliary, new_generation as usize);
+        assert_eq!(cursor.element_index, 0);
+        assert_eq!(cursor.reference_index, 0);
+
+        for _ in 0..256 {
+            let chunk = unsafe {
+                scan_object_chunk_with_context(
+                    &mut gc,
+                    map_ref,
+                    GcScanContext::new(&[]),
+                    &|_| ClosureScanLayout::default(),
+                    &mut cursor,
+                    SLOT_BYTES,
+                )
+            };
+            if chunk.done {
+                return;
+            }
+        }
+        panic!("generation-aware bounded map scan did not converge");
     }
 
     #[test]

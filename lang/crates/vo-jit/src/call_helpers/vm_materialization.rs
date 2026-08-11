@@ -6,9 +6,10 @@ use vo_runtime::jit_api::{JitContext, JitContextField};
 use crate::translator::{HelperKind, IrEmitter, NativeScratchKind};
 
 use super::{
-    emit_call_depth_enter, emit_call_depth_leave, emit_non_ok_slow_path, emit_stack_capacity_check,
-    import_jit_func_sig, load_current_func_id, restore_caller_execution_context, CallPlan,
-    CallViaVmConfig, NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
+    emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
+    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_current_func_id,
+    restore_caller_execution_context, CallPlan, CallViaVmConfig, JitCallGcMode,
+    NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
 };
 
 /// Emit a call by materializing a VM-owned call request.
@@ -201,12 +202,13 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     let sig = import_jit_func_sig(emitter);
-    let jit_call =
-        emitter
-            .builder()
-            .ins()
-            .call_indirect(sig, jit_func_ptr, &[ctx, args_ptr, ret_ptr]);
-    let jit_result_indirect = emitter.builder().inst_results(jit_call)[0];
+    let gc_mode = if plan.eligibility.may_gc {
+        JitCallGcMode::MayGc
+    } else {
+        JitCallGcMode::Never
+    };
+    let jit_result_indirect =
+        emit_effect_aware_jit_call(emitter, sig, jit_func_ptr, ctx, args_ptr, ret_ptr, gc_mode);
     emit_call_depth_leave(emitter, old_call_depth);
 
     let ok_val = emitter

@@ -23,10 +23,10 @@ fn direct_jit_uses_frame_elision_contract() {
 
     let alloc = make_func(vec![Instruction::new(Opcode::PtrNew, 0, 1, 1)], 2);
     assert!(
-        !can_elide_frame_for_direct_jit(&alloc),
-        "allocating JIT callees need materialized VM frames for GC roots"
+        can_elide_frame_for_direct_jit(&alloc),
+        "allocation-only JIT callees poll and materialize before collection"
     );
-    assert!(!can_enter_prepared_shadow_frame_for_jit(&alloc));
+    assert!(can_enter_prepared_shadow_frame_for_jit(&alloc));
     assert!(
         can_enter_materialized_frame_for_jit(&alloc),
         "allocation is safe with a materialized VM frame and precise roots"

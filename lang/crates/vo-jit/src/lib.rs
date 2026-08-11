@@ -13,6 +13,8 @@ mod intrinsics;
 pub mod loop_analysis;
 mod loop_compiler;
 mod metadata;
+mod native_frame;
+mod native_stack_map;
 mod semantics;
 #[cfg(test)]
 mod test_fixtures;
@@ -22,6 +24,7 @@ mod verifier;
 
 pub use loop_analysis::LoopInfo;
 pub use loop_compiler::LoopFunc;
+pub use native_stack_map::{JitArtifactMetadata, NativeRootKind, NativeStackMap, NativeStackRoot};
 
 use func_compiler::FunctionCompiler;
 use loop_compiler::{CompiledLoop, LoopCompiler};
@@ -60,12 +63,24 @@ pub const DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_JIT_NATIVE_FRAME_BYTES: usize = 256 * 1024;
 /// Default persistent budget for shared JIT analysis state.
 pub const MAX_JIT_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum retained native stack-map and frame-state metadata per JIT family.
+pub const MAX_JIT_METADATA_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum estimated transient compiler work owned by one artifact.
 ///
 /// Cranelift IR is substantially wider than Vo bytecode. Bounding the input
 /// shape before analysis and translation prevents one valid but adversarial
 /// function from consuming an unbounded amount of host memory.
 pub const MAX_JIT_COMPILE_WORK_BYTES: usize = 256 * 1024 * 1024;
+
+#[inline]
+fn function_needs_native_root_frame(func: &FunctionDef) -> bool {
+    func.slot_types.iter().any(|slot| {
+        matches!(
+            slot,
+            vo_runtime::SlotType::GcRef | vo_runtime::SlotType::Interface0
+        )
+    })
+}
 
 // =============================================================================
 // JitError
@@ -113,6 +128,11 @@ pub enum JitError {
         limit_bytes: usize,
         requested_bytes: usize,
     },
+    MetadataResourceLimitExceeded {
+        limit_bytes: usize,
+        used_bytes: usize,
+        requested_bytes: usize,
+    },
     CompileWorkLimitExceeded {
         limit_bytes: usize,
         requested_bytes: usize,
@@ -133,6 +153,7 @@ impl JitError {
             Self::CodeMemoryLimitExceeded { .. }
             | Self::NativeFrameLimitExceeded { .. }
             | Self::AnalysisResourceLimitExceeded { .. }
+            | Self::MetadataResourceLimitExceeded { .. }
             | Self::CompileWorkLimitExceeded { .. }
             | Self::CodeMemoryReservationFailed { .. }
             | Self::Module(cranelift_module::ModuleError::Allocation { .. }) => {
@@ -204,6 +225,14 @@ impl std::fmt::Display for JitError {
                 f,
                 "JIT analysis resource limit exceeded: limit {limit_bytes} bytes, requested {requested_bytes} bytes"
             ),
+            JitError::MetadataResourceLimitExceeded {
+                limit_bytes,
+                used_bytes,
+                requested_bytes,
+            } => write!(
+                f,
+                "JIT metadata resource limit exceeded: limit {limit_bytes} bytes, used {used_bytes} bytes, requested {requested_bytes} bytes"
+            ),
             JitError::CompileWorkLimitExceeded {
                 limit_bytes,
                 requested_bytes,
@@ -255,6 +284,7 @@ impl From<loop_analysis::LoopAnalysisError> for JitError {
 
 pub struct CompiledFunction {
     code_ptr: *const u8,
+    metadata: Arc<JitArtifactMetadata>,
 }
 
 unsafe impl Send for CompiledFunction {}
@@ -322,11 +352,17 @@ struct JitCache {
     code_allocation_granularity_bytes: usize,
     analysis_bytes: usize,
     analysis_memory_limit_bytes: usize,
+    metadata_bytes: usize,
+    metadata_memory_limit_bytes: usize,
     code_memory_limit_bytes: usize,
 }
 
 impl JitCache {
-    fn new(code_memory_limit_bytes: usize, analysis_memory_limit_bytes: usize) -> Self {
+    fn new(
+        code_memory_limit_bytes: usize,
+        analysis_memory_limit_bytes: usize,
+        metadata_memory_limit_bytes: usize,
+    ) -> Self {
         Self {
             functions: Vec::new(),
             loops: HashMap::new(),
@@ -344,6 +380,8 @@ impl JitCache {
             code_allocation_granularity_bytes: region::page::size(),
             analysis_bytes: 0,
             analysis_memory_limit_bytes,
+            metadata_bytes: 0,
+            metadata_memory_limit_bytes,
             code_memory_limit_bytes,
         }
     }
@@ -473,15 +511,41 @@ impl JitCache {
     fn ensure_artifact_slot(&self) -> Result<(), JitError> {
         self.ensure_code_capacity(self.code_allocation_granularity_bytes)
     }
-    fn record_function_allocation(&mut self, emitted_bytes: usize, committed_bytes: usize) {
+    fn ensure_metadata_capacity(&self, requested_bytes: usize) -> Result<(), JitError> {
+        if requested_bytes
+            > self
+                .metadata_memory_limit_bytes
+                .saturating_sub(self.metadata_bytes)
+        {
+            return Err(JitError::MetadataResourceLimitExceeded {
+                limit_bytes: self.metadata_memory_limit_bytes,
+                used_bytes: self.metadata_bytes,
+                requested_bytes,
+            });
+        }
+        Ok(())
+    }
+    fn record_function_allocation(
+        &mut self,
+        emitted_bytes: usize,
+        committed_bytes: usize,
+        metadata_bytes: usize,
+    ) {
         self.function_bytes = self.function_bytes.saturating_add(emitted_bytes);
         self.function_committed_bytes = self
             .function_committed_bytes
             .saturating_add(committed_bytes);
+        self.metadata_bytes = self.metadata_bytes.saturating_add(metadata_bytes);
     }
-    fn record_loop_allocation(&mut self, emitted_bytes: usize, committed_bytes: usize) {
+    fn record_loop_allocation(
+        &mut self,
+        emitted_bytes: usize,
+        committed_bytes: usize,
+        metadata_bytes: usize,
+    ) {
         self.loop_bytes = self.loop_bytes.saturating_add(emitted_bytes);
         self.loop_committed_bytes = self.loop_committed_bytes.saturating_add(committed_bytes);
+        self.metadata_bytes = self.metadata_bytes.saturating_add(metadata_bytes);
     }
     fn rejected_function(&self, func_id: u32) -> Option<JitError> {
         self.rejected_functions
@@ -542,6 +606,12 @@ impl JitCache {
             eviction_count: self.analysis_eviction_count,
         }
     }
+    fn metadata_memory_stats(&self) -> JitMetadataMemoryStats {
+        JitMetadataMemoryStats {
+            retained_bytes: self.metadata_bytes,
+            limit_bytes: self.metadata_memory_limit_bytes,
+        }
+    }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
     /// `self` must outlive every use and every copy of the returned pointer.
@@ -549,6 +619,17 @@ impl JitCache {
         self.loops
             .get(&(func_id, begin_pc))
             .map(|l| std::mem::transmute(l.code_ptr))
+    }
+    fn get_function_metadata(&self, func_id: u32) -> Option<&JitArtifactMetadata> {
+        self.functions
+            .get(func_id as usize)
+            .and_then(Option::as_ref)
+            .map(|function| function.metadata.as_ref())
+    }
+    fn get_loop_metadata(&self, func_id: u32, begin_pc: usize) -> Option<&JitArtifactMetadata> {
+        self.loops
+            .get(&(func_id, begin_pc))
+            .map(|compiled| compiled.metadata.as_ref())
     }
 }
 
@@ -621,6 +702,18 @@ pub struct JitAnalysisMemoryStats {
     pub eviction_count: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitMetadataMemoryStats {
+    pub retained_bytes: usize,
+    pub limit_bytes: usize,
+}
+
+impl JitMetadataMemoryStats {
+    pub fn remaining_bytes(self) -> usize {
+        self.limit_bytes.saturating_sub(self.retained_bytes)
+    }
+}
+
 impl JitAnalysisMemoryStats {
     pub fn remaining_bytes(self) -> usize {
         self.limit_bytes.saturating_sub(self.retained_bytes)
@@ -673,6 +766,20 @@ impl JitCompiler {
         code_memory_limit_bytes: usize,
         analysis_memory_limit_bytes: usize,
     ) -> Result<Self, JitError> {
+        Self::with_all_resource_limits(
+            debug_ir,
+            code_memory_limit_bytes,
+            analysis_memory_limit_bytes,
+            MAX_JIT_METADATA_BYTES,
+        )
+    }
+
+    pub fn with_all_resource_limits(
+        debug_ir: bool,
+        code_memory_limit_bytes: usize,
+        analysis_memory_limit_bytes: usize,
+        metadata_memory_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
         let mut flag_builder = settings::builder();
         flag_builder
             .set("opt_level", "speed")
@@ -706,7 +813,11 @@ impl JitCompiler {
             module: ManuallyDrop::new(module),
             ctx,
             func_ctx: FunctionBuilderContext::new(),
-            cache: JitCache::new(code_memory_limit_bytes, analysis_memory_limit_bytes),
+            cache: JitCache::new(
+                code_memory_limit_bytes,
+                analysis_memory_limit_bytes,
+                metadata_memory_limit_bytes,
+            ),
             helper_funcs,
             #[cfg(test)]
             verified_module_identity: None,
@@ -800,56 +911,100 @@ impl JitCompiler {
         func_id_cl: cranelift_module::FuncId,
         name: &str,
         artifact_kind: JitArtifactKind,
-    ) -> Result<*const u8, JitError> {
-        let compile_result: Result<(usize, usize), JitError> = (|| {
-            cranelift_codegen::verifier::verify_function(&self.ctx.func, self.module.isa().flags())
+    ) -> Result<(*const u8, Arc<JitArtifactMetadata>), JitError> {
+        let compile_result: Result<(usize, usize, Arc<JitArtifactMetadata>, usize), JitError> =
+            (|| {
+                cranelift_codegen::verifier::verify_function(
+                    &self.ctx.func,
+                    self.module.isa().flags(),
+                )
                 .map_err(|errors| {
                     JitError::Internal(format!(
                         "Cranelift IR verification failed for {name}: {errors}"
                     ))
                 })?;
-            if self.debug_ir {
-                eprintln!("[JIT VERIFY OK] {}", name);
-            }
+                if self.debug_ir {
+                    eprintln!("[JIT VERIFY OK] {}", name);
+                }
 
-            self.ctx
-                .compile(self.module.isa(), &mut Default::default())
-                .map_err(cranelift_module::ModuleError::from)?;
-            let compiled = self
-                .ctx
-                .compiled_code()
-                .ok_or_else(|| JitError::Internal(format!("missing compiled code for {name}")))?;
-            let code_size = compiled.code_info().total_size as usize;
-            let committed_size = self.cache.committed_artifact_bytes(code_size);
-            self.cache.ensure_code_capacity(committed_size)?;
-            let relocs = compiled
-                .buffer
-                .relocs()
-                .iter()
-                .map(|reloc| ModuleReloc::from_mach_reloc(reloc, &self.ctx.func, func_id_cl))
-                .collect::<Vec<_>>();
-            self.module
-                .define_function_bytes(
-                    func_id_cl,
-                    u64::from(compiled.buffer.alignment),
-                    compiled.code_buffer(),
-                    &relocs,
-                )
-                .map_err(JitError::from)?;
-            Ok((code_size, committed_size))
-        })();
+                self.ctx
+                    .compile(self.module.isa(), &mut Default::default())
+                    .map_err(cranelift_module::ModuleError::from)?;
+                let compiled = self.ctx.compiled_code().ok_or_else(|| {
+                    JitError::Internal(format!("missing compiled code for {name}"))
+                })?;
+                let code_size = compiled.code_info().total_size as usize;
+                let committed_size = self.cache.committed_artifact_bytes(code_size);
+                self.cache.ensure_code_capacity(committed_size)?;
+                let native_stack_maps = compiled
+                    .buffer
+                    .user_stack_maps()
+                    .iter()
+                    .map(|(return_address, frame_size, map)| {
+                        let source = compiled
+                            .buffer
+                            .get_srclocs_sorted()
+                            .iter()
+                            .find(|source| {
+                                source.start < *return_address && *return_address <= source.end
+                            })
+                            .ok_or_else(|| {
+                                JitError::Internal(format!(
+                                    "native stack map for {name} has no safepoint source location"
+                                ))
+                            })?;
+                        let safepoint_id = source.loc.bits().checked_sub(1).ok_or_else(|| {
+                            JitError::Internal(format!(
+                                "native stack map for {name} has an invalid safepoint source location"
+                            ))
+                        })?;
+                        Ok((
+                            safepoint_id,
+                            *return_address,
+                            *frame_size,
+                            map.entries().collect::<Vec<_>>(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, JitError>>()?;
+                let metadata = Arc::new(JitArtifactMetadata::from_entries(
+                    code_size,
+                    native_stack_maps,
+                    name,
+                )?);
+                let metadata_bytes = metadata.retained_bytes();
+                self.cache.ensure_metadata_capacity(metadata_bytes)?;
+                let relocs = compiled
+                    .buffer
+                    .relocs()
+                    .iter()
+                    .map(|reloc| ModuleReloc::from_mach_reloc(reloc, &self.ctx.func, func_id_cl))
+                    .collect::<Vec<_>>();
+                self.module
+                    .define_function_bytes(
+                        func_id_cl,
+                        u64::from(compiled.buffer.alignment),
+                        compiled.code_buffer(),
+                        &relocs,
+                    )
+                    .map_err(JitError::from)?;
+                Ok((code_size, committed_size, metadata, metadata_bytes))
+            })();
         self.module.clear_context(&mut self.ctx);
-        let (code_size, committed_size) = compile_result?;
+        let (code_size, committed_size, metadata, metadata_bytes) = compile_result?;
 
         match artifact_kind {
-            JitArtifactKind::Function => self
-                .cache
-                .record_function_allocation(code_size, committed_size),
-            JitArtifactKind::Loop => self.cache.record_loop_allocation(code_size, committed_size),
+            JitArtifactKind::Function => {
+                self.cache
+                    .record_function_allocation(code_size, committed_size, metadata_bytes)
+            }
+            JitArtifactKind::Loop => {
+                self.cache
+                    .record_loop_allocation(code_size, committed_size, metadata_bytes)
+            }
         }
         self.module.finalize_definitions()?;
 
-        Ok(self.module.get_finalized_function(func_id_cl))
+        Ok((self.module.get_finalized_function(func_id_cl), metadata))
     }
 
     fn finish_translation(&mut self, result: Result<(), JitError>) -> Result<(), JitError> {
@@ -975,6 +1130,17 @@ impl JitCompiler {
             compiler.compile(target_config)
         };
         self.finish_translation(compile_result)?;
+        if function_needs_native_root_frame(func) {
+            let native_frame_result = native_frame::instrument_function(
+                &mut self.ctx.func,
+                ptr_type,
+                func_id,
+                vo_runtime::jit_api::JitNativeFrame::ARTIFACT_FUNCTION,
+                u32::MAX,
+                func.slot_types.contains(&vo_runtime::SlotType::Interface0),
+            );
+            self.finish_translation(native_frame_result)?;
+        }
         let frame_budget_result = self.verify_native_frame_budget();
         self.finish_translation(frame_budget_result)?;
 
@@ -1000,8 +1166,8 @@ impl JitCompiler {
                 self.cache.reject_function(func_id, rejection);
             }
         }
-        let code_ptr = finalize_result?;
-        let compiled = CompiledFunction { code_ptr };
+        let (code_ptr, metadata) = finalize_result?;
+        let compiled = CompiledFunction { code_ptr, metadata };
         self.cache.insert(func_id, compiled);
         Ok(())
     }
@@ -1136,6 +1302,17 @@ impl JitCompiler {
             compiler.compile(target_config)
         };
         self.finish_translation(compile_result)?;
+        if function_needs_native_root_frame(func) {
+            let native_frame_result = native_frame::instrument_function(
+                &mut self.ctx.func,
+                ptr_type,
+                func_id,
+                vo_runtime::jit_api::JitNativeFrame::ARTIFACT_OSR_LOOP,
+                u32::try_from(begin_pc).unwrap_or(u32::MAX),
+                func.slot_types.contains(&vo_runtime::SlotType::Interface0),
+            );
+            self.finish_translation(native_frame_result)?;
+        }
         let frame_budget_result = self.verify_native_frame_budget();
         self.finish_translation(frame_budget_result)?;
 
@@ -1156,10 +1333,11 @@ impl JitCompiler {
                 self.cache.reject_loop(func_id, loop_info, rejection);
             }
         }
-        let code_ptr = finalize_result?;
+        let (code_ptr, metadata) = finalize_result?;
         let compiled = CompiledLoop {
             code_ptr,
             loop_info: loop_info.clone(),
+            metadata,
         };
         self.cache.insert_loop(func_id, begin_pc, compiled);
         Ok(())
@@ -1186,6 +1364,32 @@ impl JitCompiler {
 
     pub fn analysis_memory_stats(&self) -> JitAnalysisMemoryStats {
         self.cache.analysis_memory_stats()
+    }
+    pub fn metadata_memory_stats(&self) -> JitMetadataMemoryStats {
+        self.cache.metadata_memory_stats()
+    }
+    pub fn function_metadata(&self, func_id: u32) -> Option<&JitArtifactMetadata> {
+        self.cache.get_function_metadata(func_id)
+    }
+    pub fn function_metadata_handle(&self, func_id: u32) -> Option<Arc<JitArtifactMetadata>> {
+        self.cache
+            .functions
+            .get(func_id as usize)
+            .and_then(Option::as_ref)
+            .map(|function| Arc::clone(&function.metadata))
+    }
+    pub fn loop_metadata(&self, func_id: u32, begin_pc: usize) -> Option<&JitArtifactMetadata> {
+        self.cache.get_loop_metadata(func_id, begin_pc)
+    }
+    pub fn loop_metadata_handle(
+        &self,
+        func_id: u32,
+        begin_pc: usize,
+    ) -> Option<Arc<JitArtifactMetadata>> {
+        self.cache
+            .loops
+            .get(&(func_id, begin_pc))
+            .map(|loop_artifact| Arc::clone(&loop_artifact.metadata))
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
@@ -1220,14 +1424,16 @@ fn validate_loop_bounds(func: &FunctionDef, loop_info: &LoopInfo) -> Result<(), 
 /// Check if a function may use the native-stack direct JIT path that elides a
 /// materialized VM frame.
 ///
-/// This is stricter than "can be JIT-compiled". Functions that may allocate,
-/// GC, panic/unwind, call, schedule, observe frames, touch interfaces, need
-/// write barriers, or materialize closures can still be JIT-compiled, but their
-/// callers must use a VM-frame/prepared call path.
+/// This is stricter than "can be JIT-compiled". Managed allocation is admitted
+/// because allocation helpers poll before consuming capacity and materialize
+/// on pending collection. Panic/unwind, calls, scheduling, frame observation,
+/// interfaces, write barriers, and closure materialization remain excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitFrameEntryEligibility {
     pub frame_elided: bool,
     pub prepared_shadow: bool,
+    /// Native callers must publish precise roots while this callee runs.
+    pub may_gc: bool,
 }
 
 pub fn jit_frame_entry_eligibility(
@@ -1245,6 +1451,7 @@ pub(crate) fn jit_frame_entry_eligibility_for_contract(
     JitFrameEntryEligibility {
         frame_elided: has_direct_returns && contract.permits_frame_elision(),
         prepared_shadow: has_direct_returns && contract.permits_prepared_shadow_frame(),
+        may_gc: contract.may_gc,
     }
 }
 
@@ -1268,9 +1475,9 @@ pub fn can_elide_frame_for_direct_jit(func: &vo_runtime::bytecode::FunctionDef) 
 ///
 /// A shadow window has precise slots and a current JIT function id, but it has
 /// no `Fiber::CallFrame` until a non-OK result is materialized. It can therefore
-/// run instructions that need spilling or trap handling. Allocation, unwind,
-/// scheduling, and instructions that own or observe frame transitions remain
-/// excluded.
+/// run instructions that need spilling or trap handling. Allocation uses the
+/// same pre-capacity poll. Unwind, scheduling, and instructions that own or
+/// observe frame transitions remain excluded.
 pub fn can_enter_prepared_shadow_frame_for_jit(func: &vo_runtime::bytecode::FunctionDef) -> bool {
     jit_frame_entry_eligibility(func).prepared_shadow
 }

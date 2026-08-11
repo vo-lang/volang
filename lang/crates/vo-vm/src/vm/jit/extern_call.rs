@@ -172,7 +172,7 @@ pub extern "C" fn jit_call_extern(
                 ctx,
                 vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
                 extern_id as u64,
-                "JIT extern scratch allocation failed".to_string(),
+                "JIT extern scratch allocation failed",
             );
         }
         heap_buffer.resize(frame_slots, 0);

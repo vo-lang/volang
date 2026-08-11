@@ -92,6 +92,11 @@ pub fn render_run_observation_json(
         "prepared_jit_dispatches": observation.prepared_jit_dispatches,
         "prepared_vm_dispatches": observation.prepared_vm_dispatches,
         "dynamic_ic_publications": observation.dynamic_ic_publications,
+        "gc_safepoint_callbacks": observation.gc_safepoint_callbacks,
+        "native_root_frames_scanned": observation.native_root_frames_scanned,
+        "native_roots_scanned": observation.native_roots_scanned,
+        "native_root_conditional_frames": observation.native_root_conditional_frames,
+        "native_root_scan_budget_exhaustions": observation.native_root_scan_budget_exhaustions,
     }))
 }
 
@@ -510,6 +515,11 @@ mod terminal_outcome_tests {
         assert_eq!(value["prepared_jit_dispatches"], 0);
         assert_eq!(value["prepared_vm_dispatches"], 0);
         assert_eq!(value["dynamic_ic_publications"], 0);
+        assert_eq!(value["gc_safepoint_callbacks"], 0);
+        assert_eq!(value["native_root_frames_scanned"], 0);
+        assert_eq!(value["native_roots_scanned"], 0);
+        assert_eq!(value["native_root_conditional_frames"], 0);
+        assert_eq!(value["native_root_scan_budget_exhaustions"], 0);
         for reason in vo_vm::JitSideExitReason::ALL {
             assert_eq!(value["side_exits"][reason.as_str()], 0);
         }

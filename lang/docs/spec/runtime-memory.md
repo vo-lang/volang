@@ -61,6 +61,33 @@ finite limits. Full-function and loop-OSR compilation MUST share one immutable
 function analysis. Evictable analysis state MUST NOT be pinned by a second VM
 manager cache.
 
+JIT safepoint metadata MUST have a separate finite per-family limit and MUST be
+retained for exactly the lifetime of its published code. Every complete
+function and loop-OSR artifact that contains direct or conditional roots and
+can reach a native GC safepoint MUST link an active native-frame record while
+it executes. Scalar-only and safepoint-free artifacts MAY omit that record.
+Direct `GcRef` values live across a safepoint MUST have precise SP-relative
+stack-map entries in an explicit shadow-root area. Ordinary non-GC calls MUST
+NOT require root maps. Conditional roots whose pointer interpretation depends
+on runtime type tags MUST carry a machine-readable materialization requirement.
+Collection MUST wait until those frames have been materialized into typed VM
+frames.
+
+Allocation-capable generated code MUST poll before consuming new managed-heap
+capacity. The no-work path MAY use runtime-owned raw GC field offsets. The
+taken path MUST publish the current bytecode pc and all materializable frame
+state before returning to the scheduler. Native-frame validation and the
+subsequent VM root scan MUST each have finite work budgets. Allocation helpers
+MUST NOT start an implicit collection while generated frames remain active.
+Helpers that allocate only on a structural slow path SHOULD defer that
+allocation, let generated code poll, and retry with explicit allocation
+permission. A replay credential MUST be scoped to one exact function and
+instruction, MUST authorize at most one retry, and MUST be issued only after a
+collector slice completed. That exact retry MAY allocate while debt remains or
+a collection cycle is active; the next allocation-capable instruction MUST poll
+again. This guarantees progress by alternating bounded collector work with at
+least one mutator allocation.
+
 Each VM MUST also enforce finite limits for scheduled Fiber identities, stack
 slots per Fiber, call frames per Fiber, and aggregate native Fiber stack/frame
 storage. A runtime transition that publishes multiple spawns MUST reserve all
@@ -163,6 +190,10 @@ contract.
 
 Map bucket backing and queued guest payload slots MUST be represented by
 managed runtime-backing objects and precisely traced.
+
+An incremental map scan MUST record the backing generation. If resize replaces
+and rehashes the backing between bounded scan chunks, scanning MUST restart at
+the beginning of the new generation and remain work-budgeted.
 
 Native protocol metadata, including waiter and endpoint bookkeeping, MAY
 remain in Rust containers. Hosts that enforce a total-process limit MUST budget
@@ -315,6 +346,8 @@ A conforming implementation MUST test:
 - bounded root/object/card/remark/sweep work;
 - minor/major reachability under mutation;
 - Interpreter and generated JIT OOM exits;
+- full-function and loop-OSR precise stack maps, nested native-frame chains,
+  conditional-root materialization, and bounded safepoint scans;
 - managed map and queue backing reachability;
 - child-Island configuration inheritance and heap isolation;
 - lease generation and capacity failures;

@@ -19,10 +19,11 @@ pub enum JitSideExitReason {
     InterpretedFeedbackDisabled = 12,
     InterpretedResourceRejected = 13,
     InterpretedCompilerFault = 14,
+    GcSafepoint = 15,
 }
 
 impl JitSideExitReason {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::InterpretedCold,
         Self::RegularCall,
         Self::PreparedDynamicCall,
@@ -38,6 +39,7 @@ impl JitSideExitReason {
         Self::InterpretedFeedbackDisabled,
         Self::InterpretedResourceRejected,
         Self::InterpretedCompilerFault,
+        Self::GcSafepoint,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -58,6 +60,7 @@ impl JitSideExitReason {
             Self::InterpretedFeedbackDisabled => "interpreted_feedback_disabled",
             Self::InterpretedResourceRejected => "interpreted_resource_rejected",
             Self::InterpretedCompilerFault => "interpreted_compiler_fault",
+            Self::GcSafepoint => "gc_safepoint",
         }
     }
 
@@ -113,6 +116,16 @@ pub struct JitExecutionStats {
     pub prepared_vm_dispatches: u64,
     /// Dynamic-call misses that published an eligible native IC entry.
     pub dynamic_ic_publications: u64,
+    /// Taken allocation polls that entered the VM safepoint callback.
+    pub gc_safepoint_callbacks: u64,
+    /// Native JIT frames validated through precise stack maps.
+    pub native_root_frames_scanned: u64,
+    /// Exact native root slots visited through precise stack maps.
+    pub native_roots_scanned: u64,
+    /// Native frames whose interface/tagged roots require VM materialization.
+    pub native_root_conditional_frames: u64,
+    /// Bounded native scans completed by materializing into the VM scanner.
+    pub native_root_scan_budget_exhaustions: u64,
 }
 
 impl JitExecutionStats {

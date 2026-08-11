@@ -658,7 +658,38 @@ pub struct Gc {
     /// boundary runs a GC step even when there is no allocation debt, forcing
     /// mark/sweep interleavings that are otherwise rare.
     stress_every_step: bool,
+    /// Cached fast-path predicate consumed by generated JIT allocation polls.
+    /// Every production mutation of its inputs updates this byte.
+    jit_poll_required: bool,
     last_step_stats: GcStepStats,
+}
+
+/// Raw fields used by the JIT's allocation safepoint fast poll.
+///
+/// `Gc` is `repr(C)` and these offsets are derived in the runtime crate, so
+/// generated code never duplicates the collector's layout. The slow path
+/// still calls `Gc::should_step` through the VM callback before collection.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitGcPollField {
+    Required,
+    AutomaticGc,
+    State,
+    Debt,
+    StressEveryStep,
+}
+
+impl JitGcPollField {
+    #[inline]
+    pub const fn offset(self) -> i32 {
+        match self {
+            Self::Required => core::mem::offset_of!(Gc, jit_poll_required) as i32,
+            Self::AutomaticGc => core::mem::offset_of!(Gc, automatic_gc) as i32,
+            Self::State => core::mem::offset_of!(Gc, state) as i32,
+            Self::Debt => core::mem::offset_of!(Gc, debt) as i32,
+            Self::StressEveryStep => core::mem::offset_of!(Gc, stress_every_step) as i32,
+        }
+    }
 }
 
 impl Gc {
@@ -795,6 +826,7 @@ impl Gc {
             work_units_total: 0,
             max_step_work_units: 0,
             stress_every_step: false,
+            jit_poll_required: false,
             last_step_stats: GcStepStats::default(),
         })
     }
@@ -979,6 +1011,7 @@ impl Gc {
         self.reject_owner_proxy_api("gc_request_major");
         self.force_major_cycle = true;
         self.debt = self.debt.max(1);
+        self.refresh_jit_poll_required();
     }
 
     /// Request ordinary cycle scheduling without changing the selected mode.
@@ -986,6 +1019,7 @@ impl Gc {
     pub fn gc_request_cycle(&mut self) {
         self.reject_owner_proxy_api("gc_request_cycle");
         self.debt = self.debt.max(1);
+        self.refresh_jit_poll_required();
     }
 
     /// Notify the collector that a root changed after a completed remark or
@@ -1010,12 +1044,14 @@ impl Gc {
     pub fn gc_stop(&mut self) {
         self.reject_owner_proxy_api("gc_stop");
         self.automatic_gc = false;
+        self.refresh_jit_poll_required();
     }
 
     #[inline]
     pub fn gc_restart(&mut self) {
         self.reject_owner_proxy_api("gc_restart");
         self.automatic_gc = true;
+        self.refresh_jit_poll_required();
     }
 
     #[inline]
@@ -1425,6 +1461,9 @@ impl Gc {
             .allocation_bytes_total
             .saturating_add(total_size as u64);
         self.debt += total_size as i64;
+        if !self.jit_poll_required && self.automatic_gc && self.debt > 0 {
+            self.jit_poll_required = true;
+        }
         if matches!(self.state, GcState::Propagate | GcState::Atomic) {
             unsafe { Self::header_mut(data_ptr) }.set_gray();
             debug_assert!(self.gray.len() < self.gray.capacity());
@@ -1813,6 +1852,7 @@ impl Gc {
     pub fn set_stress_every_step(&mut self, enabled: bool) {
         self.reject_owner_proxy_api("set_stress_every_step");
         self.stress_every_step = enabled;
+        self.refresh_jit_poll_required();
     }
 
     /// Returns whether GC stress mode is enabled.
@@ -1833,6 +1873,12 @@ impl Gc {
         self.reject_owner_proxy_api("should_step");
         self.stress_every_step
             || (self.automatic_gc && (self.debt > 0 || self.state != GcState::Pause))
+    }
+
+    #[inline]
+    fn refresh_jit_poll_required(&mut self) {
+        self.jit_poll_required = self.stress_every_step
+            || (self.automatic_gc && (self.debt > 0 || self.state != GcState::Pause));
     }
 
     /// Incremental GC step. Returns work done (bytes processed).
@@ -2576,6 +2622,7 @@ impl Gc {
         let growth_percent = self.pause.saturating_sub(100).max(1);
         let threshold = (self.estimate as u64 * growth_percent as u64 / 100) as i64;
         self.debt = -threshold.max(1024);
+        self.refresh_jit_poll_required();
     }
 
     pub fn total_bytes(&self) -> usize {

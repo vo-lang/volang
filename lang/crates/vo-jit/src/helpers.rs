@@ -17,6 +17,7 @@ use crate::JitError;
 struct RuntimeHelperId {
     func_id: cranelift_module::FuncId,
     requires_frame_sync: bool,
+    requires_gc_poll: bool,
 }
 
 /// A Cranelift import paired with the frame policy from the runtime ABI
@@ -26,6 +27,7 @@ struct RuntimeHelperId {
 pub struct RuntimeHelper {
     func_ref: FuncRef,
     requires_frame_sync: bool,
+    requires_gc_poll: bool,
 }
 
 impl RuntimeHelper {
@@ -35,6 +37,10 @@ impl RuntimeHelper {
 
     pub(crate) fn requires_frame_sync(self) -> bool {
         self.requires_frame_sync
+    }
+
+    pub(crate) fn requires_gc_poll(self) -> bool {
+        self.requires_gc_poll
     }
 }
 
@@ -104,6 +110,7 @@ fn declare_runtime_helper(
     Ok(RuntimeHelperId {
         func_id: declare_import(module, name, sig)?,
         requires_frame_sync: abi.requires_frame_sync(),
+        requires_gc_poll: abi.requires_gc_poll(),
     })
 }
 
@@ -161,6 +168,7 @@ macro_rules! runtime_helper_table {
                         let helper = RuntimeHelper {
                             func_ref: self.module.declare_func_in_func(id.func_id, func),
                             requires_frame_sync: id.requires_frame_sync,
+                            requires_gc_poll: id.requires_gc_poll,
                         };
                         self.$field = Some(helper);
                         helper
@@ -194,6 +202,7 @@ macro_rules! runtime_helper_table {
 }
 
 runtime_helper_table! {
+    gc_safepoint => "vo_jit_gc_safepoint",
     gc_alloc => "vo_gc_alloc",
     write_barrier => "vo_gc_write_barrier",
     typed_write_barrier_by_meta => "vo_gc_typed_write_barrier_by_meta",

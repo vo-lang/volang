@@ -5,6 +5,7 @@
 
 pub mod closure_call;
 pub mod defer;
+pub mod gc_safepoint;
 pub mod goroutine;
 pub mod helpers;
 pub mod island;
@@ -13,6 +14,7 @@ pub mod select;
 
 pub use closure_call::{jit_prepare_closure_call, jit_prepare_iface_call};
 pub use defer::{jit_defer_push, jit_recover};
+pub use gc_safepoint::jit_gc_safepoint;
 pub use goroutine::{jit_go_island, jit_go_start};
 pub use helpers::jit_stack_overflow;
 pub use island::jit_create_island;

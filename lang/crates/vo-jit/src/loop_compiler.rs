@@ -21,6 +21,7 @@ pub type LoopFunc = extern "C" fn(*mut JitContext, *mut u64) -> JitResult;
 pub struct CompiledLoop {
     pub(crate) code_ptr: *const u8,
     pub(crate) loop_info: LoopInfo,
+    pub(crate) metadata: std::sync::Arc<crate::JitArtifactMetadata>,
 }
 
 unsafe impl Send for CompiledLoop {}

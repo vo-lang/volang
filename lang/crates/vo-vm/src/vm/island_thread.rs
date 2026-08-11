@@ -443,6 +443,7 @@ mod tests {
             debug_ir: false,
             code_memory_limit_bytes: 13,
             analysis_memory_limit_bytes: 14,
+            metadata_memory_limit_bytes: 15,
         };
         let strict_config = JitConfig {
             call_threshold: 21,
@@ -450,6 +451,7 @@ mod tests {
             debug_ir: false,
             code_memory_limit_bytes: 23,
             analysis_memory_limit_bytes: 24,
+            metadata_memory_limit_bytes: 25,
         };
         let child_modes = [
             VmJitState::Disabled.child_mode(),
@@ -492,6 +494,10 @@ mod tests {
             child_best_effort.analysis_memory_limit_bytes,
             best_effort_config.analysis_memory_limit_bytes
         );
+        assert_eq!(
+            child_best_effort.metadata_memory_limit_bytes,
+            best_effort_config.metadata_memory_limit_bytes
+        );
         assert_eq!(child_strict.call_threshold, strict_config.call_threshold);
         assert_eq!(child_strict.loop_threshold, strict_config.loop_threshold);
         assert_eq!(child_strict.debug_ir, strict_config.debug_ir);
@@ -502,6 +508,10 @@ mod tests {
         assert_eq!(
             child_strict.analysis_memory_limit_bytes,
             strict_config.analysis_memory_limit_bytes
+        );
+        assert_eq!(
+            child_strict.metadata_memory_limit_bytes,
+            strict_config.metadata_memory_limit_bytes
         );
 
         let best_effort_vm = create_island_vm(

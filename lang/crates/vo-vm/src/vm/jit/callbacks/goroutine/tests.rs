@@ -261,6 +261,10 @@ fn test_context<'a>(
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module,
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     }
 }
 

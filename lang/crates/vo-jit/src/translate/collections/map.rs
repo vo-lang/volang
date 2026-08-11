@@ -1,9 +1,11 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, StackSlot, StackSlotData, StackSlotKind, Value};
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::JitRuntimeTrapKind;
+use vo_runtime::jit_api::{JitRuntimeTrapKind, JIT_HELPER_MAP_SET_NEEDS_ALLOCATION};
 
-use crate::translator::{emit_runtime_helper_call, CollectionEmitter, HelperKind};
+use crate::translator::{
+    emit_gc_safepoint_poll, emit_runtime_helper_call, CollectionEmitter, HelperKind,
+};
 use crate::JitError;
 
 use super::emit_return_if_u64_jit_error;
@@ -149,13 +151,65 @@ pub(in crate::translate) fn map_set<'a>(
     let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
 
     let ctx = e.ctx_param();
+    let allocation_deferred = e.builder().ins().iconst(types::I32, 0);
     let call = emit_runtime_helper_call(
         e,
         func,
-        &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32],
+        &[
+            ctx,
+            m,
+            key_ptr,
+            key_slots_i32,
+            val_ptr,
+            val_slots_i32,
+            allocation_deferred,
+        ],
     );
-    let result = e.builder().inst_results(call)[0];
-    emit_return_if_u64_jit_error(e, result);
+    let first_result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, first_result);
+
+    let needs_allocation = e.builder().ins().icmp_imm_u(
+        IntCC::Equal,
+        first_result,
+        JIT_HELPER_MAP_SET_NEEDS_ALLOCATION as i64,
+    );
+    let retry_block = crate::compile_common::cold_block(e.builder());
+    let complete_block = e.builder().create_block();
+    e.builder().append_block_param(complete_block, types::I64);
+    e.builder().ins().brif(
+        needs_allocation,
+        retry_block,
+        &[],
+        complete_block,
+        &[first_result.into()],
+    );
+
+    e.builder().switch_to_block(retry_block);
+    e.builder().seal_block(retry_block);
+    emit_gc_safepoint_poll(e);
+    let allocation_allowed = e.builder().ins().iconst(types::I32, 1);
+    let retry = emit_runtime_helper_call(
+        e,
+        func,
+        &[
+            ctx,
+            m,
+            key_ptr,
+            key_slots_i32,
+            val_ptr,
+            val_slots_i32,
+            allocation_allowed,
+        ],
+    );
+    let retry_result = e.builder().inst_results(retry)[0];
+    emit_return_if_u64_jit_error(e, retry_result);
+    e.builder()
+        .ins()
+        .jump(complete_block, &[retry_result.into()]);
+
+    e.builder().switch_to_block(complete_block);
+    e.builder().seal_block(complete_block);
+    let result = e.builder().block_params(complete_block)[0];
 
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
     emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);

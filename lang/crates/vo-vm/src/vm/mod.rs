@@ -1264,6 +1264,14 @@ impl Vm {
     }
 
     #[cfg(feature = "jit")]
+    pub fn jit_metadata_memory_stats(&self) -> vo_jit::JitMetadataMemoryStats {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.metadata_memory_stats())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "jit")]
     pub fn jit_unsupported_function_count(&self) -> usize {
         self.jit
             .manager()

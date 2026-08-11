@@ -94,6 +94,7 @@ pub(super) fn handle_jit_non_ok_transition(
         JitResult::Replay => wait::handle_replay_transition(vm, fiber, module, ctx),
         JitResult::ExternSuspend => wait::handle_extern_suspend_transition(mode, vm, fiber, module),
         JitResult::RuntimeTransition => wait::handle_runtime_transition(vm, fiber, module, ctx),
+        JitResult::GcSafepoint => wait::handle_gc_safepoint_transition(vm, fiber, module, ctx),
     }
 }
 
@@ -138,6 +139,53 @@ mod tests {
                 .expect("jit manager")
                 .execution_stats()
                 .side_exit_count(JitSideExitReason::Yield),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn vm_jit_gc_safepoint_materializes_current_pc_and_yields() {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-gc-safepoint".to_string());
+        module.functions.push(function(1, 0));
+        vm.finish_load(module.clone());
+        let mut fiber = Fiber::new(11);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
+        ctx.ctx.call_resume_pc = 7;
+        ctx.ctx.gc_poll_resume_func_id = 3;
+        ctx.ctx.gc_poll_resume_pc = 7;
+        ctx.ctx.gc_poll_resume_armed = 1;
+        let before = vm
+            .jit
+            .manager()
+            .expect("jit manager")
+            .execution_stats()
+            .side_exit_count(JitSideExitReason::GcSafepoint);
+
+        let transition = handle_jit_non_ok_transition(
+            JitBridgeMode::FullFunction,
+            &mut vm,
+            &mut fiber,
+            &module,
+            JitResult::GcSafepoint,
+            &ctx,
+        );
+
+        assert!(matches!(transition, JitBridgeTransition::TimesliceExpired));
+        assert_eq!(fiber.frames.last().expect("entry frame").pc, 7);
+        assert_eq!(fiber.jit_gc_poll_resume, Some((3, 7)));
+        let resumed_ctx = build_jit_context(&mut vm, &mut fiber).expect("resumed jit context");
+        assert_eq!(resumed_ctx.ctx.gc_poll_resume_func_id, 3);
+        assert_eq!(resumed_ctx.ctx.gc_poll_resume_pc, 7);
+        assert_eq!(resumed_ctx.ctx.gc_poll_resume_armed, 1);
+        assert_eq!(fiber.jit_gc_poll_resume, None);
+        assert_eq!(
+            vm.jit
+                .manager()
+                .expect("jit manager")
+                .execution_stats()
+                .side_exit_count(JitSideExitReason::GcSafepoint),
             before + 1
         );
     }

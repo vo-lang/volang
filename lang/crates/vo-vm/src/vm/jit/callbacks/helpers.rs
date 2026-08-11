@@ -8,6 +8,7 @@ use vo_runtime::SlotType;
 use crate::fiber::Fiber;
 use crate::runtime_boundary::RuntimeTransition;
 use crate::vm::{RuntimeTrapKind, Vm, VmState};
+use vo_runtime::jit_api::JitNativeFrame;
 
 /// VM capabilities available to JIT callbacks.
 ///
@@ -26,6 +27,37 @@ impl JitCallbackVm<'_> {
     #[inline]
     pub(super) fn state_mut(&mut self) -> &mut VmState {
         &mut self.vm.state
+    }
+
+    #[inline]
+    pub(super) fn gc_should_step(&self) -> bool {
+        self.vm.state.gc.should_step()
+    }
+
+    /// Validate and visit the exact roots in all paused native callers.
+    /// Collection itself runs after the JIT side exit, where the VM's existing
+    /// resumable root scanner owns the bounded GC work.
+    pub(super) unsafe fn visit_native_roots<F>(
+        &mut self,
+        frame: *mut JitNativeFrame,
+        ctx: *mut JitContext,
+        max_frames: usize,
+        max_roots: usize,
+        visit: F,
+    ) -> Result<crate::vm::jit_mgr::NativeRootScanStats, vo_jit::JitError>
+    where
+        F: FnMut(*mut u64),
+    {
+        let manager = self.vm.jit.manager().ok_or_else(|| {
+            vo_jit::JitError::Internal("GC safepoint reached without a JIT manager".to_string())
+        })?;
+        let scan = unsafe { manager.visit_native_roots(frame, ctx, max_frames, max_roots, visit) }?;
+        self.vm
+            .jit
+            .manager_mut()
+            .expect("validated JIT callback must retain its manager")
+            .record_native_root_scan(scan);
+        Ok(scan)
     }
 
     #[inline]

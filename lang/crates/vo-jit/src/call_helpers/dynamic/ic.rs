@@ -10,9 +10,9 @@ use crate::JitError;
 
 use super::super::prepared::{emit_prepared_call, PreparedCallParams};
 use super::super::{
-    emit_call_depth_enter, emit_call_depth_leave, emit_non_ok_slow_path, emit_stack_capacity_check,
-    import_jit_func_sig, load_current_func_id, restore_caller_execution_context,
-    NonOkSlowPathParams, JIT_RESULT_OK,
+    emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
+    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_current_func_id,
+    restore_caller_execution_context, JitCallGcMode, NonOkSlowPathParams, JIT_RESULT_OK,
 };
 
 /// Maximum callee local_slots for the IC native-stack optimization.
@@ -29,6 +29,7 @@ pub(super) struct IcHitParams {
     pub(super) ic_args_ptr: Value,
     pub(super) ic_local_slots: Value,
     pub(super) ic_func_id: Value,
+    pub(super) ic_may_gc: Value,
     pub(super) ret_ptr: Value,
     pub(super) caller_bp: Value,
     pub(super) old_fiber_sp: Value,
@@ -63,6 +64,7 @@ pub(super) struct DynamicMissParams {
 pub(super) struct DynamicIcHitFields {
     pub(super) local_slots: Value,
     pub(super) func_id: Value,
+    pub(super) may_gc: Value,
 }
 
 /// Emit the shared IC hit fast path: copy user args, update ctx, call JIT, and
@@ -102,12 +104,15 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     emitter.store_context_field(new_sp, JitContextField::FiberSp);
 
     let jit_func_sig = import_jit_func_sig(emitter);
-    let jit_call = emitter.builder().ins().call_indirect(
+    let jit_result = emit_effect_aware_jit_call(
+        emitter,
         jit_func_sig,
         p.ic_jit_ptr,
-        &[p.ctx, p.ic_args_ptr, p.ret_ptr],
+        p.ctx,
+        p.ic_args_ptr,
+        p.ret_ptr,
+        JitCallGcMode::Dynamic(p.ic_may_gc),
     );
-    let jit_result = emitter.builder().inst_results(jit_call)[0];
     emit_call_depth_leave(emitter, old_call_depth);
 
     let ok_val = emitter
@@ -190,6 +195,12 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             p.out_slot,
             PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS,
         );
+        let out_jit_may_gc = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I32,
+            p.out_slot,
+            PreparedCall::OFFSET_JIT_MAY_GC,
+        );
         let null_jit = emitter.builder().ins().iconst(types::I64, 0);
         let has_jit = emitter
             .builder()
@@ -239,6 +250,13 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
                 .ins()
                 .store(MemFlags::trusted(), value, update.entry, offset);
         }
+        let out_jit_may_gc = emitter.builder().ins().ireduce(types::I16, out_jit_may_gc);
+        emitter.builder().ins().store(
+            MemFlags::trusted(),
+            out_jit_may_gc,
+            update.entry,
+            DynCallIC::OFFSET_JIT_MAY_GC,
+        );
         emitter.builder().ins().jump(ic_skip_block, &[]);
 
         emitter.builder().switch_to_block(ic_skip_block);
@@ -263,6 +281,12 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
         p.out_slot,
         PreparedCall::OFFSET_FUNC_ID,
     );
+    let jit_may_gc = emitter.builder().ins().stack_load(
+        types::I64,
+        types::I32,
+        p.out_slot,
+        PreparedCall::OFFSET_JIT_MAY_GC,
+    );
 
     emit_prepared_call(
         emitter,
@@ -270,6 +294,7 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             jit_func_ptr,
             callee_args_ptr,
             func_id,
+            jit_may_gc,
             ret_ptr: p.ret_ptr,
             caller_bp: p.caller_bp,
             old_fiber_sp: p.old_fiber_sp,
@@ -358,8 +383,16 @@ pub(super) fn load_hit_fields<'a, E: IrEmitter<'a>>(
         ic_entry,
         DynCallIC::OFFSET_FUNC_ID,
     );
+    let may_gc = emitter.builder().ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        ic_entry,
+        DynCallIC::OFFSET_JIT_MAY_GC,
+    );
+    let may_gc = emitter.builder().ins().uextend(types::I32, may_gc);
     DynamicIcHitFields {
         local_slots,
         func_id,
+        may_gc,
     }
 }

@@ -173,6 +173,10 @@ fn test_context(
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module,
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     }
 }
 
@@ -195,8 +199,14 @@ fn vm_jit_table_lookup_requires_dispatch_eligibility() {
         1,
         1,
     )];
-    assert!(!vo_jit::can_elide_frame_for_direct_jit(&alloc));
-    assert!(!vo_jit::can_enter_prepared_shadow_frame_for_jit(&alloc));
+    alloc.local_slots = 2;
+    alloc.slot_types = vec![SlotType::GcRef, SlotType::Value];
+    alloc.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&alloc.slot_types);
+    alloc.borrowed_scan_slots_prefix =
+        FunctionDef::compute_borrowed_scan_slots_prefix(&alloc.slot_types);
+    alloc.instruction_metadata = vec![InstructionMetadata::None];
+    assert!(vo_jit::can_elide_frame_for_direct_jit(&alloc));
+    assert!(vo_jit::can_enter_prepared_shadow_frame_for_jit(&alloc));
     assert!(!vo_jit::can_enter_prepared_shadow_frame_for_jit(&func(
         true, false, false
     )));
@@ -990,6 +1000,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         ic_jit_func_ptr: 1 as *const u8,
         callee_local_slots: 7,
         func_id: 7,
+        jit_may_gc: 1,
     };
 
     let result = jit_prepare_closure_call(
@@ -1118,6 +1129,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
         ic_jit_func_ptr: 1 as *const u8,
         callee_local_slots: 7,
         func_id: 7,
+        jit_may_gc: 1,
     };
 
     let result = jit_prepare_iface_call(

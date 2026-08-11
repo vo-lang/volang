@@ -8,6 +8,180 @@ fn backend_allocation_failure_is_a_resource_rejection() {
     assert_eq!(error.failure_kind(), JitFailureKind::ResourceRejected);
 }
 
+#[test]
+fn native_root_frames_are_omitted_for_scalar_only_artifacts() {
+    let scalar = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1);
+    assert!(!function_needs_native_root_frame(&scalar));
+
+    let direct_root = make_func_with_slot_types_and_sig(
+        vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        vec![SlotType::GcRef],
+        0,
+        0,
+        0,
+    );
+    assert!(function_needs_native_root_frame(&direct_root));
+
+    let conditional_root = make_func_with_slot_types_and_sig(
+        vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        vec![SlotType::Interface0, SlotType::Interface1],
+        0,
+        0,
+        0,
+    );
+    assert!(function_needs_native_root_frame(&conditional_root));
+}
+
+#[test]
+fn compiled_artifact_retains_precise_live_gcref_stack_maps() {
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::StrSlice, 3, 0, 1),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        3,
+        3,
+        1,
+    );
+    func.ret_slot_types = vec![SlotType::GcRef];
+    let mut module = VoModule::new("jit-native-stack-map".into());
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create JIT compiler");
+
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+    )
+    .expect("compile stack-map probe");
+
+    let metadata = jit.function_metadata(0).expect("artifact metadata");
+    assert!(metadata.code_size > 0);
+    assert!(
+        metadata.stack_maps.iter().any(|map| {
+            map.roots
+                .iter()
+                .any(|root| root.kind == NativeRootKind::GcRef)
+        }),
+        "a GcRef that is live across an allocating helper must be in a native stack map"
+    );
+    for map in metadata.stack_maps.iter() {
+        assert_eq!(
+            metadata
+                .map_for_safepoint_id(map.safepoint_id)
+                .map(|resolved| resolved.return_address_offset),
+            Some(map.return_address_offset)
+        );
+        assert!(map.anchor_sp_offset < map.frame_size);
+    }
+    assert!(jit.metadata_memory_stats().retained_bytes >= metadata.retained_bytes());
+
+    let entry = unsafe { jit.get_func_ptr(0).expect("compiled entry") };
+    let mut gc = bounded_gc(16);
+    let source = vo_runtime::objects::string::create(&mut gc, b"x");
+    let mut args = [source as u64, 0, 1, 0];
+    let mut ret = [0u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.gc = &mut gc;
+    assert_eq!(
+        entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], source as u64);
+    assert!(ctx.native_frame.is_null());
+}
+
+#[test]
+fn native_metadata_budget_rejects_before_artifact_publication() {
+    let func = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 0);
+    let mut module = VoModule::new("jit-native-metadata-budget".into());
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::with_all_resource_limits(
+        false,
+        DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES,
+        MAX_JIT_ANALYSIS_BYTES,
+        0,
+    )
+    .expect("reserve JIT arena");
+
+    let error = jit
+        .compile(
+            0,
+            &module.functions[0],
+            &module,
+            default_compile_env(&externs),
+        )
+        .expect_err("zero metadata budget must reject the artifact");
+
+    assert!(matches!(
+        error,
+        JitError::MetadataResourceLimitExceeded {
+            limit_bytes: 0,
+            used_bytes: 0,
+            requested_bytes: _,
+        }
+    ));
+    assert_eq!(error.failure_kind(), JitFailureKind::ResourceRejected);
+    assert!(unsafe { jit.get_func_ptr(0) }.is_none());
+    assert_eq!(jit.metadata_memory_stats().retained_bytes, 0);
+}
+
+#[test]
+fn osr_artifact_retains_precise_live_gcref_stack_maps() {
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::StrSlice, 3, 0, 1),
+            Instruction::new(Opcode::Jump, 0, u16::MAX, u16::MAX),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        3,
+        3,
+        1,
+    );
+    func.ret_slot_types = vec![SlotType::GcRef];
+    let mut module = VoModule::new("jit-osr-native-stack-map".into());
+    module.functions.push(func);
+    let loop_info = LoopInfo {
+        begin_pc: 0,
+        end_pc: 1,
+        exit_pc: 2,
+    };
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create JIT compiler");
+
+    jit.compile_loop(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+        &loop_info,
+    )
+    .expect("compile OSR stack-map probe");
+
+    let metadata = jit.loop_metadata(0, 0).expect("OSR metadata");
+    assert!(metadata.stack_maps.iter().any(|map| {
+        map.roots
+            .iter()
+            .any(|root| root.kind == NativeRootKind::GcRef)
+    }));
+    assert!(unsafe { jit.get_loop_func_ptr(0, 0) }.is_some());
+}
+
 fn bounded_gc(max_objects: usize) -> vo_runtime::gc::Gc {
     vo_runtime::gc::Gc::with_memory_config(vo_runtime::gc::VmMemoryConfig {
         max_objects: Some(max_objects),

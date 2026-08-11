@@ -1375,3 +1375,40 @@ fn scan_slots_by_types_rejects_malformed_interface_pair() {
         &[crate::SlotType::Interface0, crate::SlotType::Value],
     );
 }
+
+#[test]
+fn jit_gc_poll_fields_match_should_step_policy() {
+    fn raw_policy(gc: &Gc) -> bool {
+        let base = core::ptr::from_ref(gc).cast::<u8>();
+        let read_u8 = |field: JitGcPollField| unsafe { base.add(field.offset() as usize).read() };
+        let debt = unsafe {
+            base.add(JitGcPollField::Debt.offset() as usize)
+                .cast::<i64>()
+                .read()
+        };
+        read_u8(JitGcPollField::StressEveryStep) != 0
+            || (read_u8(JitGcPollField::AutomaticGc) != 0
+                && (debt > 0 || read_u8(JitGcPollField::State) != GcState::Pause as u8))
+    }
+
+    fn cached_poll(gc: &Gc) -> bool {
+        let base = core::ptr::from_ref(gc).cast::<u8>();
+        unsafe { base.add(JitGcPollField::Required.offset() as usize).read() != 0 }
+    }
+
+    fn assert_poll(gc: &Gc) {
+        assert_eq!(raw_policy(gc), gc.should_step());
+        assert_eq!(cached_poll(gc), gc.should_step());
+    }
+
+    let mut gc = Gc::new();
+    assert_poll(&gc);
+    gc.gc_request_cycle();
+    assert_poll(&gc);
+    gc.gc_stop();
+    assert_poll(&gc);
+    gc.gc_restart();
+    assert_poll(&gc);
+    gc.set_stress_every_step(true);
+    assert_poll(&gc);
+}

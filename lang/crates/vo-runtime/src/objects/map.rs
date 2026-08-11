@@ -58,6 +58,12 @@ pub enum MapKeyError {
     AllocationFailed(MemoryError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MapSetOutcome {
+    Set,
+    NeedsAllocation,
+}
+
 #[derive(Clone, Copy)]
 struct MapRuntimeMetadata<'a> {
     type_metadata: RuntimeTypeMetadata<'a>,
@@ -660,7 +666,35 @@ pub unsafe fn set_checked(
     module: Option<ModuleRuntimeMetadata<'_>>,
 ) -> Result<(), MapKeyError> {
     unsafe {
-        set_checked_with_metadata(gc, m, key, val, module.map(MapRuntimeMetadata::from_module))
+        set_checked_with_metadata(
+            gc,
+            m,
+            key,
+            val,
+            module.map(MapRuntimeMetadata::from_module),
+            true,
+        )
+        .map(|_| ())
+    }
+}
+
+pub(crate) unsafe fn set_checked_deferred(
+    gc: &mut Gc,
+    m: GcRef,
+    key: &[u64],
+    val: &[u64],
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    allow_allocation: bool,
+) -> Result<MapSetOutcome, MapKeyError> {
+    unsafe {
+        set_checked_with_metadata(
+            gc,
+            m,
+            key,
+            val,
+            module.map(MapRuntimeMetadata::from_module),
+            allow_allocation,
+        )
     }
 }
 
@@ -678,7 +712,9 @@ pub(crate) unsafe fn set_checked_with_type_metadata(
             key,
             val,
             type_metadata.map(MapRuntimeMetadata::from_types),
+            true,
         )
+        .map(|_| ())
     }
 }
 
@@ -688,11 +724,15 @@ unsafe fn set_checked_with_metadata(
     key: &[u64],
     val: &[u64],
     module: Option<MapRuntimeMetadata<'_>>,
-) -> Result<(), MapKeyError> {
+    allow_allocation: bool,
+) -> Result<MapSetOutcome, MapKeyError> {
     validate_entry_slot_counts(m, key.len(), val.len())?;
     let hash = unsafe { key_hash_checked(m, key, module)? };
     let mut backing = unsafe { backing_ref(m) };
     if backing.is_null() {
+        if !allow_allocation {
+            return Ok(MapSetOutcome::NeedsAllocation);
+        }
         backing = unsafe { resize(gc, m, MIN_CAPACITY, module)? };
     }
 
@@ -700,13 +740,16 @@ unsafe fn set_checked_with_metadata(
     let (found, mut insertion) = unsafe { find_bucket(m, backing, key, hash, module) };
     if let Some(index) = found {
         unsafe { write_bucket(m, backing, index, hash, key, val) };
-        return Ok(());
+        return Ok(MapSetOutcome::Set);
     }
 
     let mut previous_state = unsafe { bucket_state(m, backing, insertion) };
     let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize };
     let projected_used = used.saturating_add(usize::from(previous_state == BUCKET_STATE_EMPTY));
     if exceeds_load_factor(projected_used, capacity) {
+        if !allow_allocation {
+            return Ok(MapSetOutcome::NeedsAllocation);
+        }
         let live = unsafe { backing_len(backing) };
         let new_capacity = if exceeds_load_factor(live.saturating_add(1), capacity) {
             capacity
@@ -729,7 +772,7 @@ unsafe fn set_checked_with_metadata(
         let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize } + 1;
         unsafe { set_backing_slot(backing, BACKING_USED_SLOT, used as u64) };
     }
-    Ok(())
+    Ok(MapSetOutcome::Set)
 }
 
 pub unsafe fn delete_checked(
@@ -950,6 +993,32 @@ mod tests {
         let forged = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
         unsafe { MapData::as_mut(map_ref) }.inner = forged as Slot;
         assert!(!unsafe { has_valid_managed_backing_layout(&gc, map_ref) });
+    }
+
+    #[test]
+    fn deferred_set_stops_before_managed_backing_allocation() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, int_meta, int_meta, 1, 1, 0);
+
+        assert_eq!(
+            unsafe { set_checked_deferred(&mut gc, m, &[7], &[11], None, false) },
+            Ok(MapSetOutcome::NeedsAllocation)
+        );
+        assert!(unsafe { backing_ref(m) }.is_null());
+        assert_eq!(unsafe { len(m) }, 0);
+
+        assert_eq!(
+            unsafe { set_checked_deferred(&mut gc, m, &[7], &[11], None, true) },
+            Ok(MapSetOutcome::Set)
+        );
+        assert_eq!(unsafe { len(m) }, 1);
+        assert_eq!(
+            unsafe { get_checked(m, &[7], None) }
+                .expect("map read")
+                .as_deref(),
+            Some(&[11][..])
+        );
     }
 
     #[test]

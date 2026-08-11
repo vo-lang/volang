@@ -388,7 +388,8 @@ fn jit_ok_return_missing_stack_metadata_is_jit_error_instead_of_panic() {
     match result {
         Ok(ExecResult::JitError(msg)) => {
             assert!(msg.contains("JIT stack return"));
-            assert!(msg.contains("slot range 0..2"));
+            assert!(msg.contains("returned_slots=2"));
+            assert!(msg.contains("ret_slot_types=0"));
         }
         Ok(other) => panic!("missing return metadata should be JitError, got {other:?}"),
         Err(_) => panic!("missing return metadata must not panic across the JIT bridge"),
@@ -434,6 +435,7 @@ fn jit_ok_return_at_closure_replay_boundary_caches_results() {
         SlotType::Interface1,
     ]);
     func.ret_slots = 3;
+    func.ret_slot_types = vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1];
     let mut fiber = Fiber::new(0);
     fiber.push_frame(7, 3, 0, 0, 3);
     fiber.closure_replay.push_depth(fiber.frames.len());
@@ -462,11 +464,42 @@ fn jit_ok_return_at_closure_replay_boundary_caches_results() {
 }
 
 #[test]
+fn jit_closure_replay_uses_canonical_return_layout_for_packed_buffer() {
+    let mut gc = Gc::new();
+    let module = Module::new("jit-packed-return-layout-test".to_string());
+    let mut func = func_with_slot_types(vec![SlotType::Value]);
+    func.ret_slots = 2;
+    func.ret_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
+    let mut fiber = Fiber::new(0);
+    fiber.push_frame(7, 1, 0, 0, 2);
+    fiber.closure_replay.push_depth(fiber.frames.len());
+
+    let result = handle_jit_ok_return(
+        &mut gc,
+        &mut fiber,
+        &func,
+        &module,
+        &[0, 0],
+        false,
+        0,
+        19,
+        false,
+    );
+
+    assert!(matches!(result, ExecResult::FrameChanged));
+    assert_eq!(
+        fiber.closure_replay.results[0].1,
+        vec![SlotType::Interface0, SlotType::Interface1]
+    );
+}
+
+#[test]
 fn jit_closure_replay_return_skips_errdefer_without_panicking() {
     let mut gc = Gc::new();
     let module = Module::new("jit-closure-replay-errdefer-test".to_string());
     let mut func = func_with_slot_types(vec![SlotType::Value]);
     func.ret_slots = 1;
+    func.ret_slot_types = vec![SlotType::Value];
     let mut fiber = Fiber::new(0);
     fiber.push_frame(7, 1, 0, 0, 1);
     fiber.closure_replay.push_depth(fiber.frames.len());

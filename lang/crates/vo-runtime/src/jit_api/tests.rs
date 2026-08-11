@@ -20,6 +20,7 @@ fn jit_result_discriminants_match_context_abi_constants() {
             JitResult::RuntimeTransition,
             JitContext::JIT_RESULT_RUNTIME_TRANSITION,
         ),
+        (JitResult::GcSafepoint, JitContext::JIT_RESULT_GC_SAFEPOINT),
     ];
 
     for (result, abi) in results {
@@ -264,6 +265,10 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
     let flags = vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
     let mut dst = [0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
@@ -374,6 +379,10 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
     let flags = u16::from(vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG) | 0x0100;
     let mut dst = [0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
@@ -495,6 +504,10 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
     let flags = vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
     let slot0 = crate::objects::interface::pack_slot0(0, 0, ValueKind::String);
@@ -527,6 +540,21 @@ fn vm_jit_iface_to_iface_abi_061_declares_sentinel_error_channel() {
         JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
         "vo_iface_to_iface ABI manifest must match the helper's sentinel error channel"
     );
+    assert!(
+        !helper.requires_gc_poll(),
+        "interface repacking does not allocate managed heap storage"
+    );
+}
+
+#[test]
+fn jit_map_set_uses_deferred_allocation_poll_contract() {
+    let helper = runtime_helper_abi_fields()
+        .iter()
+        .find(|helper| helper.name == "vo_map_set")
+        .expect("vo_map_set helper ABI entry");
+    assert!(helper.may_gc);
+    assert!(!helper.requires_gc_poll());
+    assert_eq!(helper.params.len(), 7);
 }
 
 #[test]
@@ -646,6 +674,10 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
     let key = [11_u64];
     let mut ret = [0xaaaa_u64, 0xbbbb_u64];
@@ -752,6 +784,10 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
     let mut iter = unsafe { crate::objects::map::iter_init(core::ptr::null_mut()) };
     let mut key = [0xaaaa_u64];
@@ -941,6 +977,10 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
 
     let result = vo_gc_typed_write_barrier_by_meta(
@@ -1029,6 +1069,10 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1240,6 +1284,10 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: u32::MAX,
+        gc_poll_resume_pc: u32::MAX,
+        gc_poll_resume_armed: 0,
     };
 
     let result = vo_call_extern(&mut ctx, 7, core::ptr::null(), 0, core::ptr::null_mut(), 0);

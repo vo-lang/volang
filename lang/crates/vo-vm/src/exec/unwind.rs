@@ -134,7 +134,7 @@ pub fn handle_jit_ok_return(
     ret: &[u64],
     heap_returns: bool,
     _ret_gcref_start: usize,
-    ret_start: usize,
+    _ret_start: usize,
     include_errdefers: bool,
 ) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
@@ -181,11 +181,10 @@ pub fn handle_jit_ok_return(
                     slots_per_ref,
                 })
             } else {
-                let slot_types = match try_require_slot_types(
+                let slot_types = match try_require_jit_return_slot_types(
                     func,
                     current_frame.func_id,
                     current_frame.pc,
-                    ret_start,
                     ret.len(),
                     "JIT closure replay deferred stack return",
                 ) {
@@ -244,18 +243,11 @@ pub fn handle_jit_ok_return(
             return call_defer_entry(gc, fiber, &first_defer, module);
         }
 
-        let (vals, slot_types) = match jit_return_values_for_replay(
-            gc,
-            fiber,
-            func,
-            current_frame,
-            ret,
-            heap_returns,
-            ret_start,
-        ) {
-            Ok(values) => values,
-            Err(result) => return result,
-        };
+        let (vals, slot_types) =
+            match jit_return_values_for_replay(gc, fiber, func, current_frame, ret, heap_returns) {
+                Ok(values) => values,
+                Err(result) => return result,
+            };
         fiber.closure_replay.results.push((vals, slot_types));
         fiber.closure_replay.pop_depth();
         let _ = pop_frame(fiber);
@@ -315,13 +307,14 @@ pub fn handle_jit_ok_return(
             pending,
         )
     } else {
-        // Extract slot_types from func for GC scanning
+        // The JIT return buffer is densely packed in signature order. Its type
+        // coordinates therefore come from the canonical return layout, while
+        // Return.a names the source register range in the callee frame.
         let ret_count = ret.len();
-        let slot_types = match try_require_slot_types(
+        let slot_types = match try_require_jit_return_slot_types(
             func,
             current_frame.func_id,
             current_frame.pc,
-            ret_start,
             ret_count,
             "JIT stack return",
         ) {
@@ -407,14 +400,12 @@ fn jit_return_values_for_replay(
     frame: CallFrame,
     ret: &[u64],
     heap_returns: bool,
-    ret_start: usize,
 ) -> Result<(Vec<u64>, Vec<vo_runtime::SlotType>), ExecResult> {
     if !heap_returns {
-        let slot_types = try_require_slot_types(
+        let slot_types = try_require_jit_return_slot_types(
             func,
             frame.func_id,
             frame.pc,
-            ret_start,
             ret.len(),
             "JIT closure replay stack return",
         )?;
@@ -593,6 +584,28 @@ fn try_require_slot_types(
         )));
     }
     Ok(func.slot_types[start..end].to_vec())
+}
+
+fn try_require_jit_return_slot_types(
+    func: &FunctionDef,
+    func_id: u32,
+    pc: usize,
+    count: usize,
+    context: &'static str,
+) -> Result<Vec<vo_runtime::SlotType>, ExecResult> {
+    if count != func.ret_slots as usize || count != func.ret_slot_types.len() {
+        return Err(ExecResult::JitError(format!(
+            "{} metadata mismatch: func_id={} name={} pc={} returned_slots={} ret_slots={} ret_slot_types={}",
+            context,
+            func_id,
+            func.name,
+            pc,
+            count,
+            func.ret_slots,
+            func.ret_slot_types.len()
+        )));
+    }
+    Ok(func.ret_slot_types.clone())
 }
 
 fn try_require_heap_ret_slots(

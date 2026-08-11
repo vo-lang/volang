@@ -184,6 +184,77 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     })
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum JitCallGcMode {
+    Never,
+    MayGc,
+    Dynamic(Value),
+}
+
+/// Emit one native JIT call and attach a precise root map only on paths whose
+/// selected target can enter a managed-heap safepoint.
+pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    jit_func_sig: SigRef,
+    jit_func_ptr: Value,
+    ctx: Value,
+    args_ptr: Value,
+    ret_ptr: Value,
+    mode: JitCallGcMode,
+) -> Value {
+    let emit_call = |emitter: &mut E, attach_roots: bool| {
+        let native_roots = attach_roots.then(|| emitter.spill_native_roots()).flatten();
+        let call = emitter.builder().ins().call_indirect(
+            jit_func_sig,
+            jit_func_ptr,
+            &[ctx, args_ptr, ret_ptr],
+        );
+        if attach_roots {
+            emitter.attach_native_roots(call, native_roots);
+        }
+        emitter.builder().inst_results(call)[0]
+    };
+
+    match mode {
+        JitCallGcMode::Never => emit_call(emitter, false),
+        JitCallGcMode::MayGc => emit_call(emitter, true),
+        JitCallGcMode::Dynamic(may_gc) => {
+            let zero = emitter.builder().ins().iconst(types::I32, 0);
+            let needs_roots = emitter.builder().ins().icmp(IntCC::NotEqual, may_gc, zero);
+            let gc_block = emitter.builder().create_block();
+            let no_gc_block = emitter.builder().create_block();
+            let merge_block = emitter.builder().create_block();
+            emitter
+                .builder()
+                .append_block_param(merge_block, types::I32);
+            emitter
+                .builder()
+                .ins()
+                .brif(needs_roots, gc_block, &[], no_gc_block, &[]);
+
+            emitter.builder().switch_to_block(gc_block);
+            emitter.builder().seal_block(gc_block);
+            let gc_result = emit_call(emitter, true);
+            emitter
+                .builder()
+                .ins()
+                .jump(merge_block, &[gc_result.into()]);
+
+            emitter.builder().switch_to_block(no_gc_block);
+            emitter.builder().seal_block(no_gc_block);
+            let no_gc_result = emit_call(emitter, false);
+            emitter
+                .builder()
+                .ins()
+                .jump(merge_block, &[no_gc_result.into()]);
+
+            emitter.builder().switch_to_block(merge_block);
+            emitter.builder().seal_block(merge_block);
+            emitter.builder().block_params(merge_block)[0]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,8 +332,8 @@ mod tests {
         let allocating_plan = CallPlan::new(8, 2, &allocating);
         assert_eq!(
             allocating_plan.route_for_full_function(7),
-            CallRoute::VmCallMaterialization,
-            "allocating callees may still JIT, but must use a materialized VM frame"
+            CallRoute::DynamicJitTable,
+            "allocation-only callees use the guarded JIT table; their allocation helpers own the GC safepoint"
         );
 
         let mut trapping = func(8, false);

@@ -214,7 +214,8 @@ pub(crate) fn declare_variables(
     let mut vars = Vec::with_capacity(ssa_slots);
     for i in 0..ssa_slots {
         let ty = crate::compile_common::slot_ir_type(&func_def.slot_types, i as u16);
-        vars.push(builder.declare_var(ty));
+        let var = builder.declare_var(ty);
+        vars.push(var);
     }
     vars
 }

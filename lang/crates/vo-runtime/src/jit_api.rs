@@ -146,6 +146,8 @@ pub struct PreparedCall {
     pub callee_local_slots: u32,
     /// Resolved func_id (for VM call materialization).
     pub func_id: u32,
+    /// Non-zero when the selected native target may reach a GC safepoint.
+    pub jit_may_gc: u32,
 }
 
 impl PreparedCall {
@@ -157,6 +159,7 @@ impl PreparedCall {
     pub const OFFSET_CALLEE_LOCAL_SLOTS: i32 =
         core::mem::offset_of!(PreparedCall, callee_local_slots) as i32;
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(PreparedCall, func_id) as i32;
+    pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(PreparedCall, jit_may_gc) as i32;
     pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
 }
 
@@ -168,12 +171,13 @@ impl Default for PreparedCall {
             ic_jit_func_ptr: core::ptr::null(),
             callee_local_slots: 0,
             func_id: 0,
+            jit_may_gc: 0,
         }
     }
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(PreparedCall::SIZE == 32);
+const _: () = assert!(PreparedCall::SIZE == 40);
 
 /// Function pointer type for preparing a closure call.
 /// Writes result to `out` pointer instead of returning struct (avoids ABI mismatch
@@ -212,6 +216,8 @@ pub type JitCallExternFn = extern "C" fn(
     ret: *mut u64,
     ret_slots: u32,
 ) -> JitResult;
+
+pub type JitGcSafepointFn = extern "C" fn(ctx: *mut JitContext) -> JitResult;
 
 /// Immutable callback capabilities shared by every native invocation in one VM.
 ///
@@ -290,6 +296,7 @@ pub struct JitContextCallbacks {
         ) -> JitResult,
     >,
     pub select_exec_fn: Option<extern "C" fn(ctx: *mut JitContext, result_reg: u32) -> JitResult>,
+    pub gc_safepoint_fn: Option<JitGcSafepointFn>,
 }
 
 impl JitContextCallbacks {
@@ -309,10 +316,36 @@ impl JitContextCallbacks {
         select_send_fn: None,
         select_recv_fn: None,
         select_exec_fn: None,
+        gc_safepoint_fn: None,
     };
 }
 
 static EMPTY_JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks::EMPTY;
+
+/// One active native JIT frame.
+///
+/// Generated code allocates this record in its own native frame, links it into
+/// `JitContext::native_frame` on entry, and unlinks it on every return.  The
+/// record address is also emitted as an `I8` anchor in every Cranelift stack
+/// map, allowing the collector to translate SP-relative root offsets without
+/// platform unwind support.
+#[repr(C)]
+#[derive(Debug)]
+pub struct JitNativeFrame {
+    pub prev: *mut JitNativeFrame,
+    pub ctx: *mut JitContext,
+    pub func_id: u32,
+    pub osr_pc: u32,
+    pub artifact_kind: u32,
+    /// Runtime-selected safepoint identifier. `u32::MAX` means inactive.
+    pub safepoint_id: u32,
+}
+
+impl JitNativeFrame {
+    pub const ARTIFACT_FUNCTION: u32 = 0;
+    pub const ARTIFACT_OSR_LOOP: u32 = 1;
+    pub const INACTIVE_SAFEPOINT: u32 = u32::MAX;
+}
 
 #[repr(C)]
 pub struct JitContext {
@@ -524,6 +557,16 @@ pub struct JitContext {
     /// Verified module image owning the runtime-type facts for array scans.
     /// Appended to preserve every established field offset above.
     pub loaded_module: *const LoadedModule,
+
+    /// Intrusive chain of active native JIT frames for precise root scanning.
+    pub native_frame: *mut JitNativeFrame,
+
+    /// One-shot permission to retry the allocation at an exact bytecode site
+    /// after the VM completed the GC slice requested by that site. This keeps
+    /// stress mode from repeatedly yielding before the allocation can run.
+    pub gc_poll_resume_func_id: u32,
+    pub gc_poll_resume_pc: u32,
+    pub gc_poll_resume_armed: u8,
 }
 
 #[inline]
@@ -580,6 +623,7 @@ impl JitContext {
     pub const JIT_RESULT_JIT_ERROR: u32 = 6;
     pub const JIT_RESULT_EXTERN_SUSPEND: u32 = 7;
     pub const JIT_RESULT_RUNTIME_TRANSITION: u32 = 8;
+    pub const JIT_RESULT_GC_SAFEPOINT: u32 = 9;
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
@@ -667,6 +711,10 @@ jit_context_raw_fields!(
     (PrepareIfaceCallFn, prepare_iface_call_fn),
     (InlineCacheTable, ic_table),
     (ExecutionBudget, execution_budget),
+    (NativeFrame, native_frame),
+    (GcPollResumeFuncId, gc_poll_resume_func_id),
+    (GcPollResumePc, gc_poll_resume_pc),
+    (GcPollResumeArmed, gc_poll_resume_armed),
 );
 
 // =============================================================================
@@ -706,6 +754,10 @@ pub enum JitResult {
     /// VM-owned runtime-transition effects. Materialize at `call_resume_pc`
     /// and yield to the VM before executing another instruction.
     RuntimeTransition = 8,
+    /// Collection work is pending before the current bytecode instruction.
+    /// Materialize at `call_resume_pc`, yield to the scheduler, run a bounded
+    /// GC slice, and replay the instruction in the VM.
+    GcSafepoint = 9,
 }
 
 pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;
@@ -713,6 +765,7 @@ pub const JIT_INFRA_ERROR_MISSING_CALLBACK: u64 = 1;
 pub const JIT_INFRA_ERROR_INVALID_CALLBACK_STATE: u64 = 2;
 pub const JIT_INFRA_ERROR_INVALID_METADATA: u64 = 3;
 pub const JIT_HELPER_U64_ERROR: u64 = u64::MAX;
+pub const JIT_HELPER_MAP_SET_NEEDS_ALLOCATION: u64 = 2;
 pub const JIT_HELPER_MAP_GET_LAYOUT: u64 = 101;
 pub const JIT_HELPER_MAP_SET_LAYOUT: u64 = 102;
 pub const JIT_HELPER_MAP_DELETE_LAYOUT: u64 = 103;
@@ -737,6 +790,7 @@ pub const JIT_CALLBACK_IFACE_ASSERT: u64 = 13;
 pub const JIT_CALLBACK_CALL_EXTERN: u64 = 14;
 pub const JIT_CALLBACK_QUEUE_LEN: u64 = 15;
 pub const JIT_CALLBACK_QUEUE_CAP: u64 = 16;
+pub const JIT_CALLBACK_GC_SAFEPOINT: u64 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitContextDependencyKind {
@@ -762,6 +816,7 @@ pub enum JitContextDependencyKind {
     PrepareClosureCallFn,
     PrepareIfaceCallFn,
     InlineCacheTable,
+    GcSafepointFn,
 }
 
 impl JitContextDependencyKind {
@@ -789,6 +844,7 @@ impl JitContextDependencyKind {
             Self::PrepareClosureCallFn => ctx.prepare_closure_call_fn.is_none(),
             Self::PrepareIfaceCallFn => ctx.prepare_iface_call_fn.is_none(),
             Self::InlineCacheTable => ctx.ic_table.is_null(),
+            Self::GcSafepointFn => ctx.gc_safepoint_fn.is_none(),
         }
     }
 }
@@ -849,9 +905,40 @@ pub struct JitRuntimeHelperAbi {
 
 impl JitRuntimeHelperAbi {
     /// Generated code must publish its SSA frame before helpers that can
-    /// collect, schedule, or otherwise inspect VM-owned frame state.
+    /// schedule or otherwise inspect VM-owned frame state.
+    ///
+    /// Allocation helpers only accrue GC debt. Their separate pre-allocation
+    /// safepoint poll materializes the frame on the taken slow path, so the
+    /// capacity-available path does not need an unconditional spill.
     pub const fn requires_frame_sync(self) -> bool {
-        self.may_gc || self.may_schedule || self.observes_frame
+        self.may_schedule || self.observes_frame
+    }
+
+    /// Helpers that can consume fresh managed-heap capacity poll the VM before
+    /// executing. Barrier-only helpers stay on their existing inline/slow path
+    /// and avoid a scheduler callback on every heap store.
+    pub fn requires_gc_poll(self) -> bool {
+        matches!(
+            self.name,
+            "vo_gc_alloc"
+                | "vo_str_new"
+                | "vo_str_concat"
+                | "vo_str_slice"
+                | "vo_closure_new"
+                | "vo_queue_new_checked"
+                | "vo_array_new_checked"
+                | "vo_slice_new_checked"
+                | "vo_slice_slice"
+                | "vo_slice_slice3"
+                | "vo_slice_append"
+                | "vo_slice_from_array"
+                | "vo_slice_from_array3"
+                | "vo_slice_from_inline_array"
+                | "vo_slice_from_inline_array3"
+                | "vo_ptr_clone"
+                | "vo_map_new"
+                | "vo_island_new"
+        )
     }
 }
 
@@ -1145,6 +1232,17 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
             may_schedule: false,
             observes_frame: false,
         },
+        JitCallbackAbiField {
+            kind: Kind::GcSafepointFn,
+            name: "gc_safepoint_fn",
+            params: &[T::Ptr],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_GC_SAFEPOINT),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
     ]
 }
 
@@ -1250,6 +1348,20 @@ pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
     unsafe {
         let gc = &mut *gc;
         gc.alloc(value_meta, slots) as u64
+    }
+}
+
+/// Poll the VM before a JIT helper that may allocate managed memory.
+///
+/// Standalone JIT unit harnesses do not install VM callbacks and therefore
+/// receive `Ok`. Production contexts validate and install the callback.
+pub extern "C" fn vo_jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
+    let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
+        return JitResult::JitError;
+    };
+    match ctx_ref.gc_safepoint_fn {
+        Some(callback) => callback(ctx),
+        None => JitResult::Ok,
     }
 }
 
@@ -2141,7 +2253,8 @@ pub extern "C" fn vo_map_get(
 }
 
 /// Set value in map.
-/// Returns: 0 = success, 1 = panic (interface key with uncomparable type)
+/// Returns: 0 = success, 1 = panic (interface key with uncomparable type),
+/// 2 = retry after the caller executes its precise allocation safepoint.
 pub extern "C" fn vo_map_set(
     ctx: *mut JitContext,
     m: u64,
@@ -2149,6 +2262,7 @@ pub extern "C" fn vo_map_set(
     key_slots: u32,
     val_ptr: *const u64,
     val_slots: u32,
+    allow_allocation: u32,
 ) -> u64 {
     use crate::objects::map;
     if m == 0 {
@@ -2161,6 +2275,11 @@ pub extern "C" fn vo_map_set(
     let val_slots = match validate_jit_slot_count(ctx, val_slots, JIT_HELPER_MAP_SET_LAYOUT) {
         Ok(slots) => slots,
         Err(result) => return result,
+    };
+    let allow_allocation = match allow_allocation {
+        0 => false,
+        1 => true,
+        _ => return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT),
     };
     if let Err(result) =
         validate_jit_raw_in_buffer(ctx, key_ptr, key_slots, JIT_HELPER_MAP_SET_LAYOUT)
@@ -2220,10 +2339,13 @@ pub extern "C" fn vo_map_set(
     }
     let set_result = unsafe {
         // SAFETY: vo_map_set validated the map handle/layout and applied key/value barriers above.
-        map::set_checked(gc, m_ref, key, val, module)
+        map::set_checked_deferred(gc, m_ref, key, val, module, allow_allocation)
     };
     match set_result {
-        Ok(()) => {}
+        Ok(map::MapSetOutcome::Set) => {}
+        Ok(map::MapSetOutcome::NeedsAllocation) => {
+            return JIT_HELPER_MAP_SET_NEEDS_ALLOCATION;
+        }
         Err(map::MapKeyError::UnhashableInterfaceKey) => return 1,
         Err(map::MapKeyError::SlotCountMismatch) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
@@ -3588,6 +3710,7 @@ unsafe fn materialize_iface_assert_success(
 /// registered with Cranelift's JITBuilder.
 pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     &[
+        ("vo_jit_gc_safepoint", vo_jit_gc_safepoint as *const u8),
         ("vo_gc_alloc", vo_gc_alloc as *const u8),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         (
@@ -3661,6 +3784,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
 
 pub fn runtime_symbol_names() -> &'static [&'static str] {
     &[
+        "vo_jit_gc_safepoint",
         "vo_gc_alloc",
         "vo_gc_write_barrier",
         "vo_gc_typed_write_barrier_by_meta",
@@ -3726,6 +3850,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
     use JitRuntimeHelperReturnPolicy as Ret;
 
     &[
+        JitRuntimeHelperAbi {
+            name: "vo_jit_gc_safepoint",
+            params: &[T::Ptr],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
         JitRuntimeHelperAbi {
             name: "vo_gc_alloc",
             params: &[T::Ptr, T::U32, T::U32],
@@ -4149,7 +4283,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         },
         JitRuntimeHelperAbi {
             name: "vo_map_set",
-            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::Ptr, T::U32],
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::Ptr, T::U32, T::U32],
             ret: T::U64,
             return_policy: Ret::U64ErrorSentinel,
             panic_policy: Panic::ReturnsStatusOrSentinel,

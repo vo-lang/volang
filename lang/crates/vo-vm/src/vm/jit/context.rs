@@ -26,6 +26,7 @@ static JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks {
     select_send_fn: Some(callbacks::jit_select_send),
     select_recv_fn: Some(callbacks::jit_select_recv),
     select_exec_fn: Some(callbacks::jit_select_exec),
+    gc_safepoint_fn: Some(callbacks::jit_gc_safepoint),
 };
 
 /// JIT context wrapper.
@@ -94,6 +95,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
     fiber.jit_is_user_panic = false;
     fiber.jit_panic_msg = InterfaceSlot::default();
     fiber.jit_infra_error_message.clear();
+    let gc_poll_resume = fiber.jit_gc_poll_resume.take();
 
     let ctx = JitContext {
         gc: &mut vm.state.gc as *mut _,
@@ -154,6 +156,10 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
             .as_ref()
             .map_or(core::ptr::null(), |binding| binding as *const _),
         loaded_module,
+        native_frame: core::ptr::null_mut(),
+        gc_poll_resume_func_id: gc_poll_resume.map_or(u32::MAX, |resume| resume.0),
+        gc_poll_resume_pc: gc_poll_resume.map_or(u32::MAX, |resume| resume.1),
+        gc_poll_resume_armed: u8::from(gc_poll_resume.is_some()),
     };
 
     debug_assert_eq!(ctx.validate_required_callbacks(), Ok(()));

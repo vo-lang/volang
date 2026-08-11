@@ -1,8 +1,8 @@
 //! Shared IR generation interface.
 
 use cranelift_codegen::ir::{
-    types, AliasRegionData, InstBuilder, MemFlagsData as MemFlags, StackSlot, StackSlotData,
-    StackSlotKind, Type, Value,
+    types, AliasRegionData, Inst, InstBuilder, MemFlagsData as MemFlags, StackSlot, StackSlotData,
+    StackSlotKind, Type, UserStackMapEntry, Value,
 };
 use cranelift_frontend::FunctionBuilder;
 use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule, ResolvedExtern};
@@ -16,6 +16,7 @@ mod reg_const_facts;
 
 pub(crate) use crate::helpers::HelperRefs;
 pub use crate::helpers::{HelperKind, RuntimeHelper};
+pub(crate) use helper_calls::emit_gc_safepoint_poll;
 pub use helper_calls::{emit_funcref_call_raw, emit_runtime_helper_call};
 pub(crate) use reg_const_facts::try_compute_reg_const_facts_with_context;
 pub use reg_const_facts::RegConstFacts;
@@ -43,12 +44,14 @@ pub enum SelectSyncCase {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum JitMemoryRegion {
     Context,
+    Gc,
     Globals,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JitMemoryFlags {
     context: MemFlags,
+    gc: MemFlags,
     globals: MemFlags,
 }
 
@@ -63,8 +66,13 @@ impl JitMemoryFlags {
             user_id: 0x564f_0002,
             description: "vo globals".into(),
         });
+        let gc = regions.insert(AliasRegionData {
+            user_id: 0x564f_0003,
+            description: "vo gc poll state".into(),
+        });
         Self {
             context: MemFlags::trusted().with_alias_region(Some(context)),
+            gc: MemFlags::trusted().with_alias_region(Some(gc)),
             globals: MemFlags::trusted().with_alias_region(Some(globals)),
         }
     }
@@ -72,6 +80,7 @@ impl JitMemoryFlags {
     fn get(self, region: JitMemoryRegion) -> MemFlags {
         match region {
             JitMemoryRegion::Context => self.context,
+            JitMemoryRegion::Gc => self.gc,
             JitMemoryRegion::Globals => self.globals,
         }
     }
@@ -113,15 +122,89 @@ pub enum NativeScratchKind {
     DynamicPreparedCall,
     ExternArgs,
     ExternReturns,
+    GcRoots,
 }
 
 impl NativeScratchKind {
-    const COUNT: usize = 8;
+    const COUNT: usize = 9;
 
     #[inline]
     const fn index(self) -> usize {
         self as usize
     }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct NativeRootSpill {
+    slot: StackSlot,
+    root_count: u32,
+}
+
+/// Explicit, type-precise shadow roots for calls that can actually reach a GC
+/// safepoint. Keeping these roots separate from ordinary SSA variables avoids
+/// forcing Cranelift to spill GcRefs at every non-GC runtime helper call.
+pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + MetadataAccess {
+    fn spill_native_roots(&mut self) -> Option<NativeRootSpill> {
+        let root_slots = self
+            .function_def()
+            .slot_types
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, ty)| (*ty == vo_runtime::SlotType::GcRef).then_some(slot as u16))
+            .collect::<Vec<_>>();
+        let has_conditional_roots = self
+            .function_def()
+            .slot_types
+            .contains(&vo_runtime::SlotType::Interface0);
+        if root_slots.is_empty() && !has_conditional_roots {
+            return None;
+        }
+
+        let bytes = root_slots.len().saturating_mul(core::mem::size_of::<u64>());
+        let shadow = self.native_scratch_slot(NativeScratchKind::GcRoots, bytes.max(4));
+        for (index, source_slot) in root_slots.iter().copied().enumerate() {
+            let value = self.read_var(source_slot);
+            self.builder()
+                .ins()
+                .stack_store(types::I64, value, shadow, (index * 8) as i32);
+        }
+        Some(NativeRootSpill {
+            slot: shadow,
+            root_count: root_slots.len() as u32,
+        })
+    }
+
+    fn attach_native_roots(&mut self, inst: Inst, spill: Option<NativeRootSpill>) {
+        let Some(spill) = spill else {
+            return;
+        };
+        // I32 is a metadata-only safepoint marker consumed by the native-frame
+        // pass. Direct GcRefs use I64 entries at their exact shadow offsets.
+        self.builder().func.dfg.append_user_stack_map_entry(
+            inst,
+            UserStackMapEntry {
+                ty: types::I32,
+                slot: spill.slot,
+                offset: 0,
+            },
+        );
+        for root in 0..spill.root_count {
+            self.builder().func.dfg.append_user_stack_map_entry(
+                inst,
+                UserStackMapEntry {
+                    ty: types::I64,
+                    slot: spill.slot,
+                    offset: root * 8,
+                },
+            );
+        }
+    }
+}
+
+impl<'a, T> NativeRootMapAccess<'a> for T where
+    T: ScratchAccess<'a> + SlotAccess<'a> + MetadataAccess
+{
 }
 
 #[doc(hidden)]
@@ -492,6 +575,7 @@ pub trait IrEmitter<'a>:
     + FlowFacts
     + CallBoundary<'a>
     + StackRefresh
+    + NativeRootMapAccess<'a>
 {
 }
 
@@ -508,14 +592,33 @@ impl<'a, T> IrEmitter<'a> for T where
         + FlowFacts
         + CallBoundary<'a>
         + StackRefresh
+        + NativeRootMapAccess<'a>
 {
 }
 
 /// Capability set for helper calls that may publish the frame or invalidate
 /// compile-time facts.
-pub trait HelperCallEmitter<'a>: IrBuilder<'a> + RegConstAccess + FrameBoundary {}
+pub trait HelperCallEmitter<'a>:
+    IrBuilder<'a>
+    + RuntimeContext<'a>
+    + MetadataAccess
+    + HelperAccess
+    + RegConstAccess
+    + FrameBoundary
+    + NativeRootMapAccess<'a>
+{
+}
 
-impl<'a, T> HelperCallEmitter<'a> for T where T: IrBuilder<'a> + RegConstAccess + FrameBoundary {}
+impl<'a, T> HelperCallEmitter<'a> for T where
+    T: IrBuilder<'a>
+        + RuntimeContext<'a>
+        + MetadataAccess
+        + HelperAccess
+        + RegConstAccess
+        + FrameBoundary
+        + NativeRootMapAccess<'a>
+{
+}
 
 /// Capability set for lowering runtime traps and user panic returns.
 pub trait TrapEmitter<'a>:

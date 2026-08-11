@@ -402,6 +402,7 @@ pub extern "C" fn jit_prepare_closure_call(
             ic_jit_func_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
+            jit_may_gc: u32::from(eligibility.may_gc),
         };
     }
     record_prepared_dynamic_call_if_available(
@@ -622,6 +623,7 @@ pub extern "C" fn jit_prepare_iface_call(
             ic_jit_func_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
+            jit_may_gc: u32::from(eligibility.may_gc),
         };
     }
     record_prepared_dynamic_call_if_available(

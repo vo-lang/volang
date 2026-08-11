@@ -15,6 +15,9 @@ pub struct DynCallIC {
     pub func_id: u32,
     pub gc_scan_slots: u16,
     pub valid: u16,
+    /// Whether the cached native target can reach a managed-heap safepoint.
+    pub jit_may_gc: u16,
+    pub reserved: u16,
 }
 
 impl Default for DynCallIC {
@@ -32,6 +35,7 @@ impl DynCallIC {
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(Self, func_id) as i32;
     pub const OFFSET_GC_SCAN_SLOTS: i32 = core::mem::offset_of!(Self, gc_scan_slots) as i32;
     pub const OFFSET_VALID: i32 = core::mem::offset_of!(Self, valid) as i32;
+    pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(Self, jit_may_gc) as i32;
 }
 
 const _: () = assert!(DynCallIC::SIZE == 32);

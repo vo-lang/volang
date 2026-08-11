@@ -66,9 +66,7 @@ impl EffectContract {
     }
 
     pub fn permits_frame_elision(self) -> bool {
-        !(self.may_gc
-            || self.may_alloc
-            || self.may_panic
+        !(self.may_panic
             || self.may_unwind
             || self.may_call
             || self.may_schedule
@@ -82,9 +80,7 @@ impl EffectContract {
     /// A prepared call has precise shadow-stack slots, but no registered VM
     /// call frame until a non-OK result is materialized.
     pub fn permits_prepared_shadow_frame(self) -> bool {
-        !(self.may_gc
-            || self.may_alloc
-            || self.may_unwind
+        !(self.may_unwind
             || self.may_call
             || self.may_schedule
             || self.may_observe_frame
@@ -278,6 +274,19 @@ pub(crate) fn module_frame_entry_eligibility(
         |entry| entry.prepared_shadow,
         |entry| entry.prepared_shadow = false,
     );
+    let mut gc_worklist = eligibility
+        .iter()
+        .enumerate()
+        .filter_map(|(func_id, entry)| entry.may_gc.then_some(func_id))
+        .collect::<VecDeque<_>>();
+    while let Some(callee_id) = gc_worklist.pop_front() {
+        for &caller_id in &callers[callee_id] {
+            if !eligibility[caller_id].may_gc {
+                eligibility[caller_id].may_gc = true;
+                gc_worklist.push_back(caller_id);
+            }
+        }
+    }
     eligibility
 }
 
@@ -336,7 +345,7 @@ fn recursive_call_components(
         .map(|size| *size > 1)
         .collect::<Vec<_>>();
     for (caller, targets) in callees.iter().enumerate() {
-        if targets.iter().any(|callee| *callee == caller) {
+        if targets.contains(&caller) {
             recursive_components[component_ids[caller]] = true;
         }
     }
@@ -562,6 +571,7 @@ mod tests {
 
         assert!(eligibility.iter().all(|entry| entry.frame_elided));
         assert!(eligibility.iter().all(|entry| entry.prepared_shadow));
+        assert!(eligibility.iter().all(|entry| !entry.may_gc));
     }
 
     #[test]
@@ -586,8 +596,10 @@ mod tests {
 
         assert!(!eligibility[0].frame_elided);
         assert!(!eligibility[0].prepared_shadow);
+        assert!(eligibility[0].may_gc);
         assert!(eligibility[1].frame_elided);
         assert!(eligibility[1].prepared_shadow);
+        assert!(!eligibility[1].may_gc);
     }
 
     #[test]
@@ -616,11 +628,13 @@ mod tests {
                 1,
             ),
         ];
+        module.functions[1].has_defer = true;
         let externs = ResolvedExternTable::empty();
 
         let eligibility = module_frame_entry_eligibility(&module, env(&externs));
 
         assert!(eligibility.iter().all(|entry| !entry.frame_elided));
         assert!(eligibility.iter().all(|entry| !entry.prepared_shadow));
+        assert!(eligibility.iter().all(|entry| entry.may_gc));
     }
 }
