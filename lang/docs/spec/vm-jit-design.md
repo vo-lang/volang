@@ -20,16 +20,19 @@ execution continues.
 
 ## Strict And Best-Effort Modes
 
-Strict JIT mode is fail-fast. `vo_jit::verify_module` is the public verifier
-entry, and strict VM load/init paths run it before dispatch tables are usable.
-It returns a `VerifiedModule` digest token; `JitCompiler` caches that token and
-re-verifies only when the serialized module fingerprint changes. Compile
-failure, invalid metadata, missing helper/callback ABI, bad call shape, bad
-return shape, and internal JIT ABI errors surface as `JitError` or
-`VmError::Jit`; they are not semantic side exits.
+Strict JIT mode is fail-fast. `vo-common-core::verify_loaded_module` validates
+the owned module once and returns an immutable `LoadedModule`. That image owns
+the module, verified runtime type facts, and the dense dynamic-callsite map.
+The VM retains the exact image for the JIT lifetime; `JitCompiler` binds by
+pointer identity and reuses its derived facts without serializing, hashing, or
+rescanning the module. Compile failure, invalid metadata, missing
+helper/callback ABI, bad call/return shape, and internal JIT ABI errors surface
+as `JitError` or `VmError::Jit`; they are not semantic side exits.
 
-Best-effort JIT mode exists only through explicitly named VM APIs. It is for
-embedding compatibility and does not change strict behavior.
+Best-effort JIT mode exists only through explicitly named VM APIs. A runtime
+compile or OSR failure is recorded, disables that entry from later retries,
+and resumes in the interpreter. It is for embedding compatibility and does
+not change strict behavior.
 
 Legal runtime side exits are semantic scheduling boundaries:
 
@@ -42,36 +45,26 @@ Legal runtime side exits are semantic scheduling boundaries:
 
 ## Metadata Contract
 
-`vo-jit/src/metadata_contract.rs` is the single source of truth for opcode JIT
-metadata requirements. It defines which current metadata kind an opcode may
-consume and which layouts are required before lowering.
-
-Typed decoding used by JIT effects and loop analysis is centralized in
-`vo-jit/src/metadata.rs`. New JIT consumers should use those facts instead of
-introducing local `JitInstructionMetadata` decode tables.
+`vo-common-core` is the metadata authority for every executable module. Its
+verifier checks metadata kind, width, slot layout, and opcode compatibility.
+`vo-jit/src/metadata.rs` provides allocation-free typed views used by lowering
+and effect analysis; it does not define a second acceptance policy.
 
 `vo-common-core` owns bytecode serialization. Current-version bytecode that has
-a `jit_metadata` table must keep `jit_metadata.len() == code.len()`. Older
+a `instruction_metadata` table must keep `instruction_metadata.len() == code.len()`. Older
 bytecode versions and removed metadata tags are not accepted input; they are
 rejected before a module can execute or enter strict JIT.
 
 ## Opcode Contract
 
-`vo-jit/src/semantics/` is the opcode contract table for JIT semantics.
-Each row records packed operands, VM semantic source, lowering owner, verifier
-requirements, register effect shape, memory sync shape, runtime dependencies,
-helper return policy, frame policy, trap policy, fail-fast conditions,
-capability, and the opcode effect contract. `capability.rs` and `contract.rs`
-keep the public API and data types, but their per-opcode answers delegate to the
-semantic row instead of maintaining separate matches.
-
-Metadata remains a specialized fact source in `metadata_contract.rs`.
-The semantics table imports the opcode metadata requirement from that module, and the
-tests reject any second metadata requirement table in the semantic row.
-Concrete read/write slot lists still come from `effects.rs` because they depend
-on instruction operands, module signatures, extern signatures, and typed
-metadata payloads. The register-constant analysis uses those effect results for
-kill sets and only keeps dedicated logic for constant folding.
+`vo-jit/src/semantics/` is the compact JIT opcode table. Each row contains the
+register effect specification, backend capability, and effect contract.
+`capability.rs` and `contract.rs` expose those rows without maintaining parallel
+per-opcode matches. Dynamic register writes are enumerated by the shared
+allocation-free visitor in `vo-common-core::instruction_effects`; JIT-specific
+read effects and memory synchronization remain in `effects.rs`. Constant
+analysis consumes the same effects for kill sets and keeps dedicated logic only
+for folding.
 
 ## Lowering Responsibilities
 
@@ -81,7 +74,7 @@ extern call, queue, iterator, and interface assertion operations. It also owns
 typed return buffers and uses `FuncBuilder` helpers for shared shapes such as
 static calls, call buffers, fallthrough returns, and zero-slot initialization.
 Loop hint patching and method-value wrappers must go through typed
-`FuncBuilder` APIs so bytecode and `jit_metadata` cannot drift by pc-indexed
+`FuncBuilder` APIs so bytecode and `instruction_metadata` cannot drift by pc-indexed
 manual edits.
 
 `vo-common-core` owns VM-shared bytecode/module validation through
@@ -92,14 +85,14 @@ execution path accepts a module.
 
 `vo-jit` owns strict JIT validation and lowering:
 
-- `verifier/` checks strict JIT metadata kind policy and loop metadata
-  consistency after the shared `ModuleVerifier` has accepted the module.
+- `verifier.rs` is a compatibility surface over the shared `ModuleVerifier`;
+  executable-input acceptance remains in common-core.
 - JIT capability, helper dependencies, ABI contracts, frame materialization,
-  side exits, OSR, and direct-call contracts are described by the semantic row,
-  contract graph, helper manifests, and lowering tests.
+  side exits, OSR, and direct-call contracts are described by semantic rows,
+  helper manifests, and lowering tests.
 - `vo-jit/src/semantics/` describes opcode effects, fail-fast policy, runtime
-  dependencies, verifier requirements, and capability coverage. The contract
-  graph consumes those rows rather than re-declaring opcode policy.
+  dependencies, verifier requirements, and capability coverage. Direct tests
+  compare those rows with verifier, metadata, ABI, and lowering consumers.
 - `call_helpers/plan.rs` owns static/dynamic call route selection.
 - `call_helpers/callback_abi.rs` owns JitContext callback ABI callsites.
 - `call_helpers/result_flow.rs` owns checked helper result routing and non-OK
@@ -113,7 +106,9 @@ execution path accepts a module.
 - `helpers.rs` declares runtime helper imports from one helper table plus the
   runtime ABI manifest; helper names, `FuncId` fields, and per-function refs are
   no longer maintained as separate lists.
-- `compile_common.rs` owns common full-function/OSR compile facts and driver
+- `analysis.rs` caches one `FunctionAnalysis` shared by full JIT and every OSR
+  loop. Its dynamic callsite indices refer to the `LoadedModule`-owned table.
+- `compile_common/` owns common full-function/OSR compile facts and driver
   mechanics: `ControlPolicy`, jump-target discovery, basic-block transition,
   per-PC flow fact application, and the `CompileDriver` loop. Full-function and
   OSR compilers still own their prologues, return/call lowering, and OSR
@@ -137,6 +132,12 @@ recursively re-enter a newly materialized frame on the host stack.
 blocking or replaying. Runtime side-exit counters record only semantic runtime
 side exits, not compile or metadata failures.
 
+`RuntimeTransition` means the helper completed the current bytecode instruction
+and published deferred VM effects, such as queue wakeups. The bridge
+materializes at `call_resume_pc`, yields to the VM so those effects are applied,
+and resumes at the following instruction. Generated code must not continue past
+this result or replay the completed operation.
+
 ## OSR
 
 OSR compiles loop ranges with the same slot layout as the interpreter. A normal
@@ -156,15 +157,13 @@ Opcode maintenance is intentionally row-driven:
 - Update the opcode definition and typed instruction accessors in
   `vo-common-core`.
 - Add or update codegen metadata emission and typed builders when the opcode
-  needs JIT metadata.
-- Update `metadata_contract.rs` only if the opcode consumes per-PC JIT
-  metadata.
-- Update the semantic row in `vo-jit/src/semantics/`: packed operands, lowering
-  owner, verifier requirements, register effect shape, runtime dependencies,
-  helper/trap/fail-fast/frame policy, capability, and effect contract.
+  needs per-instruction layout metadata.
+- Update the semantic row in `vo-jit/src/semantics/`: register effects,
+  capability, and effect contract.
 - Add VM-shared slot/layout validation in `vo-common-core/src/verifier.rs`.
-- Add concrete read/write effect handling in `effects.rs` only when the opcode
-  has operand- or metadata-dependent slot lists.
+- Add shared write enumeration to `vo-common-core::instruction_effects` when the
+  opcode has operand-, metadata-, or signature-dependent destinations. Add
+  JIT-only reads or synchronization to `effects.rs` when required.
 - Add translate lowering explicitly in the relevant `translate/` module or
   compiler/call-helper owner; do not macro-generate `translate_inst`.
 - Extend focused tests first for behavior changes, then run the JIT and language
@@ -179,4 +178,6 @@ JIT changes should cover the layer they touch:
 - metadata production and typed builders: `cargo test -p vo-codegen`
 - VM bridge, callback ABI, frame materialization: `cargo test -p vo-vm --features jit`
 - engine strict mode: `cargo test -p vo-engine --features jit`
-- language parity and OSR: repo `./d.py test` suites, especially `jit` and `osr`
+- language parity and OSR: repository test targets `vm`, `jit`, `osr`,
+  `gc-vm`, and `gc-osr`; OSR contract cases must prove a native loop entry and
+  carry the matching VM baseline.

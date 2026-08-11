@@ -20,8 +20,7 @@ pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, Sl
             Ok(MemorySyncEffect::From(operand_slot(inst, operand)))
         }
         MemorySyncSpec::SliceAppendValueStart => {
-            let elem_slot =
-                checked_slot_offset(inst.c, if inst.flags == 0 { 2 } else { 1 }, "memory")?;
+            let elem_slot = checked_slot_offset(inst.c, 1, "memory")?;
             Ok(MemorySyncEffect::From(elem_slot))
         }
     }

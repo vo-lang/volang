@@ -80,47 +80,6 @@ export interface FsStat {
   modifiedMs: number;
 }
 
-export interface GrepOpts {
-  caseSensitive?: boolean;
-  maxResults?: number;
-}
-
-export interface GrepMatch {
-  path: string;
-  line: number;
-  column: number;
-  text: string;
-}
-
-export interface CheckResult {
-  ok: boolean;
-  errors: DiagnosticError[];
-}
-
-export interface CompileResult {
-  ok: boolean;
-  errors: DiagnosticError[];
-  outputPath?: string;
-}
-
-export interface BuildResult {
-  ok: boolean;
-  errors: DiagnosticError[];
-  outputPath?: string;
-}
-
-export interface DiagnosticError {
-  file: string;
-  line: number;
-  column: number;
-  message: string;
-  category: string;
-  moduleStage?: string | null;
-  moduleKind?: string | null;
-  modulePath?: string | null;
-  moduleVersion?: string | null;
-}
-
 export type RunEvent =
   | { kind: 'stdout'; text: string }
   | { kind: 'stderr'; text: string }
@@ -240,6 +199,7 @@ export interface GuiRunOutput {
   entryPath: string;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
+  vfsSnapshot: RendererBridgeVfsSnapshot;
 }
 
 export type ProcEvent =
@@ -274,12 +234,6 @@ export type GitOp =
 export interface GitResult {
   ok: boolean;
   output: string;
-}
-
-export interface ReadManyResult {
-  path: string;
-  content: string | null;
-  error: string | null;
 }
 
 export interface StreamHandle<T> {

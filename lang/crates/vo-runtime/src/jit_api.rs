@@ -17,7 +17,6 @@
 //!    |                           |
 //!    |-- vo_gc_alloc() --------->|  Allocate GC object
 //!    |-- vo_gc_write_barrier() ->|  Write barrier for GC
-//!    |-- vo_gc_safepoint() ----->|  GC safepoint check
 //!    |-- vo_call_vm() ---------->|  Call VM-interpreted function
 //!    |-- vo_panic() ------------>|  Trigger panic
 //!    |                           |
@@ -31,9 +30,10 @@ use crate::objects::interface::InterfaceSlot;
 
 use crate::slot::slots_for_bytes;
 pub use crate::EXECUTION_TIMESLICE_INSTRUCTIONS;
+pub use crate::{alloc_ic_table, DynCallIC};
 use crate::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
-use vo_common_core::bytecode::{JitInstructionMetadata, Module};
-use vo_common_core::instruction::IFACE_ASSERT_MAX_TARGET_SLOTS;
+use vo_common_core::bytecode::{InstructionMetadata, LoadedModule, Module, ModuleRuntimeMetadata};
+use vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
 
 // =============================================================================
 // JitContext
@@ -126,162 +126,52 @@ pub type JitPushResumePointFn = extern "C" fn(
     ret_slots: u32,
 ) -> JitResult;
 
-/// Monomorphic inline cache entry for dynamic calls (closure/iface).
-///
-/// Each JIT callsite hashes to an IC entry. On hit, the JIT fast path
-/// skips the prepare callback entirely and does a direct JIT-to-JIT call
-/// with native stack args.
-///
-/// Layout: 56 bytes, 8-aligned.
-#[derive(Debug)]
-#[repr(C)]
-pub struct DynCallIC {
-    /// Stable owner key for the JIT callsite that populated this entry.
-    /// Hash collisions in the shared IC table must miss rather than reuse a
-    /// target validated for a different caller/callsite.
-    pub owner_key: u64,
-    /// Tagged cache key: closure func_id or iface (itab_id, method_idx).
-    /// 0 = empty/invalid entry.
-    pub key: u64,
-    /// Extra exact key material. Interface calls store the full receiver slot0
-    /// here so same-itab forged receiver metadata cannot hit the cache.
-    pub key_extra: u64,
-    /// Cached JIT function pointer (0 = callee not compiled or not in direct_call_table).
-    pub jit_func_ptr: u64,
-    /// Callee's local_slots count.
-    pub local_slots: u32,
-    /// Offset where user args start in callee frame (0, 1, or recv_slots).
-    pub arg_offset: u32,
-    /// What to place in slot0:
-    ///   0 = nothing (named function wrapper)
-    ///   1 = closure_ref (anonymous closure or closure with captures)
-    ///   2 = captures[0] (method closure - load from closure GcRef + HEADER_SLOTS*8)
-    ///   3 = iface receiver (iface_slot1)
-    pub slot0_kind: u32,
-    /// Resolved func_id (same as key for closure; for iface, resolved via itab).
-    pub func_id: u32,
-    /// Whether callee is a leaf function (no Call/CallClosure/CallIface/CallExtern).
-    /// Leaf callees never read ctx.jit_bp/fiber_sp, so IC hit can skip ctx stores.
-    pub is_leaf: u32,
-}
-
-impl Default for DynCallIC {
-    fn default() -> Self {
-        // All zeros = empty/invalid entry (key=0)
-        unsafe { core::mem::zeroed() }
-    }
-}
-
-impl DynCallIC {
-    pub const SIZE: usize = core::mem::size_of::<DynCallIC>();
-    pub const OFFSET_OWNER_KEY: i32 = core::mem::offset_of!(DynCallIC, owner_key) as i32;
-    pub const OFFSET_KEY: i32 = core::mem::offset_of!(DynCallIC, key) as i32;
-    pub const OFFSET_KEY_EXTRA: i32 = core::mem::offset_of!(DynCallIC, key_extra) as i32;
-    pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(DynCallIC, jit_func_ptr) as i32;
-    pub const OFFSET_LOCAL_SLOTS: i32 = core::mem::offset_of!(DynCallIC, local_slots) as i32;
-    pub const OFFSET_ARG_OFFSET: i32 = core::mem::offset_of!(DynCallIC, arg_offset) as i32;
-    pub const OFFSET_SLOT0_KIND: i32 = core::mem::offset_of!(DynCallIC, slot0_kind) as i32;
-    pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(DynCallIC, func_id) as i32;
-    pub const OFFSET_IS_LEAF: i32 = core::mem::offset_of!(DynCallIC, is_leaf) as i32;
-
-    pub const SLOT0_NONE: u32 = 0;
-    pub const SLOT0_CLOSURE_REF: u32 = 1;
-    pub const SLOT0_CAPTURE0: u32 = 2;
-    pub const SLOT0_IFACE_RECEIVER: u32 = 3;
-
-    pub const KEY_KIND_SHIFT: u64 = 56;
-    pub const KEY_KIND_CLOSURE: u64 = 1;
-    pub const KEY_KIND_IFACE: u64 = 2;
-
-    /// IC table size (must be power of 2).
-    pub const TABLE_SIZE: usize = 512;
-    pub const TABLE_MASK: u32 = (Self::TABLE_SIZE - 1) as u32;
-
-    #[inline]
-    pub const fn owner_key(caller_func_id: u32, callsite_pc: u32) -> u64 {
-        ((caller_func_id as u64) << 32) | callsite_pc as u64
-    }
-
-    #[inline]
-    pub const fn closure_key(func_id: u32) -> u64 {
-        (Self::KEY_KIND_CLOSURE << Self::KEY_KIND_SHIFT) | func_id as u64
-    }
-
-    #[inline]
-    pub const fn iface_key(itab_id: u32, method_idx: u32) -> u64 {
-        (Self::KEY_KIND_IFACE << Self::KEY_KIND_SHIFT)
-            | ((method_idx as u64) << 32)
-            | itab_id as u64
-    }
-}
-
-const _: () = assert!(DynCallIC::SIZE == 56);
-const _: () = assert!(DynCallIC::TABLE_SIZE.is_power_of_two());
-
-/// Allocate a zeroed IC table with TABLE_SIZE entries.
-pub fn alloc_ic_table() -> Vec<DynCallIC> {
-    let mut table = Vec::with_capacity(DynCallIC::TABLE_SIZE);
-    unsafe {
-        core::ptr::write_bytes(table.as_mut_ptr(), 0, DynCallIC::TABLE_SIZE);
-        table.set_len(DynCallIC::TABLE_SIZE);
-    }
-    table
-}
-
 /// Result of preparing a closure or interface call.
 /// Note: SIZE must match core::mem::size_of::<PreparedCall>() (checked below).
 /// Contains information needed for JIT-to-JIT direct call or VM call materialization.
 #[repr(C)]
 pub struct PreparedCall {
-    /// JIT function pointer for direct call. Null if callee should use trampoline.
+    /// JIT function pointer for this prepared shadow-frame call. Null selects
+    /// the VM trampoline.
     pub jit_func_ptr: *const u8,
-    /// Pointer to callee's args in fiber.stack (after push_frame).
-    /// Only valid if jit_func_ptr is not null.
+    /// Pointer to the prepared callee args in fiber.stack. Generated code reads
+    /// it only when `jit_func_ptr` is non-null.
     pub callee_args_ptr: *mut u64,
-    /// Pointer to ret slot (native stack, for JIT call to write returns).
-    pub ret_ptr: *mut u64,
-    /// Callee's local_slots (for caller_bp restoration).
+    /// Stricter frame-elided pointer eligible for interface IC publication.
+    /// Closure calls and non-cacheable interface callees leave this null.
+    pub ic_jit_func_ptr: *const u8,
+    /// Callee local-slot count used when publishing an interface IC entry.
     pub callee_local_slots: u32,
     /// Resolved func_id (for VM call materialization).
     pub func_id: u32,
-    /// Offset where user args start in callee frame.
-    pub arg_offset: u32,
-    /// slot0_kind (see DynCallIC::SLOT0_*).
-    pub slot0_kind: u32,
-    /// Whether callee is a leaf function (no Call/CallClosure/CallIface/CallExtern).
-    pub is_leaf: u32,
 }
 
 impl PreparedCall {
     pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(PreparedCall, jit_func_ptr) as i32;
     pub const OFFSET_CALLEE_ARGS_PTR: i32 =
         core::mem::offset_of!(PreparedCall, callee_args_ptr) as i32;
-    pub const OFFSET_RET_PTR: i32 = core::mem::offset_of!(PreparedCall, ret_ptr) as i32;
+    pub const OFFSET_IC_JIT_FUNC_PTR: i32 =
+        core::mem::offset_of!(PreparedCall, ic_jit_func_ptr) as i32;
     pub const OFFSET_CALLEE_LOCAL_SLOTS: i32 =
         core::mem::offset_of!(PreparedCall, callee_local_slots) as i32;
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(PreparedCall, func_id) as i32;
-    pub const OFFSET_ARG_OFFSET: i32 = core::mem::offset_of!(PreparedCall, arg_offset) as i32;
-    pub const OFFSET_SLOT0_KIND: i32 = core::mem::offset_of!(PreparedCall, slot0_kind) as i32;
-    pub const OFFSET_IS_LEAF: i32 = core::mem::offset_of!(PreparedCall, is_leaf) as i32;
     pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
+}
 
-    /// Create a result whose callee must be materialized through the VM call trampoline.
-    pub fn vm_materialization(func_id: u32, callee_local_slots: u32) -> Self {
-        PreparedCall {
+impl Default for PreparedCall {
+    fn default() -> Self {
+        Self {
             jit_func_ptr: core::ptr::null(),
             callee_args_ptr: core::ptr::null_mut(),
-            ret_ptr: core::ptr::null_mut(),
-            callee_local_slots,
-            func_id,
-            arg_offset: 0,
-            slot0_kind: DynCallIC::SLOT0_NONE,
-            is_leaf: 0,
+            ic_jit_func_ptr: core::ptr::null(),
+            callee_local_slots: 0,
+            func_id: 0,
         }
     }
 }
 
-const _: () = assert!(PreparedCall::SIZE == core::mem::size_of::<PreparedCall>());
-const _: () = assert!(PreparedCall::SIZE == 48);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(PreparedCall::SIZE == 32);
 
 /// Function pointer type for preparing a closure call.
 /// Writes result to `out` pointer instead of returning struct (avoids ABI mismatch
@@ -294,7 +184,6 @@ pub type PrepareClosureCallFn = extern "C" fn(
     caller_resume_pc: u32,
     user_args: *const u64,
     user_arg_count: u32,
-    ret_ptr: *mut u64,
     out: *mut PreparedCall,
 ) -> JitResult;
 
@@ -310,9 +199,118 @@ pub type PrepareIfaceCallFn = extern "C" fn(
     caller_resume_pc: u32,
     user_args: *const u64,
     user_arg_count: u32,
-    ret_ptr: *mut u64,
     out: *mut PreparedCall,
 ) -> JitResult;
+
+pub type JitCallExternFn = extern "C" fn(
+    ctx: *mut JitContext,
+    extern_id: u32,
+    args: *const u64,
+    arg_count: u32,
+    ret: *mut u64,
+    ret_slots: u32,
+) -> JitResult;
+
+/// Immutable callback capabilities shared by every native invocation in one VM.
+///
+/// Keeping these function pointers outside `JitContext` avoids rebuilding a
+/// large, identical callback block for every JIT entry.
+#[repr(C)]
+pub struct JitContextCallbacks {
+    pub call_extern_fn: Option<JitCallExternFn>,
+    pub create_island_fn: Option<extern "C" fn(*mut JitContext, out: *mut u64) -> JitResult>,
+    pub queue_len_fn: Option<extern "C" fn(*mut JitContext, chan: u64, out: *mut u64) -> JitResult>,
+    pub queue_cap_fn: Option<extern "C" fn(*mut JitContext, chan: u64, out: *mut u64) -> JitResult>,
+    pub queue_close_fn: Option<extern "C" fn(*mut JitContext, chan: u64) -> JitResult>,
+    pub queue_send_fn: Option<
+        extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult,
+    >,
+    pub queue_recv_fn: Option<
+        extern "C" fn(
+            *mut JitContext,
+            chan: u64,
+            dst_ptr: *mut u64,
+            elem_slots: u32,
+            has_ok: u32,
+        ) -> JitResult,
+    >,
+    pub go_start_fn: Option<
+        extern "C" fn(
+            *mut JitContext,
+            func_id: u32,
+            is_closure: u32,
+            closure_ref: u64,
+            args_ptr: *const u64,
+            arg_slots: u32,
+        ) -> JitResult,
+    >,
+    pub go_island_fn: Option<
+        extern "C" fn(
+            *mut JitContext,
+            island: u64,
+            closure_ref: u64,
+            args_ptr: *const u64,
+            arg_slots: u32,
+        ) -> JitResult,
+    >,
+    pub defer_push_fn: Option<
+        extern "C" fn(
+            ctx: *mut JitContext,
+            func_id: u32,
+            is_closure: u32,
+            closure_ref: u64,
+            arg_start: u32,
+            args_ptr: *const u64,
+            arg_count: u32,
+            is_errdefer: u32,
+        ) -> JitResult,
+    >,
+    pub recover_fn: Option<extern "C" fn(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult>,
+    pub select_begin_fn:
+        Option<extern "C" fn(ctx: *mut JitContext, case_count: u32, has_default: u32) -> JitResult>,
+    pub select_send_fn: Option<
+        extern "C" fn(
+            ctx: *mut JitContext,
+            queue_reg: u32,
+            val_reg: u32,
+            elem_slots: u32,
+            case_idx: u32,
+        ) -> JitResult,
+    >,
+    pub select_recv_fn: Option<
+        extern "C" fn(
+            ctx: *mut JitContext,
+            dst_reg: u32,
+            queue_reg: u32,
+            elem_slots: u32,
+            has_ok: u32,
+            case_idx: u32,
+        ) -> JitResult,
+    >,
+    pub select_exec_fn: Option<extern "C" fn(ctx: *mut JitContext, result_reg: u32) -> JitResult>,
+}
+
+impl JitContextCallbacks {
+    pub const EMPTY: Self = Self {
+        call_extern_fn: None,
+        create_island_fn: None,
+        queue_len_fn: None,
+        queue_cap_fn: None,
+        queue_close_fn: None,
+        queue_send_fn: None,
+        queue_recv_fn: None,
+        go_start_fn: None,
+        go_island_fn: None,
+        defer_push_fn: None,
+        recover_fn: None,
+        select_begin_fn: None,
+        select_send_fn: None,
+        select_recv_fn: None,
+        select_exec_fn: None,
+    };
+}
+
+static EMPTY_JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks::EMPTY;
 
 #[repr(C)]
 pub struct JitContext {
@@ -321,10 +319,6 @@ pub struct JitContext {
 
     /// Pointer to the global variables array.
     pub globals: *mut u64,
-
-    /// Legacy ABI slot retained for extension compatibility.
-    /// Native scheduling uses `execution_budget` below.
-    pub safepoint_flag: *const bool,
 
     /// Pointer to panic flag (set by JIT when panic occurs).
     pub panic_flag: *mut bool,
@@ -358,7 +352,7 @@ pub struct JitContext {
     /// Function id for the currently executing JIT body.
     ///
     /// Runtime helpers use this with `runtime_trap_pc` to recover per-PC
-    /// `JitInstructionMetadata` from the module. `u32::MAX` means the context
+    /// `InstructionMetadata` from the module. `u32::MAX` means the context
     /// was built for a direct callback/unit test and has no current bytecode PC.
     pub current_func_id: u32,
 
@@ -369,9 +363,9 @@ pub struct JitContext {
     /// provide one without forcing it through numeric trap fields.
     pub infra_error_message: *mut String,
 
-    /// Opaque pointer to VM instance.
-    /// Cast to `*mut Vm` in trampoline code.
-    pub vm: *mut c_void,
+    /// Opaque pointer to VM-owned callback state.
+    /// VM callbacks decode it only through their restricted capability bridge.
+    pub callback_state: *mut c_void,
 
     /// Opaque pointer to current Fiber.
     /// Cast to `*mut Fiber` in trampoline code.
@@ -380,26 +374,11 @@ pub struct JitContext {
     /// Pointer to ItabCache for interface method dispatch and dynamic itab creation.
     pub itab_cache: *mut ItabCache,
 
-    /// Pointer to ExternRegistry for calling extern functions.
-    pub extern_registry: *const c_void,
+    /// Frozen extern registry used by direct extern helpers.
+    pub extern_registry: *const crate::ffi::ExternRegistry,
 
-    /// Callback to call extern function: (ctx, registry, gc, module, extern_id, args, arg_count, ret, ret_slots) -> JitResult
-    pub call_extern_fn: Option<
-        extern "C" fn(
-            *mut JitContext,
-            *const c_void,
-            *mut Gc,
-            *const c_void,
-            u32,
-            *const u64,
-            u32,
-            *mut u64,
-            u32,
-        ) -> JitResult,
-    >,
-
-    /// Pointer to Module for type information.
-    pub module: *const Module,
+    /// Shared immutable callback capability table.
+    pub callbacks: *const JitContextCallbacks,
 
     /// JIT function pointer table: jit_func_table[func_id] = pointer to JIT function (or null if not compiled).
     /// Used for direct JIT-to-JIT calls without going through VM trampoline.
@@ -407,14 +386,6 @@ pub struct JitContext {
 
     /// Number of functions (length of jit_func_table).
     pub jit_func_count: u32,
-
-    /// Direct call table: only contains entries for functions that pass the
-    /// JIT effect-contract frame-elision predicate. Other compiled functions
-    /// may still run through the prepared VM-frame path.
-    pub direct_call_table: *const *const u8,
-
-    /// Number of entries in direct_call_table.
-    pub direct_call_count: u32,
 
     /// Pointer to program arguments.
     pub program_args: *const Vec<Vec<u8>>,
@@ -431,7 +402,6 @@ pub struct JitContext {
 
     /// Pointer to shared IoRuntime for async I/O operations.
     /// JIT extern calls use this instead of creating per-call IoRuntime.
-    #[cfg(feature = "std")]
     pub io: *mut crate::io::IoRuntime,
 
     /// Call request: callee function ID (for non-jittable calls)
@@ -457,7 +427,6 @@ pub struct JitContext {
 
     /// I/O wait token (for WaitIo result).
     /// Set by jit_call_extern when extern returns WaitIo.
-    #[cfg(feature = "std")]
     pub wait_io_token: u64,
 
     /// Loop OSR exit PC. Set by loop function on normal exit.
@@ -507,124 +476,6 @@ pub struct JitContext {
     /// Only called on the slow path when callee returns non-OK.
     pub push_resume_point_fn: Option<JitPushResumePointFn>,
 
-    // =========================================================================
-    // VM Callbacks for advanced opcodes
-    // =========================================================================
-    /// Callback to create a new island.
-    /// Returns the island handle as u64.
-    pub create_island_fn: Option<extern "C" fn(*mut JitContext) -> u64>,
-
-    /// Callback to read channel length through VM-owned queue validation.
-    pub queue_len_fn: Option<extern "C" fn(*mut JitContext, chan: u64, out: *mut u64) -> JitResult>,
-
-    /// Callback to read channel capacity through VM-owned queue validation.
-    pub queue_cap_fn: Option<extern "C" fn(*mut JitContext, chan: u64, out: *mut u64) -> JitResult>,
-
-    /// Callback to close a channel.
-    /// Returns JitResult (Ok or Panic).
-    pub queue_close_fn: Option<extern "C" fn(*mut JitContext, chan: u64) -> JitResult>,
-
-    /// Callback to send on a channel.
-    /// Returns JitResult (Ok, Panic, or WaitIo).
-    pub queue_send_fn: Option<
-        extern "C" fn(*mut JitContext, chan: u64, val_ptr: *const u64, val_slots: u32) -> JitResult,
-    >,
-
-    /// Callback to receive from a channel.
-    /// Returns JitResult (Ok, Panic, or WaitIo).
-    pub queue_recv_fn: Option<
-        extern "C" fn(
-            *mut JitContext,
-            chan: u64,
-            dst_ptr: *mut u64,
-            elem_slots: u32,
-            has_ok: u32,
-        ) -> JitResult,
-    >,
-
-    /// Callback to spawn a new goroutine.
-    /// func_id: function to run, is_closure: 1 if closure, closure_ref: closure GcRef (or 0),
-    /// args_ptr: pointer to arguments, arg_slots: number of argument slots
-    pub go_start_fn: Option<
-        extern "C" fn(
-            *mut JitContext,
-            func_id: u32,
-            is_closure: u32,
-            closure_ref: u64,
-            args_ptr: *const u64,
-            arg_slots: u32,
-        ) -> JitResult,
-    >,
-
-    /// Callback to spawn a goroutine on a specific island.
-    /// island: island handle, closure_ref: closure GcRef, args_ptr: arguments, arg_slots: count
-    pub go_island_fn: Option<
-        extern "C" fn(
-            *mut JitContext,
-            island: u64,
-            closure_ref: u64,
-            args_ptr: *const u64,
-            arg_slots: u32,
-        ) -> JitResult,
-    >,
-
-    // =========================================================================
-    // Defer/Recover Support
-    // =========================================================================
-    /// Callback to push a defer entry.
-    /// func_id: function to call (0 if closure), is_closure: 1 if closure,
-    /// closure_ref: closure GcRef (or 0), args_ptr: captured args, arg_count: number of args,
-    /// is_errdefer: 1 for errdefer
-    pub defer_push_fn: Option<
-        extern "C" fn(
-            ctx: *mut JitContext,
-            func_id: u32,
-            is_closure: u32,
-            closure_ref: u64,
-            arg_start: u32,
-            args_ptr: *const u64,
-            arg_count: u32,
-            is_errdefer: u32,
-        ) -> JitResult,
-    >,
-
-    /// Callback for recover() - writes result to output (2 slots).
-    pub recover_fn: Option<extern "C" fn(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult>,
-
-    // =========================================================================
-    // Select Statement Support
-    // =========================================================================
-    /// Callback to initialize a select statement.
-    pub select_begin_fn:
-        Option<extern "C" fn(ctx: *mut JitContext, case_count: u32, has_default: u32) -> JitResult>,
-
-    /// Callback to add a send case to select.
-    pub select_send_fn: Option<
-        extern "C" fn(
-            ctx: *mut JitContext,
-            queue_reg: u32,
-            val_reg: u32,
-            elem_slots: u32,
-            case_idx: u32,
-        ) -> JitResult,
-    >,
-
-    /// Callback to add a recv case to select.
-    pub select_recv_fn: Option<
-        extern "C" fn(
-            ctx: *mut JitContext,
-            dst_reg: u32,
-            queue_reg: u32,
-            elem_slots: u32,
-            has_ok: u32,
-            case_idx: u32,
-        ) -> JitResult,
-    >,
-
-    /// Callback to execute select statement.
-    /// Returns JitResult::Ok (with result in result_reg), WaitIo (blocked), or Panic.
-    pub select_exec_fn: Option<extern "C" fn(ctx: *mut JitContext, result_reg: u32) -> JitResult>,
-
     /// Set by JIT Return to indicate explicit `fail` return (for errdefer).
     pub is_error_return: u8,
 
@@ -654,8 +505,7 @@ pub struct JitContext {
     // =========================================================================
     // Monomorphic Inline Cache for dynamic calls
     // =========================================================================
-    /// Pointer to DynCallIC table (DynCallIC::TABLE_SIZE entries).
-    /// JIT callsites hash into this table for fast-path dispatch.
+    /// Pointer to the verified module's dense DynCallIC table.
     pub ic_table: *mut DynCallIC,
 
     /// Scheduler-turn instruction budget shared by every nested native call.
@@ -665,11 +515,50 @@ pub struct JitContext {
     /// so interpreter work, loop OSR, and full-function JIT execution consume a
     /// single cooperative scheduling budget.
     pub execution_budget: u32,
+
+    /// Optional validated host-services binding used by direct extern helpers.
+    pub host_services_v2: *const crate::host_services_v2::HostServicesV2Binding,
+
+    /// Verified module image owning the runtime-type facts for array scans.
+    /// Appended to preserve every established field offset above.
+    pub loaded_module: *const LoadedModule,
 }
 
-/// JitContext field offsets for JIT compiler.
-/// These must match the actual struct layout.
+#[inline]
+unsafe fn jit_module_runtime_metadata(ctx: &JitContext) -> Option<ModuleRuntimeMetadata<'_>> {
+    unsafe { ctx.runtime_metadata() }
+}
+
 impl JitContext {
+    /// Return the module address owned by the verified image when available.
+    /// The pointer remains stable while the context's `loaded_module` owner is
+    /// alive and lets callbacks finish immutable module lookup before mutating
+    /// other context fields.
+    #[inline]
+    pub unsafe fn module_ptr(&self) -> *const Module {
+        unsafe {
+            self.loaded_module
+                .as_ref()
+                .map(|loaded| core::ptr::from_ref(loaded.module()))
+                .unwrap_or(core::ptr::null())
+        }
+    }
+
+    /// Resolve the module through its verified immutable owner.
+    #[inline]
+    pub unsafe fn module_ref(&self) -> Option<&Module> {
+        unsafe { self.module_ptr().as_ref() }
+    }
+
+    #[inline]
+    pub unsafe fn runtime_metadata(&self) -> Option<ModuleRuntimeMetadata<'_>> {
+        unsafe {
+            self.loaded_module
+                .as_ref()
+                .map(LoadedModule::runtime_metadata)
+        }
+    }
+
     pub fn validate_required_callbacks(&self) -> Result<(), &'static str> {
         for field in jit_callback_abi_fields() {
             if field.kind.is_missing(self) {
@@ -679,35 +568,6 @@ impl JitContext {
         Ok(())
     }
 
-    pub const OFFSET_JIT_FUNC_TABLE: i32 = std::mem::offset_of!(JitContext, jit_func_table) as i32;
-    pub const OFFSET_JIT_FUNC_COUNT: i32 = std::mem::offset_of!(JitContext, jit_func_count) as i32;
-    pub const OFFSET_DIRECT_CALL_TABLE: i32 =
-        std::mem::offset_of!(JitContext, direct_call_table) as i32;
-    pub const OFFSET_DIRECT_CALL_COUNT: i32 =
-        std::mem::offset_of!(JitContext, direct_call_count) as i32;
-    pub const OFFSET_CALL_FUNC_ID: i32 = std::mem::offset_of!(JitContext, call_func_id) as i32;
-    pub const OFFSET_CALL_ARG_START: i32 = std::mem::offset_of!(JitContext, call_arg_start) as i32;
-    pub const OFFSET_CALL_RESUME_PC: i32 = std::mem::offset_of!(JitContext, call_resume_pc) as i32;
-    pub const OFFSET_CALL_RET_SLOTS: i32 = std::mem::offset_of!(JitContext, call_ret_slots) as i32;
-    pub const OFFSET_CALL_RET_REG: i32 = std::mem::offset_of!(JitContext, call_ret_reg) as i32;
-    pub const OFFSET_CALL_KIND: i32 = std::mem::offset_of!(JitContext, call_kind) as i32;
-    pub const OFFSET_RUNTIME_TRAP_KIND: i32 =
-        std::mem::offset_of!(JitContext, runtime_trap_kind) as i32;
-    pub const OFFSET_RUNTIME_TRAP_ARG0: i32 =
-        std::mem::offset_of!(JitContext, runtime_trap_arg0) as i32;
-    pub const OFFSET_RUNTIME_TRAP_ARG1: i32 =
-        std::mem::offset_of!(JitContext, runtime_trap_arg1) as i32;
-    pub const OFFSET_RUNTIME_TRAP_PC: i32 =
-        std::mem::offset_of!(JitContext, runtime_trap_pc) as i32;
-    pub const OFFSET_CURRENT_FUNC_ID: i32 =
-        std::mem::offset_of!(JitContext, current_func_id) as i32;
-    pub const OFFSET_INFRA_ERROR_MESSAGE: i32 =
-        std::mem::offset_of!(JitContext, infra_error_message) as i32;
-    pub const OFFSET_USER_PANIC_PC: i32 = std::mem::offset_of!(JitContext, user_panic_pc) as i32;
-    #[cfg(feature = "std")]
-    pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
-    pub const OFFSET_LOOP_EXIT_PC: i32 = std::mem::offset_of!(JitContext, loop_exit_pc) as i32;
-
     // JitResult constants for Call infrastructure
     pub const JIT_RESULT_OK: u32 = 0;
     pub const JIT_RESULT_PANIC: u32 = 1;
@@ -716,295 +576,96 @@ impl JitContext {
     pub const JIT_RESULT_WAIT_QUEUE: u32 = 4;
     pub const JIT_RESULT_REPLAY: u32 = 5;
     pub const JIT_RESULT_JIT_ERROR: u32 = 6;
+    pub const JIT_RESULT_EXTERN_SUSPEND: u32 = 7;
+    pub const JIT_RESULT_RUNTIME_TRANSITION: u32 = 8;
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
     pub const CALL_KIND_PREPARED: u8 = 1; // prepare callback already did push_frame + arg layout
     pub const CALL_KIND_YIELD: u8 = 253;
     pub const CALL_KIND_BLOCK: u8 = 254;
-
-    // Fiber stack access offsets
-    pub const OFFSET_STACK_PTR: i32 = std::mem::offset_of!(JitContext, stack_ptr) as i32;
-    pub const OFFSET_STACK_CAP: i32 = std::mem::offset_of!(JitContext, stack_cap) as i32;
-    pub const OFFSET_STACK_LIMIT: i32 = std::mem::offset_of!(JitContext, stack_limit) as i32;
-    pub const OFFSET_CALL_DEPTH: i32 = std::mem::offset_of!(JitContext, call_depth) as i32;
-    pub const OFFSET_CALL_DEPTH_LIMIT: i32 =
-        std::mem::offset_of!(JitContext, call_depth_limit) as i32;
-    pub const OFFSET_JIT_BP: i32 = std::mem::offset_of!(JitContext, jit_bp) as i32;
-    pub const OFFSET_FIBER_SP: i32 = std::mem::offset_of!(JitContext, fiber_sp) as i32;
-    pub const OFFSET_PUSH_FRAME_FN: i32 = std::mem::offset_of!(JitContext, push_frame_fn) as i32;
-    pub const OFFSET_POP_FRAME_FN: i32 = std::mem::offset_of!(JitContext, pop_frame_fn) as i32;
-    pub const OFFSET_STACK_OVERFLOW_FN: i32 =
-        std::mem::offset_of!(JitContext, stack_overflow_fn) as i32;
-    pub const OFFSET_PUSH_RESUME_POINT_FN: i32 =
-        std::mem::offset_of!(JitContext, push_resume_point_fn) as i32;
-
-    // VM callback offsets
-    pub const OFFSET_CREATE_ISLAND_FN: i32 =
-        std::mem::offset_of!(JitContext, create_island_fn) as i32;
-    pub const OFFSET_QUEUE_LEN_FN: i32 = std::mem::offset_of!(JitContext, queue_len_fn) as i32;
-    pub const OFFSET_QUEUE_CAP_FN: i32 = std::mem::offset_of!(JitContext, queue_cap_fn) as i32;
-    pub const OFFSET_QUEUE_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, queue_close_fn) as i32;
-    pub const OFFSET_QUEUE_SEND_FN: i32 = std::mem::offset_of!(JitContext, queue_send_fn) as i32;
-    pub const OFFSET_QUEUE_RECV_FN: i32 = std::mem::offset_of!(JitContext, queue_recv_fn) as i32;
-    pub const OFFSET_GO_START_FN: i32 = std::mem::offset_of!(JitContext, go_start_fn) as i32;
-    pub const OFFSET_GO_ISLAND_FN: i32 = std::mem::offset_of!(JitContext, go_island_fn) as i32;
-
-    // Defer/Recover
-    pub const OFFSET_DEFER_PUSH_FN: i32 = std::mem::offset_of!(JitContext, defer_push_fn) as i32;
-    pub const OFFSET_RECOVER_FN: i32 = std::mem::offset_of!(JitContext, recover_fn) as i32;
-
-    // Select
-    pub const OFFSET_SELECT_BEGIN_FN: i32 =
-        std::mem::offset_of!(JitContext, select_begin_fn) as i32;
-    pub const OFFSET_SELECT_SEND_FN: i32 = std::mem::offset_of!(JitContext, select_send_fn) as i32;
-    pub const OFFSET_SELECT_RECV_FN: i32 = std::mem::offset_of!(JitContext, select_recv_fn) as i32;
-    pub const OFFSET_SELECT_EXEC_FN: i32 = std::mem::offset_of!(JitContext, select_exec_fn) as i32;
-
-    pub const OFFSET_IS_ERROR_RETURN: i32 =
-        std::mem::offset_of!(JitContext, is_error_return) as i32;
-    pub const OFFSET_RET_GCREF_START: i32 =
-        std::mem::offset_of!(JitContext, ret_gcref_start) as i32;
-    pub const OFFSET_RET_IS_HEAP: i32 = std::mem::offset_of!(JitContext, ret_is_heap) as i32;
-    pub const OFFSET_RET_START: i32 = std::mem::offset_of!(JitContext, ret_start) as i32;
-
-    // JIT-to-JIT Direct Call for Closure/Iface
-    pub const OFFSET_PREPARE_CLOSURE_CALL_FN: i32 =
-        std::mem::offset_of!(JitContext, prepare_closure_call_fn) as i32;
-    pub const OFFSET_PREPARE_IFACE_CALL_FN: i32 =
-        std::mem::offset_of!(JitContext, prepare_iface_call_fn) as i32;
-
-    // Inline Cache
-    pub const OFFSET_IC_TABLE: i32 = std::mem::offset_of!(JitContext, ic_table) as i32;
-
-    // Cooperative scheduler budget
-    pub const OFFSET_EXECUTION_BUDGET: i32 =
-        std::mem::offset_of!(JitContext, execution_budget) as i32;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JitContextAbiField {
-    pub name: &'static str,
-    pub offset: i32,
+impl core::ops::Deref for JitContext {
+    type Target = JitContextCallbacks;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            self.callbacks
+                .as_ref()
+                .unwrap_or(&EMPTY_JIT_CONTEXT_CALLBACKS)
+        }
+    }
 }
 
-/// JitContext fields that generated code may address by raw offset.
-///
-/// Keep this table in sync with `JitContext` and the offset constants above; it
-/// gives tests and downstream debug tooling a single machine-readable ABI view.
-pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
-    &[
-        JitContextAbiField {
-            name: "jit_func_table",
-            offset: JitContext::OFFSET_JIT_FUNC_TABLE,
-        },
-        JitContextAbiField {
-            name: "jit_func_count",
-            offset: JitContext::OFFSET_JIT_FUNC_COUNT,
-        },
-        JitContextAbiField {
-            name: "direct_call_table",
-            offset: JitContext::OFFSET_DIRECT_CALL_TABLE,
-        },
-        JitContextAbiField {
-            name: "direct_call_count",
-            offset: JitContext::OFFSET_DIRECT_CALL_COUNT,
-        },
-        JitContextAbiField {
-            name: "call_func_id",
-            offset: JitContext::OFFSET_CALL_FUNC_ID,
-        },
-        JitContextAbiField {
-            name: "call_arg_start",
-            offset: JitContext::OFFSET_CALL_ARG_START,
-        },
-        JitContextAbiField {
-            name: "call_resume_pc",
-            offset: JitContext::OFFSET_CALL_RESUME_PC,
-        },
-        JitContextAbiField {
-            name: "call_ret_slots",
-            offset: JitContext::OFFSET_CALL_RET_SLOTS,
-        },
-        JitContextAbiField {
-            name: "call_ret_reg",
-            offset: JitContext::OFFSET_CALL_RET_REG,
-        },
-        JitContextAbiField {
-            name: "call_kind",
-            offset: JitContext::OFFSET_CALL_KIND,
-        },
-        JitContextAbiField {
-            name: "runtime_trap_kind",
-            offset: JitContext::OFFSET_RUNTIME_TRAP_KIND,
-        },
-        JitContextAbiField {
-            name: "runtime_trap_arg0",
-            offset: JitContext::OFFSET_RUNTIME_TRAP_ARG0,
-        },
-        JitContextAbiField {
-            name: "runtime_trap_arg1",
-            offset: JitContext::OFFSET_RUNTIME_TRAP_ARG1,
-        },
-        JitContextAbiField {
-            name: "runtime_trap_pc",
-            offset: JitContext::OFFSET_RUNTIME_TRAP_PC,
-        },
-        JitContextAbiField {
-            name: "current_func_id",
-            offset: JitContext::OFFSET_CURRENT_FUNC_ID,
-        },
-        JitContextAbiField {
-            name: "infra_error_message",
-            offset: JitContext::OFFSET_INFRA_ERROR_MESSAGE,
-        },
-        JitContextAbiField {
-            name: "user_panic_pc",
-            offset: JitContext::OFFSET_USER_PANIC_PC,
-        },
-        #[cfg(feature = "std")]
-        JitContextAbiField {
-            name: "wait_io_token",
-            offset: JitContext::OFFSET_WAIT_IO_TOKEN,
-        },
-        JitContextAbiField {
-            name: "loop_exit_pc",
-            offset: JitContext::OFFSET_LOOP_EXIT_PC,
-        },
-        JitContextAbiField {
-            name: "stack_ptr",
-            offset: JitContext::OFFSET_STACK_PTR,
-        },
-        JitContextAbiField {
-            name: "stack_cap",
-            offset: JitContext::OFFSET_STACK_CAP,
-        },
-        JitContextAbiField {
-            name: "stack_limit",
-            offset: JitContext::OFFSET_STACK_LIMIT,
-        },
-        JitContextAbiField {
-            name: "call_depth",
-            offset: JitContext::OFFSET_CALL_DEPTH,
-        },
-        JitContextAbiField {
-            name: "call_depth_limit",
-            offset: JitContext::OFFSET_CALL_DEPTH_LIMIT,
-        },
-        JitContextAbiField {
-            name: "jit_bp",
-            offset: JitContext::OFFSET_JIT_BP,
-        },
-        JitContextAbiField {
-            name: "fiber_sp",
-            offset: JitContext::OFFSET_FIBER_SP,
-        },
-        JitContextAbiField {
-            name: "push_frame_fn",
-            offset: JitContext::OFFSET_PUSH_FRAME_FN,
-        },
-        JitContextAbiField {
-            name: "pop_frame_fn",
-            offset: JitContext::OFFSET_POP_FRAME_FN,
-        },
-        JitContextAbiField {
-            name: "stack_overflow_fn",
-            offset: JitContext::OFFSET_STACK_OVERFLOW_FN,
-        },
-        JitContextAbiField {
-            name: "push_resume_point_fn",
-            offset: JitContext::OFFSET_PUSH_RESUME_POINT_FN,
-        },
-        JitContextAbiField {
-            name: "create_island_fn",
-            offset: JitContext::OFFSET_CREATE_ISLAND_FN,
-        },
-        JitContextAbiField {
-            name: "queue_len_fn",
-            offset: JitContext::OFFSET_QUEUE_LEN_FN,
-        },
-        JitContextAbiField {
-            name: "queue_cap_fn",
-            offset: JitContext::OFFSET_QUEUE_CAP_FN,
-        },
-        JitContextAbiField {
-            name: "queue_close_fn",
-            offset: JitContext::OFFSET_QUEUE_CLOSE_FN,
-        },
-        JitContextAbiField {
-            name: "queue_send_fn",
-            offset: JitContext::OFFSET_QUEUE_SEND_FN,
-        },
-        JitContextAbiField {
-            name: "queue_recv_fn",
-            offset: JitContext::OFFSET_QUEUE_RECV_FN,
-        },
-        JitContextAbiField {
-            name: "go_start_fn",
-            offset: JitContext::OFFSET_GO_START_FN,
-        },
-        JitContextAbiField {
-            name: "go_island_fn",
-            offset: JitContext::OFFSET_GO_ISLAND_FN,
-        },
-        JitContextAbiField {
-            name: "defer_push_fn",
-            offset: JitContext::OFFSET_DEFER_PUSH_FN,
-        },
-        JitContextAbiField {
-            name: "recover_fn",
-            offset: JitContext::OFFSET_RECOVER_FN,
-        },
-        JitContextAbiField {
-            name: "select_begin_fn",
-            offset: JitContext::OFFSET_SELECT_BEGIN_FN,
-        },
-        JitContextAbiField {
-            name: "select_send_fn",
-            offset: JitContext::OFFSET_SELECT_SEND_FN,
-        },
-        JitContextAbiField {
-            name: "select_recv_fn",
-            offset: JitContext::OFFSET_SELECT_RECV_FN,
-        },
-        JitContextAbiField {
-            name: "select_exec_fn",
-            offset: JitContext::OFFSET_SELECT_EXEC_FN,
-        },
-        JitContextAbiField {
-            name: "is_error_return",
-            offset: JitContext::OFFSET_IS_ERROR_RETURN,
-        },
-        JitContextAbiField {
-            name: "ret_gcref_start",
-            offset: JitContext::OFFSET_RET_GCREF_START,
-        },
-        JitContextAbiField {
-            name: "ret_is_heap",
-            offset: JitContext::OFFSET_RET_IS_HEAP,
-        },
-        JitContextAbiField {
-            name: "ret_start",
-            offset: JitContext::OFFSET_RET_START,
-        },
-        JitContextAbiField {
-            name: "prepare_closure_call_fn",
-            offset: JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN,
-        },
-        JitContextAbiField {
-            name: "prepare_iface_call_fn",
-            offset: JitContext::OFFSET_PREPARE_IFACE_CALL_FN,
-        },
-        JitContextAbiField {
-            name: "ic_table",
-            offset: JitContext::OFFSET_IC_TABLE,
-        },
-        JitContextAbiField {
-            name: "execution_budget",
-            offset: JitContext::OFFSET_EXECUTION_BUDGET,
-        },
-    ]
+macro_rules! jit_context_raw_fields {
+    ($(($variant:ident, $field:ident)),+ $(,)?) => {
+        /// `JitContext` fields that generated code may address by raw offset.
+        ///
+        /// Adding raw field access requires adding a variant to the single
+        /// `JIT_CONTEXT_RAW_FIELDS` definition below. The field name and offset
+        /// are then derived from the Rust struct itself.
+        #[repr(u8)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum JitContextField {
+            $($variant),+
+        }
+
+        impl JitContextField {
+            #[inline]
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($field)),+
+                }
+            }
+
+            #[inline]
+            pub const fn offset(self) -> i32 {
+                match self {
+                    $(Self::$variant => core::mem::offset_of!(JitContext, $field) as i32),+
+                }
+            }
+        }
+
+        /// Complete machine-readable permission list for raw JIT context access.
+        pub const JIT_CONTEXT_RAW_FIELDS: &[JitContextField] = &[
+            $(JitContextField::$variant),+
+        ];
+    };
 }
+
+jit_context_raw_fields!(
+    (Gc, gc),
+    (Globals, globals),
+    (UserPanicPc, user_panic_pc),
+    (RuntimeTrapArg0, runtime_trap_arg0),
+    (RuntimeTrapArg1, runtime_trap_arg1),
+    (RuntimeTrapPc, runtime_trap_pc),
+    (CurrentFuncId, current_func_id),
+    (JitFuncTable, jit_func_table),
+    (CallResumePc, call_resume_pc),
+    (CallKind, call_kind),
+    (LoopExitPc, loop_exit_pc),
+    (StackPtr, stack_ptr),
+    (StackCap, stack_cap),
+    (StackLimit, stack_limit),
+    (CallDepth, call_depth),
+    (CallDepthLimit, call_depth_limit),
+    (JitBp, jit_bp),
+    (FiberSp, fiber_sp),
+    (PushFrameFn, push_frame_fn),
+    (PopFrameFn, pop_frame_fn),
+    (StackOverflowFn, stack_overflow_fn),
+    (PushResumePointFn, push_resume_point_fn),
+    (IsErrorReturn, is_error_return),
+    (RetGcRefStart, ret_gcref_start),
+    (RetIsHeap, ret_is_heap),
+    (RetStart, ret_start),
+    (PrepareClosureCallFn, prepare_closure_call_fn),
+    (PrepareIfaceCallFn, prepare_iface_call_fn),
+    (InlineCacheTable, ic_table),
+    (ExecutionBudget, execution_budget),
+);
 
 // =============================================================================
 // JitResult
@@ -1039,6 +700,10 @@ pub enum JitResult {
     JitError = 6,
     /// JIT extern helper published a VM-owned suspend payload on the fiber.
     ExternSuspend = 7,
+    /// A helper completed the current bytecode instruction and published
+    /// VM-owned runtime-transition effects. Materialize at `call_resume_pc`
+    /// and yield to the VM before executing another instruction.
+    RuntimeTransition = 8,
 }
 
 pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;
@@ -1130,7 +795,6 @@ impl JitContextDependencyKind {
 pub enum JitCallbackReturnPolicy {
     RawPointer,
     RawVoid,
-    RawHandle,
     JitResult,
     JitResultWithOutPointer,
     PreparedCallOutPointer,
@@ -1181,6 +845,14 @@ pub struct JitRuntimeHelperAbi {
     pub observes_frame: bool,
 }
 
+impl JitRuntimeHelperAbi {
+    /// Generated code must publish its SSA frame before helpers that can
+    /// collect, schedule, or otherwise inspect VM-owned frame state.
+    pub const fn requires_frame_sync(self) -> bool {
+        self.may_gc || self.may_schedule || self.observes_frame
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitCallbackAbiField {
     pub kind: JitContextDependencyKind,
@@ -1200,21 +872,10 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
     use JitContextDependencyKind as Kind;
 
     &[
-        #[cfg(feature = "std")]
         JitCallbackAbiField {
             kind: Kind::CallExternFn,
             name: "call_extern_fn",
-            params: &[
-                T::Ptr,
-                T::Ptr,
-                T::Ptr,
-                T::Ptr,
-                T::U32,
-                T::Ptr,
-                T::U32,
-                T::Ptr,
-                T::U32,
-            ],
+            params: &[T::Ptr, T::U32, T::Ptr, T::U32, T::Ptr, T::U32],
             ret: T::JitResult,
             infra_error_id: Some(JIT_CALLBACK_CALL_EXTERN),
             return_policy: Ret::JitResult,
@@ -1269,10 +930,10 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
         JitCallbackAbiField {
             kind: Kind::CreateIslandFn,
             name: "create_island_fn",
-            params: &[T::Ptr],
-            ret: T::U64,
+            params: &[T::Ptr, T::Ptr],
+            ret: T::JitResult,
             infra_error_id: Some(JIT_CALLBACK_CREATE_ISLAND),
-            return_policy: Ret::RawHandle,
+            return_policy: Ret::JitResultWithOutPointer,
             may_gc: true,
             may_schedule: true,
             observes_frame: true,
@@ -1441,7 +1102,6 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
                 T::Ptr,
                 T::U32,
                 T::Ptr,
-                T::Ptr,
             ],
             ret: T::JitResult,
             infra_error_id: None,
@@ -1463,7 +1123,6 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
                 T::U32,
                 T::Ptr,
                 T::U32,
-                T::Ptr,
                 T::Ptr,
             ],
             ret: T::JitResult,
@@ -1690,7 +1349,7 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
             JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT,
         );
     };
-    let module = unsafe { ctx.module.as_ref() };
+    let module = unsafe { jit_module_runtime_metadata(ctx) };
     match crate::gc_types::try_typed_write_barrier_by_meta(gc, parent, vals, elem_meta, module) {
         Ok(()) => JitResult::Ok,
         Err(_) => set_jit_infra_error(
@@ -1702,15 +1361,6 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
 }
 
 /// Legacy safepoint compatibility symbol.
-///
-/// Generated native code charges bounded control-flow regions against the
-/// scheduler-turn budget in `JitContext` and returns `CALL_KIND_YIELD` when the
-/// next region cannot fit. The VM then owns interrupt polling, root
-/// materialization, and incremental GC work at the scheduling boundary.
-pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
-    // Kept as an ABI symbol for already-built extensions.
-}
-
 /// Set Call request state in JitContext.
 /// Called by JIT when it needs to hand off to VM for a non-jittable callee.
 ///
@@ -1950,17 +1600,7 @@ pub extern "C" fn vo_call_extern(
         None => return missing_callback(ctx, JIT_CALLBACK_CALL_EXTERN),
     };
 
-    call_fn(
-        ctx,
-        ctx_ref.extern_registry,
-        ctx_ref.gc,
-        ctx_ref.module as *const c_void,
-        extern_id,
-        args,
-        arg_count,
-        ret,
-        ret_slots,
-    )
+    call_fn(ctx, extern_id, args, arg_count, ret, ret_slots)
 }
 
 // =============================================================================
@@ -2102,42 +1742,45 @@ fn validate_map_handle(
     Ok(base)
 }
 
-fn jit_metadata_lookup_required(ctx_ref: &JitContext) -> bool {
-    ctx_ref.jit_func_count != 0 || ctx_ref.direct_call_count != 0
+fn instruction_metadata_lookup_required(ctx_ref: &JitContext) -> bool {
+    ctx_ref.jit_func_count != 0
 }
 
 type JitMapLayoutSlices<'a> = (&'a [SlotType], &'a [SlotType]);
 
-fn current_jit_metadata(
+fn current_instruction_metadata(
     ctx_ref: &JitContext,
     ctx: *mut JitContext,
     detail: u64,
-) -> Result<Option<&JitInstructionMetadata>, u64> {
+) -> Result<Option<&InstructionMetadata>, u64> {
     if ctx_ref.current_func_id == u32::MAX || ctx_ref.runtime_trap_pc == u32::MAX {
-        if jit_metadata_lookup_required(ctx_ref) {
+        if instruction_metadata_lookup_required(ctx_ref) {
             return Err(set_invalid_map_metadata(ctx, detail));
         }
         return Ok(None);
     }
-    let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+    let Some(module) = (unsafe { ctx_ref.module_ref() }) else {
         return Err(set_invalid_map_metadata(ctx, detail));
     };
     let Some(func) = module.functions.get(ctx_ref.current_func_id as usize) else {
         return Err(set_invalid_map_metadata(ctx, detail));
     };
-    let Some(metadata) = func.jit_metadata.get(ctx_ref.runtime_trap_pc as usize) else {
+    let Some(metadata) = func
+        .instruction_metadata
+        .get(ctx_ref.runtime_trap_pc as usize)
+    else {
         return Err(set_invalid_map_metadata(ctx, detail));
     };
     Ok(Some(metadata))
 }
 
-fn current_jit_metadata_result(
+fn current_instruction_metadata_result(
     ctx_ref: &JitContext,
     ctx: *mut JitContext,
     detail: u64,
-) -> Result<Option<&JitInstructionMetadata>, JitResult> {
+) -> Result<Option<&InstructionMetadata>, JitResult> {
     if ctx_ref.current_func_id == u32::MAX || ctx_ref.runtime_trap_pc == u32::MAX {
-        if jit_metadata_lookup_required(ctx_ref) {
+        if instruction_metadata_lookup_required(ctx_ref) {
             return Err(set_jit_infra_error(
                 ctx,
                 JIT_INFRA_ERROR_INVALID_METADATA,
@@ -2146,7 +1789,7 @@ fn current_jit_metadata_result(
         }
         return Ok(None);
     }
-    let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+    let Some(module) = (unsafe { ctx_ref.module_ref() }) else {
         return Err(set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_METADATA,
@@ -2160,7 +1803,10 @@ fn current_jit_metadata_result(
             detail,
         ));
     };
-    let Some(metadata) = func.jit_metadata.get(ctx_ref.runtime_trap_pc as usize) else {
+    let Some(metadata) = func
+        .instruction_metadata
+        .get(ctx_ref.runtime_trap_pc as usize)
+    else {
         return Err(set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_METADATA,
@@ -2175,24 +1821,12 @@ fn jit_map_key_value_layout_for_current_pc(
     ctx: *mut JitContext,
     detail: u64,
 ) -> Result<Option<JitMapLayoutSlices<'_>>, u64> {
-    match current_jit_metadata(ctx_ref, ctx, detail)? {
+    match current_instruction_metadata(ctx_ref, ctx, detail)? {
         None => Ok(None),
-        Some(
-            JitInstructionMetadata::MapGet {
-                key_layout,
-                val_layout,
-                ..
-            }
-            | JitInstructionMetadata::MapSet {
-                key_layout,
-                val_layout,
-            }
-            | JitInstructionMetadata::MapIterNext {
-                key_layout,
-                val_layout,
-            },
-        ) => Ok(Some((key_layout.as_slice(), val_layout.as_slice()))),
-        Some(_) => Err(set_invalid_map_metadata(ctx, detail)),
+        Some(metadata) => metadata
+            .map_key_value_layout_slices()
+            .map(Some)
+            .ok_or_else(|| set_invalid_map_metadata(ctx, detail)),
     }
 }
 
@@ -2201,10 +1835,12 @@ fn jit_map_key_layout_for_current_pc(
     ctx: *mut JitContext,
     detail: u64,
 ) -> Result<Option<&[SlotType]>, u64> {
-    match current_jit_metadata(ctx_ref, ctx, detail)? {
+    match current_instruction_metadata(ctx_ref, ctx, detail)? {
         None => Ok(None),
-        Some(JitInstructionMetadata::MapDelete { key_layout }) => Ok(Some(key_layout.as_slice())),
-        Some(_) => Err(set_invalid_map_metadata(ctx, detail)),
+        Some(metadata) => metadata
+            .map_delete_key_layout()
+            .map(Some)
+            .ok_or_else(|| set_invalid_map_metadata(ctx, detail)),
     }
 }
 
@@ -2281,25 +1917,26 @@ fn validate_jit_iface_assert_abi_for_current_pc(
         return Err(JitResult::JitError);
     }
     let ctx_ref = unsafe { &*ctx };
-    match current_jit_metadata_result(ctx_ref, ctx, JIT_CALLBACK_IFACE_ASSERT)? {
+    match current_instruction_metadata_result(ctx_ref, ctx, JIT_CALLBACK_IFACE_ASSERT)? {
         None => Err(set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_METADATA,
             JIT_CALLBACK_IFACE_ASSERT,
         )),
-        Some(JitInstructionMetadata::IfaceAssertLayout {
+        Some(InstructionMetadata::IfaceAssertLayout {
             assert_kind,
             target_id: metadata_target_id,
             result_layout,
         }) => {
-            let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+            let Some(module) = (unsafe { ctx_ref.module_ref() }) else {
                 return Err(set_jit_infra_error(
                     ctx,
                     JIT_INFRA_ERROR_INVALID_METADATA,
                     JIT_CALLBACK_IFACE_ASSERT,
                 ));
             };
-            if target_id != *metadata_target_id || u16::from(*assert_kind) != flags & 0x3 {
+            if target_id != *metadata_target_id || flags & !u16::from(IFACE_ASSERT_HAS_OK_FLAG) != 0
+            {
                 return Err(set_jit_infra_error(
                     ctx,
                     JIT_INFRA_ERROR_INVALID_METADATA,
@@ -2315,19 +1952,7 @@ fn validate_jit_iface_assert_abi_for_current_pc(
                     JIT_CALLBACK_IFACE_ASSERT,
                 ));
             };
-            let Ok(result_slots) = u16::try_from(result_layout.len()) else {
-                return Err(set_jit_infra_error(
-                    ctx,
-                    JIT_INFRA_ERROR_INVALID_METADATA,
-                    JIT_CALLBACK_IFACE_ASSERT,
-                ));
-            };
-            let expected_slot_mirror = if result_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
-                result_slots
-            } else {
-                0
-            };
-            if result_layout != &expected_layout || flags >> 3 != expected_slot_mirror {
+            if result_layout != &expected_layout {
                 Err(set_jit_infra_error(
                     ctx,
                     JIT_INFRA_ERROR_INVALID_METADATA,
@@ -2345,39 +1970,6 @@ fn validate_jit_iface_assert_abi_for_current_pc(
     }
 }
 
-fn jit_value_meta_layout(
-    ctx: *mut JitContext,
-    module: Option<&Module>,
-    meta: ValueMeta,
-    slots: usize,
-    detail: u64,
-) -> Result<Vec<SlotType>, u64> {
-    match meta.value_kind() {
-        ValueKind::Struct => {
-            let Some(module) = module else {
-                return Err(set_invalid_map_metadata(ctx, detail));
-            };
-            module
-                .struct_metas
-                .get(meta.meta_id() as usize)
-                .map(|meta| meta.slot_types.clone())
-                .ok_or_else(|| set_invalid_map_metadata(ctx, detail))
-        }
-        ValueKind::Array => {
-            let Some(module) = module else {
-                return Err(set_invalid_map_metadata(ctx, detail));
-            };
-            module
-                .slot_layout_for_value_rttid(ValueRttid::new(meta.meta_id(), ValueKind::Array))
-                .ok_or_else(|| set_invalid_map_metadata(ctx, detail))
-        }
-        ValueKind::Interface => Ok(vec![SlotType::Interface0, SlotType::Interface1]),
-        ValueKind::Float32 | ValueKind::Float64 => Ok(vec![SlotType::Float; slots]),
-        kind if kind.may_contain_gc_refs() => Ok(vec![SlotType::GcRef; slots]),
-        _ => Ok(vec![SlotType::Value; slots]),
-    }
-}
-
 fn validate_map_key_value_layout(
     ctx: *mut JitContext,
     m: crate::gc::GcRef,
@@ -2388,25 +1980,28 @@ fn validate_map_key_value_layout(
     let module = if ctx.is_null() {
         None
     } else {
-        unsafe { (*ctx).module.as_ref() }
+        unsafe { (*ctx).runtime_metadata() }
     };
     // Safety: callers canonicalize `m` and verify the map header before this
     // layout comparison.
-    let expected_key = jit_value_meta_layout(
-        ctx,
-        module,
+    if key_layout.len() != unsafe { crate::objects::map::key_slots(m) } as usize
+        || val_layout.len() != unsafe { crate::objects::map::val_slots(m) } as usize
+    {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    }
+    let key_matches = crate::value_layout::value_meta_layout_matches(
         unsafe { crate::objects::map::key_meta(m) },
-        unsafe { crate::objects::map::key_slots(m) } as usize,
-        detail,
-    )?;
-    let expected_val = jit_value_meta_layout(
-        ctx,
+        key_layout,
         module,
+    )
+    .map_err(|_| set_invalid_map_metadata(ctx, detail))?;
+    let val_matches = crate::value_layout::value_meta_layout_matches(
         unsafe { crate::objects::map::val_meta(m) },
-        unsafe { crate::objects::map::val_slots(m) } as usize,
-        detail,
-    )?;
-    if key_layout != expected_key.as_slice() || val_layout != expected_val.as_slice() {
+        val_layout,
+        module,
+    )
+    .map_err(|_| set_invalid_map_metadata(ctx, detail))?;
+    if !key_matches || !val_matches {
         return Err(set_invalid_map_metadata(ctx, detail));
     }
     Ok(())
@@ -2421,18 +2016,20 @@ fn validate_map_key_layout(
     let module = if ctx.is_null() {
         None
     } else {
-        unsafe { (*ctx).module.as_ref() }
+        unsafe { (*ctx).runtime_metadata() }
     };
     // Safety: callers canonicalize `m` and verify the map header before this
     // layout comparison.
-    let expected_key = jit_value_meta_layout(
-        ctx,
-        module,
+    if key_layout.len() != unsafe { crate::objects::map::key_slots(m) } as usize {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    }
+    let key_matches = crate::value_layout::value_meta_layout_matches(
         unsafe { crate::objects::map::key_meta(m) },
-        unsafe { crate::objects::map::key_slots(m) } as usize,
-        detail,
-    )?;
-    if key_layout != expected_key.as_slice() {
+        key_layout,
+        module,
+    )
+    .map_err(|_| set_invalid_map_metadata(ctx, detail))?;
+    if !key_matches {
         return Err(set_invalid_map_metadata(ctx, detail));
     }
     Ok(())
@@ -2528,7 +2125,7 @@ pub extern "C" fn vo_map_get(
         Err(result) => return result,
     }
 
-    let module = unsafe { (*ctx).module.as_ref() };
+    let module = unsafe { (*ctx).runtime_metadata() };
     let key = unsafe { jit_raw_in_slice(key_ptr, key_slots) };
     let val_out = unsafe { jit_raw_out_slice(val_ptr, val_slots) };
     let ok = match unsafe { map::get_checked_into(m_ref, key, module, val_out) } {
@@ -2607,7 +2204,7 @@ pub extern "C" fn vo_map_set(
         Err(result) => return result,
     }
 
-    let module = unsafe { (*ctx).module.as_ref() };
+    let module = unsafe { jit_module_runtime_metadata(&*ctx) };
     let key = unsafe { jit_raw_in_slice(key_ptr, key_slots) };
     let val = unsafe { jit_raw_in_slice(val_ptr, val_slots) };
 
@@ -2688,7 +2285,7 @@ pub extern "C" fn vo_map_delete(
         Err(result) => return result,
     }
 
-    let module = unsafe { (*ctx).module.as_ref() };
+    let module = unsafe { jit_module_runtime_metadata(&*ctx) };
     let key = unsafe { jit_raw_in_slice(key_ptr, key_slots) };
     match unsafe { map::delete_checked(m_ref, key, module) } {
         Ok(()) => 0,
@@ -3155,7 +2752,8 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
 // Channel Helpers
 // =============================================================================
 
-/// Create a new queue with validation (unified logic for VM and JIT).
+/// Create a new queue with validation (unified logic for VM and JIT). Managed
+/// allocation failure writes null with status 0 for the generated memory gate.
 pub extern "C" fn vo_queue_new_checked(
     ctx: *mut JitContext,
     kind: u32,
@@ -3193,7 +2791,10 @@ unsafe fn queue_new_checked(
         return alloc_error::OVERFLOW;
     }
     let ctx = &mut *ctx;
-    if ctx.gc.is_null() || ctx.module.is_null() {
+    let Some(module) = ctx.module_ref().map(core::ptr::from_ref) else {
+        return alloc_error::OVERFLOW;
+    };
+    if ctx.gc.is_null() {
         return alloc_error::OVERFLOW;
     }
     let Ok(elem_slots) = u16::try_from(elem_slots) else {
@@ -3212,7 +2813,7 @@ unsafe fn queue_new_checked(
         elem_rttid,
         elem_slots,
         cap,
-        &*ctx.module,
+        &*module,
     ) {
         Ok(result) => {
             *out = result as u64;
@@ -3226,7 +2827,8 @@ unsafe fn queue_new_checked(
 // Array Helpers
 // =============================================================================
 
-/// Create a new array with packed element storage and report allocation errors.
+/// Create an array after validating its layout. A managed allocation failure
+/// writes null with status 0 so generated code can return `JitError`.
 pub extern "C" fn vo_array_new_checked(
     gc: *mut Gc,
     elem_meta: u32,
@@ -3257,9 +2859,6 @@ pub extern "C" fn vo_array_new_checked(
             return alloc_error::OVERFLOW;
         };
         let result = array::create(gc, elem_meta, elem_bytes as usize, len);
-        if result.is_null() {
-            return alloc_error::OVERFLOW;
-        }
         *out = result as u64;
         0
     }
@@ -3279,7 +2878,8 @@ pub unsafe extern "C" fn vo_array_len(arr: u64) -> u64 {
 // =============================================================================
 
 /// Create a new slice with validation (unified logic for VM and JIT).
-/// Returns: error code (0 = success), writes result to *out on success.
+/// Validation errors use a nonzero status; managed allocation failure writes
+/// null with status 0 so generated code can return `JitError`.
 pub extern "C" fn vo_slice_new_checked(
     gc: *mut Gc,
     elem_meta: u32,
@@ -3406,12 +3006,13 @@ pub extern "C" fn vo_slice_append(
             return set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT);
         }
         let gc = &mut *ctx_ref.gc;
-        let module = ctx_ref.module.as_ref();
+        let module = jit_module_runtime_metadata(ctx_ref);
+        let raw_module = module.map(ModuleRuntimeMetadata::module);
         let Some(elem_meta) = ValueMeta::try_from_raw(elem_meta) else {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT);
         };
         if elem_meta.value_kind() == ValueKind::Struct {
-            let missing = module
+            let missing = raw_module
                 .and_then(|module| module.struct_metas.get(elem_meta.meta_id() as usize))
                 .is_none();
             if missing {
@@ -3425,7 +3026,7 @@ pub extern "C" fn vo_slice_append(
             }
             let actual_meta = slice::elem_meta(s_ref);
             if actual_meta.value_kind() == ValueKind::Struct {
-                let missing = module
+                let missing = raw_module
                     .and_then(|module| module.struct_metas.get(actual_meta.meta_id() as usize))
                     .is_none();
                 if missing {
@@ -3614,7 +3215,7 @@ pub extern "C" fn vo_iface_to_iface(
         return JIT_HELPER_U64_ERROR;
     }
     let ctx_ref = unsafe { &*ctx };
-    let (Some(module), Some(itab_cache)) = (unsafe { ctx_ref.module.as_ref() }, unsafe {
+    let (Some(module), Some(itab_cache)) = (unsafe { ctx_ref.module_ref() }, unsafe {
         ctx_ref.itab_cache.as_mut()
     }) else {
         return set_invalid_callback_state_u64(ctx, JIT_HELPER_IFACE_TO_IFACE_LAYOUT);
@@ -3680,7 +3281,7 @@ pub unsafe extern "C" fn vo_iface_eq(
     let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
         return 2;
     };
-    let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+    let Some(module) = (unsafe { ctx_ref.module_ref() }) else {
         let _ = set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -3739,7 +3340,13 @@ pub extern "C" fn vo_iface_assert(
         };
 
     let ctx_ref = unsafe { &*ctx };
-    let module = unsafe { &*ctx_ref.module };
+    let Some(module) = (unsafe { ctx_ref.module_ref() }) else {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_CALLBACK_IFACE_ASSERT,
+        );
+    };
     let Some(gc) = (unsafe { ctx_ref.gc.as_ref() }) else {
         return set_jit_infra_error(
             ctx,
@@ -3756,7 +3363,7 @@ pub extern "C" fn vo_iface_assert(
     };
     let src_vk = src_rttid.value_kind();
     let src_rttid = src_rttid.rttid();
-    let has_ok = ((flags >> 2) & 0x1) != 0;
+    let has_ok = (flags & u16::from(IFACE_ASSERT_HAS_OK_FLAG)) != 0;
 
     // nil interface always fails
     let matches = if src_vk == ValueKind::Void {
@@ -3881,7 +3488,7 @@ unsafe fn materialize_iface_assert_success(
             let Some(ctx_ref) = ctx.as_ref() else {
                 return Err(JitResult::JitError);
             };
-            let Some(module) = ctx_ref.module.as_ref() else {
+            let Some(module) = ctx_ref.module_ref() else {
                 return Err(set_jit_infra_error(
                     ctx,
                     JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -3991,7 +3598,6 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
             "vo_gc_typed_write_barrier_by_meta",
             vo_gc_typed_write_barrier_by_meta as *const u8,
         ),
-        ("vo_gc_safepoint", vo_gc_safepoint as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_runtime_trap", vo_runtime_trap as *const u8),
         ("vo_call_extern", vo_call_extern as *const u8),
@@ -4062,7 +3668,6 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_gc_alloc",
         "vo_gc_write_barrier",
         "vo_gc_typed_write_barrier_by_meta",
-        "vo_gc_safepoint",
         "vo_panic",
         "vo_runtime_trap",
         "vo_call_extern",
@@ -4152,16 +3757,6 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             return_policy: Ret::JitResult,
             panic_policy: Panic::ReturnsJitResult,
             may_gc: true,
-            may_schedule: false,
-            observes_frame: false,
-        },
-        JitRuntimeHelperAbi {
-            name: "vo_gc_safepoint",
-            params: &[T::Ptr],
-            ret: T::Void,
-            return_policy: Ret::Void,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
-            may_gc: false,
             may_schedule: false,
             observes_frame: false,
         },
@@ -4749,14 +4344,7 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResul
     let Some(create_fn) = ctx.create_island_fn else {
         return missing_callback(ctx, JIT_CALLBACK_CREATE_ISLAND);
     };
-    unsafe {
-        let handle = create_fn(ctx);
-        if ctx.runtime_trap_arg0 == JIT_INFRA_ERROR_SENTINEL {
-            return JitResult::JitError;
-        }
-        *out = handle;
-    }
-    JitResult::Ok
+    create_fn(ctx, out)
 }
 
 /// Get channel length through VM-owned queue validation.
@@ -4782,7 +4370,9 @@ pub extern "C" fn vo_chan_cap(ctx: *mut JitContext, chan: u64, out: *mut u64) ->
 }
 
 /// Close a channel.
-/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed channel.
+/// Returns JitResult::Ok on success without deferred effects,
+/// JitResult::RuntimeTransition when close effects must be committed by the VM,
+/// or JitResult::Panic on a nil/closed channel.
 pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;
@@ -4798,8 +4388,9 @@ pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
 // =============================================================================
 
 /// Send on a channel.
-/// Returns JitResult::Ok on success, JitResult::Panic on nil/closed channel,
-/// or JitResult::WaitIo if the send would block.
+/// Returns JitResult::Ok on success without deferred effects,
+/// JitResult::RuntimeTransition when wake effects must be committed by the VM,
+/// JitResult::Panic on a nil/closed channel, or JitResult::WaitQueue when blocked.
 pub extern "C" fn vo_chan_send(
     ctx: *mut JitContext,
     chan: u64,
@@ -4816,8 +4407,9 @@ pub extern "C" fn vo_chan_send(
 }
 
 /// Receive from a channel.
-/// Returns JitResult::Ok on success (including closed channel),
-/// JitResult::Panic on nil channel, or JitResult::WaitIo if would block.
+/// Returns JitResult::Ok on success without deferred effects (including a closed channel),
+/// JitResult::RuntimeTransition when sender effects must be committed by the VM,
+/// JitResult::Panic on a nil channel, or JitResult::WaitQueue when blocked.
 pub extern "C" fn vo_chan_recv(
     ctx: *mut JitContext,
     chan: u64,
@@ -4930,7 +4522,7 @@ pub extern "C" fn vo_select_recv(
 }
 
 /// Execute the select statement.
-/// Returns JitResult::Ok (result written to fiber stack), WaitIo (blocked), or Panic.
+/// Returns Ok, RuntimeTransition (deferred queue effects), WaitQueue (blocked), or Panic.
 pub extern "C" fn vo_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;

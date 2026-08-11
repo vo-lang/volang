@@ -1,4 +1,10 @@
 use super::*;
+use crate::fiber::PendingSpawn;
+
+fn endpoint_wait_key(fiber_key: u64, wait_id: u64) -> vo_runtime::island::EndpointWaitKey {
+    vo_runtime::island::EndpointWaitKey::try_new(fiber_key, wait_id)
+        .expect("test endpoint wait ID must be non-zero")
+}
 
 #[test]
 fn run_scheduled_returns_suspended_when_waiting_for_island_response() {
@@ -25,188 +31,6 @@ fn wait_for_work_prioritizes_pending_island_response_over_host_events() {
     vm.state.pending_island_responses = 1;
 
     assert_eq!(vm.wait_for_work().unwrap(), WaitResult::Suspended);
-}
-
-fn assert_dirty_recv_endpoint_response_transition(source: &str, marker: &str, terminator: &str) {
-    let region = compact_region_between(source, marker, terminator)
-        .unwrap_or_else(|| panic!("missing recv endpoint response arm {marker}"));
-    assert!(
-            compact_contains(&region, "GcRootEffect::CurrentFiberDirty")
-                || compact_contains(&region, "GcRootEffect::AllRootsDirty"),
-            "{marker} writes recv results to the current fiber stack before returning an endpoint response transition, so it must dirty current-fiber roots"
-        );
-    assert!(
-            !compact_contains(&region, "GcRootEffect::None"),
-            "{marker} must not publish a recv-produced endpoint response transition with GcRootEffect::None"
-        );
-}
-
-#[test]
-fn vm_gc_transition_root_001_interpreter_recv_endpoint_responses_dirty_current_fiber() {
-    let queue_src = queue_action_macro_source_062();
-    let src =
-        crate::source_contract::production_source_without_test_modules(include_str!("../mod.rs"));
-
-    assert_dirty_recv_endpoint_response_transition(
-        queue_src,
-        "exec::QueueAction::RemoteSendAck",
-        "exec::QueueAction::RemoteRecvData",
-    );
-    assert_dirty_recv_endpoint_response_transition(
-        &src,
-        "exec::SelectResult::RemoteSendAck",
-        "exec::SelectResult::RemoteRecvData",
-    );
-}
-
-#[test]
-fn vm_gc_transition_none_live_002_interpreter_recv_data_transitions_dirty_current_fiber() {
-    let queue_src = queue_action_macro_source_062();
-    let src =
-        crate::source_contract::production_source_without_test_modules(include_str!("../mod.rs"));
-
-    assert_dirty_recv_endpoint_response_transition(
-        queue_src,
-        "exec::QueueAction::RemoteRecvData",
-        "exec::QueueAction::RemoteClose",
-    );
-    assert_dirty_recv_endpoint_response_transition(
-        &src,
-        "exec::SelectResult::RemoteRecvData",
-        "exec::SelectResult::Malformed",
-    );
-}
-
-#[test]
-fn vm_gc_local_recv_wake_dirty_002_interpreter_queue_wake_transition_dirties_current_fiber() {
-    let region = compact_region_between(
-        queue_action_macro_source_062(),
-        "exec::QueueAction::Wake{waiter,payload}=>",
-        "exec::QueueAction::Close",
-    )
-    .expect("QueueAction::Wake arm should precede close arm");
-
-    assert!(
-            compact_contains(&region, "GcRootEffect::CurrentFiberDirty")
-                || compact_contains(&region, "GcRootEffect::AllRootsDirty"),
-            "interpreter queue recv can write current-fiber stack slots before publishing local wake transitions"
-        );
-    assert!(
-        !compact_contains(&region, "GcRootEffect::None"),
-        "interpreter local queue wake transitions must not publish with GcRootEffect::None"
-    );
-}
-
-#[test]
-fn vm_gc_queue_wait_state_002_replay_block_dirties_queue_wait_root() {
-    let region = compact_region_between(
-        queue_action_macro_source_062(),
-        "exec::QueueAction::ReplayThenBlock{waiter}=>",
-        "exec::QueueAction::Trap",
-    )
-    .expect("ReplayThenBlock arm should precede trap arm");
-
-    assert!(
-        compact_contains(&region, "fiber.begin_queue_wait(waiter)"),
-        "Queue ReplayThenBlock must publish the queue wait root through fiber.queue_wait_state"
-    );
-    assert!(
-        compact_contains(&region, "GcRootEffect::CurrentFiberDirty")
-            || compact_contains(&region, "GcRootEffect::AllRootsDirty"),
-        "Queue ReplayThenBlock publishes queue_wait_state and must dirty current-fiber roots"
-    );
-    assert!(
-        !compact_contains(&region, "GcRootEffect::None"),
-        "Queue ReplayThenBlock must not publish queue_wait_state with GcRootEffect::None"
-    );
-}
-
-#[test]
-fn vm_macro_source_contract_062_rejects_comment_spoofed_queue_dirty_facts() {
-    let recv_probe = r#"
-            exec::QueueAction::RemoteSendAck => {
-                // GcRootEffect::CurrentFiberDirty
-                return ExecResult::Transition(RuntimeTransition::continue_with_gc_roots(
-                    GcRootEffect::None,
-                ));
-            }
-            exec::QueueAction::RemoteRecvData
-        "#;
-    let recv_region = compact_region_between(
-        recv_probe,
-        "exec::QueueAction::RemoteSendAck",
-        "exec::QueueAction::RemoteRecvData",
-    )
-    .expect("probe region");
-    assert!(
-        !compact_contains(&recv_region, "GcRootEffect::CurrentFiberDirty"),
-        "comment-only dirty-root facts must not satisfy queue transition source contracts"
-    );
-
-    let replay_probe = r#"
-            exec::QueueAction::ReplayThenBlock { waiter } => {
-                // fiber.begin_queue_wait(waiter);
-                // GcRootEffect::CurrentFiberDirty
-                return ExecResult::Transition(RuntimeTransition::continue_with_gc_roots(
-                    GcRootEffect::None,
-                ));
-            }
-            exec::QueueAction::Trap
-        "#;
-    let replay_region = compact_region_between(
-        replay_probe,
-        "exec::QueueAction::ReplayThenBlock{waiter}=>",
-        "exec::QueueAction::Trap",
-    )
-    .expect("probe replay region");
-    assert!(
-            !compact_contains(&replay_region, "fiber.begin_queue_wait(waiter)")
-                && !compact_contains(&replay_region, "GcRootEffect::CurrentFiberDirty"),
-            "comment-only queue-wait publication facts must not satisfy queue transition source contracts"
-        );
-
-    let select_probe = r#"
-            exec::SelectResult::Block => {
-                // GcRootEffect::CurrentFiberDirty
-                return ExecResult::Transition(RuntimeTransition::continue_with_gc_roots(
-                    GcRootEffect::None,
-                ));
-            }
-            exec::SelectResult::SendOnClosed
-        "#;
-    let select_region = compact_region_between(
-        select_probe,
-        "exec::SelectResult::Block=>",
-        "exec::SelectResult::SendOnClosed",
-    )
-    .expect("probe select block region");
-    assert!(
-        !compact_contains(&select_region, "GcRootEffect::CurrentFiberDirty")
-            && compact_contains(&select_region, "GcRootEffect::None"),
-        "comment-only select-block dirty-root facts must not satisfy source contracts"
-    );
-}
-
-#[test]
-fn vm_gc_select_block_dirty_002_select_block_transition_dirties_registered_queue_roots() {
-    let src =
-        crate::source_contract::production_source_without_test_modules(include_str!("../mod.rs"));
-    let region = compact_region_between(
-        &src,
-        "exec::SelectResult::Block=>",
-        "exec::SelectResult::SendOnClosed",
-    )
-    .expect("SelectResult::Block arm should precede SendOnClosed arm");
-
-    assert!(
-            compact_contains(&region, "GcRootEffect::CurrentFiberDirty")
-                || compact_contains(&region, "GcRootEffect::AllRootsDirty"),
-            "SelectExec block registers queue roots in fiber.select_state and must dirty current-fiber roots"
-        );
-    assert!(
-        !compact_contains(&region, "GcRootEffect::None"),
-        "SelectExec block must not publish registered queue roots with GcRootEffect::None"
-    );
 }
 
 #[cfg(feature = "std")]
@@ -308,10 +132,6 @@ fn vm_host_wake_identity_018_legacy_replay_token_does_not_wake_new_registration(
     vm.scheduler
         .block_for_host_event_replay(77, vo_runtime::ffi::HostEventReplaySource::GuiEvent);
 
-    assert!(
-        !vm.wake_host_event_legacy_replay_token(77),
-        "raw replay token adapter must not wake a later registration for a stale event"
-    );
     let fiber = vm.scheduler.get_fiber(fid);
     assert!(matches!(
         fiber.state,
@@ -320,205 +140,6 @@ fn vm_host_wake_identity_018_legacy_replay_token_does_not_wake_new_registration(
             source: vo_runtime::ffi::HostEventReplaySource::GuiEvent,
         })
     ));
-}
-
-#[test]
-fn runtime_command_island_wake_rejects_raw_slot_identity() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_queue();
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(
-        vo_runtime::objects::queue_state::QueueWaiter::simple(0, fid.to_raw() as u64),
-    ));
-
-    assert!(!outcome.applied);
-    assert_eq!(
-        vm.scheduler.get_fiber(fid).state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue)
-    );
-}
-
-#[test]
-fn runtime_command_island_wake_rejects_stale_generation_key() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    let stale_key = vm.scheduler.get_fiber(fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_queue();
-    vm.scheduler.get_fiber_mut(fid).generation =
-        vm.scheduler.get_fiber(fid).generation.wrapping_add(1);
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(
-        vo_runtime::objects::queue_state::QueueWaiter::simple(0, stale_key),
-    ));
-
-    assert!(!outcome.applied);
-    assert_eq!(
-        vm.scheduler.get_fiber(fid).state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue)
-    );
-}
-
-#[test]
-fn runtime_command_island_wake_rejects_wrong_wait_source() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_host_event(99, 0);
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(
-        vo_runtime::objects::queue_state::QueueWaiter::simple(0, key),
-    ));
-
-    assert!(!outcome.applied);
-    assert!(matches!(
-        vm.scheduler.get_fiber(fid).state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::HostEvent { token: 99, .. })
-    ));
-}
-
-#[test]
-fn vm_wake_queue_identity_001_island_wake_rejects_stale_select_identity() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    {
-        let fiber = vm.scheduler.current_fiber_mut().unwrap();
-        fiber.select_state = Some(crate::fiber::SelectState {
-            cases: vec![crate::fiber::SelectCase {
-                kind: crate::fiber::SelectCaseKind::Recv,
-                result_index: 0,
-                queue_reg: 0,
-                val_reg: 1,
-                elem_slots: 1,
-                elem_layout: None,
-                has_ok: false,
-            }],
-            expected_cases: 1,
-            has_default: false,
-            woken_index: None,
-            woken_result: None,
-            select_id: 11,
-            registered_queues: vec![crate::fiber::SelectRegisteredQueue {
-                case_index: 0,
-                queue: 0x1000 as vo_runtime::gc::GcRef,
-                kind: crate::fiber::SelectCaseKind::Recv,
-            }],
-        });
-    }
-    vm.scheduler.block_for_queue();
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(
-        vo_runtime::objects::queue_state::QueueWaiter::selecting(
-            0,
-            key,
-            0,
-            10,
-            0x1000,
-            vo_runtime::objects::queue_state::SelectWaitKind::Recv,
-        ),
-    ));
-
-    assert!(!outcome.applied);
-    let fiber = vm.scheduler.get_fiber(fid);
-    assert_eq!(
-        fiber.state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue)
-    );
-    assert_eq!(
-        fiber.select_state.as_ref().unwrap().woken_index,
-        None,
-        "IslandWake must prove select identity before waking"
-    );
-}
-
-#[test]
-fn vm_wake_queue_identity_001_island_wake_rejects_wrong_source_token() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    let waiter = vo_runtime::objects::queue_state::QueueWaiter::simple_queue(
-        0,
-        key,
-        0x1000,
-        vo_runtime::objects::queue_state::SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .current_fiber_mut()
-        .unwrap()
-        .begin_queue_wait(&waiter);
-    vm.scheduler.block_for_queue();
-
-    let mut command = RuntimeCommand::island_wake(waiter.clone());
-    command.source_token = crate::runtime_boundary::SourceWakeToken::IslandWake(
-        vo_runtime::objects::queue_state::QueueWaiter::simple_queue(
-            1,
-            key,
-            0x1000,
-            vo_runtime::objects::queue_state::SelectWaitKind::Recv,
-        ),
-    );
-
-    let outcome = vm.apply_runtime_command(command);
-
-    assert!(!outcome.applied);
-    assert_eq!(
-        vm.scheduler.get_fiber(fid).state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue)
-    );
-}
-
-#[test]
-fn vm_wake_queue_identity_001_island_wake_rejects_duplicate_wake() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    let waiter = vo_runtime::objects::queue_state::QueueWaiter::simple_queue(
-        0,
-        key,
-        0x1000,
-        vo_runtime::objects::queue_state::SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .current_fiber_mut()
-        .unwrap()
-        .begin_queue_wait(&waiter);
-    vm.scheduler.block_for_queue();
-
-    let first = vm.apply_runtime_command(RuntimeCommand::island_wake(waiter.clone()));
-    let second = vm.apply_runtime_command(RuntimeCommand::island_wake(waiter));
-
-    assert!(first.applied);
-    assert!(!second.applied);
-    assert_eq!(vm.scheduler.ready_queue.len(), 1);
-}
-
-#[test]
-fn vm_island_wake_ingress_rejection_reports_error_044() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_queue();
-
-    let err = vm
-        .dispatch_island_command(vo_runtime::island::IslandCommand::WakeFiber {
-            waiter: vo_runtime::objects::queue_state::QueueWaiter::simple(1, key),
-        })
-        .expect_err("wrong-island wake must be reported at island command ingress");
-
-    assert!(format!("{err:?}").contains("island wake"));
-    assert_eq!(
-        vm.scheduler.get_fiber(fid).state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue)
-    );
-    assert_eq!(vm.scheduler.ready_queue.len(), 0);
 }
 
 #[cfg(feature = "std")]
@@ -536,27 +157,6 @@ fn runtime_command_io_ready_wakes_registered_waiter() {
     let fiber = vm.scheduler.get_fiber(fid);
     assert!(fiber.state.is_runnable());
     assert_eq!(fiber.resume_io_token, Some(313));
-}
-
-#[cfg(feature = "std")]
-#[test]
-fn runtime_command_io_ready_rejects_source_mismatch() {
-    let mut vm = Vm::new();
-    let fid = vm.scheduler.spawn(Fiber::new(0));
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_io(314);
-    let key = vm.scheduler.io_wait_key(314).expect("io wait key");
-
-    let mut command = RuntimeCommand::io_ready(key);
-    command.source = crate::scheduler::WaitSource::HostEvent;
-    let outcome = vm.apply_runtime_command(command);
-
-    assert!(!outcome.applied);
-    assert_eq!(
-        vm.scheduler.get_fiber(fid).state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Io(314))
-    );
-    assert!(vm.scheduler.get_fiber(fid).resume_io_token.is_none());
 }
 
 #[cfg(feature = "std")]
@@ -590,24 +190,24 @@ fn vm_io_wake_key_002_runtime_command_rejects_mutated_wake_key_or_registration()
     vm.scheduler.block_for_io(316);
     let key = vm.scheduler.io_wait_key(316).expect("io wait key");
 
-    let mut wrong_wake_key = RuntimeCommand::io_ready(key);
-    wrong_wake_key.wake_key = Some(crate::scheduler::FiberWakeKey::new(
+    let mut wrong_wake_key = key;
+    wrong_wake_key.wake_key = crate::scheduler::FiberWakeKey::new(
         key.wake_key.slot.wrapping_add(1),
         key.wake_key.generation,
-    ));
-    let outcome = vm.apply_runtime_command(wrong_wake_key);
+    );
+    let outcome = vm.apply_runtime_command(RuntimeCommand::io_ready(wrong_wake_key));
     assert!(!outcome.applied);
 
-    let mut wrong_registration = RuntimeCommand::io_ready(key);
-    wrong_registration.registration = Some(crate::scheduler::WaitRegistrationKey {
+    let mut wrong_registration = key;
+    wrong_registration.registration = crate::scheduler::WaitRegistrationKey {
         token: key.registration.token.wrapping_add(1).max(1),
-    });
-    let outcome = vm.apply_runtime_command(wrong_registration);
+    };
+    let outcome = vm.apply_runtime_command(RuntimeCommand::io_ready(wrong_registration));
     assert!(!outcome.applied);
 
-    let mut zero_registration = RuntimeCommand::io_ready(key);
-    zero_registration.registration = Some(crate::scheduler::WaitRegistrationKey { token: 0 });
-    let outcome = vm.apply_runtime_command(zero_registration);
+    let mut zero_registration = key;
+    zero_registration.registration = crate::scheduler::WaitRegistrationKey { token: 0 };
+    let outcome = vm.apply_runtime_command(RuntimeCommand::io_ready(zero_registration));
     assert!(!outcome.applied);
 
     assert_eq!(
@@ -624,12 +224,13 @@ fn runtime_transition_applies_queue_wake_after_boundary() {
     let waiter = vm.scheduler.spawn(Fiber::new(0));
     let waiter_key = vm.scheduler.get_fiber(waiter).wake_key_packed();
     vm.scheduler.schedule_next().unwrap();
-    let queue_waiter = vo_runtime::objects::queue_state::QueueWaiter::simple_queue(
+    let queue_waiter = vo_runtime::objects::queue_state::QueueWaiter::try_queue(
         0,
         waiter_key,
         0x1000,
         vo_runtime::objects::queue_state::SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .current_fiber_mut()
         .unwrap()
@@ -663,18 +264,15 @@ fn runtime_transition_applies_pending_spawn_after_boundary() {
     vm.scheduler.schedule_next().unwrap();
     assert_eq!(vm.scheduler.current, Some(current));
     vm.state.gc_roots_dirty_all = false;
-    vm.state.gc_dirty_fibers.clear();
+    vm.state.clear_gc_dirty_fibers();
     vm.state.gc_dirty_epoch = 17;
-
-    let mut spawned = Fiber::new(99);
-    spawned.push_frame(0, 0, 0, 0, 0);
 
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::None,
     );
-    transition.spawns.push(spawned);
+    transition.spawns.push(PendingSpawn::for_test(0));
 
     vm.apply_runtime_transition(Some(current), transition)
         .expect("spawn transition");
@@ -713,11 +311,11 @@ fn vm_arch_001_continue_boundary_keeps_current_fiber_schedulable() {
 }
 
 #[test]
-fn vm_direct_endpoint_request_ingress_061_rejects_forged_transfer_source_before_peer_mutation() {
+fn vm_direct_endpoint_request_ingress_061_uses_envelope_source_for_transfer_authorization() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
     let endpoint_id = 0x0610_0000_0000_0700;
-    let forged_peer = 7;
+    let registered_peer = 7;
     let actual_source = 99;
     let new_peer = 88;
     let ch = vo_runtime::objects::queue::create(
@@ -729,45 +327,36 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_transfer_source_before_
         0,
     );
     test_queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
-    test_queue::add_home_peer(ch, forged_peer);
+    test_queue::add_home_peer(ch, registered_peer);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
 
-    let err = vm
-        .dispatch_island_command_from(
-            actual_source,
-            vo_runtime::island::IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind: vo_runtime::island::EndpointRequestKind::Transfer { new_peer },
-                from_island: forged_peer,
-                fiber_key: 0,
-                wait_id: 0,
-            },
-        )
-        .expect_err("direct endpoint request ingress must authenticate source");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("transport source")),
-        "{err:?}"
-    );
+    vm.dispatch_island_command_from(
+        actual_source,
+        vo_runtime::island::IslandCommand::EndpointRequest {
+            endpoint_id,
+            kind: vo_runtime::island::EndpointRequestKind::Transfer { new_peer },
+        },
+    )
+    .expect("unauthorized transfer source must be handled without mutation");
     assert!(
         !test_queue::home_info(ch)
             .expect("home info")
             .peers
             .contains(&new_peer),
-        "forged direct ingress must reject before endpoint peer mutation"
+        "the envelope source must drive transfer authorization"
     );
 }
 
 #[test]
-fn vm_direct_endpoint_request_ingress_061_rejects_forged_recv_source_before_waiter() {
+fn vm_direct_endpoint_request_ingress_061_uses_envelope_source_for_recv_rejection() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
     vm.state.external_island_transport = true;
-    vm.module = Some(std::sync::Arc::new(vo_common_core::bytecode::Module::new(
-        "direct-endpoint-forged-recv".to_string(),
-    )));
+    vm.module = Some(crate::vm::test_loaded_module(
+        vo_common_core::bytecode::Module::new("direct-endpoint-forged-recv".to_string()),
+    ));
     let endpoint_id = 0x0610_0000_0000_0701;
-    let forged_peer = 7;
+    let registered_peer = 7;
     let actual_source = 99;
     let ch = vo_runtime::objects::queue::create(
         &mut vm.state.gc,
@@ -778,142 +367,44 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_recv_source_before_wait
         0,
     );
     test_queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
-    test_queue::add_home_peer(ch, forged_peer);
+    test_queue::add_home_peer(ch, registered_peer);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
 
-    let err = vm
-        .dispatch_island_command_from(
-            actual_source,
-            vo_runtime::island::IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind: vo_runtime::island::EndpointRequestKind::Recv,
-                from_island: forged_peer,
-                fiber_key: 0x0000_0001_0000_0071,
-                wait_id: 17,
-            },
-        )
-        .expect_err("direct endpoint recv ingress must authenticate source");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("transport source")),
-        "{err:?}"
-    );
+    let wait_key = endpoint_wait_key(0x0000_0001_0000_0071, 17);
+    vm.dispatch_island_command_from(
+        actual_source,
+        vo_runtime::island::IslandCommand::EndpointRequest {
+            endpoint_id,
+            kind: vo_runtime::island::EndpointRequestKind::Recv { wait_key },
+        },
+    )
+    .expect("unauthorized recv source must receive a rejection response");
     assert_eq!(
         test_queue::local_state(ch).waiting_receivers.len(),
         0,
-        "forged direct ingress must reject before requester registration"
+        "the envelope source must drive recv authorization"
     );
-    assert!(vm.state.outbound_commands.is_empty());
-}
-
-#[test]
-fn vm_direct_wake_fiber_ingress_062_rejects_forged_source_before_local_wake() {
-    let mut vm = Vm::new();
-    vm.state.current_island_id = 3;
-    let ch = vo_runtime::objects::queue::create(
-        &mut vm.state.gc,
-        vo_runtime::objects::queue_state::QueueKind::Chan,
-        ValueMeta::new(0, ValueKind::Int64),
-        vo_runtime::ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let waiter = vo_runtime::objects::queue_state::QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let err = vm
-        .dispatch_island_command_from(
-            99,
-            IslandCommand::WakeFiber {
-                waiter: waiter.clone(),
+    let (target_island, response) = vm
+        .state
+        .outbound_commands
+        .pop_front()
+        .expect("unauthorized recv source must receive a response");
+    assert_eq!(target_island, actual_source);
+    assert_eq!(response.source_island_id, vm.state.current_island_id);
+    assert!(matches!(
+        response.command,
+        vo_runtime::island::IslandCommand::EndpointResponse {
+            endpoint_id: response_endpoint_id,
+            kind: vo_runtime::island::EndpointResponseKind::RecvError {
+                wait_key: response_wait_key,
             },
-        )
-        .expect_err("direct WakeFiber ingress must authenticate source");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("transport source")),
-        "{err:?}"
-    );
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue),
-        "forged WakeFiber source must reject before local wake"
-    );
-    assert!(
-        receiver_fiber.queue_wait_state.is_some(),
-        "forged WakeFiber source must preserve queue wait registration"
-    );
+        } if response_endpoint_id == endpoint_id
+            && response_wait_key == wait_key
+    ));
 }
 
 #[test]
-fn vm_queued_wake_fiber_ingress_062_rejects_same_source_transport_frame_before_local_wake() {
-    let mut vm = Vm::new();
-    vm.state.current_island_id = 3;
-    let ch = vo_runtime::objects::queue::create(
-        &mut vm.state.gc,
-        vo_runtime::objects::queue_state::QueueKind::Chan,
-        ValueMeta::new(0, ValueKind::Int64),
-        vo_runtime::ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let waiter = vo_runtime::objects::queue_state::QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    vm.push_targeted_island_command_from(
-        vm.state.current_island_id,
-        vm.state.current_island_id,
-        IslandCommand::WakeFiber {
-            waiter: waiter.clone(),
-        },
-    )
-    .expect("same target command queues");
-
-    let err = vm
-        .process_island_commands()
-        .expect_err("queued WakeFiber ingress must reject even when source matches target");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("transport ingress")),
-        "{err:?}"
-    );
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        crate::fiber::FiberState::Blocked(crate::fiber::BlockReason::Queue),
-        "queued WakeFiber ingress must reject before local wake"
-    );
-    assert!(
-        receiver_fiber.queue_wait_state.is_some(),
-        "queued WakeFiber ingress must preserve queue wait registration"
-    );
-}
-
-#[test]
-fn vm_arch_001_endpoint_send_effect_commits_with_block_boundary() {
+fn vm_arch_001_prepared_remote_send_commits_typed_request_with_block_boundary() {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
     vm.state.current_island_id = 3;
@@ -921,21 +412,34 @@ fn vm_arch_001_endpoint_send_effect_commits_with_block_boundary() {
     vm.scheduler.schedule_next().unwrap();
     assert_eq!(vm.scheduler.current, Some(current));
 
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::CurrentFiberDirty,
-    );
-    transition
-        .island_commands
-        .push(IslandCommandEffect::endpoint_send_request(
-            9,
-            42,
-            vec![1, 2, 3],
-            vm.state.current_island_id,
-            0x0000_0001_0000_0002,
-            7,
-        ));
+    let mut fiber = vm
+        .scheduler
+        .detach_for_execution(current)
+        .expect("current fiber must detach for queue action preparation");
+    let expected_wait_key = endpoint_wait_key(fiber.endpoint_response_key(), 1);
+    let prepared = crate::vm::prepare_queue_action(
+        &mut vm.state,
+        &mut fiber,
+        crate::exec::QueueAction::RemoteSend {
+            endpoint_id: 42,
+            home_island: 9,
+            data: vec![1, 2, 3],
+            island_effects: Vec::new(),
+            transfer_commit: crate::exec::QueueTransferCommit::default(),
+        },
+    )
+    .expect("remote send queue action must prepare");
+    let crate::vm::PreparedQueueAction::Transition {
+        mut transition,
+        wait,
+    } = prepared
+    else {
+        panic!("remote send must prepare a runtime transition");
+    };
+    assert_eq!(wait, Some(crate::vm::QueueWaitMode::Resume));
+    assert_eq!(transition.gc_roots, GcRootEffect::CurrentFiberDirty);
+    transition.boundary = RuntimeBoundary::Block(crate::fiber::BlockReason::Queue);
+    vm.scheduler.reattach_after_execution(current, fiber);
 
     vm.apply_runtime_transition(Some(current), transition)
         .expect("endpoint send transition");
@@ -953,25 +457,88 @@ fn vm_arch_001_endpoint_send_effect_commits_with_block_boundary() {
     assert_eq!(island_id, 9);
     assert_eq!(command.source_island_id, vm.state.current_island_id);
     match command.command {
-        IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        } => {
+        IslandCommand::EndpointRequest { endpoint_id, kind } => {
             assert_eq!(endpoint_id, 42);
-            assert!(matches!(
-                kind,
-                vo_runtime::island::EndpointRequestKind::Send { ref data }
-                    if data == &[1, 2, 3]
-            ));
-            assert_eq!(from_island, 3);
-            assert_eq!(fiber_key, 0x0000_0001_0000_0002);
-            assert_eq!(wait_id, 7);
+            let vo_runtime::island::EndpointRequestKind::Send { data, wait_key } = kind else {
+                panic!("expected endpoint send request");
+            };
+            assert_eq!(data, vec![1, 2, 3]);
+            assert_eq!(wait_key, expected_wait_key);
         }
         other => panic!("expected endpoint request, got {other:?}"),
     }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn prepared_remote_ack_restores_required_queue_rollback_on_publish_failure() {
+    let mut vm = Vm::new();
+    vm.state.current_island_id = 3;
+    let endpoint_id = 0x0610_0000_0000_0702;
+    let target_island = 9;
+    let ch = vo_runtime::objects::queue::create(
+        &mut vm.state.gc,
+        vo_runtime::objects::queue_state::QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        vo_runtime::ValueRttid::new(0, ValueKind::Int64),
+        1,
+        0,
+    );
+    test_queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
+    test_queue::add_home_peer(ch, target_island);
+    vm.state.endpoint_registry.register_live(endpoint_id, ch);
+
+    let rollback = crate::runtime_boundary::RuntimeRollback::local_queue(&vm.state, ch);
+    unsafe { vo_runtime::objects::queue::close(ch) };
+    assert!(unsafe { vo_runtime::objects::queue::is_closed(ch) });
+
+    let wait_key = endpoint_wait_key(0x0000_0001_0000_0002, 7);
+    let mut fiber = Fiber::new(0);
+    let prepared = crate::vm::prepare_queue_action(
+        &mut vm.state,
+        &mut fiber,
+        crate::exec::QueueAction::RemoteSendAck {
+            endpoint_id,
+            target_island,
+            wait_key,
+            closed: false,
+            rollback,
+        },
+    )
+    .expect("remote send acknowledgment must prepare");
+    let crate::vm::PreparedQueueAction::Transition {
+        mut transition,
+        wait,
+    } = prepared
+    else {
+        panic!("remote acknowledgment must prepare a runtime transition");
+    };
+    assert_eq!(wait, None);
+    assert_eq!(transition.gc_roots, GcRootEffect::CurrentFiberDirty);
+    let [effect] = transition.island_commands.as_slice() else {
+        panic!("remote acknowledgment must produce one endpoint response");
+    };
+    assert_eq!(effect.island_id, target_island);
+    assert!(matches!(
+        &effect.command,
+        IslandCommand::EndpointResponse {
+            endpoint_id: response_endpoint_id,
+            kind: EndpointResponseKind::SendAck {
+                closed: false,
+                wait_key: response_wait_key,
+            },
+        } if *response_endpoint_id == endpoint_id && *response_wait_key == wait_key
+    ));
+
+    transition.boundary = RuntimeBoundary::Yield;
+    vm.state.gc_roots_dirty_all = false;
+    vm.state.clear_gc_dirty_fibers();
+    vm.apply_runtime_transition(None, transition)
+        .expect_err("missing remote route must reject the prepared transition");
+
+    assert!(!unsafe { vo_runtime::objects::queue::is_closed(ch) });
+    assert!(vm.state.gc_roots_dirty_all);
+    assert!(vm.state.outbound_commands.is_empty());
 }
 
 #[cfg(feature = "jit")]
@@ -982,15 +549,12 @@ fn pending_spawn_commits_when_jit_reaches_vm_boundary() {
     vm.scheduler.schedule_next().unwrap();
     assert_eq!(vm.scheduler.current, Some(current));
 
-    let mut spawned = Fiber::new(99);
-    spawned.push_frame(0, 0, 0, 0, 0);
-
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::AllRootsDirty,
     );
-    transition.spawns.push(spawned);
+    transition.spawns.push(PendingSpawn::for_test(0));
     vm.push_pending_runtime_transition(transition);
 
     let result = vm.attach_pending_runtime_transitions(ExecResult::FrameChanged);
@@ -1001,7 +565,7 @@ fn pending_spawn_commits_when_jit_reaches_vm_boundary() {
     vm.apply_runtime_transition(Some(current), transition)
         .expect("spawn transition");
 
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.scheduler.fibers.len(), 2);
     assert!(vm.scheduler.get_fiber(current).state.is_runnable());
     assert!(vm

@@ -1,24 +1,11 @@
-use vo_runtime::bytecode::{ExternDef, FunctionDef};
+use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::metadata;
-use crate::semantics::{
-    opcode_register_effects, DynamicRegisterReadEffect, DynamicRegisterWriteEffect,
-};
+use crate::semantics::{opcode_register_effects, DynamicRegisterReadEffect};
 
 use super::operand_eval::{checked_slot_offset, try_push_slot_range};
-use super::{
-    EffectError, EffectFacts, MapGetLayout, MapIterNextLayout, MapSetLayout, SlotRangeError,
-    MAP_ITER_SLOTS,
-};
-
-pub(super) fn required_indexed_get_result_slots(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-) -> Result<u16, EffectError> {
-    indexed_get_result_slots(inst, facts)
-        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "ElemLayout"))
-}
+use super::{EffectError, EffectFacts, MapGetLayout, MapSetLayout};
 
 fn required_indexed_set_value_slots(
     inst: &Instruction,
@@ -58,14 +45,6 @@ fn required_map_delete_key_slots(
         .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapDelete"))
 }
 
-fn required_map_iter_next_layout(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-) -> Result<MapIterNextLayout, EffectError> {
-    map_iter_next_layout(inst, facts)
-        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapIterNext"))
-}
-
 fn required_queue_elem_slots(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -91,8 +70,12 @@ fn required_slot_elem_slots(
         .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "SlotLayout"))
 }
 
-pub fn indexed_get_result_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
-    metadata::indexed_get_result_slots(inst, facts)
+fn required_ptr_value_slots(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<u16, EffectError> {
+    metadata::ptr_value_slots(inst, facts)
+        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "PtrLayout"))
 }
 
 pub fn indexed_set_value_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
@@ -113,13 +96,6 @@ pub fn map_set_layout(inst: &Instruction, facts: EffectFacts<'_>) -> Option<MapS
 
 pub fn map_delete_key_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
     metadata::map_delete_key_slots(inst, facts)
-}
-
-pub fn map_iter_next_layout(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-) -> Option<MapIterNextLayout> {
-    metadata::map_iter_next_layout(inst, facts)
 }
 
 pub(super) fn try_dynamic_read_regs(
@@ -164,9 +140,6 @@ pub(super) fn try_dynamic_read_regs(
             Ok(Some(regs))
         }
         DynamicRegisterReadEffect::IndexedSetValueLayout => {
-            if !facts.has_facts() {
-                return Ok(None);
-            }
             let value_slots = required_indexed_set_value_slots(inst, facts)?;
             regs.push(inst.a);
             regs.push(inst.b);
@@ -174,52 +147,30 @@ pub(super) fn try_dynamic_read_regs(
             Ok(Some(regs))
         }
         DynamicRegisterReadEffect::SliceAppendValueLayout => {
-            if !facts.has_facts() {
-                return Ok(None);
-            }
             let value_slots = required_slice_append_value_slots(inst, facts)?;
             regs.push(inst.b);
             regs.push(inst.c);
-            let value_start =
-                checked_slot_offset(inst.c, if inst.flags == 0 { 2 } else { 1 }, "read")?;
+            let value_start = checked_slot_offset(inst.c, 1, "read")?;
             try_push_slot_range(&mut regs, value_start, value_slots, "read")?;
             Ok(Some(regs))
         }
         DynamicRegisterReadEffect::MapGetLayout => {
             let layout = required_map_get_layout(inst, facts)?;
             regs.push(inst.b);
-            regs.push(inst.c);
-            try_push_slot_range(
-                &mut regs,
-                checked_slot_offset(inst.c, 1, "read")?,
-                layout.key_slots,
-                "read",
-            )?;
+            try_push_slot_range(&mut regs, inst.c, layout.key_slots, "read")?;
             Ok(Some(regs))
         }
         DynamicRegisterReadEffect::MapSetLayout => {
             let layout = required_map_set_layout(inst, facts)?;
             regs.push(inst.a);
-            regs.push(inst.b);
-            try_push_slot_range(
-                &mut regs,
-                checked_slot_offset(inst.b, 1, "read")?,
-                layout.key_slots,
-                "read",
-            )?;
+            try_push_slot_range(&mut regs, inst.b, layout.key_slots, "read")?;
             try_push_slot_range(&mut regs, inst.c, layout.val_slots, "read")?;
             Ok(Some(regs))
         }
         DynamicRegisterReadEffect::MapDeleteLayout => {
             let key_slots = required_map_delete_key_slots(inst, facts)?;
             regs.push(inst.a);
-            regs.push(inst.b);
-            try_push_slot_range(
-                &mut regs,
-                checked_slot_offset(inst.b, 1, "read")?,
-                key_slots,
-                "read",
-            )?;
+            try_push_slot_range(&mut regs, inst.b, key_slots, "read")?;
             Ok(Some(regs))
         }
         DynamicRegisterReadEffect::QueueSendLayout => {
@@ -234,92 +185,24 @@ pub(super) fn try_dynamic_read_regs(
             try_push_slot_range(&mut regs, inst.c, elem_slots, "read")?;
             Ok(Some(regs))
         }
-    }
-}
-
-pub(super) fn try_dynamic_multi_write_regs(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-    externs: &[ExternDef],
-    functions: &[FunctionDef],
-) -> Result<Option<Vec<u16>>, EffectError> {
-    let dynamic = opcode_register_effects(inst.opcode()).dynamic_writes;
-    let mut regs = Vec::new();
-    match dynamic {
-        DynamicRegisterWriteEffect::None => Ok(None),
-        DynamicRegisterWriteEffect::StaticCallSignature => {
-            let func_id = inst.static_call_func_id();
-            let callee = functions
-                .get(func_id as usize)
-                .ok_or_else(|| EffectError::missing_function(func_id))?;
-            let ret_start = checked_slot_offset(inst.b, callee.param_slots, "write")?;
-            try_push_slot_range(&mut regs, ret_start, callee.ret_slots, "write")?;
+        DynamicRegisterReadEffect::PtrSetLayout => {
+            let value_slots = required_ptr_value_slots(inst, facts)?;
+            regs.push(inst.a);
+            try_push_slot_range(&mut regs, inst.c, value_slots, "read")?;
             Ok(Some(regs))
         }
-        DynamicRegisterWriteEffect::CallLayout => {
-            let (arg_slots, ret_slots) = required_call_layout_slots(inst, facts)?;
-            let ret_start = checked_slot_offset(inst.b, arg_slots, "write")?;
-            try_push_slot_range(&mut regs, ret_start, ret_slots, "write")?;
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::ExternSignature => {
-            let ret_slots = externs
-                .get(inst.b as usize)
-                .map(|extern_def| extern_def.returns.slots)
-                .ok_or_else(|| EffectError::missing_extern(inst.b))?;
-            try_push_slot_range(&mut regs, inst.a, ret_slots, "write")?;
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::IndexedGetResultLayout => {
-            if !facts.has_facts() {
-                return Ok(None);
+        DynamicRegisterReadEffect::SharedCall => {
+            if inst.call_shape_is_closure() {
+                let (arg_slots, _) = required_call_layout_slots(inst, facts)?;
+                regs.push(inst.a);
+                try_push_slot_range(&mut regs, inst.b, arg_slots, "read")?;
+            } else {
+                let func_id = inst.call_shape_static_func_id();
+                let callee = functions
+                    .get(func_id as usize)
+                    .ok_or_else(|| EffectError::missing_function(func_id))?;
+                try_push_slot_range(&mut regs, inst.b, callee.param_slots, "read")?;
             }
-            let slots = required_indexed_get_result_slots(inst, facts)?;
-            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::MapGetLayout => {
-            let layout = required_map_get_layout(inst, facts)?;
-            let slots = layout
-                .output_slots()
-                .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.val_slots))?;
-            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::MapIterNextLayout => {
-            let layout = required_map_iter_next_layout(inst, facts)?;
-            try_push_slot_range(&mut regs, inst.b, MAP_ITER_SLOTS, "write")?;
-            let slots = layout
-                .key_slots
-                .checked_add(layout.val_slots)
-                .ok_or_else(|| {
-                    SlotRangeError::new("write", inst.a, layout.key_slots.saturating_add(1))
-                })?;
-            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-            regs.push(inst.c);
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::QueueRecvLayout => {
-            let elem_slots = required_queue_elem_slots(inst, facts)?;
-            let result_slots = elem_slots
-                .checked_add(u16::from(inst.recv_has_ok()))
-                .ok_or_else(|| SlotRangeError::new("write", inst.a, elem_slots))?;
-            try_push_slot_range(&mut regs, inst.a, result_slots, "write")?;
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::SlotGetLayout => {
-            let elem_slots = required_slot_elem_slots(inst, facts)?;
-            try_push_slot_range(&mut regs, inst.a, elem_slots, "write")?;
-            Ok(Some(regs))
-        }
-        DynamicRegisterWriteEffect::IfaceAssertLayout => {
-            let layout = metadata::iface_assert_layout(inst, facts)
-                .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "IfaceAssertLayout"))?;
-            let result_slots = layout
-                .result_slots
-                .checked_add(u16::from(((inst.flags >> 2) & 1) != 0))
-                .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.result_slots))?;
-            try_push_slot_range(&mut regs, inst.a, result_slots, "write")?;
             Ok(Some(regs))
         }
     }

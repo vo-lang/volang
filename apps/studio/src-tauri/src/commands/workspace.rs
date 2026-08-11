@@ -30,23 +30,6 @@ pub struct FsStat {
     pub modified_ms: u64,
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadManyResult {
-    pub path: String,
-    pub content: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GrepMatch {
-    pub path: String,
-    pub line: u32,
-    pub column: u32,
-    pub text: String,
-}
-
 #[tauri::command]
 pub async fn cmd_list_dir(
     path: String,
@@ -122,19 +105,6 @@ pub struct DiscoveredProject {
 }
 
 const SKIP_DIRS: &[&str] = &[".volang", ".vo-cache", ".git", "node_modules"];
-
-#[tauri::command]
-pub async fn cmd_discover_projects(
-    root: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<DiscoveredProject>, String> {
-    let session_root = state.session_root();
-    run_blocking(move || {
-        let resolved = resolve_path(&session_root, &root)?;
-        scan_projects_in_dir(&resolved)
-    })
-    .await
-}
 
 #[tauri::command]
 pub async fn cmd_discover_workspace_projects(
@@ -303,48 +273,6 @@ fn read_file_impl(session_root: PathBuf, path: String) -> Result<String, String>
 }
 
 #[tauri::command]
-pub async fn cmd_read_many(
-    paths: Vec<String>,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<ReadManyResult>, String> {
-    let session_root = state.session_root();
-    run_blocking(move || read_many_impl(session_root, paths)).await
-}
-
-fn read_many_impl(
-    session_root: PathBuf,
-    paths: Vec<String>,
-) -> Result<Vec<ReadManyResult>, String> {
-    Ok(paths
-        .into_iter()
-        .map(|path| {
-            let resolved = match resolve_path(&session_root, &path) {
-                Ok(r) => r,
-                Err(err) => {
-                    return ReadManyResult {
-                        path,
-                        content: None,
-                        error: Some(err),
-                    }
-                }
-            };
-            match std::fs::read_to_string(&resolved) {
-                Ok(content) => ReadManyResult {
-                    path: resolved.to_string_lossy().to_string(),
-                    content: Some(content),
-                    error: None,
-                },
-                Err(err) => ReadManyResult {
-                    path,
-                    content: None,
-                    error: Some(err.to_string()),
-                },
-            }
-        })
-        .collect())
-}
-
-#[tauri::command]
 pub async fn cmd_write_file(
     path: String,
     content: String,
@@ -446,67 +374,6 @@ fn rename_entry_impl(
     })
 }
 
-#[tauri::command]
-pub async fn cmd_copy_entry(
-    src: String,
-    dst: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let session_root = state.session_root();
-    run_blocking(move || copy_entry_impl(session_root, src, dst)).await
-}
-
-fn copy_entry_impl(session_root: PathBuf, src: String, dst: String) -> Result<(), String> {
-    let src_resolved = resolve_path(&session_root, &src)?;
-    let dst_resolved = resolve_path(&session_root, &dst)?;
-    if let Some(parent) = dst_resolved.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {}", parent.display(), err))?;
-    }
-    std::fs::copy(&src_resolved, &dst_resolved)
-        .map(|_| ())
-        .map_err(|err| {
-            format!(
-                "{} -> {}: {}",
-                src_resolved.display(),
-                dst_resolved.display(),
-                err
-            )
-        })
-}
-
-#[tauri::command]
-pub async fn cmd_grep(
-    path: String,
-    pattern: String,
-    case_sensitive: Option<bool>,
-    max_results: Option<usize>,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<GrepMatch>, String> {
-    let session_root = state.session_root();
-    let case_sensitive = case_sensitive.unwrap_or(false);
-    let max_results = max_results.unwrap_or(500);
-    run_blocking(move || grep_impl(session_root, path, pattern, case_sensitive, max_results)).await
-}
-
-fn grep_impl(
-    session_root: PathBuf,
-    path: String,
-    pattern: String,
-    case_sensitive: bool,
-    max_results: usize,
-) -> Result<Vec<GrepMatch>, String> {
-    let resolved = resolve_path(&session_root, &path)?;
-    let mut results = Vec::new();
-    grep_dir(
-        &resolved,
-        &pattern,
-        case_sensitive,
-        max_results,
-        &mut results,
-    )?;
-    Ok(results)
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateFileEntry {
@@ -524,8 +391,8 @@ pub async fn cmd_create_workspace_files(
 }
 
 #[tauri::command]
-pub async fn cmd_create_project_files(files: Vec<CreateFileEntry>) -> Result<(), String> {
-    run_blocking(move || create_external_project_file_impl(files)).await
+pub async fn cmd_create_project_file(path: String, content: String) -> Result<(), String> {
+    run_blocking(move || create_project_file_impl(path, content)).await
 }
 
 fn create_workspace_files_impl(
@@ -534,20 +401,13 @@ fn create_workspace_files_impl(
 ) -> Result<(), String> {
     std::fs::create_dir_all(workspace_root)
         .map_err(|error| format!("{}: {}", workspace_root.display(), error))?;
-    create_project_files_in_root(workspace_root, files, true)
+    create_project_files_in_root(workspace_root, files)
 }
 
-fn create_external_project_file_impl(mut files: Vec<CreateFileEntry>) -> Result<(), String> {
-    if files.len() != 1 {
-        return Err(format!(
-            "External project creation requires exactly one file, received {}",
-            files.len()
-        ));
-    }
-    let file = files.pop().expect("length checked above");
-    let path = Path::new(&file.path);
+fn create_project_file_impl(path: String, content: String) -> Result<(), String> {
+    let path = Path::new(&path);
     if !path.is_absolute() {
-        return Err(format!("Path must be absolute: {}", file.path));
+        return Err(format!("Path must be absolute: {}", path.display()));
     }
     if path.extension().and_then(|extension| extension.to_str()) != Some("vo") {
         return Err(format!(
@@ -558,30 +418,76 @@ fn create_external_project_file_impl(mut files: Vec<CreateFileEntry>) -> Result<
     let parent = path
         .parent()
         .ok_or_else(|| format!("Project file has no parent: {}", path.display()))?;
-    match std::fs::symlink_metadata(parent) {
-        Ok(metadata) if is_link_or_reparse_point(&metadata) => {
-            return Err(format!(
-                "External project directory is a symbolic link: {}",
-                parent.display()
-            ))
+    validate_external_project_directory(parent)?;
+    create_new_project_file(path, content.as_bytes())
+}
+
+fn validate_external_project_directory(path: &Path) -> Result<(), String> {
+    for current in path.ancestors() {
+        if current.as_os_str().is_empty() {
+            continue;
         }
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => {
+        let metadata = std::fs::symlink_metadata(current)
+            .map_err(|error| format!("{}: {}", current.display(), error))?;
+        if is_link_or_reparse_point(&metadata) {
             return Err(format!(
-                "External project directory is not a directory: {}",
-                parent.display()
-            ))
+                "External project directory path contains a symbolic link or reparse point: {}",
+                current.display()
+            ));
         }
-        Err(error) => return Err(format!("{}: {}", parent.display(), error)),
+        if !metadata.file_type().is_dir() {
+            return Err(format!(
+                "External project directory path component is not a directory: {}",
+                current.display()
+            ));
+        }
     }
-    let authorized_root = parent.to_path_buf();
-    create_project_files_in_root(&authorized_root, vec![file], false)
+    Ok(())
+}
+
+fn create_new_project_file(path: &Path, content: &[u8]) -> Result<(), String> {
+    create_new_project_file_with(path, |file| {
+        file.write_all(content)?;
+        file.flush()
+    })
+}
+
+fn create_new_project_file_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    // create_new atomically reserves the destination name. Bytes are written
+    // after publication, so readers must not assume complete-content visibility.
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(format!("Project file already exists: {}", path.display()))
+        }
+        Err(error) => return Err(format!("{}: {}", path.display(), error)),
+    };
+    let result = write(&mut file);
+    drop(file);
+    match result {
+        Ok(()) => Ok(()),
+        Err(write_error) => match remove_project_artifact(path) {
+            Ok(()) => Err(format!("{}: {}", path.display(), write_error)),
+            Err(cleanup_error) => Err(format!(
+                "{}: {}; cleaning up the incomplete project file failed: {}",
+                path.display(),
+                write_error,
+                cleanup_error,
+            )),
+        },
+    }
 }
 
 fn create_project_files_in_root(
     authorized_root: &Path,
     files: Vec<CreateFileEntry>,
-    create_missing_parents: bool,
 ) -> Result<(), String> {
     let canonical_root = authorized_root
         .canonicalize()
@@ -617,29 +523,16 @@ fn create_project_files_in_root(
     }
 
     for (path, content) in prepared {
-        write_project_file(
-            &canonical_root,
-            &path,
-            content.as_bytes(),
-            create_missing_parents,
-        )?;
+        write_project_file(&canonical_root, &path, content.as_bytes())?;
     }
     Ok(())
 }
 
-fn write_project_file(
-    authorized_root: &Path,
-    path: &Path,
-    content: &[u8],
-    create_missing_parents: bool,
-) -> Result<(), String> {
+fn write_project_file(authorized_root: &Path, path: &Path, content: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Project file has no parent: {}", path.display()))?;
-    if create_missing_parents {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("{}: {}", parent.display(), error))?;
-    }
+    std::fs::create_dir_all(parent).map_err(|error| format!("{}: {}", parent.display(), error))?;
     verify_project_file_path(authorized_root, path)?;
 
     let (temporary_path, mut temporary_file) = create_project_temp_file(parent)?;
@@ -928,114 +821,19 @@ fn move_project_file_to_backup(path: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-fn grep_dir(
-    path: &Path,
-    pattern: &str,
-    case_sensitive: bool,
-    max_results: usize,
-    results: &mut Vec<GrepMatch>,
-) -> Result<(), String> {
-    if results.len() >= max_results {
-        return Ok(());
-    }
-    let metadata = fs_metadata_no_follow(path)?;
-    if metadata.file_type().is_file() {
-        grep_file(path, pattern, case_sensitive, max_results, results)?;
-    } else if metadata.file_type().is_dir() {
-        let mut entries: Vec<_> = std::fs::read_dir(path)
-            .map_err(|err| format!("{}: {}", path.display(), err))?
-            .filter_map(|e| e.ok())
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            if results.len() >= max_results {
-                break;
-            }
-            let entry_path = entry.path();
-            let metadata = std::fs::symlink_metadata(&entry_path)
-                .map_err(|error| format!("{}: {}", entry_path.display(), error))?;
-            let file_type = metadata.file_type();
-            if is_link_or_reparse_point(&metadata) || (!file_type.is_file() && !file_type.is_dir())
-            {
-                continue;
-            }
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with('.') {
-                continue;
-            }
-            grep_dir(&entry_path, pattern, case_sensitive, max_results, results)?;
-        }
-    }
-    Ok(())
-}
-
-fn fs_metadata_no_follow(path: &Path) -> Result<std::fs::Metadata, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("{}: {}", path.display(), error))?;
-    if is_link_or_reparse_point(&metadata) {
-        return Err(format!(
-            "Path contains unsupported symbolic link or reparse point: {}",
-            path.display(),
-        ));
-    }
-    Ok(metadata)
-}
-
-fn grep_file(
-    path: &Path,
-    pattern: &str,
-    case_sensitive: bool,
-    max_results: usize,
-    results: &mut Vec<GrepMatch>,
-) -> Result<(), String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if !matches!(
-        ext,
-        "vo" | "md" | "txt" | "toml" | "json" | "ts" | "js" | "rs" | "html" | "css" | "svelte"
-    ) {
-        return Ok(());
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(()),
-    };
-    let pattern_cmp = if case_sensitive {
-        pattern.to_string()
-    } else {
-        pattern.to_lowercase()
-    };
-    for (line_idx, line) in content.lines().enumerate() {
-        if results.len() >= max_results {
-            break;
-        }
-        let line_cmp = if case_sensitive {
-            line.to_string()
-        } else {
-            line.to_lowercase()
-        };
-        if let Some(col) = line_cmp.find(&pattern_cmp) {
-            results.push(GrepMatch {
-                path: path.to_string_lossy().to_string(),
-                line: (line_idx + 1) as u32,
-                column: col as u32,
-                text: line.to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::list_dir_impl;
     use super::{
-        create_external_project_file_impl, create_workspace_files_impl,
+        create_new_project_file_with, create_project_file_impl, create_workspace_files_impl,
         replace_project_file_via_backup, CreateFileEntry,
     };
-    #[cfg(unix)]
-    use super::{grep_dir, list_dir_impl};
     use std::fs;
+    use std::io::{self, Write as _};
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1234,43 +1032,53 @@ mod tests {
     }
 
     #[test]
-    fn external_project_creation_is_limited_to_one_vo_file_in_an_existing_directory() {
+    fn project_file_creation_is_create_only_and_validates_its_path() {
         let root = temp_dir("create-external-project");
         let entry = root.join("main.vo");
 
-        create_external_project_file_impl(vec![create_file(&entry, "package main\n")]).unwrap();
+        create_project_file_impl(
+            entry.to_string_lossy().into_owned(),
+            "package main\n".to_string(),
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(&entry).unwrap(), "package main\n");
 
-        let error = create_external_project_file_impl(Vec::new()).unwrap_err();
-        assert!(error.contains("exactly one file"), "{error}");
-        let error = create_external_project_file_impl(vec![
-            create_file(&root.join("one.vo"), "one\n"),
-            create_file(&root.join("two.vo"), "two\n"),
-        ])
+        let error = create_project_file_impl(
+            entry.to_string_lossy().into_owned(),
+            "overwritten\n".to_string(),
+        )
         .unwrap_err();
-        assert!(error.contains("exactly one file"), "{error}");
-        assert!(!root.join("one.vo").exists());
-        assert!(!root.join("two.vo").exists());
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "package main\n");
 
         let missing = root.join("missing/project.vo");
-        let error = create_external_project_file_impl(vec![create_file(&missing, "missing\n")])
-            .unwrap_err();
+        let error = create_project_file_impl(
+            missing.to_string_lossy().into_owned(),
+            "missing\n".to_string(),
+        )
+        .unwrap_err();
         assert!(error.contains("missing"), "{error}");
         assert!(!missing.exists());
 
         let invalid_extension = root.join("project.txt");
-        let error =
-            create_external_project_file_impl(vec![create_file(&invalid_extension, "invalid\n")])
-                .unwrap_err();
+        let error = create_project_file_impl(
+            invalid_extension.to_string_lossy().into_owned(),
+            "invalid\n".to_string(),
+        )
+        .unwrap_err();
         assert!(error.contains(".vo extension"), "{error}");
         assert!(!invalid_extension.exists());
+
+        let error = create_project_file_impl("relative.vo".to_string(), "invalid\n".to_string())
+            .unwrap_err();
+        assert!(error.contains("must be absolute"), "{error}");
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
     #[test]
-    fn external_project_creation_rejects_symbolic_link_directory_and_target() {
+    fn project_file_creation_rejects_symbolic_link_ancestors_and_targets() {
         use std::os::unix::fs::symlink;
 
         let container = temp_dir("create-external-links");
@@ -1278,22 +1086,27 @@ mod tests {
         let victim = outside.join("victim.vo");
         fs::write(&victim, "keep\n").unwrap();
 
-        let linked_directory = container.join("linked-directory");
-        symlink(&outside, &linked_directory).unwrap();
-        let error = create_external_project_file_impl(vec![create_file(
-            &linked_directory.join("created.vo"),
-            "created\n",
-        )])
+        let linked_ancestor = container.join("linked-ancestor");
+        let outside_directory = outside.join("nested");
+        fs::create_dir(&outside_directory).unwrap();
+        symlink(&outside, &linked_ancestor).unwrap();
+        let linked_target = linked_ancestor.join("nested/created.vo");
+        let error = create_project_file_impl(
+            linked_target.to_string_lossy().into_owned(),
+            "created\n".to_string(),
+        )
         .unwrap_err();
         assert!(error.contains("symbolic link"), "{error}");
-        assert!(!outside.join("created.vo").exists());
+        assert!(!outside_directory.join("created.vo").exists());
 
-        let linked_target = container.join("linked-target.vo");
-        symlink(&victim, &linked_target).unwrap();
-        let error =
-            create_external_project_file_impl(vec![create_file(&linked_target, "overwritten\n")])
-                .unwrap_err();
-        assert!(error.contains("symbolic link"), "{error}");
+        let target_link = container.join("linked-target.vo");
+        symlink(&victim, &target_link).unwrap();
+        let error = create_project_file_impl(
+            target_link.to_string_lossy().into_owned(),
+            "overwritten\n".to_string(),
+        )
+        .unwrap_err();
+        assert!(error.contains("already exists"), "{error}");
         assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
 
         let _ = fs::remove_dir_all(container);
@@ -1301,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn external_project_creation_replaces_hard_link_without_writing_through_it() {
+    fn project_file_creation_never_replaces_a_hard_link() {
         let root = temp_dir("create-external-hard-link");
         let outside = temp_dir("create-external-hard-link-target");
         let victim = outside.join("victim.vo");
@@ -1309,33 +1122,83 @@ mod tests {
         fs::write(&victim, "keep\n").unwrap();
         fs::hard_link(&victim, &entry).unwrap();
 
-        create_external_project_file_impl(vec![create_file(&entry, "project\n")]).unwrap();
-        assert_eq!(fs::read_to_string(&entry).unwrap(), "project\n");
+        let error = create_project_file_impl(
+            entry.to_string_lossy().into_owned(),
+            "project\n".to_string(),
+        )
+        .unwrap_err();
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(fs::read_to_string(&entry).unwrap(), "keep\n");
         assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
 
+    #[test]
+    fn concurrent_project_file_creation_has_exactly_one_winner() {
+        let root = temp_dir("create-external-concurrent");
+        let entry = root.join("main.vo");
+        let barrier = Arc::new(Barrier::new(3));
+        let attempts = ["first\n", "second\n"].map(|content| {
+            let barrier = Arc::clone(&barrier);
+            let path = entry.to_string_lossy().into_owned();
+            let content = content.to_string();
+            thread::spawn(move || {
+                barrier.wait();
+                let result = create_project_file_impl(path, content.clone());
+                (content, result)
+            })
+        });
+
+        barrier.wait();
+        let results = attempts.map(|attempt| attempt.join().unwrap());
+        assert_eq!(
+            results.iter().filter(|(_, result)| result.is_ok()).count(),
+            1
+        );
+        let winning_content = results
+            .iter()
+            .find_map(|(content, result)| result.is_ok().then_some(content))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&entry).unwrap(), *winning_content);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_project_file_write_removes_the_incomplete_file() {
+        let root = temp_dir("create-external-failed-write");
+        let entry = root.join("main.vo");
+
+        let error = create_new_project_file_with(&entry, |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "injected write failure",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.contains("injected write failure"), "{error}");
+        assert!(!entry.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
-    fn workspace_listing_and_grep_do_not_follow_nested_symbolic_links() {
+    fn workspace_listing_does_not_follow_nested_symbolic_links() {
         use std::os::unix::fs::symlink;
 
         let root = temp_dir("nofollow");
         let outside = temp_dir("outside");
-        fs::write(root.join("main.vo"), "package main\nneedle\n").unwrap();
-        fs::write(outside.join("secret.vo"), "package secret\nneedle\n").unwrap();
+        fs::write(root.join("main.vo"), "package main\n").unwrap();
         symlink(&outside, root.join("linked")).unwrap();
 
         let listed = list_dir_impl(root.clone(), ".".to_string()).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "main.vo");
-
-        let mut matches = Vec::new();
-        grep_dir(&root, "needle", true, 10, &mut matches).unwrap();
-        assert_eq!(matches.len(), 1);
-        assert!(matches[0].path.ends_with("main.vo"));
 
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
@@ -1355,6 +1218,6 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("studio-workspace-{label}-{nonce}"));
         fs::create_dir_all(&root).unwrap();
-        root
+        root.canonicalize().unwrap()
     }
 }

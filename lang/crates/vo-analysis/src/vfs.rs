@@ -667,6 +667,20 @@ fn join_module_and_subpath(module_path: &str, sub_path: &str) -> String {
     }
 }
 
+/// Build the semantic identity for one package directory below a captured
+/// module root. Filesystem spelling is normalized and validated before it can
+/// enter named-type or visibility identity.
+pub fn package_identity_for_module_path(
+    module_path: &str,
+    module_root: &Path,
+    package_dir: &Path,
+) -> Result<PackageIdentity, String> {
+    let module_root = normalize_fs_path(module_root);
+    let package_dir = normalize_fs_path(package_dir);
+    let subpath = diff_path(&package_dir, &module_root)?;
+    PackageIdentity::new(join_module_and_subpath(module_path, &subpath))
+}
+
 /// Helper to load all .vo files from a directory.
 fn load_vo_files<F: FileSystem>(fs: &F, dir: &Path) -> Result<Option<Vec<VfsFile>>, String> {
     let mut files = Vec::new();

@@ -113,12 +113,6 @@ pub struct ResolvedWebRuntimeManifest {
     pub js_modules: BTreeMap<String, AssetRef>,
 }
 
-impl ResolvedWebRuntimeManifest {
-    pub fn js_module_asset(&self, name: &str) -> Option<&AssetRef> {
-        self.js_modules.get(name)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWasmExtensionManifest {
     pub kind: WasmExtensionKind,
@@ -145,11 +139,6 @@ pub struct ResolvedExtension {
     pub manifest: ExtensionManifest,
     pub web: Option<ResolvedWebRuntimeManifest>,
     pub wasm: Option<ResolvedWasmExtensionManifest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ResolvedExtensionSet {
-    pub extensions: Vec<ResolvedExtension>,
 }
 
 pub fn resolve_extension_manifest(
@@ -224,45 +213,17 @@ pub fn resolve_ready_extension(ready: &ReadyModule) -> Option<ResolvedExtension>
     ))
 }
 
-pub fn resolve_ready_extensions(ready_modules: &[ReadyModule]) -> ResolvedExtensionSet {
-    ResolvedExtensionSet {
-        extensions: ready_modules
-            .iter()
-            .filter_map(resolve_ready_extension)
-            .collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::digest::Digest;
     use crate::ext_manifest::parse_ext_manifest_content;
-    use crate::identity::{ArtifactId, ModulePath};
-    use crate::readiness::{ReadyModule, ResolvedArtifact};
-    use crate::version::ExactVersion;
+    use crate::identity::ModulePath;
 
     fn parse_manifest(content: &str) -> ExtensionManifest {
         parse_ext_manifest_content(
             &format!("format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n{content}"),
             Path::new("/tmp/vo.mod"),
-        )
-        .unwrap()
-    }
-
-    fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
-        ResolvedArtifact::try_new(
-            ArtifactId {
-                kind: kind.to_string(),
-                target: "wasm32-unknown-unknown".to_string(),
-                name: name.to_string(),
-            },
-            1,
-            Digest::parse(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-            .unwrap(),
         )
         .unwrap()
     }
@@ -301,7 +262,7 @@ protocol = "js/dist/studio_protocol.js"
         assert_eq!(resolved.id.name, "vogui");
         assert_eq!(resolved.owner.module.as_str(), "github.com/vo-lang/vogui");
         let web = resolved.web.as_ref().unwrap();
-        let renderer = web.js_module_asset("renderer").unwrap();
+        let renderer = web.js_modules.get("renderer").unwrap();
         assert_eq!(renderer.root(), AssetRoot::ModuleRoot);
         assert_eq!(
             renderer.relative_path(),
@@ -340,44 +301,6 @@ protocol = "js/dist/studio_protocol.js"
         assert_eq!(
             artifact.parent(),
             AssetRef::artifact_root(owner, "").unwrap()
-        );
-    }
-
-    #[test]
-    fn resolve_ready_extensions_skips_modules_without_manifest() {
-        let with_manifest = ReadyModule::try_new(
-            ModulePath::parse("github.com/vo-lang/vogui").unwrap(),
-            ExactVersion::parse("0.1.4").unwrap(),
-            "wasm32-unknown-unknown",
-            vec![resolved_artifact("extension-wasm", "vogui_bg.wasm")],
-            Some(parse_manifest(
-                r#"
-[extension]
-name = "vogui"
-
-[extension.wasm]
-kind = "standalone"
-wasm = "vogui_bg.wasm"
-"#,
-            )),
-        )
-        .unwrap();
-        let without_manifest = ReadyModule::try_new(
-            ModulePath::parse("github.com/acme/demo").unwrap(),
-            ExactVersion::parse("1.2.3").unwrap(),
-            "wasm32-unknown-unknown",
-            vec![],
-            None,
-        )
-        .unwrap();
-
-        let resolved = resolve_ready_extensions(&[with_manifest, without_manifest]);
-
-        assert_eq!(resolved.extensions.len(), 1);
-        assert_eq!(resolved.extensions[0].id.name, "vogui");
-        assert_eq!(
-            resolved.extensions[0].owner.module.as_str(),
-            "github.com/vo-lang/vogui"
         );
     }
 }

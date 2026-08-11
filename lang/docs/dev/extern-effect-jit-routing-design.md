@@ -312,6 +312,7 @@ pub enum JitResult {
     Replay = 5,
     JitError = 6,
     ExternSuspend = 7,
+    RuntimeTransition = 8,
 }
 
 pub enum JitExternSuspend {
@@ -510,7 +511,7 @@ The implementation must update:
 - Update `JitBridgeTransition`, full-function transition, and OSR transition.
 - Update side-exit reason stats for wait, host wait, host replay, closure
   replay, and VM materialize-before-call.
-- Update semantics/contract graph tests for `CallExtern`.
+- Update semantics, ABI manifest, and lowering tests for `CallExtern`.
 - Update docs listed above.
 
 ## Required Validation

@@ -696,7 +696,7 @@ fn resolve_index_field_lvalue(
         let (key_type, val_type) = info.map_key_val_types(container_type);
         let key_slot_types = info.type_slot_types(key_type);
         let val_slot_types = info.type_slot_types(val_type);
-        let (key_slots, meta) = map_get_meta(&key_slot_types, &val_slot_types, false)?;
+        let key_slots = checked_layout_slots(key_slot_types.len(), "MapGet key")?;
         let tmp = func.alloc_slots(&val_slot_types);
 
         // Compile map get: container first, then index (Go evaluation order)
@@ -704,16 +704,12 @@ fn resolve_index_field_lvalue(
         let container_reg = snapshot_gcref_slot(container_value, func);
         let index_reg = crate::expr::compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
 
-        let mut meta_slot_types = vec![SlotType::Value];
-        meta_slot_types.extend(key_slot_types.iter().copied());
-        let meta_reg = func.alloc_slots(&meta_slot_types);
-        let meta_idx = ctx.const_int(meta as i64);
-        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_copy(meta_reg + 1, index_reg, key_slots);
+        let key_start = func.alloc_slots(&key_slot_types);
+        func.emit_copy(key_start, index_reg, key_slots);
         func.emit_map_get(
             tmp,
             container_reg,
-            meta_reg,
+            key_start,
             &key_slot_types,
             &val_slot_types,
             false,
@@ -785,7 +781,6 @@ fn emit_address_of_array_lvalue(
                         *container_reg,
                         *index_reg,
                         ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
-                        ctx,
                     );
                     Ok(Some(dst))
                 }
@@ -799,7 +794,6 @@ fn emit_address_of_array_lvalue(
                         *container_reg,
                         *index_reg,
                         ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
-                        ctx,
                     );
                     Ok(Some(dst))
                 }
@@ -1159,75 +1153,68 @@ pub fn emit_lvalue_load(
             kind,
             container_reg,
             index_reg,
-        } => {
-            match kind {
-                ContainerKind::StackArray {
-                    base_slot,
-                    elem_slots,
-                    len,
-                    elem_slot_types,
-                } => {
-                    func.emit_stack_array_index_check(*index_reg, *len, ctx)?;
-                    debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
-                    if !elem_slot_types.is_empty() {
-                        func.emit_slot_get_with_slot_types(
-                            dst,
-                            *base_slot,
-                            *index_reg,
-                            elem_slot_types,
-                        );
-                    }
-                }
-                ContainerKind::HeapArray {
-                    elem_bytes,
-                    elem_vk,
-                    elem_slot_types,
-                } => {
-                    func.emit_array_get(
+        } => match kind {
+            ContainerKind::StackArray {
+                base_slot,
+                elem_slots,
+                len,
+                elem_slot_types,
+            } => {
+                func.emit_stack_array_index_check(*index_reg, *len, ctx)?;
+                debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+                if !elem_slot_types.is_empty() {
+                    func.emit_slot_get_with_slot_types(
                         dst,
-                        *container_reg,
+                        *base_slot,
                         *index_reg,
-                        ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
-                        ctx,
+                        elem_slot_types,
                     );
-                }
-                ContainerKind::Slice {
-                    elem_bytes,
-                    elem_vk,
-                    elem_slot_types,
-                } => {
-                    func.emit_slice_get(
-                        dst,
-                        *container_reg,
-                        *index_reg,
-                        ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
-                        ctx,
-                    );
-                }
-                ContainerKind::Map {
-                    key_slot_types,
-                    val_slot_types,
-                } => {
-                    // MapGet: a=dst, b=map, c=meta_and_key
-                    let (key_slots, meta) = map_get_meta(key_slot_types, val_slot_types, false)?;
-                    let meta_reg = func.alloc_slots(&build_map_meta_key_slot_types(key_slot_types));
-                    let meta_idx = ctx.const_int(meta as i64);
-                    func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                    func.emit_copy(meta_reg + 1, *index_reg, key_slots);
-                    func.emit_map_get(
-                        dst,
-                        *container_reg,
-                        meta_reg,
-                        key_slot_types,
-                        val_slot_types,
-                        false,
-                    );
-                }
-                ContainerKind::String => {
-                    func.emit_op(Opcode::StrIndex, dst, *container_reg, *index_reg);
                 }
             }
-        }
+            ContainerKind::HeapArray {
+                elem_bytes,
+                elem_vk,
+                elem_slot_types,
+            } => {
+                func.emit_array_get(
+                    dst,
+                    *container_reg,
+                    *index_reg,
+                    ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
+                );
+            }
+            ContainerKind::Slice {
+                elem_bytes,
+                elem_vk,
+                elem_slot_types,
+            } => {
+                func.emit_slice_get(
+                    dst,
+                    *container_reg,
+                    *index_reg,
+                    ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
+                );
+            }
+            ContainerKind::Map {
+                key_slot_types,
+                val_slot_types,
+            } => {
+                let key_slots = checked_layout_slots(key_slot_types.len(), "MapGet key")?;
+                let key_start = func.alloc_slots(key_slot_types);
+                func.emit_copy(key_start, *index_reg, key_slots);
+                func.emit_map_get(
+                    dst,
+                    *container_reg,
+                    key_start,
+                    key_slot_types,
+                    val_slot_types,
+                    false,
+                );
+            }
+            ContainerKind::String => {
+                func.emit_op(Opcode::StrIndex, dst, *container_reg, *index_reg);
+            }
+        },
 
         LValue::ArrayElement {
             array,
@@ -1324,84 +1311,67 @@ pub fn emit_lvalue_store(
             kind,
             container_reg,
             index_reg,
-        } => {
-            match kind {
-                ContainerKind::StackArray {
-                    base_slot,
-                    elem_slots,
-                    len,
-                    elem_slot_types,
-                } => {
-                    func.emit_stack_array_index_check(*index_reg, *len, ctx)?;
-                    debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
-                    if !elem_slot_types.is_empty() {
-                        func.emit_slot_set_with_slot_types(
-                            *base_slot,
-                            *index_reg,
-                            src,
-                            elem_slot_types,
-                        );
-                    }
-                }
-                ContainerKind::HeapArray {
-                    elem_bytes,
-                    elem_vk,
-                    elem_slot_types,
-                } => {
-                    func.emit_array_set(
-                        *container_reg,
+        } => match kind {
+            ContainerKind::StackArray {
+                base_slot,
+                elem_slots,
+                len,
+                elem_slot_types,
+            } => {
+                func.emit_stack_array_index_check(*index_reg, *len, ctx)?;
+                debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+                if !elem_slot_types.is_empty() {
+                    func.emit_slot_set_with_slot_types(
+                        *base_slot,
                         *index_reg,
                         src,
-                        ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
-                        ctx,
+                        elem_slot_types,
                     );
-                }
-                ContainerKind::Slice {
-                    elem_bytes,
-                    elem_vk,
-                    elem_slot_types,
-                } => {
-                    func.emit_slice_set(
-                        *container_reg,
-                        *index_reg,
-                        src,
-                        ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
-                        ctx,
-                    );
-                }
-                ContainerKind::Map {
-                    key_slot_types,
-                    val_slot_types,
-                } => {
-                    // MapSet: a=map, b=meta_and_key, c=val
-                    // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
-                    let (key_slots, meta) = map_set_meta(key_slot_types, val_slot_types)?;
-                    let meta_and_key_reg =
-                        func.alloc_slots(&build_map_meta_key_slot_types(key_slot_types));
-                    let meta_idx = ctx.const_int(meta as i64);
-                    func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
-                    func.emit_copy(meta_and_key_reg + 1, *index_reg, key_slots);
-                    let key_may_gc = key_slot_types
-                        .iter()
-                        .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
-                    let val_may_gc = val_slot_types
-                        .iter()
-                        .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
-                    let flags = (key_may_gc as u8) | ((val_may_gc as u8) << 1);
-                    func.emit_map_set(
-                        flags,
-                        *container_reg,
-                        meta_and_key_reg,
-                        src,
-                        key_slot_types,
-                        val_slot_types,
-                    );
-                }
-                ContainerKind::String => {
-                    return Err(CodegenError::InvalidLHS);
                 }
             }
-        }
+            ContainerKind::HeapArray {
+                elem_bytes,
+                elem_vk,
+                elem_slot_types,
+            } => {
+                func.emit_array_set(
+                    *container_reg,
+                    *index_reg,
+                    src,
+                    ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
+                );
+            }
+            ContainerKind::Slice {
+                elem_bytes,
+                elem_vk,
+                elem_slot_types,
+            } => {
+                func.emit_slice_set(
+                    *container_reg,
+                    *index_reg,
+                    src,
+                    ElemLayoutSpec::new(*elem_bytes, *elem_vk, elem_slot_types),
+                );
+            }
+            ContainerKind::Map {
+                key_slot_types,
+                val_slot_types,
+            } => {
+                let key_slots = checked_layout_slots(key_slot_types.len(), "MapSet key")?;
+                let key_start = func.alloc_slots(key_slot_types);
+                func.emit_copy(key_start, *index_reg, key_slots);
+                func.emit_map_set(
+                    *container_reg,
+                    key_start,
+                    src,
+                    key_slot_types,
+                    val_slot_types,
+                );
+            }
+            ContainerKind::String => {
+                return Err(CodegenError::InvalidLHS);
+            }
+        },
 
         LValue::ArrayElement {
             array,
@@ -1528,40 +1498,12 @@ pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) -> Result<
 
 // === Internal helpers ===
 
-/// Build slot types for map meta + key: [Value (meta), key_slot_types...]
-fn build_map_meta_key_slot_types(key_slot_types: &[SlotType]) -> Vec<SlotType> {
-    let mut slot_types = vec![SlotType::Value]; // meta
-    slot_types.extend_from_slice(key_slot_types);
-    slot_types
-}
-
 fn checked_layout_slots(len: usize, context: &str) -> Result<u16, CodegenError> {
     u16::try_from(len).map_err(|_| {
         CodegenError::Internal(format!(
             "{context} slot count exceeds u16::MAX: {len} slots"
         ))
     })
-}
-
-fn map_get_meta(
-    key_slot_types: &[SlotType],
-    val_slot_types: &[SlotType],
-    has_ok: bool,
-) -> Result<(u16, u32), CodegenError> {
-    let key_slots = checked_layout_slots(key_slot_types.len(), "MapGet key")?;
-    let val_slots = checked_layout_slots(val_slot_types.len(), "MapGet value")?;
-    let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, has_ok);
-    Ok((key_slots, meta))
-}
-
-fn map_set_meta(
-    key_slot_types: &[SlotType],
-    val_slot_types: &[SlotType],
-) -> Result<(u16, u32), CodegenError> {
-    let key_slots = checked_layout_slots(key_slot_types.len(), "MapSet key")?;
-    let val_slots = checked_layout_slots(val_slot_types.len(), "MapSet value")?;
-    let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
-    Ok((key_slots, meta))
 }
 
 /// Flattened base location with accumulated offset.
@@ -1733,7 +1675,6 @@ pub fn compile_index_addr(
             container_reg,
             index_reg,
             ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
-            ctx,
         );
     } else {
         let idx = vo_syntax::ast::IndexExpr {
@@ -1812,13 +1753,36 @@ fn is_index_expression(expr: &Expr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn stack_array_index_snapshot_width_is_not_derived_from_element_layout() {
-        let source = include_str!("lvalue.rs");
-        let forbidden = concat!("1.", "min(*elem_slots)");
-        assert!(
-            !source.contains(forbidden),
-            "stack array index snapshots must copy the one-slot index operand, not the element width"
-        );
+    fn stack_array_index_snapshot_copies_one_slot() {
+        let mut func = FuncBuilder::new("stack-array-index-snapshot");
+        let old_index = func.alloc_slots(&[SlotType::Value]);
+        let mut lvalue = LValue::Index {
+            kind: ContainerKind::StackArray {
+                base_slot: 8,
+                elem_slots: 4,
+                len: 2,
+                elem_slot_types: vec![SlotType::Value; 4],
+            },
+            container_reg: 8,
+            index_reg: old_index,
+        };
+
+        snapshot_lvalue_operands(&mut lvalue, &mut func).unwrap();
+        let new_index = match lvalue {
+            LValue::Index { index_reg, .. } => index_reg,
+            _ => unreachable!(),
+        };
+        let function = func.build();
+
+        assert_ne!(new_index, old_index);
+        assert!(matches!(
+            function.code.as_slice(),
+            [copy] if copy.opcode() == Opcode::Copy
+                && copy.a == new_index
+                && copy.b == old_index
+        ));
     }
 }

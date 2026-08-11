@@ -17,8 +17,7 @@ use vo_runtime::SentinelErrorCache;
 
 use crate::runtime_boundary::RuntimeTransition;
 use crate::scheduler::FiberWakeKey;
-use vo_runtime::bytecode::ResolvedExternTable;
-use vo_runtime::ffi::ExternRegistry;
+use vo_runtime::ffi::{ExternRegistry, RuntimeMemRequests};
 #[cfg(feature = "std")]
 use vo_runtime::island::IslandCommand;
 use vo_runtime::island::IslandCommandEnvelope;
@@ -104,12 +103,10 @@ pub struct EndpointRegistry {
     live_root_indices: HbHashMap<u64, usize>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct EndpointRegistrySnapshot {
-    entries: HbHashMap<u64, EndpointEntry>,
-    tombstone_count: usize,
-    live_roots: Vec<(u64, GcRef)>,
-    live_root_indices: HbHashMap<u64, usize>,
+#[derive(Debug, Default)]
+pub(crate) struct EndpointRegistryUndo {
+    first: Option<(u64, Option<EndpointEntry>)>,
+    entries: HbHashMap<u64, Option<EndpointEntry>>,
 }
 
 impl Default for EndpointRegistry {
@@ -128,20 +125,16 @@ impl EndpointRegistry {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> EndpointRegistrySnapshot {
-        EndpointRegistrySnapshot {
-            entries: self.entries.clone(),
-            tombstone_count: self.tombstone_count,
-            live_roots: self.live_roots.clone(),
-            live_root_indices: self.live_root_indices.clone(),
-        }
-    }
-
-    pub(crate) fn restore(&mut self, snapshot: EndpointRegistrySnapshot) {
-        self.entries = snapshot.entries;
-        self.tombstone_count = snapshot.tombstone_count;
-        self.live_roots = snapshot.live_roots;
-        self.live_root_indices = snapshot.live_root_indices;
+    pub(crate) fn try_reserve_live(&mut self, additional: usize) -> Result<(), &'static str> {
+        self.entries
+            .try_reserve(additional)
+            .map_err(|_| "endpoint registry allocation failed")?;
+        self.live_roots
+            .try_reserve(additional)
+            .map_err(|_| "endpoint root allocation failed")?;
+        self.live_root_indices
+            .try_reserve(additional)
+            .map_err(|_| "endpoint root index allocation failed")
     }
 
     fn upsert_live_root(&mut self, endpoint_id: u64, ch: GcRef) {
@@ -164,6 +157,26 @@ impl EndpointRegistry {
         }
     }
 
+    fn replace_entry(&mut self, endpoint_id: u64, entry: Option<EndpointEntry>) {
+        match self.entries.remove(&endpoint_id) {
+            Some(EndpointEntry::Live(_)) => self.remove_live_root(endpoint_id),
+            Some(EndpointEntry::Tombstone { .. }) => self.tombstone_count -= 1,
+            None => {}
+        }
+        match entry {
+            Some(EndpointEntry::Live(ch)) => {
+                self.entries.insert(endpoint_id, EndpointEntry::Live(ch));
+                self.upsert_live_root(endpoint_id, ch);
+            }
+            Some(EndpointEntry::Tombstone { response_source }) => {
+                self.entries
+                    .insert(endpoint_id, EndpointEntry::Tombstone { response_source });
+                self.tombstone_count += 1;
+            }
+            None => {}
+        }
+    }
+
     /// Register or update a live channel for an endpoint.
     pub fn register_live(&mut self, endpoint_id: u64, ch: GcRef) {
         let old = self.entries.insert(endpoint_id, EndpointEntry::Live(ch));
@@ -171,6 +184,14 @@ impl EndpointRegistry {
             self.tombstone_count -= 1;
         }
         self.upsert_live_root(endpoint_id, ch);
+    }
+
+    pub(crate) fn rollback_live_insertion(&mut self, endpoint_id: u64, ch: GcRef) {
+        if self.entries.get(&endpoint_id) != Some(&EndpointEntry::Live(ch)) {
+            return;
+        }
+        self.entries.remove(&endpoint_id);
+        self.remove_live_root(endpoint_id);
     }
 
     /// Ensure endpoint is registered as live (idempotent).
@@ -264,6 +285,61 @@ impl EndpointRegistry {
 
     pub(crate) fn live_handle_at(&self, index: usize) -> Option<GcRef> {
         self.live_roots.get(index).map(|(_, ch)| *ch)
+    }
+}
+
+impl EndpointRegistryUndo {
+    pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), &'static str> {
+        self.entries
+            .try_reserve(additional.saturating_sub(usize::from(self.first.is_none())))
+            .map_err(|_| "endpoint rollback allocation failed")
+    }
+
+    pub(crate) fn record(&mut self, registry: &EndpointRegistry, endpoint_id: u64) {
+        if self
+            .first
+            .is_some_and(|(existing, _)| existing == endpoint_id)
+        {
+            return;
+        }
+        if self.first.is_none() {
+            self.first = Some((endpoint_id, registry.entry(endpoint_id)));
+            return;
+        }
+        self.entries
+            .entry(endpoint_id)
+            .or_insert_with(|| registry.entry(endpoint_id));
+    }
+
+    pub(crate) fn absorb(&mut self, mut other: Self) {
+        if self.first.is_none() {
+            self.first = other.first.take();
+        } else if let Some((endpoint_id, entry)) = other.first.take() {
+            if self
+                .first
+                .is_none_or(|(existing, _)| existing != endpoint_id)
+            {
+                self.entries.entry(endpoint_id).or_insert(entry);
+            }
+        }
+        for (endpoint_id, entry) in other.entries {
+            if self
+                .first
+                .is_some_and(|(existing, _)| existing == endpoint_id)
+            {
+                continue;
+            }
+            self.entries.entry(endpoint_id).or_insert(entry);
+        }
+    }
+
+    pub(crate) fn restore(self, registry: &mut EndpointRegistry) {
+        if let Some((endpoint_id, entry)) = self.first {
+            registry.replace_entry(endpoint_id, entry);
+        }
+        for (endpoint_id, entry) in self.entries {
+            registry.replace_entry(endpoint_id, entry);
+        }
     }
 }
 
@@ -379,9 +455,43 @@ pub enum VmError {
     },
     /// The current Island reached a terminal managed-memory failure.
     IslandMemory(MemoryError),
+    Resource(VmResourceError),
     Deadlock(String),
     Jit(String),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmResourceError {
+    Limit {
+        resource: &'static str,
+        required: usize,
+        limit: usize,
+    },
+    Allocation {
+        resource: &'static str,
+    },
+}
+
+impl core::fmt::Display for VmResourceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Limit {
+                resource,
+                required,
+                limit,
+            } => write!(
+                f,
+                "VM {resource} resource limit exceeded: required {required}, limit {limit}"
+            ),
+            Self::Allocation { resource } => {
+                write!(f, "VM host allocation failed for {resource}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for VmResourceError {}
 
 #[derive(Debug)]
 pub enum VmConstructionError {
@@ -546,8 +656,10 @@ pub struct VmState {
     pub(crate) select_rng: fastrand::Rng,
     pub globals: Vec<u64>,
     pub itab_cache: ItabCache,
-    pub extern_registry: ExternRegistry,
-    pub resolved_externs: ResolvedExternTable,
+    /// One exact entry per verified interface-call site, shared by the
+    /// interpreter and JIT tiers for this VM.
+    pub(crate) dynamic_call_ic: Vec<vo_runtime::DynCallIC>,
+    pub extern_registry: Arc<ExternRegistry>,
     pub program_args: Vec<Vec<u8>>,
     /// Output sink for fmt.Print / println. Defaults to StdoutSink (std) or
     /// GlobalBufferSink (WASM). Replace with CaptureSink to capture output.
@@ -558,6 +670,7 @@ pub struct VmState {
     /// via `ctx.set_host_output()`; read by host via `Vm::take_host_output()`.
     pub host_output: Option<Vec<u8>>,
     pub(crate) host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
+    pub(crate) runtime_mem_requests: RuntimeMemRequests,
     /// Executor notification used by process-local island transport. The
     /// callback only signals readiness; VM work stays on the owning thread.
     #[cfg(feature = "std")]
@@ -594,8 +707,6 @@ pub struct VmState {
     pub command_queue: VecDeque<IslandCommandEnvelope>,
     pub(crate) outbound_commands: VecDeque<(u32, IslandCommandEnvelope)>,
     #[cfg(feature = "jit")]
-    pub(crate) pending_runtime_transitions: Vec<RuntimeTransition>,
-    #[cfg(feature = "jit")]
     pub(crate) jit_osr_borrow_lease_depth: u32,
     pub(crate) pending_island_responses: u32,
     /// Conservative root-dirty marker for incremental GC sweep. Set when host
@@ -605,6 +716,7 @@ pub struct VmState {
     /// Fibers whose root set may have changed since the last full or dirty root
     /// scan. Used to avoid rescanning every fiber on each sweep slice.
     pub gc_dirty_fibers: Vec<u32>,
+    gc_dirty_fiber_marks: Vec<bool>,
     /// Monotonic root mutation epoch. Incremented on every dirty-root event so a
     /// bounded root snapshot can detect changes that happened while it was being
     /// scanned across scheduler boundaries.
@@ -612,9 +724,6 @@ pub struct VmState {
     pub gc_root_scan: Option<VmRootScanSnapshot>,
     pub last_gc_step_stats: VmGcStepStats,
     pub gc_verify_after_step: bool,
-    /// Safe-boundary requests issued by the public runtime/mem package.
-    pub(crate) pending_explicit_gc_work_units: usize,
-    pub(crate) pending_explicit_gc_collect: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,11 +763,6 @@ pub struct VmRootScanSnapshot {
     pub kind: GcRootScanKind,
     pub mode: VmRootScanMode,
     pub dirty_epoch: u64,
-    pub dirty_fibers: Vec<u32>,
-    /// Small pending-root buffer for non-stack fiber state and VM-owned caches.
-    /// Global and frame slots are enumerated directly through the cursors below.
-    pub roots: Vec<GcRef>,
-    pub cursor: usize,
     pub stage: VmRootScanStage,
     pub global_def_cursor: usize,
     pub global_base_cursor: usize,
@@ -668,6 +772,7 @@ pub struct VmRootScanSnapshot {
     pub fiber_slot_cursor: usize,
     pub fiber_aux_stage: VmFiberRootScanStage,
     pub fiber_aux_outer_cursor: usize,
+    pub fiber_aux_inner_cursor: usize,
     pub fiber_aux_slot_cursor: usize,
     pub io_staging_cursor: usize,
     pub sentinel_cursor: usize,
@@ -801,14 +906,15 @@ impl VmState {
             select_rng: fastrand::Rng::with_seed(select_rng_seed()),
             globals: Vec::new(),
             itab_cache: ItabCache::new(),
-            extern_registry: ExternRegistry::new(),
-            resolved_externs: ResolvedExternTable::empty(),
+            dynamic_call_ic: Vec::new(),
+            extern_registry: Arc::new(ExternRegistry::new()),
             program_args: Vec::new(),
             output: default_sink(),
             #[cfg(feature = "std")]
             io,
             host_output: None,
             host_services_v2: None,
+            runtime_mem_requests: RuntimeMemRequests::default(),
             #[cfg(feature = "std")]
             runtime_waker: None,
             sentinel_errors: SentinelErrorCache::new(),
@@ -833,18 +939,15 @@ impl VmState {
             command_queue: VecDeque::new(),
             outbound_commands: VecDeque::new(),
             #[cfg(feature = "jit")]
-            pending_runtime_transitions: Vec::new(),
-            #[cfg(feature = "jit")]
             jit_osr_borrow_lease_depth: 0,
             pending_island_responses: 0,
             gc_roots_dirty_all: true,
             gc_dirty_fibers: Vec::new(),
+            gc_dirty_fiber_marks: Vec::new(),
             gc_dirty_epoch: 0,
             gc_root_scan: None,
             last_gc_step_stats: VmGcStepStats::default(),
             gc_verify_after_step: false,
-            pending_explicit_gc_work_units: 0,
-            pending_explicit_gc_collect: false,
         }
     }
 
@@ -931,7 +1034,7 @@ impl VmState {
         self.gc_dirty_epoch = 0;
         self.gc_root_scan = None;
         self.gc_roots_dirty_all = true;
-        self.gc_dirty_fibers.clear();
+        self.clear_gc_dirty_fibers();
     }
 
     #[inline]
@@ -941,7 +1044,72 @@ impl VmState {
             self.bump_gc_dirty_epoch_or_restart_scan();
         }
         self.gc_roots_dirty_all = true;
-        self.gc_dirty_fibers.clear();
+        self.clear_gc_dirty_fibers();
+    }
+
+    #[inline]
+    pub(crate) fn clear_gc_dirty_fibers(&mut self) {
+        for raw in self.gc_dirty_fibers.drain(..) {
+            if let Some(mark) = self.gc_dirty_fiber_marks.get_mut(raw as usize) {
+                *mark = false;
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn record_gc_dirty_fiber_raw(&mut self, raw: u32) -> bool {
+        let index = raw as usize;
+        if index >= self.gc_dirty_fiber_marks.len() {
+            let additional = index + 1 - self.gc_dirty_fiber_marks.len();
+            if self
+                .gc_dirty_fiber_marks
+                .try_reserve_exact(additional)
+                .is_err()
+            {
+                self.mark_gc_all_roots_dirty();
+                return false;
+            }
+            self.gc_dirty_fiber_marks.resize(index + 1, false);
+        }
+        if self.gc_dirty_fiber_marks[index] {
+            return false;
+        }
+        if self.gc_dirty_fibers.len() == self.gc_dirty_fibers.capacity()
+            && self.gc_dirty_fibers.try_reserve(1).is_err()
+        {
+            self.mark_gc_all_roots_dirty();
+            return false;
+        }
+        self.gc_dirty_fiber_marks[index] = true;
+        self.gc_dirty_fibers.push(raw);
+        true
+    }
+
+    #[inline]
+    pub fn mark_gc_fiber_roots_dirty(&mut self, raw: u32) {
+        let already_dirty = self.gc_roots_dirty_all
+            || self
+                .gc_dirty_fiber_marks
+                .get(raw as usize)
+                .copied()
+                .unwrap_or(false);
+        if self.gc_root_scan.is_some() || !already_dirty {
+            self.gc.roots_changed();
+            self.bump_gc_dirty_epoch_or_restart_scan();
+        }
+        if !self.gc_roots_dirty_all {
+            self.record_gc_dirty_fiber_raw(raw);
+        }
+    }
+
+    /// Whether the latest completed VM root scan still covers the current root set.
+    ///
+    /// A bounded scan may span scheduler boundaries. Roots that its cursor has not
+    /// reached remain legitimately white until a later slice, so color verification
+    /// must wait while either the snapshot or a newer dirty-root set is pending.
+    #[inline]
+    pub(crate) fn gc_root_colors_are_verifiable(&self) -> bool {
+        self.gc_root_scan.is_none() && !self.gc_roots_dirty_all && self.gc_dirty_fibers.is_empty()
     }
 
     /// Allocate a new endpoint ID for this island.
@@ -963,7 +1131,7 @@ impl VmState {
     /// Check if waiter is on current island.
     #[inline]
     pub fn is_local_waiter(&self, waiter: &vo_runtime::objects::queue_state::QueueWaiter) -> bool {
-        waiter.island_id == self.current_island_id
+        waiter.island_id() == self.current_island_id
     }
 
     /// Wake a waiter (local or remote). No PC modification - blocker sets resume PC.
@@ -973,10 +1141,10 @@ impl VmState {
         select_result: Option<crate::fiber::SelectWokenResult>,
         scheduler: &mut crate::scheduler::Scheduler,
     ) -> Result<bool, String> {
-        if waiter.endpoint_wait_id() != 0 {
+        if waiter.endpoint_wait_key().is_some() {
             return Ok(false);
         }
-        if waiter.island_id == self.current_island_id {
+        if waiter.island_id() == self.current_island_id {
             let wake_key = FiberWakeKey::from_packed(waiter.fiber_key());
             if scheduler
                 .try_get_fiber(wake_key.fiber_id())
@@ -1004,7 +1172,7 @@ impl VmState {
         endpoint_id: Option<u64>,
         scheduler: &mut crate::scheduler::Scheduler,
     ) -> Result<bool, String> {
-        if waiter.island_id == self.current_island_id {
+        if waiter.island_id() == self.current_island_id {
             self.mark_gc_all_roots_dirty();
             Ok(scheduler.wake_queue_waiter(waiter))
         } else {
@@ -1022,7 +1190,7 @@ impl VmState {
         endpoint_id: Option<u64>,
         scheduler: &mut crate::scheduler::Scheduler,
     ) -> Result<bool, String> {
-        if waiter.island_id == self.current_island_id {
+        if waiter.island_id() == self.current_island_id {
             let woke = scheduler.wake_queue_sender_closed(waiter)?;
             if woke {
                 self.mark_gc_all_roots_dirty();
@@ -1054,6 +1222,7 @@ impl Drop for VmState {
 mod tests {
     use super::{EndpointRegistry, VmIdentityExhausted, VmState};
     use crate::scheduler::Scheduler;
+    use crate::test_support::endpoint_waiter;
     use vo_runtime::gc::GcRef;
     use vo_runtime::objects::queue_state::{QueueWaiter, SelectWaitKind};
 
@@ -1077,137 +1246,6 @@ mod tests {
 
         assert_eq!(state.allocate_island_id(), Ok(u32::MAX));
         assert_eq!(state.allocate_island_id(), Err(VmIdentityExhausted::Island));
-    }
-
-    #[test]
-    fn vm_endpoint_request_publication_013_request_publishers_are_boundary_owned() {
-        let src = crate::source_contract::production_source_without_test_modules(include_str!(
-            "types.rs"
-        ));
-        let vm_src =
-            crate::source_contract::production_source_without_test_modules(include_str!("mod.rs"));
-        let scheduler_src = crate::source_contract::production_source_without_test_modules(
-            include_str!("../scheduler.rs"),
-        );
-        let web_island_src = include_str!("../../../vo-web/src/island.rs");
-        let web_vm_src = include_str!("../../../vo-web/src/vm.rs");
-        let web_async_src = include_str!("../../../vo-web/src/async_runner.rs");
-        let app_session_src = include_str!("../../../vo-app-runtime/src/session.rs");
-        let app_native_src = include_str!("../../../vo-app-runtime/src/native.rs");
-        let engine_run_src = include_str!("../../../vo-engine/src/run.rs");
-
-        for removed_helper in [
-            "fn send_endpoint_request",
-            "fn send_endpoint_send_request",
-            "fn send_endpoint_recv_request",
-            "fn send_endpoint_close_request",
-        ] {
-            assert!(
-                !src.contains(removed_helper),
-                "{removed_helper} bypasses RuntimeTransition endpoint request ownership"
-            );
-        }
-        for raw_publication_surface in [
-            "pub fn try_send_to_island",
-            "pub fn send_to_island",
-            "pub outbound_commands",
-            "pub pending_island_responses",
-            "fn send_wake_to_island",
-            "pub fn send_spawn_fiber_to_island",
-            "pub fn send_endpoint_response",
-            "pub fn send_endpoint_recv_data_response",
-            "pub fn wake_waiter",
-            "pub fn wake_closed_receiver",
-            "pub fn wake_closed_sender",
-            "pub fn set_island_id",
-        ] {
-            assert!(
-                !src.contains(raw_publication_surface),
-                "{raw_publication_surface} exposes raw island publication outside the runtime boundary"
-            );
-        }
-        for raw_scheduler_surface in [
-            "pub fn host_event_key",
-            "pub fn wake_host_event(",
-            "pub fn wake_host_event_legacy_timer_token",
-            "pub fn wake_host_event_legacy_replay_token",
-            "pub fn wake_host_event_with_data",
-            "pub fn take_pending_host_events",
-            "pub fn has_host_event_waiters",
-            "pub fn poll_io_ready_tokens",
-            "pub fn io_wait_key",
-            "pub fn wake_io(",
-            "pub fn wake_io_token",
-            "pub fn has_io_waiters",
-            "pub fn wake_queue_waiter(",
-            "pub fn wake_queue_waiter_with_result",
-            "pub fn wake_queue_sender_closed",
-        ] {
-            assert!(
-                !scheduler_src.contains(raw_scheduler_surface),
-                "{raw_scheduler_surface} exposes raw scheduler wake application outside Vm runtime-command ownership"
-            );
-        }
-        for leaked_vm_field in [
-            "pub module: Option<Module>",
-            "pub scheduler: Scheduler",
-            "pub state: VmState",
-        ] {
-            assert!(
-                !vm_src.contains(leaked_vm_field),
-                "{leaked_vm_field} exposes raw VM internals outside semantic Vm APIs"
-            );
-        }
-        assert!(
-            vm_src.contains("pub fn has_outbound_commands(&self) -> bool"),
-            "Vm must expose a semantic outbound-command predicate instead of leaking VmState queues"
-        );
-        assert!(
-            vm_src.contains("pub fn push_targeted_island_command("),
-            "Vm must own targeted island identity adoption instead of leaking a raw island-id setter"
-        );
-        assert!(
-            vm_src.contains("pub fn take_pending_host_events(&mut self)"),
-            "Vm must expose semantic host-event polling instead of leaking Scheduler"
-        );
-        assert!(
-            vm_src.contains("pub fn host_event_key("),
-            "Vm must expose semantic host-event key lookup instead of leaking Scheduler"
-        );
-        assert!(
-            vm_src.contains("pub fn extern_registry_mut(")
-                && vm_src.contains("Result<&mut vo_runtime::ExternRegistry, VmError>"),
-            "Vm must expose fallible pre-load extern registration without leaking VmState"
-        );
-        assert!(
-            vm_src.contains("pub fn set_output_sink("),
-            "Vm must expose output-sink configuration without leaking VmState"
-        );
-        assert!(
-            !web_island_src.contains(".state.outbound_commands"),
-            "vo-web must use Vm::has_outbound_commands instead of reaching into VmState raw queues"
-        );
-        for external_src in [
-            web_island_src,
-            web_vm_src,
-            web_async_src,
-            app_session_src,
-            app_native_src,
-            engine_run_src,
-        ] {
-            assert!(
-                !external_src.contains(".scheduler"),
-                "external crates must use Vm host-event APIs instead of reaching into Scheduler"
-            );
-            assert!(
-                !external_src.contains(".state"),
-                "external crates must use semantic Vm APIs instead of reaching into VmState"
-            );
-            assert!(
-                !external_src.contains(".set_island_id"),
-                "external crates must use Vm::push_targeted_island_command instead of raw island-id mutation"
-            );
-        }
     }
 
     #[test]
@@ -1260,7 +1298,7 @@ mod tests {
         let mut state = super::VmState::new();
         state.external_island_transport = true;
         let mut scheduler = Scheduler::new();
-        let waiter = QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11);
+        let waiter = endpoint_waiter(7, 0x0000_0002_0000_0003, 11);
 
         let err = state
             .wake_closed_sender(&waiter, Some(42), &mut scheduler)
@@ -1278,7 +1316,8 @@ mod tests {
         let mut state = super::VmState::new();
         state.external_island_transport = true;
         let mut scheduler = Scheduler::new();
-        let waiter = QueueWaiter::simple_queue(7, 0x0000_0006_0000_0007, 31, SelectWaitKind::Recv);
+        let waiter =
+            QueueWaiter::try_queue(7, 0x0000_0006_0000_0007, 31, SelectWaitKind::Recv).unwrap();
 
         let err = state
             .wake_waiter(&waiter, None, &mut scheduler)
@@ -1296,7 +1335,7 @@ mod tests {
         let mut state = super::VmState::new();
         state.external_island_transport = true;
         let mut scheduler = Scheduler::new();
-        let waiter = QueueWaiter::endpoint(7, 0x0000_0004_0000_0005, 12);
+        let waiter = endpoint_waiter(7, 0x0000_0004_0000_0005, 12);
 
         let err = state
             .wake_closed_receiver(&waiter, Some(43), &mut scheduler)

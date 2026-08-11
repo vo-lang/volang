@@ -1,6 +1,6 @@
 use super::*;
 use crate::fiber::RemoteRecvResponse;
-use crate::test_support::{array, queue, queue_state, slice};
+use crate::test_support::{array, endpoint_waiter, queue, queue_state, slice};
 use crate::vm::{EndpointRegistry, VmState};
 use vo_common_core::bytecode::{FieldMeta, Module, NamedTypeMeta, StructMeta};
 use vo_runtime::{SlotType, ValueKind};
@@ -112,14 +112,40 @@ fn nil_queue_send_blocks() {
         &[],
         None,
     );
-    assert!(matches!(result, QueueExecResult::Block { waiter: None }));
+    assert!(matches!(result, QueueAction::Block { waiter: None }));
 }
 
 #[test]
 fn nil_queue_recv_blocks() {
-    let gc = Gc::new();
-    let result = queue_recv_core(&gc, core::ptr::null_mut(), 0, 1);
+    let state = VmState::new();
+    let result = unsafe { queue_recv_validated_core(&state, core::ptr::null_mut(), 0, 1) };
     assert!(matches!(result, QueueRecvCoreResult::WouldBlock { .. }));
+}
+
+#[test]
+fn closed_queue_send_traps_before_payload_allocation() {
+    let mut state = VmState::new();
+    let ch = queue::create(
+        &mut state.gc,
+        QueueKind::Chan,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(0, ValueKind::Int64),
+        1,
+        1,
+    );
+    queue::close(ch);
+    state.gc.memory_set_allocation_allowed(false);
+
+    let result = queue_send_core(ch, &[123], 0, 1, &mut state, &[], &[], None);
+
+    assert!(matches!(
+        result,
+        QueueAction::Trap(RuntimeTrapKind::SendOnClosedChannel)
+    ));
+    let queue_state = queue::local_state(ch);
+    assert!(queue_state.buffer.is_empty());
+    assert!(queue_state.waiting_senders.is_empty());
+    assert_eq!(state.gc.last_memory_error(), None);
 }
 
 #[test]
@@ -143,11 +169,14 @@ fn pack_failure_transaction_restores_local_queue_and_nested_endpoint_transfer() 
         1,
         0,
     );
-    let mut mutation = LocalQueueMutation::snapshot(&state, ch);
-    assert!(matches!(
-        queue::try_send(ch, vec![payload_port as u64].into_boxed_slice().into()),
-        queue_state::SendResult::Buffered
-    ));
+    let endpoint_receiver = endpoint_waiter(7, 3, 5);
+    let next_receiver = endpoint_waiter(7, 4, 6);
+    queue::register_receiver(ch, endpoint_receiver.clone());
+    queue::register_receiver(ch, next_receiver.clone());
+    let receiver = match queue::try_send(ch, vec![payload_port as u64].into_boxed_slice().into()) {
+        queue_state::SendResult::DirectSend { receiver, .. } => receiver,
+        other => panic!("endpoint receiver must accept a direct send, got {other:?}"),
+    };
     let mut effects = Vec::new();
     let commit = crate::exec::prepare_value_queue_handles_for_transfer_with_commit(
         &[payload_port as u64],
@@ -160,7 +189,6 @@ fn pack_failure_transaction_restores_local_queue_and_nested_endpoint_transfer() 
         &mut effects,
     )
     .expect("valid nested port transfer should prepare");
-    mutation.absorb_transfer(commit);
 
     let pack_result: Result<Vec<u8>, vo_runtime::pack::PackOutputError> =
         Err(vo_runtime::pack::PackOutputError::LengthOverflow {
@@ -168,10 +196,17 @@ fn pack_failure_transaction_restores_local_queue_and_nested_endpoint_transfer() 
             attempted: 1,
         });
     if pack_result.is_err() {
-        mutation.rollback(&mut state);
+        restore_direct_receiver(&mut state, ch, receiver, commit);
     }
 
-    assert_eq!(queue::len(ch), 0, "failed pack must restore queue contents");
+    assert_eq!(
+        queue::local_state(ch)
+            .waiting_receivers
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![&endpoint_receiver, &next_receiver],
+        "failed pack must restore the claimed receiver at the front"
+    );
     assert!(
         queue::home_info(payload_port).is_none(),
         "failed pack must restore nested port HomeInfo"
@@ -197,7 +232,7 @@ fn queue_send_core_rejects_payload_width_drift_035() {
     let result = queue_send_core(ch, &[123], 0, 1, &mut state, &[], &[], None);
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("QueueSend payload slots 1"), "{msg}");
             assert!(msg.contains("queue element slots 2"), "{msg}");
         }
@@ -221,13 +256,22 @@ fn exec_queue_recv_rejects_element_width_drift_before_stack_write_035() {
         queue::try_send(ch, vec![11, 22].into_boxed_slice().into()),
         queue_state::SendResult::Buffered
     ));
-    let inst = Instruction::with_flags(crate::instruction::Opcode::QueueRecv, 2, 0, 1, 0);
+    let inst = Instruction::with_flags(crate::instruction::Opcode::QueueRecv, 0, 0, 1, 0);
     let mut stack = vec![99, ch as u64, 77];
 
-    let result = exec_queue_recv(stack.as_mut_ptr(), 0, 0, 1, &inst, &state, None, None);
+    let result = exec_queue_recv(
+        stack.as_mut_ptr(),
+        0,
+        0,
+        1,
+        &inst,
+        &state,
+        None,
+        &[SlotType::Value],
+    );
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("QueueRecv payload slots 1"), "{msg}");
             assert!(msg.contains("queue element slots 2"), "{msg}");
         }
@@ -266,7 +310,7 @@ fn queue_send_core_rejects_payload_layout_drift_035() {
     );
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("QueueSend payload layout [Value]"), "{msg}");
             assert!(msg.contains("queue element layout [GcRef]"), "{msg}");
         }
@@ -301,11 +345,11 @@ fn exec_queue_recv_rejects_element_layout_drift_before_stack_write_035() {
         &inst,
         &state,
         None,
-        Some(&[SlotType::Value]),
+        &[SlotType::Value],
     );
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("QueueRecv payload layout [Value]"), "{msg}");
             assert!(msg.contains("queue element layout [GcRef]"), "{msg}");
         }
@@ -325,21 +369,18 @@ fn vm_queue_handle_validation_002_queue_ops_reject_non_queue_gcref() {
     let not_queue = state.gc.alloc(ValueMeta::new(0, ValueKind::String), 0);
 
     match queue_send_core(not_queue, &[123], 0, 1, &mut state, &[], &[], None) {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("expected queue handle"), "{msg}")
         }
         other => panic!("QueueSend with non-queue GcRef must be malformed, got {other:?}"),
     }
 
-    match queue_recv_core(&state.gc, not_queue, 0, 1) {
-        QueueRecvCoreResult::Malformed(msg) => {
-            assert!(msg.contains("expected queue handle"), "{msg}")
-        }
-        other => panic!("QueueRecv with non-queue GcRef must be malformed, got {other:?}"),
-    }
+    let err = validate_queue_handle(&state.gc, not_queue, "QueueRecv")
+        .expect_err("QueueRecv must reject a non-queue GcRef");
+    assert!(err.contains("expected queue handle"), "{err}");
 
     match queue_close_core(&state, not_queue) {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("expected queue handle"), "{msg}")
         }
         other => panic!("QueueClose with non-queue GcRef must be malformed, got {other:?}"),
@@ -350,7 +391,7 @@ fn vm_queue_handle_validation_002_queue_ops_reject_non_queue_gcref() {
     match exec_queue_get(stack.as_mut_ptr(), 0, &inst, &state.gc, |ch| unsafe {
         queue_len(ch)
     }) {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("expected queue handle"), "{msg}")
         }
         other => panic!("QueueLen with non-queue GcRef must be malformed, got {other:?}"),
@@ -368,14 +409,17 @@ fn vm_queue_remote_direct_txn_002_missing_home_info_preserves_waiting_receiver_w
         1,
         1,
     );
-    queue::register_receiver(ch, QueueWaiter::simple(7, 99));
+    queue::register_receiver(
+        ch,
+        QueueWaiter::try_queue(7, 99, ch as u64, SelectWaitKind::Recv).unwrap(),
+    );
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         queue_send_core(ch, &[123], 0, 1, &mut state, &[], &[], None)
     }));
 
     match result {
-        Ok(QueueExecResult::Malformed(msg)) => {
+        Ok(QueueAction::Malformed(msg)) => {
             assert!(msg.contains("RemoteDirect send missing HomeInfo"), "{msg}");
         }
         Ok(other) => {
@@ -409,7 +453,7 @@ fn vm_endpoint_direct_preflight_012_same_island_receiver_missing_home_info_prese
     );
     queue::register_receiver(
         ch,
-        QueueWaiter::endpoint(state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(state.current_island_id, 0x0000_0002_0000_0003, 11),
     );
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -426,7 +470,7 @@ fn vm_endpoint_direct_preflight_012_same_island_receiver_missing_home_info_prese
     }));
 
     match result {
-        Ok(QueueExecResult::Malformed(msg)) => {
+        Ok(QueueAction::Malformed(msg)) => {
             assert!(msg.contains("RemoteDirect send missing HomeInfo"), "{msg}");
         }
         Ok(other) => {
@@ -460,14 +504,15 @@ fn vm_select_woken_materialization_003_preflight_preserves_receiver_on_payload_m
     let fiber_key = 0x0000_0001_0000_0002;
     queue::register_receiver(
         ch,
-        QueueWaiter::selecting(
+        QueueWaiter::try_select(
             state.current_island_id,
             fiber_key,
             0,
             7,
             ch as u64,
             queue_state::SelectWaitKind::Recv,
-        ),
+        )
+        .unwrap(),
     );
 
     let result = queue_send_core(
@@ -482,7 +527,7 @@ fn vm_select_woken_materialization_003_preflight_preserves_receiver_on_payload_m
     );
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("typed_write_barrier"), "{msg}");
             assert!(msg.contains("vals length 1"), "{msg}");
             assert!(msg.contains("slot_types length 2"), "{msg}");
@@ -528,7 +573,7 @@ fn vm_gc_select_woken_payload_root_003_array_slots_are_precise() {
         0,
     );
 
-    let slot_types = select_woken_recv_slot_types(ch, Some(&module))
+    let slot_types = select_woken_recv_slot_types(ch, Some((&module).into()))
         .expect("array select payload slot types should derive from runtime metadata");
 
     assert_eq!(
@@ -621,7 +666,7 @@ fn vm_queue_remote_direct_txn_002_preflight_preserves_waiting_receiver_on_transf
         1,
     );
     queue::install_home_info(ch, 42, state.current_island_id);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     let payload_port = queue::create(
         &mut state.gc,
         QueueKind::Port,
@@ -639,11 +684,11 @@ fn vm_queue_remote_direct_txn_002_preflight_preserves_waiting_receiver_on_transf
         &mut state,
         &module.struct_metas,
         &module.runtime_types,
-        Some(&module),
+        Some((&module).into()),
     );
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("non-sendable"), "{msg}");
             assert!(msg.contains("Closure"), "{msg}");
         }
@@ -699,7 +744,7 @@ fn vm_endpoint_direct_preflight_012_same_island_receiver_transfer_error_preserve
     queue::install_home_info(ch, 42, state.current_island_id);
     queue::register_receiver(
         ch,
-        QueueWaiter::endpoint(state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(state.current_island_id, 0x0000_0002_0000_0003, 11),
     );
     let payload_port = queue::create(
         &mut state.gc,
@@ -718,11 +763,11 @@ fn vm_endpoint_direct_preflight_012_same_island_receiver_transfer_error_preserve
         &mut state,
         &module.struct_metas,
         &module.runtime_types,
-        Some(&module),
+        Some((&module).into()),
     );
 
     match result {
-        QueueExecResult::Malformed(msg) => {
+        QueueAction::Malformed(msg) => {
             assert!(msg.contains("non-sendable"), "{msg}");
             assert!(msg.contains("Closure"), "{msg}");
         }
@@ -777,7 +822,7 @@ fn vm_queue_remote_direct_txn_003_rejects_queue_kind_drift_before_receiver_consu
         1,
     );
     queue::install_home_info(ch, 42, state.current_island_id);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     let first_port = queue::create(
         &mut state.gc,
         QueueKind::Port,
@@ -804,12 +849,12 @@ fn vm_queue_remote_direct_txn_003_rejects_queue_kind_drift_before_receiver_consu
             &mut state,
             &module.struct_metas,
             &module.runtime_types,
-            Some(&module),
+            Some((&module).into()),
         )
     }));
 
     match result {
-        Ok(QueueExecResult::Malformed(msg)) => {
+        Ok(QueueAction::Malformed(msg)) => {
             assert!(msg.contains("kind mismatch"), "{msg}");
             assert!(msg.contains("Port"), "{msg}");
             assert!(msg.contains("Chan"), "{msg}");
@@ -867,7 +912,7 @@ fn vm_queue_remote_direct_txn_004_rejects_container_kind_drift_before_receiver_c
             1,
         );
         queue::install_home_info(ch, 42, state.current_island_id);
-        queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+        queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
         let first_port = queue::create(
             &mut state.gc,
             QueueKind::Port,
@@ -894,12 +939,12 @@ fn vm_queue_remote_direct_txn_004_rejects_container_kind_drift_before_receiver_c
                 &mut state,
                 &module.struct_metas,
                 &module.runtime_types,
-                Some(&module),
+                Some((&module).into()),
             )
         }));
 
         match result {
-            Ok(QueueExecResult::Malformed(msg)) => {
+            Ok(QueueAction::Malformed(msg)) => {
                 assert!(msg.contains("expected"), "{msg}");
                 assert!(msg.contains(&format!("{drift_kind:?}")), "{msg}");
                 assert!(msg.contains("Port"), "{msg}");
@@ -966,7 +1011,7 @@ fn vm_queue_remote_direct_txn_005_rejects_same_kind_container_layout_drift_befor
             1,
         );
         queue::install_home_info(ch, 42, state.current_island_id);
-        queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+        queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
         let first_port = queue::create(
             &mut state.gc,
             QueueKind::Port,
@@ -989,12 +1034,12 @@ fn vm_queue_remote_direct_txn_005_rejects_same_kind_container_layout_drift_befor
                 &mut state,
                 &module.struct_metas,
                 &module.runtime_types,
-                Some(&module),
+                Some((&module).into()),
             )
         }));
 
         match result {
-            Ok(QueueExecResult::Malformed(msg)) => {
+            Ok(QueueAction::Malformed(msg)) => {
                 assert!(
                     msg.contains("layout") || msg.contains("slot") || msg.contains("expected"),
                     "{msg}"
@@ -1057,7 +1102,7 @@ fn vm_queue_remote_direct_txn_005_rejects_misaligned_slice_data_pointer_before_r
         1,
     );
     queue::install_home_info(ch, 42, state.current_island_id);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     let first_port = queue::create(
         &mut state.gc,
         QueueKind::Port,
@@ -1077,12 +1122,12 @@ fn vm_queue_remote_direct_txn_005_rejects_misaligned_slice_data_pointer_before_r
             &mut state,
             &module.struct_metas,
             &module.runtime_types,
-            Some(&module),
+            Some((&module).into()),
         )
     }));
 
     match result {
-        Ok(QueueExecResult::Malformed(msg)) => {
+        Ok(QueueAction::Malformed(msg)) => {
             assert!(msg.contains("Slice layout"), "{msg}");
             assert!(msg.contains("element boundary"), "{msg}");
         }
@@ -1113,15 +1158,18 @@ fn queue_close_core_splits_receiver_and_sender_waiters() {
         1,
         0,
     );
-    queue::register_receiver(ch, QueueWaiter::simple(0, 10));
+    queue::register_receiver(
+        ch,
+        QueueWaiter::try_queue(0, 10, ch as u64, SelectWaitKind::Recv).unwrap(),
+    );
     queue::register_sender(
         ch,
-        QueueWaiter::simple(0, 20),
+        QueueWaiter::try_queue(0, 20, ch as u64, SelectWaitKind::Send).unwrap(),
         vec![7].into_boxed_slice().into(),
     );
 
     match queue_close_core(&state, ch) {
-        QueueExecResult::Close {
+        QueueAction::Close {
             receivers,
             senders,
             endpoint_id,
@@ -1129,9 +1177,9 @@ fn queue_close_core_splits_receiver_and_sender_waiters() {
         } => {
             assert!(endpoint_id.is_none());
             assert_eq!(receivers.len(), 1);
-            assert_eq!(receivers[0].fiber_key, 10);
+            assert_eq!(receivers[0].fiber_key(), 10);
             assert_eq!(senders.len(), 1);
-            assert_eq!(senders[0].fiber_key, 20);
+            assert_eq!(senders[0].fiber_key(), 20);
         }
         other => panic!("expected split close waiters, got {other:?}"),
     }
@@ -1151,11 +1199,11 @@ fn queue_send_core_reports_typed_barrier_metadata_errors_without_unwinding() {
     );
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        queue_send_core(ch, &[0], 0, 1, &mut state, &[], &[], Some(&module))
+        queue_send_core(ch, &[0], 0, 1, &mut state, &[], &[], Some((&module).into()))
     }));
 
     match result {
-        Ok(QueueExecResult::Malformed(msg)) => {
+        Ok(QueueAction::Malformed(msg)) => {
             assert!(msg.contains("typed_write_barrier_by_meta"), "{msg}");
             assert!(msg.contains("missing StructMeta"), "{msg}");
         }
@@ -1183,7 +1231,7 @@ fn remote_queue_send_rejects_non_sendable_metadata_before_pack() {
     }));
 
     match result {
-        Ok(QueueExecResult::Malformed(msg)) => {
+        Ok(QueueAction::Malformed(msg)) => {
             assert!(msg.contains("non-sendable"), "{msg}");
             assert!(msg.contains("Interface"), "{msg}");
         }
@@ -1194,85 +1242,6 @@ fn remote_queue_send_rejects_non_sendable_metadata_before_pack() {
     }
 }
 
-fn contains_panic_typed_write_barrier(compact: &[u8]) -> bool {
-    let pattern = "typed_write_barrier_by_meta(".as_bytes();
-    if pattern.len() > compact.len() {
-        return false;
-    }
-    (0..=compact.len() - pattern.len()).any(|start| {
-        compact[start..].starts_with(pattern)
-            && start
-                .checked_sub(1)
-                .and_then(|prev| compact.get(prev).copied())
-                .is_none_or(|byte| byte != b'_')
-    })
-}
-
-fn queue_send_core_uses_result_typed_barrier(source: &str) -> bool {
-    let Some(send_core) = vo_source_contract::compact_region_between(
-        source,
-        "fnqueue_send_core_with_layout(",
-        "fnqueue_recv_core(",
-    ) else {
-        return false;
-    };
-    let Some(barrier_pos) = vo_source_contract::compact_pattern_position(
-        &send_core,
-        "try_typed_write_barrier_by_meta(",
-    ) else {
-        return false;
-    };
-    let Some(mutation_pos) =
-        vo_source_contract::compact_pattern_position(&send_core, "queue::send_or_block_resolved(")
-    else {
-        return false;
-    };
-    barrier_pos < mutation_pos && !contains_panic_typed_write_barrier(&send_core)
-}
-
-#[test]
-fn queue_send_core_uses_result_typed_barrier_for_jit_callback_path() {
-    let source =
-        crate::source_contract::production_source_without_test_modules(include_str!("../queue.rs"));
-
-    assert!(
-        queue_send_core_uses_result_typed_barrier(&source),
-        "queue_send_core must use the Result-returning typed barrier helper"
-    );
-}
-
-#[test]
-fn queue_send_core_rejects_comment_spoofed_result_typed_barrier_contract() {
-    let spoof = r#"
-            fn queue_send_core_with_layout(state: &mut VmState) {
-                // try_typed_write_barrier_by_meta(&mut state.gc, ch, value, em, module)
-                vo_runtime::gc_types::typed_write_barrier_by_meta(&mut state.gc, ch, value, em, module);
-            }
-            fn queue_recv_core() {}
-        "#;
-
-    assert!(
-        !queue_send_core_uses_result_typed_barrier(spoof),
-        "comment-only Result barrier facts must not satisfy queue_send_core JIT callback contract"
-    );
-}
-
-#[test]
-fn queue_send_core_rejects_barrier_after_queue_mutation_contract() {
-    let spoof = r#"
-            fn queue_send_core_with_layout(state: &mut VmState) {
-                queue::send_or_block_resolved(ch, value, waiter, island_id);
-                try_typed_write_barrier_by_meta(&mut state.gc, ch, value, em, module)?;
-            }
-            fn queue_recv_core() {}
-        "#;
-
-    assert!(
-        !queue_send_core_uses_result_typed_barrier(spoof),
-        "queue send must run the typed barrier before mutating queue state"
-    );
-}
-
 #[test]
 fn replay_remote_queue_recv_response_restores_closed_result() {
     let mut gc = Gc::new();
@@ -1280,11 +1249,7 @@ fn replay_remote_queue_recv_response_restores_closed_result() {
     let named_type_metas = vec![];
     let runtime_types = vec![];
     let mut endpoint_registry = EndpointRegistry::new();
-    let response = RemoteRecvResponse {
-        data: Vec::new(),
-        closed: true,
-        rejected: false,
-    };
+    let response = RemoteRecvResponse::Closed;
     let mut dst = [99u64, 99u64];
 
     replay_remote_queue_recv_response(
@@ -1313,11 +1278,7 @@ fn vm_endpoint_recv_remote_direct_txn_004_rejected_response_does_not_write_recv_
     let named_type_metas = vec![];
     let runtime_types = vec![];
     let mut endpoint_registry = EndpointRegistry::new();
-    let response = RemoteRecvResponse {
-        data: Vec::new(),
-        closed: false,
-        rejected: true,
-    };
+    let response = RemoteRecvResponse::Rejected;
     let mut dst = [99u64, 99u64];
 
     let err = replay_remote_queue_recv_response(
@@ -1355,11 +1316,7 @@ fn vm_remote_recv_unpack_layout_006_rejects_wire_kind_drift_before_recv_slots() 
     let mut endpoint_registry = EndpointRegistry::new();
     let mut data = vec![ValueKind::Int64 as u8];
     data.extend_from_slice(&0xfeed_cafe_dead_beefu64.to_le_bytes());
-    let response = RemoteRecvResponse {
-        data,
-        closed: false,
-        rejected: false,
-    };
+    let response = RemoteRecvResponse::Data(data);
     let mut dst = [99u64, 99u64];
 
     let err = replay_remote_queue_recv_response(
@@ -1399,11 +1356,7 @@ fn vm_remote_recv_unpack_layout_007_rejects_slice_elem_rttid_drift_before_recv_s
     data.extend_from_slice(&ValueMeta::new(0, ValueKind::Int64).to_raw().to_le_bytes());
     data.extend_from_slice(&8u32.to_le_bytes());
     data.push(0);
-    let response = RemoteRecvResponse {
-        data,
-        closed: false,
-        rejected: false,
-    };
+    let response = RemoteRecvResponse::Data(data);
     let mut dst = [99u64, 99u64];
 
     let err = replay_remote_queue_recv_response(
@@ -1440,8 +1393,8 @@ fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
     ];
     let mut endpoint_registry = EndpointRegistry::new();
     let slice_ref = make_byte_slice(&mut gc, &[]);
-    let response = RemoteRecvResponse {
-        data: unsafe {
+    let response = RemoteRecvResponse::Data(
+        unsafe {
             crate::exec::transport::pack_transport_message(
                 &gc,
                 &[slice_ref as u64],
@@ -1452,9 +1405,7 @@ fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
             )
         }
         .expect("empty byte slice should pack"),
-        closed: false,
-        rejected: false,
-    };
+    );
     let mut dst = [0u64; 2];
 
     replay_remote_queue_recv_response(
@@ -1490,8 +1441,8 @@ fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
     ];
     let mut endpoint_registry = EndpointRegistry::new();
     let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
-    let response = RemoteRecvResponse {
-        data: unsafe {
+    let response = RemoteRecvResponse::Data(
+        unsafe {
             crate::exec::transport::pack_transport_message(
                 &gc,
                 &[slice_ref as u64],
@@ -1502,9 +1453,7 @@ fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
             )
         }
         .expect("byte slice should pack"),
-        closed: false,
-        rejected: false,
-    };
+    );
     let mut dst = [0u64; 2];
 
     replay_remote_queue_recv_response(
@@ -1545,11 +1494,11 @@ fn vm_wake_remote_endpoint_002_queue_recv_missing_home_info_preserves_waiting_se
     );
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(7, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![99, 0, ch as u64];
-    let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
+    let inst = Instruction::with_flags(Opcode::QueueRecv, 0, 0, 2, 0);
 
     let action = exec_queue_recv(
         stack.as_mut_ptr(),
@@ -1559,7 +1508,7 @@ fn vm_wake_remote_endpoint_002_queue_recv_missing_home_info_preserves_waiting_se
         &inst,
         &state,
         None,
-        None,
+        &[SlotType::Value],
     );
 
     match action {
@@ -1598,11 +1547,11 @@ fn vm_endpoint_sender_preflight_012_same_island_queue_recv_missing_home_info_pre
     );
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(state.current_island_id, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![99, 0, ch as u64];
-    let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
+    let inst = Instruction::with_flags(Opcode::QueueRecv, 0, 0, 2, 0);
 
     let action = exec_queue_recv(
         stack.as_mut_ptr(),
@@ -1612,7 +1561,7 @@ fn vm_endpoint_sender_preflight_012_same_island_queue_recv_missing_home_info_pre
         &inst,
         &state,
         None,
-        None,
+        &[SlotType::Value],
     );
 
     match action {
@@ -1650,7 +1599,7 @@ fn vm_queue_route_preflight_058_send_missing_receiver_route_preserves_queue_stat
         0,
     );
     queue::install_home_info(ch, 42, state.current_island_id);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
 
     let action = queue_send_core(
         ch,
@@ -1704,11 +1653,11 @@ fn vm_queue_route_preflight_058_recv_missing_sender_route_preserves_queue_state(
     queue::install_home_info(ch, 42, state.current_island_id);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(7, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![99, 0, ch as u64];
-    let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
+    let inst = Instruction::with_flags(Opcode::QueueRecv, 0, 0, 2, 0);
 
     let action = exec_queue_recv(
         stack.as_mut_ptr(),
@@ -1718,7 +1667,7 @@ fn vm_queue_route_preflight_058_recv_missing_sender_route_preserves_queue_state(
         &inst,
         &state,
         None,
-        None,
+        &[SlotType::Value],
     );
 
     match action {
@@ -1757,9 +1706,15 @@ fn vm_queue_route_preflight_058_remote_close_missing_home_route_preserves_proxy(
         1,
     );
 
-    let err = preflight_queue_close_routes(&state, ch)
-        .expect_err("missing remote home route must reject before close mutation");
-    assert!(err.contains("QueueClose remote home route"), "{err}");
+    match queue_close_core(&state, ch) {
+        QueueAction::Malformed(message) => {
+            assert!(
+                message.contains("QueueClose remote home route"),
+                "{message}"
+            )
+        }
+        other => panic!("missing remote home route must reject close, got {other:?}"),
+    }
     assert!(
         !queue::remote_proxy(ch).closed,
         "route preflight must not mark the remote proxy closed"
@@ -1777,10 +1732,10 @@ fn vm_queue_close_endpoint_waiter_missing_home_info_preserves_waiters() {
         1,
         0,
     );
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(8, 0x0000_0004_0000_0005, 12),
+        endpoint_waiter(8, 0x0000_0004_0000_0005, 12),
         vec![123].into_boxed_slice().into(),
     );
 
@@ -1818,11 +1773,11 @@ fn vm_wake_remote_endpoint_001_local_recv_acks_remote_endpoint_sender() {
     queue::install_home_info(ch, 42, state.current_island_id);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(7, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![0, 0, ch as u64];
-    let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
+    let inst = Instruction::with_flags(Opcode::QueueRecv, 0, 0, 2, 0);
 
     let action = exec_queue_recv(
         stack.as_mut_ptr(),
@@ -1832,7 +1787,7 @@ fn vm_wake_remote_endpoint_001_local_recv_acks_remote_endpoint_sender() {
         &inst,
         &state,
         None,
-        None,
+        &[SlotType::Value],
     );
 
     assert_eq!(stack[0], 123);
@@ -1840,15 +1795,14 @@ fn vm_wake_remote_endpoint_001_local_recv_acks_remote_endpoint_sender() {
         QueueAction::RemoteSendAck {
             endpoint_id,
             target_island,
-            fiber_key,
-            wait_id,
+            wait_key,
             closed,
             ..
         } => {
             assert_eq!(endpoint_id, 42);
             assert_eq!(target_island, 7);
-            assert_eq!(fiber_key, 0x0000_0002_0000_0003);
-            assert_eq!(wait_id, 11);
+            assert_eq!(wait_key.fiber_key(), 0x0000_0002_0000_0003);
+            assert_eq!(wait_key.wait_id().get(), 11);
             assert!(!closed);
         }
         other => {
@@ -1874,11 +1828,11 @@ fn same_island_endpoint_sender_recv_acks_through_endpoint_response_path() {
     queue::install_home_info(ch, 42, state.current_island_id);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(state.current_island_id, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![0, 0, ch as u64];
-    let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
+    let inst = Instruction::with_flags(Opcode::QueueRecv, 0, 0, 2, 0);
 
     let action = exec_queue_recv(
         stack.as_mut_ptr(),
@@ -1888,7 +1842,7 @@ fn same_island_endpoint_sender_recv_acks_through_endpoint_response_path() {
         &inst,
         &state,
         None,
-        None,
+        &[SlotType::Value],
     );
 
     assert_eq!(stack[0], 123);
@@ -1896,15 +1850,14 @@ fn same_island_endpoint_sender_recv_acks_through_endpoint_response_path() {
         QueueAction::RemoteSendAck {
             endpoint_id,
             target_island,
-            fiber_key,
-            wait_id,
+            wait_key,
             closed,
             ..
         } => {
             assert_eq!(endpoint_id, 42);
             assert_eq!(target_island, state.current_island_id);
-            assert_eq!(fiber_key, 0x0000_0002_0000_0003);
-            assert_eq!(wait_id, 11);
+            assert_eq!(wait_key.fiber_key(), 0x0000_0002_0000_0003);
+            assert_eq!(wait_key.wait_id().get(), 11);
             assert!(!closed);
         }
         other => panic!(

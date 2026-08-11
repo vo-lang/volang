@@ -1,6 +1,5 @@
 import type { Backend } from '../backend/backend';
 import type { BootstrapContext, LaunchSpec, PreparedSession, SessionInfo } from '../types';
-import type { WorkspaceService } from './workspace_service';
 
 const BUILTIN_EXAMPLE_ID_PATTERN = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
 const BUILTIN_EXAMPLE_ENTRY_PATTERN = /^[a-z0-9]+(?:[-_][a-z0-9]+)*\.vo$/;
@@ -126,10 +125,7 @@ export class ProjectService {
   private bootstrap: BootstrapContext | null = null;
   private session: SessionInfo | null = null;
 
-  constructor(
-    private readonly backend: Backend,
-    private readonly workspace: WorkspaceService,
-  ) {}
+  constructor(private readonly backend: Backend) {}
 
   get bootstrapContext(): BootstrapContext {
     if (!this.bootstrap) {
@@ -216,25 +212,26 @@ export class ProjectService {
     const previous = this.session;
     const session = await this.backend.activateSession(candidate);
     if (!sameSessionInfo(session, candidate.session)) {
+      // The backend has already committed this session. Record that actual
+      // state before attempting rollback so a failed restore cannot leave the
+      // service claiming that the previous session is still active.
+      this.session = session;
       if (previous) {
-        const restored = await this.backend.restoreSession(previous);
-        this.bindSession(restored);
-      } else {
-        this.bindSession(session);
+        await this.restoreSession(previous);
       }
       throw new Error('Backend activated a different session than it prepared');
     }
-    this.bindSession(session);
+    this.session = session;
     return session;
   }
 
   async restoreSession(previous: SessionInfo): Promise<SessionInfo> {
     const restored = await this.backend.restoreSession(previous);
     if (!sameSessionInfo(restored, previous)) {
-      this.bindSession(restored);
+      this.session = restored;
       throw new Error('Backend restored a different session than requested');
     }
-    this.bindSession(restored);
+    this.session = restored;
     return restored;
   }
 
@@ -250,8 +247,4 @@ export class ProjectService {
     return this.backend.readPreparedSessionFile(candidate, path);
   }
 
-  private bindSession(session: SessionInfo): void {
-    this.session = session;
-    this.workspace.bindSession(session);
-  }
 }

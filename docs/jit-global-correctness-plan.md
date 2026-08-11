@@ -13,14 +13,14 @@
 - `lang/crates/vo-jit/src/semantics.rs`：每个 opcode 的全局语义矩阵。
 - `lang/crates/vo-jit/src/capability.rs`：full-function JIT、OSR、runtime path policy 的显式能力声明。
 - `lang/crates/vo-jit/src/contract.rs`：may_gc、may_alloc、may_panic、may_unwind、may_schedule、observe_frame、needs_frame、slot/type metadata、write barrier、interface/closure effect。
-- `lang/crates/vo-jit/src/contract_graph.rs`：opcode、packed operand、metadata、runtime helper、callback、callback callsite、GC entry、JIT entry policy 的可枚举合同图。
+- `lang/crates/vo-jit/src/metadata_contract.rs`：strict JIT instruction metadata 的当前 schema 与 requirement。
 - `lang/crates/vo-jit/src/effects.rs`：输入/输出 slot、memory sync、call effect。
 - `lang/crates/vo-jit/src/verifier.rs`：metadata、constant/function/extern/global index、branch target、slot range、precise layout、interface pair、write barrier layout 的 JIT 准入门。
 - `lang/crates/vo-jit/src/helpers.rs`：从 runtime helper ABI manifest 生成 Cranelift import signature，并注册 runtime symbol。
 - `lang/crates/vo-jit/src/call_helpers.rs`：JitContext callback callsite manifest、callback signature 生成、pre-call spill/frame-sync policy、JIT-to-JIT/direct/prepared-call lowering。
 - `lang/crates/vo-runtime/src/jit_api.rs`：runtime helper symbol manifest、`JitContext` ABI field manifest、callback/context dependency manifest。
 - `lang/crates/vo-vm/src/vm/jit/**` 与 `lang/crates/vo-vm/src/vm/jit_mgr.rs`：VM/JIT entry/exit、OSR、materialized frame、callback implementation、strict fail-fast。
-- `lang/crates/vo-common-core/src/instruction.rs`：packed operand 的 checked ABI encoder，尤其是 queue/select recv、map iter、IfaceAssert、u8 slot-count mirror。
+- `lang/crates/vo-common-core/src/instruction.rs`：opcode 身份与语义模式位的 checked encoder；可变布局由 `InstructionMetadata` 独占。
 - `lang/crates/vo-codegen/src/func.rs` 与相关 lowering：bytecode flags 发射点必须调用 checked encoder 或 typed emit helper，不能裸 cast slot count。
 
 任何新增 opcode、runtime helper、callback、JIT entry route 或 bytecode metadata 形状，都必须同步更新这些矩阵/manifest。`cargo test -p vo-jit` 和 `cargo test -p vo-runtime` 会检查核心一致性。
@@ -92,7 +92,7 @@
 GC 是非移动、增量、精确 slot 扫描。JIT 相关规则：
 
 - may_gc/may_alloc/may_schedule/may_observe_frame 的 opcode 不允许走 frame-elision direct-call 快路。
-- helper call 默认 spill caller frame；只有明确标注 `FrameIndependent` 的 helper 可以跳过 spill。
+- runtime helper 的 frame-sync 直接来自共享 ABI manifest；`may_gc`、`may_schedule` 或 `observes_frame` 任一成立时必须 spill caller frame，其余 helper 自动跳过。
 - JitContext callback call 默认不能裸 `call_indirect`；所有 checked/returning/raw callback 必须通过 callsite descriptor wrapper，由 ABI/effect policy 决定 signature 和 frame-sync。
 - interface pair 不允许被 multi-slot copy、metadata layout、return buffer、map/array/slice value range 切开。
 - array/slice/map multi-slot 写入必须用 typed metadata write barrier，不能用 raw per-slot conservative fallback。
@@ -140,9 +140,9 @@ OSR 不再只依赖普通 JIT 编译成功：
 - Verifier 宽放行：JIT slot/layout verifier 曾以 `_ => Ok(())` 接受新增 opcode；这类 VM 通用检查现在迁入 `vo-common-core/src/verifier.rs`，普通 VM load 与 strict JIT load 都先通过同一个 `ModuleVerifier`。
 - Map helper exact layout：`vo_map_get` / `vo_map_set` / `vo_map_iter_next` 曾对 runtime map metadata 与 JIT metadata mismatch 走 `.min()`/partial copy，`vo-runtime` 的 `jit_map_helpers_do_not_min_copy_layout_mismatches` 先失败后通过；修复为 exact key/value slot-count authority，mismatch 设置 invalid-metadata infra-error 并返回 `JIT_HELPER_U64_ERROR`。
 - Map helper sentinel lowering：`vo-jit` 的语义矩阵新增 `HelperReturnPolicy::U64JitErrorSentinel`，`u64_jit_error_sentinel_helpers_are_checked_by_lowering` 强制 `MapGet`、`MapSet`、`MapDelete`、`MapIterNext` lowering 在继续使用 helper 结果前检查 sentinel。
-- Packed operand 截断：`vo-codegen` 的 `packed_operand_slot_counts_use_checked_encoders` 先在 `MapIterNext` 的 `kn|vn<<4` 裸 cast 上失败后通过；修复为 `vo-common-core::instruction` 的 checked encoder，并把 queue recv/send/new、IfaceAssert、GlobalGetN/GlobalSetN、SlotGetN/SlotSetN、CopyN mirror 等边界收敛到 checked emit helper。
+- Packed operand 截断：早期修复曾集中 compact slot-count encoder；当前 bytecode schema 进一步删除 map、queue、IfaceAssert、slot、copy 等布局副本。只有仍具语义职责的模式位和固定宽度操作数保留 checked encoder。
 - `CallExtern` / `GoIsland` / `GlobalGetN` packed operand 截断：同一个 `packed_operand_slot_counts_use_checked_encoders` meta-test 扩展到 extern call、defer extern wrapper、dynamic call/method、dynamic field/index、panic/conversion、cross-island go、package global load 路径后先失败后通过；修复为 `FuncBuilder::emit_call_extern`、`emit_go_island`、`emit_global_get` 的统一 checked emitter，extern id 与 u8 slot-count 越界在 codegen 边界 fail fast。
-- Loop-analysis test fixture 截断盲点：`vo-jit` 的 `loop_analysis_test_fixtures_use_checked_packed_operands` 先在测试 helper 的 `n.min(u8::MAX)` 饱和 flags 上失败后通过；修复为 `copy_n_mirror_flags`，需要构造 malformed bytecode 的测试现在显式手写 malformed flags，避免测试夹断掩盖 analyzer 合同。
+- Loop-analysis test fixture 截断盲点：测试 builder 现在直接按当前指令合同构造操作数；需要 malformed bytecode 的测试显式手写非法字段，避免 fixture 饱和转换掩盖 analyzer 合同。
 - `JitResult` callback 裸调：`SelectBegin` / `SelectSend` / `SelectRecv`、queue/go/defer/recover/iface/island runtime ops，以及 `CallExtern`、closure/interface prepare callback、push-resume callback 曾分散手写或遗漏 `JitResult` 检查；`runtime_ops_jit_result_helpers_use_typed_checked_lowering` 和 `call_helpers_jit_result_callbacks_use_typed_checked_lowering` 先失败后通过。修复后 direct helper、indirect callback、trap-like return callback 分别只能通过 typed helper 发射，裸 `check_call_result` 只允许存在于 helper wrapper 内部。
 - Queue/select/interface verifier 合同：`QueueSend`、`QueueRecv`、`SelectSend`、`IfaceAssert`、`IfaceEq`、`Recover` 等曾可能绕过精确 slot/interface-pair gate；`rejects_queue_select_iface_contract_mismatches` 先失败后通过，并把这些 opcode 加入显式 verifier 分支。
 - Runtime copy overlap：`vo_copy` 曾使用 `copy_nonoverlapping`，对同一 backing store 的重叠 slice copy 可能产生 UB/错误结果；`vo-runtime` 的 `jit_copy_helper_uses_overlap_safe_memmove_semantics` 先失败后通过，修复为 overlap-safe `core::ptr::copy`，保持 JIT helper 与语言 copy 语义一致。
@@ -152,7 +152,7 @@ OSR 不再只依赖普通 JIT 编译成功：
 - FFI/dynamic runtime metadata guessing：`ExternCallContext::box_to_interface`、`value_meta_for_value_rttid`、dynamic call result boxing 和 dynamic interface field set 曾在 RTTID 到 `StructMeta`/`InterfaceMeta` 解析失败时 `unwrap_or(0)`，dynamic struct field barrier layout 还会 `unwrap_or_default()` 跳过写屏障；`get_type_slot_count` 对 missing named/struct metadata 还会返回保守 slot 数，`box_to_interface` 会对缺失 raw slot 补零，并把 packed array 当作 `u64` buffer 直接写；`ret_ref` 与 FFI container GC element width 也存在 debug-only 检查，basic RTTID lookup 缺失会退回 0。`vo-runtime` 的 `ffi_runtime_metadata_does_not_guess_meta_zero`、`box_to_interface_raw_slots_are_exact_layout_authority` 和 `vo_array_bounds_are_release_checked` 先失败后通过。修复后这些路径通过 `require_*_meta_id_from_rttid`/exact slot count/release assert fail fast，field/return/array boxing 都要求精确 layout。
 - FFI container debug-only bounds：`VoArray<T, N>::get/set` 曾只用 `debug_assert!(idx < N)`，release 下会让越界进入底层 unsafe array access；`vo-runtime` 的 `vo_array_bounds_are_release_checked` 先失败后通过。修复后 FFI array accessor 在 release 下也用 `assert!` fail fast。
 - Cross-island queue transfer metadata skip：`prepare_value_queue_handles_for_transfer` 曾在缺失 `StructMeta`、缺失嵌套 struct RTTID、field layout 超出 value slots、invalid pointer、zero-byte sequence 等路径上 `return`/`continue`，可能让嵌套 queue handle 没有安装 `HomeInfo` 就进入 pack/send；`vo-vm` 的 `missing_nested_struct_runtime_type_does_not_guess_meta_zero` 改为 fail-before-pass 的 error-path 测试，`queue_handle_transfer_has_no_metadata_skip_paths` 约束源码不再静默 skip。修复后 queue transfer preparation 返回 `Result<(), String>`，JIT `go island` callback 映射为 infra `JitError`，VM/inter-island endpoint 路径 fail fast。
-- JIT-reachable queue send panic barrier：`queue_send_core` 被 `jit_queue_send` 复用，但本地 send 写屏障曾调用 panic 版 `typed_write_barrier_by_meta`，metadata drift 会跨 extern C unwind/abort；`vo-vm` 的 `queue_send_core_reports_typed_barrier_metadata_errors_without_unwinding` 和 `queue_send_core_uses_result_typed_barrier_for_jit_callback_path` 先失败后通过。修复后该路径使用 `try_typed_write_barrier_by_meta`，错误返回 `QueueExecResult::Malformed` 并由 JIT callback helper 转成 `JitResult::JitError`。
+- JIT-reachable queue send panic barrier：`queue_send_core` 被 `jit_queue_send` 复用，但本地 send 写屏障曾调用 panic 版 `typed_write_barrier_by_meta`，metadata drift 会跨 extern C unwind/abort；`vo-vm` 的 `queue_send_core_reports_typed_barrier_metadata_errors_without_unwinding` 和 `queue_send_core_uses_result_typed_barrier_for_jit_callback_path` 先失败后通过。修复后该路径使用 `try_typed_write_barrier_by_meta`，错误返回 `QueueAction::Malformed` 并由 JIT callback helper 转成 `JitResult::JitError`。
 - Pack/unpack sequence exact layout：`pack.rs` 对 struct slice/array element layout 在 missing `StructMeta` 时回退到 `elem_bytes.div_ceil(SLOT_BYTES)`，空 struct sequence 会完全跳过 metadata 校验，unpack sequence encoding 也只用 `debug_assert_eq!`；`vo-runtime` 的 `empty_struct_sequences_validate_exact_metadata` 和 `sequence_layout_contracts_do_not_fall_back_or_debug_assert_only` 先失败后通过。修复后 struct sequence slots 只能来自 exact `StructMeta`，空序列也校验 metadata，invalid sequence encoding 在 release 下硬失败。
 - Cross-island non-sendable metadata preflight：remote queue send 和 `GoIsland` transfer 曾只为可能含 queue handle 的 metadata 做 preparation，`Interface`/`Closure`/`Island`/`Channel` 等当前 pack ABI 不能安全表达的 transfer metadata 可能直接进入 `pack_slots` panic，或把 nil `chan` metadata 编成 payload；`vo-vm` 的 `remote_queue_send_rejects_non_sendable_metadata_before_pack`、`go_island_transfer_rejects_non_sendable_metadata_before_pack` 和 `vo-runtime` 的 `test_pack_queue_handle_rejects_nil_chan_metadata` 先失败后通过。修复后 transfer preparation 统一用 sendability preflight 返回 `Malformed`/infra `JitError`，runtime pack 自身也拒绝 `Channel` metadata，避免 JIT callback 跨 ABI unwind 或非法 payload drift。
 - Anonymous interface `RuntimeType` metadata drift：`type_interner.rs` 曾在找不到 `interface_meta_ids[type_key]` 时 `unwrap_or(0)`，会把匿名非空 interface 的 runtime type 静默指向 meta 0；`vo-codegen` 的 `anonymous_interface_runtime_type_uses_exact_interface_meta_id` 和 `runtime_interface_types_do_not_fallback_to_meta_zero` 先失败后通过。修复后 `InternContext` 带有可写 `interface_metas`/`interface_meta_ids`，type interner 会为匿名非空 interface 创建 exact `InterfaceMeta`，空 interface 仍显式使用 meta 0 作为无方法 fast path。
@@ -164,7 +164,7 @@ OSR 不再只依赖普通 JIT 编译成功：
 - JitContext indirect callback pre-call spill：`emit_checked_jit_result_indirect_callback_call` 曾只在 callback 返回 non-OK 后通过 `check_call_result` spill，导致 `prepare_*` / `push_resume_point_fn` 这类 may_gc/observes_frame callback 能在 caller SSA-only state 未同步时进入 VM/GC。修复后 checked 和 returning JitResult callback wrapper 在 `call_indirect` 前无条件 `spill_all_vars()`，call 后清理寄存器常量；raw frame callback 也必须通过 `emit_raw_jit_context_callback_call`，由 manifest 的 may_gc/observes_frame 决定 pre-call spill。`call_helpers_jit_result_callbacks_use_typed_checked_lowering` 与 `callback_callsite_edges_are_manifest_backed_frame_sync_boundaries` 把该策略纳入常规 contract gate。
 - Runtime helper ABI signature drift：helper import signature 曾在 `vo-jit/src/helpers.rs` 手写重复维护，runtime helper 参数/返回类型漂移可能只在运行期显现。修复后 helper signature 从 `runtime_helper_abi_fields()` 生成，`declared_helper_import_signatures_are_manifest_generated` 会在 Cranelift import 声明边界检查所有 helper ABI。
 - Callback ABI signature drift：callback return policy 已有 manifest，但参数/返回类型仍曾分散在 `call_helpers.rs` 的手写 signature helper 中。修复后 `JitCallbackAbiField` 包含 `params`/`ret`，`import_callback_sig` 只从 manifest 生成 signature；`jit_callback_abi_manifest_is_sorted_unique_and_machine_readable` 校验 callback 的首参、返回类型与 return policy 一致。
-- Callback lowering graph 只描述不枚举：早期 gate 用源码字符串确认某些 function body 调用了 typed wrapper，容易形成假闭环。修复后 `jit_context_callback_callsites()` 枚举真实 JitContext callback lowering 边界，`contract_graph.rs` 生成 `JitContextCallbackCallsite` edges 并校验 ABI policy、spill policy、concrete lowering consumer；源码字符串检查不再是 callback correctness 的 primary gate。
+- Callback lowering 边界曾只靠源码字符串确认某些 function body 调用了 typed wrapper，容易形成假闭环。修复后 `jit_context_callback_callsites()` 枚举真实 JitContext callback lowering 边界，直接测试会校验 ABI policy、spill policy 和 concrete lowering consumer；源码字符串检查不再承担 callback correctness 的 primary gate。
 
 这些修复没有关闭 JIT、OSR 或 container lowering 能力；对当前 bytecode 格式无法表达的 slot count，策略是 codegen/verifier/runtime fail fast，而不是截断或 fallback。
 
@@ -193,13 +193,26 @@ OSR 不再只依赖普通 JIT 编译成功：
 - root workspace 的全部 target 测试：通过。
 - `git diff --check`：无 whitespace/error 输出。
 
+2026-08-08 当前工作树重新验证并收紧了 OSR gate：
+
+- `osr-contract` 矩阵固定包含 `vm`、`jit`、`osr`，同一 case 内完成 VM 到普通 JIT/OSR 的输出、错误和退出状态差分。
+- `osr-contract` 的 OSR candidate 无条件要求至少一次真实 loop JIT entry；显式 `jit_loop_entries_min` 可提高门槛。普通 `osr` 兼容性 lane 继续允许无循环程序。
+- manifest lint 要求正数 `jit_loop_entries_min` 同时具备可用 VM baseline、JIT-backed OSR target 和 `jit`/`osr`/`contract` tags。
+- `cargo test -p vo-jit --locked`：256/256，通过。
+- `cargo test -p vo-vm --features jit --locked`：726/726，通过。
+- `cargo test -p vo-engine --locked`：234/234，通过。
+- `cargo run -q -p vo-dev --locked -- test run --suite lang --matrix osr-contract`：15/15，通过；5 个 contract case 均执行 VM/JIT/OSR。
+- `cargo run -q -p vo-dev --locked -- test run --suite lang --targets native --jobs 4`：3508/3508，通过。
+- `./d.py test gc -j4`：42/42，通过，`gc-vm` 与 `gc-jit` 保持差分。
+- `vo --no-default-features` 的 `vo-engine` 依赖不再泄漏默认 JIT feature；无 JIT CLI 测试 34/34，通过，依赖树不含 `vo-jit`。
+
 ## Still-open correctness risk
 
 2026-05-31 全局 review 结论：
 
 - P0：无已知 open item。
 - P1：无已知 open item。JitContext callback pre-call spill、runtime helper ABI drift、callback ABI drift 已由 executable contract/test 覆盖。
-- P2：仍有少量生产路径旁的源码 denylist/source-lint 测试，用于防止历史危险字符串回归；它们不是 correctness 的唯一来源，primary gate 已由 semantic matrix、contract graph、ABI manifest、verifier、typed wrapper 和语言差分测试承担。后续可继续把这些 denylist 收敛成 lowering descriptor 或 IR-level inspection，降低维护成本。
+- P2：仍有少量生产路径旁的源码 denylist/source-lint 测试，用于防止历史危险字符串回归；primary gate 已由 semantic matrix、metadata contract、ABI manifest、verifier、typed wrapper 和语言差分测试共同承担。后续可继续把这些 denylist 收敛成 lowering descriptor 或 IR-level inspection，降低维护成本。
 
 最终 fail-open 扫描仍会命中少量字符串，但已逐项复核，不构成 P0/P1 合同违例：
 

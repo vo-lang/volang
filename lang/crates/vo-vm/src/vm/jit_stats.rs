@@ -1,0 +1,145 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum JitSideExitReason {
+    // Explicit JIT/interpreter handoffs belong here: native side exits plus
+    // cold/not-hot interpreter handoffs. Compile, metadata, and internal ABI
+    // failures return JitError and are not side-exit reasons.
+    InterpretedCold = 0,
+    RegularCall = 1,
+    PreparedDynamicCall = 2,
+    Yield = 3,
+    QueueBlock = 4,
+    WaitIo = 5,
+    WaitQueue = 6,
+    Replay = 7,
+    LoopNotHot = 8,
+    HostEvent = 9,
+    LoopMetadataUnavailable = 10,
+    InterpretedUnsupported = 11,
+    InterpretedFeedbackDisabled = 12,
+    InterpretedResourceRejected = 13,
+    InterpretedCompilerFault = 14,
+}
+
+impl JitSideExitReason {
+    pub const ALL: [Self; 15] = [
+        Self::InterpretedCold,
+        Self::RegularCall,
+        Self::PreparedDynamicCall,
+        Self::Yield,
+        Self::QueueBlock,
+        Self::WaitIo,
+        Self::WaitQueue,
+        Self::Replay,
+        Self::LoopNotHot,
+        Self::HostEvent,
+        Self::LoopMetadataUnavailable,
+        Self::InterpretedUnsupported,
+        Self::InterpretedFeedbackDisabled,
+        Self::InterpretedResourceRejected,
+        Self::InterpretedCompilerFault,
+    ];
+    pub const COUNT: usize = Self::ALL.len();
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InterpretedCold => "interpreted_cold",
+            Self::RegularCall => "regular_call",
+            Self::PreparedDynamicCall => "prepared_dynamic_call",
+            Self::Yield => "yield",
+            Self::QueueBlock => "queue_block",
+            Self::WaitIo => "wait_io",
+            Self::WaitQueue => "wait_queue",
+            Self::Replay => "replay",
+            Self::LoopNotHot => "loop_not_hot",
+            Self::HostEvent => "host_event",
+            Self::LoopMetadataUnavailable => "loop_metadata_unavailable",
+            Self::InterpretedUnsupported => "interpreted_unsupported",
+            Self::InterpretedFeedbackDisabled => "interpreted_feedback_disabled",
+            Self::InterpretedResourceRejected => "interpreted_resource_rejected",
+            Self::InterpretedCompilerFault => "interpreted_compiler_fault",
+        }
+    }
+
+    #[inline]
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitSideExitReasonStats {
+    counts: [u64; JitSideExitReason::COUNT],
+}
+
+impl JitSideExitReasonStats {
+    #[inline]
+    pub fn get(self, reason: JitSideExitReason) -> u64 {
+        self.counts[reason.index()]
+    }
+
+    #[inline]
+    pub fn total(self) -> u64 {
+        self.counts.iter().sum()
+    }
+
+    #[inline]
+    #[cfg(any(feature = "jit", test))]
+    pub(crate) fn increment(&mut self, reason: JitSideExitReason) {
+        self.counts[reason.index()] = self.counts[reason.index()].saturating_add(1);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitExecutionStats {
+    /// VM-to-JIT full-function dispatches that reached the native entry.
+    pub function_entries: u64,
+    /// Loop OSR dispatches that reached the native entry.
+    pub loop_entries: u64,
+    pub side_exit_reasons: JitSideExitReasonStats,
+    pub low_progress_function_disables: u64,
+    pub low_progress_loop_disables: u64,
+}
+
+impl JitExecutionStats {
+    pub fn executed_jit_code(self) -> bool {
+        self.function_entries > 0 || self.loop_entries > 0
+    }
+
+    pub fn side_exit_count(self, reason: JitSideExitReason) -> u64 {
+        self.side_exit_reasons.get(reason)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_exit_reason_catalog_is_complete_and_machine_readable() {
+        let mut seen = [false; JitSideExitReason::COUNT];
+        for reason in JitSideExitReason::ALL {
+            let index = reason.index();
+            assert!(!seen[index], "duplicate side-exit index {index}");
+            seen[index] = true;
+            assert!(!reason.as_str().is_empty());
+            assert!(reason
+                .as_str()
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'));
+        }
+        assert!(seen.into_iter().all(|value| value));
+    }
+
+    #[test]
+    fn side_exit_reason_stats_count_by_canonical_reason() {
+        let mut stats = JitSideExitReasonStats::default();
+        stats.increment(JitSideExitReason::InterpretedCold);
+        stats.increment(JitSideExitReason::InterpretedCold);
+        stats.increment(JitSideExitReason::WaitIo);
+
+        assert_eq!(stats.get(JitSideExitReason::InterpretedCold), 2);
+        assert_eq!(stats.get(JitSideExitReason::WaitIo), 1);
+        assert_eq!(stats.total(), 3);
+    }
+}

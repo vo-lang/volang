@@ -1,7 +1,7 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlagsData as MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::{JitContext, JitContextField};
 
 /// The two successors created by a cooperative execution-budget check.
 pub(crate) struct ExecutionBudgetPollBlocks {
@@ -25,12 +25,12 @@ pub(crate) fn branch_on_execution_budget(
         types::I32,
         MemFlags::trusted(),
         ctx,
-        JitContext::OFFSET_EXECUTION_BUDGET,
+        JitContextField::ExecutionBudget.offset(),
     );
     let exhausted = builder
         .ins()
-        .icmp_imm(IntCC::UnsignedLessThan, remaining, i64::from(cost));
-    let exhausted_block = builder.create_block();
+        .icmp_imm_u(IntCC::UnsignedLessThan, remaining, i64::from(cost));
+    let exhausted_block = super::cold_block(builder);
     let ready_block = builder.create_block();
     builder
         .ins()
@@ -52,12 +52,12 @@ pub(crate) fn continue_after_execution_budget_poll(
 ) {
     builder.switch_to_block(poll.ready);
     builder.seal_block(poll.ready);
-    let updated = builder.ins().iadd_imm(poll.remaining, -poll.cost);
+    let updated = builder.ins().iadd_imm_s(poll.remaining, -poll.cost);
     builder.ins().store(
         MemFlags::trusted(),
         updated,
         ctx,
-        JitContext::OFFSET_EXECUTION_BUDGET,
+        JitContextField::ExecutionBudget.offset(),
     );
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn emit_cooperative_yield_return(
         MemFlags::trusted(),
         resume_pc,
         ctx,
-        JitContext::OFFSET_CALL_RESUME_PC,
+        JitContextField::CallResumePc.offset(),
     );
     let call_kind = builder
         .ins()
@@ -85,7 +85,7 @@ pub(crate) fn emit_cooperative_yield_return(
         MemFlags::trusted(),
         call_kind,
         ctx,
-        JitContext::OFFSET_CALL_KIND,
+        JitContextField::CallKind.offset(),
     );
     let result = builder
         .ins()

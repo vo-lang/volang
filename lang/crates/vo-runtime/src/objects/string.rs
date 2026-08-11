@@ -190,6 +190,9 @@ pub unsafe fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
     let b_len = slice::len(b);
     let total = a_len + b_len;
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, total);
+    if arr.is_null() {
+        return arr;
+    }
     let arr_ptr = array::data_ptr_bytes(arr);
     unsafe {
         core::ptr::copy_nonoverlapping(slice::data_ptr(a), arr_ptr, a_len);
@@ -314,6 +317,9 @@ pub unsafe fn to_byte_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
     let bytes = unsafe { bytes_unchecked(s) };
     let len = bytes.len();
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, len);
+    if arr.is_null() {
+        return arr;
+    }
     let arr_data_ptr = array::data_ptr_bytes(arr);
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, len);
@@ -369,6 +375,9 @@ pub unsafe fn to_rune_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
     }
     let len = runes.len();
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Int32), 4, len);
+    if arr.is_null() {
+        return arr;
+    }
     let arr_data_ptr = array::data_ptr_bytes(arr) as *mut i32;
     for (i, rune) in runes.into_iter().enumerate() {
         unsafe {
@@ -381,6 +390,85 @@ pub unsafe fn to_rune_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gc::{MemoryError, VmMemoryConfig};
+
+    fn gc_with_object_limit(max_objects: usize) -> Gc {
+        Gc::with_memory_config(VmMemoryConfig {
+            max_objects: Some(max_objects),
+            ..VmMemoryConfig::default()
+        })
+        .expect("bounded GC configuration")
+    }
+
+    #[test]
+    fn string_creation_propagates_descriptor_allocation_failure() {
+        let mut gc = gc_with_object_limit(1);
+
+        let value = create(&mut gc, b"x");
+
+        assert!(value.is_null());
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
+
+    #[test]
+    fn string_concat_propagates_backing_and_descriptor_allocation_failures() {
+        let mut backing_gc = gc_with_object_limit(4);
+        let a = create(&mut backing_gc, b"a");
+        let b = create(&mut backing_gc, b"b");
+        let result = unsafe { concat(&mut backing_gc, a, b) };
+        assert!(result.is_null());
+        assert_eq!(
+            backing_gc.last_memory_error(),
+            Some(MemoryError::MetadataExhausted)
+        );
+
+        let mut descriptor_gc = gc_with_object_limit(5);
+        let a = create(&mut descriptor_gc, b"a");
+        let b = create(&mut descriptor_gc, b"b");
+        let result = unsafe { concat(&mut descriptor_gc, a, b) };
+        assert!(result.is_null());
+        assert_eq!(
+            descriptor_gc.last_memory_error(),
+            Some(MemoryError::MetadataExhausted)
+        );
+    }
+
+    #[test]
+    fn string_slice_conversions_propagate_both_allocation_failures() {
+        for convert in [
+            to_byte_slice_obj as unsafe fn(&mut Gc, GcRef) -> GcRef,
+            to_rune_slice_obj,
+        ] {
+            let mut backing_gc = gc_with_object_limit(2);
+            let source = create(&mut backing_gc, b"x");
+            let result = unsafe { convert(&mut backing_gc, source) };
+            assert!(result.is_null());
+            assert_eq!(
+                backing_gc.last_memory_error(),
+                Some(MemoryError::MetadataExhausted)
+            );
+
+            let mut descriptor_gc = gc_with_object_limit(3);
+            let source = create(&mut descriptor_gc, b"x");
+            let result = unsafe { convert(&mut descriptor_gc, source) };
+            assert!(result.is_null());
+            assert_eq!(
+                descriptor_gc.last_memory_error(),
+                Some(MemoryError::MetadataExhausted)
+            );
+        }
+    }
+
+    #[test]
+    fn string_slice_view_preserves_descriptor_oom_for_memory_gate() {
+        let mut gc = gc_with_object_limit(2);
+        let source = create(&mut gc, b"xy");
+
+        let result = unsafe { slice_of(&mut gc, source, 0, 1) };
+
+        assert!(matches!(result, Some(value) if value.is_null()));
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
 
     #[test]
     fn string_to_slices_preserves_non_nil_empty_and_invalid_utf8_per_byte() {

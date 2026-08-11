@@ -2,7 +2,7 @@
 //! Map object operations.
 //!
 //! Layout: GcHeader + MapData
-//! Uses VoMap (custom hash map with iteration-safe semantics).
+//! Bucket storage lives in an Island-GC-managed open-addressing table.
 //!
 //! # Safety contract
 //! Unsafe accessors require a canonical live map allocation and key/value
@@ -21,7 +21,9 @@ use std::boxed::Box;
 use crate::gc::{Gc, GcRef, MemoryError};
 use crate::objects::string;
 use crate::slot::{Slot, SLOT_BYTES};
+#[cfg(test)]
 use vo_common_core::bytecode::Module;
+use vo_common_core::bytecode::{ModuleRuntimeMetadata, RuntimeTypeMetadata};
 pub use vo_common_core::bytecode::{MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
@@ -43,12 +45,41 @@ const MIN_CAPACITY: usize = 8;
 const LOAD_FACTOR_NUM: usize = 3;
 const LOAD_FACTOR_DEN: usize = 4;
 
+#[inline]
+fn exceeds_load_factor(entries: usize, capacity: usize) -> bool {
+    entries.saturating_mul(LOAD_FACTOR_DEN) > capacity.saturating_mul(LOAD_FACTOR_NUM)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapKeyError {
     UnhashableInterfaceKey,
     SlotCountMismatch,
     MissingModule,
     AllocationFailed(MemoryError),
+}
+
+#[derive(Clone, Copy)]
+struct MapRuntimeMetadata<'a> {
+    type_metadata: RuntimeTypeMetadata<'a>,
+    full_metadata: Option<ModuleRuntimeMetadata<'a>>,
+}
+
+impl<'a> MapRuntimeMetadata<'a> {
+    #[inline]
+    fn from_module(metadata: ModuleRuntimeMetadata<'a>) -> Self {
+        Self {
+            type_metadata: metadata.type_metadata(),
+            full_metadata: Some(metadata),
+        }
+    }
+
+    #[inline]
+    fn from_types(type_metadata: RuntimeTypeMetadata<'a>) -> Self {
+        Self {
+            type_metadata,
+            full_metadata: None,
+        }
+    }
 }
 
 pub type OwnedMapValue = Box<[u64]>;
@@ -284,7 +315,7 @@ pub unsafe fn generation(m: GcRef) -> u32 {
 unsafe fn semantic_key_hash_checked(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<MapRuntimeMetadata<'_>>,
 ) -> Result<u64, MapKeyError> {
     let kind = key_kind(m);
     if matches!(kind, ValueKind::Float32 | ValueKind::Float64) {
@@ -293,10 +324,16 @@ unsafe fn semantic_key_hash_checked(
     }
     let module = module.ok_or(MapKeyError::MissingModule)?;
     let rttid = key_rttid(m);
-    deep_hash_value_inline_checked(key, ValueRttid::new(rttid, kind), module).map_err(Into::into)
+    deep_hash_value_inline_checked(key, ValueRttid::new(rttid, kind), module.type_metadata)
+        .map_err(Into::into)
 }
 
-unsafe fn semantic_key_eq(m: GcRef, a: &[u64], b: &[u64], module: Option<&Module>) -> bool {
+unsafe fn semantic_key_eq(
+    m: GcRef,
+    a: &[u64],
+    b: &[u64],
+    module: Option<MapRuntimeMetadata<'_>>,
+) -> bool {
     let kind = key_kind(m);
     if matches!(kind, ValueKind::Float32 | ValueKind::Float64) {
         return a
@@ -307,7 +344,12 @@ unsafe fn semantic_key_eq(m: GcRef, a: &[u64], b: &[u64], module: Option<&Module
     let Some(module) = module else {
         return false;
     };
-    deep_eq_value_inline(a, b, ValueRttid::new(key_rttid(m), kind), module)
+    deep_eq_value_inline(
+        a,
+        b,
+        ValueRttid::new(key_rttid(m), kind),
+        module.type_metadata,
+    )
 }
 
 pub unsafe fn len(m: GcRef) -> usize {
@@ -333,7 +375,7 @@ fn hash_slots(slots: &[u64]) -> u64 {
 unsafe fn key_hash_checked(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<MapRuntimeMetadata<'_>>,
 ) -> Result<u64, MapKeyError> {
     match unsafe { key_kind(m) } {
         ValueKind::String => {
@@ -347,13 +389,18 @@ unsafe fn key_hash_checked(
             let module = module.ok_or(MapKeyError::MissingModule)?;
             let [slot0, slot1] =
                 <[u64; 2]>::try_from(key).map_err(|_| MapKeyError::SlotCountMismatch)?;
-            iface_hash_checked(slot0, slot1, module).map_err(Into::into)
+            iface_hash_checked(slot0, slot1, module.type_metadata).map_err(Into::into)
         }
         _ => Ok(hash_slots(key)),
     }
 }
 
-unsafe fn key_eq(m: GcRef, left: &[u64], right: &[u64], module: Option<&Module>) -> bool {
+unsafe fn key_eq(
+    m: GcRef,
+    left: &[u64],
+    right: &[u64],
+    module: Option<MapRuntimeMetadata<'_>>,
+) -> bool {
     match unsafe { key_kind(m) } {
         ValueKind::String => {
             let Some((&left, &right)) = left.first().zip(right.first()) else {
@@ -372,7 +419,7 @@ unsafe fn key_eq(m: GcRef, left: &[u64], right: &[u64], module: Option<&Module>)
             };
             left.len() == 2
                 && right.len() == 2
-                && iface_eq(left[0], left[1], right[0], right[1], module) == 1
+                && iface_eq(left[0], left[1], right[0], right[1], module.type_metadata) == 1
         }
         _ => left == right,
     }
@@ -383,7 +430,7 @@ unsafe fn find_bucket(
     backing: GcRef,
     key: &[u64],
     hash: u64,
-    module: Option<&Module>,
+    module: Option<MapRuntimeMetadata<'_>>,
 ) -> (Option<usize>, usize) {
     let capacity = unsafe { backing_capacity(backing) };
     let mut index = hash as usize & (capacity - 1);
@@ -457,11 +504,33 @@ unsafe fn write_bucket(
     }
 }
 
+fn write_resize_barrier(
+    gc: &mut Gc,
+    parent: GcRef,
+    values: &[u64],
+    meta: ValueMeta,
+    metadata: Option<MapRuntimeMetadata<'_>>,
+) {
+    match metadata {
+        Some(metadata) => crate::gc_types::typed_write_barrier_by_type_metadata(
+            gc,
+            parent,
+            values,
+            meta,
+            metadata.type_metadata,
+            metadata
+                .full_metadata
+                .and_then(ModuleRuntimeMetadata::runtime_type_facts),
+        ),
+        None => crate::gc_types::typed_write_barrier_by_meta(gc, parent, values, meta, None),
+    }
+}
+
 unsafe fn resize(
     gc: &mut Gc,
     m: GcRef,
     new_capacity: usize,
-    module: Option<&Module>,
+    module: Option<MapRuntimeMetadata<'_>>,
 ) -> Result<GcRef, MapKeyError> {
     let old = unsafe { backing_ref(m) };
     let generation = unsafe { generation(m) }
@@ -475,20 +544,8 @@ unsafe fn resize(
             }
             let key = unsafe { bucket_key(m, old, old_index) };
             let val = unsafe { bucket_value(m, old, old_index) };
-            crate::gc_types::typed_write_barrier_by_meta(
-                gc,
-                m,
-                key,
-                unsafe { key_meta(m) },
-                module,
-            );
-            crate::gc_types::typed_write_barrier_by_meta(
-                gc,
-                m,
-                val,
-                unsafe { val_meta(m) },
-                module,
-            );
+            write_resize_barrier(gc, m, key, unsafe { key_meta(m) }, module);
+            write_resize_barrier(gc, m, val, unsafe { val_meta(m) }, module);
             let hash = unsafe { bucket_hash(m, old, old_index) };
             let (_, new_index) = unsafe { find_bucket(m, new, key, hash, module) };
             unsafe { write_bucket(m, new, new_index, hash, key, val) };
@@ -507,7 +564,7 @@ unsafe fn resize(
 unsafe fn with_value_checked<R>(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<MapRuntimeMetadata<'_>>,
     consume: impl FnOnce(Option<&[u64]>) -> R,
 ) -> Result<R, MapKeyError> {
     if key.len() != key_slots(m) as usize {
@@ -527,9 +584,14 @@ unsafe fn with_value_checked<R>(
 pub unsafe fn get_checked(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) -> Result<Option<Box<[u64]>>, MapKeyError> {
-    with_value_checked(m, key, module, |value| value.map(Into::into))
+    with_value_checked(
+        m,
+        key,
+        module.map(MapRuntimeMetadata::from_module),
+        |value| value.map(Into::into),
+    )
 }
 
 /// Copy a map value into a caller-owned buffer without allocating.
@@ -539,27 +601,32 @@ pub unsafe fn get_checked(
 pub unsafe fn get_checked_into(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     out: &mut [u64],
 ) -> Result<bool, MapKeyError> {
     if out.len() != val_slots(m) as usize {
         return Err(MapKeyError::SlotCountMismatch);
     }
-    with_value_checked(m, key, module, |value| {
-        if let Some(value) = value {
-            out.copy_from_slice(value);
-            true
-        } else {
-            out.fill(0);
-            false
-        }
-    })
+    with_value_checked(
+        m,
+        key,
+        module.map(MapRuntimeMetadata::from_module),
+        |value| {
+            if let Some(value) = value {
+                out.copy_from_slice(value);
+                true
+            } else {
+                out.fill(0);
+                false
+            }
+        },
+    )
 }
 
 pub unsafe fn get_with_ok_checked(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) -> Result<(Option<OwnedMapValue>, bool), MapKeyError> {
     match get_checked(m, key, module)? {
         Some(v) => Ok((Some(v), true)),
@@ -590,41 +657,77 @@ pub unsafe fn set_checked(
     m: GcRef,
     key: &[u64],
     val: &[u64],
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+) -> Result<(), MapKeyError> {
+    unsafe {
+        set_checked_with_metadata(gc, m, key, val, module.map(MapRuntimeMetadata::from_module))
+    }
+}
+
+pub(crate) unsafe fn set_checked_with_type_metadata(
+    gc: &mut Gc,
+    m: GcRef,
+    key: &[u64],
+    val: &[u64],
+    type_metadata: Option<RuntimeTypeMetadata<'_>>,
+) -> Result<(), MapKeyError> {
+    unsafe {
+        set_checked_with_metadata(
+            gc,
+            m,
+            key,
+            val,
+            type_metadata.map(MapRuntimeMetadata::from_types),
+        )
+    }
+}
+
+unsafe fn set_checked_with_metadata(
+    gc: &mut Gc,
+    m: GcRef,
+    key: &[u64],
+    val: &[u64],
+    module: Option<MapRuntimeMetadata<'_>>,
 ) -> Result<(), MapKeyError> {
     validate_entry_slot_counts(m, key.len(), val.len())?;
     let hash = unsafe { key_hash_checked(m, key, module)? };
     let mut backing = unsafe { backing_ref(m) };
-    let mut capacity = unsafe { backing_capacity(backing) };
-    let used = if backing.is_null() {
-        0
-    } else {
-        unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize }
-    };
-    if capacity == 0
-        || (used + 1).saturating_mul(LOAD_FACTOR_DEN) > capacity.saturating_mul(LOAD_FACTOR_NUM)
-    {
-        capacity = if capacity == 0 {
-            MIN_CAPACITY
-        } else {
+    if backing.is_null() {
+        backing = unsafe { resize(gc, m, MIN_CAPACITY, module)? };
+    }
+
+    let capacity = unsafe { backing_capacity(backing) };
+    let (found, mut insertion) = unsafe { find_bucket(m, backing, key, hash, module) };
+    if let Some(index) = found {
+        unsafe { write_bucket(m, backing, index, hash, key, val) };
+        return Ok(());
+    }
+
+    let mut previous_state = unsafe { bucket_state(m, backing, insertion) };
+    let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize };
+    let projected_used = used.saturating_add(usize::from(previous_state == BUCKET_STATE_EMPTY));
+    if exceeds_load_factor(projected_used, capacity) {
+        let live = unsafe { backing_len(backing) };
+        let new_capacity = if exceeds_load_factor(live.saturating_add(1), capacity) {
             capacity
                 .checked_mul(2)
                 .ok_or(MapKeyError::AllocationFailed(
                     MemoryError::HardLimitExceeded,
                 ))?
+        } else {
+            capacity
         };
-        backing = unsafe { resize(gc, m, capacity, module)? };
+        backing = unsafe { resize(gc, m, new_capacity, module)? };
+        insertion = unsafe { find_bucket(m, backing, key, hash, module).1 };
+        previous_state = unsafe { bucket_state(m, backing, insertion) };
     }
-    let (found, insertion) = unsafe { find_bucket(m, backing, key, hash, module) };
-    let previous_state = unsafe { bucket_state(m, backing, insertion) };
+
     unsafe { write_bucket(m, backing, insertion, hash, key, val) };
-    if found.is_none() {
-        let len = unsafe { backing_len(backing) } + 1;
-        unsafe { set_backing_slot(backing, BACKING_LEN_SLOT, len as u64) };
-        if previous_state == BUCKET_STATE_EMPTY {
-            let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize } + 1;
-            unsafe { set_backing_slot(backing, BACKING_USED_SLOT, used as u64) };
-        }
+    let len = unsafe { backing_len(backing) } + 1;
+    unsafe { set_backing_slot(backing, BACKING_LEN_SLOT, len as u64) };
+    if previous_state == BUCKET_STATE_EMPTY {
+        let used = unsafe { backing_slot(backing, BACKING_USED_SLOT) as usize } + 1;
+        unsafe { set_backing_slot(backing, BACKING_USED_SLOT, used as u64) };
     }
     Ok(())
 }
@@ -632,8 +735,9 @@ pub unsafe fn set_checked(
 pub unsafe fn delete_checked(
     m: GcRef,
     key: &[u64],
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) -> Result<(), MapKeyError> {
+    let module = module.map(MapRuntimeMetadata::from_module);
     if key.len() != unsafe { key_slots(m) as usize } {
         return Err(MapKeyError::SlotCountMismatch);
     }
@@ -849,20 +953,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_map_set_checked_is_unsafe_public_primitive_058() {
-        let source =
-            vo_source_contract::production_source_without_test_modules(include_str!("map.rs"));
-        assert!(
-            source.contains("pub unsafe fn set_checked("),
-            "raw map insertion publishes key/value roots and must stay behind an unsafe contract"
-        );
-        assert!(
-            source.contains("callers must apply the precise key/value write barriers"),
-            "set_checked safety docs must name the write-barrier obligation"
-        );
-    }
-
-    #[test]
     fn raw_map_set_checked_rejects_key_value_width_drift_060() {
         let mut gc = Gc::new();
         let int_meta = ValueMeta::new(0, ValueKind::Int64);
@@ -882,6 +972,191 @@ mod tests {
                 .is_none(),
             "rejected width drift must not publish an entry"
         );
+    }
+
+    #[test]
+    fn type_only_metadata_supports_array_keys_across_resize() {
+        let mut gc = Gc::new();
+        let int_rttid = ValueRttid::new(0, ValueKind::Int64);
+        let runtime_types = vec![
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Array {
+                len: 2,
+                elem: int_rttid,
+            },
+        ];
+        let metadata = RuntimeTypeMetadata::new(&[], &[], &runtime_types);
+        let array_meta = ValueMeta::new(1, ValueKind::Array);
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, array_meta, int_meta, 2, 1, 1);
+
+        for key in 0..7u64 {
+            unsafe {
+                set_checked_with_type_metadata(
+                    &mut gc,
+                    m,
+                    &[key, key + 1],
+                    &[key + 10],
+                    Some(metadata),
+                )
+            }
+            .unwrap();
+        }
+
+        assert_eq!(unsafe { len(m) }, 7);
+        assert_eq!(unsafe { generation(m) }, 2);
+    }
+
+    #[test]
+    fn type_only_metadata_barriers_array_values_across_resize() {
+        let mut gc = Gc::new();
+        let string_rttid = ValueRttid::new(0, ValueKind::String);
+        let runtime_types = vec![
+            RuntimeType::Basic(ValueKind::String),
+            RuntimeType::Array {
+                len: 1,
+                elem: string_rttid,
+            },
+        ];
+        let metadata = RuntimeTypeMetadata::new(&[], &[], &runtime_types);
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let array_meta = ValueMeta::new(1, ValueKind::Array);
+        let m = create(&mut gc, int_meta, array_meta, 1, 1, 0);
+
+        for key in 0..7u64 {
+            let value = string::from_rust_str(&mut gc, "array-value");
+            unsafe {
+                set_checked_with_type_metadata(&mut gc, m, &[key], &[value as u64], Some(metadata))
+            }
+            .unwrap();
+        }
+
+        assert_eq!(unsafe { len(m) }, 7);
+        assert_eq!(unsafe { generation(m) }, 2);
+    }
+
+    #[test]
+    fn updating_existing_entry_does_not_resize_threshold_map() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, int_meta, int_meta, 1, 1, 0);
+        for key in 0..6 {
+            unsafe { set_checked(&mut gc, m, &[key], &[key + 10], None) }.unwrap();
+        }
+
+        let backing = unsafe { backing_ref(m) };
+        let capacity = unsafe { backing_capacity(backing) };
+        let generation_before = unsafe { generation(m) };
+        unsafe { set_checked(&mut gc, m, &[3], &[99], None) }.unwrap();
+
+        assert_eq!(unsafe { backing_ref(m) }, backing);
+        assert_eq!(unsafe { backing_capacity(backing_ref(m)) }, capacity);
+        assert_eq!(unsafe { generation(m) }, generation_before);
+        assert_eq!(unsafe { len(m) }, 6);
+        assert_eq!(
+            unsafe { get_checked(m, &[3], None) }.unwrap().as_deref(),
+            Some(&[99][..])
+        );
+    }
+
+    #[test]
+    fn insert_delete_churn_keeps_empty_map_capacity_bounded() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, int_meta, int_meta, 1, 1, 0);
+
+        for key in 0..1_024 {
+            unsafe { set_checked(&mut gc, m, &[key], &[key], None) }.unwrap();
+            unsafe { delete_checked(m, &[key], None) }.unwrap();
+        }
+
+        assert_eq!(unsafe { len(m) }, 0);
+        assert_eq!(unsafe { backing_capacity(backing_ref(m)) }, MIN_CAPACITY);
+        assert!(unsafe { has_valid_managed_backing_layout(&gc, m) });
+    }
+
+    #[test]
+    fn tombstone_compaction_preserves_entries_iteration_and_gc_roots() {
+        let mut gc = Gc::new();
+        let string_meta = ValueMeta::new(0, ValueKind::String);
+        let m = create(&mut gc, string_meta, string_meta, 1, 1, 0);
+        let mut entries = Vec::new();
+        for index in 0..6 {
+            let key = string::from_rust_str(&mut gc, &format!("key-{index}"));
+            let value = string::from_rust_str(&mut gc, &format!("value-{index}"));
+            unsafe { set_checked(&mut gc, m, &[key as u64], &[value as u64], None) }.unwrap();
+            entries.push((key, value));
+        }
+        for (key, _) in entries.iter().take(4) {
+            unsafe { delete_checked(m, &[*key as u64], None) }.unwrap();
+        }
+
+        let backing = unsafe { backing_ref(m) };
+        let capacity = unsafe { backing_capacity(backing) };
+        let generation_before = unsafe { generation(m) };
+        let new_key = (0..64)
+            .find_map(|index| {
+                let key = string::from_rust_str(&mut gc, &format!("key-new-{index}"));
+                let hash = unsafe { key_hash_checked(m, &[key as u64], None) }.unwrap();
+                let insertion = unsafe { find_bucket(m, backing, &[key as u64], hash, None).1 };
+                (unsafe { bucket_state(m, backing, insertion) } == BUCKET_STATE_EMPTY)
+                    .then_some(key)
+            })
+            .expect("test map must retain an empty insertion bucket");
+        let new_value = string::from_rust_str(&mut gc, "value-new");
+        unsafe { set_checked(&mut gc, m, &[new_key as u64], &[new_value as u64], None) }.unwrap();
+
+        assert_eq!(unsafe { backing_capacity(backing_ref(m)) }, capacity);
+        assert_eq!(unsafe { generation(m) }, generation_before + 1);
+        assert_eq!(unsafe { len(m) }, 3);
+        for (key, value) in entries.iter().skip(4) {
+            assert_eq!(
+                unsafe { get_checked(m, &[*key as u64], None) }
+                    .unwrap()
+                    .as_deref(),
+                Some(&[*value as u64][..])
+            );
+        }
+        assert_eq!(
+            unsafe { get_checked(m, &[new_key as u64], None) }
+                .unwrap()
+                .as_deref(),
+            Some(&[new_value as u64][..])
+        );
+
+        let mut iter = unsafe { iter_init(m) };
+        let mut iter_entries = Vec::new();
+        let mut key = [0];
+        let mut value = [0];
+        while unsafe { iter_next_into(&mut iter, &mut key, &mut value) }.unwrap() {
+            iter_entries.push((key[0], value[0]));
+        }
+        iter_entries.sort_unstable();
+        let mut expected = vec![
+            (entries[4].0 as u64, entries[4].1 as u64),
+            (entries[5].0 as u64, entries[5].1 as u64),
+            (new_key as u64, new_value as u64),
+        ];
+        expected.sort_unstable();
+        assert_eq!(iter_entries, expected);
+
+        let mut traced = Vec::new();
+        crate::test_support::trace_object_children_with_context(
+            m,
+            crate::gc_types::GcScanContext::new(&[]),
+            &|_| crate::gc_types::ClosureScanLayout::default(),
+            |child| traced.push(child),
+        );
+        for (key, value) in entries.iter().skip(4) {
+            assert!(traced.contains(key));
+            assert!(traced.contains(value));
+        }
+        assert!(traced.contains(&new_key));
+        assert!(traced.contains(&new_value));
+        for (key, value) in entries.iter().take(4) {
+            assert!(!traced.contains(key));
+            assert!(!traced.contains(value));
+        }
     }
 
     #[test]
@@ -968,21 +1243,24 @@ mod tests {
             u64::from((-0.0_f32).to_bits()),
             u64::from(1.0_f32.to_bits()),
         ];
-        unsafe { set_checked(&mut gc, float_map, &positive, &[7], Some(&module)) }.unwrap();
+        unsafe { set_checked(&mut gc, float_map, &positive, &[7], Some((&module).into())) }
+            .unwrap();
         assert_eq!(
-            unsafe { get_checked(float_map, &negative, Some(&module)) }
+            unsafe { get_checked(float_map, &negative, Some((&module).into())) }
                 .unwrap()
                 .as_deref(),
             Some(&[7][..])
         );
 
         let nan = [u64::from(f32::NAN.to_bits()), u64::from(1.0_f32.to_bits())];
-        unsafe { set_checked(&mut gc, float_map, &nan, &[8], Some(&module)) }.unwrap();
-        unsafe { set_checked(&mut gc, float_map, &nan, &[9], Some(&module)) }.unwrap();
+        unsafe { set_checked(&mut gc, float_map, &nan, &[8], Some((&module).into())) }.unwrap();
+        unsafe { set_checked(&mut gc, float_map, &nan, &[9], Some((&module).into())) }.unwrap();
         assert_eq!(unsafe { len(float_map) }, 3);
-        assert!(unsafe { get_checked(float_map, &nan, Some(&module)) }
-            .unwrap()
-            .is_none());
+        assert!(
+            unsafe { get_checked(float_map, &nan, Some((&module).into())) }
+                .unwrap()
+                .is_none()
+        );
 
         let first = string::from_rust_str(&mut gc, "same");
         let second = string::from_rust_str(&mut gc, "same");
@@ -994,9 +1272,18 @@ mod tests {
             1,
             string_array_rttid,
         );
-        unsafe { set_checked(&mut gc, string_map, &[first as u64], &[13], Some(&module)) }.unwrap();
+        unsafe {
+            set_checked(
+                &mut gc,
+                string_map,
+                &[first as u64],
+                &[13],
+                Some((&module).into()),
+            )
+        }
+        .unwrap();
         assert_eq!(
-            unsafe { get_checked(string_map, &[second as u64], Some(&module)) }
+            unsafe { get_checked(string_map, &[second as u64], Some((&module).into())) }
                 .unwrap()
                 .as_deref(),
             Some(&[13][..])

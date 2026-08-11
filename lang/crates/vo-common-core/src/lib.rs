@@ -19,6 +19,7 @@ pub mod debug_info;
 pub mod extern_key;
 pub mod identifier;
 pub mod instruction;
+pub mod instruction_effects;
 pub mod log_record;
 pub mod runtime_type;
 pub mod serialize;
@@ -29,10 +30,10 @@ pub mod types;
 pub mod verifier;
 
 pub use bytecode::{
-    Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef, InterfaceMeta,
-    Itab, JitInstructionMetadata, Module, ParamShape, ProviderTrust, RegisteredExternSource,
-    ResolvedExtern, ResolvedExternAbi, ResolvedExternTable, ResolvedExternTableError, ReturnShape,
-    StructMeta, TransferType,
+    Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef,
+    InstructionMetadata, InterfaceMeta, Itab, Module, ParamShape, ProviderTrust,
+    RegisteredExternSource, ResolvedExtern, ResolvedExternAbi, ResolvedExternTable,
+    ResolvedExternTableError, ReturnShape, StructMeta, TransferType,
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use extern_key::{
@@ -61,8 +62,5 @@ pub use struct_tag::lookup_struct_tag_value;
 pub use symbol::Symbol;
 #[cfg(feature = "std")]
 pub use symbol::SymbolInterner;
-pub use types::{
-    elem_flags, MetaId, SlotType, ValueKind, ValueMeta, ELEM_FLAG_BYTES_MASK, ELEM_FLAG_FLOAT32,
-    ELEM_FLAG_FLOAT_BIT, ELEM_FLAG_INT16, ELEM_FLAG_INT32, ELEM_FLAG_INT8, ELEM_FLAG_SIGN_BIT,
-};
+pub use types::{MetaId, SlotType, ValueKind, ValueMeta};
 pub use verifier::{ModuleVerificationError, ModuleVerifier, VerifiedModule};

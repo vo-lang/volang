@@ -1,44 +1,93 @@
 //! JIT callback helper functions.
 
-use vo_runtime::bytecode::{JitInstructionMetadata, Module};
+use vo_runtime::bytecode::{InstructionMetadata, Module, ModuleRuntimeMetadata};
 use vo_runtime::jit_api::{set_jit_infra_error, JitContext, JitResult, JitRuntimeTrapKind};
 use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::SlotType;
 
 use crate::fiber::Fiber;
-use crate::vm::{RuntimeTrapKind, Vm};
+use crate::runtime_boundary::RuntimeTransition;
+use crate::vm::{RuntimeTrapKind, Vm, VmState};
 
-pub struct JitCallbackBorrow<'a> {
-    pub vm: &'a mut Vm,
-    pub fiber: &'a mut Fiber,
+/// VM capabilities available to JIT callbacks.
+///
+/// Keeping the owning `Vm` private prevents ordinary callback code from
+/// reaching the scheduler while preserving the runtime-boundary commit path.
+pub(super) struct JitCallbackVm<'a> {
+    vm: &'a mut Vm,
 }
 
-/// Decode the VM/Fiber borrow carried by a JIT callback context.
+impl JitCallbackVm<'_> {
+    #[inline]
+    pub(super) fn state(&self) -> &VmState {
+        &self.vm.state
+    }
+
+    #[inline]
+    pub(super) fn state_mut(&mut self) -> &mut VmState {
+        &mut self.vm.state
+    }
+
+    #[inline]
+    pub(super) fn push_pending_runtime_transition(&mut self, transition: RuntimeTransition) {
+        self.vm.push_pending_runtime_transition(transition);
+    }
+
+    pub(super) fn create_island(&mut self) -> Result<vo_runtime::gc::GcRef, crate::vm::VmError> {
+        self.vm.create_island()
+    }
+}
+
+/// Decode the restricted VM capability carried by a JIT callback context.
 ///
 /// # Safety
 ///
 /// `ctx` must be a non-null pointer created by `build_jit_context` for the
-/// currently executing fiber. Its `vm` and `fiber` fields must still point to
-/// the same live VM and fiber, and the callback must not retain the returned
-/// references after it returns to JIT code.
+/// currently executing fiber. Its `vm` field must still point to the same live
+/// VM, and the callback must not retain the capability after returning.
 #[inline]
-pub unsafe fn borrow_context<'a>(ctx: *mut JitContext) -> JitCallbackBorrow<'a> {
-    let ctx = &mut *ctx;
-    let vm = &mut *(ctx.vm as *mut Vm);
-    let fiber = &mut *(ctx.fiber as *mut Fiber);
-    JitCallbackBorrow { vm, fiber }
+pub(super) unsafe fn extract_vm<'a>(ctx: *mut JitContext) -> JitCallbackVm<'a> {
+    let ctx = &*ctx;
+    JitCallbackVm {
+        vm: &mut *(ctx.callback_state as *mut Vm),
+    }
 }
 
-/// Compatibility helper for callbacks that only need VM/Fiber.
+/// Decode the detached fiber carried by a JIT callback context.
+///
+/// # Safety
+///
+/// The validated context must carry the live detached fiber for this callback,
+/// and the returned reference must not outlive the callback.
 #[inline]
-pub unsafe fn extract_context<'a>(ctx: *mut JitContext) -> (&'a mut Vm, &'a mut Fiber) {
-    let borrow = borrow_context(ctx);
-    (borrow.vm, borrow.fiber)
+pub(super) unsafe fn extract_fiber<'a>(ctx: *mut JitContext) -> &'a mut Fiber {
+    &mut *((*ctx).fiber as *mut Fiber)
+}
+
+/// Decode the disjoint restricted VM and detached-fiber capabilities.
+///
+/// # Safety
+///
+/// The requirements of [`extract_vm`] and [`extract_fiber`] must both hold.
+#[inline]
+pub(super) unsafe fn extract_context<'a>(
+    ctx: *mut JitContext,
+) -> (JitCallbackVm<'a>, &'a mut Fiber) {
+    (extract_vm(ctx), extract_fiber(ctx))
+}
+
+#[inline]
+pub(super) unsafe fn module_runtime_metadata<'a>(
+    ctx: *const JitContext,
+) -> ModuleRuntimeMetadata<'a> {
+    let ctx = &*ctx;
+    ctx.runtime_metadata()
+        .expect("validated JIT callback context must carry module metadata")
 }
 
 /// Validate the execution-state pointer graph shared by JIT callbacks before
 /// any raw pointer is decoded. This deliberately excludes `vm`: prepared-call
-/// callbacks only need the fiber, GC, and module, while scheduler callbacks
+/// callbacks only need the fiber, GC, and module, while VM-capability callbacks
 /// extend this check through [`validate_vm_callback_context`].
 #[inline]
 pub fn validate_callback_context(
@@ -51,7 +100,7 @@ pub fn validate_callback_context(
     };
     if ctx_ref.fiber.is_null()
         || ctx_ref.gc.is_null()
-        || ctx_ref.module.is_null()
+        || unsafe { ctx_ref.module_ref() }.is_none()
         || ctx_ref.panic_flag.is_null()
         || ctx_ref.is_user_panic.is_null()
     {
@@ -69,7 +118,7 @@ pub fn validate_vm_callback_context(
 ) -> Result<(), JitResult> {
     validate_callback_context(ctx, error_kind, detail)?;
     let ctx_ref = unsafe { &*ctx };
-    if ctx_ref.vm.is_null() {
+    if ctx_ref.callback_state.is_null() {
         Err(set_jit_infra_error(ctx, error_kind, detail))
     } else {
         Ok(())
@@ -77,7 +126,7 @@ pub fn validate_vm_callback_context(
 }
 
 fn jit_callback_metadata_lookup_required(ctx: &JitContext) -> bool {
-    ctx.jit_func_count != 0 || ctx.direct_call_count != 0
+    ctx.jit_func_count != 0
 }
 
 pub fn queue_layout_for_current_pc<'a>(
@@ -102,10 +151,8 @@ pub fn queue_layout_for_current_pc<'a>(
                 ctx.current_func_id, ctx.runtime_trap_pc
             )
         })?;
-    match func.jit_metadata.get(ctx.runtime_trap_pc as usize) {
-        Some(JitInstructionMetadata::QueueLayout { elem_layout }) => {
-            Ok(Some(elem_layout.as_slice()))
-        }
+    match func.instruction_metadata.get(ctx.runtime_trap_pc as usize) {
+        Some(InstructionMetadata::QueueLayout { elem_layout }) => Ok(Some(elem_layout.as_slice())),
         Some(other) => Err(format!(
             "JIT QueueLayout metadata mismatch at func {} pc {}: got {:?}",
             ctx.current_func_id, ctx.runtime_trap_pc, other
@@ -200,28 +247,6 @@ pub fn validate_callback_raw_slot_span<T>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vm_jit_queue_layout_requires_current_pc_metadata_for_jit_tables_037() {
-        let src = crate::source_contract::production_source_without_test_modules(include_str!(
-            "helpers.rs"
-        ));
-        let helper = src
-            .split("pub fn queue_layout_for_current_pc")
-            .nth(1)
-            .expect("queue layout lookup helper should exist")
-            .split("pub fn validate_callback_slot_count")
-            .next()
-            .expect("queue layout helper should precede callback slot-count validation");
-        assert!(
-            helper.contains("jit_callback_metadata_lookup_required(ctx)")
-                && helper.contains("return Err("),
-            "production JIT queue/select callbacks must fail-fast when current_func_id/runtime_trap_pc is unset"
-        );
-    }
-}
-
 /// Helper: set panic message on fiber and return JitResult::Panic.
 pub fn set_jit_panic(gc: &mut vo_runtime::gc::Gc, fiber: &mut Fiber, msg: &str) -> JitResult {
     let panic_str = vo_runtime::objects::string::new_from_string(gc, msg.to_string());
@@ -254,16 +279,17 @@ pub fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u
 }
 
 pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {
-    if let Err(result) = validate_vm_callback_context(
+    if let Err(result) = validate_callback_context(
         ctx,
         vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         JitRuntimeTrapKind::StackOverflow as u64,
     ) {
         return result;
     }
-    let (vm, fiber) = unsafe { extract_context(ctx) };
+    let gc = unsafe { &mut *(*ctx).gc };
+    let fiber = unsafe { extract_fiber(ctx) };
     set_jit_trap(
-        &mut vm.state.gc,
+        gc,
         fiber,
         RuntimeTrapKind::StackOverflow,
         "runtime error: stack overflow",

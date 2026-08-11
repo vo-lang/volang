@@ -26,7 +26,7 @@ pub(crate) fn snapshot_closure_value(src: u16, func: &mut FuncBuilder) -> u16 {
     snapshot
 }
 
-/// Compute slot types for the arg region of a call buffer, mirroring calc_method_arg_slots.
+/// Compute slot types for the arg region of a call buffer, matching `calc_method_arg_slots`.
 /// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
 pub(crate) fn calc_arg_slot_types(
     call: &vo_syntax::ast::CallExpr,
@@ -37,7 +37,7 @@ pub(crate) fn calc_arg_slot_types(
     calc_arg_slot_types_for_args(&call.args, call.spread, param_types, is_variadic, info)
 }
 
-/// Compute slot types for the arg region of a call buffer, mirroring calc_method_arg_slots.
+/// Compute slot types for the arg region of a call buffer, matching `calc_method_arg_slots`.
 /// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
 pub(crate) fn calc_arg_slot_types_for_args(
     args: &[Expr],
@@ -333,7 +333,7 @@ fn emit_direct_func_call_with_type(
 
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    func.emit_static_call(func_idx, args_start, total_arg_slots, ret_slots);
+    func.emit_static_call(func_idx, args_start);
 
     let ret_start = args_start + total_arg_slots;
     maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
@@ -510,8 +510,7 @@ fn compile_call_inner(
             );
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-            let c = ctx.dynamic_call_shape_or_record(total_arg_slots_usize, ret_slot_types.len());
-            func.emit_call_closure(closure_reg, args_start, c, &arg_slot_types, &ret_slot_types);
+            func.emit_call_closure(closure_reg, args_start, &arg_slot_types, &ret_slot_types);
 
             let ret_start = args_start + total_arg_slots;
             maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
@@ -650,8 +649,7 @@ pub fn compile_closure_call_from_reg(
         func.alloc_dynamic_call_buffer(&[SlotType::Value], &arg_slot_types, &ret_slot_types);
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    let c = ctx.dynamic_call_shape_or_record(total_arg_slots_usize, ret_slot_types.len());
-    func.emit_call_closure(closure_reg, args_start, c, &arg_slot_types, &ret_slot_types);
+    func.emit_call_closure(closure_reg, args_start, &arg_slot_types, &ret_slot_types);
 
     let ret_start = args_start + total_arg_slots;
     maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
@@ -1014,7 +1012,7 @@ fn emit_static_method_call(
         info,
     )?;
 
-    func.emit_static_call(func_id, args_start, total_slots, ret_slots);
+    func.emit_static_call(func_id, args_start);
 
     let ret_start = args_start + total_slots;
     maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
@@ -1065,7 +1063,6 @@ fn emit_interface_call_with_args(
         info,
     )?;
 
-    let c = ctx.dynamic_call_shape_or_record(arg_slots_usize, ret_slot_types.len());
     let iface_meta_id = ctx.get_or_create_interface_meta_id(
         iface_type,
         &info.project.tc_objs,
@@ -1077,7 +1074,6 @@ fn emit_interface_call_with_args(
         method_idx,
         iface_snapshot,
         args_start,
-        c,
         &arg_slot_types,
         &ret_slot_types,
     );
@@ -1463,21 +1459,14 @@ fn pack_variadic_args(
 
     // Create slice
     let dst = func.alloc_slots(&[SlotType::GcRef]);
-    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-    let num_regs = if flags == 0 { 3 } else { 2 };
-    let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
+    let len_cap_reg = func.alloc_slots(&[SlotType::Value; 2]);
     let total_elems_idx = ctx.const_int(total_elems_i64);
     func.emit_op(Opcode::LoadConst, len_cap_reg, total_elems_idx, 0); // len
     func.emit_op(Opcode::LoadConst, len_cap_reg + 1, total_elems_idx, 0); // cap = len
-    if flags == 0 {
-        let eb_idx = ctx.const_int(elem_bytes as i64);
-        func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
-    }
     func.emit_slice_new(
         dst,
         meta_reg,
         len_cap_reg,
-        flags,
         ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
     );
 
@@ -1500,7 +1489,6 @@ fn pack_variadic_args(
             idx_reg,
             val_reg,
             ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
-            ctx,
         );
         slice_idx = slice_idx.checked_add(1).ok_or_else(|| {
             CodegenError::Internal("variadic argument index overflow".to_string())

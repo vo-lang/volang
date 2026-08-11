@@ -6,9 +6,9 @@
 //! allowed.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 #[cfg(feature = "std")]
-use std::{boxed::Box, vec, vec::Vec};
+use std::{boxed::Box, vec::Vec};
 
 use core::alloc::Layout;
 
@@ -18,15 +18,13 @@ use alloc::alloc as heap_alloc;
 use std::alloc as heap_alloc;
 
 pub const HEAP_BLOCK_SIZE: usize = 64 * 1024;
-pub const HEAP_CARD_SIZE: usize = 512;
 
 const MIN_CLASS_SHIFT: usize = 4;
 const MAX_CLASS_SHIFT: usize = 15;
 const CLASS_COUNT: usize = MAX_CLASS_SHIFT - MIN_CLASS_SHIFT + 1;
-const MAX_CELLS_PER_BLOCK: usize = HEAP_BLOCK_SIZE >> MIN_CLASS_SHIFT;
+pub(crate) const MIN_CELL_SIZE: usize = 1usize << MIN_CLASS_SHIFT;
+const MAX_CELLS_PER_BLOCK: usize = HEAP_BLOCK_SIZE / MIN_CELL_SIZE;
 const ALLOCATION_WORDS: usize = MAX_CELLS_PER_BLOCK.div_ceil(64);
-const CARDS_PER_BLOCK: usize = HEAP_BLOCK_SIZE / HEAP_CARD_SIZE;
-const CARD_WORDS: usize = CARDS_PER_BLOCK.div_ceil(64);
 const MAX_GROWTH_BLOCKS: usize = 256;
 const FREE_CELL_NONE: u16 = u16::MAX;
 
@@ -47,17 +45,31 @@ pub struct HeapStats {
     pub segment_count: usize,
     pub block_count: usize,
     pub free_blocks: usize,
-    pub dirty_cards: usize,
 }
 
-#[derive(Clone)]
 struct SmallBlock {
     class_index: u8,
     bump_cells: u16,
     free_head: u16,
     live_cells: u16,
     allocated: [u64; ALLOCATION_WORDS],
-    dirty_cards: [u64; CARD_WORDS],
+}
+
+fn try_box<T>(value: T) -> Result<Box<T>, HeapError> {
+    let layout = Layout::new::<T>();
+    let raw = if layout.size() == 0 {
+        core::ptr::NonNull::<T>::dangling().as_ptr()
+    } else {
+        let raw = unsafe { heap_alloc::alloc(layout) }.cast::<T>();
+        if raw.is_null() {
+            return Err(HeapError::SystemAllocationFailed);
+        }
+        raw
+    };
+    unsafe {
+        raw.write(value);
+        Ok(Box::from_raw(raw))
+    }
 }
 
 impl SmallBlock {
@@ -68,7 +80,6 @@ impl SmallBlock {
             free_head: FREE_CELL_NONE,
             live_cells: 0,
             allocated: [0; ALLOCATION_WORDS],
-            dirty_cards: [0; CARD_WORDS],
         }
     }
 
@@ -104,22 +115,8 @@ impl SmallBlock {
             self.allocated[word] &= !(1u64 << bit);
         }
     }
-
-    #[inline]
-    fn dirty_card(&mut self, block_offset: usize) {
-        let card = block_offset / HEAP_CARD_SIZE;
-        let word = card / 64;
-        let bit = card % 64;
-        self.dirty_cards[word] |= 1u64 << bit;
-    }
-
-    #[inline]
-    fn has_dirty_cards(&self) -> bool {
-        self.dirty_cards.iter().any(|word| *word != 0)
-    }
 }
 
-#[derive(Clone)]
 enum BlockState {
     Free,
     Small(Box<SmallBlock>),
@@ -127,7 +124,6 @@ enum BlockState {
         blocks: u32,
         pending_reclaim: bool,
         reclaim_next: u32,
-        dirty: bool,
     },
     LargeTail {
         head: u32,
@@ -138,6 +134,7 @@ struct HeapSegment {
     base: usize,
     layout: Layout,
     blocks: Box<[BlockState]>,
+    free_blocks: usize,
 }
 
 impl HeapSegment {
@@ -174,13 +171,20 @@ pub struct LocatedAllocation {
 
 pub struct SpanHeap {
     segments: Vec<HeapSegment>,
+    /// Stable segment indices sorted by base address. Segments are never
+    /// removed, so pointer canonicalization can use binary search without
+    /// coupling allocator order to virtual-address order.
+    segment_index_by_base: Vec<usize>,
     active_small: [Option<(usize, usize)>; CLASS_COUNT],
+    partial_small: [Vec<(usize, usize)>; CLASS_COUNT],
+    partial_index_complete: [bool; CLASS_COUNT],
     hard_limit_bytes: Option<usize>,
     growth_allowed: bool,
     allocation_allowed: bool,
     committed_bytes: usize,
     allocated_span_bytes: usize,
     pending_reclaim_bytes: usize,
+    free_blocks: usize,
     next_growth_blocks: usize,
     reclaim_segment_cursor: usize,
     reclaim_block_cursor: usize,
@@ -191,13 +195,17 @@ impl SpanHeap {
     pub fn new(hard_limit_bytes: Option<usize>) -> Self {
         Self {
             segments: Vec::new(),
+            segment_index_by_base: Vec::new(),
             active_small: [None; CLASS_COUNT],
+            partial_small: core::array::from_fn(|_| Vec::new()),
+            partial_index_complete: [true; CLASS_COUNT],
             hard_limit_bytes,
             growth_allowed: true,
             allocation_allowed: true,
             committed_bytes: 0,
             allocated_span_bytes: 0,
             pending_reclaim_bytes: 0,
+            free_blocks: 0,
             next_growth_blocks: 1,
             reclaim_segment_cursor: 0,
             reclaim_block_cursor: 0,
@@ -228,6 +236,20 @@ impl SpanHeap {
     #[inline]
     pub fn hard_limit_bytes(&self) -> Option<usize> {
         self.hard_limit_bytes
+    }
+
+    /// Number of heap blocks already owned by this allocator.
+    #[inline]
+    pub fn committed_block_count(&self) -> usize {
+        self.committed_bytes / HEAP_BLOCK_SIZE
+    }
+
+    /// Conservative upper bound for simultaneous non-empty allocations in the
+    /// committed heap. GC objects always contain a header, and therefore every
+    /// object consumes at least one minimum-size cell.
+    #[inline]
+    pub fn max_min_cell_allocations(&self) -> usize {
+        self.committed_bytes / MIN_CELL_SIZE
     }
 
     pub fn set_hard_limit_bytes(&mut self, limit: Option<usize>) -> Result<(), HeapError> {
@@ -322,22 +344,39 @@ impl SpanHeap {
         &mut self,
         class_index: usize,
     ) -> Result<(usize, usize), HeapError> {
-        for (segment_index, segment) in self.segments.iter().enumerate() {
-            for (block_index, state) in segment.blocks.iter().enumerate() {
-                if matches!(
-                    state,
-                    BlockState::Small(block)
-                        if usize::from(block.class_index) == class_index && block.has_capacity()
-                ) {
-                    self.active_small[class_index] = Some((segment_index, block_index));
-                    return Ok((segment_index, block_index));
-                }
+        while let Some((segment_index, block_index)) = self.partial_small[class_index].pop() {
+            if matches!(
+                self.segments
+                    .get(segment_index)
+                    .and_then(|segment| segment.blocks.get(block_index)),
+                Some(BlockState::Small(block))
+                    if usize::from(block.class_index) == class_index && block.has_capacity()
+            ) {
+                self.active_small[class_index] = Some((segment_index, block_index));
+                return Ok((segment_index, block_index));
             }
         }
+        if !self.partial_index_complete[class_index] {
+            for (segment_index, segment) in self.segments.iter().enumerate() {
+                for (block_index, state) in segment.blocks.iter().enumerate() {
+                    if matches!(
+                        state,
+                        BlockState::Small(block)
+                            if usize::from(block.class_index) == class_index && block.has_capacity()
+                    ) {
+                        self.active_small[class_index] = Some((segment_index, block_index));
+                        return Ok((segment_index, block_index));
+                    }
+                }
+            }
+            self.partial_index_complete[class_index] = true;
+        }
 
+        let block = try_box(SmallBlock::new(class_index))?;
         let (segment_index, block_index) = self.acquire_free_run(1)?;
-        self.segments[segment_index].blocks[block_index] =
-            BlockState::Small(Box::new(SmallBlock::new(class_index)));
+        self.free_blocks -= 1;
+        self.segments[segment_index].free_blocks -= 1;
+        self.segments[segment_index].blocks[block_index] = BlockState::Small(block);
         self.active_small[class_index] = Some((segment_index, block_index));
         Ok((segment_index, block_index))
     }
@@ -345,11 +384,12 @@ impl SpanHeap {
     fn allocate_large(&mut self, size: usize) -> Result<Allocation, HeapError> {
         let blocks = size.div_ceil(HEAP_BLOCK_SIZE).max(1);
         let (segment_index, head) = self.acquire_free_run(blocks)?;
+        self.free_blocks -= blocks;
+        self.segments[segment_index].free_blocks -= blocks;
         self.segments[segment_index].blocks[head] = BlockState::LargeHead {
             blocks: blocks as u32,
             pending_reclaim: false,
             reclaim_next: 1,
-            dirty: false,
         };
         for block in 1..blocks {
             self.segments[segment_index].blocks[head + block] =
@@ -381,6 +421,9 @@ impl SpanHeap {
 
     fn find_free_run(&self, blocks: usize) -> Option<(usize, usize)> {
         for (segment_index, segment) in self.segments.iter().enumerate() {
+            if segment.free_blocks < blocks {
+                continue;
+            }
             let mut run_start = 0usize;
             let mut run_len = 0usize;
             for (block_index, state) in segment.blocks.iter().enumerate() {
@@ -416,17 +459,35 @@ impl SpanHeap {
         }
         let layout = Layout::from_size_align(bytes, HEAP_BLOCK_SIZE)
             .map_err(|_| HeapError::SystemAllocationFailed)?;
+        self.segments
+            .try_reserve(1)
+            .map_err(|_| HeapError::SystemAllocationFailed)?;
+        self.segment_index_by_base
+            .try_reserve(1)
+            .map_err(|_| HeapError::SystemAllocationFailed)?;
+        let mut block_states = Vec::new();
+        block_states
+            .try_reserve_exact(blocks)
+            .map_err(|_| HeapError::SystemAllocationFailed)?;
+        block_states.resize_with(blocks, || BlockState::Free);
         let raw = unsafe { heap_alloc::alloc_zeroed(layout) };
         if raw.is_null() {
             return Err(HeapError::SystemAllocationFailed);
         }
-        let blocks = vec![BlockState::Free; blocks].into_boxed_slice();
+        let base = raw as usize;
+        let segment_index = self.segments.len();
         self.segments.push(HeapSegment {
-            base: raw as usize,
+            base,
             layout,
-            blocks,
+            blocks: block_states.into_boxed_slice(),
+            free_blocks: blocks,
         });
+        let position = self
+            .segment_index_by_base
+            .partition_point(|index| self.segments[*index].base < base);
+        self.segment_index_by_base.insert(position, segment_index);
         self.committed_bytes = next_committed;
+        self.free_blocks += bytes / HEAP_BLOCK_SIZE;
         Ok(())
     }
 
@@ -492,14 +553,15 @@ impl SpanHeap {
     }
 
     fn locate_block(&self, address: usize) -> Option<(usize, usize)> {
-        self.segments
-            .iter()
-            .enumerate()
-            .find_map(|(segment_index, segment)| {
-                segment
-                    .contains(address)
-                    .then(|| (segment_index, (address - segment.base) / HEAP_BLOCK_SIZE))
-            })
+        let position = self
+            .segment_index_by_base
+            .partition_point(|index| self.segments[*index].base <= address)
+            .checked_sub(1)?;
+        let segment_index = self.segment_index_by_base[position];
+        let segment = &self.segments[segment_index];
+        segment
+            .contains(address)
+            .then(|| (segment_index, (address - segment.base) / HEAP_BLOCK_SIZE))
     }
 
     pub fn free(&mut self, raw: *mut u8) -> Result<(), HeapError> {
@@ -514,6 +576,7 @@ impl SpanHeap {
             BlockState::Small(block) => {
                 let class_index = usize::from(block.class_index);
                 let class_size = block.class_size();
+                let was_full = !block.has_capacity();
                 let offset = address
                     .checked_sub(block_base)
                     .ok_or(HeapError::InvalidPointer)?;
@@ -533,11 +596,20 @@ impl SpanHeap {
                 self.allocated_span_bytes -= class_size;
                 if block.live_cells == 0 {
                     self.segments[segment_index].blocks[block_index] = BlockState::Free;
+                    self.free_blocks += 1;
+                    self.segments[segment_index].free_blocks += 1;
                     if self.active_small[class_index] == Some((segment_index, block_index)) {
                         self.active_small[class_index] = None;
                     }
-                } else {
+                } else if self.active_small[class_index].is_none() {
                     self.active_small[class_index] = Some((segment_index, block_index));
+                } else if was_full {
+                    let partial = &mut self.partial_small[class_index];
+                    if partial.try_reserve(1).is_ok() {
+                        partial.push((segment_index, block_index));
+                    } else {
+                        self.partial_index_complete[class_index] = false;
+                    }
                 }
                 Ok(())
             }
@@ -601,11 +673,15 @@ impl SpanHeap {
             };
             while reclaim_next < blocks && work < max_blocks {
                 self.segments[segment_index].blocks[head + reclaim_next] = BlockState::Free;
+                self.free_blocks += 1;
+                self.segments[segment_index].free_blocks += 1;
                 reclaim_next += 1;
                 work += 1;
             }
             if reclaim_next == blocks {
                 self.segments[segment_index].blocks[head] = BlockState::Free;
+                self.free_blocks += 1;
+                self.segments[segment_index].free_blocks += 1;
                 self.pending_large_spans -= 1;
                 self.pending_reclaim_bytes -= blocks * HEAP_BLOCK_SIZE;
                 self.reclaim_block_cursor += 1;
@@ -621,83 +697,14 @@ impl SpanHeap {
         (work, self.pending_large_spans == 0)
     }
 
-    pub fn dirty_card_for_store(&mut self, parent_address: usize, slot_address: usize) {
-        let Some((segment_index, block_index)) = self.locate_block(parent_address) else {
-            return;
-        };
-        let segment_base = self.segments[segment_index].base;
-        let block_base = segment_base + block_index * HEAP_BLOCK_SIZE;
-        let offset = slot_address.saturating_sub(block_base);
-        let large_tail_head = match self.segments[segment_index].blocks[block_index] {
-            BlockState::LargeTail { head } => Some(head as usize),
-            _ => None,
-        };
-        match &mut self.segments[segment_index].blocks[block_index] {
-            BlockState::Small(block) if offset < HEAP_BLOCK_SIZE => block.dirty_card(offset),
-            BlockState::LargeHead { dirty, .. } => *dirty = true,
-            BlockState::LargeTail { .. } => {}
-            BlockState::Free => {}
-            BlockState::Small(_) => {}
-        }
-        if let Some(head) = large_tail_head {
-            if let BlockState::LargeHead { dirty, .. } =
-                &mut self.segments[segment_index].blocks[head]
-            {
-                *dirty = true;
-            }
-        }
-    }
-
-    pub fn allocation_has_dirty_cards(&self, address: usize) -> bool {
-        let Some((segment_index, block_index)) = self.locate_block(address) else {
-            return false;
-        };
-        match &self.segments[segment_index].blocks[block_index] {
-            BlockState::Small(block) => block.has_dirty_cards(),
-            BlockState::LargeHead { dirty, .. } => *dirty,
-            BlockState::LargeTail { head } => {
-                matches!(
-                    self.segments[segment_index].blocks[*head as usize],
-                    BlockState::LargeHead { dirty: true, .. }
-                )
-            }
-            BlockState::Free => false,
-        }
-    }
-
     pub fn stats(&self) -> HeapStats {
-        let mut block_count = 0usize;
-        let mut free_blocks = 0usize;
-        let mut dirty_cards = 0usize;
-        for segment in &self.segments {
-            block_count += segment.blocks.len();
-            free_blocks += segment
-                .blocks
-                .iter()
-                .filter(|state| matches!(state, BlockState::Free))
-                .count();
-            dirty_cards += segment
-                .blocks
-                .iter()
-                .map(|state| match state {
-                    BlockState::Small(block) => block
-                        .dirty_cards
-                        .iter()
-                        .map(|word| word.count_ones() as usize)
-                        .sum(),
-                    BlockState::LargeHead { dirty: true, .. } => 1,
-                    _ => 0,
-                })
-                .sum::<usize>();
-        }
         HeapStats {
             committed_bytes: self.committed_bytes,
             allocated_span_bytes: self.allocated_span_bytes,
             pending_reclaim_bytes: self.pending_reclaim_bytes,
             segment_count: self.segments.len(),
-            block_count,
-            free_blocks,
-            dirty_cards,
+            block_count: self.committed_block_count(),
+            free_blocks: self.free_blocks,
         }
     }
 }
@@ -732,6 +739,58 @@ mod tests {
     }
 
     #[test]
+    fn full_small_blocks_reenter_allocation_without_segment_rescan() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE * 2));
+        heap.reserve(HEAP_BLOCK_SIZE * 2).unwrap();
+        heap.set_growth_allowed(false);
+        let cells_per_block = HEAP_BLOCK_SIZE / 1024;
+        let allocations: Vec<_> = (0..cells_per_block * 2)
+            .map(|_| heap.allocate(1024).expect("fill two small blocks"))
+            .collect();
+
+        heap.free(allocations[0].raw).unwrap();
+        heap.free(allocations[cells_per_block].raw).unwrap();
+        assert_eq!(heap.partial_small[6].len(), 1);
+
+        assert_eq!(
+            heap.allocate(1024).expect("reuse active block").raw,
+            allocations[0].raw
+        );
+        assert_eq!(
+            heap.allocate(1024)
+                .expect("reuse indexed partial block")
+                .raw,
+            allocations[cells_per_block].raw
+        );
+        assert!(heap.partial_small[6].is_empty());
+    }
+
+    #[test]
+    fn incomplete_partial_index_falls_back_without_losing_free_cells() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE * 2));
+        heap.reserve(HEAP_BLOCK_SIZE * 2).unwrap();
+        heap.set_growth_allowed(false);
+        let cells_per_block = HEAP_BLOCK_SIZE / 1024;
+        let allocations: Vec<_> = (0..cells_per_block * 2)
+            .map(|_| heap.allocate(1024).expect("fill two small blocks"))
+            .collect();
+
+        heap.free(allocations[0].raw).unwrap();
+        heap.free(allocations[cells_per_block].raw).unwrap();
+        heap.partial_small[6].clear();
+        heap.partial_index_complete[6] = false;
+
+        assert_eq!(heap.allocate(1024).unwrap().raw, allocations[0].raw);
+        assert_eq!(
+            heap.allocate(1024)
+                .expect("slow fallback must recover an unindexed partial block")
+                .raw,
+            allocations[cells_per_block].raw
+        );
+        assert!(!heap.partial_index_complete[6]);
+    }
+
+    #[test]
     fn no_growth_and_hard_limit_fail_closed() {
         let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
         heap.set_growth_allowed(false);
@@ -743,6 +802,23 @@ mod tests {
             heap.reserve(HEAP_BLOCK_SIZE),
             Err(HeapError::HardLimitExceeded)
         );
+    }
+
+    #[test]
+    fn sub_block_reserve_reports_every_min_cell_allocation() {
+        let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
+        assert_eq!(heap.reserve(1), Ok(HEAP_BLOCK_SIZE));
+        assert_eq!(MIN_CELL_SIZE, 16);
+        assert_eq!(
+            heap.max_min_cell_allocations(),
+            HEAP_BLOCK_SIZE / MIN_CELL_SIZE
+        );
+        heap.set_growth_allowed(false);
+
+        for _ in 0..heap.max_min_cell_allocations() {
+            assert_eq!(heap.allocate(8).expect("minimum cell").capacity, 16);
+        }
+        assert!(matches!(heap.allocate(8), Err(HeapError::GrowthDisabled)));
     }
 
     #[test]
@@ -773,5 +849,27 @@ mod tests {
             .locate(large.raw as usize + HEAP_BLOCK_SIZE + 16, 8)
             .unwrap();
         assert_eq!(large_located.raw, large.raw);
+    }
+
+    #[test]
+    fn segment_address_index_locates_many_independent_segments() {
+        let mut heap = SpanHeap::new(None);
+        for _ in 0..16 {
+            heap.reserve(HEAP_BLOCK_SIZE).unwrap();
+        }
+        let allocations: Vec<_> = (0..16)
+            .map(|_| heap.allocate(HEAP_BLOCK_SIZE).unwrap())
+            .collect();
+
+        assert!(heap
+            .segment_index_by_base
+            .windows(2)
+            .all(|pair| { heap.segments[pair[0]].base < heap.segments[pair[1]].base }));
+        for allocation in allocations {
+            let located = heap
+                .locate(allocation.raw as usize + HEAP_BLOCK_SIZE - 1, 8)
+                .expect("interior address must resolve through segment index");
+            assert_eq!(located.raw, allocation.raw);
+        }
     }
 }

@@ -44,8 +44,8 @@ use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::{
-    ExtSlotKind, ExternEffects, ExternJitRoute, Module, ParamShape, ProviderTrust,
-    RegisteredExternSource, ResolvedExtern, ResolvedExternTable, ReturnShape,
+    ExtSlotKind, ExternEffects, ExternJitRoute, Module, ModuleRuntimeMetadata, ParamShape,
+    ProviderTrust, RegisteredExternSource, ResolvedExtern, ResolvedExternTable, ReturnShape,
 };
 use crate::output::OutputSink;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -67,7 +67,9 @@ fn allocate_process_identity(counter: &AtomicU64) -> Option<u64> {
 
 // Structured call types (ExternInvoke, ExternWorld, ExternFiberInputs)
 pub mod call;
-pub use call::{ExternFiberInputs, ExternInvoke, ExternReplayResult, ExternWorld};
+pub use call::{
+    ExternFiberInputs, ExternInvoke, ExternReplayResult, ExternWorld, RuntimeMemRequests,
+};
 
 // Same-image container implementations. Only allocator-neutral accessors are
 // re-exported below; map access stays private because its payload owns Rust
@@ -83,10 +85,11 @@ pub use containers::{
 use crate::distributed_slice;
 use crate::gc::{Gc, GcLease, GcOwnerDispatch, GcRef, MemoryError};
 #[cfg(feature = "std")]
-use crate::io::{IoRuntime, IoToken};
-use crate::itab::ItabCache;
+use crate::io::IoRuntime;
+use crate::itab::{validate_interface_itab, ItabCache};
 pub use crate::objects::interface::InterfaceSlot;
 use crate::objects::{slice, string};
+use crate::value_layout::{validate_interface_value, InterfaceValueError, ValidatedInterfaceValue};
 use core::ops::{Deref, DerefMut};
 use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta, WellKnownTypes};
 use vo_common_core::runtime_type::RuntimeType;
@@ -201,8 +204,7 @@ pub enum ExternResult {
     /// The fiber will be parked and must be explicitly woken by runtime.
     Block,
     /// Wait for I/O completion.
-    #[cfg(feature = "std")]
-    WaitIo { token: IoToken },
+    WaitIo { token: u64 },
     /// Block current fiber until a host-side event wakes it.
     /// `token` is an opaque ID; the runtime maps token → fiber.
     /// `delay_ms` is a hint to the platform (e.g. setTimeout ms); 0 = no hint.
@@ -351,7 +353,6 @@ fn result_effect(result: &ExternResult) -> ExternEffects {
         ExternResult::Exit(_) => ExternEffects::MAY_EXIT,
         ExternResult::Yield => ExternEffects::MAY_YIELD,
         ExternResult::Block => ExternEffects::MAY_QUEUE_BLOCK,
-        #[cfg(feature = "std")]
         ExternResult::WaitIo { .. } => ExternEffects::MAY_WAIT_IO_REPLAY,
         ExternResult::HostEventWait { .. } => ExternEffects::MAY_HOST_WAIT,
         ExternResult::HostEventWaitAndReplay { .. } => ExternEffects::MAY_HOST_REPLAY,
@@ -371,7 +372,6 @@ impl ExternResult {
             ExternResult::CallClosure { .. } | ExternResult::HostEventWaitAndReplay { .. } => {
                 ExternPostCallCheck::ReplayIntermediate
             }
-            #[cfg(feature = "std")]
             ExternResult::WaitIo { .. } => ExternPostCallCheck::ReplayIntermediate,
             _ => ExternPostCallCheck::Terminal,
         }
@@ -382,11 +382,19 @@ impl ExternResult {
 
 pub const EXTENSION_ABI_VERSION: u32 = 10;
 
+/// Native ABI v10 keeps its historical WaitIo slots for binary layout
+/// compatibility, but dynamic extensions must use the host-event replay
+/// protocol for asynchronous work.
+pub const NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR: &str =
+    "native extension WaitIo is reserved in ABI v10; use HostEventWaitAndReplay with HostServices V2";
+
 /// Extension ABI result codes returned across dylib boundary.
 pub mod ext_abi {
     pub const RESULT_OK: u32 = 0;
     pub const RESULT_YIELD: u32 = 1;
     pub const RESULT_BLOCK: u32 = 2;
+    /// Reserved ABI-v10 compatibility code. Native extensions that return it
+    /// are rejected; asynchronous extensions use host-event replay.
     pub const RESULT_WAIT_IO: u32 = 3;
     pub const RESULT_PANIC: u32 = 4;
     pub const RESULT_CALL_CLOSURE: u32 = 5;
@@ -686,6 +694,8 @@ pub type ExtBorrowReplayFn = unsafe extern "C" fn(
     out_len: *mut usize,
 ) -> u32;
 pub type ExtSetExitFn = unsafe extern "C" fn(host: *mut core::ffi::c_void, code: i32);
+/// Reserved ABI-v10 compatibility callback. Calling it records a contract
+/// violation; it cannot publish a native-extension I/O wait token.
 pub type ExtSetWaitIoFn = unsafe extern "C" fn(host: *mut core::ffi::c_void, token: u64);
 pub type ExtSetCallClosureFn = unsafe extern "C" fn(
     host: *mut core::ffi::c_void,
@@ -731,6 +741,7 @@ pub struct ExtHostOpsV10 {
     pub borrow_replay_result: Option<ExtBorrowReplayFn>,
     pub set_panic: Option<ExtSetBytesFn>,
     pub set_exit: Option<ExtSetExitFn>,
+    /// Reserved for ABI-v10 binary layout compatibility.
     pub set_wait_io: Option<ExtSetWaitIoFn>,
     pub set_call_closure: Option<ExtSetCallClosureFn>,
     pub set_host_event_wait: Option<ExtSetHostEventWaitFn>,
@@ -762,8 +773,6 @@ struct ValidatedExtHostOpsV10 {
     borrow_replay_result: ExtBorrowReplayFn,
     set_panic: ExtSetBytesFn,
     set_exit: ExtSetExitFn,
-    #[cfg(feature = "std")]
-    set_wait_io: ExtSetWaitIoFn,
     set_call_closure: ExtSetCallClosureFn,
     set_host_event_wait: ExtSetHostEventWaitFn,
     record_contract_error: ExtSetBytesFn,
@@ -780,9 +789,7 @@ struct ValidatedExtHostOpsV10 {
 
 impl ExtHostOpsV10 {
     fn validate(self) -> Result<ValidatedExtHostOpsV10, &'static str> {
-        let set_wait_io = self.set_wait_io.ok_or("set_wait_io")?;
-        #[cfg(not(feature = "std"))]
-        let _ = set_wait_io;
+        self.set_wait_io.ok_or("set_wait_io")?;
         Ok(ValidatedExtHostOpsV10 {
             borrow_arg_string: self.borrow_arg_string.ok_or("borrow_arg_string")?,
             borrow_arg_bytes: self.borrow_arg_bytes.ok_or("borrow_arg_bytes")?,
@@ -798,8 +805,6 @@ impl ExtHostOpsV10 {
             borrow_replay_result: self.borrow_replay_result.ok_or("borrow_replay_result")?,
             set_panic: self.set_panic.ok_or("set_panic")?,
             set_exit: self.set_exit.ok_or("set_exit")?,
-            #[cfg(feature = "std")]
-            set_wait_io,
             set_call_closure: self.set_call_closure.ok_or("set_call_closure")?,
             set_host_event_wait: self.set_host_event_wait.ok_or("set_host_event_wait")?,
             record_contract_error: self.record_contract_error.ok_or("record_contract_error")?,
@@ -1026,6 +1031,55 @@ impl StdlibEntry {
     ) -> Result<(), ExternContractError> {
         registry.try_register_stdlib_provider_with_effects(id, self.name, self.func, self.effects)
     }
+}
+
+/// Iterate the first module extern declaration for each provider name.
+///
+/// A verified module may repeat an identical extern contract at multiple
+/// table IDs. Providers remain name-scoped and are registered once; complete
+/// same-name ABI compatibility is still checked by module resolution before
+/// the registry is frozen.
+pub fn unique_extern_providers(
+    externs: &[crate::bytecode::ExternDef],
+) -> impl Iterator<Item = (usize, &crate::bytecode::ExternDef)> {
+    let mut seen = BTreeSet::new();
+    externs
+        .iter()
+        .enumerate()
+        .filter_map(move |(id, def)| seen.insert(def.name.as_str()).then_some((id, def)))
+}
+
+/// Register the subset of a module extern table supplied by one stdlib
+/// provider catalog.
+///
+/// Intrinsic-eligible builtins retain authority over matching stdlib wrappers.
+/// Every other pre-existing same-name provider still reaches the registry's
+/// single-assignment check and fails closed.
+pub fn register_stdlib_providers(
+    registry: &mut ExternRegistry,
+    externs: &[crate::bytecode::ExternDef],
+    entries: &[StdlibEntry],
+) -> Result<(), ExternContractError> {
+    let mut seen = BTreeSet::new();
+    for (id, def) in externs.iter().enumerate() {
+        let Some(entry) = entries.iter().find(|entry| def.name == entry.name()) else {
+            continue;
+        };
+        if !seen.insert(def.name.as_str()) {
+            continue;
+        }
+        let builtin_intrinsic_is_authoritative = registry
+            .registered_by_name(entry.name())
+            .is_some_and(|registered| {
+                registered.source() == RegisteredExternSource::Builtin
+                    && registered.trust() == ProviderTrust::IntrinsicEligible
+                    && JIT_INTRINSIC_EXTERN_NAMES.contains(&entry.name())
+            });
+        if !builtin_intrinsic_is_authoritative {
+            entry.try_register(registry, id as u32)?;
+        }
+    }
+    Ok(())
 }
 
 // ==================== Auto-registration via linkme (std only) ====================
@@ -1342,10 +1396,10 @@ pub struct HostExternCallContext<'a> {
     gc: &'a mut Gc,
     /// Module reference (provides struct_metas, interface_metas, named_type_metas,
     /// runtime_types, functions, well_known, and deep comparison support).
-    module: &'a Module,
+    module: ModuleRuntimeMetadata<'a>,
     itab_cache: &'a mut ItabCache,
-    /// Opaque pointer to VM instance (for closure calls).
-    vm: *mut core::ffi::c_void,
+    /// Scheduler-bound `runtime/mem` request mailbox.
+    runtime_mem_requests: Option<&'a mut RuntimeMemRequests>,
     /// Opaque pointer to current Fiber (for closure calls).
     fiber: *mut core::ffi::c_void,
     /// Program arguments.
@@ -1356,11 +1410,10 @@ pub struct HostExternCallContext<'a> {
     sentinel_errors: &'a mut SentinelErrorCache,
     /// Runtime I/O (std only).
     #[cfg(feature = "std")]
-    io: &'a mut IoRuntime,
+    io: Option<&'a mut IoRuntime>,
     /// I/O token that woke this fiber (std only). When present, extern should
     /// consume the completion for this token instead of submitting a new op.
-    #[cfg(feature = "std")]
-    resume_io_token: Option<IoToken>,
+    resume_io_token: Option<u64>,
     /// Generic byte output channel (FFI → Host).
     host_output: &'a mut Option<Vec<u8>>,
     /// Authoritative V2 service/caller binding for native adapters.
@@ -1389,9 +1442,6 @@ pub struct HostExternCallContext<'a> {
     ext_panic_msg: Option<String>,
     /// Extension result payload: process exit status (set by trampoline, read by runtime).
     ext_exit_code: Option<i32>,
-    /// Extension result payload: I/O token (set by trampoline, read by runtime).
-    #[cfg(feature = "std")]
-    ext_wait_io_token: Option<IoToken>,
     /// Extension result payload: closure call request (set by trampoline, read by runtime).
     ext_call_closure: Option<(GcRef, Vec<u64>)>,
     /// Extension result payload: host event wait token + delay/source
@@ -1517,7 +1567,7 @@ impl<'a> ExternCallContext<'a> {
                 gc: world.gc,
                 module: world.module,
                 itab_cache: world.itab_cache,
-                vm: world.vm_opaque,
+                runtime_mem_requests: world.runtime_mem_requests,
                 fiber: fiber_inputs.fiber_opaque,
                 program_args: world.program_args,
                 output: world.output,
@@ -1528,7 +1578,6 @@ impl<'a> ExternCallContext<'a> {
                 native_ops: native_abi_v10::OPS,
                 #[cfg(feature = "std")]
                 io: world.io,
-                #[cfg(feature = "std")]
                 resume_io_token: fiber_inputs.resume_io_token,
                 resume_host_event_token: fiber_inputs.resume_host_event_token,
                 resume_host_event_data: fiber_inputs.resume_host_event_data,
@@ -1538,8 +1587,6 @@ impl<'a> ExternCallContext<'a> {
                 replay_panic_message: fiber_inputs.replay_panic_message,
                 ext_panic_msg: None,
                 ext_exit_code: None,
-                #[cfg(feature = "std")]
-                ext_wait_io_token: None,
                 ext_call_closure: None,
                 ext_host_event_wait: None,
                 wasm_extension_bridge_abi: None,
@@ -1962,6 +2009,7 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
+    #[doc(hidden)]
     pub fn record_contract_violation(&mut self, message: impl Into<String>) {
         self.record_contract_error(message);
     }
@@ -2276,19 +2324,40 @@ impl<'a> ExternCallContext<'a> {
         self.sentinel_errors
     }
 
+    /// Try to access the VM's native I/O runtime.
+    ///
+    /// Native-extension facades return `None`. They perform asynchronous work
+    /// through HostServices V2 and `HostEventWaitAndReplay`.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn try_io_mut(&mut self) -> Option<&mut IoRuntime> {
+        match &mut self.backend {
+            ExternCallBackend::Host(host) => host.io.as_deref_mut(),
+            ExternCallBackend::Extension(_) => None,
+        }
+    }
+
+    /// Access the VM's native I/O runtime.
+    ///
+    /// Providers shared with embedders that may omit native I/O should use
+    /// [`Self::try_io_mut`] and report an appropriate extern result.
     #[cfg(feature = "std")]
     #[inline]
     pub fn io_mut(&mut self) -> &mut IoRuntime {
-        self.io
+        self.try_io_mut()
+            .expect("extern provider requires an I/O-capable VM")
     }
 
     /// Take the I/O completion token that woke this fiber.
     /// One-shot: must be consumed exactly once on the resume path.
-    /// `verify_post_call()` will panic if it was not consumed.
-    #[cfg(feature = "std")]
+    /// Native-extension facades return `None` because ABI-v10 WaitIo is a
+    /// reserved compatibility path.
     #[inline]
-    pub fn take_resume_io_token(&mut self) -> Option<IoToken> {
-        self.resume_io_token.take()
+    pub fn take_resume_io_token(&mut self) -> Option<u64> {
+        match &mut self.backend {
+            ExternCallBackend::Host(host) => host.resume_io_token.take(),
+            ExternCallBackend::Extension(_) => None,
+        }
     }
 
     /// Take the host event token that woke this fiber on the `HostEventWaitAndReplay` path.
@@ -2363,10 +2432,13 @@ impl<'a> ExternCallContext<'a> {
 
     /// Peek at the resume I/O token without consuming it.
     /// Prefer `take_resume_io_token()` in normal use.
-    #[cfg(feature = "std")]
+    /// Native-extension facades return `None`.
     #[inline]
-    pub fn resume_io_token(&self) -> Option<IoToken> {
-        self.resume_io_token
+    pub fn resume_io_token(&self) -> Option<u64> {
+        match &self.backend {
+            ExternCallBackend::Host(host) => host.resume_io_token,
+            ExternCallBackend::Extension(_) => None,
+        }
     }
 
     /// Get or create itab for a named type implementing an interface.
@@ -2477,6 +2549,30 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
+    #[inline]
+    pub fn request_gc_step(&mut self, work_units: usize) -> bool {
+        let ExternCallBackend::Host(host) = &mut self.backend else {
+            return false;
+        };
+        let Some(requests) = host.runtime_mem_requests.as_mut() else {
+            return false;
+        };
+        requests.request_step(work_units);
+        true
+    }
+
+    #[inline]
+    pub fn request_gc_collect(&mut self) -> bool {
+        let ExternCallBackend::Host(host) = &mut self.backend else {
+            return false;
+        };
+        let Some(requests) = host.runtime_mem_requests.as_mut() else {
+            return false;
+        };
+        requests.request_collect();
+        true
+    }
+
     /// Retain a managed object across native calls.
     ///
     /// `GcRef` is an opaque managed handle at this boundary. Both backends
@@ -2539,6 +2635,11 @@ impl<'a> ExternCallContext<'a> {
     /// Get module reference.
     #[inline]
     pub fn module(&self) -> &'a Module {
+        self.module.module()
+    }
+
+    #[inline]
+    pub fn module_runtime_metadata(&self) -> ModuleRuntimeMetadata<'a> {
         self.module
     }
 
@@ -2891,8 +2992,13 @@ impl<'a> ExternCallContext<'a> {
     }
 
     /// Apply type-aware write barriers for a range written into a heap container.
+    ///
+    /// # Safety
+    ///
+    /// `base_ptr` must be non-null, aligned for `u64`, and readable for
+    /// `count * elem_bytes` bytes containing complete values matching `meta`.
     #[inline]
-    pub fn typed_write_barrier_range_by_meta(
+    pub unsafe fn typed_write_barrier_range_by_meta(
         &mut self,
         parent: GcRef,
         base_ptr: *const u8,
@@ -2901,15 +3007,17 @@ impl<'a> ExternCallContext<'a> {
         meta: ValueMeta,
     ) {
         let host = self.deref_mut();
-        crate::gc_types::typed_write_barrier_range_by_meta(
-            host.gc,
-            parent,
-            base_ptr,
-            count,
-            elem_bytes,
-            meta,
-            Some(host.module),
-        );
+        unsafe {
+            crate::gc_types::typed_write_barrier_range_by_meta(
+                host.gc,
+                parent,
+                base_ptr,
+                count,
+                elem_bytes,
+                meta,
+                Some(host.module),
+            );
+        }
     }
 
     /// Box a value into interface format (InterfaceSlot).
@@ -3002,10 +3110,10 @@ impl<'a> ExternCallContext<'a> {
 
                 let elem_meta = self.value_meta_for_value_rttid(elem_value_rttid);
                 let new_ref = array::create(self.gc(), elem_meta, elem_bytes, array_len);
-                assert!(
-                    !new_ref.is_null(),
-                    "box_to_interface: array allocation failed"
-                );
+                let slot0 = interface::pack_slot0(0, rttid, vk);
+                if new_ref.is_null() {
+                    return InterfaceSlot::new(slot0, 0);
+                }
 
                 for i in 0..array_len {
                     let src_start = i
@@ -3020,7 +3128,6 @@ impl<'a> ExternCallContext<'a> {
                     self.gc().mark_allocated_for_scan(new_ref);
                 }
 
-                let slot0 = interface::pack_slot0(0, rttid, vk);
                 InterfaceSlot::new(slot0, new_ref as u64)
             }
             ValueKind::Interface => {
@@ -3040,6 +3147,9 @@ impl<'a> ExternCallContext<'a> {
         let slot_count = u16::try_from(raw_slots.len())
             .expect("alloc_and_copy_slots: value width exceeds the VM u16 slot-address domain");
         let new_ref = self.gc_alloc_raw(slot_count, struct_meta_id);
+        if new_ref.is_null() {
+            return new_ref;
+        }
         for (i, &val) in raw_slots.iter().enumerate() {
             unsafe { Gc::write_slot(new_ref, i, val) };
         }
@@ -3184,7 +3294,7 @@ impl<'a> ExternCallContext<'a> {
         source: crate::ValueRttid,
         target: crate::ValueRttid,
     ) -> bool {
-        crate::itab::runtime_value_is_assignable(source, target, self.module)
+        crate::itab::runtime_value_is_assignable(source, target, self.module.module())
     }
 
     /// Get map key ValueRttid from a Map RuntimeType.
@@ -3432,10 +3542,16 @@ impl<'a> ExternCallContext<'a> {
         // String is a reference type, takes 1 slot (8 bytes)
         let elem_meta = ValueMeta::new(0, ValueKind::String);
         let s = slice::create(self.gc(), elem_meta, 8, len, len);
+        if s.is_null() {
+            return s;
+        }
 
         // Write each string to the slice
         for (i, rust_str) in strings.iter().enumerate() {
             let str_ref = string::from_rust_str(self.gc(), rust_str);
+            if str_ref.is_null() && !rust_str.is_empty() {
+                return str_ref;
+            }
             // String is a GcRef (8 bytes), store as u64
             unsafe { slice::set(s, i, str_ref as u64, 8) };
         }
@@ -3451,9 +3567,15 @@ impl<'a> ExternCallContext<'a> {
         let len = strings.len();
         let elem_meta = ValueMeta::new(0, ValueKind::String);
         let s = slice::create(self.gc(), elem_meta, 8, len, len);
+        if s.is_null() {
+            return s;
+        }
 
         for (i, bytes) in strings.iter().enumerate() {
             let str_ref = string::create(self.gc(), bytes);
+            if str_ref.is_null() && !bytes.is_empty() {
+                return str_ref;
+            }
             // Safety: `s` is a fresh string slice and `i` is in bounds.
             unsafe { slice::set(s, i, str_ref as u64, 8) };
         }
@@ -3540,12 +3662,6 @@ impl<'a> ExternCallContext<'a> {
         }
     }
 
-    /// Get the VM pointer for direct closure calls.
-    #[inline]
-    pub fn vm_ptr(&self) -> *mut core::ffi::c_void {
-        self.vm
-    }
-
     /// Get the fiber pointer for direct closure calls.
     #[inline]
     pub fn fiber_ptr(&self) -> *mut core::ffi::c_void {
@@ -3586,17 +3702,6 @@ impl<'a> ExternCallContext<'a> {
             return;
         }
         self.ext_exit_code = Some(code);
-    }
-
-    /// Set I/O wait token for extension result (called by trampoline).
-    #[cfg(feature = "std")]
-    #[inline]
-    pub fn set_ext_wait_io(&mut self, token: IoToken) {
-        if let Some((frame, ops)) = self.extension_ops() {
-            unsafe { (ops.set_wait_io)(frame.host, token) };
-            return;
-        }
-        self.ext_wait_io_token = Some(token);
     }
 
     /// Set closure call request for extension result (called by trampoline).
@@ -3651,14 +3756,10 @@ impl<'a> ExternCallContext<'a> {
             }
             ext_abi::RESULT_YIELD => ExternResult::Yield,
             ext_abi::RESULT_BLOCK => ExternResult::Block,
-            #[cfg(feature = "std")]
             ext_abi::RESULT_WAIT_IO => {
-                let token = self.ext_wait_io_token.take().ok_or_else(|| {
-                    ExternContractError::new(
-                        "ext_abi::RESULT_WAIT_IO without set_ext_wait_io payload",
-                    )
-                })?;
-                ExternResult::WaitIo { token }
+                return Err(ExternContractError::new(
+                    NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR,
+                ));
             }
             ext_abi::RESULT_PANIC => {
                 let msg = self
@@ -3692,9 +3793,12 @@ impl<'a> ExternCallContext<'a> {
                 ExternResult::HostEventWaitAndReplay { token, source }
             }
             ext_abi::RESULT_ABI_ERROR => {
-                return Err(ExternContractError::new(
-                    "native extension trampoline rejected its ABI frame or panicked while translating the result",
-                ));
+                let message = self.contract_error.take().unwrap_or_else(|| {
+                    String::from(
+                        "native extension trampoline rejected its ABI frame or panicked while translating the result",
+                    )
+                });
+                return Err(ExternContractError::new(message));
             }
             _ => {
                 return Err(ExternContractError::new(format!(
@@ -3728,7 +3832,6 @@ impl<'a> ExternCallContext<'a> {
 
     fn verify_resume_inputs_consumed(&self) -> Result<(), ExternContractError> {
         // Check resume_io_token protocol: must be consumed if provided
-        #[cfg(feature = "std")]
         if self.resume_io_token.is_some() {
             return Err(ExternContractError::new(
                 "FFI post-call violation: resume_io_token was not consumed. Extern function must call take_resume_io_token() on the resume path.",
@@ -3818,7 +3921,14 @@ impl<'a> ExternCallContext<'a> {
                             expected_iface_meta_id,
                         )?;
                     }
-                    if crate::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
+                    let value_kind = crate::objects::interface::try_unpack_value_kind(slot0)
+                        .ok_or_else(|| {
+                            ExternContractError::new(format!(
+                                "extern_id={} returned interface with invalid value-kind tag {} ret_slot={}",
+                                self.extern_id, slot0 as u8, slot_idx
+                            ))
+                        })?;
+                    if value_kind.may_contain_gc_refs() && slot1 != 0 {
                         let Some(canonical) = self.gc.canonicalize_ref(slot1 as GcRef) else {
                             return Err(ExternContractError::new(format!(
                                 "extern_id={} returned invalid interface GcRef ret_slot={} raw=0x{slot1:016x}",
@@ -3845,369 +3955,45 @@ impl<'a> ExternCallContext<'a> {
         slot1: u64,
         expected_iface_meta_id: u32,
     ) -> Result<(), ExternContractError> {
-        use crate::objects::interface;
-
-        let Some(value_kind) = interface::try_unpack_value_kind(slot0) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface with invalid value-kind tag {} ret_slot={}",
-                self.extern_id,
-                slot0 & 0xff,
-                slot_idx
-            )));
-        };
-        if value_kind == ValueKind::Void {
-            if slot0 != 0 || slot1 != 0 {
-                return Err(ExternContractError::new(format!(
-                    "extern_id={} returned non-canonical nil interface ret_slot={} slot0=0x{slot0:016x} slot1=0x{slot1:016x}",
-                    self.extern_id, slot_idx,
-                )));
-            }
-            return Ok(());
-        }
-        if value_kind == ValueKind::Interface {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned raw interface-kind slot0 at ret_slot={}",
-                self.extern_id, slot_idx
-            )));
-        }
-        let rttid = interface::unpack_rttid(slot0);
-        let Some(value_rttid) = crate::ValueRttid::try_new(rttid, value_kind) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned reserved interface RTTID ret_slot={} rttid={} kind={:?}",
-                self.extern_id, slot_idx, rttid, value_kind
-            )));
-        };
-        if self
-            .module
-            .canonical_value_meta_for_value_rttid(value_rttid)
-            .is_none()
-        {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned non-canonical interface RTTID/kind ret_slot={} rttid={} kind={:?}",
-                self.extern_id, slot_idx, rttid, value_kind
-            )));
-        }
-        self.verify_return_interface_data_object(slot_idx, slot0, slot1, value_rttid)?;
-        let Some(expected_iface) = self
-            .module
-            .interface_metas
-            .get(expected_iface_meta_id as usize)
-        else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} return metadata expected missing interface meta id {}",
-                self.extern_id, expected_iface_meta_id
-            )));
-        };
-
-        let itab_id = interface::unpack_itab_id(slot0);
-        if expected_iface.methods.is_empty() {
-            return Ok(());
-        }
-        if itab_id == 0 {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned no-itab slot0 for non-empty interface ret_slot={} iface_meta_id={}",
-                self.extern_id, slot_idx, expected_iface_meta_id
-            )));
-        }
-        let Some(named_type_id) = self.get_named_type_id_from_rttid(rttid, true) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned non-named value for non-empty interface ret_slot={} rttid={} kind={:?}",
-                self.extern_id, slot_idx, rttid, value_kind
-            )));
-        };
-        let Some(expected_methods) = crate::itab::expected_interface_itab_methods(
-            named_type_id,
-            expected_iface_meta_id,
-            value_kind == ValueKind::Pointer,
-            &self.module.named_type_metas,
-            &self.module.interface_metas,
-        ) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned value that does not implement expected interface ret_slot={} named_type_id={} iface_meta_id={}",
-                self.extern_id, slot_idx, named_type_id, expected_iface_meta_id
-            )));
-        };
-        let Some(actual_itab) = self.itab_cache.get_itab(itab_id) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned missing itab {} for ret_slot={}",
-                self.extern_id, itab_id, slot_idx
-            )));
-        };
-        if actual_itab.iface_meta_id != expected_iface_meta_id {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned itab {} for interface {} but expected interface {} at ret_slot={}",
-                self.extern_id,
-                itab_id,
-                actual_itab.iface_meta_id,
-                expected_iface_meta_id,
-                slot_idx
-            )));
-        }
-        if actual_itab.methods != expected_methods {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned itab {} that does not match expected interface ret_slot={} iface_meta_id={}",
-                self.extern_id, itab_id, slot_idx, expected_iface_meta_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn verify_return_interface_data_object(
-        &mut self,
-        slot_idx: usize,
-        slot0: u64,
-        slot1: u64,
-        value_rttid: ValueRttid,
-    ) -> Result<(), ExternContractError> {
-        use crate::objects::interface;
-
-        if !interface::data_is_gc_ref(slot0) {
-            return Ok(());
-        }
-        if slot1 == 0 {
-            if matches!(
-                value_rttid.value_kind(),
-                ValueKind::Struct | ValueKind::Array
-            ) {
-                return Err(ExternContractError::new(format!(
-                    "extern_id={} returned interface data missing object for aggregate value kind {:?} ret_slot={}",
-                    self.extern_id,
-                    value_rttid.value_kind(),
-                    slot_idx + 1
-                )));
-            }
-            return Ok(());
-        }
-        let Some(canonical) = self.gc.canonicalize_ref(slot1 as GcRef) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned invalid interface GcRef ret_slot={} raw=0x{slot1:016x}",
-                self.extern_id,
-                slot_idx + 1
-            )));
-        };
-        self.write_return_slot(slot_idx + 1, canonical as u64)?;
-        let header = unsafe { Gc::header(canonical) };
-        match value_rttid.value_kind() {
-            ValueKind::Struct | ValueKind::Pointer => {
-                self.verify_return_interface_data_kind(
-                    slot_idx,
-                    header.kind(),
-                    ValueKind::Struct,
-                    value_rttid.value_kind(),
-                )?;
-                let Some(expected_meta) = self
-                    .module
-                    .canonical_value_meta_for_value_rttid(value_rttid)
-                else {
-                    return Err(ExternContractError::new(format!(
-                        "extern_id={} returned interface data RTTID cannot be resolved ret_slot={} rttid={} kind={:?}",
+        let validated = validate_interface_value(self.gc, self.module.module(), slot0, slot1)
+            .map_err(|err| {
+                let message = match err {
+                    InterfaceValueError::InvalidReference { raw, .. } => format!(
+                        "extern_id={} returned invalid interface GcRef ret_slot={} raw=0x{raw:016x}",
                         self.extern_id,
-                        slot_idx + 1,
-                        value_rttid.rttid(),
-                        value_rttid.value_kind()
-                    )));
-                };
-                if header.meta_id() != expected_meta.meta_id() {
-                    return Err(ExternContractError::new(format!(
-                        "extern_id={} returned interface data meta_id {} does not match expected {} ret_slot={}",
-                        self.extern_id,
-                        header.meta_id(),
-                        expected_meta.meta_id(),
                         slot_idx + 1
-                    )));
-                }
-                self.verify_return_struct_data_slots(
-                    slot_idx,
-                    header.meta_id(),
-                    header.slots as usize,
-                )
-            }
-            ValueKind::Array => {
-                self.verify_return_interface_array_data(slot_idx, canonical, header, value_rttid)
-            }
-            value_kind => {
-                if let Some(expected) = return_interface_data_heap_kind(value_kind) {
-                    self.verify_return_interface_data_kind(
-                        slot_idx,
-                        header.kind(),
-                        expected,
-                        value_kind,
-                    )?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn verify_return_interface_data_kind(
-        &self,
-        slot_idx: usize,
-        actual: ValueKind,
-        expected: ValueKind,
-        value_kind: ValueKind,
-    ) -> Result<(), ExternContractError> {
-        if actual != expected {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface data object kind {:?} does not match expected {:?} for value kind {:?} ret_slot={}",
-                self.extern_id,
-                actual,
-                expected,
-                value_kind,
-                slot_idx + 1
-            )));
-        }
-        Ok(())
-    }
-
-    fn verify_return_struct_data_slots(
-        &self,
-        slot_idx: usize,
-        struct_meta_id: u32,
-        actual_slots: usize,
-    ) -> Result<(), ExternContractError> {
-        let Some(struct_meta) = self.module.struct_metas.get(struct_meta_id as usize) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface data references missing StructMeta id {} ret_slot={}",
-                self.extern_id,
-                struct_meta_id,
-                slot_idx + 1
-            )));
+                    ),
+                    _ => format!(
+                        "extern_id={} returned interface {err} ret_slot={}",
+                        self.extern_id, slot_idx
+                    ),
+                };
+                ExternContractError::new(message)
+            })?;
+        let (value_rttid, canonical_data) = match validated {
+            ValidatedInterfaceValue::Nil => (None, None),
+            ValidatedInterfaceValue::Concrete {
+                value_rttid,
+                canonical_data,
+            } => (Some(value_rttid), canonical_data),
         };
-        self.verify_return_data_slot_width(slot_idx, actual_slots, struct_meta.slot_types.len())
-    }
-
-    fn verify_return_data_slot_width(
-        &self,
-        slot_idx: usize,
-        actual_slots: usize,
-        expected_slots: usize,
-    ) -> Result<(), ExternContractError> {
-        if actual_slots != expected_slots {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface data allocation slots {} do not match expected {} ret_slot={}",
-                self.extern_id,
-                actual_slots,
-                expected_slots,
-                slot_idx + 1
-            )));
+        if let Some(canonical) = canonical_data {
+            self.write_return_slot(slot_idx + 1, canonical as u64)?;
         }
-        Ok(())
-    }
-
-    fn verify_return_interface_array_data(
-        &self,
-        slot_idx: usize,
-        array_ref: GcRef,
-        header: &crate::gc::GcHeader,
-        value_rttid: ValueRttid,
-    ) -> Result<(), ExternContractError> {
-        use crate::objects::array;
-
-        let Some((expected_len, expected_elem_rttid)) =
-            return_interface_array_runtime_type(self.module, value_rttid)
-        else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data layout missing ret_slot={} rttid={}",
-                self.extern_id,
-                slot_idx + 1,
-                value_rttid.rttid()
-            )));
-        };
-        let Some(expected_elem_meta) = self
-            .module
-            .canonical_value_meta_for_value_rttid(expected_elem_rttid)
-        else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data element RTTID cannot be resolved ret_slot={} rttid={}",
-                self.extern_id,
-                slot_idx + 1,
-                expected_elem_rttid.rttid()
-            )));
-        };
-        let Some(expected_elem_bytes) =
-            return_sequence_element_physical_bytes(self.module, expected_elem_rttid)
-        else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data element layout missing ret_slot={} rttid={}",
-                self.extern_id,
-                slot_idx + 1,
-                expected_elem_rttid.rttid()
-            )));
-        };
-        match header.kind() {
-            ValueKind::Array => {}
-            ValueKind::Struct => {
-                return self.verify_return_interface_array_value_slot_box(
-                    slot_idx,
-                    header,
-                    value_rttid,
-                );
-            }
-            actual => {
-                return Err(ExternContractError::new(format!(
-                    "extern_id={} returned interface data object kind {:?} does not match expected Array or Struct for value kind Array ret_slot={}",
-                    self.extern_id,
-                    actual,
-                    slot_idx + 1
-                )));
-            }
-        }
-        // Safety: the return verifier canonicalized the object and established
-        // the array header kind above.
-        let actual_len = unsafe { array::len(array_ref) };
-        let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
-        let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
-        if actual_len != expected_len
-            || actual_elem_meta != expected_elem_meta
-            || actual_elem_bytes != expected_elem_bytes
-        {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data layout mismatch ret_slot={}: len {} expected {}, elem_meta 0x{:x} expected 0x{:x}, elem_bytes {} expected {}",
-                self.extern_id,
-                slot_idx + 1,
-                actual_len,
-                expected_len,
-                actual_elem_meta.to_raw(),
-                expected_elem_meta.to_raw(),
-                actual_elem_bytes,
-                expected_elem_bytes
-            )));
-        }
-        Ok(())
-    }
-
-    fn verify_return_interface_array_value_slot_box(
-        &self,
-        slot_idx: usize,
-        header: &crate::gc::GcHeader,
-        value_rttid: ValueRttid,
-    ) -> Result<(), ExternContractError> {
-        let Some(expected_layout) = self.module.slot_layout_for_value_rttid(value_rttid) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data layout missing ret_slot={} rttid={}",
-                self.extern_id,
-                slot_idx + 1,
-                value_rttid.rttid()
-            )));
-        };
-        let Some(struct_meta) = self.module.struct_metas.get(header.meta_id() as usize) else {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data value-slot box references missing StructMeta id {} ret_slot={}",
-                self.extern_id,
-                header.meta_id(),
-                slot_idx + 1
-            )));
-        };
-        if struct_meta.slot_types != expected_layout {
-            return Err(ExternContractError::new(format!(
-                "extern_id={} returned interface array data value-slot box layout {:?} does not match Array slot layout {:?} ret_slot={}",
-                self.extern_id,
-                struct_meta.slot_types,
-                expected_layout,
-                slot_idx + 1
-            )));
-        }
-        self.verify_return_data_slot_width(slot_idx, header.slots as usize, expected_layout.len())
+        let itab_id = crate::objects::interface::unpack_itab_id(slot0);
+        validate_interface_itab(
+            self.module.module(),
+            self.itab_cache,
+            expected_iface_meta_id,
+            itab_id,
+            value_rttid,
+        )
+        .map_err(|err| {
+            ExternContractError::new(format!(
+                "extern_id={} returned interface {err} ret_slot={} itab_id={} iface_meta_id={}",
+                self.extern_id, slot_idx, itab_id, expected_iface_meta_id
+            ))
+        })
     }
 
     fn return_slot(&self, slot_idx: usize) -> Result<u64, ExternContractError> {
@@ -4357,7 +4143,12 @@ impl<'a> ExternCallContext<'a> {
         src_vk: ValueKind,
         target_iface_id: u32,
     ) -> bool {
-        crate::itab::check_interface_satisfaction(src_rttid, src_vk, target_iface_id, self.module)
+        crate::itab::check_interface_satisfaction(
+            src_rttid,
+            src_vk,
+            target_iface_id,
+            self.module.module(),
+        )
     }
 
     /// Get itab by ID.
@@ -4922,7 +4713,9 @@ mod native_abi_v10 {
     }
 
     unsafe fn set_wait_io_impl(opaque: *mut core::ffi::c_void, token: u64) {
-        unsafe { host_context(opaque) }.ext_wait_io_token = Some(token);
+        let _ = token;
+        let host = unsafe { host_context(opaque) };
+        record_error(host, NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR);
     }
 
     unsafe fn set_call_closure_impl(
@@ -5679,58 +5472,6 @@ mod native_abi_v10 {
     };
 }
 
-fn return_interface_data_heap_kind(value_kind: ValueKind) -> Option<ValueKind> {
-    match value_kind {
-        ValueKind::String
-        | ValueKind::Slice
-        | ValueKind::Map
-        | ValueKind::Channel
-        | ValueKind::Port
-        | ValueKind::Closure
-        | ValueKind::Island => Some(value_kind),
-        _ => None,
-    }
-}
-
-fn return_interface_array_runtime_type(
-    module: &Module,
-    value_rttid: ValueRttid,
-) -> Option<(usize, ValueRttid)> {
-    let mut current = value_rttid;
-    let limit = module.runtime_types.len() + module.named_type_metas.len() + 1;
-    for _ in 0..limit {
-        match module.runtime_types.get(current.rttid() as usize)? {
-            RuntimeType::Array { len, elem } if current.value_kind() == ValueKind::Array => {
-                return Some((*len as usize, *elem));
-            }
-            RuntimeType::Named { id, .. } => {
-                let named = module.named_type_metas.get(*id as usize)?;
-                if named.underlying_rttid.value_kind() != ValueKind::Array {
-                    return None;
-                }
-                current = named.underlying_rttid;
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn return_sequence_element_physical_bytes(
-    module: &Module,
-    value_rttid: ValueRttid,
-) -> Option<usize> {
-    match value_rttid.value_kind() {
-        ValueKind::Void => Some(0),
-        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => Some(1),
-        ValueKind::Int16 | ValueKind::Uint16 => Some(2),
-        ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => Some(4),
-        _ => module
-            .slot_layout_for_value_rttid(value_rttid)
-            .and_then(|layout| layout.len().checked_mul(crate::slot::SLOT_BYTES)),
-    }
-}
-
 // ==================== Extern Registry ====================
 
 /// A registered extern function — either internal (Rust ABI) or extension.
@@ -5952,6 +5693,7 @@ impl ExtensionOwnerCatalog {
 pub struct ExternRegistry {
     funcs_by_name: BTreeMap<String, RegisteredExtern>,
     id_to_name: BTreeMap<u32, String>,
+    resolved_externs: ResolvedExternTable,
     /// Complete pre-freeze extension owner catalog. Ownership is selected
     /// from this set before provider function lookup.
     extension_module_owners: BTreeMap<String, ExtensionOwnerCatalog>,
@@ -5972,6 +5714,7 @@ impl ExternRegistry {
         Self {
             funcs_by_name: BTreeMap::new(),
             id_to_name: BTreeMap::new(),
+            resolved_externs: ResolvedExternTable::empty(),
             extension_module_owners: BTreeMap::new(),
             #[cfg(feature = "std")]
             native_catalog_built: false,
@@ -5987,8 +5730,24 @@ impl ExternRegistry {
         })
     }
 
-    pub fn freeze(&mut self) {
+    pub fn resolve_and_freeze(
+        &mut self,
+        extern_defs: &[crate::bytecode::ExternDef],
+    ) -> Result<(), ExternContractError> {
+        self.ensure_mutable()?;
+        self.resolved_externs = self.resolve_module_externs(extern_defs)?;
         self.frozen = true;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn resolved(&self, id: u32) -> Option<&ResolvedExtern> {
+        self.resolved_externs.get(id)
+    }
+
+    #[inline]
+    pub fn resolved_externs(&self) -> &ResolvedExternTable {
+        &self.resolved_externs
     }
 
     pub fn is_frozen(&self) -> bool {
@@ -6170,11 +5929,7 @@ impl ExternRegistry {
             for (module_owner, source) in &incoming_sources {
                 staged.try_declare_extension_module_owner(module_owner, source.owner_catalog())?;
             }
-            let mut seen = BTreeSet::new();
-            for (id, def) in extern_defs.iter().enumerate() {
-                if !seen.insert(def.name.as_str()) {
-                    continue;
-                }
+            for (id, def) in unique_extern_providers(extern_defs) {
                 let Ok(key) = vo_common_core::extern_key::decode_extern_name(&def.name) else {
                     continue;
                 };
@@ -7001,17 +6756,18 @@ impl ExternRegistry {
         invoke: ExternInvoke,
         world: ExternWorld,
         fiber_inputs: ExternFiberInputs,
-        resolved: &ResolvedExtern,
     ) -> ExternCallOutcome {
-        if resolved.source == RegisteredExternSource::WasmExtensionBridge {
-            validate_wasm_extension_bridge_resolved_param_kinds(resolved)?;
+        if !self.frozen {
+            return Err(ExternContractError::new(
+                "resolved extern dispatch requires a frozen registry",
+            ));
         }
-        if resolved.id != invoke.extern_id {
-            return Err(ExternContractError::new(format!(
-                "resolved extern id {} does not match invoke id {}",
-                resolved.id, invoke.extern_id
-            )));
-        }
+        let resolved = self.resolved(invoke.extern_id).ok_or_else(|| {
+            ExternContractError::new(format!(
+                "frozen registry is missing resolved extern id {}",
+                invoke.extern_id
+            ))
+        })?;
         if !resolved.params.accepts_slots(invoke.arg_slots) {
             return Err(ExternContractError::new(format!(
                 "resolved extern '{}' arg slot count {} does not match params {}",
@@ -7062,20 +6818,6 @@ impl ExternRegistry {
                     )));
                 }
                 let effect_authority = if let Some(resolved) = resolved {
-                    if registered.provider_name != resolved.name
-                        || registered.source != resolved.source
-                        || registered.provider_module_owner.as_deref()
-                            != resolved.provider_module_owner.as_deref()
-                        || registered.provider_effects.bits() != resolved.provider_effects.bits()
-                        || registered.trust != resolved.trust
-                        || registered.abi_fingerprint != resolved.abi_fingerprint
-                        || registered.provider_identity != resolved.provider_identity
-                    {
-                        return Err(ExternContractError::new(format!(
-                            "extern id {} provider identity or metadata drifted after module load",
-                            invoke.extern_id
-                        )));
-                    }
                     resolved.effective_effects
                 } else {
                     registered.provider_effects
@@ -7192,12 +6934,6 @@ fn validate_wasm_extension_bridge_param_kinds(
     def: &crate::bytecode::ExternDef,
 ) -> Result<(), ExternContractError> {
     validate_wasm_extension_bridge_abi(&def.name, &def.params, &def.param_kinds)
-}
-
-fn validate_wasm_extension_bridge_resolved_param_kinds(
-    resolved: &ResolvedExtern,
-) -> Result<(), ExternContractError> {
-    validate_wasm_extension_bridge_abi(&resolved.name, &resolved.params, &resolved.param_kinds)
 }
 
 fn validate_wasm_extension_bridge_abi(

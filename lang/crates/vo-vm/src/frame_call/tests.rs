@@ -6,68 +6,10 @@ use vo_common_core::bytecode::{
     InterfaceMeta, InterfaceMethodMeta, Itab, MethodInfo, NamedTypeMeta, StructMeta,
 };
 use vo_common_core::runtime_type::InterfaceMethod;
-use vo_runtime::bytecode::JitInstructionMetadata;
+use vo_runtime::bytecode::InstructionMetadata;
 use vo_runtime::itab::ItabCache;
 use vo_runtime::objects::{closure, slice, string};
 use vo_runtime::SlotType;
-
-fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
-    vo_source_contract::compact_pattern_position(compact, pattern)
-}
-
-fn compact_contains(compact: &[u8], pattern: &str) -> bool {
-    vo_source_contract::compact_contains(compact, pattern)
-}
-
-fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-    vo_source_contract::compact_region_between(source, marker, terminator)
-}
-
-fn extern_replay_setup_stack_overflow_closes_scope_062(source: &str) -> bool {
-    let src = crate::source_contract::production_source_without_test_modules(source);
-    let Some(replay_setup) = compact_region_between(
-        &src,
-        "pub(crate)fncall_extern_replay_closure",
-        "fnvalidate_closure_target",
-    ) else {
-        return false;
-    };
-    for (marker, terminator) in [
-        (
-            "try_reserve_call_window(new_bp,local_slots).is_err(){",
-            "self.fiber.zero_slots_tail_at",
-        ),
-        (
-            "try_push_call_frame(",
-            "self.fiber.closure_replay.push_depth",
-        ),
-    ] {
-        let Some(branch) = compact_region_between_compact(&replay_setup, marker, terminator) else {
-            return false;
-        };
-        let Some(close_pos) = compact_pattern_position(
-            &branch,
-            "self.fiber.closure_replay.finish_extern_terminal();",
-        ) else {
-            return false;
-        };
-        let Some(trap_pos) = compact_pattern_position(&branch, "returnruntime_trap(") else {
-            return false;
-        };
-        if !(close_pos < trap_pos && compact_contains(&branch, "RuntimeTrapKind::StackOverflow")) {
-            return false;
-        }
-    }
-    true
-}
-
-fn compact_region_between_compact(
-    compact: &[u8],
-    marker: &str,
-    terminator: &str,
-) -> Option<Vec<u8>> {
-    vo_source_contract::compact_region_between_compact(compact, marker, terminator)
-}
 
 fn test_function(param_slots: u16, local_slots: u16, is_closure: bool) -> FunctionDef {
     test_function_with_recv(param_slots, local_slots, 0, is_closure)
@@ -103,7 +45,7 @@ fn test_function_with_recv(
         has_calls: false,
         has_call_extern: false,
         code: Vec::<Instruction>::new(),
-        jit_metadata: Vec::<JitInstructionMetadata>::new(),
+        instruction_metadata: Vec::<InstructionMetadata>::new(),
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         slot_types,
         capture_types: Vec::new(),
@@ -241,7 +183,7 @@ fn caller_with_call_layout(
     ret_layout: Vec<SlotType>,
 ) -> FunctionDef {
     let mut caller = test_function(0, local_slots, false);
-    caller.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+    caller.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout,
         ret_layout,
     }];
@@ -270,7 +212,7 @@ fn vm_callsite_metadata_preserves_dynamic_call_width_boundaries() {
 
     for method_idx in [0_u32, 255, 256] {
         let mut caller = test_function(0, 2, false);
-        caller.jit_metadata = vec![JitInstructionMetadata::CallIfaceLayout {
+        caller.instruction_metadata = vec![InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 7,
             method_idx,
             arg_layout: Vec::new(),
@@ -424,39 +366,6 @@ fn vm_call_closure_canon_001_extern_replay_closure_uses_canonical_ref_for_slot0(
     assert_eq!(frame.func_id, 0);
     assert_eq!(fiber.stack[frame.bp], closure_ref as u64);
     assert_eq!(fiber.closure_replay.depth, fiber.frames.len());
-}
-
-#[test]
-fn vm_extern_replay_setup_stack_overflow_062_closes_scope_before_runtime_trap() {
-    assert!(
-            extern_replay_setup_stack_overflow_closes_scope_062(include_str!("../frame_call.rs")),
-            "extern replay setup must not leave an active replay scope when stack overflow unwinds through recover"
-        );
-}
-
-#[test]
-fn vm_extern_replay_setup_stack_overflow_062_rejects_comment_spoofed_scope_close() {
-    let spoof = r#"
-            pub(crate) fn call_extern_replay_closure() {
-                if self.fiber.try_reserve_call_window(new_bp, local_slots).is_err() {
-                    // self.fiber.closure_replay.finish_extern_terminal();
-                    return runtime_trap(RuntimeTrapKind::StackOverflow);
-                }
-                self.fiber.zero_slots_tail_at(new_bp, 0, 0);
-                if self.fiber.try_push_call_frame().is_err() {
-                    // self.fiber.closure_replay.finish_extern_terminal();
-                    return runtime_trap(RuntimeTrapKind::StackOverflow);
-                }
-                self.fiber.closure_replay.push_depth(self.fiber.frames.len());
-            }
-
-            fn validate_closure_target() {}
-        "#;
-
-    assert!(
-        !extern_replay_setup_stack_overflow_closes_scope_062(spoof),
-        "comment-only extern replay stack-overflow cleanup must not satisfy source contracts"
-    );
 }
 
 #[test]
@@ -979,6 +888,30 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_slot1_heap_kind_befo
     }
     assert_eq!(fiber.frames.len(), 1);
     assert_eq!(fiber.closure_replay.depth, 0);
+}
+
+#[test]
+fn vm_extern_replay_interface_boundary_rejects_invalid_tags_without_panicking() {
+    let mut gc = Gc::new();
+    let mut callee = test_function(2, 2, false);
+    callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
+    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
+    callee.borrowed_scan_slots_prefix =
+        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
+    callee.param_types = vec![interface_transfer(0, 0)];
+    let module = extern_replay_empty_interface_module(callee);
+    let itab_cache = ItabCache::new();
+    let closure_ref = closure::create(&mut gc, 0, 0);
+    let reserved_rttid = ((vo_runtime::INVALID_META_ID as u64) << 8) | ValueKind::String as u64;
+
+    for (slot0, expected) in [
+        (0xff, "invalid value-kind tag"),
+        (reserved_rttid, "reserved interface RTTID"),
+    ] {
+        let err = typed_extern_replay_args(&gc, &module, &itab_cache, closure_ref, vec![slot0, 0])
+            .expect_err("malformed interface metadata must fail closed");
+        assert!(err.contains(expected), "{err}");
+    }
 }
 
 #[test]

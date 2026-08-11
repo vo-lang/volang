@@ -217,7 +217,9 @@ pub fn handle_jit_ok_return(
                     frame.pc,
                 );
             }
-            let first_defer = pending.remove(0);
+            let first_defer = pending
+                .pop()
+                .expect("non-empty deferred replay pending stack");
 
             if let Err(result) = push_unwind_state(
                 fiber,
@@ -359,7 +361,7 @@ pub fn handle_jit_ok_return(
 
     if !pending_defers.is_empty() {
         let mut pending = pending_defers;
-        let first_defer = pending.remove(0);
+        let first_defer = pending.pop().expect("non-empty JIT defer pending stack");
 
         if let Err(result) = push_unwind_state(
             fiber,
@@ -757,7 +759,9 @@ fn handle_initial_return(
                     frame.pc,
                 );
             }
-            let first_defer = pending.remove(0);
+            let first_defer = pending
+                .pop()
+                .expect("non-empty closure replay pending stack");
 
             if let Err(result) = push_unwind_state(
                 fiber,
@@ -918,7 +922,9 @@ fn handle_initial_return(
     // Execute defers or complete return
     if !pending_defers.is_empty() {
         let mut pending = pending_defers;
-        let first_defer = pending.remove(0);
+        let first_defer = pending
+            .pop()
+            .expect("non-empty interpreter defer pending stack");
 
         if let Err(result) = push_unwind_state(
             fiber,
@@ -972,7 +978,7 @@ fn handle_return_defer_returned(
         return ExecResult::JitError("return defer boundary missing unwind state".to_string());
     };
     let pending = &mut state.pending;
-    collect_and_prepend_nested_defers(
+    collect_and_stack_nested_defers(
         &mut fiber.defer_stack,
         pending,
         current_frame_depth,
@@ -1108,7 +1114,9 @@ fn start_panic_in_active_defer(
         ));
     };
     fiber.clear_parent_borrowed_slots(&frame, 0, 0);
-    let first_defer = pending.remove(0);
+    let first_defer = pending
+        .pop()
+        .expect("non-empty active-defer panic pending stack");
     if let Err(result) = push_unwind_state(
         fiber,
         UnwindingState {
@@ -1140,7 +1148,7 @@ fn handle_panic_defer_returned(gc: &mut Gc, fiber: &mut Fiber, module: &Module) 
         return ExecResult::JitError("panic defer boundary missing unwind state".to_string());
     };
     let pending = &mut state.pending;
-    collect_and_prepend_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
+    collect_and_stack_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
     let _ = pop_frame(fiber);
 
     // Check if recover() was called (panic_state is None means recovered)
@@ -1194,12 +1202,7 @@ fn handle_panic_during_unwinding(gc: &mut Gc, fiber: &mut Fiber, module: &Module
             return ExecResult::JitError("panic during unwind lost unwind state".to_string());
         };
         let pending = &mut state.pending;
-        collect_and_prepend_nested_defers(
-            &mut fiber.defer_stack,
-            pending,
-            current_frame_depth,
-            true,
-        );
+        collect_and_stack_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
         if let Some(frame) = pop_frame(fiber) {
             fiber.clear_parent_borrowed_slots(&frame, 0, 0);
         }
@@ -1312,7 +1315,7 @@ fn start_panic_unwind_until(
             fiber.clear_parent_borrowed_slots(&frame, 0, 0);
 
             let mut pending = pending;
-            let first_defer = pending.remove(0);
+            let first_defer = pending.pop().expect("non-empty panic unwind pending stack");
             let panic_context = fiber.panic_context();
 
             if let Err(result) = push_unwind_state(
@@ -1925,7 +1928,10 @@ fn try_read_heap_gcrefs(
     Ok(vals)
 }
 
-/// Collect defers for a frame in LIFO order.
+/// Collect defers for a frame into tail-pop order.
+///
+/// `defer_stack` is popped in execution order (newest registration first), then
+/// reversed once so `Vec::pop` remains the O(1) next-defer operation.
 fn collect_defers(
     defer_stack: &mut Vec<DeferEntry>,
     frame_depth: usize,
@@ -1946,22 +1952,21 @@ fn collect_defers(
             break;
         }
     }
+    collected.reverse();
     collected
 }
 
-/// Collect defers from current frame and prepend to pending list.
-fn collect_and_prepend_nested_defers(
+/// Stack defers from the current frame ahead of the older pending work.
+///
+/// Both vectors keep their next entry at the tail, so appending the newly
+/// collected entries gives them priority without copying the old pending tail.
+fn collect_and_stack_nested_defers(
     defer_stack: &mut Vec<DeferEntry>,
     pending: &mut Vec<DeferEntry>,
     frame_depth: usize,
     include_errdefers: bool,
 ) {
-    let nested = collect_defers(defer_stack, frame_depth, include_errdefers);
-    if !nested.is_empty() {
-        let mut new_pending = nested;
-        new_pending.append(pending);
-        *pending = new_pending;
-    }
+    pending.extend(collect_defers(defer_stack, frame_depth, include_errdefers));
 }
 
 /// Execute next defer from pending list, updating current_defer_generation.
@@ -1970,10 +1975,9 @@ fn execute_next_defer(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
     let Some(state) = fiber.unwinding.as_mut() else {
         return ExecResult::JitError("unwind state missing while executing next defer".to_string());
     };
-    if state.pending.is_empty() {
+    let Some(next_defer) = state.pending.pop() else {
         return ExecResult::JitError("unwind state has no pending defer to execute".to_string());
-    }
-    let next_defer = state.pending.remove(0);
+    };
     state.current_defer_generation = next_defer.registered_at_generation;
     call_defer_entry(gc, fiber, &next_defer, module)
 }

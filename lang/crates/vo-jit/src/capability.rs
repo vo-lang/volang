@@ -44,7 +44,6 @@ pub enum BackendStatus {
     /// Lowered through a runtime helper/callback while staying in JIT code.
     RuntimeHelper,
     /// Compiled with an explicit runtime side-exit or VM call materialization path.
-    VmCallMaterialization,
     /// Not a valid JIT input.
     Unsupported,
 }
@@ -69,16 +68,17 @@ pub enum RuntimePathPolicy {
 pub struct OpcodeCapability {
     pub opcode: Opcode,
     pub family: OpcodeFamily,
-    pub full_jit: BackendStatus,
-    pub osr: BackendStatus,
+    /// Full-function and OSR use the same lowering catalogue.
+    pub backend: BackendStatus,
     pub runtime_path: RuntimePathPolicy,
-    pub reason: &'static str,
 }
 
+#[cfg(test)]
 pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
     crate::semantics::opcode_capability_contract(opcode)
 }
 
+#[cfg(test)]
 pub fn capability_matrix() -> Vec<OpcodeCapability> {
     (0..Opcode::COUNT)
         .map(|raw| opcode_capability(Opcode::from_u8(raw as u8)))
@@ -97,14 +97,9 @@ mod tests {
             let opcode = Opcode::from_u8(raw as u8);
             assert_eq!(capability.opcode, opcode);
             assert_ne!(
-                capability.full_jit,
+                capability.backend,
                 BackendStatus::Unsupported,
-                "{opcode:?} must declare a full-function JIT status"
-            );
-            assert_ne!(
-                capability.osr,
-                BackendStatus::Unsupported,
-                "{opcode:?} must declare an OSR status"
+                "{opcode:?} must declare a JIT backend status"
             );
         }
     }
@@ -112,15 +107,13 @@ mod tests {
     #[test]
     fn invalid_opcode_is_explicitly_unsupported() {
         let capability = opcode_capability(Opcode::Invalid);
-        assert_eq!(capability.full_jit, BackendStatus::Unsupported);
-        assert_eq!(capability.osr, BackendStatus::Unsupported);
+        assert_eq!(capability.backend, BackendStatus::Unsupported);
         assert_eq!(capability.runtime_path, RuntimePathPolicy::InvalidOpcode);
     }
 
     #[test]
     fn call_capability_matches_call_plan_routes() {
         use crate::call_helpers::{CallPlan, CallRoute, MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS};
-        use cranelift_codegen::ir::FuncRef;
         use vo_runtime::bytecode::FunctionDef;
 
         fn func(local_slots: u16, has_defer: bool) -> FunctionDef {
@@ -142,7 +135,7 @@ mod tests {
                 has_calls: false,
                 has_call_extern: false,
                 code: Vec::new(),
-                jit_metadata: Vec::new(),
+                instruction_metadata: Vec::new(),
                 slot_types: Vec::new(),
                 borrowed_scan_slots_prefix: Vec::new(),
                 capture_types: Vec::new(),
@@ -152,22 +145,23 @@ mod tests {
         }
 
         let capability = opcode_capability(Opcode::Call);
-        assert_eq!(capability.full_jit, BackendStatus::CompilerSpecific);
-        assert_eq!(capability.osr, BackendStatus::CompilerSpecific);
+        assert_eq!(capability.backend, BackendStatus::CompilerSpecific);
         assert_eq!(
             capability.runtime_path,
             RuntimePathPolicy::VmCallMaterialization
         );
 
-        let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
-        assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
-        assert_eq!(direct.route_for_loop(), CallRoute::KnownDirectJit);
+        let direct = CallPlan::new(8, 2, &func(8, false));
+        assert_eq!(
+            direct.route_for_full_function(7),
+            CallRoute::DynamicJitTable
+        );
+        assert_eq!(direct.route_for_loop(), CallRoute::DynamicJitTable);
 
         let large = CallPlan::new(
             8,
             2,
             &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
-            Some(FuncRef::from_u32(3)),
         );
         assert_eq!(
             large.route_for_full_function(7),
@@ -182,8 +176,7 @@ mod tests {
         let iface = opcode_capability(Opcode::CallIface);
 
         for capability in [closure, iface] {
-            assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
-            assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
+            assert_eq!(capability.backend, BackendStatus::RuntimeHelper);
             assert_eq!(
                 capability.runtime_path,
                 RuntimePathPolicy::VmCallMaterialization
@@ -195,14 +188,12 @@ mod tests {
     fn array_and_slice_addr_capability_matches_inline_lowering() {
         let array = opcode_capability(Opcode::ArrayAddr);
         assert_eq!(array.family, OpcodeFamily::Array);
-        assert_eq!(array.full_jit, BackendStatus::Native);
-        assert_eq!(array.osr, BackendStatus::Native);
+        assert_eq!(array.backend, BackendStatus::Native);
         assert_eq!(array.runtime_path, RuntimePathPolicy::RuntimePanic);
 
         let slice = opcode_capability(Opcode::SliceAddr);
         assert_eq!(slice.family, OpcodeFamily::Slice);
-        assert_eq!(slice.full_jit, BackendStatus::Native);
-        assert_eq!(slice.osr, BackendStatus::Native);
+        assert_eq!(slice.backend, BackendStatus::Native);
         assert_eq!(slice.runtime_path, RuntimePathPolicy::RuntimePanic);
     }
 
@@ -210,8 +201,7 @@ mod tests {
     fn array_slice_allocations_remain_helper_lowered() {
         for opcode in [Opcode::ArrayNew, Opcode::SliceNew, Opcode::SliceAppend] {
             let capability = opcode_capability(opcode);
-            assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
-            assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
+            assert_eq!(capability.backend, BackendStatus::RuntimeHelper);
         }
     }
 

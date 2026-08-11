@@ -1,6 +1,6 @@
 use super::*;
-use crate::test_support::queue;
-use vo_common_core::bytecode::{FieldMeta, StructMeta};
+use crate::test_support::{endpoint_waiter, queue};
+use vo_common_core::bytecode::{FieldMeta, Module, StructMeta};
 use vo_common_core::RuntimeType;
 use vo_runtime::objects::queue_state::QueueData;
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
@@ -147,13 +147,77 @@ fn vm_queue_handle_validation_002_select_woken_rejects_non_queue_gcref() {
 }
 
 #[test]
+fn blocked_select_send_persists_an_island_managed_payload() {
+    let mut vm_state = crate::vm::VmState::new();
+    let (meta, rttid) = int_meta();
+    let ch = queue::create(&mut vm_state.gc, QueueKind::Chan, meta, rttid, 1, 0);
+    let mut stack = vec![ch as u64, 123, 0];
+    let mut select_state = select_state_with_case(SelectCaseKind::Send);
+
+    let result = exec_select_exec(
+        SelectExecContext {
+            stack: stack.as_mut_ptr(),
+            bp: 0,
+            island_id: 0,
+            fiber_key: 1,
+            vm_state: &mut vm_state,
+            module: None,
+        },
+        &mut select_state,
+        2,
+    );
+
+    assert!(matches!(result, SelectResult::Block));
+    let (_, payload) = queue::local_state(ch)
+        .waiting_senders
+        .front()
+        .expect("blocked select sender");
+    assert_eq!(payload.as_ref(), &[123]);
+    assert!(matches!(
+        payload,
+        vo_runtime::objects::queue_state::QueueMessage::Managed { backing, len: 1 }
+            if !backing.is_null()
+    ));
+}
+
+#[test]
+fn blocked_select_send_obeys_island_allocation_policy() {
+    let mut vm_state = crate::vm::VmState::new();
+    let (meta, rttid) = int_meta();
+    let ch = queue::create(&mut vm_state.gc, QueueKind::Chan, meta, rttid, 1, 0);
+    vm_state.gc.memory_set_allocation_allowed(false);
+    let mut stack = vec![ch as u64, 123, 0];
+    let mut select_state = select_state_with_case(SelectCaseKind::Send);
+
+    let result = exec_select_exec(
+        SelectExecContext {
+            stack: stack.as_mut_ptr(),
+            bp: 0,
+            island_id: 0,
+            fiber_key: 1,
+            vm_state: &mut vm_state,
+            module: None,
+        },
+        &mut select_state,
+        2,
+    );
+
+    match result {
+        SelectResult::Malformed(message) => assert!(message.contains("allocation"), "{message}"),
+        other => panic!("disabled Island allocation must reject select send, got {other:?}"),
+    }
+    assert!(select_state.is_none());
+    assert!(queue::local_state(ch).waiting_senders.is_empty());
+}
+
+#[test]
 fn vm_select_case_contract_017_rejects_case_beyond_declared_select_begin_count() {
     let mut fiber = Fiber::new(0);
     exec_select_begin(&mut fiber, 1, false).unwrap();
 
-    exec_select_recv(&mut fiber.select_state, 0, 1, 1, false, 0)
+    exec_select_recv_with_layout(&mut fiber.select_state, 0, 1, 1, None, false, 0)
         .expect("first declared case is valid");
-    let err = exec_select_recv(&mut fiber.select_state, 0, 1, 1, false, 1)
+    let err = exec_select_recv_with_layout(&mut fiber.select_state, 0, 1, 1, None, false, 1)
         .expect_err("second case exceeds SelectBegin declaration");
 
     assert!(err.contains("SelectBegin declared 1 cases"), "{err}");
@@ -506,14 +570,15 @@ fn vm_select_woken_validation_003_invalid_queue_preserves_registered_waiters() {
     let fiber_key = 0x0000_0001_0000_0001;
     queue::register_receiver(
         other,
-        QueueWaiter::selecting(
+        QueueWaiter::try_select(
             0,
             fiber_key,
             1,
             1,
             other as u64,
             queue_state::SelectWaitKind::Recv,
-        ),
+        )
+        .unwrap(),
     );
     let mut stack = vec![not_queue as u64, 0, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Recv);
@@ -564,14 +629,15 @@ fn vm_select_woken_closed_send_003_cancels_other_registered_waiters() {
     let fiber_key = 0x0000_0001_0000_0001;
     queue::register_sender(
         other,
-        QueueWaiter::selecting(
+        QueueWaiter::try_select(
             0,
             fiber_key,
             1,
             1,
             other as u64,
             queue_state::SelectWaitKind::Send,
-        ),
+        )
+        .unwrap(),
         vec![777].into_boxed_slice().into(),
     );
     let mut stack = vec![closed as u64, 123, 0];
@@ -666,7 +732,7 @@ fn select_send_missing_struct_metadata_is_malformed() {
             island_id: 0,
             fiber_key: 1,
             vm_state: &mut vm_state,
-            module: Some(&module),
+            module: Some((&module).into()),
         },
         &mut select_state,
         2,
@@ -699,7 +765,7 @@ fn select_send_missing_struct_metadata_is_malformed() {
             island_id: 0,
             fiber_key: 1,
             vm_state: &mut vm_state,
-            module: Some(&module),
+            module: Some((&module).into()),
         },
         &mut select_state,
         2,
@@ -748,7 +814,7 @@ fn vm_queue_remote_direct_txn_002_select_preflight_preserves_waiting_receiver_on
         1,
     );
     queue::install_home_info(ch, 42, vm_state.current_island_id);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     let payload_port = queue::create(
         &mut vm_state.gc,
         QueueKind::Port,
@@ -783,7 +849,7 @@ fn vm_queue_remote_direct_txn_002_select_preflight_preserves_waiting_receiver_on
             island_id: vm_state.current_island_id,
             fiber_key: 0x0000_0001_0000_0001,
             vm_state: &mut vm_state,
-            module: Some(&module),
+            module: Some((&module).into()),
         },
         &mut select_state,
         3,
@@ -843,7 +909,7 @@ fn vm_endpoint_direct_preflight_012_same_island_select_transfer_error_preserves_
     queue::install_home_info(ch, 42, vm_state.current_island_id);
     queue::register_receiver(
         ch,
-        QueueWaiter::endpoint(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
     );
     let payload_port = queue::create(
         &mut vm_state.gc,
@@ -879,7 +945,7 @@ fn vm_endpoint_direct_preflight_012_same_island_select_transfer_error_preserves_
             island_id: vm_state.current_island_id,
             fiber_key: 0x0000_0001_0000_0001,
             vm_state: &mut vm_state,
-            module: Some(&module),
+            module: Some((&module).into()),
         },
         &mut select_state,
         3,
@@ -908,7 +974,7 @@ fn vm_queue_remote_direct_txn_002_select_missing_home_info_preserves_waiting_rec
     vm_state.current_island_id = 0;
     let (meta, rttid) = int_meta();
     let ch = queue::create(&mut vm_state.gc, QueueKind::Port, meta, rttid, 1, 1);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     let mut stack = vec![ch as u64, 123, 0, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Send);
 
@@ -953,7 +1019,7 @@ fn vm_endpoint_direct_preflight_012_same_island_select_missing_home_info_preserv
     let ch = queue::create(&mut vm_state.gc, QueueKind::Port, meta, rttid, 1, 1);
     queue::register_receiver(
         ch,
-        QueueWaiter::endpoint(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
     );
     let mut stack = vec![ch as u64, 123, 0, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Send);
@@ -1037,7 +1103,7 @@ fn vm_wake_remote_endpoint_002_select_recv_missing_home_info_preserves_waiting_s
     let ch = queue::create(&mut vm_state.gc, QueueKind::Port, meta, rttid, 1, 0);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(7, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![ch as u64, 99, 0];
@@ -1086,7 +1152,7 @@ fn vm_endpoint_sender_preflight_012_same_island_select_recv_missing_home_info_pr
     let ch = queue::create(&mut vm_state.gc, QueueKind::Port, meta, rttid, 1, 0);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(vm_state.current_island_id, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     let mut stack = vec![ch as u64, 99, 0];
@@ -1135,7 +1201,7 @@ fn vm_wake_remote_endpoint_001_select_send_responds_to_remote_receiver() {
     let (meta, rttid) = int_meta();
     let ch = queue::create(&mut vm_state.gc, QueueKind::Port, meta, rttid, 1, 0);
     queue::install_home_info(ch, 42, vm_state.current_island_id);
-    queue::register_receiver(ch, QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(7, 0x0000_0002_0000_0003, 11));
     let mut stack = vec![ch as u64, 55, 0];
     let mut select_state = select_state_with_case(SelectCaseKind::Send);
 
@@ -1154,19 +1220,18 @@ fn vm_wake_remote_endpoint_001_select_send_responds_to_remote_receiver() {
 
     assert_eq!(stack[2], 0);
     match result {
-        SelectResult::RemoteRecvData {
+        SelectResult::Queue(crate::exec::QueueAction::RemoteRecvData {
             endpoint_id,
             target_island,
-            fiber_key,
-            wait_id,
+            wait_key,
             data,
             island_effects,
             ..
-        } => {
+        }) => {
             assert_eq!(endpoint_id, 42);
             assert_eq!(target_island, 7);
-            assert_eq!(fiber_key, 0x0000_0002_0000_0003);
-            assert_eq!(wait_id, 11);
+            assert_eq!(wait_key.fiber_key(), 0x0000_0002_0000_0003);
+            assert_eq!(wait_key.wait_id().get(), 11);
             assert!(!data.is_empty());
             assert!(island_effects.is_empty());
         }
@@ -1186,7 +1251,7 @@ fn vm_wake_remote_endpoint_001_select_recv_acks_remote_sender() {
     queue::install_home_info(ch, 43, vm_state.current_island_id);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(8, 0x0000_0004_0000_0005, 12),
+        endpoint_waiter(8, 0x0000_0004_0000_0005, 12),
         vec![77].into_boxed_slice().into(),
     );
     let mut stack = vec![ch as u64, 0, 0];
@@ -1208,22 +1273,21 @@ fn vm_wake_remote_endpoint_001_select_recv_acks_remote_sender() {
     assert_eq!(stack[1], 77);
     assert_eq!(stack[2], 0);
     match result {
-            SelectResult::RemoteSendAck {
-                endpoint_id,
-                target_island,
-                fiber_key,
-                wait_id,
-                closed,
-                ..
-            } => {
-                assert_eq!(endpoint_id, 43);
-                assert_eq!(target_island, 8);
-                assert_eq!(fiber_key, 0x0000_0004_0000_0005);
-                assert_eq!(wait_id, 12);
-                assert!(!closed);
-            }
-            other => panic!(
-                "VM-WAKE-REMOTE-ENDPOINT-001 select recv must ack remote endpoint sender, got {other:?}"
-            ),
+        SelectResult::Queue(crate::exec::QueueAction::RemoteSendAck {
+            endpoint_id,
+            target_island,
+            wait_key,
+            closed,
+            ..
+        }) => {
+            assert_eq!(endpoint_id, 43);
+            assert_eq!(target_island, 8);
+            assert_eq!(wait_key.fiber_key(), 0x0000_0004_0000_0005);
+            assert_eq!(wait_key.wait_id().get(), 12);
+            assert!(!closed);
         }
+        other => panic!(
+            "VM-WAKE-REMOTE-ENDPOINT-001 select recv must ack remote endpoint sender, got {other:?}"
+        ),
+    }
 }

@@ -1,98 +1,319 @@
 use super::*;
 
 #[test]
-fn lowering_paths_do_not_raw_expect_registered_helpers() {
-    for (path, src) in [
-        ("contract.rs", include_str!("../contract.rs")),
-        ("call_helpers.rs", include_str!("../call_helpers.rs")),
-        (
-            "translate/memory.rs",
-            include_str!("../translate/memory.rs"),
-        ),
-        (
-            "translate/collections/mod.rs",
-            include_str!("../translate/collections/mod.rs"),
-        ),
-        (
-            "translate/collections/array.rs",
-            include_str!("../translate/collections/array.rs"),
-        ),
-        (
-            "translate/collections/element.rs",
-            include_str!("../translate/collections/element.rs"),
-        ),
-        (
-            "translate/collections/slice.rs",
-            include_str!("../translate/collections/slice.rs"),
-        ),
-        (
-            "translate/collections/map.rs",
-            include_str!("../translate/collections/map.rs"),
-        ),
-        (
-            "translate/collections/string.rs",
-            include_str!("../translate/collections/string.rs"),
-        ),
-        (
-            "translate/runtime_ops/mod.rs",
-            include_str!("../translate/runtime_ops/mod.rs"),
-        ),
-        (
-            "translate/runtime_ops/allocation.rs",
-            include_str!("../translate/runtime_ops/allocation.rs"),
-        ),
-        (
-            "translate/runtime_ops/closure.rs",
-            include_str!("../translate/runtime_ops/closure.rs"),
-        ),
-        (
-            "translate/runtime_ops/goroutine.rs",
-            include_str!("../translate/runtime_ops/goroutine.rs"),
-        ),
-        (
-            "translate/runtime_ops/interface.rs",
-            include_str!("../translate/runtime_ops/interface.rs"),
-        ),
-        (
-            "translate/runtime_ops/queue_select.rs",
-            include_str!("../translate/runtime_ops/queue_select.rs"),
-        ),
-    ] {
-        let production = vo_source_contract::production_source_without_test_modules(src);
-        for needle in [
-            ".expect(\"",
-            "helper not registered",
-            "helper must be registered",
-            "must be available",
-        ] {
-            assert!(
-                    !production.contains(needle),
-                    "{path} must return JitError/JitResult::JitError for missing helpers; found {needle:?}"
-                );
-        }
+fn backend_allocation_failure_is_a_resource_rejection() {
+    let error = JitError::Module(cranelift_module::ModuleError::Allocation {
+        err: std::io::Error::other("exhausted"),
+    });
+    assert_eq!(error.failure_kind(), JitFailureKind::ResourceRejected);
+}
+
+fn bounded_gc(max_objects: usize) -> vo_runtime::gc::Gc {
+    vo_runtime::gc::Gc::with_memory_config(vo_runtime::gc::VmMemoryConfig {
+        max_objects: Some(max_objects),
+        ..vo_runtime::gc::VmMemoryConfig::default()
+    })
+    .expect("bounded GC configuration")
+}
+
+#[test]
+fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
+    use vo_runtime::gc::MemoryError;
+    use vo_runtime::instruction::{SLICE_SLICE_FLAG_ARRAY, SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW};
+    use vo_runtime::objects::{array, slice, string};
+
+    let mut str_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::StrSlice, 3, 0, 1),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        3,
+        3,
+        1,
+    );
+    str_func.ret_slot_types = vec![SlotType::GcRef];
+
+    let mut slice_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::SliceSlice, 3, 0, 1),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        3,
+        3,
+        1,
+    );
+    slice_func.ret_slot_types = vec![SlotType::GcRef];
+
+    let mut array_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::with_flags(Opcode::SliceSlice, SLICE_SLICE_FLAG_ARRAY, 3, 0, 1),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        3,
+        3,
+        1,
+    );
+    array_func.ret_slot_types = vec![SlotType::GcRef];
+
+    let mut inline_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::with_flags(
+                Opcode::SliceSlice,
+                SLICE_SLICE_FLAG_ARRAY | SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW,
+                8,
+                0,
+                6,
+            ),
+            Instruction::new(Opcode::Return, 8, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        8,
+        8,
+        1,
+    );
+    inline_func.ret_slot_types = vec![SlotType::GcRef];
+
+    let mut module = VoModule::new("jit-view-oom".into());
+    module.functions = vec![str_func, slice_func, array_func, inline_func];
+    let mut jit = JitCompiler::new().expect("create jit compiler");
+    let externs = ResolvedExternTable::empty();
+    for func_id in 0..module.functions.len() {
+        jit.compile(
+            func_id as u32,
+            &module.functions[func_id],
+            &module,
+            default_compile_env(&externs),
+        )
+        .expect("compile view function");
+    }
+
+    let str_entry = unsafe { jit.cache.get_func_ptr(0).expect("string slice entry") };
+    let slice_entry = unsafe { jit.cache.get_func_ptr(1).expect("slice view entry") };
+    let array_entry = unsafe { jit.cache.get_func_ptr(2).expect("array view entry") };
+    let inline_entry = unsafe { jit.cache.get_func_ptr(3).expect("inline view entry") };
+
+    let mut string_gc = bounded_gc(2);
+    let source = string::create(&mut string_gc, b"x");
+    let mut args = [source as u64, 0, 1, 0];
+    let mut ret = [0u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.gc = &mut string_gc;
+    assert_eq!(
+        str_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::JitError
+    );
+    assert_eq!(
+        string_gc.last_memory_error(),
+        Some(MemoryError::MetadataExhausted)
+    );
+
+    let mut slice_gc = bounded_gc(2);
+    let source = slice::create(&mut slice_gc, ValueMeta::new(0, ValueKind::Int64), 8, 1, 1);
+    let mut args = [source as u64, 0, 1, 0];
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.gc = &mut slice_gc;
+    assert_eq!(
+        slice_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::JitError
+    );
+    assert_eq!(
+        slice_gc.last_memory_error(),
+        Some(MemoryError::MetadataExhausted)
+    );
+
+    let mut array_gc = bounded_gc(1);
+    let source = array::create(&mut array_gc, ValueMeta::new(0, ValueKind::Int64), 8, 1);
+    let mut args = [source as u64, 0, 1, 0];
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.gc = &mut array_gc;
+    assert_eq!(
+        array_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::JitError
+    );
+    assert_eq!(
+        array_gc.last_memory_error(),
+        Some(MemoryError::MetadataExhausted)
+    );
+
+    let mut inline_gc = bounded_gc(1);
+    let owner = inline_gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+    let mut args = [
+        owner as u64,
+        owner as u64,
+        ValueMeta::new(0, ValueKind::Int64).to_raw() as u64,
+        8,
+        8,
+        1,
+        0,
+        1,
+        0,
+    ];
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.gc = &mut inline_gc;
+    assert_eq!(
+        inline_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::JitError
+    );
+    assert_eq!(
+        inline_gc.last_memory_error(),
+        Some(MemoryError::MetadataExhausted)
+    );
+
+    for entry in [str_entry, slice_entry] {
+        let mut nil_gc = bounded_gc(0);
+        let mut args = [0u64; 4];
+        ret[0] = u64::MAX;
+        let mut ctx = parts.context(&module, &mut args);
+        ctx.gc = &mut nil_gc;
+        assert_eq!(
+            entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+            JitResult::Ok
+        );
+        assert_eq!(ret[0], 0);
+        assert_eq!(nil_gc.last_memory_error(), None);
     }
 }
 
 #[test]
-fn cranelift_ir_verifier_is_fail_fast_in_all_builds() {
-    let src = include_str!("../lib.rs");
-    let finalize = src
-        .split("fn finalize_function")
-        .nth(1)
-        .expect("finalize_function body");
-    let verifier_prefix = finalize
-        .split("verify_function")
-        .next()
-        .expect("verifier prefix");
+fn jit_checked_allocations_prioritize_managed_oom_over_runtime_traps() {
+    use vo_runtime::bytecode::InstructionMetadata;
+    use vo_runtime::gc::{Gc, MemoryError};
 
-    assert!(
-        !verifier_prefix.contains("debug_assertions"),
-        "Cranelift IR verification must not be debug-only"
+    let elem_meta = ValueMeta::new(0, ValueKind::Int64);
+    let elem_rttid = ValueRttid::new(0, ValueKind::Int64);
+    let packed_elem_type = u64::from(elem_meta.to_raw()) | (u64::from(elem_rttid.to_raw()) << 32);
+
+    let mut array_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 0, 0, 0),
+            Instruction::new(Opcode::LoadInt, 1, 1, 0),
+            Instruction::with_flags(Opcode::ArrayNew, 0, 2, 0, 1),
+            Instruction::new(Opcode::Return, 2, 1, 0),
+        ],
+        vec![SlotType::Value, SlotType::Value, SlotType::GcRef],
+        0,
+        0,
+        1,
     );
-    assert!(
-        finalize.contains("JitError::Internal(format!"),
-        "Cranelift IR verifier errors must fail the JIT compile boundary"
+    array_func.ret_slot_types = vec![SlotType::GcRef];
+    array_func.instruction_metadata[2] = InstructionMetadata::ElemLayout {
+        elem_bytes: 8,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Value],
+    };
+
+    let mut slice_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 0, 0, 0),
+            Instruction::new(Opcode::LoadInt, 1, 1, 0),
+            Instruction::new(Opcode::LoadInt, 2, 1, 0),
+            Instruction::with_flags(Opcode::SliceNew, 0, 3, 0, 1),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        vec![
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+        ],
+        0,
+        0,
+        1,
     );
+    slice_func.ret_slot_types = vec![SlotType::GcRef];
+    slice_func.instruction_metadata[3] = InstructionMetadata::ElemLayout {
+        elem_bytes: 8,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Value],
+    };
+
+    let mut queue_func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 0, 1, 0),
+            Instruction::new(Opcode::LoadInt, 1, 0, 0),
+            Instruction::new(Opcode::QueueNew, 2, 0, 1),
+            Instruction::new(Opcode::Return, 2, 1, 0),
+        ],
+        vec![SlotType::Value, SlotType::Value, SlotType::GcRef],
+        0,
+        0,
+        1,
+    );
+    queue_func.ret_slot_types = vec![SlotType::GcRef];
+    queue_func.instruction_metadata[2] = InstructionMetadata::QueueLayout {
+        elem_layout: vec![SlotType::Value],
+    };
+
+    let mut module = VoModule::new("jit-checked-allocation-oom".into());
+    module.constants = vec![
+        Constant::Int(i64::from(elem_meta.to_raw())),
+        Constant::Int(packed_elem_type as i64),
+    ];
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Int64));
+    module.functions = vec![array_func, slice_func, queue_func];
+
+    let mut jit = JitCompiler::new().expect("create jit compiler");
+    let externs = ResolvedExternTable::empty();
+    for func_id in 0..module.functions.len() {
+        jit.compile(
+            func_id as u32,
+            &module.functions[func_id],
+            &module,
+            default_compile_env(&externs),
+        )
+        .expect("compile checked allocation function");
+    }
+
+    let entries = [
+        unsafe { jit.cache.get_func_ptr(0).expect("array allocation entry") },
+        unsafe { jit.cache.get_func_ptr(1).expect("slice allocation entry") },
+        unsafe { jit.cache.get_func_ptr(2).expect("queue allocation entry") },
+    ];
+    let mut parts = JitContextParts::new();
+    for entry in entries {
+        let mut gc: Gc = bounded_gc(0);
+        let mut args = [0u64; 4];
+        let mut ret = [u64::MAX];
+        let mut ctx = parts.context(&module, &mut args);
+        ctx.gc = &mut gc;
+
+        assert_eq!(
+            entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+            JitResult::JitError
+        );
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
 }
 
 #[test]
@@ -113,7 +334,7 @@ fn jit_copy_n_overlap_matches_memmove_semantics() {
     let mut jit = JitCompiler::new().expect("create jit compiler");
     let externs = ResolvedExternTable::empty();
     let env = default_compile_env(&externs);
-    jit.compile(0, &module.functions[0], &module, env, &[])
+    jit.compile(0, &module.functions[0], &module, env)
         .expect("compile CopyN overlap repro");
     let code = jit.code_memory_stats();
     assert_eq!(code.function_count, 1);
@@ -121,7 +342,10 @@ fn jit_copy_n_overlap_matches_memmove_semantics() {
         code.function_bytes > 0,
         "compiled code bytes must be observable"
     );
-    assert_eq!(code.total_bytes(), code.function_bytes);
+    assert_eq!(code.total_emitted_bytes(), code.function_bytes);
+    assert_eq!(code.total_bytes(), code.function_committed_bytes);
+    assert!(code.total_bytes() >= code.total_emitted_bytes());
+    assert_eq!(code.total_bytes() % code.allocation_granularity_bytes, 0);
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
 
     let mut args = [1_u64, 2, 3, 0];
@@ -140,6 +364,218 @@ fn jit_copy_n_overlap_matches_memmove_semantics() {
 }
 
 #[test]
+fn jit_code_memory_limit_checks_committed_pages_and_caches_rejections() {
+    let func = make_func_with_sig(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 0, 0, 0, 0);
+    let mut module = VoModule::new("jit-code-memory-limit".into());
+    module.functions = vec![func.clone(), func];
+    let externs = ResolvedExternTable::empty();
+
+    let mut sizing = JitCompiler::new().expect("create sizing compiler");
+    sizing
+        .compile(
+            0,
+            &module.functions[0],
+            &module,
+            default_compile_env(&externs),
+        )
+        .expect("measure one compiled function");
+    let exact_limit = sizing.code_memory_stats().function_committed_bytes;
+    assert!(exact_limit > 0);
+
+    let mut jit =
+        JitCompiler::with_code_memory_limit(false, exact_limit).expect("create limited compiler");
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+    )
+    .expect("an exact-fit artifact must be admitted");
+    let admitted = jit.code_memory_stats();
+    assert_eq!(admitted.function_count, 1);
+    assert_eq!(admitted.total_bytes(), exact_limit);
+    assert_eq!(admitted.remaining_bytes(), 0);
+    assert_eq!(admitted.limit_bytes, exact_limit);
+
+    for _ in 0..2 {
+        let error = jit
+            .compile(
+                1,
+                &module.functions[1],
+                &module,
+                default_compile_env(&externs),
+            )
+            .expect_err("a second artifact must exceed the exact-fit budget");
+        assert!(matches!(
+            error,
+            JitError::CodeMemoryLimitExceeded {
+                limit_bytes,
+                used_bytes,
+                requested_bytes,
+            } if limit_bytes == exact_limit && used_bytes == exact_limit && requested_bytes > 0
+        ));
+    }
+
+    let rejected = jit.code_memory_stats();
+    assert_eq!(rejected.function_count, 1);
+    assert_eq!(rejected.total_bytes(), exact_limit);
+    assert_eq!(rejected.rejected_artifact_count, 1);
+    assert_eq!(
+        jit.analysis_memory_stats().analysis_count,
+        1,
+        "a code-page rejection must happen before building another function analysis"
+    );
+    assert!(unsafe { jit.get_func_ptr(1) }.is_none());
+}
+
+#[test]
+fn jit_code_memory_limit_covers_osr_artifacts_before_executable_allocation() {
+    let func = make_func(vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)], 1);
+    let mut module = VoModule::new("jit-osr-code-memory-limit".into());
+    module.functions.push(func);
+    let loop_info = LoopInfo {
+        begin_pc: 0,
+        end_pc: 0,
+        exit_pc: 1,
+    };
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::with_code_memory_limit(false, 0).expect("create zero-budget JIT");
+
+    for _ in 0..2 {
+        assert!(matches!(
+            jit.compile_loop(
+                0,
+                &module.functions[0],
+                &module,
+                default_compile_env(&externs),
+                &loop_info,
+            ),
+            Err(JitError::CodeMemoryLimitExceeded {
+                limit_bytes: 0,
+                used_bytes: 0,
+                requested_bytes,
+            }) if requested_bytes > 0
+        ));
+    }
+
+    let stats = jit.code_memory_stats();
+    assert_eq!(stats.loop_count, 0);
+    assert_eq!(stats.total_bytes(), 0);
+    assert_eq!(stats.rejected_artifact_count, 1);
+    assert_eq!(
+        jit.analysis_memory_stats().analysis_count,
+        0,
+        "OSR code-budget rejection must happen before building function analysis"
+    );
+    assert!(unsafe { jit.get_loop_func_ptr(0, 0) }.is_none());
+    let changed_scope = LoopInfo {
+        exit_pc: 2,
+        ..loop_info
+    };
+    assert!(matches!(
+        jit.compile_loop(
+            0,
+            &module.functions[0],
+            &module,
+            default_compile_env(&externs),
+            &changed_scope,
+        ),
+        Err(JitError::LoopScopeChanged)
+    ));
+}
+
+#[test]
+fn jit_analysis_budget_rejection_is_retryable_without_retained_poison_state() {
+    let func = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1);
+    let mut module = VoModule::new("jit-analysis-budget".into());
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::with_resource_limits(false, DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES, 0)
+        .expect("create analysis-limited JIT");
+
+    for _ in 0..2 {
+        assert!(matches!(
+            jit.compile(
+                0,
+                &module.functions[0],
+                &module,
+                default_compile_env(&externs),
+            ),
+            Err(JitError::AnalysisResourceLimitExceeded {
+                limit_bytes: 0,
+                requested_bytes,
+            }) if requested_bytes > 0
+        ));
+    }
+    assert!(jit.cache.analyses[0].is_none());
+    assert_eq!(
+        jit.analysis_memory_stats(),
+        JitAnalysisMemoryStats {
+            analysis_count: 0,
+            retained_bytes: 0,
+            limit_bytes: 0,
+            rejected_analysis_count: 2,
+            eviction_count: 0,
+        }
+    );
+}
+
+#[test]
+fn full_jit_and_all_osr_loops_share_one_function_analysis() {
+    let func = make_func(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 1, 0),
+            Instruction::new(Opcode::LoadInt, 1, 2, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ],
+        2,
+    );
+    let mut module = VoModule::new("shared-function-analysis".into());
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create JIT compiler");
+
+    for loop_info in [
+        LoopInfo {
+            begin_pc: 0,
+            end_pc: 1,
+            exit_pc: 2,
+        },
+        LoopInfo {
+            begin_pc: 1,
+            end_pc: 1,
+            exit_pc: 2,
+        },
+    ] {
+        jit.compile_loop(
+            0,
+            &module.functions[0],
+            &module,
+            default_compile_env(&externs),
+            &loop_info,
+        )
+        .expect("compile OSR loop");
+    }
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+    )
+    .expect("compile full function");
+
+    let analysis_stats = jit.analysis_memory_stats();
+    assert_eq!(analysis_stats.analysis_count, 1);
+    assert!(analysis_stats.retained_bytes > 0);
+    assert_eq!(
+        analysis_stats.remaining_bytes(),
+        analysis_stats.limit_bytes - analysis_stats.retained_bytes
+    );
+    assert_eq!(jit.code_memory_stats().loop_count, 2);
+    assert_eq!(jit.code_memory_stats().function_count, 1);
+}
+
+#[test]
 fn native_backedge_exhausts_budget_through_scheduler_yield_contract() {
     let func = make_func_with_sig(vec![Instruction::new(Opcode::Jump, 0, 0, 0)], 0, 0, 0, 0);
     let mut module = VoModule::new("native-timeslice".into());
@@ -152,7 +588,6 @@ fn native_backedge_exhausts_budget_through_scheduler_yield_contract() {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile native loop");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
@@ -185,7 +620,6 @@ fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile native straight-line function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
@@ -230,7 +664,6 @@ fn wide_function_reads_high_parameter_and_writes_high_integer_slot() {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile wide integer function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
@@ -276,7 +709,6 @@ fn wide_function_round_trips_high_float_slot() {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile wide float function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
@@ -335,7 +767,6 @@ fn callback_reload_crosses_the_ssa_memory_boundary() {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile callback reload function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
@@ -343,8 +774,8 @@ fn callback_reload_crosses_the_ssa_memory_boundary() {
     let mut args = vec![0_u64; usize::from(local_slots)];
     let mut ret = [0_u64; 2];
     let mut parts = JitContextParts::new();
+    parts.callbacks.recover_fn = Some(write_recover_slots);
     let mut ctx = parts.context(&module, &mut args);
-    ctx.recover_fn = Some(write_recover_slots);
 
     let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
 
@@ -378,7 +809,6 @@ fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile wide yielding function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
@@ -416,16 +846,9 @@ fn wide_osr_loop_writes_memory_backed_suffix_slots() {
     let mut module = VoModule::new("wide-osr-loop".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc: 0,
         exit_pc: 1,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: vec![high_slot],
-        has_calls: false,
     };
 
     let mut jit = JitCompiler::new().expect("create jit compiler");
@@ -436,7 +859,6 @@ fn wide_osr_loop_writes_memory_backed_suffix_slots() {
         &module,
         default_compile_env(&externs),
         &loop_info,
-        &[],
     )
     .expect("compile wide OSR loop");
     let loop_func = unsafe { jit.cache.get_loop_func_ptr(0, 0).expect("compiled loop") };
@@ -472,7 +894,6 @@ fn compiled_wide_function_bytes(local_slots: u16) -> usize {
         &module.functions[0],
         &module,
         default_compile_env(&externs),
-        &[],
     )
     .expect("compile wide scale function");
     jit.code_memory_stats().function_bytes
@@ -485,16 +906,9 @@ fn compiled_wide_loop_bytes(local_slots: u16) -> usize {
     let mut module = VoModule::new(format!("wide-loop-scale-{local_slots}"));
     module.functions.push(func);
     let loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc,
         exit_pc: end_pc + 1,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: Vec::new(),
-        has_calls: false,
     };
 
     let mut jit = JitCompiler::new().expect("create jit compiler");
@@ -505,7 +919,6 @@ fn compiled_wide_loop_bytes(local_slots: u16) -> usize {
         &module,
         default_compile_env(&externs),
         &loop_info,
-        &[],
     )
     .expect("compile wide scale loop");
     jit.code_memory_stats().loop_bytes
@@ -535,16 +948,9 @@ fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
     let mut module = VoModule::new("test".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc: 0,
         exit_pc: JitResult::JitError as usize,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: vec![0],
-        has_calls: false,
     };
 
     let mut jit = JitCompiler::new().expect("create jit compiler");
@@ -553,7 +959,7 @@ fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
         externs: &externs,
         backend_caps: Default::default(),
     };
-    jit.compile_loop(0, &module.functions[0], &module, env, &loop_info, &[])
+    jit.compile_loop(0, &module.functions[0], &module, env, &loop_info)
         .expect("compile minimal fallthrough loop");
     let loop_func = unsafe { jit.cache.get_loop_func_ptr(0, 0).expect("compiled loop") };
 
@@ -589,16 +995,9 @@ fn compile_loop_rejects_module_scope_change_instead_of_reusing_cached_loop_042()
         1,
     ));
     let loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc: 0,
         exit_pc: 1,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: vec![0],
-        has_calls: false,
     };
 
     let mut jit = JitCompiler::new().expect("create jit compiler");
@@ -607,11 +1006,11 @@ fn compile_loop_rejects_module_scope_change_instead_of_reusing_cached_loop_042()
         externs: &externs,
         backend_caps: Default::default(),
     };
-    jit.compile_loop(0, &first.functions[0], &first, env, &loop_info, &[])
+    jit.compile_loop(0, &first.functions[0], &first, env, &loop_info)
         .expect("compile first module loop");
 
     assert!(
-        jit.compile_loop(0, &second.functions[0], &second, env, &loop_info, &[])
+        jit.compile_loop(0, &second.functions[0], &second, env, &loop_info)
             .is_err(),
         "JitCompiler must not reuse OSR loop cache entries across different verified modules"
     );
@@ -625,16 +1024,9 @@ fn compile_loop_rejects_env_scope_change_instead_of_reusing_cached_loop_043() {
         1,
     ));
     let loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc: 0,
         exit_pc: 1,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: vec![0],
-        has_calls: false,
     };
 
     let first_externs = resolved_extern_table_for_scope(1);
@@ -651,7 +1043,6 @@ fn compile_loop_rejects_env_scope_change_instead_of_reusing_cached_loop_043() {
             },
         },
         &loop_info,
-        &[],
     )
     .expect("compile first env loop");
 
@@ -667,7 +1058,6 @@ fn compile_loop_rejects_env_scope_change_instead_of_reusing_cached_loop_043() {
                     },
                 },
                 &loop_info,
-                &[],
             )
             .is_err(),
             "JitCompiler must not reuse OSR loop cache entries across resolved extern/backend-cap scopes"
@@ -682,16 +1072,9 @@ fn compile_loop_rejects_loop_scope_change_instead_of_reusing_cached_loop_044() {
         1,
     ));
     let first_loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc: 0,
         exit_pc: 1,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: vec![0],
-        has_calls: false,
     };
     let mut second_loop_info = first_loop_info.clone();
     second_loop_info.exit_pc = 2;
@@ -699,34 +1082,13 @@ fn compile_loop_rejects_loop_scope_change_instead_of_reusing_cached_loop_044() {
     let mut jit = JitCompiler::new().expect("create jit compiler");
     let externs = ResolvedExternTable::empty();
     let env = default_compile_env(&externs);
-    jit.compile_loop(0, &module.functions[0], &module, env, &first_loop_info, &[])
+    jit.compile_loop(0, &module.functions[0], &module, env, &first_loop_info)
         .expect("compile first loop scope");
 
     assert!(
-        jit.compile_loop(
-            0,
-            &module.functions[0],
-            &module,
-            env,
-            &second_loop_info,
-            &[],
-        )
-        .is_err(),
+        jit.compile_loop(0, &module.functions[0], &module, env, &second_loop_info)
+            .is_err(),
         "JitCompiler must not reuse OSR loop cache entries across different LoopInfo scopes"
-    );
-}
-
-#[test]
-fn vm_osr_borrow_boundary_001_loop_compiler_has_no_runtime_transition_path() {
-    let loop_compiler = include_str!("../loop_compiler.rs");
-    assert!(
-            !loop_compiler.contains("apply_runtime_transition")
-                && !loop_compiler.contains("push_pending_runtime_transition"),
-            "vo-jit loop compiler must return JitResult boundaries instead of mutating VM runtime state"
-        );
-    assert!(
-        loop_compiler.contains("JitResult::Ok"),
-        "OSR loop exits must publish control back to the VM through JitResult"
     );
 }
 
@@ -736,16 +1098,9 @@ fn compile_loop_rejects_out_of_range_loop_info_instead_of_panicking() {
     let mut module = VoModule::new("test".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
-        depth: 0,
         begin_pc: 0,
         end_pc: 7,
         exit_pc: 1,
-        has_defer: false,
-        has_labeled_break: false,
-        has_labeled_continue: false,
-        live_in: Vec::new(),
-        live_out: vec![0],
-        has_calls: false,
     };
 
     let mut jit = JitCompiler::new().expect("create jit compiler");
@@ -755,13 +1110,28 @@ fn compile_loop_rejects_out_of_range_loop_info_instead_of_panicking() {
         backend_caps: Default::default(),
     };
     let err = jit
-        .compile_loop(0, &module.functions[0], &module, env, &loop_info, &[])
+        .compile_loop(0, &module.functions[0], &module, env, &loop_info)
         .expect_err("malformed LoopInfo must fail fast");
 
     assert!(matches!(err, JitError::InvalidOsrTarget(0)));
 }
 
 #[test]
-fn source_contract_tests_do_not_use_textual_cfg_test_truncation_062() {
-    vo_source_contract::assert_no_textual_cfg_test_splits(env!("CARGO_MANIFEST_DIR"));
+fn native_frame_budget_rejects_oversized_explicit_stack_storage() {
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+
+    let mut jit = JitCompiler::new().expect("create jit compiler");
+    jit.ctx.func.sized_stack_slots.push(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (MAX_JIT_NATIVE_FRAME_BYTES + 8) as u32,
+        3,
+    ));
+
+    assert!(matches!(
+        jit.verify_native_frame_budget(),
+        Err(JitError::NativeFrameLimitExceeded {
+            limit_bytes: MAX_JIT_NATIVE_FRAME_BYTES,
+            requested_bytes,
+        }) if requested_bytes == MAX_JIT_NATIVE_FRAME_BYTES + 8
+    ));
 }

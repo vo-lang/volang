@@ -312,6 +312,7 @@ pub struct IoRuntime {
     /// are reused, so storage is bounded by peak concurrent write-back reads.
     staged_gc_roots: Vec<Option<GcRef>>,
     free_staged_gc_root_slots: Vec<usize>,
+    staged_gc_root_additions: u64,
     token_attachments: HashMap<IoToken, TokenAttachment>,
     resource_cleanups: HashMap<IoResourceToken, ResourceCleanup>,
 }
@@ -356,6 +357,7 @@ impl IoRuntime {
             slice_staging: HashMap::new(),
             staged_gc_roots: Vec::new(),
             free_staged_gc_root_slots: Vec::new(),
+            staged_gc_root_additions: 0,
             token_attachments: HashMap::new(),
             resource_cleanups: HashMap::new(),
         })
@@ -924,15 +926,20 @@ impl IoRuntime {
     }
 
     fn retain_staged_gc_root(&mut self, root: GcRef) -> usize {
-        if let Some(slot) = self.free_staged_gc_root_slots.pop() {
-            debug_assert!(self.staged_gc_roots[slot].is_none());
-            self.staged_gc_roots[slot] = Some(root);
-            slot
-        } else {
-            let slot = self.staged_gc_roots.len();
-            self.staged_gc_roots.push(Some(root));
-            slot
-        }
+        let slot = loop {
+            let Some(slot) = self.free_staged_gc_root_slots.pop() else {
+                let slot = self.staged_gc_roots.len();
+                self.staged_gc_roots.push(Some(root));
+                break slot;
+            };
+            let Some(entry @ None) = self.staged_gc_roots.get_mut(slot) else {
+                continue;
+            };
+            *entry = Some(root);
+            break slot;
+        };
+        self.staged_gc_root_additions = self.staged_gc_root_additions.wrapping_add(1);
+        slot
     }
 
     fn release_staged_gc_root(&mut self, slot: usize) {
@@ -949,15 +956,19 @@ impl IoRuntime {
         while self.staged_gc_roots.last().is_some_and(Option::is_none) {
             self.staged_gc_roots.pop();
         }
-        let retained_len = self.staged_gc_roots.len();
-        self.free_staged_gc_root_slots
-            .retain(|free| *free < retained_len);
     }
 
     /// Stable root slots retained by asynchronous read write-back targets.
     /// The VM scans every slot, including holes, within its normal byte budget.
     pub fn staged_gc_root_slots(&self) -> &[Option<GcRef>] {
         &self.staged_gc_roots
+    }
+
+    /// Opaque token that changes whenever a write-back operation retains a new
+    /// managed root. Callers compare tokens around one provider invocation.
+    #[inline]
+    pub fn staged_gc_root_additions(&self) -> u64 {
+        self.staged_gc_root_additions
     }
 }
 
@@ -995,7 +1006,7 @@ mod tests {
     #[cfg(unix)]
     use std::fs::File;
     #[cfg(unix)]
-    use std::io::Write;
+    use std::io::{Read, Write};
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
     #[cfg(unix)]
@@ -1110,11 +1121,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn fd_is_open(fd: i32) -> bool {
-        (unsafe { libc::fcntl(fd, libc::F_GETFD) }) != -1
-    }
-
-    #[cfg(unix)]
     fn high_numbered_stream(stream: UnixStream) -> UnixStream {
         let fd = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10_000) };
         assert!(
@@ -1132,9 +1138,9 @@ mod tests {
         source: &UnixStream,
         cancellation: IoCancellation,
         buffer: &mut [u8],
-    ) -> (IoToken, i32, IoCancelKey) {
+    ) -> (IoToken, std::sync::Weak<AtomicBool>, IoCancelKey) {
+        let lease_lifetime = Arc::downgrade(&cancellation.cancelled);
         let lease = IoLease::try_clone(source, cancellation).expect("clone I/O lease");
-        let leased_fd = lease.handle() as i32;
         let cancel_key = lease.cancel_key();
         let token = runtime.submit_leased(
             lease,
@@ -1145,7 +1151,7 @@ mod tests {
             None,
         );
         assert!(!runtime.has_completion(token));
-        (token, leased_fd, cancel_key)
+        (token, lease_lifetime, cancel_key)
     }
 
     #[cfg(unix)]
@@ -1159,7 +1165,7 @@ mod tests {
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         let mut buffer = [0xa5];
         let source_fd = source.as_raw_fd();
-        let (token, leased_fd, _cancel_key) =
+        let (token, _lease_lifetime, _cancel_key) =
             pending_read(&mut runtime, &source, cancellation.clone(), &mut buffer);
 
         cancellation.cancel();
@@ -1176,7 +1182,11 @@ mod tests {
             io::ErrorKind::Interrupted
         );
         assert_eq!(buffer, [0xa5], "canceled read touched reused /dev/zero fd");
-        assert!(!fd_is_open(leased_fd), "completed lease fd remained open");
+        assert_eq!(
+            Arc::strong_count(&cancellation.cancelled),
+            1,
+            "completed operation retained its I/O lease"
+        );
         drop(reused);
     }
 
@@ -1188,7 +1198,7 @@ mod tests {
         source.set_nonblocking(true).expect("nonblocking source");
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         let mut buffer = [0];
-        let (token, leased_fd, cancel_key) = pending_read(
+        let (token, lease_lifetime, cancel_key) = pending_read(
             &mut runtime,
             &source,
             IoCancellation::new().expect("I/O cancellation key"),
@@ -1202,7 +1212,10 @@ mod tests {
             runtime.has_pending(),
             "the scheduler notification remains pending until poll"
         );
-        assert!(!fd_is_open(leased_fd));
+        assert!(
+            lease_lifetime.upgrade().is_none(),
+            "cancelled operation retained its I/O lease"
+        );
         assert_eq!(runtime.poll(), vec![token]);
         assert!(
             runtime.poll().is_empty(),
@@ -1223,7 +1236,7 @@ mod tests {
         source.set_nonblocking(true).expect("nonblocking source");
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         let mut buffer = [0];
-        let (token, leased_fd, cancel_key) = pending_read(
+        let (token, lease_lifetime, cancel_key) = pending_read(
             &mut runtime,
             &source,
             IoCancellation::new().expect("I/O cancellation key"),
@@ -1235,7 +1248,10 @@ mod tests {
             runtime.take_completion(token).result.unwrap_err().kind(),
             io::ErrorKind::Interrupted
         );
-        assert!(!fd_is_open(leased_fd));
+        assert!(
+            lease_lifetime.upgrade().is_none(),
+            "consumed cancellation retained its I/O lease"
+        );
         assert!(!runtime.has_pending());
         assert!(runtime.poll().is_empty());
     }
@@ -1248,7 +1264,7 @@ mod tests {
         source.set_nonblocking(true).expect("nonblocking source");
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         let mut buffer = [0];
-        let (token, leased_fd, cancel_key) = pending_read(
+        let (token, lease_lifetime, cancel_key) = pending_read(
             &mut runtime,
             &source,
             IoCancellation::new().expect("I/O cancellation key"),
@@ -1264,8 +1280,37 @@ mod tests {
             Ok(CompletionData::Size(1))
         ));
         assert_eq!(buffer, *b"x");
-        assert!(!fd_is_open(leased_fd));
+        assert!(
+            lease_lifetime.upgrade().is_none(),
+            "completed operation retained its I/O lease"
+        );
         assert!(!runtime.has_pending());
+    }
+
+    #[test]
+    fn staged_root_free_list_lazily_discards_trimmed_tail_slots() {
+        let mut runtime = IoRuntime::new().expect("test I/O runtime");
+        let root = core::ptr::NonNull::<crate::slot::Slot>::dangling().as_ptr();
+
+        let first = runtime.retain_staged_gc_root(root);
+        let middle = runtime.retain_staged_gc_root(root);
+        let tail = runtime.retain_staged_gc_root(root);
+        assert_eq!((first, middle, tail), (0, 1, 2));
+        runtime.release_staged_gc_root(tail);
+        runtime.release_staged_gc_root(first);
+
+        assert_eq!(runtime.retain_staged_gc_root(root), first);
+        assert_eq!(
+            runtime.retain_staged_gc_root(root),
+            2,
+            "a stale trimmed-tail entry must be skipped before append"
+        );
+
+        for _ in 0..10_000 {
+            let slot = runtime.retain_staged_gc_root(root);
+            runtime.release_staged_gc_root(slot);
+        }
+        assert!(runtime.free_staged_gc_root_slots.len() <= 3);
     }
 
     #[cfg(unix)]
@@ -1286,7 +1331,10 @@ mod tests {
             1,
             1,
         );
+        let additions_before = runtime.staged_gc_root_additions();
         let token = runtime.submit_lease_slice_read(lease, target);
+        assert_ne!(runtime.staged_gc_root_additions(), additions_before);
+        let additions_after_submit = runtime.staged_gc_root_additions();
         assert_eq!(runtime.staged_gc_root_slots(), &[Some(target)]);
         peer.write_all(b"r").expect("wake ready read");
         assert_eq!(runtime.poll(), vec![token]);
@@ -1300,6 +1348,11 @@ mod tests {
             Ok(CompletionData::Size(1))
         ));
         assert!(runtime.staged_gc_root_slots().is_empty());
+        assert_eq!(
+            runtime.staged_gc_root_additions(),
+            additions_after_submit,
+            "consuming a completion removes a root without reporting an addition"
+        );
         assert_eq!(unsafe { slice::byte_vec(target) }, b"r");
 
         let (source, _peer) = UnixStream::pair().expect("cancel socket pair");
@@ -1315,6 +1368,7 @@ mod tests {
             1,
         );
         let token = runtime.submit_lease_slice_read(lease, target);
+        assert_ne!(runtime.staged_gc_root_additions(), additions_after_submit);
         assert_eq!(runtime.staged_gc_root_slots(), &[Some(target)]);
         cancellation.cancel();
         runtime.cancel(cancel_key);
@@ -1391,12 +1445,9 @@ mod tests {
         peer.write_all(b"x").expect("prime socket");
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         let mut completed_buffer = [0];
-        let lease = IoLease::try_clone(
-            &source,
-            IoCancellation::new().expect("I/O cancellation key"),
-        )
-        .expect("clone lease");
-        let completed_fd = lease.handle() as i32;
+        let cancellation = IoCancellation::new().expect("I/O cancellation key");
+        let completed_lease_lifetime = Arc::downgrade(&cancellation.cancelled);
+        let lease = IoLease::try_clone(&source, cancellation).expect("clone lease");
         let token = runtime.submit_leased(
             lease,
             OpKind::Read,
@@ -1407,7 +1458,10 @@ mod tests {
         );
         assert!(runtime.has_completion(token));
         assert!(runtime.has_pending());
-        assert!(!fd_is_open(completed_fd));
+        assert!(
+            completed_lease_lifetime.upgrade().is_none(),
+            "immediate completion retained its I/O lease"
+        );
         assert!(matches!(
             runtime.take_completion(token).result,
             Ok(CompletionData::Size(1))
@@ -1417,23 +1471,25 @@ mod tests {
         assert!(runtime.poll().is_empty());
 
         let mut pending_buffer = [0];
-        let (_token, pending_fd, _) = pending_read(
+        let (_token, pending_lease_lifetime, _) = pending_read(
             &mut runtime,
             &source,
             IoCancellation::new().expect("I/O cancellation key"),
             &mut pending_buffer,
         );
         drop(runtime);
-        assert!(!fd_is_open(pending_fd), "VM/runtime drop leaked a lease fd");
+        assert!(
+            pending_lease_lifetime.upgrade().is_none(),
+            "VM/runtime drop retained an I/O lease"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn unconsumed_accept_completion_owns_and_closes_accepted_fd() {
         let _guard = IO_FD_TEST_LOCK.lock().unwrap();
-        let (accepted, _peer) = UnixStream::pair().expect("accepted socket pair");
+        let (accepted, mut peer) = UnixStream::pair().expect("accepted socket pair");
         let accepted = unsafe { OwnedFd::from_raw_fd(accepted.into_raw_fd()) };
-        let accepted_fd = accepted.as_raw_fd();
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         let token = runtime.alloc_token();
         runtime.completions.insert(
@@ -1443,12 +1499,16 @@ mod tests {
                 result: Ok(CompletionData::Accept(accepted)),
             },
         );
-        assert!(fd_is_open(accepted_fd));
-        drop(runtime);
-        assert!(
-            !fd_is_open(accepted_fd),
-            "unconsumed accepted fd leaked on VM drop"
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        let mut byte = [0_u8];
+        assert_eq!(
+            peer.read(&mut byte)
+                .expect_err("accepted fd is still owned")
+                .kind(),
+            io::ErrorKind::WouldBlock
         );
+        drop(runtime);
+        assert_eq!(peer.read(&mut byte).expect("peer observes close"), 0);
     }
 
     #[cfg(unix)]
@@ -1458,8 +1518,8 @@ mod tests {
         let (source, _peer) = UnixStream::pair().expect("socket pair");
         source.set_nonblocking(true).expect("nonblocking source");
         let cancellation = IoCancellation::new().expect("I/O cancellation key");
+        let lease_lifetime = Arc::downgrade(&cancellation.cancelled);
         let lease = IoLease::try_clone(&source, cancellation).expect("clone I/O lease");
-        let leased_fd = lease.handle() as i32;
         let mut runtime = IoRuntime::new().expect("test I/O runtime");
         runtime
             .driver
@@ -1472,7 +1532,10 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(error.to_string().contains("injected registration failure"));
         assert!(!runtime.has_pending());
-        assert!(!fd_is_open(leased_fd));
+        assert!(
+            lease_lifetime.upgrade().is_none(),
+            "failed registration retained its I/O lease"
+        );
     }
 
     #[cfg(unix)]

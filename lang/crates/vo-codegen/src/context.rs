@@ -487,33 +487,23 @@ impl CodegenContext {
     }
 
     pub fn new(name: &str) -> Self {
+        let mut module = Module::new(name.to_string());
+        // Index 0 is reserved for ref box (single GcRef slot for boxing reference types).
+        module.struct_metas.push(vo_runtime::bytecode::StructMeta {
+            slot_types: vec![vo_runtime::SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: HashMap::new(),
+        });
+        // Index 0 is reserved for empty interface{}.
+        module
+            .interface_metas
+            .push(vo_runtime::bytecode::InterfaceMeta {
+                name: String::new(),
+                method_names: Vec::new(),
+                methods: Vec::new(),
+            });
         Self {
-            module: Module {
-                name: name.to_string(),
-                // Index 0 is reserved for ref box (single GcRef slot for boxing reference types)
-                struct_metas: vec![vo_runtime::bytecode::StructMeta {
-                    slot_types: vec![vo_runtime::SlotType::GcRef],
-                    fields: Vec::new(),
-                    field_index: HashMap::new(),
-                }],
-                // Index 0 is reserved for empty interface{}
-                interface_metas: vec![vo_runtime::bytecode::InterfaceMeta {
-                    name: String::new(),
-                    method_names: Vec::new(),
-                    methods: Vec::new(),
-                }],
-                named_type_metas: Vec::new(),
-                runtime_types: Vec::new(),
-                itabs: Vec::new(),
-                well_known: vo_runtime::bytecode::WellKnownTypes::default(),
-                constants: Vec::new(),
-                globals: Vec::new(),
-                functions: Vec::new(),
-                externs: Vec::new(),
-                entry_func: 0,
-                island_init_func: 0,
-                debug_info: vo_common_core::debug_info::DebugInfo::new(),
-            },
+            module,
             func_indices: HashMap::new(),
             extern_names: HashMap::new(),
             global_indices: HashMap::new(),
@@ -603,16 +593,6 @@ impl CodegenContext {
             self.record_layout_error(format!("type slot count exceeds u16::MAX: {slots} slots"));
             0
         })
-    }
-
-    pub(crate) fn dynamic_call_shape_or_record(
-        &mut self,
-        arg_slots: usize,
-        ret_slots: usize,
-    ) -> u16 {
-        let arg_slots = self.slot_count_u16_or_record(arg_slots);
-        let ret_slots = self.slot_count_u16_or_record(ret_slots);
-        crate::type_info::encode_dynamic_call_args(arg_slots, ret_slots)
     }
 
     pub(crate) fn call_iface_method_index_or_record(&mut self, method_idx: usize) -> u32 {
@@ -1489,7 +1469,7 @@ impl CodegenContext {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             slot_types: Vec::new(),
             borrowed_scan_slots_prefix: vec![0],
             capture_types: Vec::new(),
@@ -2405,7 +2385,7 @@ impl CodegenContext {
             builder.emit_copy(args_start + recv_slots, first_param, forwarded_param_slots);
         }
 
-        builder.emit_static_call(method_func_id, args_start, total_arg_slots, ret_slots);
+        builder.emit_static_call(method_func_id, args_start);
         builder.set_ret_slot_types(ret_slot_types);
         builder.emit_op(
             vo_runtime::instruction::Opcode::Return,
@@ -2482,15 +2462,12 @@ impl CodegenContext {
             builder.emit_copy(args_start, first_param, param_slots);
         }
 
-        let call_c =
-            self.dynamic_call_shape_or_record(forwarded_slot_types.len(), ret_slot_types.len());
         let method_idx = self.call_iface_method_index_or_record(method_idx as usize);
         builder.emit_call_iface(
             iface_meta_id,
             method_idx,
             iface_slot,
             args_start,
-            call_c,
             &forwarded_slot_types,
             &ret_slot_types,
         );

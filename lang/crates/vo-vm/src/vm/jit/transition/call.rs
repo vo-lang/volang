@@ -2,8 +2,7 @@ use vo_runtime::bytecode::Module;
 use vo_runtime::jit_api::JitContext;
 
 use crate::fiber::Fiber;
-use crate::vm::jit_mgr::JitSideExitReason;
-use crate::vm::Vm;
+use crate::vm::{JitSideExitReason, Vm};
 
 use super::super::bridge_result::{JitBridgeMode, JitBridgeTransition};
 use super::super::context::JitContextWrapper;
@@ -119,12 +118,22 @@ mod tests {
             .side_exit_count(reason)
     }
 
+    fn finish_jit_test_load(vm: &mut Vm, module: Module) {
+        let function_count = module.functions.len();
+        vm.finish_load(module);
+        vm.jit
+            .manager_mut()
+            .expect("jit manager")
+            .init(function_count);
+    }
+
     fn assert_nested_special_call_materializes(call_kind: u8) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-materialize-test".to_string());
         module.functions.push(function(2, 0));
         module.functions.push(returning_function(3, 1, 1));
         module.functions.push(returning_function(4, 2, 1));
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(1);
         let entry_bp = fiber.push_frame(0, 2, 0, 0, 0);
@@ -147,7 +156,7 @@ mod tests {
             ret_slots: 1,
         });
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.call_kind = call_kind;
         ctx.ctx.call_resume_pc = 33;
 
@@ -192,12 +201,13 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-top-level-materialize-test".to_string());
         module.functions.push(function(5, 0));
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(1);
         let bp = fiber.push_frame(0, 5, 0, 0, 0);
         fiber.sp = bp;
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.call_kind = call_kind;
         ctx.ctx.call_resume_pc = 44;
 
@@ -249,10 +259,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-side-exit-txn-test".to_string());
         module.functions.push(function(1, 0));
-        vm.jit
-            .manager_mut()
-            .expect("jit manager")
-            .init(module.functions.len());
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(25);
         fiber.push_frame(0, 1, 0, 0, 0);
@@ -266,7 +273,7 @@ mod tests {
         });
         let before_yield_side_exits = side_exit_count(&vm, JitSideExitReason::Yield);
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.call_kind = JitContext::CALL_KIND_YIELD;
         ctx.ctx.call_resume_pc = 33;
 
@@ -303,10 +310,7 @@ mod tests {
         callee.has_calls = true;
         callee.code = vec![Instruction::new(Opcode::CallClosure, 0, 0, 0)];
         module.functions.push(callee);
-        vm.jit
-            .manager_mut()
-            .expect("jit manager")
-            .init(module.functions.len());
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(23);
         let entry_bp = fiber.push_frame(0, 4, 0, 0, 0);
@@ -323,7 +327,7 @@ mod tests {
         let before_cold_side_exits = side_exit_count(&vm, JitSideExitReason::InterpretedCold);
         let before_regular_side_exits = side_exit_count(&vm, JitSideExitReason::RegularCall);
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.call_func_id = 2;
         ctx.ctx.call_arg_start = 1;
         ctx.ctx.call_resume_pc = 33;
@@ -360,10 +364,7 @@ mod tests {
         module.functions.push(function(0, 0));
         module.functions.push(function(1, 0));
         module.functions.push(function(1, 0));
-        vm.jit
-            .manager_mut()
-            .expect("jit manager")
-            .init(module.functions.len());
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(26);
         fiber.push_frame(0, 0, 0, 0, 0);
@@ -378,7 +379,7 @@ mod tests {
         let before_cold_side_exits = side_exit_count(&vm, JitSideExitReason::InterpretedCold);
         let before_regular_side_exits = side_exit_count(&vm, JitSideExitReason::RegularCall);
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.call_func_id = 2;
         ctx.ctx.call_arg_start = 1;
         ctx.ctx.call_resume_pc = 33;
@@ -421,10 +422,7 @@ mod tests {
         callee.has_calls = true;
         callee.code = vec![Instruction::new(Opcode::CallClosure, 0, 0, 0)];
         module.functions.push(callee);
-        vm.jit
-            .manager_mut()
-            .expect("jit manager")
-            .init(module.functions.len());
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(24);
         let caller_bp = fiber.push_frame(0, 2, 0, 0, 0);
@@ -436,7 +434,7 @@ mod tests {
         let before_prepared_side_exits =
             side_exit_count(&vm, JitSideExitReason::PreparedDynamicCall);
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = 0;
         ctx.ctx.jit_bp = caller_bp as u32;
         ctx.ctx.fiber_sp = before_sp as u32;
@@ -481,10 +479,7 @@ mod tests {
         let mut module = Module::new("jit-prepared-cold-call-side-exit-txn-test".to_string());
         module.functions.push(function(0, 0));
         module.functions.push(function(1, 0));
-        vm.jit
-            .manager_mut()
-            .expect("jit manager")
-            .init(module.functions.len());
+        finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(27);
         while fiber.try_reserve_call_frames(1).is_ok() {
@@ -497,7 +492,7 @@ mod tests {
         let before_prepared_side_exits =
             side_exit_count(&vm, JitSideExitReason::PreparedDynamicCall);
 
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.fiber_sp = before_sp as u32;
         ctx.ctx.call_func_id = 1;
         ctx.ctx.call_arg_start = 8;
@@ -530,16 +525,11 @@ mod tests {
 }
 
 fn callee_interpreter_reason(vm: &Vm, target: &CallTarget) -> Option<JitSideExitReason> {
-    if let Some(jit_mgr) = vm.jit.manager() {
-        if jit_mgr.get_entry(target.func_id).is_some() {
-            return None;
-        }
-        if jit_mgr.is_unsupported(target.func_id).unwrap_or(false) {
-            return Some(JitSideExitReason::InterpretedUnsupported);
-        }
-        return Some(JitSideExitReason::InterpretedCold);
-    }
-    None
+    vm.jit
+        .manager()?
+        .interpreter_reason(target.func_id)
+        .ok()
+        .flatten()
 }
 
 fn rollback_prepared_callback_window(fiber: &mut Fiber, ctx: &JitContextWrapper) {

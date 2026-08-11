@@ -6,13 +6,29 @@
 
 本次复核覆盖 `vo-jit` 的 full-function JIT、loop OSR、shared translator、direct JIT-to-JIT call、dynamic call inline cache、JIT/VM frame materialization、CopyN 编码与 loop liveness。结论基于源码阅读和现有 JIT/OSR 测试验证。
 
+## 2026-08-07 verified image / dispatch table cleanup
+
+- 编译、缓存和二进制加载现在只在边界构造一次 `Arc<LoadedModule>`；VM、子 Island、GC runtime facts 与 JIT 共用同一份不可变模块镜像。
+- strict JIT 在模块加载提交点直接消费 common verifier certificate。首次热点编译只检查精确模块地址，不再重复 common verifier、整模块序列化和摘要计算。裸 `Module` 的独立 JIT API 仍保留完整验证与 mutation 检测。
+- closure/interface dynamic call 与 static guest call 共用 Island-local `jit_func_table`。prepared miss 使用独立的 shadow-frame 资格，interface IC hit 继续要求 frame-elision 资格；第二张 `direct_call_table` 及其 JIT context 字段、分配、写入和失效逻辑已删除。
+- `ResolvedExternTable` 改为共享不可变存储。JIT 环境作用域持有该存储的所有权并使用安全的共享身份快路，消除了裸 slice 地址复用导致错误 cache hit 的风险，也把冻结 registry 的克隆降为常数成本。
+- BestEffort 保留按实际热点函数尝试 strict JIT policy 的语义；模块级 common verifier 仍在加载时强制执行。strict 模式在任何 native dispatch 前完成 JIT metadata preflight。
+
+## 2026-08-07 shared JIT / dynamic call maturity pass
+
+- 同一 Island family 现在共享一个 `SharedJitCode` 编译器、代码缓存和可执行页；每个 VM 仍独立拥有热度、dispatch table、inline cache、feedback 和运行统计。共享 owner write-once 持有精确 `Arc<LoadedModule>`，析构顺序固定为 compiler/code pages 先释放、module image 后释放，避免 JIT 保存的模块身份悬垂。
+- closure/interface prepare callback 已有完整 fiber shadow window。新的 `prepared_shadow` entry contract 允许 `PtrGet`、bounds/trap 和 write-barrier leaf 直接进入已编译函数；alloc/GC、nested call、schedule、unwind、frame observation 和 heap return 保持 materialized-frame 路由。interface miss 同时返回严格 IC pointer，防止 shadow-only callee 被发布到无 frame 的 IC hit 路径。
+- `PreparedCall` 从 48 bytes 收到 32 bytes；`DynCallIC` 从 56 bytes 收到 32 bytes。closure 不再分配或更新 interface-only IC，interface entry 只保留 callsite owner、完整 receiver slot0、entry pointer、local slots 和 func id。每个 VM 的 512-entry table 从约 28 KiB 降到 16 KiB。
+- 修复 heap-return 函数误入 frame-elided/prepared ABI、合法零 key 无法随低进度禁用而清除旧 IC entry、wasm32 固定 64-bit `PreparedCall` 尺寸断言，以及 `MapIterNext` helper ABI/semantic row 的 spill 契约漂移。RuntimeHelper 依赖现在由全表测试验证 `may_gc || observes_frame` 必须对应可 spill 的 frame policy。
+- `jit-call` 三次 release-native 测量：VM `586.3 ms`，JIT `297.2 ms`，JIT 快 `1.97x`；改动前 JIT `810.3 ms`，约慢于 VM `1.39x`。`prepared_dynamic_call` 从约 998k 降到 0。`jit-loop` 保持 `43.9 ms` 对 `893.7 ms`，JIT 快 `20.35x`。
+
 ## 2026-06-03 opcode fact source / call lowering cleanup
 
 本轮把 `vo-jit` 的 opcode 能力、effect、metadata contract、verifier requirement、trap/fail-fast、runtime dependency 与 lowering owner 收敛到 `vo-jit/src/semantics.rs` 的 row table。`effects.rs` 的常规读写寄存器、memory sync 和 may-call 事实从 row spec 派生；只保留依赖 metadata、module signature、extern/multi-result 或运行时上下文的动态例外。`metadata_contract.rs` 不再维护第二份 opcode metadata match。
 
 VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.rs`; `vo-jit/src/verifier.rs` only adds strict JIT metadata policy after that shared verifier accepts a module. `call_helpers.rs` stays as the shared ABI/frame guard surface, while dynamic inline cache, prepared call dispatch, extern call, and VM call materialization remain in focused submodules.
 
-命名上，JIT capability 使用 `RuntimePathPolicy`，合法 VM call materialization 明确命名为 `VmCallMaterialization`；`PreparedCall::vm_materialization` 表示没有 direct JIT entry 时走 prepared VM trampoline，不再叫 fallback。strict compile/metadata/ABI/contract 失败仍必须 fail fast，不能静默转解释器。维护细则见 `lang/docs/dev/jit-fact-source.md`。
+命名上，JIT capability 使用 `RuntimePathPolicy`，合法 VM call materialization 明确命名为 `VmCallMaterialization`。strict compile/metadata/ABI/contract 失败仍必须 fail fast，不能静默转解释器。维护细则见 `lang/docs/dev/jit-fact-source.md`。
 
 ## 2026-05-29 JIT correctness architecture pass
 
@@ -22,7 +38,7 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 
 1. true nil interface method call 在 VM/JIT 路径都会越过 nil check，可能解出 `itab_id=0` 后错误分发或崩溃。新增 `tests/lang/cases/jit_nil_calliface_recover.vo`，修复前 `vm` 与 `jit` 都失败；修复后 `vm`、`jit`、`osr`、`gc-jit` 都 recover 到 nil pointer panic。VM `CallIface`、JIT lowering、JIT prepare callback 现在都在 itab/IC/direct route 前检查 nil interface。
 2. interface-to-interface assignment 会把 true nil interface 重新 pack 成非 nil `slot0`。VM `IfaceAssign` 与 JIT helper `vo_iface_to_iface` 现在保留 nil `(0, 0)`，并统一使用 runtime `interface::is_nil` 语义；typed nil pointer 仍不是 nil interface。
-3. direct JIT call 的“可 direct 调用”和“可省略 VM frame”原本混在一起。现在 `vo_jit::can_elide_frame_for_direct_jit` 基于 `EffectContract::permits_frame_elision()`；会 alloc/GC/panic/unwind/call/schedule/observe frame/touch interface/materialize closure/write barrier 的函数仍可 JIT，但必须走 materialized VM frame 或 prepared call path。static route、dynamic direct table、closure/interface callback 查表都使用同一判断。
+3. direct JIT call 的“可 direct 调用”和“可省略 VM frame”原本混在一起。现在 `vo_jit::can_elide_frame_for_direct_jit` 基于 `EffectContract::permits_frame_elision()`；会 alloc/GC/panic/unwind/call/schedule/observe frame/touch interface/materialize closure/write barrier 的函数仍可 JIT，但必须走 materialized VM frame 或 prepared call path。static guest call 与 closure/interface callback 共用 Island-local `jit_func_table`，动态调用在读取槽位前执行同一 frame-elision 判断，不再维护第二张函数指针表。
 4. full JIT 的普通 `JitResult::Call` 路径会在 VM frame 已 materialize 后立即递归 re-enter 编译 callee。深递归时 host stack 会先于 fiber stack 上限溢出，绕过可 recover 的 Vo stack panic。现在该路径只 push callee frame 并返回 `FrameChanged` 给 VM scheduler；strict mode 仍会在 side-exit 时 resolve/compile callee 以保持 metadata fail-fast。materialized-frame 再入口由 `can_enter_materialized_frame_for_jit` 和 `fiber.unwinding.is_none()` 共同判断，允许普通 call/alloc callee 在已有 VM frame 上继续 JIT，但 defer/errdefer unwind 期间的 deferred calls 保留 materialized frame 并解释执行，避免 deferred-call 顺序和 recover 资格分叉。self-recursive direct-native route 也统一走 VM call materialization，避免隐藏 frame depth 和 root 边界。
 5. metadata 缺失存在 fail-open：defer arg layout、unwind stack return slot types、heap return gcref slot count、closure GC scan layout 和 interface assert named type metadata 都可能用空 metadata 或默认值继续执行。现在这些路径在缺失或越界时 fail fast，错误信息带 func id/name、pc、slot range、expected/actual。
 6. 语言 test runner 过去只分别验证各 target pass，没有比较 VM/JIT/OSR/GC-JIT 的 stdout、panic/error 和 exit status。`vo-test run-plan` 现在按 case 做差分：`jit`/`osr` 对齐 `vm`，`gc-jit` 优先对齐 `gc-vm`，没有 `gc-vm` 时对齐 `vm`。
@@ -30,7 +46,7 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 架构变化：
 
 - 新增 `vo-jit/src/contract.rs`，集中声明 opcode、runtime helper、JIT callback 的 `may_gc`、`may_alloc`、`may_panic`、`may_unwind`、`may_call`、`may_schedule`、`may_observe_frame`、`needs_frame`、`needs_slot_metadata`、`needs_type_metadata`、`needs_write_barrier`、`touches_interface`、`materializes_closure`。
-- JIT lowering 的 call route、direct table 填充、callback direct lookup 和 frame elision 都查询 effect contract，不再靠局部 `has_calls` / `has_defer` 近似判断。
+- JIT lowering 的 call route、callback direct lookup 和 frame elision 都查询 effect contract，不再靠局部 `has_calls` / `has_defer` 近似判断。
 - direct JIT-to-JIT 能力保留在 effect contract 允许的 leaf/native-stack 路径；一旦需要 materialized VM frame，JIT 会回到 scheduler 边界而不是在 host stack 上递归执行。scheduler frame-entry 再入口使用独立的 materialized-frame contract 和 runtime unwind gate，保留普通 nested-call/alloc JIT 能力，同时防止 defer/recover 语义被隐藏。
 - nil interface、interface assignment、callback trap、panic/trap return ABI 使用共享 runtime 语义或 typed JIT trap helper。JIT generated code 对 interface nil 判断生成等价的 value-kind `Void` 检查，避免 raw unpack nil interface。
 - `DeferArgLayout::try_from_caller_slot_types`、`require_slot_types`、`require_heap_ret_slots` 把 defer/unwind/heap-return 元数据边界变成 typed failure，正常 defer/recover/GC 路径继续通过既有 layout。
@@ -39,13 +55,13 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 新增和扩展的保护：
 
 - 语言回归：`jit_nil_calliface_recover.vo`、`jit_direct_call_frame_contract.vo`，并纳入 `vm`、`jit`、`osr`、`gc-jit`；既有/本轮 JIT 语义回归还覆盖 nil closure defer/recover、defer hidden args under GC、direct call alloc/panic/interface/closure args。
-- Rust 单测：`vo-runtime::objects::interface::nil_interface_semantics_use_value_kind_void`、`vo-jit::direct_call_table_uses_frame_elision_contract`、`vo-jit::effect_contract_protects_key_runtime_boundaries`、`vo-jit::call_plan_routes_full_function_call_shapes`、`vo-vm` metadata fail-fast tests、`vo-test` differential runner tests。
+- Rust 单测：`vo-runtime::objects::interface::nil_interface_semantics_use_value_kind_void`、`vo-jit::direct_jit_uses_frame_elision_contract`、`vo-jit::effect_contract_protects_key_runtime_boundaries`、`vo-jit::call_plan_routes_full_function_call_shapes`、`vo-vm` metadata fail-fast tests、`vo-test` differential runner tests。
 - 差分实跑：`cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit --path tests/lang/cases/jit_nil_calliface_recover.vo --path tests/lang/cases/jit_direct_call_frame_contract.vo --path tests/lang/cases/gc_defer_closure_hidden_slot_args.vo`，13/13 通过。
 
 本轮审计结论：
 
 - 合法 side exit 仍限于 cold/not-hot、regular/prepared VM call materialization、WaitIo/WaitQueue/Yield/Replay、OSR normal exit、stack-capacity trampoline 和显式 best-effort embedding API。strict JIT 的 compile/metadata/internal ABI failure 仍必须 fail fast。
-- 未发现新的 JIT silent fallback、metadata 猜测、panic payload 缺失或 GC root materialization fail-open。`JitInstructionMetadata::None` 的剩余出现集中在 verifier/test 构造和无需 metadata 的 opcode；JIT callback 的 raw pointer 解码前增加 nil/contract gate 或沿用 typed trap ABI。
+- 未发现新的 JIT silent fallback、metadata 猜测、panic payload 缺失或 GC root materialization fail-open。`InstructionMetadata::None` 的剩余出现集中在 verifier/test 构造和无需 metadata 的 opcode；JIT callback 的 raw pointer 解码前增加 nil/contract gate 或沿用 typed trap ABI。
 - 剩余风险是新增 opcode/helper/callback 时必须继续维护 `EffectContract` 和差分覆盖；helper effect 当前偏保守，可能多 spill 或走 prepared path，但不牺牲 correctness。后续建议增加 malformed metadata fuzzing，并把 stderr parity 作为可选差分模式用于调试基础设施输出。
 
 ## 2026-05-29 JIT/OSR/GC 架构级修复
@@ -62,17 +78,17 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 
 ## 2026-05-28 strict JIT 当前状态
 
-当前状态：本轮重新分析中已知 P1/P2 问题已完成修复，没有再发现必须关闭 JIT 能力才能规避的严重问题。JIT runtime panic 通过 typed trap ABI 回传 `RuntimeTrapKind`、动态 panic 参数和 bytecode pc；显式 `panic()` 与 extern `ExternResult::Panic` 使用独立的 `user_panic_pc` 记录用户 panic pc，避免复用 WaitIo/Replay/call materialization 的 `call_resume_pc`，也避免把 user panic 混入 typed trap 的 `runtime_trap_pc`。VM 侧在 unwind 前恢复 trap kind、panic message 和 source location，避免除零、负 shift、bounds、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port、queue callback panic、builtin assert panic 等路径落回默认 nil pointer 或泛化 `runtime error: JIT panic` 文案。`RunMode::Jit` 下 JIT 初始化失败会直接返回 runtime error；feature 关闭时 `RunMode::Jit` 也 fail fast，不再 warning 后回退 VM。hot full-function 编译失败、InvalidMetadata、LoopAnalysis、Codegen/Internal、OSR bad metadata/bad LoopEnd/missing layout、JIT extern `NotRegistered` 等错误会 fail fast 到 `VmError::Jit`，只保留 cold/not-hot、WaitIo/WaitQueue/Yield/Replay、explicit VM call materialization、OSR normal exit、stack-capacity trampoline 等语义 side exit。
+当前状态：本轮重新分析中已知 P1/P2 问题已完成修复，没有再发现必须关闭 JIT 能力才能规避的严重问题。JIT runtime panic 通过 typed trap ABI 回传 `RuntimeTrapKind`、动态 panic 参数和 bytecode pc；显式 `panic()` 与 extern `ExternResult::Panic` 使用独立的 `user_panic_pc` 记录用户 panic pc，避免复用 WaitIo/Replay/call materialization 的 `call_resume_pc`，也避免把 user panic 混入 typed trap 的 `runtime_trap_pc`。VM 侧在 unwind 前恢复 trap kind、panic message 和 source location，避免除零、负 shift、bounds、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port、queue callback panic、builtin assert panic 等路径落回默认 nil pointer 或泛化 `runtime error: JIT panic` 文案。`RunMode::Jit` 下 JIT 初始化失败会直接返回 runtime error；feature 关闭时 `RunMode::Jit` 也 fail fast，不再 warning 后回退 VM。Strict 模式下，hot full-function 编译失败、InvalidMetadata、LoopAnalysis、Codegen/Internal、OSR bad metadata/bad LoopEnd/missing layout、JIT extern `NotRegistered` 等错误会 fail fast 到 `VmError::Jit`。显式 BestEffort 模式记录并禁用失败的 full-function/OSR entry，随后继续解释执行，避免每次热调用重复编译。cold/not-hot、WaitIo/WaitQueue/Yield/Replay、explicit VM call materialization、OSR normal exit、stack-capacity trampoline 仍是正常语义 side exit。
 
 完成项：
 
 1. 新增 `JitRuntimeTrapKind` 与 `vo_runtime_trap` helper，JIT lowering 对除零、bounds、负 shift、nil map write、unhashable/uncomparable、type assertion、make slice/chan/port 和 queue callback trap 记录 typed kind、消息参数和 pc。make slice/chan/port 使用 runtime helper 返回的 `alloc_error` code 生成消息，和 VM 的 `makeslice_error_message` / `make_queue_error_message` 分类一致。
 2. `setup_jit_panic` 保留 VM/JIT trap kind。typed runtime trap 使用 `runtime_trap_pc` 设置 panic source location；显式 `panic()`、builtin/extern panic 使用 `user_panic_pc`；`call_resume_pc` 不是 panic location fallback，只保留 WaitIo/Replay/call materialization 语义。callback trap 改为 `set_recoverable_trap`，不再退化成普通 user panic。
-3. `JitManager::resolve_call` 改为 `Result<Option<JitFunc>, JitError>`：`Ok(None)` 只表示 cold interpreter execution，compile/metadata/internal/codegen 失败会向 VM 传播。dynamic closure/interface callee 预编译错误也会返回 visible JIT error。
-4. loop OSR 的 `get_or_compile_loop` 改为 fail-fast：坏 `LoopEnd`、缺 metadata/layout/extern、slot overflow、compile failure 和 previously failed loop 不再 mark failed 后静默解释执行。
+3. `JitManager::resolve_call` 改为 `Result<Option<JitFunc>, JitError>`：首次 compile/metadata/internal/codegen 失败会向 VM 策略层传播；Strict 转成可见错误，BestEffort 记录并禁用该 entry 后解释执行。dynamic closure/interface callee 预编译错误也遵循同一模式策略。
+4. loop OSR 的 `get_or_compile_loop` 将坏 `LoopEnd`、缺 metadata/layout/extern、slot overflow 和 compile failure 传播给 VM 策略层；失败循环会缓存为不可重试，Strict 终止执行，BestEffort 继续解释执行。
 5. `LoopEnd` invariant 集中到 verifier：metadata 长度/kind/range/offset 一致性之外，`end_pc` 必须是跳回 `begin_pc` 的 `Jump` 或 `ForLoop` back-edge；compact offset 和 explicit metadata 都受同一校验保护。
 6. loop analysis 的 public API 收紧为 `try_analyze_loops_with_module`；无 module extern/context 的 helper 只保留给本模块测试使用，避免生产代码误用空 extern/metadata context。
-7. codegen 的 dynamic elem metadata overflow 不再返回 `JitInstructionMetadata::None`，改为 fail-fast；`loop_compiler` 的 explicit `Panic` lowering 缺少 panic helper 时与 full compiler 一样直接报 invariant 失败。
+7. codegen 的 dynamic elem metadata overflow 不再返回 `InstructionMetadata::None`，改为 fail-fast；`loop_compiler` 的 explicit `Panic` lowering 缺少 panic helper 时与 full compiler 一样直接报 invariant 失败。
 8. `Vm::with_best_effort_jit_config` / `init_jit` 明确保留非严格、机会性 JIT 语义；严格路径使用 `try_with_jit_config` / `try_init_jit`。island thread 继承 JIT config 时使用严格初始化，失败以明确 fatal message 终止该 island thread。
 9. JIT extern `NotRegistered` 视为 JIT/registry 内部不变量破坏，返回 `JitResult::JitError`，调度层转成 `VmError::Jit`；不允许再落到泛化 `runtime error: JIT panic`，用户代码不能 recover 掉该基础设施错误。
 10. capability matrix 继续和 call route/dynamic call/addr lowering/helper allocation tests 同步；`tests/lang/cases/jit/runtime_traps.vo` 现在断言 VM/JIT recover message 精确一致，覆盖 make slice/chan/port 和 send-on-closed queue callback。
@@ -122,18 +138,19 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 
 完成项：
 
-1. 增加 `verify_jit_metadata`，在 full-function JIT 与 loop OSR 编译入口校验 metadata 长度、opcode kind、metadata kind、elem layout，以及 effects 推导出的 slot 读写是否落在 `local_slots` 内。zero-size element layout 是合法语言语义：`ElemLayout { elem_bytes: 0 }` 现在被建模为 0-slot layout，JIT lowering 对 get/set 在 bounds check 后不读写 value slot；不合法的是 zero-size layout 搭配 sign-extension。
+1. 增加 `verify_instruction_metadata`，在 full-function JIT 与 loop OSR 编译入口校验 metadata 长度、opcode kind、metadata kind、elem layout，以及 effects 推导出的 slot 读写是否落在 `local_slots` 内。zero-size element layout 是合法语言语义：`ElemLayout { elem_bytes: 0 }` 现在被建模为 0-slot layout，JIT lowering 对 get/set 在 bounds check 后不读写 value slot；不合法的是 zero-size layout 搭配 sign-extension。
 2. 增加机器可读 `capability_matrix()` / `opcode_capability()`。每个 `Opcode` 必须显式声明 full JIT、OSR 与 runtime path 策略，新增 opcode 漏声明会在编译期 match exhaustiveness 或单测中暴露。
-3. 把复杂 opcode 的 packed 语义集中到 `Instruction` accessor：static call func id、closure func id、defer/go shared call shape、packed arg/ret slots、queue recv/select recv flags、MapNew/MapIterNext slot counts。VM、JIT、effects、formatter 改为复用同一语义入口。
+3. `Instruction` accessor 只集中 opcode 身份与模式位：static/closure func id、defer/go closure mode、queue/recv 语义 flags。可变布局统一由 `InstructionMetadata` 提供，static call ABI 统一由 callee `FunctionDef` 提供；VM、JIT、effects、formatter 复用相同入口。
 4. 拆分 `translate.rs`：scalar、memory、conversions、collections、runtime ops 独立成 opcode-family lowering 文件；父模块只保留 dispatcher 与少量 shared checks。
 5. 新增 `FunctionAnalysis`，full-function JIT 与 loop OSR 共享 metadata-aware reg const facts、effects 和 `memory_only_start` 推导。loop analysis 现在从 `Module` 读取 extern return slot metadata。
 6. 建立 side-exit reason 可观测性：`JitSideExitReason` 和 `JitSideExitReasonStats` 只记录 cold interpreter execution、regular/prepared call materialization、yield/block、WaitIo/WaitQueue/Replay、loop not hot。unsupported/compile failure、metadata error 和内部 ABI 错误必须走 `JitError`，不属于 side-exit reason。
 7. 系统化 frame materialization invariant：`materialized_jit_frame_invariants` 校验 materialization 后 `resume_stack` 清空、frame func_id 有效、GC scan extent 不越过当前 `fiber.sp`、scan slot 不超过函数 metadata、最内层 frame 的 local extent 被 `fiber.sp` 覆盖，并显式允许 borrowed-call parent 的完整 local extent 高于当前 callee `sp`。
-8. 统一 static call route：`CallPlan` 先选择 `KnownDirectJit`、`DynamicJitTable` 或 `VmCallMaterialization`，full-function 与 OSR call lowering 共享同一 plan。closure/interface dynamic call 也有 `DynamicCallPlan` 统一 packed arg/ret/resume_pc 解码。
+8. 统一 static call route：所有 static guest call 都在每次执行时通过 Island-local `jit_func_table[func_id]` 槽位 dispatch。非 null 槽位走 native JIT call，null 槽位走 `VmCallMaterialization`；null check 是函数禁用和 Island 隔离的正确性边界，不得被编译时 callee 直连消除。full-function 与 OSR call lowering 共享同一 `CallPlan`；closure/interface dynamic call 由 `DynamicCallPlan` 统一读取 per-PC argument/return layout 和 resume pc。
 9. 固化 runtime ABI 边界：`runtime_symbol_names()` 与 `jit_context_abi_fields()` 提供 helper symbol 和 `JitContext` offset 的机器可读 manifest，runtime/JIT 单测保证 manifest 与注册表同步。
 10. defer/recover JIT 支持选择为保留支持，不拒绝。已有 `DeferPush`/`ErrDeferPush`/`Recover` lowering 继续使用 runtime callback；新增递归 defer 回归用例保护 direct-call 收紧后的 frame 深度语义。
 11. 增加 JIT 专项 benchmark manifest：`jit-map`、`jit-slice`、`jit-call`、`jit-loop`、`jit-copy`，用于后续 `./d.py bench vo --jit-hot` 做性能回归观察。
-12. 移除 loop analysis 对未编码 `HINT_LOOP` end offset 的 back-edge 扫描路径。大循环必须由 codegen 写入 `JitInstructionMetadata::LoopEnd`；缺失、与紧凑 offset 不一致、或指向的 end 不是 `Jump`/`ForLoop` back-edge 时直接 fail fast，同时保留大循环 OSR 能力。
+12. 移除 loop analysis 对未编码 `HINT_LOOP` end offset 的 back-edge 扫描路径。大循环必须由 codegen 写入 `InstructionMetadata::LoopEnd`；缺失、与紧凑 offset 不一致、或指向的 end 不是 `Jump`/`ForLoop` back-edge 时直接 fail fast，同时保留大循环 OSR 能力。
+13. 退役 `HINT_LOOP` 低 4 位的 defer/labeled-break/labeled-continue 协议。三组标志在 JIT 中已无消费者，codegen 不再跟踪或编码它们，verifier 要求保留位为零；结构深度镜像、end offset、`LoopEnd` 和 OSR 退出边界继续由现有 metadata 合同保护。
 
 测试分层：
 
@@ -145,14 +162,14 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 结构性重构说明：
 
 - metadata verifier、capability matrix、translate split、ABI manifest、benchmark manifest 是 invariant/maintainability 改动，不对应单一 pre-fix failing runtime case；因此用结构性单测、manifest lint 和编译期 exhaustiveness 作为保护。
-- packed metadata register 路径已不再作为 JIT layout fallback。动态 element/map layout 必须来自 per-instruction `jit_metadata`；缺失时 verifier/effects/loop analysis 显式报错，fail fast。
+- packed metadata register 路径已不再作为 JIT layout fallback。动态 element/map layout 必须来自 per-instruction `instruction_metadata`；缺失时 verifier/effects/loop analysis 显式报错，fail fast。
 - `HINT_LOOP` 的未编码 end offset 不再通过扫描 bytecode 恢复。`end_offset == 0` 表示必须存在 `LoopEnd` metadata；这是显式 metadata 边界，不是兼容兜底。
 
 ## 优先级一：必须修复
 
 ### 1. `reg_consts` 是线性状态，不能跨控制流粘滞
 
-`reg_consts` 只服务算术安全检查优化（除零、移位等）。旧实现还把它当作 map/slice layout metadata 的兼容来源；这个路径已经移除，动态 layout 只认 `jit_metadata`。旧的常量事实如果只在 `LoadConst` 写入时记录，普通写入和控制流 merge 不系统失效，仍容易把某个分支里的常量误用于 join block。后果是 JIT 可能跳过本应保留的运行期 panic 检查。
+`reg_consts` 只服务算术安全检查优化（除零、移位等）。旧实现还把它当作 map/slice layout metadata 的兼容来源；这个路径已经移除，动态 layout 只认 `instruction_metadata`。旧的常量事实如果只在 `LoadConst` 写入时记录，普通写入和控制流 merge 不系统失效，仍容易把某个分支里的常量误用于 join block。后果是 JIT 可能跳过本应保留的运行期 panic 检查。
 
 修复方向：把常量事实建模成按 PC 的前向数据流，控制流 merge 只保留所有前驱一致的 `(reg, const)`；translator 的实际写入仍负责清除当前 slot，`LoadInt`/`LoadConst`/`Copy`/`CopyN` 再重新设置事实。这样不牺牲 map/slice metadata 在安全控制流里的 JIT 能力。
 
@@ -189,7 +206,7 @@ VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.r
 
 direct call 快路径会内联更新 `ctx.jit_bp/fiber_sp`，但旧实现只检查 `MAX_JIT_NATIVE_STACK_SLOTS`，没有确认当前 `fiber.stack.len()` 足够。深递归或连续 direct calls 后，如果 callee 发生 WaitIo/Call/Panic 并需要 spill/materialize 到 fiber.stack，就可能在未扩容的区间写入。
 
-修复方向：在 full-function self recursion、known direct call、dynamic IC hit fast path统一走 `emit_stack_capacity_check`。当 `new_sp > ctx.stack_cap` 时，不降级 JIT 编译能力，而是走已有 VM call/prepare materialization side exit，让 VM 的 `push_frame` 扩容并保持 frame materialization 语义。
+修复方向：在 full-function self recursion、static `jit_func_table` hit、dynamic IC hit fast path 统一走 `emit_stack_capacity_check`。当 `new_sp > ctx.stack_cap` 时，不降级 JIT 编译能力，而是走已有 VM call/prepare materialization side exit，让 VM 的 `push_frame` 扩容并保持 frame materialization 语义。
 
 修复前失败用例：
 
@@ -209,8 +226,8 @@ direct call 快路径会内联更新 `ctx.jit_bp/fiber_sp`，但旧实现只检�
 ## 优先级二：建议后续重构
 
 1. helper call effect 分类：当前 `emit_funcref_call` 对所有 helper 全量 spill，正确但偏重。建议给 helper 标注 `may_gc/may_suspend/may_realloc_stack/may_observe_frame/may_write_slots`，只在需要时 spill 或 reload。
-2. call lowering 继续收敛：direct call、self recursion、IC hit 都有相似的 ctx 更新、capacity/depth guard、OK/non-OK 分支。建议抽出 typed call plan，减少三处逻辑漂移。
-3. 保持 metadata fail-fast 边界：map/slice 动态 layout 和大循环 `LoopEnd` 只从 `jit_metadata` 解码，`reg_consts` 只负责优化事实；新增 opcode 或新动态 layout 不允许回到“值寄存器常量表”兜底。
+2. call lowering 继续收敛：static table-hit call、self recursion、dynamic IC hit 都有相似的 ctx 更新、capacity/depth guard、OK/non-OK 分支。建议抽出 typed call plan，减少三处逻辑漂移。
+3. 保持 metadata fail-fast 边界：map/slice 动态 layout 和大循环 `LoopEnd` 只从 `instruction_metadata` 解码，`reg_consts` 只负责优化事实；新增 opcode 或新动态 layout 不允许回到“值寄存器常量表”兜底。
 4. loop liveness 与 translator 写集共享：现在二者各自维护 opcode 写集，后续应抽成 `InstructionEffects`，统一 read/write/may_call/may_suspend/may_memory_alias。
 5. JIT 回归测试分层：把 “source-level behavior”、“bytecode encoding”、“IR/unit analysis” 三层分开，避免只有 source 测试时漏掉 encoding 级别的退化。
 

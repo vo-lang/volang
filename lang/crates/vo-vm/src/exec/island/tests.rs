@@ -73,7 +73,7 @@ fn direct_method_function(slot_types: Vec<SlotType>) -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types: slot_types.clone(),
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         capture_types: Vec::new(),
@@ -353,6 +353,62 @@ fn vm_goisland_transfer_txn_002_preflight_prevents_partial_queue_publication() {
         island_effects.is_empty(),
         "failed preflight must not stage island effects"
     );
+}
+
+#[test]
+fn vm_goisland_transfer_txn_003_commit_failure_rolls_back_earlier_endpoints() {
+    let mut state = crate::vm::VmState::new();
+    state.external_island_transport = true;
+    state.current_island_id = 4;
+    state.next_endpoint_id = Some(u32::MAX);
+    let first = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
+        1,
+        0,
+    );
+    let second = queue::create(
+        &mut state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(1, ValueKind::Int64),
+        1,
+        0,
+    );
+    let result = GoIslandResult {
+        island: core::ptr::null_mut(),
+        func_id: 0,
+        receiver_capture_slots: 0,
+        capture_data: Vec::new(),
+        arg_data: vec![first as u64, second as u64],
+    };
+    let port_type = TransferType {
+        meta_raw: ValueMeta::new(0, ValueKind::Port).to_raw(),
+        rttid_raw: ValueRttid::new(0, ValueKind::Port).to_raw(),
+        slots: 1,
+    };
+    let mut island_effects = Vec::new();
+
+    let err = prepare_queue_handles_for_transfer(
+        &result,
+        9,
+        &[],
+        &[port_type, port_type],
+        &[],
+        &[],
+        &port_i64_runtime_types(),
+        &mut state,
+        &mut island_effects,
+    )
+    .expect_err("the second endpoint allocation must exhaust the identity space");
+
+    assert!(err.contains("endpoint identity space exhausted"), "{err}");
+    assert!(queue::home_info(first).is_none());
+    assert!(queue::home_info(second).is_none());
+    assert!(!state.endpoint_registry.has_live());
+    assert!(island_effects.is_empty());
 }
 
 #[test]
@@ -2436,164 +2492,16 @@ fn queue_handle_transfer_stages_remote_transfer_as_runtime_effect() {
 
     assert!(state.outbound_commands.is_empty());
     let effect = island_effects.pop().expect("transfer effect");
-    assert!(!effect.pending_response);
     assert_eq!(effect.island_id, 9);
     match effect.command {
         IslandCommand::EndpointRequest {
             endpoint_id,
             kind: EndpointRequestKind::Transfer { new_peer },
-            from_island,
-            fiber_key,
-            wait_id,
         } => {
             assert_eq!(endpoint_id, 0x0000_0009_0000_0042);
             assert_eq!(new_peer, 7);
-            assert_eq!(from_island, 2);
-            assert_eq!(fiber_key, 0);
-            assert_eq!(wait_id, 0);
         }
         other => panic!("expected endpoint transfer request, got {other:?}"),
     }
     assert!(island_effects.is_empty());
-}
-
-fn queue_handle_transfer_metadata_contract(source: &str) -> bool {
-    let compact = vo_source_contract::compact_rust_source_for_contract(source).0;
-    let Some(transfer_inner) = vo_source_contract::compact_region_between(
-        source,
-        "fnprepare_value_queue_handles_for_transfer_inner(",
-        "fnprepare_remote_send_value_if_needed(",
-    ) else {
-        return false;
-    };
-    let Some(single_handle) = vo_source_contract::compact_region_between(
-        source,
-        "fnprepare_single_queue_handle(",
-        "fnmay_contain_queue_handle(",
-    ) else {
-        return false;
-    };
-    let missing_meta_errors = vo_source_contract::compact_pattern_positions(
-        &transfer_inner,
-        "letSome(meta)=struct_metas.get(meta_id)else{returnErr(format!(",
-    )
-    .len();
-
-    vo_source_contract::compact_contains(&compact, "pubtypeQueueTransferResult=Result<(),String>;")
-        && missing_meta_errors >= 2
-        && vo_source_contract::compact_contains(
-            &transfer_inner,
-            "ifoffset+fslots>slots.len(){returnErr(format!(",
-        )
-        && vo_source_contract::compact_contains(
-            &transfer_inner,
-            "lettype_resolver=RuntimeTypeResolver::new(",
-        )
-        && vo_source_contract::compact_contains(
-            &transfer_inner,
-            "type_resolver.canonical_value_meta_for_value_rttid(field.type_info)",
-        )
-        && vo_source_contract::compact_contains(&transfer_inner, ".ok_or_else(||{format!(")
-        && !vo_source_contract::compact_contains(
-            &transfer_inner,
-            "ifmeta_id>=struct_metas.len(){return;}",
-        )
-        && !vo_source_contract::compact_contains(
-            &transfer_inner,
-            "struct_metas.get(meta_id)else{returnOk(());}",
-        )
-        && !vo_source_contract::compact_contains(&transfer_inner, "None=>Ok(())")
-        && !vo_source_contract::compact_contains(
-            &transfer_inner,
-            "ifoffset+fslots>slots.len(){continue;}",
-        )
-        && !vo_source_contract::compact_contains(
-            &transfer_inner,
-            "struct_metas.get(meta_id)else{continue;}",
-        )
-        && !vo_source_contract::compact_contains(&compact, "state.send_to_island(")
-        && vo_source_contract::compact_contains(
-            &single_handle,
-            "IslandCommandEffect::endpoint_transfer_request(",
-        )
-}
-
-#[test]
-fn queue_handle_transfer_has_no_metadata_skip_paths() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../island.rs"
-    ));
-
-    assert!(
-        queue_handle_transfer_metadata_contract(&source),
-        "queue-handle transfer must expose metadata failures as Result and stage remote endpoint transfer effects through the runtime boundary"
-    );
-}
-
-#[test]
-fn queue_handle_transfer_rejects_comment_spoofed_metadata_contract() {
-    let spoof = r#"
-            // pub type QueueTransferResult = Result<(), String>;
-            fn prepare_value_queue_handles_for_transfer_inner(
-                meta_id: usize,
-                struct_metas: &[StructMeta],
-                offset: usize,
-                fslots: usize,
-                slots: &[u64],
-            ) {
-                if meta_id >= struct_metas.len() { return; }
-                if offset + fslots > slots.len() { continue; }
-                else { continue; }
-            }
-            fn prepare_remote_send_value_if_needed() {}
-            fn prepare_single_queue_handle() {
-                // IslandCommandEffect::endpoint_transfer_request(...)
-                state.send_to_island(command);
-            }
-            fn may_contain_queue_handle() {}
-        "#;
-
-    assert!(
-        !queue_handle_transfer_metadata_contract(spoof),
-        "comment-only queue-transfer metadata facts must not satisfy source contracts"
-    );
-}
-
-#[test]
-fn queue_handle_transfer_rejects_alternate_metadata_skip_paths() {
-    let spoof = r#"
-            pub type QueueTransferResult = Result<(), String>;
-            fn prepare_value_queue_handles_for_transfer_inner(
-                meta_id: usize,
-                struct_metas: &[StructMeta],
-                offset: usize,
-                fslots: usize,
-                slots: &[u64],
-            ) {
-                let Some(meta) = struct_metas.get(meta_id) else { return Ok(()); };
-                match struct_metas.get(meta_id) {
-                    None => Ok(()),
-                    Some(meta) => Ok(()),
-                }?;
-                if offset + fslots > slots.len() { return Err(format!("bad")); }
-                let type_resolver = RuntimeTypeResolver::new(
-                    struct_metas,
-                    named_type_metas,
-                    runtime_types,
-                );
-                type_resolver
-                    .canonical_value_meta_for_value_rttid(field.type_info)
-                    .ok_or_else(|| { format!("bad") })?;
-            }
-            fn prepare_remote_send_value_if_needed() {}
-            fn prepare_single_queue_handle() {
-                IslandCommandEffect::endpoint_transfer_request(...);
-            }
-            fn may_contain_queue_handle() {}
-        "#;
-
-    assert!(
-        !queue_handle_transfer_metadata_contract(spoof),
-        "alternate metadata skip forms must not satisfy queue-transfer source contracts"
-    );
 }

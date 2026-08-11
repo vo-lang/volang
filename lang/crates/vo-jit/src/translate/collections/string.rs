@@ -3,11 +3,8 @@ use cranelift_codegen::ir::{types, InstBuilder};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
-use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if, require_helper};
-use crate::translator::{
-    emit_funcref_call, emit_funcref_call_with_effect, CollectionEmitter, HelperCallEffect,
-};
-use crate::JitError;
+use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if};
+use crate::translator::{emit_runtime_helper_call, CollectionEmitter, HelperKind};
 
 use super::{emit_nil_guarded_load, SLICE_FIELD_LEN};
 
@@ -18,11 +15,8 @@ pub(in crate::translate) fn str_len<'a>(e: &mut impl CollectionEmitter<'a>, inst
     e.write_var(inst.a, result);
 }
 
-pub(in crate::translate) fn str_index<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
-    let str_index_func = require_helper(e.helpers().str_index, "str_index")?;
+pub(in crate::translate) fn str_index<'a>(e: &mut impl CollectionEmitter<'a>, inst: &Instruction) {
+    let str_index_func = e.helper(HelperKind::str_index);
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
@@ -37,26 +31,17 @@ pub(in crate::translate) fn str_index<'a>(
         Some(idx),
         Some(len),
     );
-    let call = emit_funcref_call_with_effect(
-        e,
-        str_index_func,
-        &[s, idx],
-        HelperCallEffect::FrameIndependent,
-    );
+    let call = emit_runtime_helper_call(e, str_index_func, &[s, idx]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
-    Ok(())
 }
 
-pub(in crate::translate) fn str_concat<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_concat, "str_concat")?;
+pub(in crate::translate) fn str_concat<'a>(e: &mut impl CollectionEmitter<'a>, inst: &Instruction) {
+    let func = e.helper(HelperKind::str_concat);
     let gc_ptr = e.gc_ptr();
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call(e, func, &[gc_ptr, a, b]);
+    let call = emit_runtime_helper_call(e, func, &[gc_ptr, a, b]);
     let result = e.builder().inst_results(call)[0];
     let a_len = emit_nil_guarded_load(e, a, SLICE_FIELD_LEN);
     let b_len = emit_nil_guarded_load(e, b, SLICE_FIELD_LEN);
@@ -66,22 +51,18 @@ pub(in crate::translate) fn str_concat<'a>(
     let total_is_nonzero = e.builder().ins().icmp(IntCC::NotEqual, total_len, zero);
     let failed = e.builder().ins().band(result_is_zero, total_is_nonzero);
     let failed_as_i64 = e.builder().ins().uextend(types::I64, failed);
-    let allocation_ok = e.builder().ins().bxor_imm(failed_as_i64, 1);
+    let allocation_ok = e.builder().ins().bxor_imm_u(failed_as_i64, 1);
     emit_jit_error_if_zero(e, allocation_ok);
     e.write_var(inst.a, result);
-    Ok(())
 }
 
-pub(in crate::translate) fn str_slice<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_slice, "str_slice")?;
+pub(in crate::translate) fn str_slice<'a>(e: &mut impl CollectionEmitter<'a>, inst: &Instruction) {
+    let func = e.helper(HelperKind::str_slice);
     let gc_ptr = e.gc_ptr();
     let s = e.read_var(inst.b);
     let lo = e.read_var(inst.c);
     let hi = e.read_var(inst.c + 1);
-    let call = emit_funcref_call(e, func, &[gc_ptr, s, lo, hi]);
+    let call = emit_runtime_helper_call(e, func, &[gc_ptr, s, lo, hi]);
     let result = e.builder().inst_results(call)[0];
     let error_val = e.builder().ins().iconst(types::I64, -1i64);
     let is_error = e.builder().ins().icmp(IntCC::Equal, result, error_val);
@@ -92,69 +73,63 @@ pub(in crate::translate) fn str_slice<'a>(
         Some(lo),
         Some(hi),
     );
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let result_is_nonzero = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
+    let slice_is_empty = e.builder().ins().icmp(IntCC::Equal, lo, hi);
+    let allocation_ok = e.builder().ins().bor(result_is_nonzero, slice_is_empty);
+    let allocation_ok = e.builder().ins().uextend(types::I64, allocation_ok);
+    emit_jit_error_if_zero(e, allocation_ok);
     e.write_var(inst.a, result);
-    Ok(())
 }
 
-pub(in crate::translate) fn str_eq<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_eq, "str_eq")?;
+pub(in crate::translate) fn str_eq<'a>(e: &mut impl CollectionEmitter<'a>, inst: &Instruction) {
+    let func = e.helper(HelperKind::str_eq);
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
+    let call = emit_runtime_helper_call(e, func, &[a, b]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
-    Ok(())
 }
 
-pub(in crate::translate) fn str_ne<'a>(
-    e: &mut impl CollectionEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_eq, "str_eq")?;
+pub(in crate::translate) fn str_ne<'a>(e: &mut impl CollectionEmitter<'a>, inst: &Instruction) {
+    let func = e.helper(HelperKind::str_eq);
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
+    let call = emit_runtime_helper_call(e, func, &[a, b]);
     let eq_result = e.builder().inst_results(call)[0];
     let zero = e.builder().ins().iconst(types::I64, 0);
     let cmp = e.builder().ins().icmp(IntCC::Equal, eq_result, zero);
     let result = e.builder().ins().uextend(types::I64, cmp);
     e.write_var(inst.a, result);
-    Ok(())
 }
 
 pub(in crate::translate) fn str_cmp<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
     cc: IntCC,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_cmp, "str_cmp")?;
+) {
+    let func = e.helper(HelperKind::str_cmp);
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
-    let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
+    let call = emit_runtime_helper_call(e, func, &[a, b]);
     let cmp_result = e.builder().inst_results(call)[0];
     let zero = e.builder().ins().iconst(types::I32, 0);
     let cmp = e.builder().ins().icmp(cc, cmp_result, zero);
     let result = e.builder().ins().uextend(types::I64, cmp);
     e.write_var(inst.a, result);
-    Ok(())
 }
 
 pub(in crate::translate) fn str_decode_rune<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_decode_rune, "str_decode_rune")?;
+) {
+    let func = e.helper(HelperKind::str_decode_rune);
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let call =
-        emit_funcref_call_with_effect(e, func, &[s, idx], HelperCallEffect::FrameIndependent);
+    let call = emit_runtime_helper_call(e, func, &[s, idx]);
     let packed = e.builder().inst_results(call)[0];
-    let rune = e.builder().ins().ushr_imm(packed, 32);
-    let width = e.builder().ins().band_imm(packed, 0xFFFFFFFF);
+    let rune = e.builder().ins().ushr_imm_u(packed, 32);
+    let width = e.builder().ins().band_imm_u(packed, 0xFFFFFFFF);
     e.write_var(inst.a, rune);
     e.write_var(inst.a + 1, width);
-    Ok(())
 }

@@ -8,9 +8,11 @@
 
 mod app_plan;
 
+use futures_util::future::{AbortHandle, Abortable};
 use js_sys::{Function, Object, Reflect};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use vo_app_runtime::{
     DynamicInstanceGroupPlan, EntryIslandConstructCommand, EntryLaunchSupervisor,
@@ -47,6 +49,75 @@ fn ensure_panic_hook() {
     INIT.call_once(console_error_panic_hook::set_once);
 }
 
+const MAX_STUDIO_OPERATION_ID_BYTES: usize = 128;
+
+fn validate_studio_operation_id(operation_id: &str) -> Result<(), JsValue> {
+    if operation_id.is_empty()
+        || operation_id.len() > MAX_STUDIO_OPERATION_ID_BYTES
+        || !operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_'))
+    {
+        return Err(js_sys::Error::new("invalid Studio operation ID").into());
+    }
+    Ok(())
+}
+
+fn cancellable_studio_promise<F>(operation_id: &str, future: F) -> js_sys::Promise
+where
+    F: Future<Output = Result<JsValue, JsValue>> + 'static,
+{
+    if let Err(error) = validate_studio_operation_id(operation_id) {
+        return js_sys::Promise::reject(&error);
+    }
+    let operation_id = operation_id.to_string();
+    let (abort, registration) = AbortHandle::new_pair();
+    let generation = match NEXT_STUDIO_OPERATION_GENERATION.with(|next| {
+        let generation = next.get();
+        let following = generation
+            .checked_add(1)
+            .ok_or_else(|| js_sys::Error::new("Studio operation generation exhausted"))?;
+        next.set(following);
+        Ok::<_, js_sys::Error>(generation)
+    }) {
+        Ok(generation) => generation,
+        Err(error) => return js_sys::Promise::reject(error.as_ref()),
+    };
+    ACTIVE_STUDIO_OPERATIONS.with(|operations| {
+        if let Some((_, previous)) = operations
+            .borrow_mut()
+            .insert(operation_id.clone(), (generation, abort))
+        {
+            previous.abort();
+        }
+    });
+    wasm_bindgen_futures::future_to_promise(async move {
+        let result = Abortable::new(future, registration).await;
+        ACTIVE_STUDIO_OPERATIONS.with(|operations| {
+            let mut operations = operations.borrow_mut();
+            if operations
+                .get(&operation_id)
+                .is_some_and(|(current, _)| *current == generation)
+            {
+                operations.remove(&operation_id);
+            }
+        });
+        result.unwrap_or_else(|_| Err(js_sys::Error::new("Studio operation cancelled").into()))
+    })
+}
+
+#[wasm_bindgen(js_name = "cancelStudioOperation")]
+pub fn cancel_studio_operation(operation_id: &str) -> Result<bool, JsValue> {
+    validate_studio_operation_id(operation_id)?;
+    Ok(ACTIVE_STUDIO_OPERATIONS.with(|operations| {
+        let Some((_, operation)) = operations.borrow_mut().remove(operation_id) else {
+            return false;
+        };
+        operation.abort();
+        true
+    }))
+}
+
 /// Synchronize one JavaScript-side extension disposal with Rust routing state.
 #[wasm_bindgen(js_name = "forgetWasmExtModuleOwner")]
 pub fn forget_wasm_ext_module_owner(owner: &str) -> Result<(), JsValue> {
@@ -77,23 +148,9 @@ pub fn forget_wasm_ext_scope(scope: u64) -> Result<(), JsValue> {
 ///
 /// A completed program reports `exit_code == 0`; an explicit `os.Exit` keeps
 /// the exact VM exit code so the Studio frontend can surface process status.
-#[wasm_bindgen]
-pub struct StudioRunResult {
+struct StudioRunResult {
     output: String,
     exit_code: i32,
-}
-
-#[wasm_bindgen]
-impl StudioRunResult {
-    #[wasm_bindgen(getter)]
-    pub fn output(&self) -> String {
-        self.output.clone()
-    }
-
-    #[wasm_bindgen(getter, js_name = "exitCode")]
-    pub fn exit_code(&self) -> i32 {
-        self.exit_code
-    }
 }
 
 fn pending_host_event_to_js(event: &PendingHostEvent) -> Object {
@@ -519,6 +576,9 @@ thread_local! {
     static NEXT_APP_PLAN_GENERATION: Cell<u64> = const { Cell::new(1) };
     static GC_STRESS_EVERY_STEP: Cell<bool> = const { Cell::new(false) };
     static GC_STRESS_HOST_STEP: Cell<bool> = const { Cell::new(false) };
+    static ACTIVE_STUDIO_OPERATIONS: RefCell<BTreeMap<String, (u64, AbortHandle)>> =
+        const { RefCell::new(BTreeMap::new()) };
+    static NEXT_STUDIO_OPERATION_GENERATION: Cell<u64> = const { Cell::new(1) };
 }
 
 const MAX_GUI_PREVIEWS: usize = 16;
@@ -530,6 +590,25 @@ struct PreparedGuiLaunch {
     runtime_plan: vo_web::BrowserRuntimePlan,
     browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
+    extensions: Vec<vo_web::ReadyWasmExtensionBytes>,
+}
+
+impl PreparedGuiLaunch {
+    fn extension_payload_bytes(&self) -> Result<usize, String> {
+        self.extensions.iter().try_fold(0usize, |total, extension| {
+            total
+                .checked_add(extension.wasm_bytes.len())
+                .and_then(|total| {
+                    total.checked_add(
+                        extension
+                            .js_glue_bytes
+                            .as_ref()
+                            .map_or(0, |bytes| bytes.len()),
+                    )
+                })
+                .ok_or_else(|| String::from("prepared GUI extension byte count overflow"))
+        })
+    }
 }
 
 struct BrowserEntryVm {
@@ -2814,8 +2893,48 @@ fn build_prepared_gui_launch(
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
 ) -> Result<PreparedGuiLaunch, String> {
     let intent = runtime_plan.artifact_intent()?;
-    let browser_artifacts =
-        vo_web::materialized_browser_artifacts_from_vfs(&intent, &runtime_plan)?;
+    let mut extension_indices = BTreeMap::new();
+    let mut extensions = Vec::<vo_web::ReadyWasmExtensionBytes>::new();
+    let browser_artifacts = vo_web::materialized_browser_artifacts_from_vfs(
+        &intent,
+        &runtime_plan,
+        |artifact, bytes| match artifact.role {
+            vo_web::MaterializedBrowserArtifactRole::WasmModule => {
+                if extension_indices.contains_key(&artifact.module_key) {
+                    return Err(format!(
+                        "browser GUI launch contains duplicate WASM owner {}",
+                        artifact.module_key
+                    ));
+                }
+                extension_indices.insert(artifact.module_key.clone(), extensions.len());
+                extensions.push(vo_web::ReadyWasmExtensionBytes {
+                    name: artifact.extension_name.clone(),
+                    module_key: artifact.module_key.clone(),
+                    wasm_bytes: bytes,
+                    js_glue_bytes: None,
+                });
+                Ok(())
+            }
+            vo_web::MaterializedBrowserArtifactRole::JavaScriptGlue => {
+                let index = extension_indices.get(&artifact.module_key).ok_or_else(|| {
+                    format!(
+                        "browser GUI launch contains JavaScript glue without WASM for {}",
+                        artifact.module_key
+                    )
+                })?;
+                let extension = &mut extensions[*index];
+                if extension.name != artifact.extension_name || extension.js_glue_bytes.is_some() {
+                    return Err(format!(
+                        "browser GUI launch contains conflicting JavaScript glue for {}",
+                        artifact.module_key
+                    ));
+                }
+                extension.js_glue_bytes = Some(bytes);
+                Ok(())
+            }
+            vo_web::MaterializedBrowserArtifactRole::JavaScriptModule => Ok(()),
+        },
+    )?;
     if browser_artifacts.len() > vo_app_runtime::MAX_RUNTIME_PLAN_ARTIFACTS.saturating_sub(3) {
         return Err(format!(
             "browser GUI launch materialized {} artifacts, exceeding the AppBuildPlan budget",
@@ -2828,6 +2947,7 @@ fn build_prepared_gui_launch(
         runtime_plan,
         browser_artifacts,
         locked_modules,
+        extensions,
     })
 }
 
@@ -2837,7 +2957,9 @@ fn prepare_gui_launch(
     runtime_plan: vo_web::BrowserRuntimePlan,
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
 ) -> Result<u64, String> {
+    ensure_prepared_gui_launch_capacity()?;
     let launch = build_prepared_gui_launch(entry_path, bytecode, runtime_plan, locked_modules)?;
+    let launch_bytes = launch.extension_payload_bytes()?;
     let token = next_browser_identity(&NEXT_PREPARED_GUI_LAUNCH, "prepared GUI launch identity")?;
     PREPARED_GUI_LAUNCHES.with(|launches| {
         let mut launches = launches.borrow_mut();
@@ -2846,9 +2968,44 @@ fn prepare_gui_launch(
                 "cannot prepare GUI launch: launch capacity reached",
             ));
         }
+        let retained_bytes = launches.values().try_fold(launch_bytes, |total, launch| {
+            total
+                .checked_add(launch.extension_payload_bytes()?)
+                .ok_or_else(|| String::from("prepared GUI launch byte count overflow"))
+        })?;
+        if retained_bytes > vo_web::MAX_BROWSER_SNAPSHOT_BYTES {
+            return Err(format!(
+                "prepared GUI launches retain more than {} extension bytes",
+                vo_web::MAX_BROWSER_SNAPSHOT_BYTES
+            ));
+        }
         launches.insert(token, launch);
         Ok(token)
     })
+}
+
+fn ensure_prepared_gui_launch_capacity() -> Result<(), String> {
+    PREPARED_GUI_LAUNCHES.with(|launches| {
+        if launches.borrow().len() >= MAX_GUI_PREVIEWS {
+            Err(String::from(
+                "cannot prepare GUI launch: launch capacity reached",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn parse_prepared_gui_launch_token(token: &str) -> Result<u64, JsValue> {
+    let parsed = token
+        .parse::<u64>()
+        .map_err(|_| JsValue::from_str("prepared GUI launch token is invalid"))?;
+    if parsed == 0 || parsed.to_string() != token {
+        return Err(JsValue::from_str(
+            "prepared GUI launch token is not canonical",
+        ));
+    }
+    Ok(parsed)
 }
 
 fn take_prepared_gui_launch(
@@ -2856,9 +3013,7 @@ fn take_prepared_gui_launch(
     entry_path: &str,
     bytecode: &[u8],
 ) -> Result<PreparedGuiLaunch, JsValue> {
-    let token = token
-        .parse::<u64>()
-        .map_err(|_| JsValue::from_str("prepared GUI launch token is invalid"))?;
+    let token = parse_prepared_gui_launch_token(token)?;
     let launch = PREPARED_GUI_LAUNCHES.with(|launches| {
         launches
             .borrow_mut()
@@ -2876,15 +3031,10 @@ fn take_prepared_gui_launch(
 
 #[wasm_bindgen(js_name = "discardPreparedGuiLaunch")]
 pub fn discard_prepared_gui_launch(token: &str) -> Result<(), JsValue> {
-    let token = token
-        .parse::<u64>()
-        .map_err(|_| JsValue::from_str("prepared GUI launch token is invalid"))?;
+    let token = parse_prepared_gui_launch_token(token)?;
     PREPARED_GUI_LAUNCHES.with(|launches| {
-        launches
-            .borrow_mut()
-            .remove(&token)
-            .map(|_| ())
-            .ok_or_else(|| JsValue::from_str("prepared GUI launch token is unknown or consumed"))
+        launches.borrow_mut().remove(&token);
+        Ok(())
     })
 }
 
@@ -3148,7 +3298,8 @@ impl StudioVoVm {
         Ok(format!("{:?}", step.outcome))
     }
 
-    /// Push an island transport frame into the VM command queue (does not run the VM).
+    /// Push a frame received from Studio's certified island transport into the
+    /// VM command queue (does not run the VM).
     #[wasm_bindgen(js_name = "pushIslandCommand")]
     pub fn push_island_command(&mut self, frame: &[u8]) -> Result<(), JsValue> {
         self.runtime
@@ -3197,7 +3348,7 @@ impl StudioVoVm {
 
 // =============================================================================
 // VoWebModule exports — initVFS
-// preloadExtModule is provided by vo-web (3-param version with optional jsGlueUrl).
+// preloadExtModule is provided by vo-web (3-param version with optional JS glue source).
 // =============================================================================
 
 #[wasm_bindgen(js_name = "getBuildId")]
@@ -3211,11 +3362,6 @@ pub fn get_build_id() -> String {
 pub fn render_initial_module_manifest(module: &str) -> Result<String, JsValue> {
     vo_module::ops::render_initial_mod_file(module)
         .map_err(|error| js_sys::Error::new(&error.to_string()).into())
-}
-
-#[wasm_bindgen(js_name = "voVersion")]
-pub fn vo_version() -> String {
-    vo_module::TOOLCHAIN_VERSION.to_string()
 }
 
 #[wasm_bindgen(js_name = "initVFS")]
@@ -3277,13 +3423,50 @@ pub fn register_browser_release_capabilities(
 
 const VFS_MOD_ROOT: &str = "";
 const STUDIO_HOST_PRIVATE_VFS_ROOT: &str = "/__volang_studio_host";
-const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "4";
+const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "5";
 const STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE: &str = "studio-vfs-compile-cache-slot";
 const STUDIO_VFS_COMPILE_CACHE_NAMESPACE: &str = "studio-vfs-compile-cache";
 
+#[derive(Clone)]
 struct ResolvedVfsCompileTarget {
     entry_path: String,
     project_root: Option<String>,
+}
+
+struct PreparedVfsCompile {
+    target: ResolvedVfsCompileTarget,
+    local_fs: MemoryFs,
+    authority: VfsCompileAuthority,
+    project_context: Option<vo_module::project::ProjectContext>,
+}
+
+struct ReadyVfsCompile {
+    prepared: PreparedVfsCompile,
+    ready_modules: Vec<vo_module::readiness::ReadyModule>,
+}
+
+impl PreparedVfsCompile {
+    fn locked_modules(&self) -> &[vo_module::schema::lockfile::LockedModule] {
+        self.project_context
+            .as_ref()
+            .map(|context| context.project_plan().locked_modules())
+            .unwrap_or_default()
+    }
+}
+
+impl ReadyVfsCompile {
+    fn locked_modules(&self) -> &[vo_module::schema::lockfile::LockedModule] {
+        self.prepared.locked_modules()
+    }
+
+    fn browser_runtime_plan(&self) -> Result<vo_web::BrowserRuntimePlan, String> {
+        match self.prepared.project_context.as_ref() {
+            Some(context) => {
+                browser_runtime_plan_for_context_with_ready(context, &self.ready_modules)
+            }
+            None => Ok(vo_web::BrowserRuntimePlan::default()),
+        }
+    }
 }
 
 struct VfsCompileCacheSlot {
@@ -3316,8 +3499,6 @@ struct FrameworkContract {
     roles: Vec<String>,
     js_modules: BTreeMap<String, String>,
 }
-
-type WasmExtensionCompileSpec = vo_web::ReadyWasmExtensionBytes;
 
 fn normalize_vfs_path(path: &str) -> String {
     let trimmed = path.trim();
@@ -3776,21 +3957,16 @@ fn build_workspace_project_from_vfs(
     Ok((local_fs, context))
 }
 
-fn target_locked_modules(
-    target: &ResolvedVfsCompileTarget,
-    options: &ProjectContextOptions,
-) -> Result<Vec<vo_module::schema::lockfile::LockedModule>, String> {
-    if let Some(project_root) = &target.project_root {
-        let (_, context) = build_workspace_project_from_vfs(project_root, options)?;
-        return Ok(context.project_plan().locked_modules().to_vec());
-    }
-    let single_file = SingleFileEntry::load(target)?;
-    single_file.validate_dependency_authority()?;
-    Ok(Vec::new())
+fn browser_runtime_plan_for_context_with_ready(
+    context: &vo_module::project::ProjectContext,
+    ready: &[vo_module::readiness::ReadyModule],
+) -> Result<vo_web::BrowserRuntimePlan, String> {
+    merge_browser_runtime_plan_for_context(context, vo_web::plan_ready_browser_runtime(ready)?)
 }
 
-fn browser_runtime_plan_for_context(
+fn merge_browser_runtime_plan_for_context(
     context: &vo_module::project::ProjectContext,
+    published: vo_web::BrowserRuntimePlan,
 ) -> Result<vo_web::BrowserRuntimePlan, String> {
     let mut plans = Vec::new();
     for local_dir in context.workspace_sources().values() {
@@ -3799,23 +3975,8 @@ fn browser_runtime_plan_for_context(
             &local_root,
         )?);
     }
-    plans.push(vo_web::published_browser_runtime_plan_from_vfs(
-        context.project_plan().locked_modules(),
-        "",
-    )?);
+    plans.push(published);
     vo_web::merge_browser_runtime_plans(plans)
-}
-
-fn browser_runtime_plan_for_target(
-    target: &ResolvedVfsCompileTarget,
-    options: &ProjectContextOptions,
-) -> Result<vo_web::BrowserRuntimePlan, String> {
-    if let Some(project_root) = &target.project_root {
-        let (_, context) = build_workspace_project_from_vfs(project_root, options)?;
-        return browser_runtime_plan_for_context(&context);
-    }
-    let locked_modules = target_locked_modules(target, options)?;
-    vo_web::published_browser_runtime_plan_from_vfs(&locked_modules, "")
 }
 
 fn read_vfs_text_limited(path: &str, max_bytes: usize, label: &str) -> Result<String, String> {
@@ -3858,14 +4019,6 @@ async fn ensure_project_plan_for_studio(
     .map_err(|error| error.to_string())
 }
 
-async fn load_ready_wasm_extensions_for_studio(
-    ready: &[vo_module::readiness::ReadyModule],
-) -> Result<(), String> {
-    vo_web::load_ready_wasm_extensions_from_vfs(ready)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 fn log_prepare_entry_resolve_install_done<'a>(modules: impl IntoIterator<Item = &'a str>) {
     for module in modules {
         log_wasm_module(
@@ -3874,6 +4027,72 @@ fn log_prepare_entry_resolve_install_done<'a>(modules: impl IntoIterator<Item = 
             js_sys::Date::now(),
         );
     }
+}
+
+async fn prepare_ready_vfs_compile(
+    entry_path: &str,
+    options: &ProjectContextOptions,
+) -> Result<ReadyVfsCompile, String> {
+    let total_start = js_sys::Date::now();
+    let mut prepared = prepare_vfs_compile(entry_path, options)?;
+    let ready_modules = match prepared.project_context.as_ref() {
+        Some(context) if context.project_plan().has_mod_file() => {
+            let deps_start = js_sys::Date::now();
+            let ready = ensure_project_plan_for_studio(context.project_plan()).await?;
+            log_prepare_entry_resolve_install_done(
+                context
+                    .project_plan()
+                    .locked_modules()
+                    .iter()
+                    .map(|module| module.path.as_str()),
+            );
+            log_wasm_path(
+                "prepare_entry_ensure_deps_done",
+                &prepared.target.entry_path,
+                "system",
+                Some(deps_start),
+            );
+            let refreshed = prepare_vfs_compile(entry_path, options)?;
+            if refreshed.target.entry_path != prepared.target.entry_path
+                || refreshed.target.project_root != prepared.target.project_root
+            {
+                return Err(String::from(
+                    "Studio compile target changed while dependencies were being prepared",
+                ));
+            }
+            let refreshed_context = refreshed.project_context.as_ref().ok_or_else(|| {
+                String::from("Studio project disappeared while dependencies were being prepared")
+            })?;
+            validate_project_context_authority(context, refreshed_context)?;
+            if context.workspace_sources() != refreshed_context.workspace_sources() {
+                return Err(String::from(
+                    "Studio workspace selection changed while dependencies were being prepared",
+                ));
+            }
+            prepared = refreshed;
+            ready
+        }
+        _ => Vec::new(),
+    };
+    log_wasm_path(
+        "prepare_entry_done",
+        &prepared.target.entry_path,
+        "system",
+        Some(total_start),
+    );
+    Ok(ReadyVfsCompile {
+        prepared,
+        ready_modules,
+    })
+}
+
+async fn prepare_ready_vfs_compile_from_discovery(
+    entry_path: &str,
+    workspace_discovery: &str,
+) -> Result<(ReadyVfsCompile, ProjectContextOptions), String> {
+    let options = project_context_options_from_workspace_discovery(workspace_discovery)?;
+    let ready = prepare_ready_vfs_compile(entry_path, &options).await?;
+    Ok((ready, options))
 }
 
 impl SingleFileEntry {
@@ -3930,23 +4149,14 @@ impl SingleFileEntry {
     }
 }
 
-fn build_compile_fs_from_vfs(
+fn prepare_vfs_compile(
     entry_path: &str,
     options: &ProjectContextOptions,
-) -> Result<
-    (
-        ResolvedVfsCompileTarget,
-        MemoryFs,
-        VfsCompileAuthority,
-        Vec<vo_module::schema::lockfile::LockedModule>,
-    ),
-    String,
-> {
+) -> Result<PreparedVfsCompile, String> {
     let target = resolve_vfs_compile_target(entry_path)?;
-    let (local_fs, authority, locked_modules) = if let Some(project_root) = &target.project_root {
+    let (local_fs, authority, project_context) = if let Some(project_root) = &target.project_root {
         let (local_fs, context) = build_workspace_project_from_vfs(project_root, options)?;
-        let locked_modules = context.project_plan().locked_modules().to_vec();
-        (local_fs, VfsCompileAuthority::Project, locked_modules)
+        (local_fs, VfsCompileAuthority::Project, Some(context))
     } else {
         let single_file = SingleFileEntry::load(&target)?;
         let authority = if single_file.inline_mod.is_some() {
@@ -3957,28 +4167,32 @@ fn build_compile_fs_from_vfs(
         single_file.validate_dependency_authority()?;
         let mut local_fs = MemoryFs::new();
         single_file.populate_compile_fs(&mut local_fs)?;
-        (local_fs, authority, Vec::new())
+        (local_fs, authority, None)
     };
 
-    Ok((target, local_fs, authority, locked_modules))
+    Ok(PreparedVfsCompile {
+        target,
+        local_fs,
+        authority,
+        project_context,
+    })
 }
 
 fn validate_materialized_modules_with_fs<F: FileSystem>(
     module_fs: &F,
     locked_modules: &[vo_module::schema::lockfile::LockedModule],
-) -> Result<(), String> {
+) -> Result<Vec<vo_module::readiness::ReadyModule>, String> {
     vo_module::readiness::check_materialized_modules_readiness(
         module_fs,
         locked_modules,
         WASM_INSTALL_TARGET,
     )
-    .map(|_| ())
     .map_err(|error| format!("Studio module cache does not match the authorized graph: {error}"))
 }
 
 fn validate_vfs_materialized_modules(
     locked_modules: &[vo_module::schema::lockfile::LockedModule],
-) -> Result<(), String> {
+) -> Result<Vec<vo_module::readiness::ReadyModule>, String> {
     validate_materialized_modules_with_fs(&vo_web::WasmVfs::new(""), locked_modules)
 }
 
@@ -4209,23 +4423,14 @@ fn framework_contract_from_vo_web(contract: vo_web::BrowserRuntimeContract) -> F
     }
 }
 
-fn build_wasm_extension_compile_specs(
+fn materialize_render_island_snapshot(
+    target: &ResolvedVfsCompileTarget,
     plan: &vo_web::BrowserRuntimePlan,
-) -> Result<Vec<WasmExtensionCompileSpec>, String> {
-    vo_web::collect_browser_wasm_extensions_from_vfs(&plan.wasm_extensions)
-        .map_err(|error| error.to_string())
-}
-
-fn collect_render_island_snapshot(
-    entry_path: &str,
-    options: &ProjectContextOptions,
-) -> Result<JsValue, String> {
-    let target = resolve_vfs_compile_target(entry_path)?;
+) -> Result<(String, Vec<(String, Vec<u8>)>), String> {
     let root_path = target
         .project_root
         .clone()
         .unwrap_or_else(|| vfs_parent_dir(&target.entry_path).unwrap_or_else(|| "/".to_string()));
-    let plan = browser_runtime_plan_for_target(&target, options)?;
     let snapshot = if target.project_root.is_some() {
         plan.snapshot_plan(vo_web::BrowserSnapshotRoot::ProjectRoot)
     } else {
@@ -4241,7 +4446,7 @@ fn collect_render_island_snapshot(
     .into_iter()
     .map(|file| (file.path, file.bytes))
     .collect();
-    Ok(render_island_snapshot_to_js(&root_path, files))
+    Ok((root_path, files))
 }
 
 fn render_island_snapshot_to_js(root_path: &str, files: Vec<(String, Vec<u8>)>) -> JsValue {
@@ -4263,15 +4468,36 @@ fn render_island_snapshot_to_js(root_path: &str, files: Vec<(String, Vec<u8>)>) 
     obj.into()
 }
 
-fn compile_from_vfs(entry_path: &str, options: &ProjectContextOptions) -> Result<Vec<u8>, String> {
-    let (target, local_fs, authority, locked_modules) =
-        build_compile_fs_from_vfs(entry_path, options)?;
-    // Cache hits are executable compiler outputs, so they carry the same
-    // authenticated dependency-readiness precondition as cache misses. This
-    // check binds the current VFS release/package/source/artifact closure to
-    // the materialized subset selected by ProjectContext before any bytecode
-    // cache lookup can bypass that boundary.
-    validate_vfs_materialized_modules(&locked_modules)?;
+fn compile_prepared_vfs(
+    prepared: PreparedVfsCompile,
+    options: &ProjectContextOptions,
+) -> Result<Vec<u8>, String> {
+    let ready_modules = validate_vfs_materialized_modules(prepared.locked_modules())?;
+    compile_authenticated_vfs(prepared, options, &ready_modules)
+}
+
+fn compile_ready_vfs(
+    ready: ReadyVfsCompile,
+    options: &ProjectContextOptions,
+) -> Result<Vec<u8>, String> {
+    let ReadyVfsCompile {
+        prepared,
+        ready_modules,
+    } = ready;
+    compile_authenticated_vfs(prepared, options, &ready_modules)
+}
+
+fn compile_authenticated_vfs(
+    prepared: PreparedVfsCompile,
+    options: &ProjectContextOptions,
+    ready_modules: &[vo_module::readiness::ReadyModule],
+) -> Result<Vec<u8>, String> {
+    let PreparedVfsCompile {
+        target,
+        local_fs,
+        authority,
+        project_context: _,
+    } = prepared;
     let cache_slot = vfs_compile_cache_slot(&target);
     let fingerprint = compute_vfs_compile_cache_fingerprint(&target, &local_fs)?;
     if let Some(bytecode) = try_load_vfs_compile_cache(&cache_slot, &fingerprint)? {
@@ -4284,11 +4510,12 @@ fn compile_from_vfs(entry_path: &str, options: &ProjectContextOptions) -> Result
             vo_web::compile_ephemeral_entry_with_vfs(entry_clean, local_fs, VFS_MOD_ROOT)
         }
         VfsCompileAuthority::Project | VfsCompileAuthority::AdHocSingleFile => {
-            vo_web::compile_entry_with_vfs_with_options(
+            vo_web::compile_ready_entry_with_vfs(
                 entry_clean,
                 local_fs,
                 VFS_MOD_ROOT,
                 options,
+                ready_modules,
             )
         }
     }
@@ -4298,47 +4525,8 @@ fn compile_from_vfs(entry_path: &str, options: &ProjectContextOptions) -> Result
     Ok(bytecode)
 }
 
-fn diagnostic_error_to_js(file: &str, category: &str, message: &str) -> JsValue {
-    let obj = Object::new();
-    let _ = Reflect::set(&obj, &JsValue::from_str("file"), &JsValue::from_str(file));
-    let _ = Reflect::set(&obj, &JsValue::from_str("line"), &JsValue::from_f64(0.0));
-    let _ = Reflect::set(&obj, &JsValue::from_str("column"), &JsValue::from_f64(0.0));
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("message"),
-        &JsValue::from_str(message),
-    );
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("category"),
-        &JsValue::from_str(category),
-    );
-    let _ = Reflect::set(&obj, &JsValue::from_str("moduleStage"), &JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("moduleKind"), &JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("modulePath"), &JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("moduleVersion"), &JsValue::NULL);
-    obj.into()
-}
-
-fn compiler_result_to_js(ok: bool, errors: js_sys::Array, bytecode: Option<&[u8]>) -> JsValue {
-    let obj = Object::new();
-    let _ = Reflect::set(&obj, &JsValue::from_str("ok"), &JsValue::from_bool(ok));
-    let _ = Reflect::set(&obj, &JsValue::from_str("errors"), &errors);
-    let bytecode_value = bytecode
-        .map(|bytes| js_sys::Uint8Array::from(bytes).into())
-        .unwrap_or(JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("bytecode"), &bytecode_value);
-    obj.into()
-}
-
-fn compiler_success_to_js(bytecode: Option<&[u8]>) -> JsValue {
-    compiler_result_to_js(true, js_sys::Array::new(), bytecode)
-}
-
-fn compiler_error_to_js(entry_path: &str, category: &str, message: String) -> JsValue {
-    let errors = js_sys::Array::new();
-    errors.push(&diagnostic_error_to_js(entry_path, category, &message));
-    compiler_result_to_js(false, errors, None)
+fn compile_from_vfs(entry_path: &str, options: &ProjectContextOptions) -> Result<Vec<u8>, String> {
+    compile_prepared_vfs(prepare_vfs_compile(entry_path, options)?, options)
 }
 
 struct GuiCompileOutput {
@@ -4346,21 +4534,19 @@ struct GuiCompileOutput {
     bytecode: Vec<u8>,
     framework: Option<FrameworkContract>,
     provider_frameworks: Vec<FrameworkContract>,
-    wasm_extensions: Vec<WasmExtensionCompileSpec>,
     runtime_plan: vo_web::BrowserRuntimePlan,
     locked_modules: Vec<vo_module::schema::lockfile::LockedModule>,
 }
 
 fn compile_gui_run_output(
-    entry_path: &str,
+    ready: ReadyVfsCompile,
     options: &ProjectContextOptions,
 ) -> Result<GuiCompileOutput, String> {
-    let target = resolve_vfs_compile_target(entry_path)?;
-    let bytecode = compile_from_vfs(entry_path, options)?;
-    let plan = browser_runtime_plan_for_target(&target, options)?;
-    let locked_modules = target_locked_modules(&target, options)?;
+    let target = ready.prepared.target.clone();
+    let plan = ready.browser_runtime_plan()?;
+    let locked_modules = ready.locked_modules().to_vec();
+    let bytecode = compile_ready_vfs(ready, options)?;
     let split = plan.primary_framework_split();
-    let wasm_extensions = build_wasm_extension_compile_specs(&plan)?;
     let framework = split.primary_framework.map(framework_contract_from_vo_web);
     let provider_frameworks = split
         .provider_frameworks
@@ -4372,7 +4558,6 @@ fn compile_gui_run_output(
         bytecode,
         framework,
         provider_frameworks,
-        wasm_extensions,
         runtime_plan: plan,
         locked_modules,
     })
@@ -4429,170 +4614,118 @@ fn framework_contract_to_js(contract: &FrameworkContract) -> JsValue {
     obj.into()
 }
 
-fn wasm_extension_compile_spec_to_js(spec: &WasmExtensionCompileSpec) -> JsValue {
-    let obj = Object::new();
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("name"),
-        &JsValue::from_str(&spec.name),
-    );
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("moduleKey"),
-        &JsValue::from_str(&spec.module_key),
-    );
-    let wasm_bytes = js_sys::Uint8Array::from(spec.wasm_bytes.as_slice());
-    let _ = Reflect::set(&obj, &JsValue::from_str("wasmBytes"), &wasm_bytes);
-    let js_glue_value = spec
-        .js_glue_bytes
-        .as_ref()
-        .map(|bytes| js_sys::Uint8Array::from(bytes.as_slice()).into())
-        .unwrap_or(JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("jsGlueBytes"), &js_glue_value);
-    obj.into()
-}
-
-#[wasm_bindgen(js_name = "prepareEntry")]
-pub fn prepare_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Promise {
-    ensure_panic_hook();
-    let entry_path = entry_path.to_string();
-    let workspace_discovery = workspace_discovery.to_string();
-    wasm_bindgen_futures::future_to_promise(async move {
-        let total_start = js_sys::Date::now();
-        let options = project_context_options_from_workspace_discovery(&workspace_discovery)
-            .map_err(|e| JsValue::from_str(&e))?;
-        let target = resolve_vfs_compile_target(&entry_path).map_err(|e| JsValue::from_str(&e))?;
-
-        if let Some(project_root) = &target.project_root {
-            let read_start = js_sys::Date::now();
-            let (_local_fs, context) = build_workspace_project_from_vfs(project_root, &options)
-                .map_err(|e| JsValue::from_str(&e))?;
-            log_wasm_path(
-                "prepare_entry_read_package_done",
-                project_root,
-                "system",
-                Some(read_start),
-            );
-            let deps_start = js_sys::Date::now();
-            let ready = if context.project_plan().has_mod_file() {
-                ensure_project_plan_for_studio(context.project_plan())
-                    .await
-                    .map_err(|e| JsValue::from_str(&e))?
-            } else {
-                Vec::new()
-            };
-            if !ready.is_empty() {
-                load_ready_wasm_extensions_for_studio(&ready)
-                    .await
-                    .map_err(|e| JsValue::from_str(&e))?;
-            }
-            log_prepare_entry_resolve_install_done(
-                context
-                    .project_plan()
-                    .locked_modules()
-                    .iter()
-                    .map(|module| module.path.as_str()),
-            );
-            log_wasm_path(
-                "prepare_entry_ensure_deps_done",
-                &target.entry_path,
-                "system",
-                Some(deps_start),
-            );
-        } else {
-            let single_file_start = js_sys::Date::now();
-            let single_file = SingleFileEntry::load(&target).map_err(|e| JsValue::from_str(&e))?;
-            log_wasm_path(
-                "prepare_entry_load_single_file_done",
-                &target.entry_path,
-                "system",
-                Some(single_file_start),
-            );
-            single_file
-                .validate_dependency_authority()
-                .map_err(|e| JsValue::from_str(&e))?;
-        }
-
-        log_wasm_path(
-            "prepare_entry_done",
-            &target.entry_path,
-            "system",
-            Some(total_start),
-        );
-
-        Ok(JsValue::NULL)
-    })
-}
-
 #[wasm_bindgen(js_name = "compileRunEntry")]
 pub fn compile_run_entry(
     entry_path: &str,
     workspace_discovery: &str,
-) -> Result<StudioRunResult, JsValue> {
+    operation_id: &str,
+) -> js_sys::Promise {
     ensure_panic_hook();
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    let bytecode = compile_from_vfs(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    run_console_bytecode(&bytecode).map_err(|e| JsValue::from_str(&e))
+    let entry_path = entry_path.to_string();
+    let workspace_discovery = workspace_discovery.to_string();
+    cancellable_studio_promise(operation_id, async move {
+        let (ready, options) =
+            prepare_ready_vfs_compile_from_discovery(&entry_path, &workspace_discovery)
+                .await
+                .map_err(|error| JsValue::from_str(&error))?;
+        let runtime_plan = ready
+            .browser_runtime_plan()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let bytecode =
+            compile_ready_vfs(ready, &options).map_err(|error| JsValue::from_str(&error))?;
+        let extensions = vo_web::collect_browser_wasm_extensions_from_vfs(&runtime_plan)
+            .map_err(|error| JsValue::from_str(&error))?;
+        vo_web::load_wasm_extensions(&extensions)
+            .await
+            .map_err(|error| JsValue::from_str(&error))?;
+        let result = run_console_bytecode(&bytecode).map_err(|error| JsValue::from_str(&error))?;
+        Ok(studio_run_result_to_js(&result))
+    })
+}
+
+fn studio_run_result_to_js(result: &StudioRunResult) -> JsValue {
+    let obj = Object::new();
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("output"),
+        &JsValue::from_str(&result.output),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("exitCode"),
+        &JsValue::from_f64(result.exit_code.into()),
+    );
+    obj.into()
 }
 
 fn run_console_bytecode(bytecode: &[u8]) -> Result<StudioRunResult, String> {
     vo_web::take_output();
 
     let saved = vo_web::ext_bridge::save_extern_state();
-    let run_result = vo_web::create_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges);
+    let run_result = (|| {
+        let mut vm =
+            vo_web::create_loaded_vm(bytecode, vo_web::ext_bridge::register_wasm_ext_bridges)?;
+        match vm.run().map_err(|error| format!("{error:?}"))? {
+            vo_vm::vm::SchedulingOutcome::Completed => Ok(0),
+            vo_vm::vm::SchedulingOutcome::Exited(code) => Ok(code),
+            vo_vm::vm::SchedulingOutcome::Blocked => Err(format!("{:?}", vm.deadlock_err())),
+            vo_vm::vm::SchedulingOutcome::Suspended => Err(String::from(
+                "console VM suspended before completion; asynchronous replay is unavailable",
+            )),
+            vo_vm::vm::SchedulingOutcome::SuspendedForHostEvents => Err(String::from(
+                "console VM is waiting for host events; asynchronous replay is unavailable",
+            )),
+            vo_vm::vm::SchedulingOutcome::Panicked => Err(String::from(
+                "console VM terminated with an unexpected panic",
+            )),
+        }
+    })();
     vo_web::ext_bridge::restore_extern_state(saved)?;
-    let vm = run_result?;
 
     Ok(StudioRunResult {
         output: vo_web::take_output(),
-        exit_code: vm.exit_code().unwrap_or(0),
+        exit_code: run_result?,
     })
 }
 
-#[wasm_bindgen(js_name = "checkEntry")]
-pub fn check_entry(entry_path: &str, workspace_discovery: &str) -> Result<JsValue, JsValue> {
-    ensure_panic_hook();
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    match compile_from_vfs(entry_path, &options) {
-        Ok(_) => Ok(compiler_success_to_js(None)),
-        Err(error) => Ok(compiler_error_to_js(entry_path, "compile", error)),
-    }
-}
-
-#[wasm_bindgen(js_name = "compileEntry")]
-pub fn compile_entry(entry_path: &str, workspace_discovery: &str) -> Result<JsValue, JsValue> {
-    ensure_panic_hook();
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    match compile_from_vfs(entry_path, &options) {
-        Ok(bytecode) => Ok(compiler_success_to_js(Some(&bytecode))),
-        Err(error) => Ok(compiler_error_to_js(entry_path, "compile", error)),
-    }
-}
-
 #[wasm_bindgen(js_name = "dumpEntry")]
-pub fn dump_entry(entry_path: &str, workspace_discovery: &str) -> Result<String, JsValue> {
+pub fn dump_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Promise {
     ensure_panic_hook();
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    let bytecode = compile_from_vfs(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    let module =
-        decode_verified_module(&bytecode, "Studio dump").map_err(|e| JsValue::from_str(&e))?;
-    Ok(bytecode_text_format::format_text(&module))
+    let entry_path = entry_path.to_string();
+    let workspace_discovery = workspace_discovery.to_string();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let (ready, options) =
+            prepare_ready_vfs_compile_from_discovery(&entry_path, &workspace_discovery)
+                .await
+                .map_err(|error| JsValue::from_str(&error))?;
+        let bytecode =
+            compile_ready_vfs(ready, &options).map_err(|error| JsValue::from_str(&error))?;
+        let module = decode_verified_module(&bytecode, "Studio dump")
+            .map_err(|error| JsValue::from_str(&error))?;
+        Ok(JsValue::from_str(&bytecode_text_format::format_text(
+            &module,
+        )))
+    })
 }
 
 #[wasm_bindgen(js_name = "dumpGuiEntry")]
-pub fn dump_gui_entry(entry_path: &str, workspace_discovery: &str) -> Result<String, JsValue> {
+pub fn dump_gui_entry(entry_path: &str, workspace_discovery: &str) -> js_sys::Promise {
     ensure_panic_hook();
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    let GuiCompileOutput { bytecode, .. } =
-        compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    let module =
-        decode_verified_module(&bytecode, "Studio GUI dump").map_err(|e| JsValue::from_str(&e))?;
-    Ok(bytecode_text_format::format_text(&module))
+    let entry_path = entry_path.to_string();
+    let workspace_discovery = workspace_discovery.to_string();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let (ready, options) =
+            prepare_ready_vfs_compile_from_discovery(&entry_path, &workspace_discovery)
+                .await
+                .map_err(|error| JsValue::from_str(&error))?;
+        let GuiCompileOutput { bytecode, .. } =
+            compile_gui_run_output(ready, &options).map_err(|error| JsValue::from_str(&error))?;
+        let module = decode_verified_module(&bytecode, "Studio GUI dump")
+            .map_err(|error| JsValue::from_str(&error))?;
+        Ok(JsValue::from_str(&bytecode_text_format::format_text(
+            &module,
+        )))
+    })
 }
 
 #[wasm_bindgen(js_name = "dumpBytecode")]
@@ -4605,69 +4738,75 @@ pub fn dump_bytecode(bytecode: &[u8]) -> Result<String, JsValue> {
 
 /// Compile a GUI entry point without running it.
 /// Returns `{ bytecode: Uint8Array, entryPath: string, framework: FrameworkContract | null }`.
-/// Intended for the web backend unified compile path: call prepareEntry first, then compileGui,
-/// then use the shared post-compile pipeline (preload extensions, prepare the
-/// planned Session, load host providers, and start the prepared guest).
+/// Intended for the web backend unified compile path, followed by host-provider
+/// setup and prepared guest startup.
 #[wasm_bindgen(js_name = "compileGui")]
-pub fn compile_gui(entry_path: &str, workspace_discovery: &str) -> Result<JsValue, JsValue> {
-    let compile_start = js_sys::Date::now();
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    let GuiCompileOutput {
-        target,
-        bytecode,
-        framework,
-        provider_frameworks,
-        wasm_extensions,
-        runtime_plan,
-        locked_modules,
-    } = compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    log_wasm_path(
-        "gui_compile_done",
-        &target.entry_path,
-        "system",
-        Some(compile_start),
-    );
-    let obj = Object::new();
-    let bytes = js_sys::Uint8Array::from(bytecode.as_slice());
-    let _ = Reflect::set(&obj, &JsValue::from_str("bytecode"), &bytes);
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("entryPath"),
-        &JsValue::from_str(&target.entry_path),
-    );
-    let framework_value = framework
-        .as_ref()
-        .map(framework_contract_to_js)
-        .unwrap_or(JsValue::NULL);
-    let _ = Reflect::set(&obj, &JsValue::from_str("framework"), &framework_value);
-    let provider_frameworks_value = js_sys::Array::new();
-    for provider in &provider_frameworks {
-        provider_frameworks_value.push(&framework_contract_to_js(provider));
-    }
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("providerFrameworks"),
-        &provider_frameworks_value,
-    );
-    let wasm_extensions_value = js_sys::Array::new();
-    for spec in &wasm_extensions {
-        wasm_extensions_value.push(&wasm_extension_compile_spec_to_js(spec));
-    }
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("wasmExtensions"),
-        &wasm_extensions_value,
-    );
-    let launch_token =
-        prepare_gui_launch(&target.entry_path, &bytecode, runtime_plan, locked_modules)
-            .map_err(|error| JsValue::from_str(&error))?;
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("launchToken"),
-        &JsValue::from_str(&launch_token.to_string()),
-    );
-    Ok(obj.into())
+pub fn compile_gui(
+    entry_path: &str,
+    workspace_discovery: &str,
+    operation_id: &str,
+) -> js_sys::Promise {
+    ensure_panic_hook();
+    let entry_path = entry_path.to_string();
+    let workspace_discovery = workspace_discovery.to_string();
+    cancellable_studio_promise(operation_id, async move {
+        ensure_prepared_gui_launch_capacity().map_err(|error| JsValue::from_str(&error))?;
+        let compile_start = js_sys::Date::now();
+        let (ready, options) =
+            prepare_ready_vfs_compile_from_discovery(&entry_path, &workspace_discovery)
+                .await
+                .map_err(|error| JsValue::from_str(&error))?;
+        let GuiCompileOutput {
+            target,
+            bytecode,
+            framework,
+            provider_frameworks,
+            runtime_plan,
+            locked_modules,
+        } = compile_gui_run_output(ready, &options).map_err(|error| JsValue::from_str(&error))?;
+        let (snapshot_root, snapshot_files) =
+            materialize_render_island_snapshot(&target, &runtime_plan)
+                .map_err(|error| JsValue::from_str(&error))?;
+        log_wasm_path(
+            "gui_compile_done",
+            &target.entry_path,
+            "system",
+            Some(compile_start),
+        );
+        let launch_token =
+            prepare_gui_launch(&target.entry_path, &bytecode, runtime_plan, locked_modules)
+                .map_err(|error| JsValue::from_str(&error))?;
+        let obj = Object::new();
+        let bytes = js_sys::Uint8Array::from(bytecode.as_slice());
+        let _ = Reflect::set(&obj, &JsValue::from_str("bytecode"), &bytes);
+        let _ = Reflect::set(
+            &obj,
+            &JsValue::from_str("entryPath"),
+            &JsValue::from_str(&target.entry_path),
+        );
+        let framework_value = framework
+            .as_ref()
+            .map(framework_contract_to_js)
+            .unwrap_or(JsValue::NULL);
+        let _ = Reflect::set(&obj, &JsValue::from_str("framework"), &framework_value);
+        let provider_frameworks_value = js_sys::Array::new();
+        for provider in &provider_frameworks {
+            provider_frameworks_value.push(&framework_contract_to_js(provider));
+        }
+        let _ = Reflect::set(
+            &obj,
+            &JsValue::from_str("providerFrameworks"),
+            &provider_frameworks_value,
+        );
+        let snapshot = render_island_snapshot_to_js(&snapshot_root, snapshot_files);
+        let _ = Reflect::set(&obj, &JsValue::from_str("vfsSnapshot"), &snapshot);
+        let _ = Reflect::set(
+            &obj,
+            &JsValue::from_str("launchToken"),
+            &JsValue::from_str(&launch_token.to_string()),
+        );
+        Ok(obj.into())
+    })
 }
 
 /// Run a GUI app from pre-compiled bytecode (compiled by the native Rust backend via cmd_compile_gui).
@@ -4677,10 +4816,19 @@ pub fn prepare_gui_from_bytecode(
     bytecode: &[u8],
     entry_path: &str,
     launch_token: &str,
-) -> Result<JsValue, JsValue> {
-    let prepared = take_prepared_gui_launch(launch_token, entry_path, bytecode)?;
-    let handle = prepare_gui_from_bytecode_with(bytecode, entry_path, prepared)?;
-    Ok(preview_handle_to_js(handle))
+    operation_id: &str,
+) -> js_sys::Promise {
+    let bytecode = bytecode.to_vec();
+    let entry_path = entry_path.to_string();
+    let launch_token = launch_token.to_string();
+    cancellable_studio_promise(operation_id, async move {
+        let prepared = take_prepared_gui_launch(&launch_token, &entry_path, &bytecode)?;
+        vo_web::load_wasm_extensions(&prepared.extensions)
+            .await
+            .map_err(|error| JsValue::from_str(&error))?;
+        let handle = prepare_gui_from_bytecode_with(&bytecode, &entry_path, prepared)?;
+        Ok(preview_handle_to_js(handle))
+    })
 }
 
 #[wasm_bindgen(js_name = "startPreparedGui")]
@@ -7208,16 +7356,6 @@ pub fn submit_display_pulse(
     })
 }
 
-#[wasm_bindgen(js_name = "getRenderIslandVfsSnapshot")]
-pub fn get_render_island_vfs_snapshot(
-    entry_path: &str,
-    workspace_discovery: &str,
-) -> Result<JsValue, JsValue> {
-    let options = project_context_options_from_workspace_discovery(workspace_discovery)
-        .map_err(|e| JsValue::from_str(&e))?;
-    collect_render_island_snapshot(entry_path, &options).map_err(|e| JsValue::from_str(&e))
-}
-
 #[wasm_bindgen(js_name = "pollIslandData")]
 pub fn poll_island_data(preview_index: u32, preview_generation: u32) -> Result<Vec<u8>, JsValue> {
     with_guest_mut(preview_handle(preview_index, preview_generation), |host| {
@@ -7417,7 +7555,7 @@ pub fn vo_host_run_bytecode_capture(bytecode: &[u8]) -> Result<String, JsValue> 
 
 #[cfg(test)]
 fn empty_return_test_module(name: &str) -> vo_common_core::bytecode::Module {
-    use vo_common_core::bytecode::{FunctionDef, JitInstructionMetadata, Module};
+    use vo_common_core::bytecode::{FunctionDef, InstructionMetadata, Module};
     use vo_common_core::instruction::{Instruction, Opcode};
     use vo_common_core::types::SlotType;
 
@@ -7442,7 +7580,7 @@ fn empty_return_test_module(name: &str) -> vo_common_core::bytecode::Module {
         has_calls: false,
         has_call_extern: false,
         code,
-        jit_metadata: vec![JitInstructionMetadata::None],
+        instruction_metadata: vec![InstructionMetadata::None],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
@@ -7655,428 +7793,36 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn studio_vfs_compile_cache_epoch_tracks_extern_protocol_v3() {
-        assert_eq!(STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION, "4");
-        assert_eq!(
-            vo_web_runtime_wasm::ext_bridge::WASM_EXTENSION_PROTOCOL_VERSION,
-            3
-        );
+    fn studio_vfs_compile_cache_epoch_rejects_pre_capability_validation_artifacts() {
+        assert_eq!(STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION, "5");
     }
 
     #[wasm_bindgen_test]
-    fn browser_extension_bridges_use_strict_tuple_routing_source_contract() {
-        let sources = [("Studio", include_str!("../../src/lib/studio_wasm.ts"))];
-        for (label, source) in sources {
-            for required in [
-                "export function decodeVoExternName(",
-                "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })",
-                "parseExternByteLength(",
-                "export function validateCanonicalModuleOwner(",
-                "function isCanonicalPortableModuleSegment(",
-                "function isPortablePackageSegment(",
-                "segments[0] !== 'github.com'",
-                "MAX_CANONICAL_MODULE_OWNER_BYTES = 255",
-                "MAX_PORTABLE_PACKAGE_COMPONENT_BYTES = 255",
-                "const UTF8_ENCODER = new TextEncoder()",
-                "export function selectVoExternModuleOwner(",
-                "packageName.startsWith(`${owner}/`)",
-                "suffix.split('/').every(isPortablePackageSegment)",
-                "UTF8_ENCODER.encode(packageName).length > MAX_EXTERN_NAME_BYTES",
-                "owner.length > selected.length",
-                "vo_ext_protocol_version",
-                "WASM_EXTENSION_PROTOCOL_VERSION = 3",
-                "WASM_EXTENSION_EXPORT_PREFIX = '__vo_ext_'",
-                "export function voExternExportKey(",
-                "VO_EXTERN_BOM_CONTRACT_VECTORS",
-                "VO_PACKAGE_OWNER_NFC_CONTRACT_VECTORS",
-                "segment.normalize('NFC') !== segment",
-                "'github.com/acme/graphics/é', true",
-                "'github.com/acme/graphics/e\\u0301', false",
-                "'vo1:27:\\uFEFFgithub.com/acme/graphics:4:Draw'",
-                "'vo1:24:github.com/acme/graphics:7:\\uFEFFDraw'",
-                "byte.toString(16).padStart(2, '0')",
-                "const exportKey = wasmExtensionExportKeyFromCanonical(externName)",
-                "bindgenModule[exportKey]",
-                "exp[exportKey]",
-                "bindgenProtocolExports(",
-                "bindgen initializer did not return raw WebAssembly instance exports",
-                "Always import a fresh Blob URL",
-                "let extArtifacts = new Map",
-                "let extLoadOperations = new Map",
-                "let extExhaustedOwnerLoads = new Set",
-                "type ExtensionLoadHandle",
-                "artifactToken: string",
-                "leaseToken: string",
-                "ready: Promise<void>",
-                "voCommitExtModule",
-                "voAbortExtModuleLoad",
-                "voAbortExtModuleLoadHandle",
-                "let extLoadHandleLeases = new WeakMap",
-                "const handle = Object.freeze(",
-                "extensionLoadGenerationToken(",
-                "voIsExtModuleLoadCurrent",
-                "forgetWasmExtModuleOwner",
-                "clearWasmExtModuleOwners",
-                "pendingLoad.jsGlueSourcePromise",
-                "pendingLoad.hasJsGlue !== hasJsGlue",
-                "existingArtifact.jsGlueSource === jsGlueSource",
-                "bytesEqual(existingArtifact.bytes, moduleBytes)",
-                "await pendingLoad.promise",
-                "assertExtensionLoadActive(",
-                "extLoadOperations.get(key) !== currentOperation",
-                "is already loaded with a different artifact",
-                "voDisposeExtModule =",
-                "voDisposeAllExtModules =",
-                "function wasmU32(",
-                "function validateWasmRange(",
-                "function wasmRangesOverlap(",
-                "function bestEffortDealloc(",
-                "if (outPtr === 0)",
-                "if (outLen !== 0)",
-                "inputAllocated = inputPtr !== 0",
-                "Input must be a Uint8Array",
-            ] {
-                assert!(
-                    source.contains(required),
-                    "{label} extension bridge is missing strict contract marker {required:?}"
-                );
-            }
-            for forbidden in [
-                "externName.startsWith(",
-                "externName.substring(",
-                "voRegisterExtModuleAlias",
-                "voCallExtReplay",
-                "exp[externName]",
-                "bindgenModule[externName]",
-                "bindgenModule[decoded.functionName]",
-                "exp[decoded.functionName]",
-                "endsWith('waitForEvent')",
-                "return glue;",
-                "typeof result === 'string'",
-            ] {
-                assert!(
-                    !source.contains(forbidden),
-                    "{label} extension bridge retains legacy routing heuristic {forbidden:?}"
-                );
-            }
+    fn browser_extension_protocol_uses_shared_canonical_identity() {
+        use vo_common_core::extern_key::{decode_extern_name, deepest_owning_module, ExternKeyRef};
 
-            use vo_common_core::extern_key::ExternKeyRef;
-            for key in [
-                ExternKeyRef::new("github.com/acme/graphics", "Draw"),
-                ExternKeyRef::new("github.com/acme/图形", "绘制"),
-                ExternKeyRef::new("github.com/acme/graphics/render", "Draw"),
-            ] {
-                let encoded = key.encode().expect("contract extern must encode");
-                let export = key
-                    .wasm_extension_export_key()
-                    .expect("contract export key must encode");
-                assert!(
-                    source.contains(&format!("'{encoded}'")),
-                    "{label} is missing shared encoded-extern vector {encoded:?}"
-                );
-                assert!(
-                    source.contains(&format!("'{export}'")),
-                    "{label} is missing shared WASM export-key vector {export:?}"
-                );
-            }
-
-            let setup = source
-                .split("voSetupExtModule =")
-                .nth(1)
-                .expect("extension setup function")
-                .split("voIsExtModuleLoadCurrent =")
-                .next()
-                .expect("extension setup body");
-            assert!(setup.contains("const existingArtifact = extArtifacts.get(key)"));
-            assert!(
-                setup
-                    .find("const pendingLoad = extLoadOperations.get(key)")
-                    .expect("pending owner transaction")
-                    < setup
-                        .find("const jsGlueSourcePromise =")
-                        .expect("glue source fetch transaction"),
-                "pending owner state must be checked before preparing glue identity"
-            );
-            assert!(
-                setup
-                    .find("extLoadOperations.set(key, operation)")
-                    .expect("publish pending owner transaction")
-                    < setup.find("await loadPromise;").expect("await owner load"),
-                "the owner transaction must be published before the setup call yields"
-            );
-            assert!(
-                setup.contains("return;"),
-                "identical reload must be idempotent"
-            );
-            assert!(
-                !setup.contains("unloadExtModule(key)"),
-                "failed or conflicting reload must preserve the live artifact"
-            );
-            for forbidden_publish in [
-                "extArtifacts.set(",
-                "extInstances.set(",
-                "extBindgenModules.set(",
-                "extStandaloneRefs.set(",
-            ] {
-                assert!(
-                    !setup.contains(forbidden_publish),
-                    "{label} setup must keep prepared artifacts outside active dispatch maps: {forbidden_publish}"
-                );
-            }
-
-            let allocate_lease = source
-                .split("function allocateExtensionLoadLease(")
-                .nth(1)
-                .expect("lease allocator")
-                .split("function extensionLoadHandle(")
-                .next()
-                .expect("lease allocator body");
-            assert!(
-                allocate_lease
-                    .find("extLoadLeases.set(leaseToken")
-                    .expect("lease-map publication")
-                    < allocate_lease
-                        .find("nextExtLoadLease = nextLease")
-                        .expect("lease-generation commit"),
-                "{label} must not consume a lease generation before its map entry is published"
-            );
-            let load_handle_tail = source
-                .split("function extensionLoadHandle(")
-                .nth(1)
-                .expect("load-handle constructor");
-            let load_handle = if label == "Studio" {
-                load_handle_tail
-                    .split("let extBridgeInstalled")
-                    .next()
-                    .expect("Studio load-handle body")
-            } else {
-                load_handle_tail
-                    .split("function requireExtensionProtocolV3(")
-                    .next()
-                    .expect("legacy load-handle body")
-            };
-            assert!(load_handle.contains("extLoadHandleLeases.set(handle"));
-            assert!(
-                load_handle.contains("abortExtensionLoadLease(owner, artifactToken, leaseToken)")
-            );
-
-            let commit = source
-                .split("function commitExtModule(")
-                .nth(1)
-                .expect("extension commit function")
-                .split("function ")
-                .next()
-                .expect("extension commit body");
-            assert!(commit.contains("extArtifacts.set(key, prepared.artifact)"));
-            assert!(commit.contains("extLoadOperations.delete(key)"));
-            assert!(commit.contains("extArtifacts.delete(key)"));
-            assert!(commit.contains("disposePreparedExtensionArtifact(prepared)"));
-            let abort = source
-                .split("function abortExtensionLoadLease(")
-                .nth(1)
-                .expect("extension abort transaction")
-                .split("function unloadExtModule(")
-                .next()
-                .expect("extension abort transaction body");
-            assert!(abort.contains("hasAnotherLease"));
-            assert!(abort.contains("extExhaustedOwnerLoads.add(key)"));
-            assert!(abort.contains("throw error;"));
-            assert!(abort.contains("cancelPendingExtensionLoad(key, artifactToken)"));
-
-            let unload = source
-                .split("function unloadExtModule(")
-                .nth(1)
-                .expect("single-owner unload function")
-                .split("function bytesEqual(")
-                .next()
-                .expect("single-owner unload body");
-            assert!(
-                unload
-                    .find("forgetWasmExtModuleOwner(")
-                    .expect("Rust owner forget")
-                    < unload
-                        .find("extArtifacts.delete(")
-                        .expect("artifact dispatch removal"),
-                "{label} must preserve active JS dispatch state when Rust owner disposal throws"
-            );
-            for js_mutation in [
-                "extOwnerLoadGenerations.set(",
-                "extLoadOperations.delete(",
-                "removeExtensionLoadLeases(",
-                "extBindgenModules.delete(",
-                "extInstances.delete(",
-                "extArtifacts.delete(",
-            ] {
-                assert!(
-                    unload
-                        .find("forgetWasmExtModuleOwner(")
-                        .expect("Rust owner forget")
-                        < unload.find(js_mutation).unwrap_or_else(|| {
-                            panic!("{label} unload is missing JavaScript mutation {js_mutation}")
-                        }),
-                    "{label} must leave the complete JavaScript owner transaction unchanged when Rust owner disposal throws: {js_mutation}"
-                );
-            }
-            assert!(
-                unload
-                    .find("extArtifacts.delete(")
-                    .expect("artifact dispatch removal")
-                    < unload
-                        .find("disposePreparedExtensionArtifact(prepared)")
-                        .expect("prepared artifact cleanup"),
-                "{label} prepared cleanup must observe every JavaScript dispatch map as absent"
-            );
-            let cleanup = if label == "Studio" {
-                unload.find("disposeStandaloneRef(standaloneRef")
-            } else {
-                unload.find("typeof bindgen.__voDispose")
-            }
-            .expect("extension cleanup hook");
-            assert!(
-                unload
-                    .find("forgetWasmExtModuleOwner(")
-                    .expect("Rust owner forget")
-                    < cleanup,
-                "{label} cleanup must observe the owner as absent in both routing layers"
-            );
-
-            let unload_all = source
-                .split("function unloadAllExtModules(")
-                .nth(1)
-                .expect("all-owner unload function")
-                .split("function throwVoCallExtFailure(")
-                .next()
-                .unwrap_or_else(|| {
-                    source
-                        .split("function unloadAllExtModules(")
-                        .nth(1)
-                        .expect("legacy all-owner unload function")
-                        .split("function wasmU32(")
-                        .next()
-                        .expect("legacy all-owner unload body")
-                });
-            assert!(
-                unload_all
-                    .find("clearWasmExtModuleOwners(")
-                    .expect("Rust owner catalog clear")
-                    < unload_all
-                        .find("extArtifacts.clear()")
-                        .expect("active artifact map clear"),
-                "{label} must preserve all active JS dispatch maps when Rust owner reset throws"
-            );
-            for js_mutation in [
-                "extResetGeneration = nextResetGeneration",
-                "extOwnerLoadGenerations.clear()",
-                "extLoadOperations.clear()",
-                "extLoadLeases.clear()",
-                "extBindgenModules.clear()",
-                "extInstances.clear()",
-                "extArtifacts.clear()",
-            ] {
-                assert!(
-                    unload_all
-                        .find("clearWasmExtModuleOwners(")
-                        .expect("Rust owner catalog clear")
-                        < unload_all.find(js_mutation).unwrap_or_else(|| {
-                            panic!("{label} reset is missing JavaScript mutation {js_mutation}")
-                        }),
-                    "{label} must leave the complete JavaScript reset transaction unchanged when Rust owner reset throws: {js_mutation}"
-                );
-            }
-            assert!(
-                unload_all
-                    .find("extArtifacts.clear()")
-                    .expect("active artifact map clear")
-                    < unload_all
-                        .find("disposePreparedExtensionArtifact(prepared)")
-                        .expect("prepared artifact cleanup"),
-                "{label} cleanup hooks must run after both routing layers are absent"
-            );
-        }
-        let studio = sources[0].1;
-        assert!(studio.contains("let extStandaloneRefs = new Map"));
-        assert!(studio.contains("let standaloneHostStates = new Set"));
-        assert!(studio.contains("disposeStandaloneRef(standaloneRef"));
-
-        let loader = studio
-            .split("export async function loadStudioWasm()")
-            .nth(1)
-            .expect("Studio WASM loader")
-            .split("export function resetStudioWasmInstance()")
-            .next()
-            .expect("Studio WASM loader body");
-        assert!(
-            loader
-                .find("if (generation !== loadGeneration)")
-                .expect("superseded-load generation guard")
-                < loader
-                    .find("installExtBridgeGlobals(normalized)")
-                    .expect("global bridge publication"),
-            "a superseded Studio WASM initializer must not publish a stale owner-state bridge"
-        );
-    }
-
-    #[wasm_bindgen_test]
-    fn browser_extension_protocol_v3_has_one_normative_spec() {
-        let normalize_markdown =
-            |source: &str| source.split_whitespace().collect::<Vec<_>>().join(" ");
-        let native_ffi =
-            normalize_markdown(include_str!("../../../../lang/docs/spec/native-ffi.md"));
-        for required in [
-            "## 6. Browser WASM Extension Protocol v3",
-            "vo_ext_protocol_version(void)",
-            "vo_ext::export_wasm_extension_protocol!()",
-            "case-sensitive and may contain portable Unicode",
-            "__vo_ext_ + lowercase_hex(UTF-8(canonical_encoded_extern_name))",
-            "no hash and no truncation",
-            "MUST NOT retry a less-specific owner",
-            "UTF-8 BOM bytes at the beginning of a field are ordinary U+FEFF data",
-            "(output_ptr=0, output_len=0)",
-            "pairwise disjoint",
-            "exactly 3 bytes",
-            "Function-name suffixes and JS-side semantic guesses MUST NOT",
-            "Only one load transaction may be pending for an owner",
-            "invalidated asynchronous result MUST NOT publish",
-            "Strings, promises, and other JavaScript values do not satisfy",
-            "host timers, intervals, animation frames, and game",
-            "monotonically increasing generation",
-            "Setup synchronously returns an opaque artifact token",
-            "validates that binding both immediately before and immediately after",
-            "last uncommitted lease destroys the prepared artifact",
-            "owner lifecycle epoch and active artifact generations",
-            "Studio VFS compile cache epoch for protocol v3 is `4`",
-        ] {
-            assert!(
-                native_ffi.contains(required),
-                "native FFI spec is missing browser-v3 contract marker {required:?}"
-            );
-        }
-
-        let module = normalize_markdown(include_str!("../../../../lang/docs/spec/module.md"));
-        assert!(module.contains(
-            "The browser WASM extension wire protocol is specified by `native-ffi.md` section 6."
-        ));
-    }
-
-    #[wasm_bindgen_test]
-    fn canonical_extern_owner_selection_handles_unicode_functions_and_portable_nesting() {
-        use vo_common_core::extern_key::{decode_extern_name, ExternKeyRef};
-
-        let encoded = ExternKeyRef::new("github.com/acme/graphics/图形/Render/V2", "绘制")
+        let encoded = ExternKeyRef::new("github.com/acme/graphics/render/图形/V2", "绘制")
             .encode()
             .expect("canonical Unicode extern");
         let key = decode_extern_name(&encoded).expect("decode canonical Unicode extern");
-        let owners = [
-            "github.com/acme/graphics",
-            "github.com/acme/graphics-vector",
-            "github.com/acme/graphic",
-        ];
-        let selected = owners
-            .into_iter()
-            .filter(|owner| key.is_owned_by_module(owner))
-            .max_by_key(|owner| owner.len());
-        assert_eq!(selected, Some("github.com/acme/graphics"));
+        let owners = BTreeSet::from([
+            "github.com/acme/graphics".to_string(),
+            "github.com/acme/graphics/render".to_string(),
+            "github.com/acme/graphics-vector".to_string(),
+        ]);
+        assert_eq!(
+            deepest_owning_module(key, &owners),
+            Some("github.com/acme/graphics/render")
+        );
         assert!(!key.is_owned_by_module("github.com/acme/graphic"));
+
+        for key in [
+            ExternKeyRef::new("\u{feff}github.com/acme/graphics", "Draw"),
+            ExternKeyRef::new("github.com/acme/graphics", "\u{feff}Draw"),
+        ] {
+            let encoded = key.encode().expect("BOM-bearing wire identity");
+            assert_eq!(decode_extern_name(&encoded), Ok(key));
+        }
 
         for package in [
             "github.com/acme/graphics/图形/é",

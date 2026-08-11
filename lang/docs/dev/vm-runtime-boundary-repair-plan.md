@@ -281,7 +281,7 @@ pub struct RuntimeTransition {
     pub wakes: Vec<WakeCommand>,
     pub gc_roots: GcRootEffect,
     pub host: Vec<HostCommand>,
-    pub spawns: Vec<Fiber>,
+    pub spawns: Vec<PendingSpawn>,
 }
 ```
 
@@ -291,12 +291,13 @@ single pending owner:
 ```rust
 pub struct PendingRuntimeEffects {
     transitions: Vec<RuntimeTransition>,
-    spawns: Vec<Fiber>,
+    spawns: Vec<PendingSpawn>,
 }
 ```
 
-The direct `spawns: Vec<Fiber>` design is simpler and should be preferred
-unless a concrete implementation constraint appears.
+The implementation uses `spawns: Vec<PendingSpawn>` because direct `Fiber`
+ownership grows its execution stack before commit and discards retained stack
+capacity when a dead scheduler slot is replaced.
 
 ### Required Changes
 

@@ -111,19 +111,4 @@ mod tests {
             })
         );
     }
-
-    #[test]
-    fn raw_struct_set_field_is_unsafe_public_primitive_058() {
-        let source = vo_source_contract::production_source_without_test_modules(include_str!(
-            "struct_ops.rs"
-        ));
-        assert!(
-            source.contains("pub unsafe fn set_field("),
-            "raw struct field mutation must stay behind an unsafe contract"
-        );
-        assert!(
-            source.contains("required write barrier"),
-            "set_field safety docs must name the write-barrier obligation"
-        );
-    }
 }

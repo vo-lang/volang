@@ -1,4 +1,38 @@
 use super::*;
+use crate::fiber::PendingSpawn;
+
+#[test]
+fn wait_io_root_effect_is_precise_about_staged_root_additions() {
+    assert_eq!(
+        wait_io_gc_root_effect(false),
+        GcRootEffect::CurrentFiberDirty
+    );
+    assert_eq!(wait_io_gc_root_effect(true), GcRootEffect::AllRootsDirty);
+}
+
+#[test]
+fn committed_pending_spawn_roots_entry_slots() {
+    let mut vm = Vm::new();
+    vm.finish_load(gc_test_module());
+    let root = alloc_gc_test_object(&mut vm);
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::AllRootsDirty,
+    );
+    transition
+        .spawns
+        .push(PendingSpawn::try_new(0, 1, 1, 0, vec![root as u64]).expect("root spawn shape"));
+
+    vm.apply_runtime_transition(None, transition)
+        .expect("spawn transition");
+
+    let spawned = vm
+        .scheduler
+        .get_fiber(crate::scheduler::FiberId::from_raw(0));
+    assert_eq!(spawned.stack[0], root as u64);
+    assert_gc_roots_survive(&mut vm, &[root]);
+}
 
 #[test]
 fn gc_root_matrix_scans_globals_fibers_stacks_and_call_frames() {
@@ -489,6 +523,7 @@ fn gc_root_full_vm_scan_is_budgeted() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
     vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+    vm.set_gc_verify_after_step(true);
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
@@ -496,11 +531,15 @@ fn gc_root_full_vm_scan_is_budgeted() {
     }
 
     let meta = ValueMeta::new(1, ValueKind::Struct);
+    let mut roots = Vec::with_capacity(ROOTS as usize);
     for idx in 0..ROOTS as usize {
         let root = vm.state.gc.alloc(meta, 0);
+        roots.push(root);
         vm.scheduler.get_fiber_mut(fid).stack[idx] = root as u64;
     }
 
+    // Verification runs after this partial StartCycle scan. The unvisited half
+    // of the frame is still white and must remain valid until the cursor resumes.
     vm.gc_step_after_fiber(None);
     let stats = vm.last_gc_step_stats();
     assert_eq!(stats.gc.root_scan_calls, 1);
@@ -508,14 +547,29 @@ fn gc_root_full_vm_scan_is_budgeted() {
     assert_eq!(stats.gc.object_scans, 0);
     assert!(vm.state.gc_root_scan.is_some());
     assert!(vm.state.gc_roots_dirty_all);
+    assert!(!vm.state.gc_root_colors_are_verifiable());
 
-    vm.gc_step_after_fiber(None);
-    let stats = vm.last_gc_step_stats();
-    assert_eq!(stats.gc.root_scan_calls, 1);
-    assert_eq!(stats.gc.root_scan_work_bytes, 8192);
-    assert!(stats.full_roots_scanned);
+    let mut scan_steps = 1;
+    while vm.state.gc_root_scan.is_some() {
+        vm.gc_step_after_fiber(None);
+        scan_steps += 1;
+        let stats = vm.last_gc_step_stats();
+        assert_eq!(stats.gc.root_scan_calls, 1);
+        assert!(stats.gc.root_scan_work_bytes <= 8192);
+        assert_eq!(stats.full_roots_scanned, vm.state.gc_root_scan.is_none());
+    }
+    assert!(
+        scan_steps > 2,
+        "root-domain bookkeeping must consume budget"
+    );
     assert!(vm.state.gc_root_scan.is_none());
     assert!(!vm.state.gc_roots_dirty_all);
+    assert!(vm.state.gc_root_colors_are_verifiable());
+
+    run_gc_until_pause(&mut vm);
+    for root in roots {
+        assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+    }
 }
 
 #[test]
@@ -648,7 +702,7 @@ fn finish_load_resets_pending_gc_root_scan_state() {
     assert!(vm.state.gc_root_scan.is_some());
 
     vm.state.gc_roots_dirty_all = false;
-    vm.state.gc_dirty_fibers.push(fid.to_raw());
+    vm.state.record_gc_dirty_fiber_raw(fid.to_raw());
     let epoch_before = vm.state.gc_dirty_epoch;
 
     vm.finish_load(gc_test_module());
@@ -716,9 +770,6 @@ fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan
         kind: vo_runtime::gc::GcRootScanKind::Sweep,
         mode: VmRootScanMode::DirtyFibers,
         dirty_epoch: vm.state.gc_dirty_epoch,
-        dirty_fibers: vec![fid.to_raw()],
-        roots: Vec::new(),
-        cursor: 0,
         stage: VmRootScanStage::Fibers,
         global_def_cursor: 0,
         global_base_cursor: 0,
@@ -728,6 +779,7 @@ fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan
         fiber_slot_cursor: 0,
         fiber_aux_stage: VmFiberRootScanStage::Defers,
         fiber_aux_outer_cursor: 0,
+        fiber_aux_inner_cursor: 0,
         fiber_aux_slot_cursor: 0,
         io_staging_cursor: 0,
         sentinel_cursor: 0,
@@ -738,7 +790,7 @@ fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan
 
     vm.state.gc_dirty_epoch = u64::MAX;
     vm.state.gc_roots_dirty_all = false;
-    vm.state.gc_dirty_fibers.clear();
+    vm.state.clear_gc_dirty_fibers();
     vm.mark_gc_fiber_roots_dirty(fid);
     assert_eq!(vm.state.gc_dirty_epoch, 0);
     assert!(vm.state.gc_root_scan.is_none());

@@ -16,7 +16,7 @@ crate-type = ["rlib"]
 [features]
 default = []
 source = ["dep:vo-common", "dep:vo-stdlib-source"]
-std = ["source", "vo-runtime/std", "memchr/std", "regex/std", "regex-syntax/std", "dep:vo-module", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:linkme", "dep:libc", "dep:nix", "dep:ureq", "dep:chrono", "dep:chrono-tz"]
+std = ["source", "vo-runtime/std", "memchr/std", "regex/std", "regex-syntax/std", "dep:vo-module", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:libc", "dep:nix", "dep:ureq", "dep:chrono", "dep:chrono-tz"]
 
 [dependencies]
 libm.workspace = true
@@ -43,7 +43,6 @@ icu_casemap = { version = "=2.0.1", default-features = false, features = ["compi
 lazy_static = { version = "1.4", optional = true }
 dirs = { version = "5", optional = true }
 hostname = { version = "0.4", optional = true }
-linkme = { version = "0.3", optional = true }
 libc = { version = "0.2", optional = true }
 nix = { version = "0.29", optional = true, features = ["signal", "process"] }
 ureq = { version = "2", optional = true, features = ["tls"] }

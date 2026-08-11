@@ -1,5 +1,9 @@
 use super::*;
 
+fn endpoint_wait_key_061(fiber_key: u64, wait_id: u64) -> EndpointWaitKey {
+    EndpointWaitKey::try_new(fiber_key, wait_id).expect("test endpoint wait id must be non-zero")
+}
+
 #[test]
 fn vm_composite_rollback_061_forwards_frame_and_select_state_rollback() {
     let mut vm = Vm::new();
@@ -19,7 +23,7 @@ fn vm_composite_rollback_061_forwards_frame_and_select_state_rollback() {
     let fid = vm.scheduler.spawn(fiber);
     let mut rollback = RuntimeRollback::combine(
         RuntimeRollback::local_queue(&vm.state, ch),
-        RuntimeRollback::endpoint_transfer(vm.state.endpoint_registry.snapshot(), Vec::new()),
+        RuntimeRollback::endpoint_transfer(EndpointRegistryUndo::default(), Vec::new()),
     );
     rollback.push_stack_slot(0, 0x0610);
     rollback.set_select_state(Some(original_select));
@@ -40,166 +44,6 @@ fn vm_composite_rollback_061_forwards_frame_and_select_state_rollback() {
 }
 
 #[test]
-fn vm_same_island_endpoint_request_shape_061_requires_pending_response_before_waiter() {
-    let (mut vm, ch, endpoint_id) =
-        live_same_island_endpoint_061("same-island-endpoint-pending-missing");
-    let fiber_key = 0x0000_0001_0000_0063;
-    let wait_id = 15;
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind: EndpointRequestKind::Recv,
-            from_island: vm.state.current_island_id,
-            fiber_key,
-            wait_id,
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island Recv request must carry a pending-response obligation");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("EndpointRequest pending-response contract")),
-        "{err:?}"
-    );
-    assert_eq!(vm.state.pending_island_responses, 0);
-    assert_eq!(
-        queue::local_state(ch).waiting_receivers.len(),
-        0,
-        "pending-response shape rejection must happen before requester registration"
-    );
-}
-
-#[test]
-fn vm_same_island_endpoint_request_shape_061_rejects_spurious_pending_response() {
-    let (mut vm, ch, endpoint_id) =
-        live_same_island_endpoint_061("same-island-endpoint-pending-spurious");
-    let new_peer = 88;
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind: EndpointRequestKind::Transfer { new_peer },
-            from_island: vm.state.current_island_id,
-            fiber_key: 0,
-            wait_id: 0,
-        },
-        pending_response: true,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island Transfer request must not carry a pending-response obligation");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("EndpointRequest pending-response contract")),
-        "{err:?}"
-    );
-    assert_eq!(vm.state.pending_island_responses, 0);
-    assert!(
-        !queue::home_info(ch)
-            .expect("home info")
-            .peers
-            .contains(&new_peer),
-        "spurious pending-response rejection must happen before endpoint peer mutation"
-    );
-}
-
-#[test]
-fn vm_same_island_endpoint_request_shape_061_rejects_forged_source_before_transfer() {
-    let (mut vm, ch, endpoint_id) =
-        live_same_island_endpoint_061("same-island-endpoint-forged-transfer");
-    let forged_peer = 7;
-    let new_peer = 88;
-    queue::add_home_peer(ch, forged_peer);
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind: EndpointRequestKind::Transfer { new_peer },
-            from_island: forged_peer,
-            fiber_key: 0,
-            wait_id: 0,
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island EndpointRequest must not impersonate a peer");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("same-island EndpointRequest source")),
-        "{err:?}"
-    );
-    assert!(
-        !queue::home_info(ch)
-            .expect("home info")
-            .peers
-            .contains(&new_peer),
-        "forged same-island source must reject before endpoint peer mutation"
-    );
-}
-
-#[test]
-fn vm_same_island_endpoint_request_shape_061_rejects_forged_source_before_waiter() {
-    let (mut vm, ch, endpoint_id) =
-        live_same_island_endpoint_061("same-island-endpoint-forged-recv");
-    let forged_peer = 7;
-    queue::add_home_peer(ch, forged_peer);
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind: EndpointRequestKind::Recv,
-            from_island: forged_peer,
-            fiber_key: 0x0000_0001_0000_0064,
-            wait_id: 16,
-        },
-        pending_response: true,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island Recv request must not impersonate a peer");
-
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("same-island EndpointRequest source")),
-        "{err:?}"
-    );
-    assert_eq!(vm.state.pending_island_responses, 0);
-    assert_eq!(
-        queue::local_state(ch).waiting_receivers.len(),
-        0,
-        "forged same-island source must reject before requester registration"
-    );
-    assert!(vm.state.outbound_commands.is_empty());
-}
-
-#[test]
 fn vm_same_island_endpoint_response_preflight_061_rejects_before_local_wake() {
     let mut vm = Vm::new();
     let wake_ch = queue::create(
@@ -212,12 +56,13 @@ fn vm_same_island_endpoint_response_preflight_061_rejects_before_local_wake() {
     );
     let receiver = vm.scheduler.spawn(Fiber::new(0));
     let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
+    let receiver_waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         receiver_key,
         wake_ch as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .get_fiber_mut(receiver)
         .begin_queue_wait(&receiver_waiter);
@@ -237,11 +82,7 @@ fn vm_same_island_endpoint_response_preflight_061_rejects_before_local_wake() {
         .endpoint_registry
         .register_live(endpoint_id, endpoint_ch);
     let endpoint_waiter = vm.scheduler.spawn(Fiber::new(1));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(endpoint_waiter)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -263,11 +104,10 @@ fn vm_same_island_endpoint_response_preflight_061_rejects_before_local_wake() {
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            endpoint_key,
-            wait_id + 1,
+            EndpointResponseKind::RecvError {
+                wait_key: endpoint_wait_key_061(wait_key.fiber_key(), wait_key.wait_id().get() + 1),
+            },
         ));
 
     let err = vm
@@ -288,249 +128,6 @@ fn vm_same_island_endpoint_response_preflight_061_rejects_before_local_wake() {
 }
 
 #[test]
-fn vm_same_island_endpoint_response_source_061_rejects_before_local_wake() {
-    let mut vm = Vm::new();
-    let wake_ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        wake_ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&receiver_waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let endpoint_id = 0xE261;
-    let endpoint_ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    vm.state
-        .endpoint_registry
-        .register_live(endpoint_id, endpoint_ch);
-    let endpoint_waiter = vm.scheduler.spawn(Fiber::new(1));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
-        .scheduler
-        .get_fiber_mut(endpoint_waiter)
-        .begin_remote_endpoint_recv_wait(endpoint_id);
-    assert_eq!(vm.scheduler.schedule_next(), Some(endpoint_waiter));
-    vm.scheduler.block_for_queue();
-    vm.state.pending_island_responses = 1;
-
-    let current = vm.scheduler.spawn(Fiber::new(2));
-    assert_eq!(vm.scheduler.schedule_next(), Some(current));
-    let forged_peer = vm.state.current_island_id + 99;
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Yield,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::CurrentFiberDirty,
-    );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(receiver_waiter));
-    transition
-        .island_commands
-        .push(IslandCommandEffect::endpoint_response(
-            vm.state.current_island_id,
-            forged_peer,
-            endpoint_id,
-            EndpointResponseKind::RecvError,
-            endpoint_key,
-            wait_id,
-        ));
-
-    let err = vm
-        .apply_runtime_transition(Some(current), transition)
-        .expect_err("forged same-island endpoint response must reject during preflight");
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("same-island EndpointResponse source")),
-        "{err:?}"
-    );
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-    assert!(
-            !vm.scheduler.ready_queue.contains(&receiver),
-            "failed transition must not wake a local queue waiter before rejecting the forged same-island endpoint response"
-        );
-    assert!(receiver_fiber.queue_wait_state.is_some());
-    assert_eq!(vm.state.pending_island_responses, 1);
-}
-
-#[test]
-fn vm_same_island_endpoint_response_shape_061_rejects_spurious_pending_response_before_dispatch() {
-    let mut vm = Vm::new();
-    let wake_ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        wake_ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&receiver_waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let current = vm.scheduler.spawn(Fiber::new(1));
-    assert_eq!(vm.scheduler.schedule_next(), Some(current));
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Yield,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::CurrentFiberDirty,
-    );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(receiver_waiter));
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::EndpointResponse {
-            endpoint_id: 0xE461,
-            kind: EndpointResponseKind::Closed,
-            from_island: vm.state.current_island_id,
-            fiber_key: 0,
-            wait_id: 0,
-        },
-        pending_response: true,
-    });
-
-    let err = vm
-        .apply_runtime_transition(Some(current), transition)
-        .expect_err("same-island EndpointResponse must not create pending obligations");
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("pending-response contract")),
-        "{err:?}"
-    );
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-    assert!(
-            !vm.scheduler.ready_queue.contains(&receiver),
-            "failed transition must not wake a local queue waiter before rejecting malformed EndpointResponse"
-        );
-    assert_eq!(vm.state.pending_island_responses, 0);
-}
-
-#[test]
-fn vm_same_island_wake_fiber_shape_061_rejects_spurious_pending_response_before_wake() {
-    let mut vm = Vm::new();
-    let wake_ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        wake_ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&receiver_waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let current = vm.scheduler.spawn(Fiber::new(1));
-    assert_eq!(vm.scheduler.schedule_next(), Some(current));
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Yield,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::CurrentFiberDirty,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: receiver_waiter,
-        },
-        pending_response: true,
-    });
-
-    let err = vm
-        .apply_runtime_transition(Some(current), transition)
-        .expect_err("same-island WakeFiber must not create pending obligations");
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("pending-response contract")),
-        "{err:?}"
-    );
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-    assert!(
-        !vm.scheduler.ready_queue.contains(&receiver),
-        "failed transition must not wake a local queue waiter before rejecting malformed WakeFiber"
-    );
-    assert_eq!(vm.state.pending_island_responses, 0);
-}
-
-#[test]
-fn vm_same_island_shutdown_shape_061_rejects_spurious_pending_response_before_dispatch() {
-    let mut vm = Vm::new();
-    let current = vm.scheduler.spawn(Fiber::new(0));
-    assert_eq!(vm.scheduler.schedule_next(), Some(current));
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Yield,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::CurrentFiberDirty,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::Shutdown,
-        pending_response: true,
-    });
-
-    let err = vm
-        .apply_runtime_transition(Some(current), transition)
-        .expect_err("same-island Shutdown must not create pending obligations");
-    assert!(
-        matches!(err, VmError::Jit(ref msg) if msg.contains("pending-response contract")),
-        "{err:?}"
-    );
-    assert_eq!(vm.state.pending_island_responses, 0);
-}
-
-#[test]
 fn vm_same_island_closed_endpoint_wake_source_061_rejects_foreign_live_remote_before_local_wake() {
     let mut vm = Vm::new();
     let wake_ch = queue::create(
@@ -543,12 +140,13 @@ fn vm_same_island_closed_endpoint_wake_source_061_rejects_foreign_live_remote_be
     );
     let receiver = vm.scheduler.spawn(Fiber::new(0));
     let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
+    let receiver_waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         receiver_key,
         wake_ch as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .get_fiber_mut(receiver)
         .begin_queue_wait(&receiver_waiter);
@@ -570,11 +168,7 @@ fn vm_same_island_closed_endpoint_wake_source_061_rejects_foreign_live_remote_be
         .endpoint_registry
         .register_live(endpoint_id, remote_proxy);
     let endpoint_waiter = vm.scheduler.spawn(Fiber::new(1));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(endpoint_waiter)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -584,8 +178,7 @@ fn vm_same_island_closed_endpoint_wake_source_061_rejects_foreign_live_remote_be
 
     let current = vm.scheduler.spawn(Fiber::new(2));
     assert_eq!(vm.scheduler.schedule_next(), Some(current));
-    let endpoint_queue_waiter =
-        QueueWaiter::endpoint(vm.state.current_island_id, endpoint_key, wait_id);
+    let endpoint_queue_waiter = QueueWaiter::endpoint(vm.state.current_island_id, wait_key);
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
@@ -645,11 +238,7 @@ fn vm_endpoint_response_activation_061_rejects_cross_form_duplicate_before_commi
         .endpoint_registry
         .register_live(endpoint_id, endpoint_ch);
     let endpoint_waiter = vm.scheduler.spawn(Fiber::new(0));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(endpoint_waiter)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -662,8 +251,7 @@ fn vm_endpoint_response_activation_061_rejects_cross_form_duplicate_before_commi
         ResumePolicy::PreserveFramePc,
         GcRootEffect::None,
     );
-    let endpoint_queue_waiter =
-        QueueWaiter::endpoint(vm.state.current_island_id, endpoint_key, wait_id);
+    let endpoint_queue_waiter = QueueWaiter::endpoint(vm.state.current_island_id, wait_key);
     transition.wakes.push(WakeCommand::queue_closed_receiver(
         endpoint_queue_waiter,
         Some(endpoint_id),
@@ -672,11 +260,8 @@ fn vm_endpoint_response_activation_061_rejects_cross_form_duplicate_before_commi
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            endpoint_key,
-            wait_id,
+            EndpointResponseKind::RecvError { wait_key },
         ));
 
     let err = vm
@@ -701,11 +286,7 @@ fn vm_endpoint_response_activation_062_rejects_same_island_authorization_drift_b
     let mut vm = Vm::new();
     let endpoint_id = 0xE162;
     let endpoint_waiter = vm.scheduler.spawn(Fiber::new(0));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(endpoint_waiter)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -713,8 +294,7 @@ fn vm_endpoint_response_activation_062_rejects_same_island_authorization_drift_b
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 1;
 
-    let endpoint_queue_waiter =
-        QueueWaiter::endpoint(vm.state.current_island_id, endpoint_key, wait_id);
+    let endpoint_queue_waiter = QueueWaiter::endpoint(vm.state.current_island_id, wait_key);
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
@@ -728,11 +308,8 @@ fn vm_endpoint_response_activation_062_rejects_same_island_authorization_drift_b
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            endpoint_key,
-            wait_id,
+            EndpointResponseKind::RecvError { wait_key },
         ));
 
     let err = vm
@@ -765,11 +342,7 @@ fn vm_endpoint_response_activation_062_rejects_tombstone_authorization_drift_bef
     let mut vm = Vm::new();
     let endpoint_id = 0xE163;
     let endpoint_waiter = vm.scheduler.spawn(Fiber::new(0));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(endpoint_waiter)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -792,11 +365,8 @@ fn vm_endpoint_response_activation_062_rejects_tombstone_authorization_drift_bef
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            endpoint_key,
-            wait_id,
+            EndpointResponseKind::RecvError { wait_key },
         ));
 
     let err = vm
@@ -830,11 +400,7 @@ fn vm_endpoint_response_activation_062_rejects_tombstone_authority_revocation_be
     let endpoint_id = 0xE164;
     let peer_island = vm.state.current_island_id + 1;
     let endpoint_waiter = vm.scheduler.spawn(Fiber::new(0));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(endpoint_waiter)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -860,11 +426,8 @@ fn vm_endpoint_response_activation_062_rejects_tombstone_authority_revocation_be
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            endpoint_key,
-            wait_id,
+            EndpointResponseKind::RecvError { wait_key },
         ));
 
     let err = vm
@@ -917,11 +480,10 @@ fn vm_endpoint_response_activation_062_rejects_remote_tombstone_authority_revoca
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             remote_island,
-            from_island,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            0x0000_0001_0000_0002,
-            1,
+            EndpointResponseKind::RecvError {
+                wait_key: endpoint_wait_key_061(0x0000_0001_0000_0002, 1),
+            },
         ));
     transition
         .endpoint_tombstones
@@ -968,7 +530,7 @@ fn vm_endpoint_response_activation_062_rejects_remote_closed_wake_tombstone_auth
     );
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
 
-    let waiter = QueueWaiter::endpoint(remote_island, 0x0000_0001_0000_0002, 7);
+    let waiter = endpoint_waiter(remote_island, 0x0000_0001_0000_0002, 7);
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
@@ -1011,7 +573,6 @@ fn vm_endpoint_response_activation_062_rejects_response_count_over_pending_befor
     let endpoint_a = 0xE165;
     let endpoint_b = 0xE166;
     let waiter_a = vm.scheduler.spawn(Fiber::new(0));
-    let key_a = vm.scheduler.get_fiber(waiter_a).endpoint_response_key();
     let wait_a = vm
         .scheduler
         .get_fiber_mut(waiter_a)
@@ -1020,7 +581,6 @@ fn vm_endpoint_response_activation_062_rejects_response_count_over_pending_befor
     vm.scheduler.block_for_queue();
 
     let waiter_b = vm.scheduler.spawn(Fiber::new(1));
-    let key_b = vm.scheduler.get_fiber(waiter_b).endpoint_response_key();
     let wait_b = vm
         .scheduler
         .get_fiber_mut(waiter_b)
@@ -1047,21 +607,15 @@ fn vm_endpoint_response_activation_062_rejects_response_count_over_pending_befor
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_a,
-            EndpointResponseKind::RecvError,
-            key_a,
-            wait_a,
+            EndpointResponseKind::RecvError { wait_key: wait_a },
         ));
     transition
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             vm.state.current_island_id,
-            vm.state.current_island_id,
             endpoint_b,
-            EndpointResponseKind::RecvError,
-            key_b,
-            wait_b,
+            EndpointResponseKind::RecvError { wait_key: wait_b },
         ));
 
     let err = vm
@@ -1087,273 +641,6 @@ fn vm_endpoint_response_activation_062_rejects_response_count_over_pending_befor
 }
 
 #[test]
-fn vm_same_island_wake_fiber_command_061_rejects_before_local_wake() {
-    let mut vm = Vm::new();
-    let wake_ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        wake_ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&receiver_waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let endpoint_waiter = vm.scheduler.spawn(Fiber::new(1));
-    let endpoint_key = vm
-        .scheduler
-        .get_fiber(endpoint_waiter)
-        .endpoint_response_key();
-    let endpoint_wait_id = vm
-        .scheduler
-        .get_fiber_mut(endpoint_waiter)
-        .begin_remote_endpoint_recv_wait(0xE261);
-    assert_eq!(vm.scheduler.schedule_next(), Some(endpoint_waiter));
-    vm.scheduler.block_for_queue();
-
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(receiver_waiter));
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: QueueWaiter::endpoint(
-                vm.state.current_island_id,
-                endpoint_key,
-                endpoint_wait_id,
-            ),
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island WakeFiber command must preflight reject endpoint waiters");
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-    assert!(
-            !vm.scheduler.ready_queue.contains(&receiver),
-            "failed transition must not wake a local queue waiter before rejecting same-island WakeFiber"
-        );
-    assert!(receiver_fiber.queue_wait_state.is_some());
-}
-
-#[test]
-fn vm_same_island_wake_fiber_activation_061_rejects_duplicate_commands_before_wake() {
-    let mut vm = Vm::new();
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&receiver_waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: receiver_waiter.clone(),
-        },
-        pending_response: false,
-    });
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: receiver_waiter,
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("duplicate same-island WakeFiber commands must preflight fail");
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-    assert!(
-        !vm.scheduler.ready_queue.contains(&receiver),
-        "duplicate same-island WakeFiber rejection must not consume the waiter"
-    );
-    assert!(receiver_fiber.queue_wait_state.is_some());
-}
-
-#[test]
-fn vm_same_island_wake_fiber_activation_061_rejects_mixed_wake_before_wake() {
-    let mut vm = Vm::new();
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    let receiver_waiter = QueueWaiter::simple_queue(
-        vm.state.current_island_id,
-        receiver_key,
-        ch as u64,
-        SelectWaitKind::Recv,
-    );
-    vm.scheduler
-        .get_fiber_mut(receiver)
-        .begin_queue_wait(&receiver_waiter);
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(receiver_waiter.clone()));
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: receiver_waiter,
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("mixed same-island wake activations must preflight fail");
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    let receiver_fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(
-        receiver_fiber.state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-    assert!(
-        !vm.scheduler.ready_queue.contains(&receiver),
-        "mixed wake activation rejection must not consume the waiter"
-    );
-    assert!(receiver_fiber.queue_wait_state.is_some());
-}
-
-#[test]
-fn vm_remote_wake_fiber_activation_061_rejects_duplicate_commands_before_publish() {
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let waiter = QueueWaiter::simple_queue(
-        remote_island,
-        0x0000_0001_0000_0002,
-        0xCAFE,
-        SelectWaitKind::Recv,
-    );
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber {
-            waiter: waiter.clone(),
-        },
-        pending_response: false,
-    });
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber { waiter },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("duplicate remote WakeFiber commands must preflight fail");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(
-        vm.state.outbound_commands.is_empty(),
-        "duplicate remote WakeFiber rejection must happen before publish"
-    );
-}
-
-#[test]
-fn vm_remote_wake_fiber_activation_061_rejects_mixed_wake_before_publish() {
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let waiter = QueueWaiter::simple_queue(
-        remote_island,
-        0x0000_0003_0000_0004,
-        0xBEEF,
-        SelectWaitKind::Recv,
-    );
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(waiter.clone()));
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber { waiter },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("mixed remote wake activations must preflight fail");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(
-        vm.state.outbound_commands.is_empty(),
-        "mixed remote wake activation rejection must happen before publish"
-    );
-}
-
-#[test]
 fn vm_remote_endpoint_response_activation_061_rejects_mixed_closed_wake_before_publish() {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
@@ -1368,7 +655,7 @@ fn vm_remote_endpoint_response_activation_061_rejects_mixed_closed_wake_before_p
         0,
     );
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
-    let waiter = QueueWaiter::endpoint(remote_island, 0x0000_0005_0000_0006, 17);
+    let waiter = endpoint_waiter(remote_island, 0x0000_0005_0000_0006, 17);
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
@@ -1382,11 +669,10 @@ fn vm_remote_endpoint_response_activation_061_rejects_mixed_closed_wake_before_p
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             remote_island,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            waiter.fiber_key(),
-            waiter.endpoint_wait_id(),
+            EndpointResponseKind::RecvError {
+                wait_key: waiter.endpoint_wait_key().unwrap(),
+            },
         ));
 
     let err = vm
@@ -1427,11 +713,10 @@ fn vm_remote_endpoint_response_activation_061_rejects_duplicate_commands_before_
             .island_commands
             .push(IslandCommandEffect::endpoint_response(
                 remote_island,
-                vm.state.current_island_id,
                 endpoint_id,
-                EndpointResponseKind::RecvError,
-                fiber_key,
-                wait_id,
+                EndpointResponseKind::RecvError {
+                    wait_key: endpoint_wait_key_061(fiber_key, wait_id),
+                },
             ));
     }
 
@@ -1447,283 +732,6 @@ fn vm_remote_endpoint_response_activation_061_rejects_duplicate_commands_before_
 }
 
 #[test]
-fn vm_remote_wake_fiber_shape_061_rejects_forged_waiter_before_publish() {
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let forged_waiter = QueueWaiter::simple_queue(
-        remote_island + 1,
-        0x0000_0009_0000_000A,
-        0xF00D,
-        SelectWaitKind::Recv,
-    );
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber {
-            waiter: forged_waiter,
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("remote WakeFiber must reject waiter islands that do not match the target");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(
-        vm.state.outbound_commands.is_empty(),
-        "remote WakeFiber shape rejection must happen before publish"
-    );
-
-    let endpoint_waiter = QueueWaiter::endpoint(remote_island, 0x0000_000B_0000_000C, 23);
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber {
-            waiter: endpoint_waiter,
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("remote WakeFiber must not tunnel endpoint response waits");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(
-        vm.state.outbound_commands.is_empty(),
-        "remote endpoint waiter rejection must happen before publish"
-    );
-}
-
-#[test]
-fn vm_remote_endpoint_effect_shape_061_rejects_forged_source_before_publish() {
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let endpoint_id = 0x0610_0000_0000_0103;
-    let forged_source = 99;
-    let fiber_key = 0x0000_000D_0000_000E;
-    let wait_id = 29;
-
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition
-        .island_commands
-        .push(IslandCommandEffect::endpoint_recv_request(
-            remote_island,
-            endpoint_id,
-            forged_source,
-            fiber_key,
-            wait_id,
-        ));
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("remote EndpointRequest must originate from the current island");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert_eq!(
-        vm.state.pending_island_responses, 0,
-        "forged remote request must not create a pending response obligation"
-    );
-    assert!(
-        vm.state.outbound_commands.is_empty(),
-        "remote EndpointRequest source rejection must happen before publish"
-    );
-
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition
-        .island_commands
-        .push(IslandCommandEffect::endpoint_response(
-            remote_island,
-            forged_source,
-            endpoint_id,
-            EndpointResponseKind::RecvError,
-            fiber_key,
-            wait_id,
-        ));
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("remote EndpointResponse must originate from the current island");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(
-        vm.state.outbound_commands.is_empty(),
-        "remote EndpointResponse source rejection must happen before publish"
-    );
-}
-
-#[test]
-fn vm_wake_fiber_shape_061_rejects_select_recv_without_payload_before_wake_or_publish() {
-    let mut vm = Vm::new();
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Chan,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    vm.scheduler.get_fiber_mut(receiver).select_state = Some(select_state_for_queue_061(ch));
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: QueueWaiter::selecting(
-                vm.state.current_island_id,
-                receiver_key,
-                0,
-                61,
-                ch as u64,
-                SelectWaitKind::Recv,
-            ),
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island WakeFiber must not wake select recv without payload");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    let fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(fiber.state, FiberState::Blocked(BlockReason::Queue));
-    assert!(!vm.scheduler.ready_queue.contains(&receiver));
-
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber {
-            waiter: QueueWaiter::selecting(
-                remote_island,
-                0x0000_0031_0000_0032,
-                0,
-                61,
-                0xF0F0,
-                SelectWaitKind::Recv,
-            ),
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("remote WakeFiber must not publish select recv without payload");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(vm.state.outbound_commands.is_empty());
-}
-
-#[test]
-fn vm_wake_fiber_shape_061_rejects_select_send_without_payload_before_wake_or_publish() {
-    let mut vm = Vm::new();
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Chan,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let sender = vm.scheduler.spawn(Fiber::new(0));
-    let sender_key = vm.scheduler.get_fiber(sender).wake_key_packed();
-    vm.scheduler.get_fiber_mut(sender).select_state = Some(select_send_state_for_queue_061(ch));
-    assert_eq!(vm.scheduler.schedule_next(), Some(sender));
-    vm.scheduler.block_for_queue();
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: vm.state.current_island_id,
-        command: IslandCommand::WakeFiber {
-            waiter: QueueWaiter::selecting(
-                vm.state.current_island_id,
-                sender_key,
-                0,
-                61,
-                ch as u64,
-                SelectWaitKind::Send,
-            ),
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("same-island WakeFiber must not wake select send without payload");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    let fiber = vm.scheduler.get_fiber(sender);
-    assert_eq!(fiber.state, FiberState::Blocked(BlockReason::Queue));
-    assert!(!vm.scheduler.ready_queue.contains(&sender));
-
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.island_commands.push(IslandCommandEffect {
-        island_id: remote_island,
-        command: IslandCommand::WakeFiber {
-            waiter: QueueWaiter::selecting(
-                remote_island,
-                0x0000_0041_0000_0042,
-                0,
-                61,
-                0xF0F1,
-                SelectWaitKind::Send,
-            ),
-        },
-        pending_response: false,
-    });
-
-    let err = vm
-        .apply_runtime_transition(None, transition)
-        .expect_err("remote WakeFiber must not publish select send without payload");
-
-    assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-    assert!(vm.state.outbound_commands.is_empty());
-}
-
-#[test]
 fn vm_remote_select_recv_wake_061_rejects_unrepresentable_payload_before_publish() {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
@@ -1736,14 +744,15 @@ fn vm_remote_select_recv_wake_061_rejects_unrepresentable_payload_before_publish
         1,
         0,
     );
-    let waiter = QueueWaiter::selecting(
+    let waiter = QueueWaiter::try_select(
         remote_island,
         0x0000_0039_0000_003A,
         0,
         61,
         ch as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
@@ -1774,14 +783,15 @@ fn vm_remote_select_send_wake_061_rejects_unrepresentable_payload_before_publish
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
     let remote_island = 7;
-    let waiter = QueueWaiter::selecting(
+    let waiter = QueueWaiter::try_select(
         remote_island,
         0x0000_003F_0000_0040,
         0,
         61,
         0x0610_0000_0000_0300,
         SelectWaitKind::Send,
-    );
+    )
+    .unwrap();
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
@@ -1801,73 +811,7 @@ fn vm_remote_select_send_wake_061_rejects_unrepresentable_payload_before_publish
 }
 
 #[test]
-fn vm_island_wake_command_061_rejects_select_recv_without_payload_before_wake() {
-    let mut vm = Vm::new();
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Chan,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let receiver = vm.scheduler.spawn(Fiber::new(0));
-    let receiver_key = vm.scheduler.get_fiber(receiver).wake_key_packed();
-    vm.scheduler.get_fiber_mut(receiver).select_state = Some(select_state_for_queue_061(ch));
-    assert_eq!(vm.scheduler.schedule_next(), Some(receiver));
-    vm.scheduler.block_for_queue();
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(QueueWaiter::selecting(
-        vm.state.current_island_id,
-        receiver_key,
-        0,
-        61,
-        ch as u64,
-        SelectWaitKind::Recv,
-    )));
-
-    assert!(!outcome.applied);
-    assert!(!outcome.payload_accepted);
-    let fiber = vm.scheduler.get_fiber(receiver);
-    assert_eq!(fiber.state, FiberState::Blocked(BlockReason::Queue));
-    assert!(!vm.scheduler.ready_queue.contains(&receiver));
-}
-
-#[test]
-fn vm_island_wake_command_061_rejects_select_send_without_payload_before_wake() {
-    let mut vm = Vm::new();
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Chan,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    let sender = vm.scheduler.spawn(Fiber::new(0));
-    let sender_key = vm.scheduler.get_fiber(sender).wake_key_packed();
-    vm.scheduler.get_fiber_mut(sender).select_state = Some(select_send_state_for_queue_061(ch));
-    assert_eq!(vm.scheduler.schedule_next(), Some(sender));
-    vm.scheduler.block_for_queue();
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(QueueWaiter::selecting(
-        vm.state.current_island_id,
-        sender_key,
-        0,
-        61,
-        ch as u64,
-        SelectWaitKind::Send,
-    )));
-
-    assert!(!outcome.applied);
-    assert!(!outcome.payload_accepted);
-    let fiber = vm.scheduler.get_fiber(sender);
-    assert_eq!(fiber.state, FiberState::Blocked(BlockReason::Queue));
-    assert!(!vm.scheduler.ready_queue.contains(&sender));
-}
-
-#[test]
-fn vm_remote_endpoint_request_activation_061_rejects_duplicate_or_missing_wait_identity() {
+fn vm_remote_endpoint_request_activation_061_rejects_duplicate_or_raw_fiber_identity() {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
     let remote_island = 7;
@@ -1885,9 +829,7 @@ fn vm_remote_endpoint_request_activation_061_rejects_duplicate_or_missing_wait_i
             .push(IslandCommandEffect::endpoint_recv_request(
                 remote_island,
                 endpoint_id,
-                vm.state.current_island_id,
-                fiber_key,
-                wait_id,
+                endpoint_wait_key_061(fiber_key, wait_id),
             ));
     }
 
@@ -1909,14 +851,12 @@ fn vm_remote_endpoint_request_activation_061_rejects_duplicate_or_missing_wait_i
         .push(IslandCommandEffect::endpoint_recv_request(
             remote_island,
             endpoint_id,
-            vm.state.current_island_id,
-            0,
-            0,
+            endpoint_wait_key_061(0, 1),
         ));
 
     let err = vm
         .apply_runtime_transition(None, transition)
-        .expect_err("remote endpoint request must carry response wait identity");
+        .expect_err("remote endpoint request must carry a generation-bearing fiber identity");
 
     assert!(matches!(err, VmError::Jit(_)), "{err:?}");
     assert_eq!(vm.state.pending_island_responses, 0);
@@ -1929,7 +869,7 @@ fn vm_remote_endpoint_response_source_061_requires_local_authority_before_publis
     vm.state.external_island_transport = true;
     let remote_island = 7;
     let endpoint_id = 0x0610_0000_0000_0105;
-    let waiter = QueueWaiter::endpoint(remote_island, 0x0000_0035_0000_0036, 37);
+    let waiter = endpoint_waiter(remote_island, 0x0000_0035_0000_0036, 37);
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
@@ -1956,11 +896,10 @@ fn vm_remote_endpoint_response_source_061_requires_local_authority_before_publis
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             remote_island,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            0x0000_0037_0000_0038,
-            41,
+            EndpointResponseKind::RecvError {
+                wait_key: endpoint_wait_key_061(0x0000_0037_0000_0038, 41),
+            },
         ));
 
     let err = vm
@@ -1972,7 +911,7 @@ fn vm_remote_endpoint_response_source_061_requires_local_authority_before_publis
 }
 
 #[test]
-fn vm_remote_endpoint_response_shape_061_rejects_missing_wait_identity_before_publish() {
+fn vm_remote_endpoint_response_shape_061_rejects_raw_fiber_identity_before_publish() {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
     let remote_island = 7;
@@ -1997,21 +936,20 @@ fn vm_remote_endpoint_response_shape_061_rejects_missing_wait_identity_before_pu
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             remote_island,
-            vm.state.current_island_id,
             endpoint_id,
-            EndpointResponseKind::RecvError,
-            0,
-            0,
+            EndpointResponseKind::RecvError {
+                wait_key: endpoint_wait_key_061(0, 1),
+            },
         ));
 
     let err = vm
         .apply_runtime_transition(None, transition)
-        .expect_err("remote endpoint response must carry a response wait identity");
+        .expect_err("remote endpoint response must carry a generation-bearing fiber identity");
 
     assert!(matches!(err, VmError::Jit(_)), "{err:?}");
     assert!(
         vm.state.outbound_commands.is_empty(),
-        "identityless remote endpoint response must be rejected before publish"
+        "raw-fiber remote endpoint response must be rejected before publish"
     );
 }
 
@@ -2035,21 +973,23 @@ fn vm_remote_closed_non_endpoint_wake_061_rejects_unrepresentable_response_befor
 
     for wake in [
         WakeCommand::queue_closed_receiver(
-            QueueWaiter::simple_queue(
+            QueueWaiter::try_queue(
                 remote_island,
                 0x0000_003B_0000_003C,
                 0x0610_0000_0000_0200,
                 SelectWaitKind::Recv,
-            ),
+            )
+            .unwrap(),
             Some(endpoint_id),
         ),
         WakeCommand::queue_closed_sender(
-            QueueWaiter::simple_queue(
+            QueueWaiter::try_queue(
                 remote_island,
                 0x0000_003D_0000_003E,
                 0x0610_0000_0000_0201,
                 SelectWaitKind::Send,
-            ),
+            )
+            .unwrap(),
             Some(endpoint_id),
         ),
     ] {

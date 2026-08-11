@@ -209,6 +209,16 @@ Raw callback fields use nullable C function-pointer representations. The
 constructor rejects a missing required operation or host-service callback
 before creating the extension facade.
 
+ABI v10 retains result code `RESULT_WAIT_IO = 3` and the
+`ExtHostOpsV10::set_wait_io` callback slot solely to preserve the published C
+layout and fingerprint. They are reserved compatibility slots, not a native
+extension capability. Calling `set_wait_io` records a contract violation, and
+returning `RESULT_WAIT_IO` is rejected with the same structured error. A native
+extension that performs asynchronous I/O submits work through HostServices V2
+and returns `HostEventWaitAndReplay`; the replay invocation consumes the
+host-event token and optional data. Same-image runtime and stdlib providers may
+continue to use the VM-owned `IoRuntime`/`WaitIo` protocol.
+
 Argument and return helpers address slots relative to their declared windows.
 One-slot scalar/reference operations and two-slot interface operations must fit
 completely. Offset arithmetic is checked in the `u16` slot domain, including
@@ -302,7 +312,7 @@ pub enum ExternResult {
     Exit(i32),
     Yield,
     Block,
-    WaitIo { token: IoToken },
+    WaitIo { token: u64 },
     HostEventWait { token: u64, delay_ms: u32 },
     HostEventWaitAndReplay { token: u64, source: HostEventReplaySource },
     Panic(String),
@@ -316,6 +326,12 @@ pub enum ExternResult {
 their corresponding precise `MAY_*` effect. `Panic(String)` and
 `CallClosure { args }` remain source-level Rust conveniences; the trampoline
 copies their bytes or slots before the extension drops its allocation.
+
+`WaitIo` remains in the shared Rust enum for same-image runtime providers. A
+native `#[vo_fn]` trampoline treats that variant as a contract violation and
+returns `RESULT_ABI_ERROR`; extension authors use HostServices V2 together with
+`HostEventWaitAndReplay`. On an extension facade, `try_io_mut`,
+`take_resume_io_token`, and `resume_io_token` return `None`.
 
 ### 3.6 Type Mapping
 
@@ -972,6 +988,6 @@ failure because a Rust snapshot cannot roll back JavaScript instances. Restore
 MUST verify the owner lifecycle epoch and active artifact generations before
 restoring replay metadata; it MUST NOT overwrite a newer live owner set.
 
-Browser compile caches MUST include a protocol-dependent schema epoch. The
-Studio VFS compile cache epoch for protocol v3 is `4`; artifacts cached under
-an earlier epoch are not reusable.
+Browser compile caches MUST include a compiler-authority and protocol schema
+epoch. The Studio VFS compile cache epoch is `5`; artifacts cached under an
+earlier epoch are not reusable.

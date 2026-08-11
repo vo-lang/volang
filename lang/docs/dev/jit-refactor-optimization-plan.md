@@ -11,6 +11,12 @@ module split, and call-helper module split described in older refactor notes
 have been implemented. Treat remaining optimization ideas below as candidates
 that need fresh measurement before work starts.
 
+Current static guest-call contract: every call dispatches through the current
+Island's `jit_func_table[func_id]` slot. Generated code retains the null check:
+a non-null slot enters the native callee, while a null slot materializes the VM
+call. This runtime lookup makes per-Island disable and isolation authoritative
+even while compiled callee code remains resident.
+
 ## Baseline Performance (2026-02-20)
 
 ```
@@ -75,7 +81,7 @@ vo-runtime/src/jit_api.rs JitContext, JitResult, DynCallIC, PreparedCall, all vo
 
 | Call Type | Fast Path | Slow Path |
 |-----------|-----------|-----------|
-| **Static (Call)** | Direct FuncRef if callee compiled; otherwise jit_func_table[id] indirect | VM call materialization via set_call_request + return Call |
+| **Static (Call)** | Island-local `jit_func_table[id]` lookup on every execution; non-null slot calls JIT indirectly | Null slot → VM call materialization via `set_call_request` + return `Call` |
 | **Self-recursive** | VM-owned frame required | VM call materialization preserves recoverable stack/defer semantics |
 | **Closure (CallClosure)** | IC hit → native stack, direct JIT call | IC miss → prepare_closure_call → PreparedCall |
 | **Interface (CallIface)** | IC hit → native stack, direct JIT call | IC miss → prepare_iface_call → PreparedCall |
@@ -86,31 +92,27 @@ vo-runtime/src/jit_api.rs JitContext, JitResult, DynCallIC, PreparedCall, all vo
 
 ## Identified Optimization Opportunities
 
-### O1. JitContext Caching (HIGH IMPACT, LOW RISK)
+### O1. JitContext Caching (EVALUATED, SKIPPED)
 
-**Problem**: `build_jit_context()` rebuilds a ~450-byte JitContext from scratch for every JIT invocation (dispatch_jit_call, dispatch_loop_osr). Most fields (gc, globals, module, callbacks, func_table, etc.) are constant within a fiber's execution. Only 4 fields change per call: `stack_ptr`, `stack_cap`, `jit_bp`, `fiber_sp`.
+`build_jit_context()` rebuilds the context for every full-JIT and OSR entry.
+Several result, panic, call, budget, stack, VM, and fiber pointers also change
+or require reset on each entry. Caching the self-referential raw-pointer
+structure on `Fiber` or `Vm` introduces relocation and invalidation hazards.
 
-**Current cost**: ~50 field assignments per JIT entry, plus Box allocation for JitOwnedState.
+Keep construction explicit until a benchmark shows it is material and a cached
+design can prove pointer validity across VM moves, stack growth, module reload,
+and Island transfer. Immutable callback functions already live in one shared
+`JitContextCallbacks` table.
 
-**Solution**: Cache JitContext on the Fiber. Rebuild only when VM state changes (module load, GC compaction). Per-call: only update the 4 dynamic fields + reset call/panic state.
+### O2. Eliminate ret Vec Allocation (COMPLETED)
 
-**Estimated impact**: Eliminates ~90% of JitContext setup overhead. Matters most for short JIT functions called frequently (fibonacci, recursive-tree).
+`invoke_jit_and_handle()` uses a 16-slot stack buffer and allocates only for
+larger return shapes.
 
-### O2. Eliminate ret Vec Allocation (HIGH IMPACT, LOW RISK)
+### O3. Eliminate JitOwnedState Box Allocation (COMPLETED)
 
-**Problem**: `invoke_jit_and_handle()` allocates `let mut ret: Vec<u64> = vec![0u64; ret_slots.max(1)]` for EVERY JIT call. This is a heap allocation on the hot path.
-
-**Solution**: Use a fixed-size stack buffer (e.g., `[u64; 16]`) for small ret_slots, only heap-allocate for large returns. Or better: write return values directly to caller's fiber.stack instead of a temporary buffer — the JIT already has `ret_ptr` and the VM copies from ret to fiber.stack anyway.
-
-**Estimated impact**: Eliminates one malloc+free per JIT call. ~10-20ns per call.
-
-### O3. Eliminate JitOwnedState Box Allocation (MEDIUM IMPACT, LOW RISK)
-
-**Problem**: `build_jit_context()` allocates `Box::new(JitOwnedState { ... })` for panic_flag, is_user_panic, panic_msg pointers. This is a heap allocation per JIT entry.
-
-**Solution**: Move JitOwnedState inline into cached JitContext (or into Fiber). The panic_flag etc. can be fields on Fiber or on the cached JitContext directly.
-
-**Estimated impact**: Eliminates one malloc+free per JIT entry.
+Panic and diagnostic state lives on `Fiber`; `JitContext` points to those stable
+fields and performs no per-entry box allocation.
 
 ### O4. Unify FunctionCompiler and LoopCompiler Code Paths (MEDIUM IMPACT, ARCHITECTURE)
 
@@ -118,7 +120,7 @@ Current note: full-function and OSR compilers now share analysis and
 translation contracts, but their entry/exit and stack-base semantics remain
 intentionally different. Extracting a shared compiler core is still possible,
 but it should be justified by a concrete duplication reduction and must keep
-native-stack direct-call state separate from OSR locals-pointer state.
+native-stack call state separate from OSR locals-pointer state.
 
 **Problem**: FunctionCompiler and LoopCompiler have significant code duplication:
 - Both implement `IrEmitter` with nearly identical read_var/write_var/read_var_f64/write_var_f64
@@ -150,19 +152,19 @@ This trades one additional function call on IC hit for dramatically smaller IR p
 - Runtime: Negligible impact on IC hit path (helper call vs inline is ~1-2ns, both L1-hot)
 - Code size: ~60% smaller per dynamic callsite
 
-### O6. Static Call Deferred Compilation (LOW IMPACT, LOW RISK)
+### O6. Static Guest Direct-Link Specialization (RETIRED)
 
-**Problem**: `emit_jit_call_with_vm_materialization` can generate two complete code paths for static `Call`:
-1. Direct call path (callee compiled) + OK/non-OK handling
-2. VM call materialization path (callee not compiled) + set_call_request + return Call
+**Status**: Retired. An earlier proposal would have linked an already-compiled
+guest callee directly into its caller and removed the VM-materialization null
+check. That optimization is incompatible with the current ownership contract:
+the same compiled caller can run under Island-local dispatch state, and a callee
+may be disabled while its native code remains resident.
 
-When callee_func_ref is known at compile time (already compiled), the VM materialization path is dead code that still increases IR size and compilation time.
-
-**Solution**: When callee_func_ref is Some (compile-time known callee), skip generating the VM materialization path entirely. The callee is guaranteed compiled, null check is unnecessary.
-
-When callee_func_ref is None, the indirect path already handles both JIT and VM cases correctly.
-
-**Estimated impact**: Modest IR reduction for functions calling already-compiled callees.
+Static guest calls therefore load `jit_func_table[func_id]` on every execution.
+A non-null entry takes the indirect native path; a null entry materializes the
+VM call. Future performance work may reduce surrounding IR or hoist the stable
+table-base load, but it must not cache a guest callee entry in compiled code or
+remove the per-call null check. Measure such work with the `jit-call` benchmark.
 
 ### O7. Inline Common Helper Operations (MEDIUM IMPACT, HIGH RISK)
 
@@ -193,7 +195,11 @@ The GC alloc inline is the highest-value optimization here. The bump allocator c
 
 **Estimated impact**: Negligible for most code. Minor improvement for tight integer loops.
 
-### O9. HelperFuncs → Direct FuncRef Loading (LOW IMPACT, ARCHITECTURE)
+### O9. Runtime HelperFuncs → Direct FuncRef Loading (LOW IMPACT, ARCHITECTURE)
+
+This item concerns imported runtime helper symbols only. It does not permit
+direct links to guest functions; static guest calls remain governed by the
+Island-local dispatch-table contract above.
 
 **Problem**: HelperFuncs is a large struct (~80 Option<FuncRef> fields = ~1280 bytes) that is rebuilt via `get_helper_refs()` for every function compilation. Each helper is `module.declare_func_in_func()` which does a hash lookup.
 
@@ -245,7 +251,6 @@ The GC alloc inline is the highest-value optimization here. The bump allocator c
    - `checked_non_nil: HashSet<u16>`
    - `memory_only_start: u16`
    - `slot_types: &'a [SlotType]`
-   - `callee_func_refs: &'a [Option<FuncRef>]`
 
 2. Implement `IrEmitter` on `CompilerCore`. FunctionCompiler and LoopCompiler hold a `CompilerCore` + their specific fields.
 
@@ -324,7 +329,8 @@ The GC alloc inline is the highest-value optimization here. The bump allocator c
 ### Completed
 
 1. **Phase A1: Eliminate Box<JitOwnedState> per-call allocation**
-   - Moved `panic_flag`, `is_user_panic`, `safepoint_flag`, `panic_msg` fields to `Fiber` struct
+   - Moved `panic_flag`, `is_user_panic`, and `panic_msg` fields to `Fiber`; the
+     retired safepoint pointer remains a constant legacy ABI slot
    - JitContext now points directly into Fiber's fields — no heap allocation per JIT call
    - Files: `vo-vm/src/fiber.rs`, `vo-vm/src/vm/jit/context.rs`
 

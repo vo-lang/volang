@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 use vo_runtime::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, JitInstructionMetadata, MethodInfo,
+    Constant, ExternDef, FunctionDef, GlobalDef, InstructionMetadata, InterfaceMeta, MethodInfo,
     NamedTypeMeta, ParamShape, ReturnShape, StructMeta,
 };
 use vo_runtime::ffi::{ExternCallContext, ExternResult};
@@ -182,7 +182,7 @@ fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         code: Vec::new(),
         slot_types: vec![SlotType::GcRef; root_slots as usize],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
@@ -252,7 +252,7 @@ fn malformed_single_instruction_module(
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None; code.len()],
+        instruction_metadata: vec![vo_runtime::bytecode::InstructionMetadata::None; code.len()],
         code,
         slot_types: vec![SlotType::Value; 4],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
@@ -308,261 +308,18 @@ fn finish_load_and_resolve_externs_for_test(
 ) {
     vm.finish_load(module);
     let externs = vm.module.as_ref().expect("loaded module").externs.clone();
+    let registry = Arc::make_mut(&mut vm.state.extern_registry);
     for (id, func, effects) in registrations {
         let name = externs
             .get(*id as usize)
             .unwrap_or_else(|| panic!("test extern id {id} missing from loaded module"))
             .name
             .clone();
-        vm.state
-            .extern_registry
-            .register_test_named_with_effects(*id, name, *func, *effects);
+        registry.register_test_named_with_effects(*id, name, *func, *effects);
     }
-    vm.state.resolved_externs = vm
-        .state
-        .extern_registry
-        .resolve_module_externs(&externs)
+    registry
+        .resolve_and_freeze(&externs)
         .expect("resolve test externs");
-}
-
-#[cfg(feature = "jit")]
-fn assert_goisland_validators_before(name: &str, source: &str, terminal: &str) {
-    assert!(
-            goisland_validators_before(source, terminal),
-            "{name} GoIsland path must use shared frame_call object-kind validators before publishing island work"
-        );
-}
-
-#[cfg(feature = "jit")]
-fn goisland_validators_before_jit_publication(source: &str) -> bool {
-    goisland_validators_before(source, "commit_go_spawn(")
-        && goisland_validators_before(source, "commit_go_island_commands(")
-}
-
-#[cfg(feature = "jit")]
-fn goisland_validators_before(source: &str, terminal: &str) -> bool {
-    let (compact, _offsets) = vo_source_contract::compact_rust_source_for_contract(source);
-    let compact = compact_source_without_non_dominating_blocks(&compact);
-    let Some(island_pos) = compact_pattern_position(&compact, "validate_island_handle(") else {
-        return false;
-    };
-    let Some(closure_pos) = compact_pattern_position(&compact, "validate_closure_target(") else {
-        return false;
-    };
-    let Some(terminal_pos) = compact_pattern_position(&compact, terminal) else {
-        return false;
-    };
-    island_pos < terminal_pos && closure_pos < terminal_pos
-}
-
-fn compact_source_without_non_dominating_blocks(compact: &[u8]) -> Vec<u8> {
-    let mut filtered = Vec::with_capacity(compact.len());
-    let mut idx = 0usize;
-    let mut brace_depth = 0usize;
-    while idx < compact.len() {
-        let skipped_open = if compact[idx..].starts_with(b"iffalse{") {
-            Some(idx + "iffalse".len())
-        } else if compact[idx..].starts_with(b"ifcfg!(any()){") {
-            Some(idx + "ifcfg!(any())".len())
-        } else if compact[idx..].starts_with(b"matchfalse{") {
-            Some(idx + "matchfalse".len())
-        } else if compact[idx..].starts_with(b"async{") {
-            Some(idx + "async".len())
-        } else if compact[idx..].starts_with(b"asyncmove{") {
-            Some(idx + "asyncmove".len())
-        } else if compact[idx..].starts_with(b"macro_rules!") {
-            compact[idx..]
-                .iter()
-                .position(|byte| *byte == b'{')
-                .map(|offset| idx + offset)
-        } else if compact[idx..].starts_with(b"move|") || compact[idx..].starts_with(b"|") {
-            compact_closure_body_open(compact, idx)
-        } else if compact[idx..].starts_with(b"||{") {
-            Some(idx + "||".len())
-        } else if brace_depth > 0 && compact_keyword_at(compact, idx, b"fn") {
-            nested_function_body_open(compact, idx + 2)
-        } else {
-            None
-        };
-        if let Some(open_idx) = skipped_open {
-            if let Some(close_idx) = compact_delimiter_close(compact, open_idx) {
-                idx = close_idx + 1;
-                continue;
-            }
-        }
-        match compact[idx] {
-            b'{' => brace_depth += 1,
-            b'}' => brace_depth = brace_depth.saturating_sub(1),
-            _ => {}
-        }
-        filtered.push(compact[idx]);
-        idx += 1;
-    }
-    filtered
-}
-
-fn compact_closure_body_open(compact: &[u8], idx: usize) -> Option<usize> {
-    let mut cursor = idx;
-    if compact[cursor..].starts_with(b"move") {
-        cursor += "move".len();
-    }
-    if compact.get(cursor) != Some(&b'|') {
-        return None;
-    }
-    cursor += 1;
-    while cursor < compact.len() && compact[cursor] != b'|' {
-        cursor += 1;
-    }
-    if compact.get(cursor) != Some(&b'|') {
-        return None;
-    }
-    cursor += 1;
-    while cursor < compact.len() {
-        match compact[cursor] {
-            b'(' | b'[' => {
-                cursor = compact_delimiter_close(compact, cursor)? + 1;
-            }
-            b'{' => return Some(cursor),
-            b';' => return None,
-            _ => cursor += 1,
-        }
-    }
-    None
-}
-
-fn compact_keyword_at(compact: &[u8], idx: usize, keyword: &[u8]) -> bool {
-    compact.get(idx..idx + keyword.len()) == Some(keyword)
-        && (idx == 0 || !rust_ident_continue(compact[idx - 1]))
-        && compact
-            .get(idx + keyword.len())
-            .is_some_and(|byte| rust_ident_start(*byte))
-}
-
-fn nested_function_body_open(compact: &[u8], mut idx: usize) -> Option<usize> {
-    while idx < compact.len() {
-        match compact[idx] {
-            b'(' | b'[' => {
-                idx = compact_delimiter_close(compact, idx)? + 1;
-                continue;
-            }
-            b'{' => return Some(idx),
-            b';' => return None,
-            _ => idx += 1,
-        }
-    }
-    None
-}
-
-fn rust_ident_start(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphabetic()
-}
-
-fn rust_ident_continue(byte: u8) -> bool {
-    rust_ident_start(byte) || byte.is_ascii_digit()
-}
-
-fn compact_delimiter_close(compact: &[u8], open_idx: usize) -> Option<usize> {
-    let (open, close) = match compact.get(open_idx).copied()? {
-        b'(' => (b'(', b')'),
-        b'[' => (b'[', b']'),
-        b'{' => (b'{', b'}'),
-        _ => return None,
-    };
-    let mut depth = 0usize;
-    for (idx, byte) in compact.iter().copied().enumerate().skip(open_idx) {
-        if byte == open {
-            depth += 1;
-        } else if byte == close {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(idx);
-            }
-        }
-    }
-    None
-}
-
-fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
-    let pattern = pattern.as_bytes();
-    if pattern.is_empty() || pattern.len() > compact.len() {
-        return None;
-    }
-    (0..=compact.len() - pattern.len()).find(|start| compact[*start..].starts_with(pattern))
-}
-
-fn compact_pattern_positions(compact: &[u8], pattern: &str) -> Vec<usize> {
-    let pattern = pattern.as_bytes();
-    if pattern.is_empty() || pattern.len() > compact.len() {
-        return Vec::new();
-    }
-    (0..=compact.len() - pattern.len())
-        .filter(|start| compact[*start..].starts_with(pattern))
-        .collect()
-}
-
-fn compact_pattern_position_at_max_brace_depth(
-    compact: &[u8],
-    pattern: &str,
-    max_depth: usize,
-) -> Option<usize> {
-    compact_pattern_positions_at_max_brace_depth(compact, pattern, max_depth)
-        .into_iter()
-        .next()
-}
-
-fn compact_pattern_positions_at_max_brace_depth(
-    compact: &[u8],
-    pattern: &str,
-    max_depth: usize,
-) -> Vec<usize> {
-    let pattern = pattern.as_bytes();
-    if pattern.is_empty() || pattern.len() > compact.len() {
-        return Vec::new();
-    }
-    let mut positions = Vec::new();
-    let mut depth = 0usize;
-    for idx in 0..compact.len() {
-        if compact[idx..].starts_with(pattern) && depth <= max_depth {
-            positions.push(idx);
-        }
-        match compact[idx] {
-            b'{' => depth += 1,
-            b'}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    positions
-}
-
-fn compact_source_bytes(source: &str) -> Vec<u8> {
-    vo_source_contract::compact_rust_source_for_contract(source).0
-}
-
-fn compact_contains(compact: &[u8], pattern: &str) -> bool {
-    compact_pattern_position(compact, pattern).is_some()
-}
-
-fn compact_region_between_compact(
-    compact: &[u8],
-    marker: &str,
-    terminator: &str,
-) -> Option<Vec<u8>> {
-    let marker_pos = compact_pattern_position(compact, marker)?;
-    let start = marker_pos + marker.len();
-    let end = compact_pattern_position(&compact[start..], terminator)
-        .map(|offset| start + offset)
-        .unwrap_or(compact.len());
-    Some(compact[start..end].to_vec())
-}
-
-fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-    let compact = compact_source_bytes(source);
-    compact_region_between_compact(&compact, marker, terminator)
-}
-
-fn source_slice_between<'a>(source: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    let tail = source.split(start).nth(1)?;
-    Some(tail.split(end).next().unwrap_or(tail))
 }
 
 fn run_gc_until_pause(vm: &mut Vm) {
@@ -594,15 +351,6 @@ fn run_until_atomic_root_scan_pending(vm: &mut Vm) {
     );
 }
 
-fn queue_action_macro_source_062() -> &'static str {
-    source_slice_between(
-        include_str!("../mod.rs"),
-        "macro_rules! handle_queue_action",
-        "while fiber.execution_budget > 0",
-    )
-    .expect("handle_queue_action macro body")
-}
-
 mod extern_replay;
 mod gc_roots;
 mod go_island;
@@ -610,7 +358,6 @@ mod go_island;
 mod host_services;
 mod load_validation;
 mod pending_transitions;
-mod queue_boundary;
 mod runtime_wake;
 mod scheduler_and_frame;
 mod spawn_and_host;

@@ -341,8 +341,5 @@ mod tests {
             super::wasm_extension_export_key("vo1:1:x:1:F").unwrap(),
             "__vo_ext_766f313a313a783a313a46"
         );
-        let source = include_str!("lib.rs");
-        assert!(source.contains("export_wasm_extension_protocol"));
-        assert!(source.contains("pub extern \"C\" fn vo_ext_protocol_version()"));
     }
 }

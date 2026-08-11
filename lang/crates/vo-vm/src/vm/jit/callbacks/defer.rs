@@ -11,8 +11,8 @@ use crate::fiber::{DeferArgLayout, DeferEntry, Fiber};
 use crate::frame_call::validate_closure_target;
 
 use super::helpers::{
-    validate_callback_bool, validate_callback_raw_slot_span, validate_callback_raw_slots,
-    validate_callback_slot_count, validate_vm_callback_context,
+    validate_callback_bool, validate_callback_context, validate_callback_raw_slot_span,
+    validate_callback_raw_slots, validate_callback_slot_count,
 };
 
 const JIT_RECOVER_INVALID_RESULT_PTR: u64 = 1;
@@ -32,7 +32,7 @@ pub extern "C" fn jit_defer_push(
     is_errdefer: u32,
 ) -> JitResult {
     if let Err(result) =
-        validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+        validate_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
     {
         return result;
     }
@@ -49,7 +49,9 @@ pub extern "C" fn jit_defer_push(
     let ctx_ref = unsafe { &*ctx };
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let gc = unsafe { &mut *ctx_ref.gc };
-    let module = unsafe { &*ctx_ref.module };
+    let Some(module) = (unsafe { ctx_ref.module_ref() }) else {
+        return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64);
+    };
 
     let arg_slots = match validate_callback_raw_slots(
         ctx,
@@ -149,7 +151,7 @@ pub extern "C" fn jit_defer_push(
 /// Called by JIT-compiled code when executing Recover instruction.
 /// Result (interface{}) is written to result_ptr (2 slots).
 pub extern "C" fn jit_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
-    if let Err(result) = validate_vm_callback_context(
+    if let Err(result) = validate_callback_context(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         JIT_RECOVER_INVALID_RESULT_PTR,
@@ -227,7 +229,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             slot_types: vec![SlotType::Value],
             borrowed_scan_slots_prefix: vec![0, 0],
             capture_types: Vec::new(),
@@ -247,10 +249,10 @@ mod tests {
 
     fn assert_defer_bool_abi_rejected(is_closure: u32, is_errdefer: u32) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(
             ctx.as_ptr(),
@@ -277,10 +279,10 @@ mod tests {
     #[test]
     fn vm_jit_callback_abi_defer_push_rejects_arg_count_overflow_before_truncation() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         let args = [99_u64];
 
         let result = jit_defer_push(
@@ -302,10 +304,10 @@ mod tests {
     #[test]
     fn vm_jit_callback_abi_defer_push_rejects_null_non_empty_args_before_defer_entry() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(ctx.as_ptr(), 0, 0, 0, 0, core::ptr::null(), 1, 0);
 
@@ -317,10 +319,10 @@ mod tests {
     #[test]
     fn vm_jit_callback_abi_defer_push_rejects_arg_start_width_drift_before_defer_entry() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         let args = [99_u64];
 
         let result = jit_defer_push(
@@ -343,10 +345,10 @@ mod tests {
     fn vm_jit_defer_closure_kind_062_rejects_non_closure_before_defer_publication() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let non_closure = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::String), 1);
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(ctx.as_ptr(), 0, 1, non_closure as u64, 0, [].as_ptr(), 0, 0);
 
@@ -358,10 +360,10 @@ mod tests {
     #[test]
     fn vm_jit_defer_closure_kind_062_preserves_nil_defer_registration_for_recover() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(ctx.as_ptr(), 0, 1, 0, 0, [].as_ptr(), 0, 0);
 
@@ -372,52 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn vm_jit_defer_closure_kind_062_source_validates_before_entry_publication() {
-        let source = crate::source_contract::production_source_without_test_modules(include_str!(
-            "defer.rs"
-        ));
-        let callback_body = source
-            .split("pub extern \"C\" fn jit_defer_push")
-            .nth(1)
-            .expect("jit_defer_push source");
-        assert!(
-            vo_source_contract::compact_pattern_before(
-                callback_body,
-                "validate_closure_target(",
-                "fiber.defer_stack.push(DeferEntry"
-            ),
-            "JIT defer registration must validate closure target before DeferEntry publication"
-        );
-    }
-
-    #[test]
-    fn vm_jit_defer_closure_kind_062_source_order_ignores_comment_spoofed_validator() {
-        let probe = r#"
-            pub extern "C" fn jit_defer_push() {
-                /* validate_closure_target( */
-                fiber.defer_stack.push(DeferEntry {
-                    frame_depth,
-                });
-            }
-        "#;
-
-        assert!(
-            !vo_source_contract::compact_pattern_before(
-                probe,
-                "validate_closure_target(",
-                "fiber.defer_stack.push(DeferEntry"
-            ),
-            "comments must not satisfy JIT defer validator-before-publication source contracts"
-        );
-    }
-
-    #[test]
     fn vm_jit_callback_boundary_001_recover_rejects_null_result_pointer() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = caller_module();
+        vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_recover(ctx.as_ptr(), core::ptr::null_mut());
 

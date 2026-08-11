@@ -1,0 +1,28 @@
+package main
+
+const fiberCount = 4096
+
+func peakWorker(gate chan int, ready chan int, done chan int) {
+	ready <- 1
+	<-gate
+	done <- 1
+}
+
+func main() {
+	gate := make(chan int)
+	ready := make(chan int, fiberCount)
+	done := make(chan int, fiberCount)
+	for i := 0; i < fiberCount; i++ {
+		go peakWorker(gate, ready, done)
+	}
+	for i := 0; i < fiberCount; i++ {
+		<-ready
+	}
+	for i := 0; i < fiberCount; i++ {
+		gate <- 1
+	}
+	for i := 0; i < fiberCount; i++ {
+		<-done
+	}
+	println(fiberCount)
+}

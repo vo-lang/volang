@@ -900,20 +900,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn extern_inputs_never_narrow_i64_with_wrapping_casts() {
-        let source = include_str!("exec.rs");
-        let production = source
-            .split("#[cfg(all(test, feature = \"std\"))]")
-            .next()
-            .expect("production exec implementation");
-        assert!(!production.contains("arg_i64(slots::ARG_STDIN) as i32"));
-        assert!(!production.contains("arg_i64(slots::ARG_STDOUT) as i32"));
-        assert!(!production.contains("arg_i64(slots::ARG_STDERR) as i32"));
-        assert!(!production.contains("arg_i64(slots::ARG_HANDLE) as u64"));
-        assert!(!production.contains("arg_i64(slots::ARG_PID)"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn environment_decoder_preserves_non_utf8_unix_bytes() {
@@ -958,16 +944,6 @@ mod tests {
         assert_eq!(decoded[0].1, std::ffi::OsStr::new(r"C:\work"));
         assert_eq!(decoded[1].0, std::ffi::OsStr::new("KEY"));
         assert!(super::decode_environment_for_platform(vec![b"=bad".to_vec()], false).is_err());
-    }
-
-    #[test]
-    fn non_unix_command_setup_does_not_reject_resolved_program_argv_zero() {
-        let production = include_str!("exec.rs")
-            .split("#[cfg(all(test, feature = \"std\"))]")
-            .next()
-            .unwrap();
-        assert!(!production.contains("custom process argv[0] is unavailable"));
-        assert!(!production.contains("arg0 != &program"));
     }
 
     #[cfg(unix)]

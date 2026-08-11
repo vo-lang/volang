@@ -4,10 +4,8 @@ use vo_common_core::bytecode::MAP_ITER_SLOTS as MAP_ITER_SLOT_COUNT;
 use vo_runtime::bytecode::{ExternDef, FunctionDef};
 use vo_runtime::instruction::{Instruction, Opcode};
 
-pub use crate::metadata::{
-    MapGetLayout, MapIterNextLayout, MapSetLayout, MetadataFacts as EffectFacts,
-};
-use crate::semantics::{opcode_register_effects, DynamicRegisterWriteEffect};
+pub use crate::metadata::{MapGetLayout, MapSetLayout, MetadataFacts as EffectFacts};
+use crate::semantics::opcode_register_effects;
 
 mod dynamic;
 mod effect_analysis;
@@ -109,26 +107,29 @@ pub fn try_read_regs_with_module_context(
     Ok(regs)
 }
 
+#[cfg(test)]
 pub fn single_write_reg(inst: &Instruction) -> Option<u16> {
-    opcode_register_effects(inst.opcode())
-        .single_write
-        .map(|operand| operand_eval::operand_slot(inst, operand))
+    let mut write = None;
+    let mut count = 0;
+    vo_common_core::instruction_effects::visit_instruction_register_writes(
+        inst,
+        None,
+        &[],
+        &[],
+        |start, slots| {
+            count += slots;
+            if slots == 1 {
+                write = Some(start);
+            }
+        },
+    )
+    .ok()?;
+    (count == 1).then_some(write?)
 }
 
+#[cfg(test)]
 pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
-    let mut regs = Vec::new();
-    if let Some(dynamic) =
-        dynamic::try_dynamic_multi_write_regs(inst, EffectFacts::none(), &[], &[])?
-    {
-        return Ok(dynamic);
-    }
-    operand_eval::push_register_effect_operands(
-        &mut regs,
-        inst,
-        opcode_register_effects(inst.opcode()).writes,
-        "write",
-    )?;
-    Ok(regs)
+    collect_write_regs(inst, EffectFacts::none(), &[], &[])
 }
 
 #[cfg(test)]
@@ -140,32 +141,19 @@ pub fn try_multi_write_regs_with_context(
     try_multi_write_regs_with_module_context(inst, facts, externs, &[])
 }
 
+#[cfg(test)]
 pub fn try_multi_write_regs_with_module_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
     externs: &[ExternDef],
     functions: &[FunctionDef],
 ) -> Result<Vec<u16>, EffectError> {
-    let mut regs = Vec::new();
-    if let Some(dynamic) = dynamic::try_dynamic_multi_write_regs(inst, facts, externs, functions)? {
-        return Ok(dynamic);
-    }
-    operand_eval::push_register_effect_operands(
-        &mut regs,
-        inst,
-        opcode_register_effects(inst.opcode()).writes,
-        "write",
-    )?;
-    Ok(regs)
+    collect_write_regs(inst, facts, externs, functions)
 }
 
+#[cfg(test)]
 pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
-    let mut regs = Vec::new();
-    if let Some(reg) = single_write_reg(inst) {
-        regs.push(reg);
-    }
-    regs.extend(try_multi_write_regs(inst)?);
-    Ok(regs)
+    collect_write_regs(inst, EffectFacts::none(), &[], &[])
 }
 
 #[cfg(test)]
@@ -183,39 +171,69 @@ pub fn try_write_regs_with_module_context(
     externs: &[ExternDef],
     functions: &[FunctionDef],
 ) -> Result<Vec<u16>, EffectError> {
-    if !facts.has_facts() && externs.is_empty() && functions.is_empty() {
-        return try_write_regs(inst);
-    }
-
     let mut regs = Vec::new();
-    let row = opcode_register_effects(inst.opcode());
-    let has_single_write = match row.dynamic_writes {
-        DynamicRegisterWriteEffect::IndexedGetResultLayout if facts.has_facts() => {
-            dynamic::required_indexed_get_result_slots(inst, facts)? > 0
-        }
-        _ => true,
-    };
-    if has_single_write {
-        if let Some(reg) = single_write_reg(inst) {
-            regs.push(reg);
-        }
-    }
-    regs.extend(try_multi_write_regs_with_module_context(
-        inst, facts, externs, functions,
-    )?);
+    vo_common_core::instruction_effects::visit_instruction_register_writes(
+        inst,
+        facts.instruction(),
+        externs,
+        functions,
+        |start, count| {
+            for offset in 0..count {
+                regs.push(start + offset);
+            }
+        },
+    )
+    .map_err(write_effect_error)?;
     Ok(regs)
+}
+
+#[cfg(test)]
+fn collect_write_regs(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+    functions: &[FunctionDef],
+) -> Result<Vec<u16>, EffectError> {
+    try_write_regs_with_module_context(inst, facts, externs, functions)
+}
+
+fn write_effect_error(
+    error: vo_common_core::instruction_effects::InstructionWriteError,
+) -> EffectError {
+    use vo_common_core::instruction_effects::InstructionWriteError;
+    match error {
+        InstructionWriteError::MissingMetadata(opcode) => {
+            let layout = match opcode {
+                Opcode::ArrayGet | Opcode::SliceGet => "ElemLayout",
+                Opcode::SlotGetN => "SlotLayout",
+                Opcode::PtrGetN => "PtrLayout",
+                Opcode::CallClosure | Opcode::CallIface => "call layout",
+                Opcode::MapGet => "MapGet",
+                Opcode::MapIterNext => "MapIterNext",
+                Opcode::QueueRecv | Opcode::SelectRecv => "QueueLayout",
+                Opcode::IfaceAssert => "IfaceAssertLayout",
+                _ => "instruction metadata",
+            };
+            EffectError::missing_layout(opcode, layout)
+        }
+        InstructionWriteError::MissingFunction(func_id) => EffectError::missing_function(func_id),
+        InstructionWriteError::MissingExtern(extern_id) => EffectError::missing_extern(extern_id),
+        InstructionWriteError::SlotRangeOverflow { start, count } => EffectError::SlotRange(
+            SlotRangeError::new("write", start, u16::try_from(count).unwrap_or(u16::MAX)),
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::{JitInstructionMetadata, ParamShape, ReturnShape};
+    use vo_runtime::bytecode::{InstructionMetadata, ParamShape, ReturnShape};
     use vo_runtime::SlotType;
 
     #[test]
     fn dynamic_call_effects_use_wide_metadata_layouts() {
         let iface = Instruction::with_flags(Opcode::CallIface, 0, 1, 10, 0);
-        let iface_metadata = JitInstructionMetadata::CallIfaceLayout {
+        let iface_metadata = InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 300,
             arg_layout: vec![SlotType::Value; 300],
@@ -233,7 +251,7 @@ mod tests {
         assert_eq!(writes.last(), Some(&566));
 
         let go_island = Instruction::with_flags(Opcode::GoIsland, 0, 3, 4, 20);
-        let go_metadata = JitInstructionMetadata::CallLayout {
+        let go_metadata = InstructionMetadata::CallLayout {
             arg_layout: vec![SlotType::Value; 300],
             ret_layout: Vec::new(),
         };
@@ -249,14 +267,12 @@ mod tests {
 
     #[test]
     fn iface_assert_zero_sized_effects_use_logical_result_width() {
-        let single_flags =
-            vo_common_core::instruction::pack_iface_assert_flags(0, false, 0).unwrap();
-        let comma_ok_flags =
-            vo_common_core::instruction::pack_iface_assert_flags(0, true, 0).unwrap();
+        let single_flags = 0;
+        let comma_ok_flags = vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
 
         let single = Instruction::with_flags(Opcode::IfaceAssert, single_flags, 9, 2, 0);
         let comma_ok = Instruction::with_flags(Opcode::IfaceAssert, comma_ok_flags, 9, 2, 0);
-        let metadata = JitInstructionMetadata::IfaceAssertLayout {
+        let metadata = InstructionMetadata::IfaceAssertLayout {
             assert_kind: 0,
             target_id: 0,
             result_layout: Vec::new(),
@@ -275,9 +291,9 @@ mod tests {
 
     #[test]
     fn iface_assert_wide_effects_use_metadata_layout() {
-        let flags = vo_common_core::instruction::pack_iface_assert_flags(0, true, 40).unwrap();
+        let flags = vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
         let inst = Instruction::with_flags(Opcode::IfaceAssert, flags, 9, 50, 0);
-        let metadata = JitInstructionMetadata::IfaceAssertLayout {
+        let metadata = InstructionMetadata::IfaceAssertLayout {
             assert_kind: 0,
             target_id: 0,
             result_layout: vec![SlotType::Value; 40],
@@ -297,7 +313,7 @@ mod tests {
     #[test]
     fn map_get_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapGet, 10, 2, 5);
-        let meta = JitInstructionMetadata::MapGet {
+        let meta = InstructionMetadata::MapGet {
             key_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
             val_layout: vec![SlotType::Interface0, SlotType::Interface1],
             has_ok: true,
@@ -306,41 +322,41 @@ mod tests {
             try_instruction_effects_with_facts(&inst, EffectFacts::from_instruction(Some(&meta)))
                 .unwrap();
 
-        assert_eq!(effects.reads, vec![2, 5, 6, 7, 8]);
+        assert_eq!(effects.reads, vec![2, 5, 6, 7]);
         assert_eq!(effects.writes, vec![10, 11, 12]);
     }
 
     #[test]
     fn map_set_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
-        let meta = JitInstructionMetadata::MapSet {
+        let meta = InstructionMetadata::MapSet {
             key_layout: vec![SlotType::Interface0, SlotType::Interface1],
             val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
         };
 
         assert_eq!(
             try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
-            vec![1, 4, 5, 6, 9, 10, 11]
+            vec![1, 4, 5, 9, 10, 11]
         );
     }
 
     #[test]
     fn map_delete_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapDelete, 1, 4, 0);
-        let meta = JitInstructionMetadata::MapDelete {
+        let meta = InstructionMetadata::MapDelete {
             key_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
         };
 
         assert_eq!(
             try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
-            vec![1, 4, 5, 6, 7]
+            vec![1, 4, 5, 6]
         );
     }
 
     #[test]
-    fn map_iter_next_effects_use_metadata_layout_when_flags_are_sentinel() {
+    fn map_iter_next_effects_use_metadata_layout() {
         let inst = Instruction::with_flags(Opcode::MapIterNext, 0, 20, 3, 50);
-        let meta = JitInstructionMetadata::MapIterNext {
+        let meta = InstructionMetadata::MapIterNext {
             key_layout: vec![SlotType::Value; 17],
             val_layout: vec![SlotType::GcRef, SlotType::Value],
         };
@@ -360,7 +376,7 @@ mod tests {
     #[test]
     fn indexed_get_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::Value; 3],
@@ -380,7 +396,7 @@ mod tests {
     #[test]
     fn zero_size_indexed_get_has_no_write_effect() {
         let inst = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 0,
             needs_sign_extend: false,
             slot_layout: Vec::new(),
@@ -394,9 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn indexed_access_effects_do_not_read_dynamic_elem_bytes_register() {
+    fn indexed_access_effects_use_only_value_operands() {
         let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 9, 2, 7);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::Value; 3],
@@ -410,10 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn collection_constructor_effects_do_not_read_dynamic_elem_bytes_register() {
+    fn collection_constructor_effects_use_only_value_operands() {
         let array = Instruction::with_flags(Opcode::ArrayNew, 0, 1, 2, 7);
         let slice = Instruction::with_flags(Opcode::SliceNew, 0, 3, 4, 9);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::Value; 3],
@@ -430,9 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn packed_addr_does_not_read_dynamic_elem_bytes_register() {
-        let array = Instruction::with_flags(Opcode::ArrayAddr, 0x82, 9, 2, 7);
-        let slice = Instruction::with_flags(Opcode::SliceAddr, 0x44, 10, 3, 8);
+    fn addr_effects_ignore_layout_metadata_storage() {
+        let array = Instruction::with_flags(Opcode::ArrayAddr, 0, 9, 2, 7);
+        let slice = Instruction::with_flags(Opcode::SliceAddr, 0, 10, 3, 8);
 
         assert_eq!(try_read_regs(&array).unwrap(), vec![2, 7]);
         assert_eq!(try_write_regs(&array).unwrap(), vec![9]);
@@ -441,14 +457,14 @@ mod tests {
     }
 
     #[test]
-    fn array_addr_dynamic_elem_bytes_register_is_not_an_effect_operand() {
+    fn array_addr_has_only_array_and_index_read_operands() {
         let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 1, 2, u16::MAX);
 
         assert_eq!(try_read_regs(&inst).unwrap(), vec![2, u16::MAX]);
     }
 
     #[test]
-    fn slice_addr_dynamic_elem_bytes_register_is_not_an_effect_operand() {
+    fn slice_addr_has_only_slice_and_index_read_operands() {
         let inst = Instruction::with_flags(Opcode::SliceAddr, 0, 1, 2, u16::MAX);
 
         assert_eq!(try_read_regs(&inst).unwrap(), vec![2, u16::MAX]);
@@ -457,7 +473,7 @@ mod tests {
     #[test]
     fn indexed_set_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::Value; 3],
@@ -472,7 +488,7 @@ mod tests {
     #[test]
     fn zero_size_indexed_set_reads_no_value_slots() {
         let inst = Instruction::with_flags(Opcode::ArraySet, 0, 1, 4, 20);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 0,
             needs_sign_extend: false,
             slot_layout: Vec::new(),
@@ -487,7 +503,7 @@ mod tests {
     #[test]
     fn vm_select_zero_slot_send_contract_018_jit_read_effects_skip_value_slots() {
         let inst = Instruction::with_flags(Opcode::SelectSend, 0, 12, 13, 0);
-        let meta = JitInstructionMetadata::QueueLayout {
+        let meta = InstructionMetadata::QueueLayout {
             elem_layout: Vec::new(),
         };
 
@@ -501,7 +517,7 @@ mod tests {
     fn slot_n_effects_use_wide_metadata_layout() {
         let get = Instruction::with_flags(Opcode::SlotGetN, 0, 500, 10, 20);
         let set = Instruction::with_flags(Opcode::SlotSetN, 0, 10, 20, 500);
-        let meta = JitInstructionMetadata::SlotLayout {
+        let meta = InstructionMetadata::SlotLayout {
             elem_layout: vec![SlotType::Value; 300],
         };
         let facts = EffectFacts::from_instruction(Some(&meta));
@@ -519,7 +535,7 @@ mod tests {
     #[test]
     fn slice_append_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::SliceAppend, 0, 1, 2, 10);
-        let meta = JitInstructionMetadata::ElemLayout {
+        let meta = InstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::Value; 3],
@@ -527,21 +543,21 @@ mod tests {
 
         assert_eq!(
             try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
-            vec![2, 10, 12, 13, 14]
+            vec![2, 10, 11, 12, 13]
         );
     }
 
     #[test]
     fn effects_use_instruction_metadata_without_reg_consts() {
         let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
-        let meta = vo_runtime::bytecode::JitInstructionMetadata::MapSet {
+        let meta = vo_runtime::bytecode::InstructionMetadata::MapSet {
             key_layout: vec![SlotType::Interface0, SlotType::Interface1],
             val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
         };
 
         assert_eq!(
             try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
-            vec![1, 4, 5, 6, 9, 10, 11]
+            vec![1, 4, 5, 9, 10, 11]
         );
     }
 
@@ -622,7 +638,7 @@ mod tests {
     fn vm_jit_002_call_effects_fail_without_module_facts() {
         let call = Instruction::with_flags(Opcode::Call, 0, 7, 20, (2 << 8) | 1);
         let call_extern = Instruction::with_flags(Opcode::CallExtern, 2, 10, 7, 20);
-        let call_extern_metadata = JitInstructionMetadata::CallExternLayout {
+        let call_extern_metadata = InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::Value; 2],
             ret_layout: Vec::new(),
         };

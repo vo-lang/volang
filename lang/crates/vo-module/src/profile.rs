@@ -910,32 +910,6 @@ pub fn resolve_artifact_variants(
     Ok(resolved)
 }
 
-pub fn select_exact_artifact_variant<'a>(
-    variants: &'a [ResolvedArtifactVariant],
-    capabilities: &CapabilitySet,
-    target: &str,
-    toolchain: &str,
-) -> Result<&'a ResolvedArtifactVariant, Error> {
-    let mut matches = variants.iter().filter(|variant| {
-        variant.capabilities == *capabilities
-            && variant.target == target
-            && variant.toolchain == toolchain
-    });
-    let selected = matches.next().ok_or_else(|| {
-        Error::InvalidReleaseMetadata(format!(
-            "no exact artifact variant for capabilities [{}], target {target}, toolchain {toolchain}",
-            capabilities.as_slice().join(", ")
-        ))
-    })?;
-    if matches.next().is_some() {
-        return Err(Error::InvalidReleaseMetadata(format!(
-            "multiple artifact variants match capabilities [{}], target {target}, toolchain {toolchain}",
-            capabilities.as_slice().join(", ")
-        )));
-    }
-    Ok(selected)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCapabilityModule {
     pub requested_by: Vec<String>,
@@ -953,15 +927,6 @@ pub struct ResolvedCapabilityGraph {
 /// frozen one release per module. Requests from every incoming edge are
 /// normalized against the target module's own profile catalog and then
 /// unioned. Artifact selection accepts an exact set only.
-pub fn resolve_capability_graph(
-    root: &crate::schema::modfile::ModFile,
-    graph: &crate::solver::ResolvedGraph,
-    target: &str,
-    toolchain: &str,
-) -> Result<ResolvedCapabilityGraph, Error> {
-    resolve_capability_graph_with_policy(root, graph, target, toolchain, SourceBuildPolicy::Deny)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBuildPolicy {
     Deny,

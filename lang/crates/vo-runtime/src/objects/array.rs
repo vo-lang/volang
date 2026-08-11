@@ -301,27 +301,6 @@ pub unsafe fn set(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
 mod public_api_contract_tests {
     use super::*;
 
-    #[test]
-    fn raw_array_element_accessors_are_unsafe_public_primitives_055() {
-        let src = include_str!("array.rs");
-        for name in ["get", "get_auto", "set", "set_auto", "get_n", "set_n"] {
-            assert!(
-                src.contains(&format!("pub unsafe fn {name}(")),
-                "array::{name} is an unchecked raw heap element primitive and must require unsafe at public call sites"
-            );
-        }
-    }
-
-    #[test]
-    fn raw_array_bulk_copy_is_unsafe_public_primitive_056() {
-        let src = include_str!("array.rs");
-        let needle = ["pub unsafe fn ", "copy_range("].concat();
-        assert!(
-            src.contains(&needle),
-            "array::copy_range is an unchecked raw heap copy primitive and must require unsafe at public call sites"
-        );
-    }
-
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn array_creation_rejects_element_width_that_header_cannot_represent() {

@@ -9,15 +9,23 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+#[cfg(test)]
 use vo_common_core::runtime_type::RuntimeType;
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::itab::ItabCache;
+use vo_runtime::itab::{validate_interface_itab, ItabCache};
 use vo_runtime::objects::closure;
-use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
+use vo_runtime::value_layout::{
+    canonicalize_concrete_heap_value, validate_interface_value, validate_transfer_layout,
+    ValidatedInterfaceValue,
+};
+#[cfg(test)]
+use vo_runtime::ValueRttid;
+use vo_runtime::{SlotType, ValueKind, ValueMeta};
 
-use crate::bytecode::{FunctionDef, JitInstructionMetadata, Module, TransferType};
+use crate::bytecode::{FunctionDef, InstructionMetadata, Module, TransferType};
 use crate::exec::direct_method_receiver_transfer_plan;
 use crate::fiber::{Fiber, TypedSlotPayload};
+use crate::instruction::Instruction;
 use crate::vm::helpers::{closure_call_layout, runtime_trap, stack_set, ClosureCallLayout};
 use crate::vm::{ExecResult, RuntimeTrapKind};
 
@@ -526,8 +534,13 @@ fn validate_extern_replay_transfer_args(
                 values.len()
             ));
         }
-        let transfer_meta =
-            validate_extern_replay_transfer_layout(module, slot_types, slot_idx, transfer, target)?;
+        let transfer_meta = validate_transfer_layout(module, slot_types, slot_idx, transfer)
+            .map_err(|err| {
+                format!(
+                    "CallExtern closure replay param {err} for func_id={} name={} slot={}",
+                    target.func_id, target.func.name, slot_idx
+                )
+            })?;
         if transfer_meta.value_kind() == ValueKind::Interface {
             let Some(itab_cache) = itab_cache else {
                 return Err(format!(
@@ -536,7 +549,13 @@ fn validate_extern_replay_transfer_args(
                 ));
             };
             validate_extern_replay_interface_arg(
-                gc, module, itab_cache, values, slot_idx, transfer, target,
+                gc,
+                module,
+                itab_cache,
+                values,
+                slot_idx,
+                transfer_meta,
+                target,
             )?;
         } else {
             validate_extern_replay_concrete_arg(gc, values, slot_idx, transfer_meta, target)?;
@@ -705,67 +724,6 @@ fn extern_replay_slot_types_require_transfer_metadata(slot_types: &[SlotType]) -
     })
 }
 
-fn validate_extern_replay_transfer_layout(
-    module: &Module,
-    slot_types: &[SlotType],
-    slot_idx: usize,
-    transfer: &TransferType,
-    target: &ValidClosureTarget<'_>,
-) -> Result<ValueMeta, String> {
-    let expected_meta = ValueMeta::from_raw(transfer.meta_raw);
-    let expected_rttid = ValueRttid::from_raw(transfer.rttid_raw);
-    if expected_meta.value_kind() != expected_rttid.value_kind() {
-        return Err(format!(
-            "CallExtern closure replay param metadata kind {:?} does not match RTTID kind {:?} for func_id={} name={} slot={}",
-            expected_meta.value_kind(),
-            expected_rttid.value_kind(),
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
-    }
-    let Some(canonical_meta) = module.canonical_value_meta_for_value_rttid(expected_rttid) else {
-        return Err(format!(
-            "CallExtern closure replay param RTTID cannot be resolved for func_id={} name={} slot={}",
-            target.func_id, target.func.name, slot_idx
-        ));
-    };
-    if expected_meta != canonical_meta {
-        return Err(format!(
-            "CallExtern closure replay param metadata raw 0x{:x} does not match RTTID canonical raw 0x{:x} for func_id={} name={} slot={}",
-            expected_meta.to_raw(),
-            canonical_meta.to_raw(),
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
-    }
-    let Some(expected_layout) = module.slot_layout_for_value_rttid(expected_rttid) else {
-        return Err(format!(
-            "CallExtern closure replay param RTTID cannot resolve slot layout for func_id={} name={} slot={}",
-            target.func_id, target.func.name, slot_idx
-        ));
-    };
-    if transfer.slots as usize != expected_layout.len() {
-        return Err(format!(
-            "CallExtern closure replay param transfer has {} slots but RTTID layout has {} for func_id={} name={} slot={}",
-            transfer.slots,
-            expected_layout.len(),
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
-    }
-    let end = slot_idx + expected_layout.len();
-    if slot_types.get(slot_idx..end) != Some(expected_layout.as_slice()) {
-        return Err(format!(
-            "CallExtern closure replay param slot layout mismatch for func_id={} name={} slot={}",
-            target.func_id, target.func.name, slot_idx
-        ));
-    }
-    Ok(expected_meta)
-}
-
 fn validate_extern_replay_concrete_arg(
     gc: &Gc,
     values: &mut [u64],
@@ -773,65 +731,17 @@ fn validate_extern_replay_concrete_arg(
     expected_meta: ValueMeta,
     target: &ValidClosureTarget<'_>,
 ) -> Result<(), String> {
-    let value_kind = expected_meta.value_kind();
-    let Some(expected_header_kind) = replay_heap_header_kind_for_value_kind(value_kind) else {
-        return Ok(());
-    };
     let raw = values[slot_idx];
-    if raw == 0 {
-        return Ok(());
-    }
-    let Some(canonical) = gc.canonicalize_ref(raw as GcRef) else {
-        let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
-        return Err(format!(
-            "CallExtern closure replay param invalid GcRef func_id={} name={} slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
-            target.func_id,
-            target.func.name,
-            slot_idx,
-            raw,
-            in_all,
-            in_index,
-            index_len
-        ));
-    };
-    values[slot_idx] = canonical as u64;
-    let header = unsafe { Gc::header(canonical) };
-    if header.kind() != expected_header_kind {
-        return Err(format!(
-            "CallExtern closure replay param object kind {:?} does not match expected {:?} for value kind {:?} func_id={} name={} slot={}",
-            header.kind(),
-            expected_header_kind,
-            value_kind,
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
-    }
-    if value_kind == ValueKind::Pointer && header.meta_id() != expected_meta.meta_id() {
-        return Err(format!(
-            "CallExtern closure replay pointer param meta_id {} does not match expected {} for func_id={} name={} slot={}",
-            header.meta_id(),
-            expected_meta.meta_id(),
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
+    let canonical = canonicalize_concrete_heap_value(gc, raw, expected_meta).map_err(|err| {
+        format!(
+            "CallExtern closure replay param {err} for func_id={} name={} slot={}",
+            target.func_id, target.func.name, slot_idx
+        )
+    })?;
+    if let Some(canonical) = canonical {
+        values[slot_idx] = canonical as u64;
     }
     Ok(())
-}
-
-fn replay_heap_header_kind_for_value_kind(value_kind: ValueKind) -> Option<ValueKind> {
-    match value_kind {
-        ValueKind::String
-        | ValueKind::Slice
-        | ValueKind::Map
-        | ValueKind::Channel
-        | ValueKind::Port
-        | ValueKind::Closure
-        | ValueKind::Island => Some(value_kind),
-        ValueKind::Pointer => Some(ValueKind::Struct),
-        _ => None,
-    }
 }
 
 fn validate_extern_replay_interface_arg(
@@ -840,482 +750,42 @@ fn validate_extern_replay_interface_arg(
     itab_cache: &ItabCache,
     values: &mut [u64],
     slot_idx: usize,
-    transfer: &TransferType,
+    expected_meta: ValueMeta,
     target: &ValidClosureTarget<'_>,
 ) -> Result<(), String> {
-    use vo_runtime::objects::interface;
-
-    if transfer.slots != 2 {
-        return Err(format!(
-            "CallExtern closure replay interface param has {} slots for func_id={} name={} slot={}",
-            transfer.slots, target.func_id, target.func.name, slot_idx
-        ));
-    }
-    let expected_meta = ValueMeta::from_raw(transfer.meta_raw);
-    if expected_meta.value_kind() != ValueKind::Interface {
-        return Err(format!(
-            "CallExtern closure replay interface param metadata kind {:?} for func_id={} name={} slot={}",
-            expected_meta.value_kind(),
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
-    }
-    let expected_rttid = ValueRttid::from_raw(transfer.rttid_raw);
-    let Some(canonical_meta) = module.canonical_value_meta_for_value_rttid(expected_rttid) else {
-        return Err(format!(
-            "CallExtern closure replay interface param RTTID cannot be resolved for func_id={} name={} slot={}",
-            target.func_id, target.func.name, slot_idx
-        ));
-    };
-    if canonical_meta != expected_meta {
-        return Err(format!(
-            "CallExtern closure replay interface param metadata raw 0x{:x} does not match RTTID canonical raw 0x{:x} for func_id={} name={} slot={}",
-            expected_meta.to_raw(),
-            canonical_meta.to_raw(),
-            target.func_id,
-            target.func.name,
-            slot_idx
-        ));
-    }
     let expected_iface_meta_id = expected_meta.meta_id();
-    let Some(expected_iface) = module.interface_metas.get(expected_iface_meta_id as usize) else {
-        return Err(format!(
-            "CallExtern closure replay interface param references missing interface {} for func_id={} name={} slot={}",
-            expected_iface_meta_id, target.func_id, target.func.name, slot_idx
-        ));
-    };
     let slot0 = values[slot_idx];
     let slot1 = values[slot_idx + 1];
-    let value_kind = interface::unpack_value_kind(slot0);
-    if value_kind == ValueKind::Void {
-        if slot1 != 0 {
-            return Err(format!(
-                "CallExtern closure replay nil interface arg has nonzero data for func_id={} name={} slot={}",
-                target.func_id, target.func.name, slot_idx
-            ));
-        }
-        return Ok(());
-    }
-    if value_kind == ValueKind::Interface {
-        return Err(format!(
-            "CallExtern closure replay raw interface-kind arg for func_id={} name={} slot={}",
+    let validated = validate_interface_value(gc, module, slot0, slot1).map_err(|err| {
+        format!(
+            "CallExtern closure replay interface arg {err} for func_id={} name={} slot={}",
             target.func_id, target.func.name, slot_idx
-        ));
-    }
-    let rttid = interface::unpack_rttid(slot0);
-    if module
-        .canonical_value_meta_for_value_rttid(ValueRttid::new(rttid, value_kind))
-        .is_none()
-    {
-        return Err(format!(
-            "CallExtern closure replay interface arg has non-canonical RTTID/kind for func_id={} name={} slot={} rttid={} kind={:?}",
-            target.func_id, target.func.name, slot_idx, rttid, value_kind
-        ));
-    }
-    validate_extern_replay_interface_data_object(
-        gc, module, values, slot_idx, slot0, slot1, rttid, value_kind, target,
-    )?;
-    let itab_id = interface::unpack_itab_id(slot0);
-    if expected_iface.methods.is_empty() {
-        return Ok(());
-    }
-    if itab_id == 0 {
-        return Err(format!(
-            "CallExtern closure replay interface arg missing itab for func_id={} name={} slot={} iface_meta_id={}",
-            target.func_id, target.func.name, slot_idx, expected_iface_meta_id
-        ));
-    }
-    let Some(named_type_id) = named_type_id_from_replay_interface_value(module, rttid, value_kind)
-    else {
-        return Err(format!(
-            "CallExtern closure replay interface arg is not a named value for func_id={} name={} slot={} rttid={} kind={:?}",
-            target.func_id, target.func.name, slot_idx, rttid, value_kind
-        ));
+        )
+    })?;
+    let (value_rttid, canonical_data) = match validated {
+        ValidatedInterfaceValue::Nil => (None, None),
+        ValidatedInterfaceValue::Concrete {
+            value_rttid,
+            canonical_data,
+        } => (Some(value_rttid), canonical_data),
     };
-    let Some(expected_methods) = vo_runtime::itab::expected_interface_itab_methods(
-        named_type_id,
+    if let Some(canonical) = canonical_data {
+        values[slot_idx + 1] = canonical as u64;
+    }
+    let itab_id = vo_runtime::objects::interface::unpack_itab_id(slot0);
+    validate_interface_itab(
+        module,
+        itab_cache,
         expected_iface_meta_id,
-        value_kind == ValueKind::Pointer,
-        &module.named_type_metas,
-        &module.interface_metas,
-    ) else {
-        return Err(format!(
-            "CallExtern closure replay interface arg does not implement expected interface for func_id={} name={} slot={} named_type_id={} iface_meta_id={}",
-            target.func_id, target.func.name, slot_idx, named_type_id, expected_iface_meta_id
-        ));
-    };
-    let Some(actual_itab) = itab_cache.get_itab(itab_id) else {
-        return Err(format!(
-            "CallExtern closure replay interface arg references missing itab {} for func_id={} name={} slot={}",
-            itab_id, target.func_id, target.func.name, slot_idx
-        ));
-    };
-    if actual_itab.iface_meta_id != expected_iface_meta_id
-        || actual_itab.methods != expected_methods
-    {
-        return Err(format!(
-            "CallExtern closure replay interface arg itab {} does not match expected interface for func_id={} name={} slot={} iface_meta_id={}",
-            itab_id, target.func_id, target.func.name, slot_idx, expected_iface_meta_id
-        ));
-    }
-    Ok(())
-}
-
-fn validate_extern_replay_interface_data_object(
-    gc: &Gc,
-    module: &Module,
-    values: &mut [u64],
-    slot_idx: usize,
-    slot0: u64,
-    slot1: u64,
-    rttid: u32,
-    value_kind: ValueKind,
-    target: &ValidClosureTarget<'_>,
-) -> Result<(), String> {
-    use vo_runtime::objects::interface;
-
-    if !interface::data_is_gc_ref(slot0) {
-        return Ok(());
-    }
-    if slot1 == 0 {
-        if matches!(value_kind, ValueKind::Struct | ValueKind::Array) {
-            return Err(format!(
-                "CallExtern closure replay interface arg data missing object for aggregate value kind {:?} func_id={} name={} slot={}",
-                value_kind,
-                target.func_id,
-                target.func.name,
-                slot_idx + 1
-            ));
-        }
-        return Ok(());
-    }
-    let Some(canonical) = gc.canonicalize_ref(slot1 as GcRef) else {
-        let (in_all, in_index, index_len) = gc.debug_ref_membership(slot1 as GcRef);
-        return Err(format!(
-            "CallExtern closure replay interface arg data invalid GcRef func_id={} name={} slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
-            target.func_id,
-            target.func.name,
-            slot_idx + 1,
-            slot1,
-            in_all,
-            in_index,
-            index_len
-        ));
-    };
-    values[slot_idx + 1] = canonical as u64;
-    let header = unsafe { Gc::header(canonical) };
-    let Some(expected_meta) =
-        module.canonical_value_meta_for_value_rttid(ValueRttid::new(rttid, value_kind))
-    else {
-        return Err(format!(
-            "CallExtern closure replay interface arg data RTTID cannot be resolved for func_id={} name={} slot={} rttid={} kind={:?}",
-            target.func_id, target.func.name, slot_idx + 1, rttid, value_kind
-        ));
-    };
-    match value_kind {
-        ValueKind::Struct | ValueKind::Pointer => {
-            validate_extern_replay_interface_data_kind(
-                header.kind(),
-                ValueKind::Struct,
-                value_kind,
-                target,
-                slot_idx,
-            )?;
-            if header.meta_id() != expected_meta.meta_id() {
-                return Err(format!(
-                    "CallExtern closure replay interface arg data meta_id {} does not match expected {} for func_id={} name={} slot={}",
-                    header.meta_id(),
-                    expected_meta.meta_id(),
-                    target.func_id,
-                    target.func.name,
-                    slot_idx + 1
-                ));
-            }
-            validate_extern_replay_struct_data_slots(
-                module,
-                header.meta_id(),
-                header.slots as usize,
-                target,
-                slot_idx,
-            )?;
-        }
-        ValueKind::Array => {
-            validate_extern_replay_interface_array_data(
-                module, canonical, header, rttid, target, slot_idx,
-            )?;
-        }
-        _ => {
-            if let Some(expected_kind) = interface_data_heap_kind_for_value_kind(value_kind) {
-                validate_extern_replay_interface_data_kind(
-                    header.kind(),
-                    expected_kind,
-                    value_kind,
-                    target,
-                    slot_idx,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn interface_data_heap_kind_for_value_kind(value_kind: ValueKind) -> Option<ValueKind> {
-    match value_kind {
-        ValueKind::String
-        | ValueKind::Slice
-        | ValueKind::Map
-        | ValueKind::Channel
-        | ValueKind::Port
-        | ValueKind::Closure
-        | ValueKind::Island => Some(value_kind),
-        _ => None,
-    }
-}
-
-fn validate_extern_replay_interface_data_kind(
-    actual: ValueKind,
-    expected: ValueKind,
-    value_kind: ValueKind,
-    target: &ValidClosureTarget<'_>,
-    slot_idx: usize,
-) -> Result<(), String> {
-    if actual != expected {
-        return Err(format!(
-            "CallExtern closure replay interface arg data object kind {:?} does not match expected {:?} for value kind {:?} func_id={} name={} slot={}",
-            actual,
-            expected,
-            value_kind,
-            target.func_id,
-            target.func.name,
-            slot_idx + 1
-        ));
-    }
-    Ok(())
-}
-
-fn validate_extern_replay_struct_data_slots(
-    module: &Module,
-    struct_meta_id: u32,
-    actual_slots: usize,
-    target: &ValidClosureTarget<'_>,
-    slot_idx: usize,
-) -> Result<(), String> {
-    let Some(struct_meta) = module.struct_metas.get(struct_meta_id as usize) else {
-        return Err(format!(
-            "CallExtern closure replay interface arg data references missing StructMeta id {} for func_id={} name={} slot={}",
-            struct_meta_id,
-            target.func_id,
-            target.func.name,
-            slot_idx + 1
-        ));
-    };
-    validate_extern_replay_data_slot_width(
-        actual_slots,
-        struct_meta.slot_types.len(),
-        target,
-        slot_idx,
+        itab_id,
+        value_rttid,
     )
-}
-
-fn validate_extern_replay_data_slot_width(
-    actual_slots: usize,
-    expected_slots: usize,
-    target: &ValidClosureTarget<'_>,
-    slot_idx: usize,
-) -> Result<(), String> {
-    if actual_slots != expected_slots {
-        return Err(format!(
-            "CallExtern closure replay interface arg data allocation slots {} do not match expected {} for func_id={} name={} slot={}",
-            actual_slots,
-            expected_slots,
-            target.func_id,
-            target.func.name,
-            slot_idx + 1
-        ));
-    }
-    Ok(())
-}
-
-fn validate_extern_replay_interface_array_data(
-    module: &Module,
-    array_ref: GcRef,
-    header: &vo_runtime::gc::GcHeader,
-    rttid: u32,
-    target: &ValidClosureTarget<'_>,
-    slot_idx: usize,
-) -> Result<(), String> {
-    use vo_runtime::objects::array;
-
-    let value_rttid = ValueRttid::new(rttid, ValueKind::Array);
-    let Some((expected_len, expected_elem_rttid)) =
-        interface_array_runtime_type(module, value_rttid)
-    else {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data layout missing for func_id={} name={} slot={} rttid={}",
-            target.func_id,
-            target.func.name,
-            slot_idx + 1,
-            rttid
-        ));
-    };
-    let Some(expected_elem_meta) = module.canonical_value_meta_for_value_rttid(expected_elem_rttid)
-    else {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data element RTTID cannot be resolved for func_id={} name={} slot={} rttid={}",
-            target.func_id,
-            target.func.name,
-            slot_idx + 1,
-            expected_elem_rttid.rttid()
-        ));
-    };
-    let Some(expected_elem_bytes) = sequence_element_physical_bytes(module, expected_elem_rttid)
-    else {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data element layout missing for func_id={} name={} slot={} rttid={}",
-            target.func_id,
-            target.func.name,
-            slot_idx + 1,
-            expected_elem_rttid.rttid()
-        ));
-    };
-    match header.kind() {
-        ValueKind::Array => {}
-        ValueKind::Struct => {
-            return validate_extern_replay_interface_array_value_slot_box(
-                module, header, rttid, target, slot_idx,
-            );
-        }
-        actual => {
-            return Err(format!(
-                "CallExtern closure replay interface arg data object kind {:?} does not match expected Array or Struct for value kind Array func_id={} name={} slot={}",
-                actual,
-                target.func_id,
-                target.func.name,
-                slot_idx + 1
-            ));
-        }
-    }
-    // Safety: the replay validator canonicalized the object and checked its array kind.
-    let actual_len = unsafe { array::len(array_ref) };
-    let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
-    let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
-    if actual_len != expected_len
-        || actual_elem_meta != expected_elem_meta
-        || actual_elem_bytes != expected_elem_bytes
-    {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data layout mismatch for func_id={} name={} slot={}: len {} expected {}, elem_meta 0x{:x} expected 0x{:x}, elem_bytes {} expected {}",
-            target.func_id,
-            target.func.name,
-            slot_idx + 1,
-            actual_len,
-            expected_len,
-            actual_elem_meta.to_raw(),
-            expected_elem_meta.to_raw(),
-            actual_elem_bytes,
-            expected_elem_bytes
-        ));
-    }
-    Ok(())
-}
-
-fn validate_extern_replay_interface_array_value_slot_box(
-    module: &Module,
-    header: &vo_runtime::gc::GcHeader,
-    rttid: u32,
-    target: &ValidClosureTarget<'_>,
-    slot_idx: usize,
-) -> Result<(), String> {
-    let Some(expected_layout) =
-        module.slot_layout_for_value_rttid(ValueRttid::new(rttid, ValueKind::Array))
-    else {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data layout missing for func_id={} name={} slot={} rttid={}",
-            target.func_id,
-            target.func.name,
-            slot_idx + 1,
-            rttid
-        ));
-    };
-    let Some(struct_meta) = module.struct_metas.get(header.meta_id() as usize) else {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data value-slot box references missing StructMeta id {} for func_id={} name={} slot={}",
-            header.meta_id(),
-            target.func_id,
-            target.func.name,
-            slot_idx + 1
-        ));
-    };
-    if struct_meta.slot_types != expected_layout {
-        return Err(format!(
-            "CallExtern closure replay interface arg array data value-slot box layout {:?} does not match Array slot layout {:?} for func_id={} name={} slot={}",
-            struct_meta.slot_types,
-            expected_layout,
-            target.func_id,
-            target.func.name,
-            slot_idx + 1
-        ));
-    }
-    validate_extern_replay_data_slot_width(
-        header.slots as usize,
-        expected_layout.len(),
-        target,
-        slot_idx,
-    )
-}
-
-fn interface_array_runtime_type(
-    module: &Module,
-    value_rttid: ValueRttid,
-) -> Option<(usize, ValueRttid)> {
-    let mut current = value_rttid;
-    let limit = module.runtime_types.len() + module.named_type_metas.len() + 1;
-    for _ in 0..limit {
-        match module.runtime_types.get(current.rttid() as usize)? {
-            RuntimeType::Array { len, elem } if current.value_kind() == ValueKind::Array => {
-                return Some((*len as usize, *elem));
-            }
-            RuntimeType::Named { id, .. } => {
-                let named = module.named_type_metas.get(*id as usize)?;
-                if named.underlying_rttid.value_kind() != ValueKind::Array {
-                    return None;
-                }
-                current = named.underlying_rttid;
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn sequence_element_physical_bytes(module: &Module, value_rttid: ValueRttid) -> Option<usize> {
-    match value_rttid.value_kind() {
-        ValueKind::Void => Some(0),
-        ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8 => Some(1),
-        ValueKind::Int16 | ValueKind::Uint16 => Some(2),
-        ValueKind::Int32 | ValueKind::Uint32 | ValueKind::Float32 => Some(4),
-        _ => module
-            .slot_layout_for_value_rttid(value_rttid)
-            .and_then(|layout| layout.len().checked_mul(vo_runtime::slot::SLOT_BYTES)),
-    }
-}
-
-fn named_type_id_from_replay_interface_value(
-    module: &Module,
-    rttid: u32,
-    value_kind: ValueKind,
-) -> Option<u32> {
-    match module.runtime_types.get(rttid as usize)? {
-        RuntimeType::Named { id, .. } => Some(*id),
-        RuntimeType::Pointer(elem) if value_kind == ValueKind::Pointer => {
-            match module.runtime_types.get(elem.rttid() as usize)? {
-                RuntimeType::Named { id, .. } => Some(*id),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    .map_err(|err| {
+        format!(
+            "CallExtern closure replay interface arg {err} for func_id={} name={} slot={} itab_id={} iface_meta_id={}",
+            target.func_id, target.func.name, slot_idx, itab_id, expected_iface_meta_id
+        )
+    })
 }
 
 pub(crate) fn validate_gc_visible_payload_values(
@@ -1343,16 +813,9 @@ pub(crate) fn validate_gc_visible_payload_values(
                 let raw = values[slot_idx];
                 if raw != 0 {
                     let Some(canonical) = gc.canonicalize_ref(raw as GcRef) else {
-                        let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
                         return Err(format!(
-                            "{context} invalid GcRef func_id={} name={} slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
-                            func_id,
-                            func_name,
-                            slot_idx,
-                            raw,
-                            in_all,
-                            in_index,
-                            index_len
+                            "{context} invalid GcRef func_id={} name={} slot={} raw=0x{:016x}",
+                            func_id, func_name, slot_idx, raw
                         ));
                     };
                     values[slot_idx] = canonical as u64;
@@ -1370,18 +833,21 @@ pub(crate) fn validate_gc_visible_payload_values(
                 }
                 let slot0 = values[slot_idx];
                 let raw = values[slot_idx + 1];
-                if vo_runtime::objects::interface::data_is_gc_ref(slot0) && raw != 0 {
+                let value_kind = vo_runtime::objects::interface::try_unpack_value_kind(slot0)
+                    .ok_or_else(|| {
+                        format!(
+                            "{context} interface has invalid value-kind tag {} for func_id={} name={} slot={}",
+                            slot0 as u8, func_id, func_name, slot_idx
+                        )
+                    })?;
+                if value_kind.may_contain_gc_refs() && raw != 0 {
                     let Some(canonical) = gc.canonicalize_ref(raw as GcRef) else {
-                        let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
                         return Err(format!(
-                            "{context} invalid interface GcRef func_id={} name={} slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
+                            "{context} invalid interface GcRef func_id={} name={} slot={} raw=0x{:016x}",
                             func_id,
                             func_name,
                             slot_idx + 1,
-                            raw,
-                            in_all,
-                            in_index,
-                            index_len
+                            raw
                         ));
                     };
                     values[slot_idx + 1] = canonical as u64;
@@ -1533,14 +999,14 @@ pub(crate) fn call_layout_for_callsite<'a>(
     pc: usize,
     context: &str,
 ) -> Result<(&'a [SlotType], &'a [SlotType]), String> {
-    let metadata = func.jit_metadata.get(pc).ok_or_else(|| {
+    let metadata = func.instruction_metadata.get(pc).ok_or_else(|| {
         format!(
             "{context} missing CallLayout metadata for caller {} pc {}",
             func.name, pc
         )
     })?;
     match metadata {
-        JitInstructionMetadata::CallLayout {
+        InstructionMetadata::CallLayout {
             arg_layout,
             ret_layout,
         } => Ok((arg_layout.as_slice(), ret_layout.as_slice())),
@@ -1551,19 +1017,53 @@ pub(crate) fn call_layout_for_callsite<'a>(
     }
 }
 
+pub(crate) fn shared_call_arg_layout_for_callsite<'a>(
+    caller: &'a FunctionDef,
+    module: &'a Module,
+    pc: usize,
+    inst: &Instruction,
+    context: &str,
+) -> Result<&'a [SlotType], String> {
+    if inst.call_shape_is_closure() {
+        let (args, returns) = call_layout_for_callsite(caller, pc, context)?;
+        if !returns.is_empty() {
+            return Err(format!(
+                "{context} closure callsite must not declare return slots"
+            ));
+        }
+        return Ok(args);
+    }
+    let func_id = inst.call_shape_static_func_id();
+    let callee = module
+        .functions
+        .get(func_id as usize)
+        .ok_or_else(|| format!("{context} references missing function {func_id}"))?;
+    callee
+        .slot_types
+        .get(..usize::from(callee.param_slots))
+        .ok_or_else(|| {
+            format!(
+                "{context} target {} has param_slots={} with only {} slot types",
+                callee.name,
+                callee.param_slots,
+                callee.slot_types.len()
+            )
+        })
+}
+
 pub(crate) fn call_iface_layout_for_callsite<'a>(
     func: &'a FunctionDef,
     pc: usize,
     context: &str,
 ) -> Result<(u32, u32, &'a [SlotType], &'a [SlotType]), String> {
-    let Some(metadata) = func.jit_metadata.get(pc) else {
+    let Some(metadata) = func.instruction_metadata.get(pc) else {
         return Err(format!(
             "{context} missing CallIfaceLayout metadata for caller {} pc {}",
             func.name, pc
         ));
     };
     match metadata {
-        JitInstructionMetadata::CallIfaceLayout {
+        InstructionMetadata::CallIfaceLayout {
             iface_meta_id,
             method_idx,
             arg_layout,

@@ -8,10 +8,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-#[cfg(any(test, target_arch = "wasm32"))]
+use vo_analysis::project::PackageIdentity;
 use vo_analysis::vfs::analyze_file_set_with_synthesized_ephemeral_module;
 use vo_analysis::vfs::{
-    analyze_file_set_with_current_module, project_package_resolver_with_workspace_sources,
+    analyze_file_set_with_package_identity, package_identity_for_module_path,
+    project_package_resolver_with_workspace_sources,
 };
 use vo_common::vfs::{FileSet, FileSystem, MemoryFs};
 use vo_module::operation_error::OperationError;
@@ -19,6 +20,7 @@ use vo_module::project::ProjectContextOptions;
 use vo_module::project::{
     ProjectPlan, ProjectPlanError, ProjectPlanErrorKind, ProjectPlanStage, SingleFileContext,
 };
+use vo_module::readiness::ReadyModule;
 
 use crate::js_types::CompileResult;
 #[cfg(target_arch = "wasm32")]
@@ -69,11 +71,13 @@ struct PreparedCompileInput {
     module_authority: ModuleAnalysisAuthority,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModuleAnalysisAuthority {
-    Project,
-    #[cfg(any(test, target_arch = "wasm32"))]
-    SynthesizedEphemeral,
+    Project {
+        current_package: Option<PackageIdentity>,
+    },
+    SynthesizedEphemeral {
+        current_module: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,26 @@ enum WebCompileErrorKind {
 }
 
 type WebCompileError = OperationError<WebCompileStage, WebCompileErrorKind>;
+
+fn current_package_identity(
+    current_module: Option<&str>,
+    project_root: &Path,
+    package_dir: &Path,
+) -> Result<Option<PackageIdentity>, WebCompileError> {
+    let Some(current_module) = current_module else {
+        return Ok(None);
+    };
+    package_identity_for_module_path(current_module, project_root, package_dir)
+        .map(Some)
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::Analysis,
+                WebCompileErrorKind::Analysis,
+                format!("invalid current package identity: {error}"),
+            )
+            .with_path(package_dir)
+        })
+}
 
 fn web_compile_error_from_project(error: ProjectPlanError) -> WebCompileError {
     fn project_stage(stage: ProjectPlanStage) -> WebCompileStage {
@@ -146,6 +170,11 @@ fn prepare_single_file_input(
             // A caller-supplied `local_fs` cannot realistically contain an
             // ancestor `vo.mod` (this MemoryFs is created fresh inside this
             // helper), but if a future caller adds one we respect it.
+            let current_package = current_package_identity(
+                project_context.project_plan().current_module(),
+                project_context.project_root(),
+                entry_package_dir(filename),
+            )?;
             let workspace_modules = project_context.workspace_modules().to_vec();
             let (project_root, project_plan, workspace_sources) = project_context.into_parts();
             Ok(PreparedCompileInput {
@@ -155,10 +184,10 @@ fn prepare_single_file_input(
                 project_plan,
                 workspace_modules,
                 workspace_sources,
-                module_authority: ModuleAnalysisAuthority::Project,
+                module_authority: ModuleAnalysisAuthority::Project { current_package },
             })
         }
-        SingleFileContext::EphemeralInlineMod { .. } => {
+        SingleFileContext::EphemeralInlineMod { inline_mod, .. } => {
             // An ephemeral single-file module sees only the stdlib.
             reject_external_imports_in_source(source, "single-file ephemeral module")?;
             Ok(PreparedCompileInput {
@@ -168,7 +197,9 @@ fn prepare_single_file_input(
                 project_plan: ProjectPlan::default(),
                 workspace_modules: Vec::new(),
                 workspace_sources: HashMap::new(),
-                module_authority: ModuleAnalysisAuthority::Project,
+                module_authority: ModuleAnalysisAuthority::SynthesizedEphemeral {
+                    current_module: inline_mod.module.as_str().to_string(),
+                },
             })
         }
         SingleFileContext::AdHoc { .. } => {
@@ -181,7 +212,9 @@ fn prepare_single_file_input(
                 project_plan: ProjectPlan::default(),
                 workspace_modules: Vec::new(),
                 workspace_sources: HashMap::new(),
-                module_authority: ModuleAnalysisAuthority::Project,
+                module_authority: ModuleAnalysisAuthority::Project {
+                    current_package: None,
+                },
             })
         }
     }
@@ -240,6 +273,11 @@ fn prepare_entry_input_with_options(
         options,
     )
     .map_err(web_compile_error_from_project)?;
+    let current_package = current_package_identity(
+        context.project_plan().current_module(),
+        context.project_root(),
+        entry_package_dir(entry),
+    )?;
     let workspace_modules = context.workspace_modules().to_vec();
     let (project_root, project_plan, workspace_sources) = context.into_parts();
     Ok(PreparedCompileInput {
@@ -249,7 +287,7 @@ fn prepare_entry_input_with_options(
         project_plan,
         workspace_modules,
         workspace_sources,
-        module_authority: ModuleAnalysisAuthority::Project,
+        module_authority: ModuleAnalysisAuthority::Project { current_package },
     })
 }
 
@@ -359,6 +397,10 @@ fn prepare_ephemeral_entry_input(
         )
         .with_path(&project_root)
     })?;
+    let current_module = project_plan
+        .current_module()
+        .expect("ephemeral project plan always carries its validated module identity")
+        .to_string();
 
     Ok(PreparedCompileInput {
         local_fs,
@@ -367,33 +409,29 @@ fn prepare_ephemeral_entry_input(
         project_plan,
         workspace_modules: Vec::new(),
         workspace_sources: HashMap::new(),
-        module_authority: ModuleAnalysisAuthority::SynthesizedEphemeral,
+        module_authority: ModuleAnalysisAuthority::SynthesizedEphemeral { current_module },
     })
 }
 
 fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     input: PreparedCompileInput,
     package_resolver: R,
+    ready_modules: &[ReadyModule],
 ) -> Result<Vec<u8>, WebCompileError> {
     let current_module = input.project_plan.current_module().map(str::to_string);
     let local_fs = input.local_fs;
     let project = match input.module_authority {
-        ModuleAnalysisAuthority::Project => analyze_file_set_with_current_module(
-            input.file_set,
-            package_resolver,
-            local_fs,
-            input.project_root,
-            current_module,
-        ),
-        #[cfg(any(test, target_arch = "wasm32"))]
-        ModuleAnalysisAuthority::SynthesizedEphemeral => {
-            let current_module = current_module.ok_or_else(|| {
-                WebCompileError::new(
-                    WebCompileStage::Policy,
-                    WebCompileErrorKind::Validation,
-                    "synthesized ephemeral compilation lost its module identity",
-                )
-            })?;
+        ModuleAnalysisAuthority::Project { current_package } => {
+            analyze_file_set_with_package_identity(
+                input.file_set,
+                package_resolver,
+                local_fs,
+                input.project_root,
+                current_module,
+                current_package,
+            )
+        }
+        ModuleAnalysisAuthority::SynthesizedEphemeral { current_module } => {
             analyze_file_set_with_synthesized_ephemeral_module(
                 input.file_set,
                 package_resolver,
@@ -410,6 +448,29 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
             format!("{}", error),
         )
     })?;
+    let imported_packages = project
+        .imported_packages_in_order()
+        .map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::Analysis,
+                WebCompileErrorKind::Analysis,
+                error,
+            )
+        })?
+        .into_iter()
+        .map(|(path, _, _, _)| path)
+        .collect::<Vec<_>>();
+    for ready in ready_modules {
+        ready
+            .validate_import_capabilities(imported_packages.iter().copied())
+            .map_err(|error| {
+                WebCompileError::new(
+                    WebCompileStage::Analysis,
+                    WebCompileErrorKind::Analysis,
+                    error.to_string(),
+                )
+            })?;
+    }
     let module = vo_codegen::compile_project(&project).map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Codegen,
@@ -438,8 +499,30 @@ fn compile_with_fs_modules<M: FileSystem + Send + Sync>(
     std_fs: MemoryFs,
     mod_fs: M,
 ) -> Result<Vec<u8>, WebCompileError> {
-    vo_module::readiness::validate_materialized_graph(
+    validate_materialized_graph(&input, &mod_fs)?;
+    let ready_modules = vo_module::readiness::check_materialized_modules_readiness(
         &mod_fs,
+        input.project_plan.locked_modules(),
+        WASM_TARGET,
+    )
+    .map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            error.to_string(),
+        )
+    })?;
+    compile_with_ready_fs_modules(input, std_fs, mod_fs, &ready_modules)
+}
+
+const WASM_TARGET: &str = "wasm32-unknown-unknown";
+
+fn validate_materialized_graph<M: FileSystem>(
+    input: &PreparedCompileInput,
+    mod_fs: &M,
+) -> Result<(), WebCompileError> {
+    vo_module::readiness::validate_materialized_graph(
+        mod_fs,
         &input.project_plan,
         &input.workspace_modules,
     )
@@ -449,7 +532,15 @@ fn compile_with_fs_modules<M: FileSystem + Send + Sync>(
             WebCompileErrorKind::Validation,
             error.to_string(),
         )
-    })?;
+    })
+}
+
+fn compile_with_ready_fs_modules<M: FileSystem + Send + Sync>(
+    input: PreparedCompileInput,
+    std_fs: MemoryFs,
+    mod_fs: M,
+    ready_modules: &[ReadyModule],
+) -> Result<Vec<u8>, WebCompileError> {
     let package_resolver = project_package_resolver_with_workspace_sources(
         std_fs,
         mod_fs,
@@ -457,7 +548,7 @@ fn compile_with_fs_modules<M: FileSystem + Send + Sync>(
         &input.project_plan,
         input.workspace_sources.clone(),
     );
-    compile_with_package_resolver(input, package_resolver)
+    compile_with_package_resolver(input, package_resolver, ready_modules)
 }
 
 fn is_external_import_path(import_path: &str) -> bool {
@@ -507,6 +598,22 @@ fn compile_entry_with_external_fs_with_options<M: FileSystem + Send + Sync>(
     let input = prepare_entry_input_with_options(entry, local_fs, options)
         .map_err(|error| error.to_string())?;
     compile_with_fs_modules(input, std_fs, mod_fs).map_err(|error| error.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn compile_entry_with_external_fs_and_ready<M: FileSystem + Send + Sync>(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+    mod_fs: M,
+    options: &ProjectContextOptions,
+    ready_modules: &[ReadyModule],
+) -> Result<Vec<u8>, String> {
+    let input = prepare_entry_input_with_options(entry, local_fs, options)
+        .map_err(|error| error.to_string())?;
+    validate_materialized_graph(&input, &mod_fs).map_err(|error| error.to_string())?;
+    compile_with_ready_fs_modules(input, std_fs, mod_fs, ready_modules)
+        .map_err(|error| error.to_string())
 }
 
 // ── Public compilation functions ─────────────────────────────────────────────
@@ -601,6 +708,27 @@ pub fn compile_entry_with_vfs_with_options(
         build_stdlib_fs(),
         WasmVfs::new(mod_root),
         options,
+    )
+}
+
+/// Compile against the exact ready-module generation already authenticated by
+/// the browser installer. The caller must retain those modules together with
+/// the matching project context until this synchronous compile returns.
+#[cfg(target_arch = "wasm32")]
+pub fn compile_ready_entry_with_vfs(
+    entry: &str,
+    local_fs: MemoryFs,
+    mod_root: &str,
+    options: &ProjectContextOptions,
+    ready_modules: &[ReadyModule],
+) -> Result<Vec<u8>, String> {
+    compile_entry_with_external_fs_and_ready(
+        entry,
+        local_fs,
+        build_stdlib_fs(),
+        WasmVfs::new(mod_root),
+        options,
+        ready_modules,
     )
 }
 

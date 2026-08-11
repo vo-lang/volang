@@ -1,40 +1,28 @@
 import type { Backend } from '../backend/backend';
 import { NativeBackend } from '../backend/native_backend';
 import { WebBackend } from '../backend/web_backend';
-import { CompilerService } from './compiler_service';
-import { ExtensionService } from './extension_service';
 import { ProjectCatalogService } from './project_catalog_service';
 import { ProjectService } from './project_service';
 import { RuntimeService } from './runtime_service';
-import { WorkspaceService } from './workspace_service';
 
 export interface ServiceRegistry {
   backend: Backend;
-  compiler: CompilerService;
-  extension: ExtensionService;
   projectCatalog: ProjectCatalogService;
   project: ProjectService;
   runtime: RuntimeService;
-  workspace: WorkspaceService;
 }
 
 export async function createServiceRegistry(): Promise<ServiceRegistry> {
   const backend = createBackend();
-  const compiler = new CompilerService(backend);
-  const extension = new ExtensionService(backend);
-  const workspace = new WorkspaceService(backend);
-  const project = new ProjectService(backend, workspace);
-  const projectCatalog = new ProjectCatalogService(backend, workspace);
+  const project = new ProjectService(backend);
+  const projectCatalog = new ProjectCatalogService(backend);
   const runtime = new RuntimeService(backend);
   await project.initialize();
   return {
     backend,
-    compiler,
-    extension,
     projectCatalog,
     project,
     runtime,
-    workspace,
   };
 }
 

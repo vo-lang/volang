@@ -5,15 +5,16 @@
 //! Unsafe scanners require canonical live GC objects whose allocation layout
 //! matches the supplied runtime metadata for the complete call.
 
-#[cfg(not(feature = "std"))]
-use alloc::vec;
-
 use crate::gc::{trace_slots_by_types, Gc, GcObjectScanChunk, GcRef, GcTraceCursor};
 #[cfg(test)]
 use crate::objects::string;
 use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, SLOT_BYTES};
-use vo_common_core::bytecode::{NamedTypeMeta, RuntimeTypeResolver, StructMeta};
+use vo_common_core::bytecode::{
+    LoadedModule, ModuleRuntimeMetadata, RuntimeTypeFact, RuntimeTypeFacts, RuntimeTypeMetadata,
+    RuntimeTypeScan, StructMeta,
+};
+#[cfg(test)]
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
@@ -21,41 +22,20 @@ use vo_common_core::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 pub enum TypedWriteBarrierByMetaError {
     AllocationFailed,
     MissingModuleMetadata,
-    MissingStructMeta {
-        meta_id: usize,
-    },
-    MissingRuntimeType {
-        rttid: u32,
-    },
-    MissingNamedTypeMeta {
-        id: u32,
-    },
-    RuntimeTypeKindMismatch {
-        rttid: u32,
-        expected: ValueKind,
-        actual: ValueKind,
-    },
-    ArraySlotWidthMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    MissingStructMeta { meta_id: usize },
+    MissingRuntimeType { rttid: u32 },
+    MissingRuntimeTypeFacts,
+    ArraySlotWidthMismatch { expected: usize, actual: usize },
     ArraySlotWidthOverflow,
-    SlotWidthMismatch {
-        vals: usize,
-        slot_types: usize,
-    },
-    InterfacePairTruncated {
-        slot: usize,
-    },
-    InterfacePairMalformed {
-        slot: usize,
-    },
+    SlotWidthMismatch { vals: usize, slot_types: usize },
+    InterfacePairTruncated { slot: usize },
+    InterfacePairMalformed { slot: usize },
 }
 
 impl core::fmt::Display for TypedWriteBarrierByMetaError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::AllocationFailed => write!(f, "typed_write_barrier_by_meta: allocation failed"),
+            Self::AllocationFailed => write!(f, "typed operation allocation failed"),
             Self::MissingModuleMetadata => {
                 write!(f, "typed_write_barrier_by_meta: missing module metadata")
             }
@@ -68,19 +48,9 @@ impl core::fmt::Display for TypedWriteBarrierByMetaError {
             Self::MissingRuntimeType { rttid } => {
                 write!(f, "typed_write_barrier_by_meta: missing runtime type {rttid}")
             }
-            Self::MissingNamedTypeMeta { id } => {
-                write!(
-                    f,
-                    "typed_write_barrier_by_meta: missing named type metadata {id}"
-                )
-            }
-            Self::RuntimeTypeKindMismatch {
-                rttid,
-                expected,
-                actual,
-            } => write!(
+            Self::MissingRuntimeTypeFacts => write!(
                 f,
-                "typed_write_barrier_by_meta: runtime type {rttid} has kind {actual:?}, expected {expected:?}"
+                "typed_write_barrier_by_meta: verified runtime type facts are unavailable"
             ),
             Self::ArraySlotWidthMismatch { expected, actual } => write!(
                 f,
@@ -108,15 +78,13 @@ impl core::fmt::Display for TypedWriteBarrierByMetaError {
 
 /// Metadata tables needed for precise heap-object scanning.
 ///
-/// `ValueMeta` can identify structs and interfaces directly, but array values
-/// need their `ValueRttid` to recover nested element layout. Keep the full
-/// module-side type tables together so every heap container uses the same
-/// recursive slot interpretation.
+/// `ValueMeta` identifies structs and interfaces directly. Array values use
+/// verified module facts that collapse nested element layouts to a bounded
+/// width and one terminal scan pattern.
 #[derive(Clone, Copy, Debug)]
 pub struct GcScanContext<'a> {
-    pub struct_metas: &'a [StructMeta],
-    pub named_type_metas: &'a [NamedTypeMeta],
-    pub runtime_types: &'a [RuntimeType],
+    struct_metas: &'a [StructMeta],
+    runtime_type_facts: Option<&'a RuntimeTypeFacts>,
 }
 
 impl<'a> GcScanContext<'a> {
@@ -124,27 +92,32 @@ impl<'a> GcScanContext<'a> {
     pub const fn new(struct_metas: &'a [StructMeta]) -> Self {
         Self {
             struct_metas,
-            named_type_metas: &[],
-            runtime_types: &[],
+            runtime_type_facts: None,
         }
     }
 
     #[inline]
-    pub const fn from_module_parts(
+    pub const fn with_runtime_type_facts(
         struct_metas: &'a [StructMeta],
-        named_type_metas: &'a [NamedTypeMeta],
-        runtime_types: &'a [RuntimeType],
+        runtime_type_facts: &'a RuntimeTypeFacts,
     ) -> Self {
         Self {
             struct_metas,
-            named_type_metas,
-            runtime_types,
+            runtime_type_facts: Some(runtime_type_facts),
         }
     }
 
     #[inline]
-    fn has_runtime_types(self) -> bool {
-        !self.runtime_types.is_empty()
+    pub fn from_runtime_metadata(metadata: ModuleRuntimeMetadata<'a>) -> Self {
+        Self {
+            struct_metas: metadata.type_metadata().struct_metas,
+            runtime_type_facts: metadata.runtime_type_facts(),
+        }
+    }
+
+    #[inline]
+    pub fn from_loaded_module(module: &'a LoadedModule) -> Self {
+        Self::from_runtime_metadata(module.runtime_metadata())
     }
 }
 
@@ -239,7 +212,7 @@ pub fn typed_write_barrier_by_meta(
     parent: GcRef,
     vals: &[u64],
     meta: vo_common_core::types::ValueMeta,
-    module: Option<&vo_common_core::bytecode::Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) {
     try_typed_write_barrier_by_meta(gc, parent, vals, meta, module)
         .unwrap_or_else(|err| panic!("{err}"));
@@ -250,7 +223,52 @@ pub fn try_typed_write_barrier_by_meta(
     parent: GcRef,
     vals: &[u64],
     meta: vo_common_core::types::ValueMeta,
-    module: Option<&vo_common_core::bytecode::Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+) -> Result<(), TypedWriteBarrierByMetaError> {
+    let type_metadata = module.map(ModuleRuntimeMetadata::type_metadata);
+    let runtime_type_facts = module.and_then(ModuleRuntimeMetadata::runtime_type_facts);
+    try_typed_write_barrier_by_type_metadata(
+        gc,
+        parent,
+        vals,
+        meta,
+        type_metadata,
+        runtime_type_facts,
+        false,
+    )
+}
+
+/// Apply a precise barrier from borrowed type tables without manufacturing a
+/// full module. The raw-layout fallback is reserved for transactional unpack,
+/// whose validated metadata predates the destination [`LoadedModule`] owner.
+pub(crate) fn typed_write_barrier_by_type_metadata(
+    gc: &mut Gc,
+    parent: GcRef,
+    vals: &[u64],
+    meta: vo_common_core::types::ValueMeta,
+    type_metadata: RuntimeTypeMetadata<'_>,
+    runtime_type_facts: Option<&RuntimeTypeFacts>,
+) {
+    try_typed_write_barrier_by_type_metadata(
+        gc,
+        parent,
+        vals,
+        meta,
+        Some(type_metadata),
+        runtime_type_facts,
+        true,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+}
+
+fn try_typed_write_barrier_by_type_metadata(
+    gc: &mut Gc,
+    parent: GcRef,
+    vals: &[u64],
+    meta: vo_common_core::types::ValueMeta,
+    type_metadata: Option<RuntimeTypeMetadata<'_>>,
+    runtime_type_facts: Option<&RuntimeTypeFacts>,
+    allow_raw_array_layout: bool,
 ) -> Result<(), TypedWriteBarrierByMetaError> {
     use vo_common_core::types::ValueKind;
     let vk = meta.value_kind();
@@ -271,9 +289,10 @@ pub fn try_typed_write_barrier_by_meta(
         }
         // Struct with mixed slots: need slot_types from struct_metas.
         ValueKind::Struct => {
-            let module = module.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
+            let type_metadata =
+                type_metadata.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
             let meta_id = meta.meta_id() as usize;
-            let struct_meta = module
+            let struct_meta = type_metadata
                 .struct_metas
                 .get(meta_id)
                 .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?;
@@ -285,15 +304,32 @@ pub fn try_typed_write_barrier_by_meta(
         // Fixed arrays are flattened in value storage. Their precise layout is
         // recovered from the array rttid stored in ValueMeta::meta_id.
         ValueKind::Array => {
-            let module = module.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
-            let ctx = GcScanContext::from_module_parts(
-                &module.struct_metas,
-                &module.named_type_metas,
-                &module.runtime_types,
-            );
-            trace_value_slots_by_meta(vals, meta, ctx, &mut |child| {
-                gc.write_barrier(parent, child)
-            })?;
+            let type_metadata =
+                type_metadata.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
+            if let Some(runtime_type_facts) = runtime_type_facts {
+                let ctx = GcScanContext::with_runtime_type_facts(
+                    type_metadata.struct_metas,
+                    runtime_type_facts,
+                );
+                trace_value_slots_by_meta(vals, meta, ctx, &mut |child| {
+                    gc.write_barrier(parent, child)
+                })?;
+            } else if allow_raw_array_layout {
+                let value_rttid = ValueRttid::try_new(meta.meta_id(), ValueKind::Array).ok_or(
+                    TypedWriteBarrierByMetaError::MissingRuntimeType {
+                        rttid: meta.meta_id(),
+                    },
+                )?;
+                let slot_types = type_metadata
+                    .resolver()
+                    .slot_layout_for_value_rttid(value_rttid)
+                    .ok_or(TypedWriteBarrierByMetaError::MissingRuntimeType {
+                        rttid: meta.meta_id(),
+                    })?;
+                try_typed_write_barrier(gc, parent, vals, &slot_types)?;
+            } else {
+                return Err(TypedWriteBarrierByMetaError::MissingRuntimeTypeFacts);
+            }
         }
         // Interface: 2 slots (slot0=header, slot1=data). Only barrier data if it's a GcRef.
         ValueKind::Interface => {
@@ -326,28 +362,69 @@ fn require_meta_slot_width(
 
 /// Apply typed write barriers for a contiguous range of elements just written
 /// into an existing heap container.
-pub fn typed_write_barrier_range_by_meta(
+///
+/// # Safety
+///
+/// `base_ptr` must be non-null, aligned for `u64`, and readable for
+/// `count * elem_bytes` bytes. Every element must contain a complete value
+/// matching `meta` and `module`.
+pub unsafe fn typed_write_barrier_range_by_meta(
     gc: &mut Gc,
     parent: GcRef,
     base_ptr: *const u8,
     count: usize,
     elem_bytes: usize,
     meta: vo_common_core::types::ValueMeta,
-    module: Option<&vo_common_core::bytecode::Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) {
     if count == 0 || !meta.value_kind().may_contain_gc_refs() {
         return;
     }
 
-    let elem_slots = elem_bytes.div_ceil(SLOT_BYTES);
-    let mut vals = vec![0u64; elem_slots];
-    for idx in 0..count {
-        let elem_ptr = unsafe { base_ptr.add(idx * elem_bytes) };
-        vals.fill(0);
-        unsafe {
-            core::ptr::copy_nonoverlapping(elem_ptr, vals.as_mut_ptr() as *mut u8, elem_bytes);
+    if elem_bytes == 0 {
+        typed_write_barrier_by_meta(gc, parent, &[], meta, module);
+        return;
+    }
+
+    assert!(
+        elem_bytes.is_multiple_of(SLOT_BYTES),
+        "GC-bearing range barrier elements must be slot aligned"
+    );
+    assert!(
+        (base_ptr as usize).is_multiple_of(core::mem::align_of::<u64>()),
+        "GC-bearing range barrier base pointer must be u64 aligned"
+    );
+    if module.is_none() && matches!(meta.value_kind(), ValueKind::Struct | ValueKind::Array) {
+        typed_write_barrier_by_meta(gc, parent, &[], meta, None);
+        return;
+    }
+    let context = module
+        .map(GcScanContext::from_runtime_metadata)
+        .unwrap_or_else(|| GcScanContext::new(&[]));
+    let elem_slots = logical_slots_in_stride(meta, elem_bytes, context)
+        .unwrap_or_else(|err| panic!("typed_write_barrier_range_by_meta: {err}"));
+    let has_gc_slots = match meta.value_kind() {
+        ValueKind::Struct => slot_types_may_contain_gc_refs(
+            &context.struct_metas[meta.meta_id() as usize].slot_types,
+        ),
+        ValueKind::Array => {
+            array_runtime_type_fact(meta, context)
+                .unwrap_or_else(|err| panic!("typed_write_barrier_range_by_meta: {err}"))
+                .scan()
+                != RuntimeTypeScan::None
         }
-        typed_write_barrier_by_meta(gc, parent, &vals, meta, module);
+        _ => true,
+    };
+    if !has_gc_slots {
+        return;
+    }
+    for idx in 0..count {
+        let byte_offset = idx
+            .checked_mul(elem_bytes)
+            .expect("GC-bearing range barrier byte offset overflow");
+        let elem_ptr = unsafe { base_ptr.add(byte_offset) };
+        let vals = unsafe { core::slice::from_raw_parts(elem_ptr as *const u64, elem_slots) };
+        typed_write_barrier_by_meta(gc, parent, vals, meta, module);
     }
 }
 
@@ -489,13 +566,30 @@ fn scan_value_slots_chunk(
     slot_budget: usize,
     label: &str,
 ) -> GcObjectScanChunk {
+    let array_fact = if meta.value_kind() == ValueKind::Array {
+        let fact =
+            array_runtime_type_fact(meta, context).unwrap_or_else(|err| panic!("{label}: {err}"));
+        validate_array_fact_width(slots, fact).unwrap_or_else(|err| panic!("{label}: {err}"));
+        if fact.scan() == RuntimeTypeScan::None {
+            return GcObjectScanChunk::complete(0);
+        }
+        Some(fact)
+    } else {
+        None
+    };
     let start = cursor.reference_index.min(slots.len());
     let end = start.saturating_add(slot_budget).min(slots.len());
     for flat_index in start..end {
-        trace_flat_value_slot(slots, meta, context, flat_index, &mut |child| {
-            gc.mark_gray(child)
-        })
-        .unwrap_or_else(|err| panic!("{label}: {err}"));
+        let result = if let Some(fact) = array_fact {
+            trace_flat_array_slot(slots, fact, context, flat_index, &mut |child| {
+                gc.mark_gray(child)
+            })
+        } else {
+            trace_flat_value_slot(slots, meta, context, flat_index, &mut |child| {
+                gc.mark_gray(child)
+            })
+        };
+        result.unwrap_or_else(|err| panic!("{label}: {err}"));
     }
     cursor.reference_index = end;
     let work_bytes = (end - start) * SLOT_BYTES;
@@ -552,113 +646,183 @@ where
     }
 }
 
-fn trace_flat_value_slot<V>(
-    mut slots: &[u64],
-    mut meta: ValueMeta,
+fn array_runtime_type_fact(
+    meta: ValueMeta,
     context: GcScanContext<'_>,
-    mut flat_index: usize,
+) -> Result<RuntimeTypeFact, TypedWriteBarrierByMetaError> {
+    let facts = context
+        .runtime_type_facts
+        .ok_or(TypedWriteBarrierByMetaError::MissingRuntimeTypeFacts)?;
+    let rttid = ValueRttid::new(meta.meta_id(), ValueKind::Array);
+    facts
+        .get(rttid)
+        .ok_or(TypedWriteBarrierByMetaError::MissingRuntimeType {
+            rttid: rttid.rttid(),
+        })
+}
+
+fn logical_slots_in_stride(
+    meta: ValueMeta,
+    elem_bytes: usize,
+    context: GcScanContext<'_>,
+) -> Result<usize, TypedWriteBarrierByMetaError> {
+    let physical_slots = elem_bytes / SLOT_BYTES;
+    let logical_slots = match meta.value_kind() {
+        ValueKind::Struct => context
+            .struct_metas
+            .get(meta.meta_id() as usize)
+            .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta {
+                meta_id: meta.meta_id() as usize,
+            })?
+            .slot_types
+            .len(),
+        ValueKind::Array => array_runtime_type_fact(meta, context)?
+            .slot_count()
+            .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?,
+        ValueKind::Interface => 2,
+        kind if kind.may_contain_gc_refs() => 1,
+        _ => physical_slots,
+    };
+    if logical_slots > physical_slots {
+        return Err(TypedWriteBarrierByMetaError::SlotWidthMismatch {
+            vals: physical_slots,
+            slot_types: logical_slots,
+        });
+    }
+    Ok(logical_slots)
+}
+
+fn validate_array_fact_width(
+    slots: &[u64],
+    fact: RuntimeTypeFact,
+) -> Result<(), TypedWriteBarrierByMetaError> {
+    let expected = fact
+        .slot_count()
+        .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
+    if slots.len() != expected {
+        return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+            expected,
+            actual: slots.len(),
+        });
+    }
+    Ok(())
+}
+
+fn trace_flat_array_slot<V>(
+    slots: &[u64],
+    fact: RuntimeTypeFact,
+    context: GcScanContext<'_>,
+    flat_index: usize,
     visit: &mut V,
 ) -> Result<(), TypedWriteBarrierByMetaError>
 where
     V: FnMut(GcRef),
 {
-    loop {
-        match meta.value_kind() {
-            ValueKind::Array => {
-                if !context.has_runtime_types() {
-                    return Ok(());
-                }
-                let resolver = RuntimeTypeResolver::new(
-                    context.struct_metas,
-                    context.named_type_metas,
-                    context.runtime_types,
-                );
-                let array_rttid = ValueRttid::new(meta.meta_id(), ValueKind::Array);
-                let Some((_, RuntimeType::Array { len, elem })) =
-                    resolver.resolve_value_rttid(array_rttid)
-                else {
-                    return Err(TypedWriteBarrierByMetaError::MissingRuntimeType {
-                        rttid: array_rttid.rttid(),
-                    });
-                };
-                let expected = resolver
-                    .slot_count_for_value_rttid(array_rttid)
-                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                if slots.len() != expected {
-                    return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-                        expected,
-                        actual: slots.len(),
-                    });
-                }
-                let len = usize::try_from(*len)
-                    .map_err(|_| TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                if len == 0 {
-                    return Ok(());
-                }
-                let elem_slots = slots.len() / len;
-                if elem_slots == 0 || !slots.len().is_multiple_of(len) {
-                    return Err(TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
-                        expected: len,
-                        actual: slots.len(),
-                    });
-                }
-                let element_index = flat_index / elem_slots;
-                if element_index >= len {
-                    return Ok(());
-                }
-                let start = element_index
-                    .checked_mul(elem_slots)
-                    .ok_or(TypedWriteBarrierByMetaError::ArraySlotWidthOverflow)?;
-                slots = &slots[start..start + elem_slots];
-                flat_index %= elem_slots;
-                meta = resolver.canonical_value_meta_for_value_rttid(*elem).ok_or(
-                    TypedWriteBarrierByMetaError::MissingRuntimeType {
-                        rttid: elem.rttid(),
-                    },
-                )?;
+    if flat_index >= slots.len() {
+        return Ok(());
+    }
+    match fact.scan() {
+        RuntimeTypeScan::None => {}
+        RuntimeTypeScan::GcRef if slots[flat_index] != 0 => {
+            visit(slots[flat_index] as GcRef);
+        }
+        RuntimeTypeScan::GcRef => {}
+        RuntimeTypeScan::Interface => {
+            let local = flat_index % 2;
+            if local == 1
+                && interface::data_is_gc_ref(slots[flat_index - 1])
+                && slots[flat_index] != 0
+            {
+                visit(slots[flat_index] as GcRef);
             }
-            ValueKind::Struct => {
-                let meta_id = meta.meta_id() as usize;
-                let slot_types = &context
-                    .struct_metas
-                    .get(meta_id)
-                    .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
-                    .slot_types;
-                if slots.len() != slot_types.len() {
-                    return Err(TypedWriteBarrierByMetaError::SlotWidthMismatch {
-                        vals: slots.len(),
-                        slot_types: slot_types.len(),
-                    });
-                }
-                trace_flat_slot_by_types(slots, slot_types, flat_index, visit);
-                return Ok(());
+        }
+        RuntimeTypeScan::Struct {
+            meta_id,
+            slots: struct_slots,
+        } => {
+            let meta_id = meta_id as usize;
+            let slot_types = &context
+                .struct_metas
+                .get(meta_id)
+                .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
+                .slot_types;
+            let struct_slots = struct_slots as usize;
+            if struct_slots == 0 || slot_types.len() != struct_slots {
+                return Err(TypedWriteBarrierByMetaError::SlotWidthMismatch {
+                    vals: struct_slots,
+                    slot_types: slot_types.len(),
+                });
             }
-            ValueKind::Interface => {
-                if flat_index == 1
-                    && slots.len() >= 2
-                    && interface::data_is_gc_ref(slots[0])
-                    && slots[1] != 0
-                {
-                    visit(slots[1] as GcRef);
-                }
-                return Ok(());
-            }
-            ValueKind::String
-            | ValueKind::Slice
-            | ValueKind::Map
-            | ValueKind::Channel
-            | ValueKind::Closure
-            | ValueKind::Pointer
-            | ValueKind::Port
-            | ValueKind::Island => {
-                if flat_index == 0 && slots.first().copied().unwrap_or(0) != 0 {
-                    visit(slots[0] as GcRef);
-                }
-                return Ok(());
-            }
-            _ => return Ok(()),
+            let local = flat_index % struct_slots;
+            let start = flat_index - local;
+            trace_flat_slot_by_types(
+                &slots[start..start + struct_slots],
+                slot_types,
+                local,
+                visit,
+            );
         }
     }
+    Ok(())
+}
+
+fn trace_flat_value_slot<V>(
+    slots: &[u64],
+    meta: ValueMeta,
+    context: GcScanContext<'_>,
+    flat_index: usize,
+    visit: &mut V,
+) -> Result<(), TypedWriteBarrierByMetaError>
+where
+    V: FnMut(GcRef),
+{
+    if meta.value_kind() == ValueKind::Array {
+        let fact = array_runtime_type_fact(meta, context)?;
+        validate_array_fact_width(slots, fact)?;
+        trace_flat_array_slot(slots, fact, context, flat_index, visit)?;
+        return Ok(());
+    }
+
+    match meta.value_kind() {
+        ValueKind::Struct => {
+            let meta_id = meta.meta_id() as usize;
+            let slot_types = &context
+                .struct_metas
+                .get(meta_id)
+                .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
+                .slot_types;
+            if slots.len() != slot_types.len() {
+                return Err(TypedWriteBarrierByMetaError::SlotWidthMismatch {
+                    vals: slots.len(),
+                    slot_types: slot_types.len(),
+                });
+            }
+            trace_flat_slot_by_types(slots, slot_types, flat_index, visit);
+        }
+        ValueKind::Interface => {
+            if flat_index == 1
+                && slots.len() >= 2
+                && interface::data_is_gc_ref(slots[0])
+                && slots[1] != 0
+            {
+                visit(slots[1] as GcRef);
+            }
+        }
+        ValueKind::String
+        | ValueKind::Slice
+        | ValueKind::Map
+        | ValueKind::Channel
+        | ValueKind::Closure
+        | ValueKind::Pointer
+        | ValueKind::Port
+        | ValueKind::Island => {
+            if flat_index == 0 && slots.first().copied().unwrap_or(0) != 0 {
+                visit(slots[0] as GcRef);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Visit a GC object's children through the same precise metadata rules used by collection.
@@ -867,9 +1031,29 @@ unsafe fn scan_array_chunk(
         elem_bytes.is_multiple_of(SLOT_BYTES),
         "scan_array_chunk: GC-containing element has non-slot-aligned elem_bytes={elem_bytes}"
     );
-    let elem_slots = elem_bytes / SLOT_BYTES;
+    if elem_bytes == 0 {
+        return GcObjectScanChunk::complete(0);
+    }
+    let elem_slots = logical_slots_in_stride(elem_meta, elem_bytes, context)
+        .unwrap_or_else(|err| panic!("scan_array_chunk: {err}"));
     if elem_slots == 0 {
         return GcObjectScanChunk::complete(0);
+    }
+    let array_fact = if elem_meta.value_kind() == ValueKind::Array {
+        let fact = array_runtime_type_fact(elem_meta, context)
+            .unwrap_or_else(|err| panic!("scan_array_chunk: {err}"));
+        if fact.scan() == RuntimeTypeScan::None {
+            return GcObjectScanChunk::complete(0);
+        }
+        Some(fact)
+    } else {
+        None
+    };
+    if elem_meta.value_kind() == ValueKind::Struct {
+        let slot_types = &context.struct_metas[elem_meta.meta_id() as usize].slot_types;
+        if !slot_types_may_contain_gc_refs(slot_types) {
+            return GcObjectScanChunk::complete(0);
+        }
     }
     let total_slots = len
         .checked_mul(elem_slots)
@@ -883,10 +1067,16 @@ unsafe fn scan_array_chunk(
         let elem_ptr =
             unsafe { (obj as *const u8).add(base_off + element_index * elem_bytes) as *const u64 };
         let slots = unsafe { core::slice::from_raw_parts(elem_ptr, elem_slots) };
-        trace_flat_value_slot(slots, elem_meta, context, element_slot, &mut |child| {
-            gc.mark_gray(child)
-        })
-        .unwrap_or_else(|err| panic!("scan_array_chunk: {err}"));
+        let result = if let Some(fact) = array_fact {
+            trace_flat_array_slot(slots, fact, context, element_slot, &mut |child| {
+                gc.mark_gray(child)
+            })
+        } else {
+            trace_flat_value_slot(slots, elem_meta, context, element_slot, &mut |child| {
+                gc.mark_gray(child)
+            })
+        };
+        result.unwrap_or_else(|err| panic!("scan_array_chunk: {err}"));
     }
     cursor.reference_index = end;
     let work_bytes = (end - start) * SLOT_BYTES;
@@ -1079,23 +1269,26 @@ where
     if elem_bytes == 0 {
         return;
     }
-    let elem_slots = if elem_kind == ValueKind::Struct {
-        let meta_id = elem_meta.meta_id() as usize;
-        let slot_count = context
-            .struct_metas
-            .get(meta_id)
-            .unwrap_or_else(|| panic!("scan_array: missing struct element metadata {meta_id}"))
-            .slot_types
-            .len();
-        assert!(
-            slot_count * SLOT_BYTES <= elem_bytes,
-            "scan_array: struct element metadata has {} slots but elem_bytes={elem_bytes}",
-            slot_count
-        );
-        slot_count
-    } else {
-        elem_bytes / SLOT_BYTES
-    };
+    let elem_slots = logical_slots_in_stride(elem_meta, elem_bytes, context)
+        .unwrap_or_else(|err| panic!("scan_array: {err}"));
+    if elem_slots == 0 {
+        return;
+    }
+    if elem_kind == ValueKind::Array
+        && array_runtime_type_fact(elem_meta, context)
+            .unwrap_or_else(|err| panic!("scan_array: {err}"))
+            .scan()
+            == RuntimeTypeScan::None
+    {
+        return;
+    }
+    if elem_kind == ValueKind::Struct
+        && !slot_types_may_contain_gc_refs(
+            &context.struct_metas[elem_meta.meta_id() as usize].slot_types,
+        )
+    {
+        return;
+    }
     let base_off = byte_offset_for_slots(array::HEADER_SLOTS);
     for idx in 0..len {
         let elem_ptr = unsafe { (obj as *const u8).add(base_off + idx * elem_bytes) as *const u64 };
@@ -1219,13 +1412,13 @@ fn trace_array_value_slots<V>(
 where
     V: FnMut(GcRef),
 {
-    // Runtime-only GC tests can call the scanner without a Module. VM paths
-    // always provide the module-backed layout.
-    if !context.has_runtime_types() {
+    let fact = array_runtime_type_fact(meta, context)?;
+    validate_array_fact_width(slots, fact)?;
+    if fact.scan() == RuntimeTypeScan::None {
         return Ok(());
     }
     for flat_index in 0..slots.len() {
-        trace_flat_value_slot(slots, meta, context, flat_index, visit)?;
+        trace_flat_array_slot(slots, fact, context, flat_index, visit)?;
     }
     Ok(())
 }
@@ -1331,74 +1524,9 @@ mod tests {
     use super::*;
     use crate::test_support::{queue, scan_object, trace_object_children_with_context};
 
-    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let start = src.find(start).expect("section start");
-        let end = src[start..]
-            .find(end)
-            .map(|offset| start + offset)
-            .expect("section end");
-        &src[start..end]
-    }
-
-    #[test]
-    fn gc_layout_metadata_drift_has_no_release_skip_or_all_gcref_substitute() {
-        let src = include_str!("gc_types.rs");
-
-        let barrier = section(
-            src,
-            "pub fn typed_write_barrier_by_meta",
-            "/// Apply typed write barriers",
-        );
-        assert!(
-            !barrier.contains("conservative"),
-            "typed write barriers must not conservatively continue when struct metadata is missing"
-        );
-
-        let scan_object = section(src, "pub fn scan_object", "/// Scan closure captures");
-        assert!(
-            !scan_object.contains("debug_assert"),
-            "GC object layout validation must run in release builds"
-        );
-        assert!(
-            !scan_object.contains("skip scanning"),
-            "invalid GC object layouts must fail fast instead of skipping scans"
-        );
-
-        let scan_closure = section(src, "fn trace_closure_children", "fn trace_array_children");
-        assert!(
-            !scan_closure.contains("debug_assert"),
-            "closure capture layout validation must run in release builds"
-        );
-        assert!(
-            !scan_closure.contains("Compatibility fallback"),
-            "closure capture layout drift must not use all-GcRef substitute"
-        );
-
-        let scan_array = section(src, "fn trace_array_children", "fn trace_queue_children");
-        assert!(
-            !scan_array.contains("No struct_meta available"),
-            "array struct-element metadata drift must fail fast instead of skipping scans"
-        );
-
-        let elem_scan = section(
-            src,
-            "fn trace_value_slots_by_meta",
-            "fn trace_array_value_slots",
-        );
-        assert!(
-            !elem_scan.contains("ElemScan::Skip"),
-            "container element scan resolution must not use missing-metadata skip"
-        );
-        assert!(
-            elem_scan.contains("trace_array_value_slots"),
-            "container array values must use recursive array layout instead of all-GcRef scanning"
-        );
-
-        let scan_struct = section(src, "fn trace_struct_children", "/// Finalize");
-        assert!(
-            !scan_struct.contains("return;"),
-            "struct metadata drift must fail fast instead of returning without scanning"
-        );
+    fn runtime_type_facts(runtime_types: &[RuntimeType]) -> RuntimeTypeFacts {
+        RuntimeTypeFacts::from_module_parts(&[], &[], runtime_types)
+            .expect("valid test runtime type facts")
     }
 
     #[test]
@@ -1408,7 +1536,7 @@ mod tests {
             &mut gc,
             queue_state::QueueKind::Chan,
             ValueMeta::new(0, ValueKind::Array),
-            vo_common_core::types::ValueRttid::new(0, ValueKind::Array),
+            vo_common_core::types::ValueRttid::new(1, ValueKind::Array),
             2,
             1,
         );
@@ -1421,8 +1549,22 @@ mod tests {
             other => panic!("expected buffered array value send, got {other:?}"),
         }
 
+        let runtime_types = vec![
+            RuntimeType::Basic(ValueKind::Uint64),
+            RuntimeType::Array {
+                len: 2,
+                elem: ValueRttid::new(0, ValueKind::Uint64),
+            },
+        ];
+        let facts = runtime_type_facts(&runtime_types);
+
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan_object(&mut gc, ch, &[], &|_| ClosureScanLayout::default());
+            trace_object_children_with_context(
+                ch,
+                GcScanContext::with_runtime_type_facts(&[], &facts),
+                &|_| ClosureScanLayout::default(),
+                |_| {},
+            );
         }));
 
         assert!(
@@ -1453,7 +1595,7 @@ mod tests {
         let mut visited = Vec::new();
         trace_object_children_with_context(
             ch,
-            GcScanContext::from_module_parts(&[], &[], &[]),
+            GcScanContext::new(&[]),
             &|_| ClosureScanLayout::default(),
             |child| visited.push(child),
         );
@@ -1488,7 +1630,7 @@ mod tests {
                 scan_object_chunk_with_context(
                     &mut gc,
                     ch,
-                    GcScanContext::from_module_parts(&[], &[], &[]),
+                    GcScanContext::new(&[]),
                     &|_| ClosureScanLayout::default(),
                     &mut cursor,
                     SLOT_BYTES,
@@ -1531,10 +1673,11 @@ mod tests {
                 elem: ValueRttid::new(0, ValueKind::String),
             },
         ];
+        let facts = runtime_type_facts(&runtime_types);
         let mut visited = Vec::new();
         trace_object_children_with_context(
             ch,
-            GcScanContext::from_module_parts(&[], &[], &runtime_types),
+            GcScanContext::with_runtime_type_facts(&[], &facts),
             &|_| ClosureScanLayout::default(),
             |child| visited.push(child),
         );
@@ -1558,18 +1701,15 @@ mod tests {
             2,
             0,
         );
-        let waiter = queue_state::QueueWaiter::simple_queue(
-            4,
-            9,
-            ch as u64,
-            queue_state::SelectWaitKind::Send,
-        );
+        let waiter =
+            queue_state::QueueWaiter::try_queue(4, 9, ch as u64, queue_state::SelectWaitKind::Send)
+                .expect("queue waiter");
         match queue::send_or_block(
             ch,
             vec![left as u64, right as u64].into_boxed_slice(),
             waiter,
         ) {
-            queue::BlockingSendResult::Blocked => {}
+            queue::BlockingSendResult::Blocked(_) => {}
             other => panic!("expected waiting sender array value, got {other:?}"),
         }
 
@@ -1580,10 +1720,11 @@ mod tests {
                 elem: ValueRttid::new(0, ValueKind::String),
             },
         ];
+        let facts = runtime_type_facts(&runtime_types);
         let mut visited = Vec::new();
         trace_object_children_with_context(
             ch,
-            GcScanContext::from_module_parts(&[], &[], &runtime_types),
+            GcScanContext::with_runtime_type_facts(&[], &facts),
             &|_| ClosureScanLayout::default(),
             |child| visited.push(child),
         );
@@ -1615,7 +1756,7 @@ mod tests {
         let mut visited = Vec::new();
         trace_object_children_with_context(
             map_ref,
-            GcScanContext::from_module_parts(&[], &[], &[]),
+            GcScanContext::new(&[]),
             &|_| ClosureScanLayout::default(),
             |child| visited.push(child),
         );
@@ -1650,7 +1791,7 @@ mod tests {
                 scan_object_chunk_with_context(
                     &mut gc,
                     map_ref,
-                    GcScanContext::from_module_parts(&[], &[], &[]),
+                    GcScanContext::new(&[]),
                     &|_| ClosureScanLayout::default(),
                     &mut cursor,
                     SLOT_BYTES,
@@ -1688,10 +1829,11 @@ mod tests {
                 elem: ValueRttid::new(0, ValueKind::String),
             },
         ];
+        let facts = runtime_type_facts(&runtime_types);
         let mut visited = Vec::new();
         trace_object_children_with_context(
             capture_box,
-            GcScanContext::from_module_parts(&[], &[], &runtime_types),
+            GcScanContext::with_runtime_type_facts(&[], &facts),
             &|_| ClosureScanLayout::default(),
             |child| visited.push(child),
         );
@@ -1717,17 +1859,246 @@ mod tests {
             runtime_types.push(RuntimeType::Array { len: 1, elem });
         }
         runtime_types.push(RuntimeType::Basic(ValueKind::String));
+        let facts = runtime_type_facts(&runtime_types);
 
         let mut visited = Vec::new();
         trace_value_slots_by_meta(
             &[leaf as u64],
             ValueMeta::new(0, ValueKind::Array),
-            GcScanContext::from_module_parts(&[], &[], &runtime_types),
+            GcScanContext::with_runtime_type_facts(&[], &facts),
             &mut |child| visited.push(child),
         )
-        .expect("deep nested Array metadata must scan through an explicit work stack");
+        .expect("deep nested Array metadata must scan through collapsed facts");
 
         assert_eq!(visited, [leaf]);
+    }
+
+    #[test]
+    fn gc_deep_array_value_scan_consumes_one_physical_slot_unit() {
+        const DEPTH: usize = 4_096;
+
+        let mut runtime_types = Vec::with_capacity(DEPTH + 1);
+        for index in 0..DEPTH {
+            runtime_types.push(RuntimeType::Array {
+                len: 1,
+                elem: if index + 1 == DEPTH {
+                    ValueRttid::new(DEPTH as u32, ValueKind::String)
+                } else {
+                    ValueRttid::new((index + 1) as u32, ValueKind::Array)
+                },
+            });
+        }
+        runtime_types.push(RuntimeType::Basic(ValueKind::String));
+        let facts = runtime_type_facts(&runtime_types);
+
+        let mut gc = Gc::new();
+        let leaf = string::create(&mut gc, b"deep-budget-root");
+        let value = gc.alloc_value_slots(ValueMeta::new(0, ValueKind::Array), 1);
+        unsafe { Gc::write_slot(value, 0, leaf as u64) };
+        let mut cursor = GcTraceCursor::default();
+        let chunk = unsafe {
+            scan_object_chunk_with_context(
+                &mut gc,
+                value,
+                GcScanContext::with_runtime_type_facts(&[], &facts),
+                &|_| ClosureScanLayout::default(),
+                &mut cursor,
+                SLOT_BYTES,
+            )
+        };
+
+        assert_eq!(chunk, GcObjectScanChunk::complete(SLOT_BYTES));
+        assert_eq!(cursor.reference_index, 1);
+        assert!(unsafe { Gc::header(leaf) }.is_gray());
+    }
+
+    #[test]
+    fn gc_wide_array_value_scan_is_strictly_linear_and_budgeted() {
+        const WIDTH: usize = 4_096;
+
+        let runtime_types = [
+            RuntimeType::Basic(ValueKind::String),
+            RuntimeType::Array {
+                len: WIDTH as u64,
+                elem: ValueRttid::new(0, ValueKind::String),
+            },
+        ];
+        let facts = runtime_type_facts(&runtime_types);
+        let mut gc = Gc::new();
+        let leaf = string::create(&mut gc, b"wide-budget-root");
+        let value = gc.alloc_value_slots(ValueMeta::new(1, ValueKind::Array), WIDTH as u16);
+        for slot in 0..WIDTH {
+            unsafe { Gc::write_slot(value, slot, leaf as u64) };
+        }
+
+        let mut cursor = GcTraceCursor::default();
+        let mut calls = 0;
+        let mut work_bytes = 0;
+        loop {
+            let before = cursor.reference_index;
+            let chunk = unsafe {
+                scan_object_chunk_with_context(
+                    &mut gc,
+                    value,
+                    GcScanContext::with_runtime_type_facts(&[], &facts),
+                    &|_| ClosureScanLayout::default(),
+                    &mut cursor,
+                    SLOT_BYTES,
+                )
+            };
+            assert!(chunk.work_bytes <= SLOT_BYTES);
+            assert_eq!(cursor.reference_index, before + 1);
+            calls += 1;
+            work_bytes += chunk.work_bytes;
+            if chunk.done {
+                break;
+            }
+        }
+
+        assert_eq!(calls, WIDTH);
+        assert_eq!(work_bytes, WIDTH * SLOT_BYTES);
+        assert!(unsafe { Gc::header(leaf) }.is_gray());
+    }
+
+    #[test]
+    fn gc_pointer_free_array_fact_finishes_without_slot_work() {
+        const WIDTH: usize = 4_096;
+
+        let runtime_types = [
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Array {
+                len: WIDTH as u64,
+                elem: ValueRttid::new(0, ValueKind::Int64),
+            },
+        ];
+        let facts = runtime_type_facts(&runtime_types);
+        let mut gc = Gc::new();
+        let value = gc.alloc_value_slots(ValueMeta::new(1, ValueKind::Array), WIDTH as u16);
+        let mut cursor = GcTraceCursor::default();
+
+        let chunk = unsafe {
+            scan_object_chunk_with_context(
+                &mut gc,
+                value,
+                GcScanContext::with_runtime_type_facts(&[], &facts),
+                &|_| ClosureScanLayout::default(),
+                &mut cursor,
+                SLOT_BYTES,
+            )
+        };
+
+        assert_eq!(chunk, GcObjectScanChunk::complete(0));
+        assert_eq!(cursor.reference_index, 0);
+    }
+
+    #[test]
+    fn gc_array_facts_scan_struct_and_interface_periods_precisely() {
+        let struct_metas = [StructMeta {
+            slot_types: vec![
+                SlotType::Value,
+                SlotType::GcRef,
+                SlotType::Interface0,
+                SlotType::Interface1,
+            ],
+            fields: Vec::new(),
+            field_index: std::collections::HashMap::new(),
+        }];
+        let runtime_types = [
+            RuntimeType::Struct {
+                fields: Vec::new(),
+                meta_id: 0,
+            },
+            RuntimeType::Array {
+                len: 2,
+                elem: ValueRttid::new(0, ValueKind::Struct),
+            },
+            RuntimeType::Interface {
+                methods: Vec::new(),
+                meta_id: 0,
+            },
+            RuntimeType::Array {
+                len: 2,
+                elem: ValueRttid::new(2, ValueKind::Interface),
+            },
+        ];
+        let facts = RuntimeTypeFacts::from_module_parts(&struct_metas, &[], &runtime_types)
+            .expect("struct and interface facts");
+        let mut gc = Gc::new();
+        let fake_value_0 = string::create(&mut gc, b"fake-value-0");
+        let direct_0 = string::create(&mut gc, b"direct-0");
+        let fake_iface_0 = string::create(&mut gc, b"fake-interface-0");
+        let fake_value_1 = string::create(&mut gc, b"fake-value-1");
+        let direct_1 = string::create(&mut gc, b"direct-1");
+        let iface_ref = string::create(&mut gc, b"interface-ref");
+        let scalar_header = interface::pack_slot0(0, 0, ValueKind::Int64);
+        let ref_header = interface::pack_slot0(0, 0, ValueKind::String);
+        let struct_slots = [
+            fake_value_0 as u64,
+            direct_0 as u64,
+            scalar_header,
+            fake_iface_0 as u64,
+            fake_value_1 as u64,
+            direct_1 as u64,
+            ref_header,
+            iface_ref as u64,
+        ];
+        let mut visited = Vec::new();
+        trace_value_slots_by_meta(
+            &struct_slots,
+            ValueMeta::new(1, ValueKind::Array),
+            GcScanContext::with_runtime_type_facts(&struct_metas, &facts),
+            &mut |child| visited.push(child),
+        )
+        .expect("struct array scan");
+        assert_eq!(visited, [direct_0, direct_1, iface_ref]);
+
+        visited.clear();
+        trace_value_slots_by_meta(
+            &[
+                scalar_header,
+                fake_iface_0 as u64,
+                ref_header,
+                iface_ref as u64,
+            ],
+            ValueMeta::new(3, ValueKind::Array),
+            GcScanContext::with_runtime_type_facts(&struct_metas, &facts),
+            &mut |child| visited.push(child),
+        )
+        .expect("interface array scan");
+        assert_eq!(visited, [iface_ref]);
+    }
+
+    #[test]
+    fn gc_array_value_scan_without_verified_facts_fails_before_progress() {
+        let mut visited = Vec::new();
+        let err = trace_value_slots_by_meta(
+            &[0],
+            ValueMeta::new(0, ValueKind::Array),
+            GcScanContext::new(&[]),
+            &mut |child| visited.push(child),
+        )
+        .expect_err("array scans without facts must fail closed");
+        assert_eq!(err, TypedWriteBarrierByMetaError::MissingRuntimeTypeFacts);
+        assert!(visited.is_empty());
+
+        let mut gc = Gc::new();
+        let leaf = string::create(&mut gc, b"unscanned-root");
+        let value = gc.alloc_value_slots(ValueMeta::new(0, ValueKind::Array), 1);
+        unsafe { Gc::write_slot(value, 0, leaf as u64) };
+        let mut cursor = GcTraceCursor::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            scan_object_chunk_with_context(
+                &mut gc,
+                value,
+                GcScanContext::new(&[]),
+                &|_| ClosureScanLayout::default(),
+                &mut cursor,
+                SLOT_BYTES,
+            )
+        }));
+        assert!(result.is_err());
+        assert_eq!(cursor.reference_index, 0);
+        assert!(!unsafe { Gc::header(leaf) }.is_gray());
     }
 
     #[test]
@@ -1774,6 +2145,60 @@ mod tests {
             result.is_ok(),
             "struct array scanning should use StructMeta slot width with elem_bytes as stride"
         );
+    }
+
+    #[test]
+    fn gc_chunk_scan_struct_array_uses_logical_width_and_physical_stride() {
+        let mut gc = Gc::new();
+        let child = gc.alloc(ValueMeta::new(0, ValueKind::String), 1);
+        let arr = array::create(&mut gc, ValueMeta::new(0, ValueKind::Struct), 24, 1);
+        unsafe { array::set(arr, 0, child as u64, 8) };
+        let struct_metas = vec![StructMeta {
+            slot_types: vec![SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: std::collections::HashMap::new(),
+        }];
+        let mut cursor = GcTraceCursor::default();
+
+        let chunk = unsafe {
+            scan_object_chunk_with_context(
+                &mut gc,
+                arr,
+                GcScanContext::new(&struct_metas),
+                &|_| ClosureScanLayout::default(),
+                &mut cursor,
+                SLOT_BYTES,
+            )
+        };
+
+        assert_eq!(chunk, GcObjectScanChunk::complete(SLOT_BYTES));
+        assert_eq!(cursor.reference_index, 1);
+        assert!(unsafe { Gc::header(child) }.is_gray());
+    }
+
+    #[test]
+    fn range_barrier_ignores_struct_stride_padding() {
+        let mut module = vo_common_core::bytecode::Module::new("test".to_string());
+        module.struct_metas.push(StructMeta {
+            slot_types: vec![SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: std::collections::HashMap::new(),
+        });
+        let mut gc = Gc::new();
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Array), 1);
+        let storage = [0u64; 3];
+
+        unsafe {
+            typed_write_barrier_range_by_meta(
+                &mut gc,
+                parent,
+                storage.as_ptr().cast(),
+                1,
+                3 * SLOT_BYTES,
+                ValueMeta::new(0, ValueKind::Struct),
+                Some(ModuleRuntimeMetadata::unverified(&module)),
+            );
+        }
     }
 
     #[test]
@@ -1827,7 +2252,7 @@ mod tests {
             parent,
             &[],
             ValueMeta::new(0, ValueKind::Struct),
-            Some(&module),
+            Some(ModuleRuntimeMetadata::unverified(&module)),
         )
         .expect("zero-width no-ref struct barrier should be a no-op");
     }

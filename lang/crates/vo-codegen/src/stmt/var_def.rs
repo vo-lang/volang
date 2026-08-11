@@ -685,7 +685,6 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
                             elem_vk,
                             &slot_types[(i * elem_slots) as usize..((i + 1) * elem_slots) as usize],
                         ),
-                        self.ctx,
                     );
                 }
             }

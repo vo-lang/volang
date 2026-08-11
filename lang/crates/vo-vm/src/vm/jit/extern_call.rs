@@ -1,12 +1,9 @@
-#[cfg(feature = "std")]
-use vo_runtime::bytecode::Module;
-#[cfg(feature = "std")]
 use vo_runtime::jit_api::{JitContext, JitResult, JitRuntimeTrapKind};
 
-#[cfg(feature = "std")]
 use crate::fiber::Fiber;
-#[cfg(feature = "std")]
 use crate::fiber::JitExternSuspend;
+
+const EXTERN_STACK_SLOTS: usize = 16;
 
 /// Callback for JIT code to call extern functions.
 ///
@@ -15,12 +12,8 @@ use crate::fiber::JitExternSuspend;
 ///
 /// # Safety
 /// All pointers must be valid. Called from JIT-generated code.
-#[cfg(feature = "std")]
 pub extern "C" fn jit_call_extern(
     ctx: *mut JitContext,
-    extern_registry: *const core::ffi::c_void,
-    gc: *mut vo_runtime::gc::Gc,
-    module: *const core::ffi::c_void,
     extern_id: u32,
     args: *const u64,
     arg_count: u32,
@@ -31,13 +24,11 @@ pub extern "C" fn jit_call_extern(
         apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary,
     };
     use super::callbacks::helpers::{
-        validate_callback_raw_buffer, validate_callback_slot_count, validate_vm_callback_context,
+        validate_callback_context, validate_callback_raw_buffer, validate_callback_slot_count,
     };
     use crate::runtime_boundary::ResumePolicy;
-    use vo_runtime::ffi::{
-        ExternContractErrorKind, ExternFiberInputs, ExternInvoke, ExternRegistry, ExternWorld,
-    };
-    if let Err(result) = validate_vm_callback_context(
+    use vo_runtime::ffi::{ExternContractErrorKind, ExternFiberInputs, ExternInvoke, ExternWorld};
+    if let Err(result) = validate_callback_context(
         ctx,
         vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         extern_id as u64,
@@ -45,21 +36,20 @@ pub extern "C" fn jit_call_extern(
         return result;
     }
     let ctx_ref = unsafe { &mut *ctx };
-    if extern_registry.is_null()
-        || gc.is_null()
-        || module.is_null()
-        || extern_registry != ctx_ref.extern_registry
-        || gc != ctx_ref.gc
-        || module != ctx_ref.module.cast()
-    {
+    let Some(registry) = (unsafe { ctx_ref.extern_registry.as_ref() }) else {
         return vo_runtime::jit_api::set_jit_infra_error(
             ctx,
             vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
             extern_id as u64,
         );
-    }
-    let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
-    let module = unsafe { &*(module as *const Module) };
+    };
+    let module_ptr = unsafe { ctx_ref.module_ptr() };
+    let module =
+        unsafe { module_ptr.as_ref() }.expect("validated JIT extern context must carry a module");
+    let loaded_module_ptr = ctx_ref.loaded_module;
+    let runtime_metadata = unsafe { loaded_module_ptr.as_ref() }
+        .map(vo_runtime::bytecode::LoadedModule::runtime_metadata)
+        .unwrap_or_else(|| vo_runtime::bytecode::ModuleRuntimeMetadata::unverified(module));
     let Some(_extern_def) = module.externs.get(extern_id as usize) else {
         return vo_runtime::jit_api::set_jit_infra_error(
             ctx,
@@ -67,21 +57,14 @@ pub extern "C" fn jit_call_extern(
             extern_id as u64,
         );
     };
-    let resolved_extern = unsafe { &*(ctx_ref.vm as *const crate::vm::Vm) }
-        .state
-        .resolved_externs
-        .get(extern_id)
-        .cloned();
-    let Some(resolved_extern) = resolved_extern else {
+    let Some(resolved_extern) = registry.resolved(extern_id) else {
         return vo_runtime::jit_api::set_jit_infra_error(
             ctx,
             vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_METADATA,
             extern_id as u64,
         );
     };
-    // The short immutable VM borrow above ends before decoding mutable pointers
-    // to individual VM-owned services carried by JitContext.
-    let gc = unsafe { &mut *gc };
+    let gc = unsafe { &mut *ctx_ref.gc };
     let arg_slots = match validate_callback_slot_count(
         ctx,
         vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_METADATA,
@@ -143,22 +126,6 @@ pub extern "C" fn jit_call_extern(
         return result;
     }
 
-    let mut empty_buffer: [u64; 0] = [];
-    let ret_start = arg_slots;
-    let frame_slots = arg_slots_usize + ret_slots_usize;
-    let mut frame_buffer;
-    let buffer = if frame_slots == 0 {
-        &mut empty_buffer
-    } else {
-        frame_buffer = vec![0_u64; frame_slots];
-        if arg_slots_usize > 0 {
-            unsafe {
-                core::ptr::copy_nonoverlapping(args, frame_buffer.as_mut_ptr(), arg_slots_usize);
-            }
-        }
-        frame_buffer.as_mut_slice()
-    };
-
     // Get additional context needed for extern calls
     let (Some(itab_cache), Some(program_args), Some(sentinel_errors), Some(io), Some(host_output)) = (
         unsafe { ctx_ref.itab_cache.as_mut() },
@@ -182,10 +149,41 @@ pub extern "C" fn jit_call_extern(
             extern_id as u64,
         );
     };
+    let staged_io_root_additions_before = io.staged_gc_root_additions();
 
     // Get resume_io_token from fiber (for replay-at-PC semantics)
     let fiber = unsafe { &mut *(ctx_ref.fiber as *mut Fiber) };
     let resume_io_token = fiber.resume_io_token.take();
+
+    let ret_start = arg_slots;
+    let frame_slots = arg_slots_usize + ret_slots_usize;
+    let mut stack_buffer = [0_u64; EXTERN_STACK_SLOTS];
+    let mut heap_buffer = core::mem::take(&mut fiber.jit_extern_scratch);
+    let buffer: &mut [u64] = if frame_slots <= EXTERN_STACK_SLOTS {
+        &mut stack_buffer[..frame_slots]
+    } else {
+        if frame_slots > heap_buffer.len()
+            && heap_buffer
+                .try_reserve_exact(frame_slots - heap_buffer.len())
+                .is_err()
+        {
+            fiber.jit_extern_scratch = heap_buffer;
+            return vo_runtime::jit_api::set_jit_infra_error_with_message(
+                ctx,
+                vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                extern_id as u64,
+                "JIT extern scratch allocation failed".to_string(),
+            );
+        }
+        heap_buffer.resize(frame_slots, 0);
+        heap_buffer[..frame_slots].fill(0);
+        &mut heap_buffer[..frame_slots]
+    };
+    if arg_slots_usize > 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(args, buffer.as_mut_ptr(), arg_slots_usize);
+        }
+    }
 
     // Take closure replay state from fiber (populated by VM suspend/replay on re-entry)
     let replay_frame_depth = jit_extern_replay_frame_depth(fiber, ctx_ref);
@@ -200,32 +198,19 @@ pub extern "C" fn jit_call_extern(
         ret_start,
         ret_slots: ret_slots_u16,
     };
-    // Project only the disjoint V2 binding field from the opaque VM. A shared
-    // reference to the complete VM here would alias mutable runtime fields.
-    let host_services_v2 = if ctx_ref.vm.is_null() {
-        None
-    } else {
-        let binding = unsafe {
-            &*core::ptr::addr_of!(
-                (*(ctx_ref.vm as *const crate::vm::Vm))
-                    .state
-                    .host_services_v2
-            )
-        };
-        binding.as_ref()
-    };
-    let world = ExternWorld {
+    // Direct helpers receive only the validated binding captured in JitContext.
+    let host_services_v2 = unsafe { ctx_ref.host_services_v2.as_ref() };
+    let world = ExternWorld::new(
         gc,
-        module,
+        runtime_metadata,
         itab_cache,
-        vm_opaque: ctx_ref.vm,
         program_args,
         output,
         sentinel_errors,
         host_output,
-        host_services_v2,
-        io,
-    };
+    )
+    .with_host_services_v2(host_services_v2)
+    .with_io(io);
     let fiber_inputs = ExternFiberInputs {
         fiber_opaque: ctx_ref.fiber,
         resume_io_token,
@@ -234,8 +219,7 @@ pub extern "C" fn jit_call_extern(
         replay_results: closure_replay_results,
         replay_panic_message: closure_replay_panic_message,
     };
-    let result = match registry.call_resolved(buffer, invoke, world, fiber_inputs, &resolved_extern)
-    {
+    let result = match registry.call_resolved(buffer, invoke, world, fiber_inputs) {
         Ok(result) => result,
         Err(err) => {
             fiber.closure_replay.finish_extern_terminal();
@@ -245,6 +229,7 @@ pub extern "C" fn jit_call_extern(
                 }
                 ExternContractErrorKind::Generic => err.to_string(),
             };
+            fiber.jit_extern_scratch = heap_buffer;
             return vo_runtime::jit_api::set_jit_infra_error_with_message(
                 ctx,
                 vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_METADATA,
@@ -253,6 +238,7 @@ pub extern "C" fn jit_call_extern(
             );
         }
     };
+    let staged_io_roots_added = io.staged_gc_root_additions() != staged_io_root_additions_before;
     if matches!(result, vo_runtime::ffi::ExternResult::Ok) && ret_slots_usize > 0 {
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -262,8 +248,9 @@ pub extern "C" fn jit_call_extern(
             );
         }
     }
+    fiber.jit_extern_scratch = heap_buffer;
     let replay_pc = ctx_ref.call_resume_pc;
-    let transition = extern_result_to_transition(&resolved_extern, result, replay_pc);
+    let transition = extern_result_to_transition(resolved_extern, result, replay_pc);
     apply_extern_replay_scope_effect(fiber, transition.replay_scope);
 
     match transition.boundary {
@@ -336,9 +323,12 @@ pub extern "C" fn jit_call_extern(
             fiber.jit_extern_suspend = Some(JitExternSuspend::QueueBlock { resume_pc });
             JitResult::ExternSuspend
         }
-        #[cfg(feature = "std")]
         ExternBoundary::WaitIo(token) => {
-            fiber.jit_extern_suspend = Some(JitExternSuspend::WaitIo { token, replay_pc });
+            fiber.jit_extern_suspend = Some(JitExternSuspend::WaitIo {
+                token,
+                replay_pc,
+                staged_io_roots_added,
+            });
             JitResult::ExternSuspend
         }
         ExternBoundary::HostEventWait { token, delay_ms } => {
@@ -376,7 +366,6 @@ pub extern "C" fn jit_call_extern(
     }
 }
 
-#[cfg(feature = "std")]
 fn jit_extern_replay_frame_depth(fiber: &Fiber, ctx: &JitContext) -> usize {
     // Direct JIT-to-JIT callees are logical call frames before a side exit
     // materializes them into `fiber.frames`; use the same depth identity before
@@ -384,7 +373,7 @@ fn jit_extern_replay_frame_depth(fiber: &Fiber, ctx: &JitContext) -> usize {
     fiber.frames.len() + ctx.call_depth as usize
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::super::context::{build_jit_context, JitContextWrapper};
     use super::super::test_support::function;
@@ -404,56 +393,6 @@ mod tests {
             .expect("VM test extern identity must be canonical")
     }
 
-    fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
-        vo_source_contract::compact_pattern_position(compact, pattern)
-    }
-
-    fn compact_contains(compact: &[u8], pattern: &str) -> bool {
-        vo_source_contract::compact_contains(compact, pattern)
-    }
-
-    fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-        vo_source_contract::compact_region_between(source, marker, terminator)
-    }
-
-    fn compact_source_without_non_dominating_blocks(compact: &[u8]) -> Vec<u8> {
-        vo_source_contract::compact_rust_source_without_non_dominating_blocks_for_contract(compact)
-    }
-
-    fn callclosure_suspend_publishes_after_typed_args_062(source: &str) -> bool {
-        let Some(callclosure_arm) = compact_region_between(
-            source,
-            "ExternBoundary::CallClosure{closure_ref,args}=>{",
-            "ExternBoundary::Panic",
-        ) else {
-            return false;
-        };
-        let validation = "letargs=matchcrate::frame_call::typed_extern_replay_args(";
-        if !callclosure_arm.starts_with(validation.as_bytes()) {
-            return false;
-        }
-        let Some(validate_pos) = compact_pattern_position(&callclosure_arm, validation) else {
-            return false;
-        };
-        let callclosure_arm = compact_source_without_non_dominating_blocks(&callclosure_arm);
-        let Some(publish_pos) = compact_pattern_position(
-            &callclosure_arm,
-            "fiber.jit_extern_suspend=Some(JitExternSuspend::CallClosure{",
-        ) else {
-            return false;
-        };
-
-        validate_pos < publish_pos
-            && compact_contains(
-                &callclosure_arm[validate_pos..publish_pos],
-                "Ok(args)=>args",
-            )
-            && compact_contains(
-                &callclosure_arm[validate_pos..publish_pos],
-                "Err(err)=>{fiber.closure_replay.finish_extern_terminal();return",
-            )
-    }
-
     fn noop_extern(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
         ExternResult::Ok
     }
@@ -469,20 +408,15 @@ mod tests {
     ) -> (Box<Vm>, Box<Fiber>, JitContextWrapper) {
         // `JitContext` stores raw pointers into the VM; keep the VM address stable after return.
         let mut vm = Box::new(Vm::try_with_jit_config(JitConfig::default()).expect("jit vm"));
-        vm.state.extern_registry.register_test_named_with_effects(
-            0,
-            module.externs[0].name.clone(),
-            func,
-            effects,
-        );
-        vm.state.resolved_externs = vm
-            .state
-            .extern_registry
-            .resolve_module_externs(&module.externs)
+        let registry = std::sync::Arc::make_mut(&mut vm.state.extern_registry);
+        registry.register_test_named_with_effects(0, module.externs[0].name.clone(), func, effects);
+        registry
+            .resolve_and_freeze(&module.externs)
             .expect("resolve test externs");
+        vm.finish_load(module.clone());
         let mut fiber = Box::new(Fiber::new(7));
         fiber.push_frame(0, 4, 0, 0, 0);
-        let ctx = build_jit_context(vm.as_mut(), fiber.as_mut(), module).expect("jit context");
+        let ctx = build_jit_context(vm.as_mut(), fiber.as_mut()).expect("jit context");
         (vm, fiber, ctx)
     }
 
@@ -522,21 +456,11 @@ mod tests {
         provider_effects: ExternEffects,
     ) -> BridgeObservation {
         let module = module_with_extern("contract", allowed_effects);
-        let (mut vm, mut fiber, mut ctx) =
+        let (_vm, mut fiber, mut ctx) =
             jit_context_for_extern_bridge_with(&module, func, provider_effects);
         let mut args = [0u64; 1];
 
-        let result = jit_call_extern(
-            ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
-            0,
-            args.as_mut_ptr(),
-            0,
-            args.as_mut_ptr(),
-            0,
-        );
+        let result = jit_call_extern(ctx.as_ptr(), 0, args.as_mut_ptr(), 0, args.as_mut_ptr(), 0);
 
         BridgeObservation {
             result,
@@ -650,7 +574,7 @@ mod tests {
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
-        let (mut vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
+        let (_vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
             &module,
             return_arg_plus_one_extern,
             ExternEffects::NONE,
@@ -658,17 +582,7 @@ mod tests {
         let args = [41_u64];
         let mut ret = [0_u64];
 
-        let result = jit_call_extern(
-            ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
-            0,
-            args.as_ptr(),
-            1,
-            ret.as_mut_ptr(),
-            1,
-        );
+        let result = jit_call_extern(ctx.as_ptr(), 0, args.as_ptr(), 1, ret.as_mut_ptr(), 1);
 
         assert_eq!(result, JitResult::Ok);
         assert_eq!(args, [41], "extern args are immutable ABI input");
@@ -713,6 +627,7 @@ mod tests {
             Some(JitExternSuspend::WaitIo {
                 token: 99,
                 replay_pc: 0,
+                staged_io_roots_added: false,
             })
         );
         assert!(wait_obs.extern_scope_active);
@@ -767,7 +682,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_replay_scope_062_survives_direct_call_materialization_depth_change() {
         let module = module_with_extern("replay_scope", ExternEffects::MAY_CALL_CLOSURE_REPLAY);
-        let (mut vm, mut fiber, mut ctx) = jit_context_for_extern_bridge_with(
+        let (_vm, mut fiber, mut ctx) = jit_context_for_extern_bridge_with(
             &module,
             call_closure_until_replayed_extern,
             ExternEffects::MAY_CALL_CLOSURE_REPLAY,
@@ -777,9 +692,6 @@ mod tests {
         ctx.ctx.call_depth = 1;
         let first = jit_call_extern(
             ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
             0,
             scratch.as_mut_ptr(),
             0,
@@ -802,9 +714,6 @@ mod tests {
 
         let replay = jit_call_extern(
             ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
             0,
             scratch.as_mut_ptr(),
             0,
@@ -849,24 +758,14 @@ mod tests {
         malformed.param_slots = 1;
         malformed.is_closure = true;
         module.functions.push(malformed);
-        let (mut vm, fiber, mut ctx) = jit_context_for_extern_bridge_with(
+        let (_vm, fiber, mut ctx) = jit_context_for_extern_bridge_with(
             &module,
             call_malformed_closure_extern,
             ExternEffects::MAY_CALL_CLOSURE_REPLAY,
         );
         let mut args = [0u64; 1];
 
-        let result = jit_call_extern(
-            ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
-            0,
-            args.as_mut_ptr(),
-            0,
-            args.as_mut_ptr(),
-            0,
-        );
+        let result = jit_call_extern(ctx.as_ptr(), 0, args.as_mut_ptr(), 0, args.as_mut_ptr(), 0);
 
         assert_eq!(result, JitResult::JitError);
         assert!(fiber.jit_extern_suspend.is_none());
@@ -881,198 +780,6 @@ mod tests {
         };
         assert!(message.contains("invalid target frame shape"), "{message}");
         assert!(message.contains("gc_scan_slots=2"), "{message}");
-    }
-
-    #[test]
-    fn vm_jit_extern_suspend_062_validates_callclosure_payload_before_suspend_publication() {
-        let src = crate::source_contract::production_source_without_test_modules(include_str!(
-            "extern_call.rs"
-        ));
-        assert!(
-            callclosure_suspend_publishes_after_typed_args_062(&src),
-            "CallClosure extern suspend must be typed and frame-shape validated before publication"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_suspend_062_rejects_comment_spoofed_callclosure_validation() {
-        let spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                // let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                //     Ok(args) => args,
-                //     Err(err) => {
-                //         fiber.closure_replay.finish_extern_terminal();
-                //         return err;
-                //     }
-                // };
-                fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                    closure_ref,
-                    args,
-                    replay_pc,
-                });
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-
-        assert!(
-            !callclosure_suspend_publishes_after_typed_args_062(spoof),
-            "comment-only typed replay validation must not satisfy CallClosure suspend publication"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_suspend_062_rejects_non_dominating_callclosure_validation() {
-        let spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                if false {
-                    let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                        Ok(args) => args,
-                        Err(err) => {
-                            fiber.closure_replay.finish_extern_terminal();
-                            return err;
-                        }
-                    };
-                }
-                fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                    closure_ref,
-                    args,
-                    replay_pc,
-                });
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-
-        assert!(
-            !callclosure_suspend_publishes_after_typed_args_062(spoof),
-            "unreachable typed replay validation must not satisfy CallClosure suspend publication"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_suspend_062_rejects_unreachable_callclosure_publication() {
-        let spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                    Ok(args) => args,
-                    Err(err) => {
-                        fiber.closure_replay.finish_extern_terminal();
-                        return err;
-                    }
-                };
-                if false {
-                    fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                        closure_ref,
-                        args,
-                        replay_pc,
-                    });
-                }
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-
-        assert!(
-            !callclosure_suspend_publishes_after_typed_args_062(spoof),
-            "unreachable CallClosure suspend publication must not satisfy the proof"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_suspend_062_rejects_local_helper_callclosure_publication() {
-        let spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                    Ok(args) => args,
-                    Err(err) => {
-                        fiber.closure_replay.finish_extern_terminal();
-                        return err;
-                    }
-                };
-                fn publish_suspend(fiber: &mut Fiber, closure_ref: GcRef, args: Vec<u64>, replay_pc: u32) {
-                    fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                        closure_ref,
-                        args,
-                        replay_pc,
-                    });
-                }
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-
-        assert!(
-            !callclosure_suspend_publishes_after_typed_args_062(spoof),
-            "local helper CallClosure suspend publication must not satisfy the proof"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_suspend_062_rejects_closure_wrapped_callclosure_publication() {
-        let closure_spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                    Ok(args) => args,
-                    Err(err) => {
-                        fiber.closure_replay.finish_extern_terminal();
-                        return err;
-                    }
-                };
-                let _publish = || {
-                    fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                        closure_ref,
-                        args,
-                        replay_pc,
-                    });
-                };
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-        let typed_closure_spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                    Ok(args) => args,
-                    Err(err) => {
-                        fiber.closure_replay.finish_extern_terminal();
-                        return err;
-                    }
-                };
-                let _publish = move |fiber: &mut Fiber, args: Vec<u64>| -> JitResult {
-                    fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                        closure_ref,
-                        args,
-                        replay_pc,
-                    });
-                    JitResult::ExternSuspend
-                };
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-        let macro_spoof = r#"
-            ExternBoundary::CallClosure { closure_ref, args } => {
-                let args = match crate::frame_call::typed_extern_replay_args(gc, module, itab, closure_ref, args) {
-                    Ok(args) => args,
-                    Err(err) => {
-                        fiber.closure_replay.finish_extern_terminal();
-                        return err;
-                    }
-                };
-                macro_rules! publish_suspend {
-                    () => {
-                        fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
-                            closure_ref,
-                            args,
-                            replay_pc,
-                        });
-                    };
-                }
-            }
-            ExternBoundary::Panic(msg) => {}
-        "#;
-
-        for spoof in [closure_spoof, typed_closure_spoof, macro_spoof] {
-            assert!(
-                !callclosure_suspend_publishes_after_typed_args_062(spoof),
-                "closure/macro-wrapped CallClosure suspend publication must not satisfy the proof"
-            );
-        }
     }
 
     #[test]
@@ -1125,46 +832,6 @@ mod tests {
     }
 
     #[test]
-    fn vm_jit_extern_call_classifies_removed_resolved_provider_as_not_registered() {
-        let module = module_with_extern("contract", ExternEffects::NONE);
-        let extern_name = module.externs[0].name.clone();
-        let (mut vm, fiber, mut ctx) = jit_context_for_extern_bridge(&module);
-        vm.state.extern_registry = vo_runtime::ffi::ExternRegistry::new();
-        let mut args = [0u64; 1];
-
-        let result = jit_call_extern(
-            ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
-            0,
-            args.as_mut_ptr(),
-            0,
-            args.as_mut_ptr(),
-            0,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(ctx.ctx.runtime_trap_arg1, JIT_INFRA_ERROR_INVALID_METADATA);
-        let message = unsafe {
-            ctx.ctx
-                .infra_error_message
-                .as_ref()
-                .cloned()
-                .unwrap_or_default()
-        };
-        assert!(
-            message.contains(&format!(
-                "JIT extern call failed: extern function '{extern_name}'"
-            )),
-            "{message}"
-        );
-        assert!(message.contains("not registered"), "{message}");
-        assert!(fiber.closure_replay.extern_scope.is_none());
-    }
-
-    #[test]
     fn vm_jit_extern_call_declared_arg_count_mismatch_is_jit_error() {
         let mut module = Module::new("jit-extern-arg-mismatch".to_string());
         module.functions.push(function(4, 0));
@@ -1175,20 +842,10 @@ mod tests {
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
-        let (mut vm, _fiber, mut ctx) = jit_context_for_extern_bridge(&module);
+        let (_vm, _fiber, mut ctx) = jit_context_for_extern_bridge(&module);
         let mut args = [0u64; 2];
 
-        let result = jit_call_extern(
-            ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
-            0,
-            args.as_mut_ptr(),
-            1,
-            args.as_mut_ptr(),
-            0,
-        );
+        let result = jit_call_extern(ctx.as_ptr(), 0, args.as_mut_ptr(), 1, args.as_mut_ptr(), 0);
 
         assert_eq!(result, JitResult::JitError);
         assert_eq!(ctx.ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
@@ -1206,7 +863,7 @@ mod tests {
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
-        let (mut vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
+        let (_vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
             &module,
             panic_if_called_extern,
             ExternEffects::NONE,
@@ -1214,9 +871,6 @@ mod tests {
 
         let result = jit_call_extern(
             ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
             0,
             core::ptr::null(),
             1,
@@ -1240,7 +894,7 @@ mod tests {
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
-        let (mut vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
+        let (_vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
             &module,
             panic_if_called_extern,
             ExternEffects::NONE,
@@ -1248,9 +902,6 @@ mod tests {
 
         let result = jit_call_extern(
             ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
             0,
             core::ptr::null(),
             0,
@@ -1274,7 +925,7 @@ mod tests {
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
-        let (mut vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
+        let (_vm, _fiber, mut ctx) = jit_context_for_extern_bridge_with(
             &module,
             panic_if_called_extern,
             ExternEffects::NONE,
@@ -1283,9 +934,6 @@ mod tests {
 
         let result = jit_call_extern(
             ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
             0,
             args.as_mut_ptr(),
             u32::from(u16::MAX) + 1,
@@ -1309,20 +957,10 @@ mod tests {
             allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
-        let (mut vm, _fiber, mut ctx) = jit_context_for_extern_bridge(&module);
+        let (_vm, _fiber, mut ctx) = jit_context_for_extern_bridge(&module);
         let mut args = [0u64; 2];
 
-        let result = jit_call_extern(
-            ctx.as_ptr(),
-            &vm.state.extern_registry as *const _ as *const core::ffi::c_void,
-            &mut vm.state.gc as *mut _,
-            &module as *const Module as *const core::ffi::c_void,
-            0,
-            args.as_mut_ptr(),
-            1,
-            args.as_mut_ptr(),
-            2,
-        );
+        let result = jit_call_extern(ctx.as_ptr(), 0, args.as_mut_ptr(), 1, args.as_mut_ptr(), 2);
 
         assert_eq!(result, JitResult::JitError);
         assert_eq!(ctx.ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);

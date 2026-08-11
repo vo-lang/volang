@@ -1,7 +1,9 @@
 //! Bytecode text format parser and formatter.
 
 use vo_common_core::{types::ValueRttid, SlotType, ValueMeta};
-use vo_vm::bytecode::{Constant, FunctionDef, Module, ParamShape, TransferType};
+use vo_vm::bytecode::{
+    Constant, FunctionDef, InstructionMetadata, Module, ParamShape, TransferType,
+};
 use vo_vm::instruction::{Instruction, Opcode};
 
 /// Format a Module as text.
@@ -156,7 +158,11 @@ fn format_function(func_id: u32, f: &FunctionDef) -> String {
     }
 
     for (pc, instr) in f.code.iter().enumerate() {
-        out.push_str(&format!("  {:04}: {}\n", pc, format_instruction(instr)));
+        out.push_str(&format!(
+            "  {:04}: {}\n",
+            pc,
+            format_instruction(instr, f.instruction_metadata.get(pc))
+        ));
     }
 
     out
@@ -234,7 +240,7 @@ fn format_slot_type(slot_type: SlotType) -> &'static str {
     }
 }
 
-fn format_instruction(instr: &Instruction) -> String {
+fn format_instruction(instr: &Instruction, metadata: Option<&InstructionMetadata>) -> String {
     let op = instr.opcode();
     let a = instr.a;
     let b = instr.b;
@@ -259,14 +265,8 @@ fn format_instruction(instr: &Instruction) -> String {
         // SLOT
         Opcode::SlotGet => format!("SlotGet       r{}, r{}[r{}]", a, b, c),
         Opcode::SlotSet => format!("SlotSet       r{}[r{}], r{}", a, b, c),
-        Opcode::SlotGetN => format!(
-            "SlotGetN      r{}, r{}[r{}], layout=metadata, legacy_n={}",
-            a, b, c, flags
-        ),
-        Opcode::SlotSetN => format!(
-            "SlotSetN      r{}[r{}], r{}, layout=metadata, legacy_n={}",
-            a, b, c, flags
-        ),
+        Opcode::SlotGetN => format!("SlotGetN      r{}, r{}[r{}], layout=metadata", a, b, c),
+        Opcode::SlotSetN => format!("SlotSetN      r{}[r{}], r{}, layout=metadata", a, b, c),
 
         // GLOBAL
         Opcode::GlobalGet => format!("GlobalGet     r{}, global_{}", a, b),
@@ -275,11 +275,21 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::GlobalSetN => format!("GlobalSetN    global_{}, r{}, n={}", a, b, flags),
 
         // PTR
-        Opcode::PtrNew => format!("PtrNew        r{}, meta=r{}, slots={}", a, b, c),
+        Opcode::PtrNew => match metadata {
+            Some(InstructionMetadata::PtrLayout { value_layout }) => {
+                format!(
+                    "PtrNew        r{}, meta=r{}, slots={}",
+                    a,
+                    b,
+                    value_layout.len()
+                )
+            }
+            _ => format!("PtrNew        r{}, meta=r{}, layout=missing", a, b),
+        },
         Opcode::PtrGet => format!("PtrGet        r{}, r{}[{}]", a, b, c),
         Opcode::PtrSet => format!("PtrSet        r{}[{}], r{}", a, b, c),
-        Opcode::PtrGetN => format!("PtrGetN       r{}, r{}[{}], n={}", a, b, c, flags),
-        Opcode::PtrSetN => format!("PtrSetN       r{}[{}], r{}, n={}", a, b, c, flags),
+        Opcode::PtrGetN => format!("PtrGetN       r{}, r{}[{}], layout=metadata", a, b, c),
+        Opcode::PtrSetN => format!("PtrSetN       r{}[{}], r{}, layout=metadata", a, b, c),
         Opcode::PtrAdd => format!("PtrAdd        r{}, r{}, r{}", a, b, c),
 
         // ARITH Integer
@@ -352,39 +362,26 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::JumpIfNot => format!("JumpIfNot     r{}, pc_{}", a, instr.imm32()),
 
         // CALL
-        // a=func_id_low, b=args_start, c=(arg_slots<<8|ret_slots), flags=func_id_high
+        // a=func_id_low, b=args_start, flags=func_id_high; callee owns the layout
         Opcode::Call => {
             let func_id = instr.static_call_func_id();
-            let arg_slots = instr.packed_arg_slots();
-            let ret_slots = instr.packed_ret_slots();
-            format!(
-                "Call          func_{}, args=r{}, arg_slots={}, ret_slots={}",
-                func_id, b, arg_slots, ret_slots
-            )
+            format!("Call          func_{}, args=r{}, layout=callee", func_id, b)
         }
-        // CallExtern: a=result_start, b=extern_id, c=arg_start, flags=arg_count
+        // CallExtern: a=result_start, b=extern_id, c=arg_start
         Opcode::CallExtern => format!(
-            "CallExtern    r{}, extern_{}, args={}, count={}",
-            a, b, c, flags
+            "CallExtern    r{}, extern_{}, args=r{}, layout=metadata",
+            a, b, c
         ),
-        // CallClosure: a=closure_reg, b=args_start, c=(arg_slots<<8|ret_slots)
         Opcode::CallClosure => {
-            let arg_slots = instr.packed_arg_slots();
-            let ret_slots = instr.packed_ret_slots();
-            format!(
-                "CallClosure   r{}, r{}, arg_slots={}, ret_slots={}",
-                a, b, arg_slots, ret_slots
-            )
+            format!("CallClosure   r{}, args=r{}, layout=metadata", a, b)
         }
-        // CallIface: a=iface_slot, b=args_start, c=(arg_slots<<8|ret_slots), flags=method_idx
-        Opcode::CallIface => {
-            let arg_slots = instr.packed_arg_slots();
-            let ret_slots = instr.packed_ret_slots();
-            format!(
-                "CallIface     r{}, r{}, method={}, arg_slots={}, ret_slots={}",
-                a, b, flags, arg_slots, ret_slots
-            )
-        }
+        Opcode::CallIface => match metadata {
+            Some(InstructionMetadata::CallIfaceLayout { method_idx, .. }) => format!(
+                "CallIface     r{}, args=r{}, method={}, layout=metadata",
+                a, b, method_idx
+            ),
+            _ => format!("CallIface     r{}, args=r{}, layout=metadata", a, b),
+        },
         Opcode::Return => {
             if a == 0 && b == 0 {
                 "Return".to_string()
@@ -408,27 +405,22 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::StrDecodeRune => format!("StrDecodeRune r{}, r{}, r{}", a, b, c),
 
         // ARRAY
-        // ArrayNew: a=dst, b=meta_reg, c=len_reg, flags=elem_bytes_encoding
         Opcode::ArrayNew => format!(
-            "ArrayNew      r{}, meta=r{}, len=r{}, flags={}",
-            a, b, c, flags
+            "ArrayNew      r{}, meta=r{}, len=r{}, layout=metadata",
+            a, b, c
         ),
-        // ArrayGet: a=dst, b=array, c=idx, flags=elem_bytes_encoding
-        Opcode::ArrayGet => format!("ArrayGet      r{}, r{}[r{}], flags={}", a, b, c, flags),
-        // ArraySet: a=array, b=idx, c=val, flags=elem_bytes_encoding
-        Opcode::ArraySet => format!("ArraySet      r{}[r{}], r{}, flags={}", a, b, c, flags),
-        Opcode::ArrayAddr => format!("ArrayAddr     r{}, r{}[r{}], flags={}", a, b, c, flags),
+        Opcode::ArrayGet => format!("ArrayGet      r{}, r{}[r{}], layout=metadata", a, b, c),
+        Opcode::ArraySet => format!("ArraySet      r{}[r{}], r{}, layout=metadata", a, b, c),
+        Opcode::ArrayAddr => format!("ArrayAddr     r{}, r{}[r{}], layout=metadata", a, b, c),
 
         // SLICE
-        // SliceNew: a=dst, b=meta_reg, c=len_reg (len at c, cap at c+1), flags=elem_bytes_encoding
+        // SliceNew: a=dst, b=meta_reg, c=len_reg (len at c, cap at c+1)
         Opcode::SliceNew => format!(
-            "SliceNew      r{}, meta=r{}, len=r{}, flags={}",
-            a, b, c, flags
+            "SliceNew      r{}, meta=r{}, len=r{}, layout=metadata",
+            a, b, c
         ),
-        // SliceGet: a=dst, b=slice, c=idx, flags=elem_bytes_encoding
-        Opcode::SliceGet => format!("SliceGet      r{}, r{}[r{}], elem_slots={}", a, b, c, flags),
-        // SliceSet: a=slice, b=idx, c=val, flags=elem_bytes_encoding
-        Opcode::SliceSet => format!("SliceSet      r{}[r{}], r{}, elem_slots={}", a, b, c, flags),
+        Opcode::SliceGet => format!("SliceGet      r{}, r{}[r{}], layout=metadata", a, b, c),
+        Opcode::SliceSet => format!("SliceSet      r{}[r{}], r{}, layout=metadata", a, b, c),
         Opcode::SliceLen => format!("SliceLen      r{}, r{}", a, b),
         Opcode::SliceCap => format!("SliceCap      r{}, r{}", a, b),
         // SliceSlice: a=dst, b=src, c=lo_reg (lo at c, hi at c+1), flags=mode
@@ -449,36 +441,26 @@ fn format_instruction(instr: &Instruction) -> String {
                 a, b, c, src_type, max_str
             )
         }
-        // SliceAppend: a=dst, b=slice, c=meta_reg, flags=elem_bytes_encoding
         Opcode::SliceAppend => {
-            format!("SliceAppend   r{}, r{}, meta=r{}, flags={}", a, b, c, flags)
+            format!("SliceAppend   r{}, r{}, meta=r{}, layout=metadata", a, b, c)
         }
-        Opcode::SliceAddr => format!("SliceAddr     r{}, r{}[r{}], flags={}", a, b, c, flags),
+        Opcode::SliceAddr => format!("SliceAddr     r{}, r{}[r{}], layout=metadata", a, b, c),
 
         // MAP
-        Opcode::MapNew => format!(
-            "MapNew        r{}, layout=metadata, legacy_key_slots={}, legacy_val_slots={}",
-            a,
-            instr.map_new_legacy_key_slots(),
-            instr.map_new_legacy_val_slots()
-        ),
+        Opcode::MapNew => format!("MapNew        r{}, meta=r{}, layout=metadata", a, b),
         Opcode::MapGet => format!("MapGet        r{}, r{}[r{}]", a, b, c),
         Opcode::MapSet => format!("MapSet        r{}[r{}], r{}", a, b, c),
         Opcode::MapDelete => format!("MapDelete     r{}[r{}]", a, b),
         Opcode::MapLen => format!("MapLen        r{}, r{}", a, b),
         Opcode::MapIterInit => format!("MapIterInit   r{}, r{}", a, b),
-        Opcode::MapIterNext => {
-            let key_slots = instr.map_iter_key_slots();
-            let val_slots = instr.map_iter_val_slots();
-            format!(
-                "MapIterNext   r{}, iter=r{}, ok=r{}, key_slots={}, val_slots={}",
-                a, b, c, key_slots, val_slots
-            )
-        }
+        Opcode::MapIterNext => format!(
+            "MapIterNext   r{}, iter=r{}, ok=r{}, layout=metadata",
+            a, b, c
+        ),
 
         // QUEUE
         Opcode::QueueNew => format!(
-            "QueueNew      r{}, type=r{}, cap=r{}, kind={}, layout=metadata, legacy_slots={}",
+            "QueueNew      r{}, type=r{}, cap=r{}, kind={}, layout=metadata",
             a,
             b,
             c,
@@ -487,19 +469,12 @@ fn format_instruction(instr: &Instruction) -> String {
             } else {
                 "chan"
             },
-            instr.queue_new_legacy_elem_slots(),
         ),
-        Opcode::QueueSend => format!(
-            "QueueSend     r{}, r{}, layout=metadata, legacy_slots={}",
-            a,
-            b,
-            instr.queue_send_legacy_elem_slots()
-        ),
+        Opcode::QueueSend => format!("QueueSend     r{}, r{}, layout=metadata", a, b),
         Opcode::QueueRecv => format!(
-            "QueueRecv     r{}, r{}, layout=metadata, legacy_slots={}, has_ok={}",
+            "QueueRecv     r{}, r{}, layout=metadata, has_ok={}",
             a,
             b,
-            instr.recv_legacy_elem_slots(),
             instr.recv_has_ok()
         ),
         Opcode::QueueClose => format!("QueueClose    r{}", a),
@@ -522,32 +497,32 @@ fn format_instruction(instr: &Instruction) -> String {
         Opcode::ClosureGet => format!("ClosureGet    r{}, capture[{}]", a, b),
 
         // GO
-        // a=func_id_low/closure_reg, b=args_start, c=arg_slots, flags bit0=is_closure
+        // a=func_id_low/closure_reg, b=args_start, flags bit0=is_closure
         Opcode::GoStart => {
             if instr.call_shape_is_closure() {
-                format!("GoStart       closure=r{}, args=r{}, slots={}", a, b, c)
+                format!("GoStart       closure=r{}, args=r{}, layout=metadata", a, b)
             } else {
                 let func_id = instr.call_shape_static_func_id();
-                format!("GoStart       func_{}, args=r{}, slots={}", func_id, b, c)
+                format!("GoStart       func_{}, args=r{}, layout=callee", func_id, b)
             }
         }
 
         // DEFER
-        // a=func_id_low/closure_reg, b=arg_start, c=arg_slots, flags bit0=is_closure
+        // a=func_id_low/closure_reg, b=arg_start, flags bit0=is_closure
         Opcode::DeferPush => {
             if instr.call_shape_is_closure() {
-                format!("DeferPush     closure=r{}, args=r{}, slots={}", a, b, c)
+                format!("DeferPush     closure=r{}, args=r{}, layout=metadata", a, b)
             } else {
                 let func_id = instr.call_shape_static_func_id();
-                format!("DeferPush     func_{}, args=r{}, slots={}", func_id, b, c)
+                format!("DeferPush     func_{}, args=r{}, layout=callee", func_id, b)
             }
         }
         Opcode::ErrDeferPush => {
             if instr.call_shape_is_closure() {
-                format!("ErrDeferPush  closure=r{}, args=r{}, slots={}", a, b, c)
+                format!("ErrDeferPush  closure=r{}, args=r{}, layout=metadata", a, b)
             } else {
                 let func_id = instr.call_shape_static_func_id();
-                format!("ErrDeferPush  func_{}, args=r{}, slots={}", func_id, b, c)
+                format!("ErrDeferPush  func_{}, args=r{}, layout=callee", func_id, b)
             }
         }
         Opcode::Panic => format!("Panic         r{}", a),
@@ -556,10 +531,21 @@ fn format_instruction(instr: &Instruction) -> String {
         // IFACE
         // IfaceAssign: a=dst(2 slots), b=src, c=const_idx, flags=value_kind
         Opcode::IfaceAssign => format!("IfaceAssign   r{}, r{}, const={}, vk={}", a, b, c, flags),
-        Opcode::IfaceAssert => format!(
-            "IfaceAssert   r{}, r{}, target_meta={}, flags={}",
-            a, b, c, flags
-        ),
+        Opcode::IfaceAssert => match metadata {
+            Some(InstructionMetadata::IfaceAssertLayout {
+                assert_kind,
+                target_id,
+                ..
+            }) => format!(
+                "IfaceAssert   r{}, r{}, kind={}, target={}, has_ok={}",
+                a,
+                b,
+                assert_kind,
+                target_id,
+                (flags & vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG) != 0
+            ),
+            _ => format!("IfaceAssert   r{}, r{}, layout=metadata", a, b),
+        },
         Opcode::IfaceEq => format!("IfaceEq       r{}, r{}, r{}", a, b, c),
 
         // CONV

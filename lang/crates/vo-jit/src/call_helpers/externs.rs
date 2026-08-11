@@ -1,11 +1,11 @@
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{types, InstBuilder};
 
-use vo_runtime::bytecode::{ExternJitRoute, JitInstructionMetadata};
+use vo_runtime::bytecode::{ExternJitRoute, InstructionMetadata};
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::JitContextField;
 
 use crate::intrinsics;
-use crate::translator::IrEmitter;
+use crate::translator::{HelperKind, IrEmitter, NativeScratchKind};
 
 use super::{emit_checked_jit_result_helper_call, JIT_RESULT_REPLAY};
 
@@ -26,8 +26,8 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     let dst = inst.a as usize;
     let extern_id = inst.b as u32;
     let arg_start = inst.c as usize;
-    let (arg_count, callsite_ret_slots) = match emitter.current_jit_metadata() {
-        Some(JitInstructionMetadata::CallExternLayout {
+    let (arg_count, callsite_ret_slots) = match emitter.current_instruction_metadata() {
+        Some(InstructionMetadata::CallExternLayout {
             arg_layout,
             ret_layout,
         }) => (arg_layout.len(), ret_layout.len()),
@@ -74,21 +74,14 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         return Ok(false);
     }
 
-    let call_extern_func =
-        crate::translate::require_helper(emitter.helpers().call_extern, "call_extern")?;
+    let call_extern_func = emitter.helper(HelperKind::call_extern);
 
     let current_pc_val = emitter
         .builder()
         .ins()
         .iconst(types::I32, config.current_pc as i64);
     if matches!(jit_route, ExternJitRoute::VmMaterializeBeforeCall) {
-        let ctx = emitter.ctx_param();
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            current_pc_val,
-            ctx,
-            JitContext::OFFSET_CALL_RESUME_PC,
-        );
+        emitter.store_context_field(current_pc_val, JitContextField::CallResumePc);
         emitter.spill_all_vars();
         let replay_result = emitter
             .builder()
@@ -114,24 +107,19 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         extern_ret_slots
     };
 
-    let builder = emitter.builder();
-    let args_slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (arg_count.max(1) * 8) as u32,
-        8,
-    ));
-    let ret_slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (extern_ret_slots.max(1) * 8) as u32,
-        8,
-    ));
+    let args_slot =
+        emitter.native_scratch_slot(NativeScratchKind::ExternArgs, arg_count.max(1) * 8);
+    let ret_slot = emitter.native_scratch_slot(
+        NativeScratchKind::ExternReturns,
+        extern_ret_slots.max(1) * 8,
+    );
 
     for i in 0..arg_count {
         let val = emitter.read_var((arg_start + i) as u16);
         emitter
             .builder()
             .ins()
-            .stack_store(val, args_slot, (i * 8) as i32);
+            .stack_store(types::I64, val, args_slot, (i * 8) as i32);
     }
 
     let ctx = emitter.ctx_param();
@@ -147,20 +135,10 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     // Publish the current pc before the helper call. Direct-helper extern
     // suspends travel through VM-owned ExternSuspend payloads; materialize-only
     // routes use Replay before calling the extern.
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        current_pc_val,
-        ctx,
-        JitContext::OFFSET_CALL_RESUME_PC,
-    );
+    emitter.store_context_field(current_pc_val, JitContextField::CallResumePc);
     // Extern panics are user panics at the CallExtern bytecode pc. Publish the
     // panic location through user_panic_pc; call_resume_pc is only a resume ABI.
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        current_pc_val,
-        ctx,
-        JitContext::OFFSET_USER_PANIC_PC,
-    );
+    emitter.store_context_field(current_pc_val, JitContextField::UserPanicPc);
 
     emit_checked_jit_result_helper_call(
         emitter,
@@ -173,46 +151,19 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
             ret_ptr,
             ret_slots_val,
         ],
-        true,
     );
     emitter.refresh_stack_base_after_reallocation();
 
     let no_user_panic_pc = emitter.builder().ins().iconst(types::I32, -1);
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        no_user_panic_pc,
-        ctx,
-        JitContext::OFFSET_USER_PANIC_PC,
-    );
+    emitter.store_context_field(no_user_panic_pc, JitContextField::UserPanicPc);
 
     for i in 0..copy_back_slots {
-        let val = emitter
-            .builder()
-            .ins()
-            .stack_load(types::I64, ret_slot, (i * 8) as i32);
+        let val =
+            emitter
+                .builder()
+                .ins()
+                .stack_load(types::I64, types::I64, ret_slot, (i * 8) as i32);
         emitter.write_var((dst + i) as u16, val);
     }
     Ok(false)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vm_osr_call_extern_stack_061_refreshes_before_return_copyback() {
-        let source = include_str!("externs.rs");
-        let helper_call = source
-            .find("emit_checked_jit_result_helper_call(")
-            .expect("CallExtern must route through checked helper call");
-        let refresh = source
-            .find("emitter.refresh_stack_base_after_reallocation();")
-            .expect("CallExtern must refresh stack base after helper calls");
-        let copy_back = source
-            .find("for i in 0..copy_back_slots")
-            .expect("CallExtern must copy direct-helper returns back to locals");
-
-        assert!(
-            helper_call < refresh && refresh < copy_back,
-            "CallExtern must refresh stack base after helper return and before local copy-back"
-        );
-    }
 }

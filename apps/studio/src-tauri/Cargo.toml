@@ -39,13 +39,3 @@ vo-engine = { path = "../../../lang/crates/vo-engine" }
 vo-module = { path = "../../../lang/crates/vo-module" }
 vo-runtime = { path = "../../../lang/crates/vo-runtime" }
 vo-web = { path = "../../../lang/crates/vo-web" }
-vogui-protocol = { git = "https://github.com/vo-lang/vogui", rev = "a5bf43f92f02667dcd339dee8975eb45e1ccf21e" }
-
-[patch."https://github.com/vo-lang/volang"]
-vo-common    = { path = "../../../lang/crates/vo-common" }
-vo-engine    = { path = "../../../lang/crates/vo-engine" }
-vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
-vo-module    = { path = "../../../lang/crates/vo-module" }
-vo-runtime   = { path = "../../../lang/crates/vo-runtime" }
-vo-syntax    = { path = "../../../lang/crates/vo-syntax" }
-vo-vm        = { path = "../../../lang/crates/vo-vm" }

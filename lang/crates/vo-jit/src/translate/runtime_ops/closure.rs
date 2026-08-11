@@ -1,25 +1,23 @@
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags};
 use vo_runtime::instruction::Instruction;
 
-use crate::translate::{emit_jit_error_if_zero, require_helper};
-use crate::translator::{emit_funcref_call, RuntimeOpsEmitter};
-use crate::JitError;
+use crate::translate::emit_jit_error_if_zero;
+use crate::translator::{emit_runtime_helper_call, HelperKind, RuntimeOpsEmitter};
 
 pub(in crate::translate) fn closure_new<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
-) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().closure_new, "closure_new")?;
+) {
+    let func = e.helper(HelperKind::closure_new);
     let gc_ptr = e.gc_ptr();
     let func_id = inst.closure_new_func_id();
     let capture_count = inst.c as u32;
     let func_id_i32 = e.builder().ins().iconst(types::I32, func_id as i64);
     let capture_count_i32 = e.builder().ins().iconst(types::I32, capture_count as i64);
-    let call = emit_funcref_call(e, func, &[gc_ptr, func_id_i32, capture_count_i32]);
+    let call = emit_runtime_helper_call(e, func, &[gc_ptr, func_id_i32, capture_count_i32]);
     let result = e.builder().inst_results(call)[0];
     emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
-    Ok(())
 }
 
 pub(in crate::translate) fn closure_get<'a>(

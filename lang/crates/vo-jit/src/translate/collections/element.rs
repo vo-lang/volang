@@ -1,28 +1,22 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitResult, JIT_HELPER_U64_ERROR};
 
 use crate::translator::CollectionEmitter;
 use crate::JitError;
 
-/// Resolve elem_bytes from instruction flags or per-PC JIT metadata.
-/// When flags==0, verifier requires metadata; register constants are not a
-/// layout authority.
+/// Resolve elem_bytes from per-PC metadata.
 /// Returns (elem_bytes, needs_sign_extend).
 pub(in crate::translate) fn resolve_elem_bytes<'a>(
     e: &impl CollectionEmitter<'a>,
     opcode: Opcode,
-    flags: u8,
-    eb_reg: u16,
 ) -> Result<(usize, bool), JitError> {
-    let layout = e
-        .elem_layout(flags, eb_reg)
-        .ok_or(JitError::MissingJitLayout {
-            pc: e.current_pc(),
-            opcode,
-            layout: "ElemLayout",
-        })?;
+    let layout = e.elem_layout().ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode,
+        layout: "ElemLayout",
+    })?;
     Ok((layout.bytes, layout.needs_sign_extend))
 }
 
@@ -103,10 +97,8 @@ pub(in crate::translate) fn store_element<'a>(
 pub(in crate::translate) fn emit_elem_bytes_i32<'a>(
     e: &mut impl CollectionEmitter<'a>,
     opcode: Opcode,
-    flags: u8,
-    eb_reg: u16,
 ) -> Result<Value, JitError> {
-    let (elem_bytes, _) = resolve_elem_bytes(e, opcode, flags, eb_reg)?;
+    let (elem_bytes, _) = resolve_elem_bytes(e, opcode)?;
     Ok(e.builder().ins().iconst(types::I32, elem_bytes as i64))
 }
 
@@ -119,7 +111,7 @@ pub(in crate::translate) fn emit_return_if_u64_jit_error<'a>(
         .ins()
         .iconst(types::I64, JIT_HELPER_U64_ERROR as i64);
     let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
-    let error_block = e.builder().create_block();
+    let error_block = crate::compile_common::cold_block(e.builder());
     let ok_block = e.builder().create_block();
     e.builder()
         .ins()

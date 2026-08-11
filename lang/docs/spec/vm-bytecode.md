@@ -82,8 +82,8 @@ pub enum Opcode {
     // === SLOT: Stack dynamic indexing (for stack arrays) ===
     SlotGet,      // slots[a] = slots[b + slots[c]]
     SlotSet,      // slots[a + slots[b]] = slots[c]
-    SlotGetN,     // multi-slot element load; SlotLayout owns width, flags is mirror/sentinel
-    SlotSetN,     // multi-slot element store; SlotLayout owns width, flags is mirror/sentinel
+    SlotGetN,     // multi-slot element load; SlotLayout owns the layout, flags=0
+    SlotSetN,     // multi-slot element store; SlotLayout owns the layout, flags=0
 
     // === GLOBAL: Global variables ===
     GlobalGet,    // slots[a] = globals[b]
@@ -132,8 +132,8 @@ pub enum Opcode {
     JumpIfNot,    // if !slots[a]: pc += sign_extend(b | (c << 16))
 
     // === CALL: Function calls ===
-    Call,         // static function id=a|(flags<<16), args at b; c is a compact shape mirror
-    CallExtern,   // a=dst, b=extern_id, c=args_start; flags is a compact arg-count mirror
+    Call,         // static function id=a|(flags<<16), args at b; callee FunctionDef owns shape
+    CallExtern,   // a=dst, b=extern_id, c=args_start; CallExternLayout owns callsite shape
     CallClosure,  // closure at a, args at b; CallLayout owns the complete shape
     CallIface,    // interface at a, args at b; CallIfaceLayout owns shape and method index
     Return,       // return values at a, ret_slots=b
@@ -148,29 +148,29 @@ pub enum Opcode {
     StrDecodeRune,// Decode UTF-8 rune at position: (rune, width) = decode(str, pos)
 
     // === ARRAY: Heap array operations ===
-    ArrayNew,     // slots[a] = new array, b=meta_reg, c=len_reg, flags=elem_slots
-    ArrayGet,     // slots[a..a+flags] = arr[idx], b=arr, c=idx, flags=elem_slots
-    ArraySet,     // arr[idx] = slots[c..c+flags], a=arr, b=idx, flags=elem_slots
-    ArrayAddr,    // a=dst, b=array_gcref, c=index, flags=elem_bytes
+    ArrayNew,     // slots[a] = new array, b=meta_reg, c=len_reg; ElemLayout owns layout
+    ArrayGet,     // slots[a..] = arr[idx], b=arr, c=idx; ElemLayout owns layout
+    ArraySet,     // arr[idx] = slots[c..], a=arr, b=idx; ElemLayout owns layout
+    ArrayAddr,    // a=dst, b=array_gcref, c=index; ElemLayout owns element size
 
     // === SLICE: Slice operations ===
-    SliceNew,     // slots[a] = make([]T, len, cap), b=meta_reg, c=params_start, flags=elem_slots
-    SliceGet,     // slots[a..a+flags] = slice[idx], b=slice, c=idx, flags=elem_slots
-    SliceSet,     // slice[idx] = slots[c..c+flags], a=slice, b=idx, flags=elem_slots
+    SliceNew,     // slots[a] = make([]T, len, cap), b=meta_reg, c=params_start; ElemLayout owns layout
+    SliceGet,     // slots[a..] = slice[idx], b=slice, c=idx; ElemLayout owns layout
+    SliceSet,     // slice[idx] = slots[c..], a=slice, b=idx; ElemLayout owns layout
     SliceLen,     // slots[a] = len(slots[b])
     SliceCap,     // slots[a] = cap(slots[b])
     SliceSlice,   // slots[a] = slice[lo:hi:max], b=slice, c=params_start
-    SliceAppend,  // slots[a] = append(slice, slots[c..c+flags]), b=slice, flags=elem_slots
-    SliceAddr,    // a=dst, b=slice_reg, c=index, flags=elem_bytes
+    SliceAppend,  // slots[a] = append(slice, slots[c..]), b=slice; ElemLayout owns layout
+    SliceAddr,    // a=dst, b=slice_reg, c=index; ElemLayout owns element size
 
     // === MAP: Map operations ===
     MapNew,       // slots[a] = make(map), MapNew metadata owns key/value widths
-    MapGet,       // slots[a..] = map[key], b=map, c=meta_and_key
-    MapSet,       // map[key] = val, a=map, b=meta_and_key, c=val_start
-    MapDelete,    // delete(map, key), a=map, b=meta_and_key
+    MapGet,       // slots[a..] = map[key], b=map, c=key_start
+    MapSet,       // map[key] = val, a=map, b=key_start, c=val_start
+    MapDelete,    // delete(map, key), a=map, b=key_start
     MapLen,       // slots[a] = len(slots[b])
     MapIterInit,  // a=iter_slot (7 slots), b=map_reg
-    MapIterNext,  // a=key_slot, b=iter_slot, flags=key_slots|(val_slots<<4)
+    MapIterNext,  // a=key/value start, b=iter_slot, c=ok_slot; metadata owns layouts
 
     // === QUEUE: Channel/port operations ===
     QueueNew,     // make queue; QueueLayout owns elem width, flags bit7=port
@@ -191,7 +191,7 @@ pub enum Opcode {
     ClosureGet,   // slots[a] = slots[0].captures[b] (closure implicit in r0)
 
     // === GO / ISLAND / LOOP ===
-    GoStart,      // start goroutine, a=func_id_low/closure_reg, b=args_start, c=arg_slots, flags=is_closure|func_id_high
+    GoStart,      // a=func_id_low/closure_reg, b=args_start; flags=is_closure|func_id_high
     IslandNew,    // create island handle, a=dst
     GoIsland,     // a=island, b=closure, c=args_start; CallLayout owns the argument layout
     ForLoop,      // idx step/check/jump, a=idx, b=limit, c=offset, flags=signed/decrement
@@ -221,15 +221,17 @@ pub enum Opcode {
 
 ### 3.1 Container Creation Instructions
 
-Container creation instructions use registers to pass `ValueMeta` (via `LoadConst`). Fixed-width operands carry layouts where they fit; metadata-owned instructions use their per-instruction layout:
+Container creation instructions use registers to pass semantic `ValueMeta` and
+runtime type identities. Variable-width layouts live only in the matching
+per-instruction metadata entry:
 
 | Instruction | Encoding | Description |
 |-------------|----------|-------------|
-| `PtrNew` | `a=dst, b=meta_reg, c=slots, flags=reserved` | `slots[b]` = ValueMeta, `c` = object size in slots |
-| `ArrayNew` | `a=dst, b=meta_reg, c=len_reg, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = length |
-| `SliceNew` | `a=dst, b=meta_reg, c=params, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = len, `slots[c+1]` = cap |
+| `PtrNew` | `a=dst, b=meta_reg, c=0, flags=0` | `slots[b]` = ValueMeta; `PtrLayout.value_layout` owns the heap layout |
+| `ArrayNew` | `a=dst, b=meta_reg, c=len_reg, flags=0` | `slots[b]` = elem ValueMeta, `slots[c]` = length; `ElemLayout` owns element size/layout |
+| `SliceNew` | `a=dst, b=meta_reg, c=params, flags=0` | `slots[b]` = elem ValueMeta, `slots[c]` = len, `slots[c+1]` = cap; `ElemLayout` owns element size/layout |
 | `QueueNew` | `a=dst, b=meta_reg, c=cap_reg, flags=optional port bit` | `slots[b]` = packed element ValueMeta/RTTID, `slots[c]` = capacity, `QueueLayout.elem_layout` = exact logical slot layout |
-| `MapNew` | `a=dst, b=type_info_reg, c=compact width mirror or zero` | `slots[b]` = packed type info; MapNew metadata carries exact `u16`-bounded layouts |
+| `MapNew` | `a=dst, b=type_info_reg, c=0, flags=0` | `slots[b]` = packed semantic type info; `MapNew` metadata owns key/value layouts |
 | `StrNew` | `a=dst, b=const_idx` | Load string from constants pool |
 | `ClosureNew` | `a=dst, b=func_id, c=capture_count` | Create closure |
 
@@ -239,18 +241,16 @@ Container creation instructions use registers to pass `ValueMeta` (via `LoadCons
 LoadConst r1, <int_value_meta>   // ValueMeta for int
 LoadInt   r2, 10                 // len
 LoadInt   r3, 20                 // cap (must be r2+1)
-SliceNew  r0, r1, r2, flags=1    // elem_slots=1
+SliceNew  r0, r1, r2             // ElemLayout = { elem_bytes: 8, slots: [Value] }
 
 // make(map[string]Point)  where Point is 2 slots
 LoadConst r1, <packed_u64>       // [key_meta:32 | val_meta:32]
-MapNew    r0, r1, c=0x0102       // key_slots=1, val_slots=2
+MapNew    r0, r1, c=0            // MapNew metadata owns [key] and [Point] layouts
 ```
 
-MapNew, MapGet, and MapSet consume exact per-instruction layouts. Their compact
-width fields are validated when nonzero; zero width bits are the metadata
-sentinel. MapGet retains its comma-ok bit in the sentinel form. SlotGetN and
-SlotSetN follow the same rule with `SlotLayout`, so widths above 255 are never
-truncated.
+MapNew, MapGet, MapSet, and MapDelete consume exact per-instruction layouts.
+SlotGetN and SlotSetN use `SlotLayout`. The retired width operands and flags
+must be zero, so every accepted module has one unambiguous layout source.
 
 ### 3.2 Numeric Conversion Instructions
 
@@ -316,16 +316,11 @@ dynamic:
 - `IfaceAssertLayout` owns assertion kind, full-width target id, and result
   layout. `has_ok` remains a semantic flag bit.
 
-The packed `CallClosure`/`CallIface` shape, `CallIface.flags`,
-`CallExtern.flags`, and `GoIsland.flags` are integrity mirrors when the value
-fits. A mirror is zero when its authoritative value does not fit the compact
-field. Zero also represents a genuine zero value. The verifier checks this
-canonical mirror rule, while the VM and JIT consume metadata.
-
-For `IfaceAssert`, the kind and result-width flag fields and operand `c` are
-integrity mirrors. A result width above 31 uses zero; a target id above
-`u16::MAX` uses `0xffff`. Exact zero/`0xffff` values intentionally collide
-with those sentinels, and `IfaceAssertLayout` supplies the unique meaning.
+Static `Call`, static `GoStart`, and static defer instructions derive their ABI
+from the target `FunctionDef`. Dynamic calls use the metadata above. Retired
+shape operands and flags must be zero. `IfaceAssert.flags` retains only the
+comma-ok semantic bit; assertion kind, target identity, and result layout come
+exclusively from `IfaceAssertLayout`.
 
 ---
 
@@ -369,7 +364,7 @@ pub struct FunctionDef {
     pub has_calls: bool,
     pub has_call_extern: bool,
     pub code: Vec<Instruction>,
-    pub jit_metadata: Vec<JitInstructionMetadata>,
+    pub instruction_metadata: Vec<InstructionMetadata>,
     pub slot_types: Vec<SlotType>,  // for GC scanning
     pub borrowed_scan_slots_prefix: Vec<u16>,
     pub capture_types: Vec<TransferType>,
@@ -486,7 +481,7 @@ pub struct Module {
 
 **Key Points**:
 - `slot_types` must match `local_slots` length
-- `jit_metadata` must have one entry per instruction. The common verifier checks shared layout shape; strict opcode/metadata pairing remains JIT-only policy.
+- `instruction_metadata` must have one entry per instruction. The common verifier checks shared layout shape; strict opcode/metadata pairing remains JIT-only policy.
 - `NamedTypeMeta` used by VM to build itab at runtime and for type assertion
 - Source package-level named types use the identity `<canonical-package>.<declaration>`.
   Function-local named types use
@@ -762,7 +757,6 @@ Opcode::CallIface => {
 Opcode::CallExtern => {
     // a=return_start, b=extern_id, c=arg_start.
     let CallExternLayout { arg_layout, ret_layout } = metadata_at(pc);
-    verify_u8_mirror(flags, arg_layout.len());
     verify_extern_shape(module.externs[b as usize], &arg_layout, &ret_layout);
     invoke_extern(b, &slots[c..c + arg_layout.len()], &mut slots[a..a + ret_layout.len()]);
 }
@@ -771,21 +765,19 @@ Opcode::GoIsland => {
     // a=island, b=closure, c=arg_start.
     let CallLayout { arg_layout, ret_layout } = metadata_at(pc);
     assert(ret_layout.is_empty());
-    verify_u8_mirror(flags, arg_layout.len());
     transfer_and_spawn(slots[a], slots[b], &slots[c..c + arg_layout.len()]);
 }
 ```
 
 Both paths use metadata for zero, 255, 256, and all other `u16`-bounded slot
-counts. Compact flags only detect malformed bytecode.
+counts. Their retired layout flags must be zero.
 
 ### 6.5 Interface Assertion (IfaceAssert)
 
 ```rust
 Opcode::IfaceAssert => {
     let IfaceAssertLayout { assert_kind, target_id, result_layout } = metadata_at(pc);
-    let has_ok = ((flags >> 2) & 1) != 0;
-    verify_iface_assert_mirrors(flags, c, assert_kind, target_id, result_layout.len());
+    let has_ok = (flags & 1) != 0;
 
     let matches = match assert_kind {
         0 => unpack_rttid(slots[b]) == target_id,
@@ -796,8 +788,7 @@ Opcode::IfaceAssert => {
 }
 ```
 
-The VM and JIT pass the metadata `target_id` to runtime helpers. In particular,
-targets 65535 and 65536 share the encoded `c=0xffff` mirror and remain distinct.
+The VM and JIT pass the full-width metadata `target_id` to runtime helpers.
 
 ### 6.6 Itab Cache Management
 
@@ -954,7 +945,8 @@ Opcode::QueueClose => {
 
 ```rust
 Opcode::GoStart => {
-    // a=func_id_low/closure_reg, b=args_start, c=arg_slots, flags=is_closure|func_id_high
+    // a=func_id_low/closure_reg, b=args_start, c=0, flags=is_closure|func_id_high
+    // Static calls use the callee FunctionDef; closure calls use CallLayout.
     // 1. Resolve function ID or closure
     // 2. Create new fiber
     // 3. Copy arguments to new fiber's stack

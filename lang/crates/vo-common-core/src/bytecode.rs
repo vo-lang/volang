@@ -65,6 +65,7 @@ use alloc::format;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -73,6 +74,8 @@ use alloc::{
 use hashbrown::{HashMap, HashSet};
 #[cfg(feature = "std")]
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use crate::debug_info::DebugInfo;
 use crate::instruction::Instruction;
@@ -596,7 +599,7 @@ pub type ResolvedExtern = ResolvedExternAbi;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedExternTable {
-    entries: Vec<ResolvedExtern>,
+    entries: Arc<[ResolvedExtern]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -822,13 +825,13 @@ impl ResolvedExternTable {
                 first_by_name.insert(entry.name.as_str(), entry);
             }
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries: entries.into(),
+        })
     }
 
     pub fn empty() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn get(&self, id: u32) -> Option<&ResolvedExtern> {
@@ -837,6 +840,11 @@ impl ResolvedExternTable {
 
     pub fn entries(&self) -> &[ResolvedExtern] {
         &self.entries
+    }
+
+    #[inline]
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.entries, &other.entries)
     }
 
     pub fn len(&self) -> usize {
@@ -888,15 +896,60 @@ pub struct TransferType {
     pub slots: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElemLayout {
+    pub bytes: usize,
+    pub slots: u16,
+    pub needs_sign_extend: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapGetLayout {
+    pub key_slots: u16,
+    pub val_slots: u16,
+    pub has_ok: bool,
+}
+
+impl MapGetLayout {
+    pub fn output_slots(self) -> Option<u16> {
+        self.val_slots.checked_add(u16::from(self.has_ok))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapNewLayout {
+    pub key_slots: u16,
+    pub val_slots: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSetLayout {
+    pub key_slots: u16,
+    pub val_slots: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapIterNextLayout {
+    pub key_slots: u16,
+    pub val_slots: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IfaceAssertLayout {
+    pub assert_kind: u8,
+    pub target_id: u32,
+    pub result_slots: u16,
+}
+
 /// Per-instruction metadata attached to a bytecode instruction.
 ///
-/// The instruction stream remains the VM source of truth. This table gives the
-/// VM and JIT typed, per-PC layout facts that are awkward to recover from
-/// temporary metadata registers after optimization and control-flow merging.
-/// Strict JIT-only policy for metadata kind, lowering capability, loop/OSR
-/// facts, and helper ABI stays in `vo-jit`.
+/// This table is the sole authority for variable-width instruction layouts.
+/// The instruction stream owns opcodes, registers, control-flow targets, and
+/// semantic mode bits; it does not repeat layout widths or wide identities.
+/// Opcode/metadata pairing is verified once by the common module verifier;
+/// backend-only lowering capability and helper ABI policy stay in `vo-jit`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum JitInstructionMetadata {
+pub enum InstructionMetadata {
     #[default]
     None,
     ElemLayout {
@@ -932,8 +985,7 @@ pub enum JitInstructionMetadata {
     },
     CallIfaceLayout {
         iface_meta_id: u32,
-        /// Full-width interface method index. The instruction flags contain
-        /// only an optional u8 mirror; zero is also the overflow sentinel.
+        /// Full-width interface method index.
         method_idx: u32,
         arg_layout: Vec<SlotType>,
         ret_layout: Vec<SlotType>,
@@ -952,14 +1004,271 @@ pub enum JitInstructionMetadata {
     IfaceAssertLayout {
         /// 0 = concrete runtime type id, 1 = interface metadata id.
         assert_kind: u8,
-        /// Full-width target identity. The instruction's `c` operand is only
-        /// an optional u16 mirror/sentinel.
+        /// Full-width target identity.
         target_id: u32,
         result_layout: Vec<SlotType>,
     },
     LoopEnd {
         end_pc: u32,
     },
+}
+
+impl InstructionMetadata {
+    pub fn elem_slot_layout(&self) -> Option<&[SlotType]> {
+        match self {
+            Self::ElemLayout { slot_layout, .. } => Some(slot_layout),
+            _ => None,
+        }
+    }
+
+    pub fn elem_layout(&self) -> Option<ElemLayout> {
+        let Self::ElemLayout {
+            elem_bytes,
+            needs_sign_extend,
+            slot_layout,
+        } = self
+        else {
+            return None;
+        };
+        let bytes = *elem_bytes as usize;
+        if bytes == 0 {
+            if *needs_sign_extend
+                || (!slot_layout.is_empty() && slot_layout.as_slice() != [SlotType::Value])
+            {
+                return None;
+            }
+            return Some(ElemLayout {
+                bytes: 0,
+                slots: 0,
+                needs_sign_extend: false,
+            });
+        }
+        let slots = u16::try_from(bytes.div_ceil(8)).ok()?;
+        (slot_layout.len() == slots as usize).then_some(ElemLayout {
+            bytes,
+            slots,
+            needs_sign_extend: *needs_sign_extend,
+        })
+    }
+
+    pub fn map_get_layout(&self) -> Option<MapGetLayout> {
+        let Self::MapGet {
+            key_layout,
+            val_layout,
+            has_ok,
+        } = self
+        else {
+            return None;
+        };
+        Some(MapGetLayout {
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+            has_ok: *has_ok,
+        })
+    }
+
+    pub fn map_get_layout_slices(&self) -> Option<(&[SlotType], &[SlotType], bool)> {
+        match self {
+            Self::MapGet {
+                key_layout,
+                val_layout,
+                has_ok,
+            } => Some((key_layout, val_layout, *has_ok)),
+            _ => None,
+        }
+    }
+
+    pub fn map_new_layout(&self) -> Option<MapNewLayout> {
+        let Self::MapNew {
+            key_layout,
+            val_layout,
+        } = self
+        else {
+            return None;
+        };
+        Some(MapNewLayout {
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+        })
+    }
+
+    pub fn map_new_layout_slices(&self) -> Option<(&[SlotType], &[SlotType])> {
+        match self {
+            Self::MapNew {
+                key_layout,
+                val_layout,
+            } => Some((key_layout, val_layout)),
+            _ => None,
+        }
+    }
+
+    pub fn map_set_layout(&self) -> Option<MapSetLayout> {
+        let Self::MapSet {
+            key_layout,
+            val_layout,
+        } = self
+        else {
+            return None;
+        };
+        Some(MapSetLayout {
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+        })
+    }
+
+    pub fn map_key_value_layout_slices(&self) -> Option<(&[SlotType], &[SlotType])> {
+        match self {
+            Self::MapGet {
+                key_layout,
+                val_layout,
+                ..
+            }
+            | Self::MapSet {
+                key_layout,
+                val_layout,
+            }
+            | Self::MapIterNext {
+                key_layout,
+                val_layout,
+            } => Some((key_layout, val_layout)),
+            _ => None,
+        }
+    }
+
+    pub fn map_delete_key_slots(&self) -> Option<u16> {
+        let Self::MapDelete { key_layout } = self else {
+            return None;
+        };
+        u16::try_from(key_layout.len()).ok()
+    }
+
+    pub fn map_delete_key_layout(&self) -> Option<&[SlotType]> {
+        match self {
+            Self::MapDelete { key_layout } => Some(key_layout),
+            _ => None,
+        }
+    }
+
+    pub fn map_iter_next_layout(&self) -> Option<MapIterNextLayout> {
+        let Self::MapIterNext {
+            key_layout,
+            val_layout,
+        } = self
+        else {
+            return None;
+        };
+        Some(MapIterNextLayout {
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+        })
+    }
+
+    pub fn iface_assert_layout(&self) -> Option<IfaceAssertLayout> {
+        let Self::IfaceAssertLayout {
+            assert_kind,
+            target_id,
+            result_layout,
+        } = self
+        else {
+            return None;
+        };
+        Some(IfaceAssertLayout {
+            assert_kind: *assert_kind,
+            target_id: *target_id,
+            result_slots: u16::try_from(result_layout.len()).ok()?,
+        })
+    }
+
+    pub fn call_layout_slots(&self) -> Option<(u16, u16)> {
+        let (arg_layout, ret_layout) = match self {
+            Self::CallLayout {
+                arg_layout,
+                ret_layout,
+            }
+            | Self::CallIfaceLayout {
+                arg_layout,
+                ret_layout,
+                ..
+            }
+            | Self::CallExternLayout {
+                arg_layout,
+                ret_layout,
+            } => (arg_layout, ret_layout),
+            _ => return None,
+        };
+        Some((
+            u16::try_from(arg_layout.len()).ok()?,
+            u16::try_from(ret_layout.len()).ok()?,
+        ))
+    }
+
+    pub fn call_layout_slices(&self) -> Option<(&[SlotType], &[SlotType])> {
+        match self {
+            Self::CallLayout {
+                arg_layout,
+                ret_layout,
+            }
+            | Self::CallIfaceLayout {
+                arg_layout,
+                ret_layout,
+                ..
+            }
+            | Self::CallExternLayout {
+                arg_layout,
+                ret_layout,
+            } => Some((arg_layout, ret_layout)),
+            _ => None,
+        }
+    }
+
+    pub fn call_iface_method_index(&self) -> Option<u32> {
+        match self {
+            Self::CallIfaceLayout { method_idx, .. } => Some(*method_idx),
+            _ => None,
+        }
+    }
+
+    pub fn queue_elem_slots(&self) -> Option<u16> {
+        let Self::QueueLayout { elem_layout } = self else {
+            return None;
+        };
+        u16::try_from(elem_layout.len()).ok()
+    }
+
+    pub fn queue_elem_layout(&self) -> Option<&[SlotType]> {
+        match self {
+            Self::QueueLayout { elem_layout } => Some(elem_layout),
+            _ => None,
+        }
+    }
+
+    pub fn slot_elem_slots(&self) -> Option<u16> {
+        let Self::SlotLayout { elem_layout } = self else {
+            return None;
+        };
+        u16::try_from(elem_layout.len()).ok()
+    }
+
+    pub fn slot_elem_layout(&self) -> Option<&[SlotType]> {
+        match self {
+            Self::SlotLayout { elem_layout } => Some(elem_layout),
+            _ => None,
+        }
+    }
+
+    pub fn ptr_value_slots(&self) -> Option<u16> {
+        let Self::PtrLayout { value_layout } = self else {
+            return None;
+        };
+        u16::try_from(value_layout.len()).ok()
+    }
+
+    pub fn ptr_value_layout(&self) -> Option<&[SlotType]> {
+        match self {
+            Self::PtrLayout { value_layout } => Some(value_layout),
+            _ => None,
+        }
+    }
 }
 
 /// Closure payloads reserve one slot for `ClosureHeader`; the full allocation
@@ -1011,11 +1320,9 @@ pub struct FunctionDef {
     /// ctx.jit_bp/fiber_sp update for such functions.
     pub has_call_extern: bool,
     pub code: Vec<Instruction>,
-    /// Optional per-instruction metadata for JIT lowering.
-    ///
-    /// Length must match `code.len()` for versioned bytecode that carries the
-    /// table. Pre-metadata bytecode deserializes with a `None`-filled table.
-    pub jit_metadata: Vec<JitInstructionMetadata>,
+    /// Per-instruction layout metadata shared by verification, VM execution,
+    /// and JIT lowering. Length must match `code.len()`.
+    pub instruction_metadata: Vec<InstructionMetadata>,
     pub slot_types: Vec<SlotType>,
     pub borrowed_scan_slots_prefix: Vec<u16>,
     /// Capture types for cross-island transfer (closures only).
@@ -1333,6 +1640,748 @@ pub struct WellKnownTypes {
     pub call_object_iface_id: Option<u32>,
 }
 
+const OVERWIDE_RUNTIME_TYPE_SLOTS: usize = u16::MAX as usize + 1;
+
+/// Immutable physical facts derived from a verified runtime-type graph.
+///
+/// The bytecode keeps source-level type identity in [`RuntimeType`]. Runtime
+/// consumers need a smaller index: the verified value kind, bounded physical
+/// width, and terminal GC scan pattern. Keeping that index beside a loaded
+/// module avoids rebuilding flattened layouts in GC and barrier paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeTypeFacts {
+    entries: Vec<RuntimeTypeFact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeTypeFact {
+    kind: ValueKind,
+    slot_count: u32,
+    scan: RuntimeTypeScan,
+}
+
+/// Constant-time GC interpretation for one flattened value slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeTypeScan {
+    None,
+    GcRef,
+    Interface,
+    Struct { meta_id: u32, slots: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeTypeFactsError {
+    MissingRuntimeType {
+        source: Option<usize>,
+        target: usize,
+    },
+    InvalidValueRttid {
+        source: usize,
+        raw: u32,
+    },
+    MissingNamedTypeMeta {
+        runtime_type: usize,
+        named_type: u32,
+    },
+    MissingStructMeta {
+        runtime_type: usize,
+        struct_meta: u32,
+    },
+    InvalidBasicKind {
+        runtime_type: usize,
+        kind: ValueKind,
+    },
+    InlineCycle {
+        source: Option<usize>,
+        target: usize,
+    },
+    KindMismatch {
+        runtime_type: usize,
+        expected: ValueKind,
+        actual: ValueKind,
+    },
+    UnsupportedArrayElement {
+        runtime_type: usize,
+        element: usize,
+    },
+    UnresolvedInlineChild {
+        runtime_type: usize,
+        child: usize,
+    },
+}
+
+impl core::fmt::Display for RuntimeTypeFactsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingRuntimeType { source, target } => match source {
+                Some(source) => write!(
+                    f,
+                    "runtime_types[{source}] contains missing runtime_types[{target}] by value"
+                ),
+                None => write!(
+                    f,
+                    "runtime value containment references missing runtime_types[{target}]"
+                ),
+            },
+            Self::InvalidValueRttid { source, raw } => write!(
+                f,
+                "runtime_types[{source}] contains invalid ValueRttid 0x{raw:08x}"
+            ),
+            Self::MissingNamedTypeMeta {
+                runtime_type,
+                named_type,
+            } => write!(
+                f,
+                "runtime_types[{runtime_type}] references missing named_type_metas[{named_type}]"
+            ),
+            Self::MissingStructMeta {
+                runtime_type,
+                struct_meta,
+            } => write!(
+                f,
+                "runtime_types[{runtime_type}] references missing struct_metas[{struct_meta}]"
+            ),
+            Self::InvalidBasicKind { runtime_type, kind } => write!(
+                f,
+                "runtime_types[{runtime_type}] RuntimeType::Basic contains non-basic ValueKind {kind:?}"
+            ),
+            Self::InlineCycle { source, target } => {
+                let source = source
+                    .map(|source| format!("runtime_types[{source}]"))
+                    .unwrap_or_else(|| "the runtime type graph".to_string());
+                write!(
+                    f,
+                    "{source} contains active runtime_types[{target}] by value, forming an inline type cycle"
+                )
+            }
+            Self::KindMismatch {
+                runtime_type,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "runtime_types[{runtime_type}] has canonical kind {actual:?}, expected {expected:?}"
+            ),
+            Self::UnsupportedArrayElement {
+                runtime_type,
+                element,
+            } => write!(
+                f,
+                "runtime_types[{runtime_type}] array element runtime_types[{element}] resolves to Void/tuple metadata"
+            ),
+            Self::UnresolvedInlineChild {
+                runtime_type,
+                child,
+            } => write!(
+                f,
+                "runtime_types[{runtime_type}] inline child runtime_types[{child}] was not resolved"
+            ),
+        }
+    }
+}
+
+impl RuntimeTypeFact {
+    #[inline]
+    pub const fn value_kind(self) -> ValueKind {
+        self.kind
+    }
+
+    #[inline]
+    pub fn slot_count(self) -> Option<usize> {
+        let slots = self.slot_count as usize;
+        (slots <= RuntimeTypeResolver::MAX_LAYOUT_SLOTS).then_some(slots)
+    }
+
+    #[inline]
+    pub(crate) const fn bounded_slot_count(self) -> usize {
+        self.slot_count as usize
+    }
+
+    #[inline]
+    pub const fn scan(self) -> RuntimeTypeScan {
+        self.scan
+    }
+}
+
+impl RuntimeTypeFacts {
+    pub fn from_module_parts(
+        struct_metas: &[StructMeta],
+        named_type_metas: &[NamedTypeMeta],
+        runtime_types: &[RuntimeType],
+    ) -> Result<Self, RuntimeTypeFactsError> {
+        enum Task {
+            Enter {
+                id: usize,
+                source: Option<usize>,
+                expected_kind: Option<ValueKind>,
+            },
+            Exit {
+                id: usize,
+                expected_kind: Option<ValueKind>,
+            },
+        }
+
+        #[inline]
+        fn bounded_add(left: usize, right: usize) -> usize {
+            left.saturating_add(right).min(OVERWIDE_RUNTIME_TYPE_SLOTS)
+        }
+
+        #[inline]
+        fn bounded_array_width(len: u64, elem_width: usize) -> usize {
+            if len == 0 || elem_width == 0 {
+                return 0;
+            }
+            let elem_width = elem_width.min(OVERWIDE_RUNTIME_TYPE_SLOTS);
+            let exact_limit = OVERWIDE_RUNTIME_TYPE_SLOTS as u64;
+            if elem_width == OVERWIDE_RUNTIME_TYPE_SLOTS || len > exact_limit / elem_width as u64 {
+                OVERWIDE_RUNTIME_TYPE_SLOTS
+            } else {
+                usize::try_from(len * elem_width as u64)
+                    .unwrap_or(OVERWIDE_RUNTIME_TYPE_SLOTS)
+                    .min(OVERWIDE_RUNTIME_TYPE_SLOTS)
+            }
+        }
+
+        let mut states = vec![0u8; runtime_types.len()];
+        let unresolved = RuntimeTypeFact {
+            kind: ValueKind::Void,
+            slot_count: 0,
+            scan: RuntimeTypeScan::None,
+        };
+        let mut facts = vec![unresolved; runtime_types.len()];
+        let mut tasks = Vec::new();
+
+        for root in 0..runtime_types.len() {
+            if states[root] != 0 {
+                continue;
+            }
+            tasks.push(Task::Enter {
+                id: root,
+                source: None,
+                expected_kind: None,
+            });
+            while let Some(task) = tasks.pop() {
+                match task {
+                    Task::Enter {
+                        id,
+                        source,
+                        expected_kind,
+                    } => {
+                        let Some(state) = states.get(id).copied() else {
+                            return Err(RuntimeTypeFactsError::MissingRuntimeType {
+                                source,
+                                target: id,
+                            });
+                        };
+                        match state {
+                            2 => {
+                                if let Some(expected) = expected_kind {
+                                    let actual = facts[id].value_kind();
+                                    if expected != actual {
+                                        return Err(RuntimeTypeFactsError::KindMismatch {
+                                            runtime_type: id,
+                                            expected,
+                                            actual,
+                                        });
+                                    }
+                                }
+                                continue;
+                            }
+                            1 => {
+                                return Err(RuntimeTypeFactsError::InlineCycle {
+                                    source,
+                                    target: id,
+                                });
+                            }
+                            0 => {
+                                states[id] = 1;
+                                tasks.push(Task::Exit { id, expected_kind });
+                                match &runtime_types[id] {
+                                    RuntimeType::Named { id: named_id, .. } => {
+                                        let named = named_type_metas
+                                            .get(*named_id as usize)
+                                            .ok_or(RuntimeTypeFactsError::MissingNamedTypeMeta {
+                                                runtime_type: id,
+                                                named_type: *named_id,
+                                            })?;
+                                        let expected_kind = named
+                                            .underlying_rttid
+                                            .try_value_kind()
+                                            .ok_or(RuntimeTypeFactsError::InvalidValueRttid {
+                                                source: id,
+                                                raw: named.underlying_rttid.to_raw(),
+                                            })?;
+                                        tasks.push(Task::Enter {
+                                            id: named.underlying_rttid.rttid() as usize,
+                                            source: Some(id),
+                                            expected_kind: Some(expected_kind),
+                                        });
+                                    }
+                                    RuntimeType::Array { elem, .. } => {
+                                        let expected_kind = elem.try_value_kind().ok_or(
+                                            RuntimeTypeFactsError::InvalidValueRttid {
+                                                source: id,
+                                                raw: elem.to_raw(),
+                                            },
+                                        )?;
+                                        tasks.push(Task::Enter {
+                                            id: elem.rttid() as usize,
+                                            source: Some(id),
+                                            expected_kind: Some(expected_kind),
+                                        });
+                                    }
+                                    RuntimeType::Struct { fields, .. } => {
+                                        for field in fields.iter().rev() {
+                                            let expected_kind = field.typ.try_value_kind().ok_or(
+                                                RuntimeTypeFactsError::InvalidValueRttid {
+                                                    source: id,
+                                                    raw: field.typ.to_raw(),
+                                                },
+                                            )?;
+                                            tasks.push(Task::Enter {
+                                                id: field.typ.rttid() as usize,
+                                                source: Some(id),
+                                                expected_kind: Some(expected_kind),
+                                            });
+                                        }
+                                    }
+                                    RuntimeType::Tuple(elems) => {
+                                        for elem in elems.iter().rev() {
+                                            let expected_kind = elem.try_value_kind().ok_or(
+                                                RuntimeTypeFactsError::InvalidValueRttid {
+                                                    source: id,
+                                                    raw: elem.to_raw(),
+                                                },
+                                            )?;
+                                            tasks.push(Task::Enter {
+                                                id: elem.rttid() as usize,
+                                                source: Some(id),
+                                                expected_kind: Some(expected_kind),
+                                            });
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => unreachable!("runtime type traversal state is 0, 1, or 2"),
+                        }
+                    }
+                    Task::Exit { id, expected_kind } => {
+                        let fact = match &runtime_types[id] {
+                            RuntimeType::Basic(kind) => {
+                                if !ValueKind::BASIC.contains(kind) {
+                                    return Err(RuntimeTypeFactsError::InvalidBasicKind {
+                                        runtime_type: id,
+                                        kind: *kind,
+                                    });
+                                }
+                                RuntimeTypeFact {
+                                    kind: *kind,
+                                    slot_count: 1,
+                                    scan: if matches!(kind, ValueKind::String) {
+                                        RuntimeTypeScan::GcRef
+                                    } else {
+                                        RuntimeTypeScan::None
+                                    },
+                                }
+                            }
+                            RuntimeType::Pointer(_)
+                            | RuntimeType::Slice(_)
+                            | RuntimeType::Map { .. }
+                            | RuntimeType::Chan { .. }
+                            | RuntimeType::Port { .. }
+                            | RuntimeType::Func { .. }
+                            | RuntimeType::Island => {
+                                let kind = runtime_type_value_kind(&runtime_types[id]).ok_or(
+                                    RuntimeTypeFactsError::UnresolvedInlineChild {
+                                        runtime_type: id,
+                                        child: id,
+                                    },
+                                )?;
+                                RuntimeTypeFact {
+                                    kind,
+                                    slot_count: 1,
+                                    scan: RuntimeTypeScan::GcRef,
+                                }
+                            }
+                            RuntimeType::Interface { .. } => RuntimeTypeFact {
+                                kind: ValueKind::Interface,
+                                slot_count: 2,
+                                scan: RuntimeTypeScan::Interface,
+                            },
+                            RuntimeType::Struct { meta_id, .. } => {
+                                let slots = struct_metas
+                                    .get(*meta_id as usize)
+                                    .ok_or(RuntimeTypeFactsError::MissingStructMeta {
+                                        runtime_type: id,
+                                        struct_meta: *meta_id,
+                                    })?
+                                    .slot_types
+                                    .len()
+                                    .min(OVERWIDE_RUNTIME_TYPE_SLOTS);
+                                RuntimeTypeFact {
+                                    kind: ValueKind::Struct,
+                                    slot_count: slots as u32,
+                                    scan: RuntimeTypeScan::Struct {
+                                        meta_id: *meta_id,
+                                        slots: slots as u32,
+                                    },
+                                }
+                            }
+                            RuntimeType::Named { id: named_id, .. } => {
+                                let child = named_type_metas[*named_id as usize]
+                                    .underlying_rttid
+                                    .rttid() as usize;
+                                if states.get(child) != Some(&2) {
+                                    return Err(RuntimeTypeFactsError::UnresolvedInlineChild {
+                                        runtime_type: id,
+                                        child,
+                                    });
+                                }
+                                facts[child]
+                            }
+                            RuntimeType::Array { len, elem } => {
+                                let child = elem.rttid() as usize;
+                                if states.get(child) != Some(&2) {
+                                    return Err(RuntimeTypeFactsError::UnresolvedInlineChild {
+                                        runtime_type: id,
+                                        child,
+                                    });
+                                }
+                                let elem_fact = facts[child];
+                                if elem_fact.value_kind() == ValueKind::Void {
+                                    return Err(RuntimeTypeFactsError::UnsupportedArrayElement {
+                                        runtime_type: id,
+                                        element: child,
+                                    });
+                                }
+                                let elem_slots = elem_fact.bounded_slot_count();
+                                RuntimeTypeFact {
+                                    kind: ValueKind::Array,
+                                    slot_count: bounded_array_width(*len, elem_slots) as u32,
+                                    scan: elem_fact.scan,
+                                }
+                            }
+                            RuntimeType::Tuple(elems) => {
+                                let slots = elems.iter().try_fold(0usize, |total, elem| {
+                                    let child = elem.rttid() as usize;
+                                    if states.get(child) != Some(&2) {
+                                        return Err(RuntimeTypeFactsError::UnresolvedInlineChild {
+                                            runtime_type: id,
+                                            child,
+                                        });
+                                    }
+                                    let fact = facts[child];
+                                    Ok::<_, RuntimeTypeFactsError>(bounded_add(
+                                        total,
+                                        fact.bounded_slot_count(),
+                                    ))
+                                })?;
+                                RuntimeTypeFact {
+                                    kind: ValueKind::Void,
+                                    slot_count: slots as u32,
+                                    scan: RuntimeTypeScan::None,
+                                }
+                            }
+                        };
+                        if let Some(expected) = expected_kind {
+                            let actual = fact.value_kind();
+                            if expected != actual {
+                                return Err(RuntimeTypeFactsError::KindMismatch {
+                                    runtime_type: id,
+                                    expected,
+                                    actual,
+                                });
+                            }
+                        }
+                        facts[id] = fact;
+                        states[id] = 2;
+                    }
+                }
+            }
+        }
+
+        Ok(Self { entries: facts })
+    }
+
+    #[inline]
+    pub fn get(&self, value_rttid: ValueRttid) -> Option<RuntimeTypeFact> {
+        let value_rttid = ValueRttid::try_from_raw(value_rttid.to_raw())?;
+        let fact = *self.entries.get(value_rttid.rttid() as usize)?;
+        (fact.value_kind() == value_rttid.value_kind()).then_some(fact)
+    }
+
+    #[inline]
+    pub fn slot_count(&self, value_rttid: ValueRttid) -> Option<usize> {
+        self.get(value_rttid)?.slot_count()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// A verified immutable module image shared by one VM family.
+///
+/// Derived runtime facts live here so they cannot outlive or drift from the
+/// exact module tables that produced them.
+#[derive(Debug)]
+pub struct LoadedModule {
+    module: Module,
+    runtime_type_facts: RuntimeTypeFacts,
+    dynamic_callsite_map: Arc<DynamicCallsiteMap>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DynamicCallsiteMap {
+    /// Sorted `CallIface` PCs per function.  The global callsite id is the
+    /// function base plus the position in this sparse list.
+    callsite_pcs: Vec<Vec<u32>>,
+    function_bases: Vec<u32>,
+    len: usize,
+}
+
+impl DynamicCallsiteMap {
+    pub fn for_module(module: &Module) -> Self {
+        let mut next = 0u32;
+        let mut callsite_pcs = Vec::with_capacity(module.functions.len());
+        let mut function_bases = Vec::with_capacity(module.functions.len());
+        for func in &module.functions {
+            function_bases.push(next);
+            let pcs = func
+                .code
+                .iter()
+                .enumerate()
+                .filter(|(_, inst)| inst.opcode() == crate::instruction::Opcode::CallIface)
+                .map(|(pc, _)| {
+                    next = next
+                        .checked_add(1)
+                        .expect("verified module dynamic callsite count must fit u32");
+                    u32::try_from(pc).expect("verified function PC must fit u32")
+                })
+                .collect();
+            callsite_pcs.push(pcs);
+        }
+        Self {
+            callsite_pcs,
+            function_bases,
+            len: next as usize,
+        }
+    }
+
+    #[inline]
+    pub fn index(&self, func_id: u32, pc: usize) -> Option<u32> {
+        let pc = u32::try_from(pc).ok()?;
+        let func_id = func_id as usize;
+        let ordinal = self.callsite_pcs.get(func_id)?.binary_search(&pc).ok()?;
+        self.function_bases[func_id].checked_add(ordinal as u32)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl LoadedModule {
+    pub(crate) fn new(module: Module, runtime_type_facts: RuntimeTypeFacts) -> Self {
+        debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
+        let dynamic_callsite_map = Arc::new(DynamicCallsiteMap::for_module(&module));
+        Self {
+            module,
+            runtime_type_facts,
+            dynamic_callsite_map,
+        }
+    }
+
+    #[inline]
+    pub fn module(&self) -> &Module {
+        &self.module
+    }
+
+    #[inline]
+    pub fn runtime_type_facts(&self) -> &RuntimeTypeFacts {
+        &self.runtime_type_facts
+    }
+
+    #[inline]
+    pub fn dynamic_callsite_map(&self) -> &DynamicCallsiteMap {
+        &self.dynamic_callsite_map
+    }
+
+    #[inline]
+    pub fn shared_dynamic_callsite_map(&self) -> Arc<DynamicCallsiteMap> {
+        Arc::clone(&self.dynamic_callsite_map)
+    }
+
+    #[inline]
+    pub fn runtime_metadata(&self) -> ModuleRuntimeMetadata<'_> {
+        ModuleRuntimeMetadata {
+            module: self.module(),
+            runtime_type_facts: Some(self.runtime_type_facts()),
+        }
+    }
+
+    /// Build a module image for runtime hardening tests that deliberately feed
+    /// metadata rejected by the verifier. Invalid runtime-type graphs receive
+    /// unavailable facts, so GC consumers continue to fail closed.
+    ///
+    /// # Safety
+    ///
+    /// The returned value does not carry a verification guarantee. It must
+    /// remain confined to tests that exercise defensive runtime paths and must
+    /// never be used to authorize guest execution or JIT compilation.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub unsafe fn from_unverified_for_test(module: Module) -> Self {
+        let runtime_type_facts = RuntimeTypeFacts::from_module_parts(
+            &module.struct_metas,
+            &module.named_type_metas,
+            &module.runtime_types,
+        )
+        .unwrap_or_else(|_| RuntimeTypeFacts {
+            entries: vec![
+                RuntimeTypeFact {
+                    kind: ValueKind::Void,
+                    slot_count: u32::MAX,
+                    scan: RuntimeTypeScan::None,
+                };
+                module.runtime_types.len()
+            ],
+        });
+        Self::new(module, runtime_type_facts)
+    }
+}
+
+impl core::ops::Deref for LoadedModule {
+    type Target = Module;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.module()
+    }
+}
+
+/// Borrowed module metadata for runtime paths that may need array scan facts.
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleRuntimeMetadata<'a> {
+    module: &'a Module,
+    runtime_type_facts: Option<&'a RuntimeTypeFacts>,
+}
+
+/// Borrowed type tables used by runtime equality, hashing, and layout logic.
+/// This keeps type-only paths independent from the full module container.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeTypeMetadata<'a> {
+    pub struct_metas: &'a [StructMeta],
+    pub named_type_metas: &'a [NamedTypeMeta],
+    pub runtime_types: &'a [RuntimeType],
+}
+
+impl<'a> RuntimeTypeMetadata<'a> {
+    #[inline]
+    pub const fn new(
+        struct_metas: &'a [StructMeta],
+        named_type_metas: &'a [NamedTypeMeta],
+        runtime_types: &'a [RuntimeType],
+    ) -> Self {
+        Self {
+            struct_metas,
+            named_type_metas,
+            runtime_types,
+        }
+    }
+
+    #[inline]
+    pub fn resolver(self) -> RuntimeTypeResolver<'a> {
+        RuntimeTypeResolver::new(self.struct_metas, self.named_type_metas, self.runtime_types)
+    }
+}
+
+impl<'a> From<&'a Module> for RuntimeTypeMetadata<'a> {
+    #[inline]
+    fn from(module: &'a Module) -> Self {
+        Self::new(
+            &module.struct_metas,
+            &module.named_type_metas,
+            &module.runtime_types,
+        )
+    }
+}
+
+impl<'a> ModuleRuntimeMetadata<'a> {
+    /// Metadata for construction-time code and tests. Array scans fail closed
+    /// until verification produces a [`LoadedModule`].
+    #[inline]
+    pub fn unverified(module: &'a Module) -> Self {
+        Self {
+            module,
+            runtime_type_facts: None,
+        }
+    }
+
+    #[inline]
+    pub const fn module(self) -> &'a Module {
+        self.module
+    }
+
+    #[inline]
+    pub const fn runtime_type_facts(self) -> Option<&'a RuntimeTypeFacts> {
+        self.runtime_type_facts
+    }
+
+    #[inline]
+    pub fn type_metadata(self) -> RuntimeTypeMetadata<'a> {
+        self.module.into()
+    }
+
+    /// Compare with the canonical physical layout. Loaded modules use their
+    /// verified compact type facts and perform no allocation; construction-time
+    /// callers retain the flattening fallback.
+    pub fn value_rttid_layout_matches(
+        self,
+        value_rttid: ValueRttid,
+        actual: &[SlotType],
+    ) -> Option<bool> {
+        if let Some(facts) = self.runtime_type_facts {
+            return self
+                .module
+                .runtime_type_resolver()
+                .value_rttid_layout_matches(facts, value_rttid, actual);
+        }
+        self.module
+            .slot_layout_for_value_rttid(value_rttid)
+            .map(|expected| expected == actual)
+    }
+}
+
+impl core::ops::Deref for ModuleRuntimeMetadata<'_> {
+    type Target = Module;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        (*self).module()
+    }
+}
+
+impl<'a> From<&'a Module> for ModuleRuntimeMetadata<'a> {
+    #[inline]
+    fn from(module: &'a Module) -> Self {
+        Self::unverified(module)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
@@ -1485,12 +2534,11 @@ impl<'a> RuntimeTypeResolver<'a> {
         let value_rttid = ValueRttid::try_from_raw(value_rttid.to_raw())?;
         let expected_kind = value_rttid.value_kind();
         let mut current = value_rttid;
-        let mut seen = HashSet::new();
 
-        loop {
+        for _ in 0..=self.runtime_types.len() {
             current = ValueRttid::try_from_raw(current.to_raw())?;
             let current_kind = current.value_kind();
-            if current_kind != expected_kind || !seen.insert(current.rttid()) {
+            if current_kind != expected_kind {
                 return None;
             }
             let runtime_type = self.runtime_types.get(current.rttid() as usize)?;
@@ -1502,6 +2550,133 @@ impl<'a> RuntimeTypeResolver<'a> {
             };
             current = self.named_type_metas.get(*id as usize)?.underlying_rttid;
         }
+        None
+    }
+
+    /// Match a verified runtime value against a physical slot layout without
+    /// flattening arrays or allocating traversal storage.
+    pub fn value_rttid_layout_matches(
+        &self,
+        facts: &RuntimeTypeFacts,
+        value_rttid: ValueRttid,
+        actual: &[SlotType],
+    ) -> Option<bool> {
+        let expected_slots = facts.get(value_rttid)?.slot_count()?;
+        if actual.len() != expected_slots {
+            return Some(false);
+        }
+        let mut terminal = value_rttid;
+        for _ in 0..=self.runtime_types.len() {
+            let (_, runtime_type) = self.resolve_value_rttid(terminal)?;
+            match runtime_type {
+                RuntimeType::Array { elem, .. } => terminal = *elem,
+                RuntimeType::Basic(kind) => {
+                    let expected = slot_type_for_value_kind(*kind);
+                    return Some(actual.iter().all(|&slot| slot == expected));
+                }
+                RuntimeType::Pointer(_)
+                | RuntimeType::Slice(_)
+                | RuntimeType::Map { .. }
+                | RuntimeType::Chan { .. }
+                | RuntimeType::Port { .. }
+                | RuntimeType::Func { .. }
+                | RuntimeType::Island => {
+                    return Some(actual.iter().all(|&slot| slot == SlotType::GcRef));
+                }
+                RuntimeType::Interface { .. } => {
+                    return Some(
+                        actual
+                            .chunks_exact(2)
+                            .all(|slots| slots == [SlotType::Interface0, SlotType::Interface1])
+                            && actual.len().is_multiple_of(2),
+                    );
+                }
+                RuntimeType::Struct { meta_id, .. } => {
+                    let pattern = &self.struct_metas.get(*meta_id as usize)?.slot_types;
+                    return if pattern.is_empty() {
+                        Some(actual.is_empty())
+                    } else {
+                        let chunks = actual.chunks_exact(pattern.len());
+                        Some(
+                            chunks.remainder().is_empty()
+                                && chunks.into_iter().all(|v| v == pattern),
+                        )
+                    };
+                }
+                RuntimeType::Tuple(_) => break,
+                RuntimeType::Named { .. } => return None,
+            }
+        }
+
+        // Tuple facts are verifier-only aggregate layouts. Keep their general
+        // indexed matcher off the array/map hot path.
+        for (index, actual_slot) in actual.iter().copied().enumerate() {
+            if self.value_rttid_slot_type_at(facts, value_rttid, index)? != actual_slot {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
+    fn value_rttid_slot_type_at(
+        &self,
+        facts: &RuntimeTypeFacts,
+        mut value_rttid: ValueRttid,
+        mut index: usize,
+    ) -> Option<SlotType> {
+        for _ in 0..=self.runtime_types.len() {
+            let (_, runtime_type) = self.resolve_value_rttid(value_rttid)?;
+            match runtime_type {
+                RuntimeType::Basic(kind) => {
+                    return (index == 0).then(|| slot_type_for_value_kind(*kind));
+                }
+                RuntimeType::Pointer(_)
+                | RuntimeType::Slice(_)
+                | RuntimeType::Map { .. }
+                | RuntimeType::Chan { .. }
+                | RuntimeType::Port { .. }
+                | RuntimeType::Func { .. }
+                | RuntimeType::Island => return (index == 0).then_some(SlotType::GcRef),
+                RuntimeType::Interface { .. } => {
+                    return match index {
+                        0 => Some(SlotType::Interface0),
+                        1 => Some(SlotType::Interface1),
+                        _ => None,
+                    };
+                }
+                RuntimeType::Struct { meta_id, .. } => {
+                    return self
+                        .struct_metas
+                        .get(*meta_id as usize)?
+                        .slot_types
+                        .get(index)
+                        .copied();
+                }
+                RuntimeType::Array { len, elem } => {
+                    let elem_slots = facts.get(*elem)?.slot_count()?;
+                    let total_slots = usize::try_from(*len).ok()?.checked_mul(elem_slots)?;
+                    if index >= total_slots || elem_slots == 0 {
+                        return None;
+                    }
+                    index %= elem_slots;
+                    value_rttid = *elem;
+                }
+                RuntimeType::Tuple(elems) => {
+                    let mut selected = None;
+                    for elem in elems {
+                        let elem_slots = facts.get(*elem)?.slot_count()?;
+                        if index < elem_slots {
+                            selected = Some(*elem);
+                            break;
+                        }
+                        index = index.checked_sub(elem_slots)?;
+                    }
+                    value_rttid = selected?;
+                }
+                RuntimeType::Named { .. } => return None,
+            }
+        }
+        None
     }
 
     /// Reconstruct a validated `ValueRttid` from a bare runtime-type id.
@@ -1762,7 +2937,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
                 &slot_types,
             ),
@@ -1771,6 +2946,68 @@ mod tests {
             param_types: Vec::new(),
             slot_types,
         }
+    }
+
+    #[test]
+    fn dynamic_callsite_map_assigns_dense_exact_iface_indices() {
+        let mut module = Module::new("dynamic-callsites".to_string());
+        let mut first = function_with_slot_types(Vec::new());
+        first.code = vec![
+            crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 0),
+            crate::instruction::Instruction::new(crate::instruction::Opcode::CallClosure, 0, 0, 0),
+            crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 0),
+        ];
+        let mut second = function_with_slot_types(Vec::new());
+        second.code = vec![crate::instruction::Instruction::new(
+            crate::instruction::Opcode::CallIface,
+            0,
+            0,
+            0,
+        )];
+        module.functions.extend([first, second]);
+
+        let map = DynamicCallsiteMap::for_module(&module);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.index(0, 0), Some(0));
+        assert_eq!(map.index(0, 1), None);
+        assert_eq!(map.index(0, 2), Some(1));
+        assert_eq!(map.index(1, 0), Some(2));
+        assert_eq!(map.index(2, 0), None);
+    }
+
+    #[test]
+    fn instruction_metadata_owns_typed_layout_views() {
+        let elem = InstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
+        };
+        assert_eq!(
+            elem.elem_layout(),
+            Some(ElemLayout {
+                bytes: 24,
+                slots: 3,
+                needs_sign_extend: false,
+            })
+        );
+
+        let map = InstructionMetadata::MapGet {
+            key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            val_layout: vec![SlotType::GcRef, SlotType::Float],
+            has_ok: true,
+        };
+        let layout = map.map_get_layout().expect("map layout");
+        assert_eq!(layout.key_slots, 2);
+        assert_eq!(layout.val_slots, 2);
+        assert_eq!(layout.output_slots(), Some(3));
+        assert_eq!(
+            map.map_get_layout_slices(),
+            Some((
+                [SlotType::Interface0, SlotType::Interface1].as_slice(),
+                [SlotType::GcRef, SlotType::Float].as_slice(),
+                true,
+            ))
+        );
     }
 
     #[test]
@@ -1853,6 +3090,160 @@ mod tests {
             module.slot_layout_for_value_rttid(outer),
             Some(vec![SlotType::Value])
         );
+    }
+
+    #[test]
+    fn runtime_type_facts_collapse_deep_array_chains_without_layout_expansion() {
+        const DEPTH: usize = 8_192;
+
+        let mut runtime_types = Vec::with_capacity(DEPTH + 1);
+        for id in 0..DEPTH {
+            runtime_types.push(RuntimeType::Array {
+                len: 1,
+                elem: if id + 1 == DEPTH {
+                    ValueRttid::new(DEPTH as u32, ValueKind::String)
+                } else {
+                    ValueRttid::new((id + 1) as u32, ValueKind::Array)
+                },
+            });
+        }
+        runtime_types.push(RuntimeType::Basic(ValueKind::String));
+
+        let facts = RuntimeTypeFacts::from_module_parts(&[], &[], &runtime_types)
+            .expect("deep array facts must build iteratively");
+        let outer = facts
+            .get(ValueRttid::new(0, ValueKind::Array))
+            .expect("outer array fact");
+        assert_eq!(facts.len(), DEPTH + 1);
+        assert_eq!(outer.slot_count(), Some(1));
+        assert_eq!(outer.scan(), RuntimeTypeScan::GcRef);
+    }
+
+    #[test]
+    fn runtime_type_facts_keep_wide_array_scans_compact() {
+        let runtime_types = [
+            RuntimeType::Basic(ValueKind::String),
+            RuntimeType::Array {
+                len: 4_096,
+                elem: ValueRttid::new(0, ValueKind::String),
+            },
+        ];
+
+        let facts = RuntimeTypeFacts::from_module_parts(&[], &[], &runtime_types)
+            .expect("wide array facts");
+        let array = facts
+            .get(ValueRttid::new(1, ValueKind::Array))
+            .expect("array fact");
+        assert_eq!(facts.len(), runtime_types.len());
+        assert_eq!(array.slot_count(), Some(4_096));
+        assert_eq!(array.scan(), RuntimeTypeScan::GcRef);
+    }
+
+    #[test]
+    fn verified_layout_matcher_handles_nested_array_and_struct_slots() {
+        let struct_metas = [StructMeta {
+            slot_types: vec![SlotType::GcRef, SlotType::Float, SlotType::Value],
+            fields: Vec::new(),
+            field_index: HashMap::new(),
+        }];
+        let runtime_types = [
+            RuntimeType::Struct {
+                fields: Vec::new(),
+                meta_id: 0,
+            },
+            RuntimeType::Array {
+                len: 2,
+                elem: ValueRttid::new(0, ValueKind::Struct),
+            },
+            RuntimeType::Array {
+                len: 2,
+                elem: ValueRttid::new(1, ValueKind::Array),
+            },
+        ];
+        let facts = RuntimeTypeFacts::from_module_parts(&struct_metas, &[], &runtime_types)
+            .expect("nested array facts");
+        let resolver = RuntimeTypeResolver::new(&struct_metas, &[], &runtime_types);
+        let mut expected = Vec::new();
+        for _ in 0..4 {
+            expected.extend_from_slice(&[SlotType::GcRef, SlotType::Float, SlotType::Value]);
+        }
+        let outer = ValueRttid::new(2, ValueKind::Array);
+
+        assert_eq!(
+            resolver.value_rttid_layout_matches(&facts, outer, &expected),
+            Some(true)
+        );
+        expected[7] = SlotType::Value;
+        assert_eq!(
+            resolver.value_rttid_layout_matches(&facts, outer, &expected),
+            Some(false)
+        );
+        assert_eq!(
+            resolver.value_rttid_layout_matches(&facts, outer, &expected[..11]),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn runtime_type_facts_reject_completed_kind_drift_and_tuple_arrays() {
+        assert_eq!(
+            RuntimeTypeFacts::from_module_parts(&[], &[], &[RuntimeType::Basic(ValueKind::Array)],),
+            Err(RuntimeTypeFactsError::InvalidBasicKind {
+                runtime_type: 0,
+                kind: ValueKind::Array,
+            })
+        );
+        assert_eq!(
+            RuntimeTypeFacts::from_module_parts(
+                &[],
+                &[],
+                &[RuntimeType::Array {
+                    len: 1,
+                    elem: ValueRttid::from_raw(0xff),
+                }],
+            ),
+            Err(RuntimeTypeFactsError::InvalidValueRttid {
+                source: 0,
+                raw: 0xff,
+            })
+        );
+
+        let kind_drift = [
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Array {
+                len: 1,
+                elem: ValueRttid::new(0, ValueKind::String),
+            },
+        ];
+        assert_eq!(
+            RuntimeTypeFacts::from_module_parts(&[], &[], &kind_drift),
+            Err(RuntimeTypeFactsError::KindMismatch {
+                runtime_type: 0,
+                expected: ValueKind::String,
+                actual: ValueKind::Int64,
+            })
+        );
+
+        let tuple_array = [
+            RuntimeType::Tuple(Vec::new()),
+            RuntimeType::Array {
+                len: 1,
+                elem: ValueRttid::new(0, ValueKind::Void),
+            },
+        ];
+        assert_eq!(
+            RuntimeTypeFacts::from_module_parts(&[], &[], &tuple_array),
+            Err(RuntimeTypeFactsError::UnsupportedArrayElement {
+                runtime_type: 1,
+                element: 0,
+            })
+        );
+
+        let facts =
+            RuntimeTypeFacts::from_module_parts(&[], &[], &[RuntimeType::Basic(ValueKind::Int64)])
+                .expect("basic facts");
+        assert_eq!(facts.get(ValueRttid::from_raw(0xff)), None);
+        assert_eq!(facts.get(ValueRttid::from_raw(INVALID_META_ID << 8)), None);
     }
 
     #[test]
@@ -2282,6 +3673,18 @@ mod tests {
             trust: ProviderTrust::IntrinsicEligible,
             jit_route: ExternJitRoute::Intrinsic,
         }
+    }
+
+    #[test]
+    fn resolved_extern_table_clone_shares_immutable_storage() {
+        let entry = resolved_extension_entry("github.com/acme/demo");
+        let table = ResolvedExternTable::try_new(vec![entry.clone()]).expect("valid table");
+        let shared = table.clone();
+        let equal_but_distinct = ResolvedExternTable::try_new(vec![entry]).expect("valid table");
+
+        assert!(table.shares_storage_with(&shared));
+        assert!(!table.shares_storage_with(&equal_but_distinct));
+        assert_eq!(table, equal_but_distinct);
     }
 
     #[test]

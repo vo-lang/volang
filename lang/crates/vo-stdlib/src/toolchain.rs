@@ -3,16 +3,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use vo_module::schema::lockfile::LockedModule;
-use vo_runtime::bytecode::ExternDef;
+use vo_runtime::bytecode::{ExternDef, LoadedModule};
 use vo_runtime::ext_loader::NativeExtensionSpec;
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult, StdlibEntry};
 use vo_runtime::io::{IoResourceToken, IoRuntime};
 use vo_runtime::objects::interface::InterfaceSlot;
-use vo_runtime::Module;
 
 #[derive(Debug, Clone)]
 pub struct ToolchainModule {
-    pub module: Module,
+    pub module: Arc<LoadedModule>,
     pub source_root: PathBuf,
     pub extensions: Vec<NativeExtensionSpec>,
     pub locked_modules: Vec<LockedModule>,
@@ -435,7 +434,8 @@ fn toolchain_free_ast(call: &mut ExternCallContext) -> ExternResult {
 fn toolchain_name(call: &mut ExternCallContext) -> ExternResult {
     let name = unwrap_toolchain_result(require_module(call.arg_any_as_i64(0)))
         .module
-        .name;
+        .name
+        .clone();
     call.ret_str(0, &name);
     ExternResult::Ok
 }
@@ -640,15 +640,7 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-    for (id, def) in externs.iter().enumerate() {
-        for entry in REGISTERED_EXTERNS {
-            if def.name == entry.name() {
-                entry.try_register(registry, id as u32)?;
-                break;
-            }
-        }
-    }
-    Ok(())
+    vo_runtime::ffi::register_stdlib_providers(registry, externs, REGISTERED_EXTERNS)
 }
 
 #[cfg(test)]

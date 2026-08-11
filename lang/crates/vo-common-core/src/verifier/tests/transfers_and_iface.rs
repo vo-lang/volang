@@ -260,7 +260,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Struct as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
     let mut wrapper = function_with_slot_types(vec![SlotType::GcRef]);
@@ -268,7 +268,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
     wrapper.param_slots = 1;
     wrapper.recv_slots = 1;
     wrapper.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    wrapper.jit_metadata = vec![JitInstructionMetadata::None];
+    wrapper.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(finish_test_function(wrapper));
 
     let mut methods = BTreeMap::new();
@@ -329,7 +329,7 @@ fn vm_iface_assign_receiver_layout_058_nil_source_does_not_validate_itab_zero() 
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Void as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
     let mut target = function_with_slot_types(vec![SlotType::GcRef]);
@@ -337,7 +337,7 @@ fn vm_iface_assign_receiver_layout_058_nil_source_does_not_validate_itab_zero() 
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(finish_test_function(target));
     let mut methods = BTreeMap::new();
     methods.insert(
@@ -392,7 +392,7 @@ fn vm_iface_assign_receiver_layout_058_no_itab_sentinel_skips_itab_zero() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Int64 as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
     let mut target = function_with_slot_types(vec![SlotType::Value]);
@@ -401,7 +401,7 @@ fn vm_iface_assign_receiver_layout_058_no_itab_sentinel_skips_itab_zero() {
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(finish_test_function(target));
     let mut methods = BTreeMap::new();
     methods.insert(
@@ -447,7 +447,7 @@ fn vm_iface_assign_rejects_concrete_itab_zero_collision_060() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Int64 as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
     let err = verify_module(&module)
@@ -460,7 +460,7 @@ fn module_verifier_rejects_closure_new_capture_count_drift() {
     let mut module = Module::new("closure-new-capture-count".to_string());
     let mut maker = function_with_slot_types(vec![SlotType::GcRef]);
     maker.code = vec![Instruction::with_flags(Opcode::ClosureNew, 0, 0, 1, 1)];
-    maker.jit_metadata = vec![JitInstructionMetadata::None];
+    maker.instruction_metadata = vec![InstructionMetadata::None];
     let mut target = function_with_slot_types(vec![SlotType::GcRef]);
     target.is_closure = true;
     target.param_slots = 1;
@@ -487,7 +487,7 @@ fn module_verifier_rejects_closure_new_without_header_capacity() {
         1,
         u16::MAX,
     )];
-    maker.jit_metadata = vec![JitInstructionMetadata::None];
+    maker.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(maker);
     module.functions.push(function_with_slot_types(Vec::new()));
 
@@ -505,7 +505,7 @@ fn vm_ver_closureget_scope_001_rejects_closure_get_in_non_closure_function() {
     let mut module = Module::new("closure-get-non-closure-scope".to_string());
     let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::Value]);
     func.code = vec![Instruction::new(Opcode::ClosureGet, 1, 0, 0)];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
 
     let err = verify_module(&module).unwrap_err();
@@ -516,21 +516,19 @@ fn vm_ver_closureget_scope_001_rejects_closure_get_in_non_closure_function() {
 }
 
 #[test]
-fn module_verifier_rejects_queue_new_metadata_slot_drift() {
+fn module_verifier_rejects_retired_queue_width_flags() {
     let mut module = Module::new("queue-new-layout".to_string());
     let mut func =
         function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
     func.code = vec![Instruction::with_flags(Opcode::QueueNew, 2, 0, 1, 2)];
-    func.jit_metadata = vec![JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::GcRef],
     }];
     module.functions.push(func);
 
     let err = verify_module(&module).unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("QueueNew QueueLayout slots 1 do not match legacy encoded element slots 2"));
+    assert!(err.to_string().contains("unsupported flags 0x02"));
 }
 
 #[test]
@@ -555,19 +553,19 @@ fn vm_select_case_contract_017_rejects_extra_case_beyond_select_begin_count() {
     let mut func = function_with_slot_types(vec![SlotType::Value, SlotType::GcRef]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 2, 0, 1, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 2, 0, 1, 1),
+        Instruction::new(Opcode::SelectRecv, 0, 1, 0),
+        Instruction::new(Opcode::SelectRecv, 0, 1, 1),
         Instruction::new(Opcode::SelectExec, 0, 0, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::QueueLayout {
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(func);
 
@@ -585,15 +583,15 @@ fn vm_select_case_contract_017_rejects_source_case_index_outside_domain() {
         function_with_slot_types(vec![SlotType::Value, SlotType::GcRef, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 2, 0, 1, 1),
+        Instruction::new(Opcode::SelectRecv, 0, 1, 1),
         Instruction::new(Opcode::SelectExec, 0, 0, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(func);
 
@@ -611,19 +609,19 @@ fn vm_select_case_contract_017_rejects_duplicate_source_case_index() {
         function_with_slot_types(vec![SlotType::Value, SlotType::GcRef, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 2, 0, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 2, 0, 1, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 2, 0, 1, 0),
+        Instruction::new(Opcode::SelectRecv, 0, 1, 0),
+        Instruction::new(Opcode::SelectRecv, 0, 1, 0),
         Instruction::new(Opcode::SelectExec, 0, 0, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::QueueLayout {
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(func);
 
@@ -641,12 +639,12 @@ fn vm_select_zero_slot_send_contract_018_accepts_empty_element_layout() {
         Instruction::with_flags(Opcode::SelectSend, 0, 0, 1, 0),
         Instruction::new(Opcode::SelectExec, 1, 0, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
             elem_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(func);
 
@@ -661,16 +659,16 @@ fn vm_select_pending_region_contract_018_rejects_non_select_opcode_before_exec()
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
         Instruction::new(Opcode::LoadInt, 0, 0, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 2, 0, 1, 0),
+        Instruction::new(Opcode::SelectRecv, 0, 1, 0),
         Instruction::new(Opcode::SelectExec, 0, 0, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(func);
 
@@ -694,15 +692,15 @@ fn vm_select_recv_layout_contract_018_rejects_structural_interface_destination()
     ]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
-        Instruction::with_flags(Opcode::SelectRecv, 4, 0, 2, 0),
+        Instruction::new(Opcode::SelectRecv, 0, 2, 0),
         Instruction::new(Opcode::SelectExec, 3, 0, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value, SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(func);
 
@@ -713,12 +711,12 @@ fn vm_select_recv_layout_contract_018_rejects_structural_interface_destination()
 }
 
 #[test]
-fn module_verifier_rejects_map_new_metadata_slot_drift() {
+fn module_verifier_rejects_retired_map_new_width_operand() {
     let mut module = Module::new("map-new-layout".to_string());
     let mut func =
         function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
-    func.code = vec![Instruction::new(Opcode::MapNew, 0, 1, (2 << 8) | 1)];
-    func.jit_metadata = vec![JitInstructionMetadata::MapNew {
+    func.code = vec![Instruction::new(Opcode::MapNew, 0, 1, 1)];
+    func.instruction_metadata = vec![InstructionMetadata::MapNew {
         key_layout: vec![SlotType::GcRef],
         val_layout: vec![SlotType::Value],
     }];
@@ -726,9 +724,7 @@ fn module_verifier_rejects_map_new_metadata_slot_drift() {
 
     let err = verify_module(&module).unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("MapNew metadata layout key=1 val=1 does not match legacy encoded key=2 val=1"));
+    assert!(err.to_string().contains("reserved c must be zero"));
 }
 
 #[test]
@@ -748,12 +744,12 @@ fn module_verifier_rejects_map_new_runtime_meta_layout_drift_031() {
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),
-        Instruction::new(Opcode::MapNew, 0, 1, (1 << 8) | 1),
+        Instruction::new(Opcode::MapNew, 0, 1, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::MapNew {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
             val_layout: vec![SlotType::GcRef],
         },
@@ -765,7 +761,9 @@ fn module_verifier_rejects_map_new_runtime_meta_layout_drift_031() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("MapNew value metadata layout [Value] does not match JIT metadata [GcRef]"),
+        msg.contains(
+            "MapNew value metadata layout [Value] does not match instruction metadata [GcRef]"
+        ),
         "{msg}"
     );
 }
@@ -804,11 +802,11 @@ fn module_verifier_rejects_ptr_new_runtime_meta_layout_drift_060() {
     let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
-        Instruction::new(Opcode::PtrNew, 0, 1, 2),
+        Instruction::new(Opcode::PtrNew, 0, 1, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::PtrLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::PtrLayout {
             value_layout: vec![SlotType::Value, SlotType::GcRef],
         },
     ];
@@ -820,7 +818,7 @@ fn module_verifier_rejects_ptr_new_runtime_meta_layout_drift_060() {
     let msg = err.to_string();
     assert!(
         msg.contains(
-            "PtrNew value metadata layout [Value] does not match JIT metadata [Value, GcRef]"
+            "PtrNew value metadata layout [Value] does not match instruction metadata [Value, GcRef]"
         ),
         "{msg}"
     );

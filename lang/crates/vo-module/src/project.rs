@@ -129,14 +129,6 @@ impl ProjectPlan {
             .and_then(|context| context.lock_state.lock_file())
     }
 
-    /// Consume this context and return its registry materialization subset.
-    pub fn into_locked_modules(self) -> Vec<LockedModule> {
-        match self.kind {
-            ProjectPlanKind::NoModule => Vec::new(),
-            ProjectPlanKind::WithModule(context) => context.lock_state.into_locked_modules(),
-        }
-    }
-
     fn select_workspace_sources(&mut self, workspace_modules: &BTreeSet<String>) {
         let Some(context) = self.module_context_mut() else {
             return;
@@ -184,13 +176,6 @@ impl LockState {
 
     fn lock_file(&self) -> Option<&LockFile> {
         self.locked_context().map(|context| &context.lock_file)
-    }
-
-    fn into_locked_modules(self) -> Vec<LockedModule> {
-        match self {
-            LockState::NoLock => Vec::new(),
-            LockState::Locked(context) => context.locked_modules,
-        }
     }
 }
 
@@ -2636,10 +2621,6 @@ fn single_file_classification_generation_key(
 }
 
 impl SingleFileContext {
-    pub fn has_inline_mod(&self) -> bool {
-        matches!(self, SingleFileContext::EphemeralInlineMod { .. })
-    }
-
     pub fn inline_mod(&self) -> Option<&InlineMod> {
         match self {
             SingleFileContext::EphemeralInlineMod { inline_mod, .. } => Some(inline_mod),

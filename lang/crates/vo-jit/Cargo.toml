@@ -14,13 +14,9 @@ vo-runtime = { path = "../vo-runtime" }
 vo-common-core = { path = "../vo-common-core" }
 
 # Cranelift JIT
-cranelift-codegen = "0.116"
-cranelift-frontend = "0.116"
-cranelift-jit = "0.116"
-cranelift-module = "0.116"
-cranelift-native = "0.116"
-
-target-lexicon = "0.12"
-
-[dev-dependencies]
-vo-source-contract = { path = "../vo-source-contract" }
+cranelift-codegen = "0.134.3"
+cranelift-frontend = "0.134.3"
+cranelift-jit = "0.134.3"
+cranelift-module = "0.134.3"
+cranelift-native = "0.134.3"
+region = "3.0"

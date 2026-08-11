@@ -21,19 +21,11 @@ pub fn exec_slice_new(
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
+    elem_bytes: usize,
 ) -> SliceNewResult {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let len = stack_get(stack, bp + inst.c as usize) as i64;
     let cap = stack_get(stack, bp + inst.c as usize + 1) as i64;
-
-    // flags: 0=dynamic (read from c+2), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
-    let elem_bytes = match inst.flags {
-        0 => stack_get(stack, bp + inst.c as usize + 2) as usize,
-        0x81 => 1,
-        0x82 => 2,
-        0x84 | 0x44 => 4,
-        f => f as usize,
-    };
 
     // Use unified validation logic from slice::create_checked
     match slice::create_checked(gc, meta_raw, elem_bytes, len, cap) {
@@ -162,25 +154,16 @@ pub fn exec_slice_append(
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
-    module: Option<&vo_runtime::bytecode::Module>,
+    module: Option<vo_runtime::bytecode::ModuleRuntimeMetadata<'_>>,
+    elem_bytes: usize,
 ) -> Result<(), String> {
     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
-    // flags: 0=dynamic (read from c+1), 1-63=direct, 0x81=int8, 0x82=int16, 0x84=int32, 0x44=float32
-    // When flags!=0: c=[elem_meta], c+1..=[elem]
-    // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
-    let (elem_bytes, elem_offset): (usize, usize) = match inst.flags {
-        0 => (stack_get(stack, bp + inst.c as usize + 1) as usize, 2usize), // dynamic: elem_bytes in c+1, elem at c+2
-        0x81 => (1, 1),                                                     // int8
-        0x82 => (2, 1),                                                     // int16
-        0x84 | 0x44 => (4, 1),                                              // int32 or float32
-        f => (f as usize, 1),
-    };
     let elem_slots = elem_bytes.div_ceil(8);
 
     // Read elem_meta from c
     let elem_meta = ValueMeta::from_raw(stack_get(stack, bp + inst.c as usize) as u32);
 
-    let src_start = bp + inst.c as usize + elem_offset;
+    let src_start = bp + inst.c as usize + 1;
 
     // Safety: verified SliceAppend metadata keeps this range in the active
     // frame, and try_append consumes it before the destination slot is written.

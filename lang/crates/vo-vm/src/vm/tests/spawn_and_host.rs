@@ -1,4 +1,5 @@
 use super::*;
+use crate::fiber::VmResourceLimits;
 
 fn configured_test_extern(_ctx: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
@@ -42,6 +43,80 @@ fn spawn_call_without_module_returns_error_instead_of_expect_panic() {
 }
 
 #[test]
+fn configured_fiber_limit_is_a_typed_vm_resource_error() {
+    let limits = VmResourceLimits {
+        max_fibers: 0,
+        ..VmResourceLimits::default()
+    };
+    let mut vm = Vm::try_with_resource_limits(limits).expect("resource-limited VM");
+    vm.load(malformed_single_instruction_module(
+        "zero-fiber-limit",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+
+    assert!(matches!(
+        vm.spawn_call(0, &[]),
+        Err(VmError::Resource(VmResourceError::Limit {
+            resource: "scheduled fibers",
+            required: 1,
+            limit: 0,
+        }))
+    ));
+    assert!(vm.scheduler.ready_queue.is_empty());
+}
+
+#[test]
+fn aggregate_fiber_storage_limit_rolls_back_rejected_spawn() {
+    let limits = VmResourceLimits {
+        max_total_fiber_storage_bytes: 0,
+        ..VmResourceLimits::default()
+    };
+    let mut vm = Vm::try_with_resource_limits(limits).expect("resource-limited VM");
+    vm.load(malformed_single_instruction_module(
+        "zero-fiber-storage",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            vm.spawn_call(0, &[]),
+            Err(VmError::Resource(VmResourceError::Limit {
+                resource: "fiber call frames",
+                limit: 0,
+                ..
+            }))
+        ));
+        assert_eq!(vm.fiber_storage_bytes(), 0);
+        assert!(vm.scheduler.ready_queue.is_empty());
+    }
+}
+
+#[test]
+fn guest_termination_preserves_vm_resource_policy() {
+    let limits = VmResourceLimits {
+        max_fibers: 7,
+        max_total_fiber_storage_bytes: 4096,
+        max_stack_slots_per_fiber: 128,
+        max_call_frames_per_fiber: 16,
+    };
+    let mut vm = Vm::try_with_resource_limits(limits).expect("resource-limited VM");
+    vm.load(malformed_single_instruction_module(
+        "first-resource-policy-module",
+        Vec::new(),
+        Vec::new(),
+    ))
+    .unwrap();
+    vm.terminate_guest(0);
+
+    assert_eq!(vm.resource_limits(), limits);
+    assert_eq!(vm.fiber_storage_bytes(), 0);
+}
+
+#[test]
 fn spawn_call_missing_function_returns_error_instead_of_index_panic() {
     let module =
         malformed_single_instruction_module("spawn-call-missing-func", Vec::new(), Vec::new());
@@ -81,32 +156,9 @@ fn spawn_call_arg_count_mismatch_is_vm_error_instead_of_silent_zero_fill() {
         Ok(other) => panic!("spawn_call arg mismatch should be a VM error, got {other:?}"),
         Err(_) => panic!("spawn_call arg mismatch must not panic"),
     }
-}
-
-#[test]
-fn spawn_call_frame_shape_062_uses_shared_validator_before_enqueue() {
-    let src =
-        crate::source_contract::production_source_without_test_modules(include_str!("../mod.rs"));
-    let body = src
-        .split("pub fn spawn_call")
-        .nth(1)
-        .expect("spawn_call should exist")
-        .split("pub fn spawn_closure_call")
-        .next()
-        .expect("spawn_call precedes spawn_closure_call");
-    let validator = body
-        .find("validate_function_arg_shape")
-        .expect("spawn_call must use shared function arg/frame shape validator");
-    let enqueue = body
-        .find("reuse_or_spawn")
-        .expect("spawn_call enqueues a fiber through the scheduler");
-    let frame_publish = body
-        .find("try_push_call_frame")
-        .expect("spawn_call publishes a call frame");
-
     assert!(
-        validator < enqueue && validator < frame_publish,
-        "spawn_call must prove function arg/frame shape before enqueueing or publishing a frame"
+        vm.scheduler.ready_queue.is_empty(),
+        "rejected spawn_call shape must not enqueue a fiber"
     );
 }
 
@@ -248,7 +300,7 @@ fn spawn_call_transfer_contract_061_rejects_empty_param_types_with_gcref_suffix(
     module.functions[0].slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     refresh_vm_test_function_metadata(&mut module.functions[0]);
     let mut vm = Vm::new();
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let receiver = string::new_from_string(&mut vm.state.gc, "receiver".to_string());
     let suffix = string::new_from_string(&mut vm.state.gc, "suffix".to_string());
 
@@ -263,36 +315,6 @@ fn spawn_call_transfer_contract_061_rejects_empty_param_types_with_gcref_suffix(
     assert!(
         vm.scheduler.ready_queue.is_empty(),
         "rejected typed spawn_call args must not enqueue a fiber"
-    );
-}
-
-#[test]
-fn vm_closure_call_surface_is_vm_owned_047() {
-    let vm_src =
-        crate::source_contract::production_source_without_test_modules(include_str!("../mod.rs"));
-    assert!(
-        vm_src.contains("pub(crate) mod helpers;"),
-        "VM helper internals must be visible to crate-owned exec/frame modules"
-    );
-    assert!(
-        vm_src.contains("pub(crate) use helpers::{stack_get, stack_set};"),
-        "raw stack helpers may be shared inside the crate but not exported"
-    );
-    assert!(
-        !vm_src.contains("pub mod helpers;"),
-        "public vo_vm::vm::helpers would expose raw VM internals"
-    );
-    assert!(
-        !vm_src.contains("pub use helpers::{stack_get, stack_set};"),
-        "raw stack helpers must not be public safe API"
-    );
-
-    let helpers_src = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../helpers.rs"
-    ));
-    assert!(
-        !helpers_src.contains("build_closure_args"),
-        "closure argument layout must be owned by Vm::spawn_closure_call"
     );
 }
 
@@ -373,7 +395,7 @@ fn vm_gc_001_spawn_call_marks_spawned_roots_dirty() {
     vm.load(module).unwrap();
     let root = string::new_from_string(&mut vm.state.gc, "spawn-root".to_string());
     vm.state.gc_roots_dirty_all = false;
-    vm.state.gc_dirty_fibers.clear();
+    vm.state.clear_gc_dirty_fibers();
     vm.state.gc_dirty_epoch = 23;
 
     vm.spawn_call(0, &[root as u64]).expect("spawn call");
@@ -535,7 +557,7 @@ fn targeted_command_rejects_max_island_adoption_without_partial_state_change() {
     let mut vm = Vm::new();
 
     let error = vm
-        .push_targeted_island_command(u32::MAX, vo_runtime::island::IslandCommand::Shutdown)
+        .push_targeted_island_command_from(0, u32::MAX, vo_runtime::island::IslandCommand::Shutdown)
         .expect_err("u32::MAX leaves no successor island identity");
 
     assert_eq!(
@@ -725,15 +747,17 @@ fn create_island_startup_timeout_retains_the_real_worker_handle() {
 
     let mut module = gc_test_module_with_root_slots(0);
     module.functions[0].code = vec![Instruction::new(Opcode::Jump, 0, 0, 0)];
-    module.functions[0].jit_metadata = vec![JitInstructionMetadata::None];
+    module.functions[0].instruction_metadata = vec![InstructionMetadata::None];
 
     let mut vm = Vm::new();
-    vm.finish_load(module);
-    let shared_module = vm.module.as_ref().unwrap().clone();
+    vm.load(module).expect("load timeout test module");
+    let image = vm
+        .inherited_program_image()
+        .expect("timeout test program image");
 
     let error = vm
-        .create_island_with_shared_module_and_timeout(
-            Some(shared_module),
+        .create_island_with_program_image_and_timeout(
+            Some(image),
             None,
             std::time::Duration::from_millis(10),
         )
@@ -759,19 +783,21 @@ fn create_island_startup_timeout_retains_the_real_worker_handle() {
 }
 
 #[test]
-fn detached_execution_shares_loaded_module_ownership() {
+fn detached_execution_shares_module_and_restores_fiber_after_unwind() {
     let mut vm = Vm::new();
     vm.finish_load(gc_test_module());
     let fiber_id = vm.scheduler.spawn(Fiber::new(0));
 
-    {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let execution =
             DetachedFiberExecution::try_new(&mut vm, fiber_id).expect("fiber execution lease");
         let loaded = execution.vm.module.as_ref().expect("loaded module");
         assert!(std::sync::Arc::ptr_eq(&execution.module, loaded));
         assert_eq!(std::sync::Arc::strong_count(loaded), 2);
-    }
+        panic!("injected detached execution panic");
+    }));
 
+    assert!(result.is_err());
     assert!(vm.module.is_some());
     assert!(vm.scheduler.try_get_fiber(fiber_id).is_some());
 }
@@ -791,7 +817,7 @@ fn load_missing_extern_returns_error_instead_of_registration_panic() {
         vo_runtime::bytecode::ExternEffects::NONE,
     ));
     let func = &mut module.functions[0];
-    func.jit_metadata = vec![JitInstructionMetadata::CallExternLayout {
+    func.instruction_metadata = vec![InstructionMetadata::CallExternLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];

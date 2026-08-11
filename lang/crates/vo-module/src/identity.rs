@@ -481,23 +481,11 @@ impl ModIdentity {
         matches!(self, ModIdentity::Local(_))
     }
 
-    pub fn is_public(&self) -> bool {
-        matches!(self, ModIdentity::Public(_))
-    }
-
     /// Borrow the underlying public ModuleId, if any.
     pub fn as_public(&self) -> Option<&ModulePath> {
         match self {
             ModIdentity::Public(mp) => Some(mp),
             ModIdentity::Local(_) => None,
-        }
-    }
-
-    /// Borrow the underlying local name, if any.
-    pub fn as_local(&self) -> Option<&LocalName> {
-        match self {
-            ModIdentity::Local(name) => Some(name),
-            ModIdentity::Public(_) => None,
         }
     }
 }

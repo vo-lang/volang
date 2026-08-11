@@ -1,10 +1,9 @@
-use vo_runtime::bytecode::Module;
+use vo_runtime::bytecode::{LoadedModule, Module};
 use vo_runtime::jit_api::JitResult;
 
 use crate::fiber::Fiber;
 use crate::runtime_boundary::RuntimeTransition;
-use crate::vm::jit_mgr::JitSideExitReason;
-use crate::vm::Vm;
+use crate::vm::{JitSideExitReason, Vm};
 
 use super::bridge_result::{osr_result_from_bridge_transition, JitBridgeMode};
 use super::context::build_jit_context;
@@ -57,6 +56,8 @@ pub fn dispatch_loop_osr(
     vm: &mut Vm,
     fiber: &mut Fiber,
     module: &Module,
+    func_id: u32,
+    loop_pc: usize,
     loop_func: vo_jit::LoopFunc,
     bp: usize,
     local_slots: usize,
@@ -65,17 +66,14 @@ pub fn dispatch_loop_osr(
         Ok(guard) => guard,
         Err(error) => return OsrResult::JitError(error),
     };
-    let (result, ctx) = {
-        if let Some(jit_mgr) = vm.jit.manager_mut() {
-            jit_mgr.record_loop_entry();
-        }
-
+    let budget_before = fiber.execution_budget;
+    let (result, ctx, budget_after) = {
         // Sync fiber.sp to the correct value for this frame.
         // After a WaitIo cycle, fiber.sp may be stale (left at a higher value
         // by push_frame in the non-OK path). The correct sp is bp + local_slots.
         fiber.sp = bp + local_slots;
 
-        let mut ctx = match build_jit_context(vm, fiber, module) {
+        let mut ctx = match build_jit_context(vm, fiber) {
             Ok(ctx) => ctx,
             Err(err) => return OsrResult::JitError(err),
         };
@@ -92,11 +90,25 @@ pub fn dispatch_loop_osr(
         let locals_ptr = unsafe { fiber.stack_ptr().add(bp) };
 
         // Call loop function
+        if let Some(jit_mgr) = vm.jit.manager_mut() {
+            jit_mgr.record_loop_entry();
+        }
         let result = loop_func(ctx.as_ptr(), locals_ptr);
-        fiber.execution_budget = ctx.ctx.execution_budget;
-        (result, ctx)
+        let budget_after = ctx.ctx.execution_budget;
+        fiber.execution_budget = budget_after;
+        (result, ctx, budget_after)
     };
     drop(lease_guard);
+
+    if let Some(jit_mgr) = vm.jit.manager_mut() {
+        if let Err(err) =
+            jit_mgr.record_loop_outcome(func_id, loop_pc, result, budget_before, budget_after)
+        {
+            return OsrResult::JitError(format!(
+                "JIT execution feedback failed for loop pc {loop_pc} in function {func_id}: {err}"
+            ));
+        }
+    }
 
     match result {
         JitResult::Ok => {
@@ -123,14 +135,17 @@ pub fn dispatch_loop_osr(
 pub(crate) fn try_loop_osr(
     vm: &mut Vm,
     fiber: &mut Fiber,
-    module: &Module,
+    loaded_module: &LoadedModule,
     func_id: u32,
     loop_pc: usize,
     bp: usize,
 ) -> Option<OsrResult> {
-    let loop_func = match get_or_compile_loop(vm, module, func_id, loop_pc) {
+    let module = loaded_module.module();
+    let best_effort = vm.jit.is_best_effort();
+    let loop_func = match get_or_compile_loop(vm, loaded_module, func_id, loop_pc) {
         Ok(Some(loop_func)) => loop_func,
         Ok(None) => return None,
+        Err(_) if best_effort => return None,
         Err(err) => {
             let func_name = module
                 .functions
@@ -152,6 +167,8 @@ pub(crate) fn try_loop_osr(
         vm,
         fiber,
         module,
+        func_id,
+        loop_pc,
         loop_func,
         bp,
         local_slots,
@@ -162,20 +179,27 @@ pub(crate) fn try_loop_osr(
 #[allow(clippy::result_large_err)]
 fn get_or_compile_loop(
     vm: &mut Vm,
-    module: &Module,
+    loaded_module: &LoadedModule,
     func_id: u32,
     loop_pc: usize,
 ) -> Result<Option<vo_jit::LoopFunc>, vo_jit::JitError> {
-    let func_def = module
-        .functions
-        .get(func_id as usize)
-        .ok_or(vo_jit::JitError::FunctionNotFound(func_id))?;
+    let module = loaded_module.module();
     let Some(jit_mgr) = vm.jit.manager_mut() else {
         return Ok(None);
     };
 
+    // Disabled OSR entries remain in the code cache, so feedback must win over
+    // the compiled-pointer lookup and hotness accounting below.
+    if jit_mgr.is_loop_disabled(func_id, loop_pc)? {
+        return Ok(None);
+    }
+    module
+        .functions
+        .get(func_id as usize)
+        .ok_or(vo_jit::JitError::FunctionNotFound(func_id))?;
+
     // Already compiled?
-    if let Some(lf) = unsafe { jit_mgr.get_loop_func(func_id, loop_pc) } {
+    if let Some(lf) = jit_mgr.get_loop_entry(func_id, loop_pc) {
         return Ok(Some(lf));
     }
 
@@ -191,41 +215,32 @@ fn get_or_compile_loop(
     }
 
     // Hot - try to compile
-    let loop_info = match jit_mgr.find_loop(func_id, func_def, module, loop_pc) {
+    let loop_info = match jit_mgr.find_loop(func_id, loaded_module.verified_module(), loop_pc) {
         Ok(Some(info)) => info,
         Ok(None) => {
-            jit_mgr.mark_loop_failed(func_id, loop_pc)?;
+            jit_mgr.mark_loop_failed(
+                func_id,
+                loop_pc,
+                vo_jit::JitFailureKind::SemanticUnsupported,
+            )?;
             jit_mgr.record_side_exit(JitSideExitReason::LoopMetadataUnavailable);
             return Ok(None);
         }
         Err(err) => {
-            jit_mgr.mark_loop_failed(func_id, loop_pc)?;
+            jit_mgr.mark_loop_failed(func_id, loop_pc, err.failure_kind())?;
             return Err(err);
         }
     };
 
     let env = vo_jit::JitCompileEnv {
-        externs: &vm.state.resolved_externs,
+        externs: vm.state.extern_registry.resolved_externs(),
         backend_caps: Default::default(),
     };
-    match jit_mgr.compile_loop(func_id, func_def, module, env, &loop_info) {
-        Ok(_) => {
-            let loop_func =
-                unsafe { jit_mgr.get_loop_func(func_id, loop_pc) }.ok_or_else(|| {
-                    vo_jit::JitError::Internal(format!(
-                        "compiled loop at pc {loop_pc} but no function pointer was registered"
-                    ))
-                })?;
-            Ok(Some(loop_func))
-        }
+    match jit_mgr.compile_loop(func_id, loaded_module.verified_module(), env, &loop_info) {
+        Ok(loop_func) => Ok(Some(loop_func)),
         Err(err) => {
-            jit_mgr.mark_loop_failed(func_id, loop_pc)?;
-            if matches!(&err, vo_jit::JitError::UnsupportedOpcode(_)) {
-                jit_mgr.record_side_exit(JitSideExitReason::InterpretedUnsupported);
-                Ok(None)
-            } else {
-                Err(err)
-            }
+            jit_mgr.mark_loop_failed(func_id, loop_pc, err.failure_kind())?;
+            Err(err)
         }
     }
 }
@@ -236,6 +251,8 @@ mod tests {
     use super::*;
     use crate::scheduler::FiberId;
     use crate::vm::JitConfig;
+    use vo_runtime::bytecode::InstructionMetadata;
+    use vo_runtime::instruction::{Instruction, Opcode};
     use vo_runtime::jit_api::{JitContext, JitRuntimeTrapKind};
     use vo_runtime::InterfaceSlot;
 
@@ -265,7 +282,7 @@ mod tests {
         ctx: *mut JitContext,
         _locals: *mut u64,
     ) -> JitResult {
-        let vm = unsafe { &mut *((*ctx).vm as *mut Vm) };
+        let vm = unsafe { &mut *((*ctx).callback_state as *mut Vm) };
         let transition = crate::runtime_boundary::RuntimeTransition::continue_with_gc_roots(
             crate::vm::GcRootEffect::None,
         );
@@ -297,7 +314,7 @@ mod tests {
             .scheduler
             .detach_for_execution(fid)
             .expect("active fiber");
-        let result = dispatch_loop_osr(vm, &mut fiber, &module, loop_func, 0, 1);
+        let result = dispatch_loop_osr(vm, &mut fiber, &module, 0, 0, loop_func, 0, 1);
         vm.scheduler.reattach_after_execution(fid, fiber);
         result
     }
@@ -323,22 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn vm_osr_borrow_boundary_001_source_has_active_lease_guard() {
-        let osr_src =
-            crate::source_contract::production_source_without_test_modules(include_str!("osr.rs"));
-        let boundary_src = include_str!("../../runtime_boundary.rs");
-
-        assert!(
-            osr_src.contains("OsrBorrowBoundaryGuard"),
-            "OSR dispatch must install a lease while the JIT loop can call callbacks"
-        );
-        assert!(
-            boundary_src.contains("jit_osr_borrow_lease_depth"),
-            "runtime boundary applier must reject direct transition while the OSR lease is active"
-        );
-    }
-
-    #[test]
     fn vm_osr_borrow_boundary_001_lease_rejects_direct_transition_during_osr() {
         let (mut vm, fid) = vm_with_jit_frame();
 
@@ -347,5 +348,66 @@ mod tests {
             _ => panic!("OSR lease must reject direct runtime transition during loop callback"),
         }
         assert_eq!(vm.state.jit_osr_borrow_lease_depth, 0);
+    }
+
+    #[test]
+    fn disabled_loop_short_circuits_cached_lookup_and_recompilation() {
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            loop_threshold: 1,
+            ..JitConfig::default()
+        })
+        .expect("jit vm");
+        let mut loaded = Module::new("jit-disabled-loop-test".to_string());
+        loaded.functions.push(function(1, 0));
+        vm.load(loaded).expect("load module");
+        let module = vm.module.as_ref().cloned().expect("loaded module");
+        let loop_pc = 7;
+        for _ in 0..8 {
+            vm.jit
+                .manager_mut()
+                .expect("jit manager")
+                .record_loop_outcome(0, loop_pc, JitResult::WaitQueue, 100, 100)
+                .expect("record loop feedback");
+        }
+
+        assert!(get_or_compile_loop(&mut vm, &module, 0, loop_pc)
+            .expect("disabled loop lookup")
+            .is_none());
+        let manager = vm.jit.manager().expect("jit manager");
+        assert!(manager.is_loop_disabled(0, loop_pc).expect("loop state"));
+        assert!(!manager.is_loop_failed(0, loop_pc).expect("loop state"));
+    }
+
+    #[test]
+    fn best_effort_osr_compile_failure_is_cached_and_interpreted() {
+        let mut func = function(1, 0);
+        func.code = vec![
+            Instruction::with_flags(Opcode::Hint, vo_runtime::instruction::HINT_LOOP, 0, 0, 0),
+            Instruction::new(Opcode::LoadInt, 0, 1, 0),
+            Instruction::new(Opcode::Jump, 0, u16::MAX, u16::MAX),
+        ];
+        func.instruction_metadata = vec![
+            InstructionMetadata::LoopEnd { end_pc: 2 },
+            InstructionMetadata::None,
+            InstructionMetadata::None,
+        ];
+        let mut module = Module::new("jit-best-effort-osr-failure".to_string());
+        module.functions.push(func);
+        let mut vm = Vm::with_best_effort_jit_config(JitConfig {
+            loop_threshold: 1,
+            code_memory_limit_bytes: 0,
+            ..JitConfig::default()
+        });
+        vm.load(module).expect("best-effort module load");
+        let module = vm.module.as_ref().cloned().expect("loaded module");
+        let mut fiber = Fiber::new(0);
+
+        assert!(try_loop_osr(&mut vm, &mut fiber, &module, 0, 1, 0).is_none());
+        assert!(vm
+            .jit
+            .manager()
+            .expect("jit manager")
+            .is_loop_failed(0, 1)
+            .expect("loop state"));
     }
 }

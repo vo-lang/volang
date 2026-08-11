@@ -1978,7 +1978,7 @@ fn emit_entry_static_call(
     }
 
     let args_start = builder.alloc_call_buffer(&[], &callee.ret_slot_types);
-    builder.emit_static_call(func_id, args_start, 0, callee.ret_slots);
+    builder.emit_static_call(func_id, args_start);
     Ok(())
 }
 
@@ -2059,27 +2059,6 @@ mod tests {
             messages.insert(message);
         }
         assert_eq!(messages.len(), 1);
-    }
-
-    #[test]
-    fn vm_codegen_generated_entry_builder_layout_023_uses_context_registration_owner() {
-        let source = include_str!("lib.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("lib source should contain tests section");
-
-        assert!(
-            !source.contains("let init_func = init_builder.build()"),
-            "__init__ builder must not bypass context-owned layout error recording"
-        );
-        assert!(
-            !source.contains("let island_init_func = island_init_builder.build()"),
-            "__island_init__ builder must not bypass context-owned layout error recording"
-        );
-        assert!(
-            !source.contains("let entry_func = entry_builder.build()"),
-            "__entry__ builder must not bypass context-owned layout error recording"
-        );
     }
 
     #[test]

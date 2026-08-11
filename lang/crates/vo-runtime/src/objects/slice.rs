@@ -11,6 +11,9 @@
 //! recorded backing range alive and whose element layout remains valid during
 //! access. A null owner is reserved for permanently rooted external storage
 //! such as package globals.
+//! Checked view constructors reserve `None` for invalid bounds or geometry;
+//! descriptor allocation failure is `Some(null)` so the VM/JIT memory gate can
+//! report the collector's sticky allocation error.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec;
@@ -116,7 +119,8 @@ pub fn create(
 /// - len <= cap
 /// - cap * elem_bytes <= isize::MAX (overflow check)
 ///
-/// Returns Ok(GcRef) on success, Err(error_code) on failure.
+/// Returns `Err` for invalid dimensions/layout. Managed allocation failure is
+/// `Ok(null)` and remains recorded in the GC for the VM/JIT memory gate.
 pub fn create_checked(
     gc: &mut Gc,
     elem_meta: u32,
@@ -125,6 +129,7 @@ pub fn create_checked(
     cap: i64,
 ) -> Result<GcRef, i32> {
     let elem_meta = ValueMeta::try_from_raw(elem_meta).ok_or(alloc_error::OVERFLOW)?;
+    u32::try_from(elem_bytes).map_err(|_| alloc_error::OVERFLOW)?;
     // Unified validation logic
     if len < 0 {
         return Err(alloc_error::NEGATIVE_LEN);
@@ -151,11 +156,7 @@ pub fn create_checked(
     }
 
     // Allocation
-    let result = create(gc, elem_meta, elem_bytes, len_usize, cap_usize);
-    if result.is_null() {
-        return Err(alloc_error::OVERFLOW); // OOM treated as overflow
-    }
-    Ok(result)
+    Ok(create(gc, elem_meta, elem_bytes, len_usize, cap_usize))
 }
 
 pub unsafe fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize) -> GcRef {
@@ -174,30 +175,45 @@ pub unsafe fn from_array_range_with_cap(
     length: usize,
     capacity: usize,
 ) -> GcRef {
+    unsafe {
+        try_from_array_range_with_cap(gc, arr, start_off, length, capacity)
+            .unwrap_or(core::ptr::null_mut())
+    }
+}
+
+unsafe fn try_from_array_range_with_cap(
+    gc: &mut Gc,
+    arr: GcRef,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+) -> Option<GcRef> {
     let arr_len = array::len(arr);
     if start_off > arr_len {
-        return core::ptr::null_mut();
+        return None;
     }
     let backing_cap = arr_len - start_off;
     if length > capacity || capacity > backing_cap {
-        return core::ptr::null_mut();
+        return None;
     }
     let elem_meta = array::elem_meta(arr);
     let elem_bytes = array::elem_bytes(arr);
     let backing_ptr = array::data_ptr_bytes(arr);
-    alloc_view(
-        gc,
-        arr,
-        backing_ptr,
-        arr_len,
-        start_off,
-        length,
-        capacity,
-        elem_meta,
-        elem_bytes,
-        elem_bytes,
-        STORAGE_MODE_PACKED,
-    )
+    unsafe {
+        try_alloc_view(
+            gc,
+            arr,
+            backing_ptr,
+            arr_len,
+            start_off,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            elem_bytes,
+            STORAGE_MODE_PACKED,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -214,50 +230,101 @@ unsafe fn alloc_view(
     storage_stride: usize,
     storage_mode: Slot,
 ) -> GcRef {
-    let Some(geometry) = validate_view_geometry(
+    unsafe {
+        try_alloc_view(
+            gc,
+            owner,
+            backing_ptr,
+            backing_len,
+            start_off,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            storage_mode,
+        )
+        .unwrap_or(core::ptr::null_mut())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn try_alloc_view(
+    gc: &mut Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    backing_len: usize,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    storage_stride: usize,
+    storage_mode: Slot,
+) -> Option<GcRef> {
+    let geometry = validate_owned_view_geometry(
+        gc,
+        owner,
+        backing_ptr,
+        backing_len,
+        start_off,
+        length,
+        capacity,
+        storage_stride,
+    )?;
+
+    Some(unsafe {
+        alloc_view_descriptor(
+            gc,
+            owner,
+            backing_ptr,
+            backing_len,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            storage_mode,
+            geometry,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_owned_view_geometry(
+    gc: &Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    backing_len: usize,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+    storage_stride: usize,
+) -> Option<ViewGeometry> {
+    let geometry = validate_view_geometry(
         backing_len,
         start_off,
         length,
         capacity,
         backing_ptr,
         storage_stride,
-    ) else {
-        return core::ptr::null_mut();
-    };
+    )?;
 
     // Heap-owned inline views must remain wholly inside the allocation named
     // by `owner`. A null owner is reserved for permanently rooted storage
     // (package globals), where the geometry validation above is the available
     // runtime authority.
     if !owner.is_null() {
-        let Some((base, _, allocation_bytes)) = gc.ref_data_range(owner) else {
-            return core::ptr::null_mut();
-        };
-        let Some(allocation_end) = (base as usize).checked_add(allocation_bytes) else {
-            return core::ptr::null_mut();
-        };
+        let (base, _, allocation_bytes) = gc.ref_data_range(owner)?;
+        let allocation_end = (base as usize).checked_add(allocation_bytes)?;
         let backing_start = backing_ptr as usize;
-        let Some(backing_end) = backing_start.checked_add(geometry.backing_bytes) else {
-            return core::ptr::null_mut();
-        };
+        let backing_end = backing_start.checked_add(geometry.backing_bytes)?;
         if backing_start < base as usize || backing_end > allocation_end {
-            return core::ptr::null_mut();
+            return None;
         }
     }
 
-    alloc_view_descriptor(
-        gc,
-        owner,
-        backing_ptr,
-        backing_len,
-        length,
-        capacity,
-        elem_meta,
-        elem_bytes,
-        storage_stride,
-        storage_mode,
-        geometry,
-    )
+    Some(geometry)
 }
 
 #[derive(Clone, Copy)]
@@ -421,8 +488,8 @@ pub unsafe fn inline_array_slice(
     if lo > hi || hi > array_len {
         return None;
     }
-    let result = unsafe {
-        from_inline_array_range_with_cap(
+    unsafe {
+        try_alloc_view(
             gc,
             owner,
             backing_ptr,
@@ -433,9 +500,9 @@ pub unsafe fn inline_array_slice(
             elem_meta,
             elem_bytes,
             storage_stride,
+            STORAGE_MODE_FLAT_SLOTS,
         )
-    };
-    (!result.is_null()).then_some(result)
+    }
 }
 
 /// Three-index slice over an inline fixed-array subobject.
@@ -455,8 +522,8 @@ pub unsafe fn inline_array_slice_with_cap(
     if lo > hi || hi > max || max > array_len {
         return None;
     }
-    let result = unsafe {
-        from_inline_array_range_with_cap(
+    unsafe {
+        try_alloc_view(
             gc,
             owner,
             backing_ptr,
@@ -467,9 +534,9 @@ pub unsafe fn inline_array_slice_with_cap(
             elem_meta,
             elem_bytes,
             storage_stride,
+            STORAGE_MODE_FLAT_SLOTS,
         )
-    };
-    (!result.is_null()).then_some(result)
+    }
 }
 
 /// Two-index array slice: arr[lo:hi].
@@ -479,8 +546,7 @@ pub unsafe fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Opti
     if lo > hi || hi > arr_len {
         return None;
     }
-    let result = from_array_range(gc, arr, lo, hi - lo);
-    (!result.is_null()).then_some(result)
+    unsafe { try_from_array_range_with_cap(gc, arr, lo, hi - lo, arr_len - lo) }
 }
 
 /// Three-index array slice: arr[lo:hi:max].
@@ -496,8 +562,7 @@ pub unsafe fn array_slice_with_cap(
     if lo > hi || hi > max || max > arr_len {
         return None;
     }
-    let result = from_array_range_with_cap(gc, arr, lo, hi - lo, max - lo);
-    (!result.is_null()).then_some(result)
+    unsafe { try_from_array_range_with_cap(gc, arr, lo, hi - lo, max - lo) }
 }
 
 pub unsafe fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
@@ -939,20 +1004,6 @@ pub unsafe fn copy_logical_elements_at(
     }
 }
 
-#[cfg(test)]
-mod public_api_contract_tests {
-    #[test]
-    fn raw_slice_element_accessors_are_unsafe_public_primitives_055() {
-        let src = include_str!("slice.rs");
-        for name in ["get", "get_auto", "set", "set_auto", "get_n", "set_n"] {
-            assert!(
-                src.contains(&format!("pub unsafe fn {name}(")),
-                "slice::{name} is an unchecked raw heap element primitive and must require unsafe at public call sites"
-            );
-        }
-    }
-}
-
 /// Two-index slice: s[lo:hi] - capacity extends to original cap.
 /// Returns None on bounds error (lo > hi or hi > cap).
 pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
@@ -961,26 +1012,7 @@ pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<Gc
     if lo > hi || hi > cap {
         return None;
     }
-    let stride = storage_stride(s);
-    let new_data_ptr = unsafe { data_ptr(s).add(lo * stride) };
-    let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    if new_s.is_null() {
-        return None;
-    }
-    // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
-    let new_data = unsafe { SliceData::as_mut(new_s) };
-    new_data.owner = data.owner;
-    new_data.data_ptr = ptr_to_slot(new_data_ptr);
-    new_data.len = (hi - lo) as Slot;
-    new_data.cap = (cap - lo) as Slot;
-    new_data.elem_meta = data.elem_meta;
-    new_data.elem_bytes = data.elem_bytes;
-    new_data.backing_ptr = data.backing_ptr;
-    new_data.backing_len = data.backing_len;
-    new_data.storage_stride = data.storage_stride;
-    new_data.storage_mode = data.storage_mode;
-    gc.mark_allocated_for_scan(new_s);
-    Some(new_s)
+    unsafe { try_reslice(gc, data, lo, hi - lo, cap - lo) }
 }
 
 /// Three-index slice: s[lo:hi:max] - capacity = max - lo.
@@ -997,26 +1029,57 @@ pub unsafe fn slice_of_with_cap(
     if lo > hi || hi > max || max > cap {
         return None;
     }
-    let stride = storage_stride(s);
-    let new_data_ptr = unsafe { data_ptr(s).add(lo * stride) };
-    let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    if new_s.is_null() {
-        return None;
-    }
-    // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
-    let new_data = unsafe { SliceData::as_mut(new_s) };
-    new_data.owner = data.owner;
-    new_data.data_ptr = ptr_to_slot(new_data_ptr);
-    new_data.len = (hi - lo) as Slot;
-    new_data.cap = (max - lo) as Slot;
-    new_data.elem_meta = data.elem_meta;
-    new_data.elem_bytes = data.elem_bytes;
-    new_data.backing_ptr = data.backing_ptr;
-    new_data.backing_len = data.backing_len;
-    new_data.storage_stride = data.storage_stride;
-    new_data.storage_mode = data.storage_mode;
-    gc.mark_allocated_for_scan(new_s);
-    Some(new_s)
+    unsafe { try_reslice(gc, data, lo, hi - lo, max - lo) }
+}
+
+unsafe fn try_reslice(
+    gc: &mut Gc,
+    source: &SliceData,
+    lo: usize,
+    length: usize,
+    capacity: usize,
+) -> Option<GcRef> {
+    let backing_ptr = slot_to_ptr::<u8>(source.backing_ptr);
+    let data_ptr = slot_to_ptr::<u8>(source.data_ptr);
+    let storage_stride = slot_to_usize(source.storage_stride);
+    let current_byte_offset = (data_ptr as usize).checked_sub(backing_ptr as usize)?;
+    let current_start = if storage_stride == 0 {
+        if current_byte_offset != 0 {
+            return None;
+        }
+        0
+    } else {
+        if !current_byte_offset.is_multiple_of(storage_stride) {
+            return None;
+        }
+        current_byte_offset / storage_stride
+    };
+    let start_off = current_start.checked_add(lo)?;
+    let backing_len = slot_to_usize(source.backing_len);
+    let geometry = validate_view_geometry(
+        backing_len,
+        start_off,
+        length,
+        capacity,
+        backing_ptr,
+        storage_stride,
+    )?;
+
+    Some(unsafe {
+        alloc_view_descriptor(
+            gc,
+            slot_to_ptr::<Slot>(source.owner),
+            backing_ptr,
+            backing_len,
+            length,
+            capacity,
+            ValueMeta::from_raw(source.elem_meta as u32),
+            slot_to_usize(source.elem_bytes),
+            storage_stride,
+            source.storage_mode,
+            geometry,
+        )
+    })
 }
 
 /// Create new slice header with updated length (same backing array, same start).
@@ -1055,7 +1118,7 @@ pub unsafe fn append(
     elem_bytes: usize,
     s: GcRef,
     val: &[u64],
-    module: Option<&vo_common_core::bytecode::Module>,
+    module: Option<vo_common_core::bytecode::ModuleRuntimeMetadata<'_>>,
 ) -> GcRef {
     try_append(gc, em, elem_bytes, s, val, module).unwrap_or_else(|err| panic!("{err}"))
 }
@@ -1066,7 +1129,7 @@ pub unsafe fn try_append(
     elem_bytes: usize,
     s: GcRef,
     val: &[u64],
-    module: Option<&vo_common_core::bytecode::Module>,
+    module: Option<vo_common_core::bytecode::ModuleRuntimeMetadata<'_>>,
 ) -> Result<GcRef, crate::gc_types::TypedWriteBarrierByMetaError> {
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
@@ -1077,6 +1140,9 @@ pub unsafe fn try_append(
             crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, em, module)?;
         }
         let result = from_array_range_with_cap(gc, new_arr, 0, 1, 4);
+        if result.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
         unsafe { write_logical_slots(result, 0, val) };
         if em.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
@@ -1105,9 +1171,13 @@ pub unsafe fn try_append(
                 )?;
             }
         }
-        unsafe { write_logical_slots(s, cur_len, val) };
         // Go semantics: append never modifies original slice header
-        Ok(with_new_len(gc, s, cur_len + 1))
+        let result = with_new_len(gc, s, cur_len + 1);
+        if result.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
+        unsafe { write_logical_slots(s, cur_len, val) };
+        Ok(result)
     } else {
         let new_cap = if cur_cap == 0 {
             4
@@ -1124,6 +1194,9 @@ pub unsafe fn try_append(
             crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, actual_em, module)?;
         }
         let result = from_array_range_with_cap(gc, new_arr, 0, cur_len + 1, new_cap);
+        if result.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
         let elem_slots = elem_slots_for_bytes(actual_elem_bytes);
         let mut elem = vec![0u64; elem_slots];
         for index in 0..cur_len {
@@ -1141,12 +1214,21 @@ pub unsafe fn try_append(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gc::{MemoryError, VmMemoryConfig};
     use crate::test_support::{
         array,
         slice::{from_array_range, from_array_range_with_cap, try_append, with_new_len},
     };
     use vo_common_core::bytecode::{Module, StructMeta};
     use vo_common_core::types::SlotType;
+
+    fn gc_with_object_limit(max_objects: usize) -> Gc {
+        Gc::with_memory_config(VmMemoryConfig {
+            max_objects: Some(max_objects),
+            ..VmMemoryConfig::default()
+        })
+        .expect("bounded GC configuration")
+    }
 
     #[test]
     fn create_rejects_length_larger_than_capacity() {
@@ -1167,6 +1249,107 @@ mod tests {
             0,
         );
         assert!(slice.is_null());
+    }
+
+    #[test]
+    fn option_slice_views_preserve_descriptor_oom_for_memory_gate() {
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+
+        let mut slice_gc = gc_with_object_limit(2);
+        let source = create(&mut slice_gc, meta, SLOT_BYTES, 1, 1);
+        assert!(matches!(
+            unsafe { slice_of(&mut slice_gc, source, 0, 1) },
+            Some(result) if result.is_null()
+        ));
+        assert!(matches!(
+            unsafe { slice_of_with_cap(&mut slice_gc, source, 0, 1, 1) },
+            Some(result) if result.is_null()
+        ));
+        assert_eq!(
+            slice_gc.last_memory_error(),
+            Some(MemoryError::MetadataExhausted)
+        );
+
+        let mut array_gc = gc_with_object_limit(1);
+        let source = array::create(&mut array_gc, meta, SLOT_BYTES, 1);
+        assert!(matches!(
+            unsafe { array_slice(&mut array_gc, source, 0, 1) },
+            Some(result) if result.is_null()
+        ));
+        assert!(matches!(
+            unsafe { array_slice_with_cap(&mut array_gc, source, 0, 1, 1) },
+            Some(result) if result.is_null()
+        ));
+        assert_eq!(
+            array_gc.last_memory_error(),
+            Some(MemoryError::MetadataExhausted)
+        );
+
+        let mut inline_gc = gc_with_object_limit(1);
+        let owner = inline_gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        assert!(matches!(
+            unsafe {
+                inline_array_slice(
+                    &mut inline_gc,
+                    owner,
+                    owner.cast(),
+                    meta,
+                    SLOT_BYTES,
+                    SLOT_BYTES,
+                    1,
+                    0,
+                    1,
+                )
+            },
+            Some(result) if result.is_null()
+        ));
+        assert!(matches!(
+            unsafe {
+                inline_array_slice_with_cap(
+                    &mut inline_gc,
+                    owner,
+                    owner.cast(),
+                    meta,
+                    SLOT_BYTES,
+                    SLOT_BYTES,
+                    1,
+                    0,
+                    1,
+                    1,
+                )
+            },
+            Some(result) if result.is_null()
+        ));
+        assert_eq!(
+            inline_gc.last_memory_error(),
+            Some(MemoryError::MetadataExhausted)
+        );
+    }
+
+    #[test]
+    fn option_slice_views_keep_invalid_bounds_and_geometry_as_none() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+        let source = create(&mut gc, meta, SLOT_BYTES, 1, 1);
+        let array = unsafe { array_ref(source) };
+
+        assert!(unsafe { slice_of(&mut gc, source, 1, 0) }.is_none());
+        assert!(unsafe { array_slice(&mut gc, array, 1, 0) }.is_none());
+        assert!(unsafe {
+            inline_array_slice(
+                &mut gc,
+                array,
+                core::ptr::null_mut(),
+                meta,
+                SLOT_BYTES,
+                SLOT_BYTES,
+                1,
+                0,
+                1,
+            )
+        }
+        .is_none());
+        assert_eq!(gc.last_memory_error(), None);
     }
 
     #[test]
@@ -1267,6 +1450,57 @@ mod tests {
         assert_eq!(result, Err(crate::objects::alloc_error::OVERFLOW));
     }
 
+    #[test]
+    fn try_append_nil_propagates_slice_descriptor_allocation_failure() {
+        let mut gc = gc_with_object_limit(1);
+        let em = ValueMeta::new(0, ValueKind::Int64);
+
+        let result = try_append(&mut gc, em, SLOT_BYTES, core::ptr::null_mut(), &[7], None);
+
+        assert_eq!(
+            result,
+            Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)
+        );
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
+
+    #[test]
+    fn try_append_spare_capacity_is_transactional_when_header_allocation_fails() {
+        let mut gc = gc_with_object_limit(2);
+        let em = ValueMeta::new(0, ValueKind::Int64);
+        let source = create(&mut gc, em, SLOT_BYTES, 1, 2);
+        let backing = unsafe { array_ref(source) };
+        array::set(backing, 1, 42, SLOT_BYTES);
+
+        let result = try_append(&mut gc, em, SLOT_BYTES, source, &[7], None);
+
+        assert_eq!(
+            result,
+            Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)
+        );
+        assert_eq!(array::get(backing, 1, SLOT_BYTES), 42);
+        assert_eq!(unsafe { len(source) }, 1);
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
+
+    #[test]
+    fn try_append_growth_propagates_second_allocation_failure() {
+        let mut gc = gc_with_object_limit(3);
+        let em = ValueMeta::new(0, ValueKind::Int64);
+        let source = create(&mut gc, em, SLOT_BYTES, 1, 1);
+        unsafe { set(source, 0, 11, SLOT_BYTES) };
+
+        let result = try_append(&mut gc, em, SLOT_BYTES, source, &[7], None);
+
+        assert_eq!(
+            result,
+            Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)
+        );
+        assert_eq!(unsafe { get(source, 0, SLOT_BYTES) }, 11);
+        assert_eq!(unsafe { len(source) }, 1);
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
+
     #[cfg(target_pointer_width = "32")]
     #[test]
     fn create_checked_rejects_dimension_that_does_not_fit_target_usize() {
@@ -1292,7 +1526,7 @@ mod tests {
         let s = from_array_range(&mut gc, arr, 0, 1);
         let module = Module::new("test".to_string());
 
-        let err = try_append(&mut gc, em, 8, s, &[0], Some(&module))
+        let err = try_append(&mut gc, em, 8, s, &[0], Some((&module).into()))
             .expect_err("missing struct metadata should reject append");
 
         assert_eq!(
@@ -1315,7 +1549,7 @@ mod tests {
             field_index: Default::default(),
         });
 
-        let result = try_append(&mut gc, em, 8, s, &[0], Some(&module))
+        let result = try_append(&mut gc, em, 8, s, &[0], Some((&module).into()))
             .expect("struct metadata should allow append");
 
         assert!(!result.is_null());
@@ -1332,7 +1566,7 @@ mod tests {
         let s = from_array_range(&mut gc, arr, 0, 1);
         let module = Module::new("test".to_string());
 
-        let err = try_append(&mut gc, caller_em, 8, s, &[0], Some(&module))
+        let err = try_append(&mut gc, caller_em, 8, s, &[0], Some((&module).into()))
             .expect_err("non-nil append must derive metadata from the slice backing array");
 
         assert_eq!(

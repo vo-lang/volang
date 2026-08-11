@@ -59,12 +59,12 @@ contracts before a module can execute.
 `vo-jit/src/verifier.rs` runs only after the shared verifier. It owns strict JIT
 metadata policy and loop metadata consistency; lowering capability, helper ABI,
 frame materialization, side-exit, OSR, and direct-call contracts are enforced by
-the semantic row, contract graph, helper manifests, and lowering tests.
+the semantic row, metadata contract, helper manifests, and lowering tests.
 
 `VerifierRequirement` remains a semantic-row fact for fail-fast policy and
-contract graph coverage. VM-shared enforcement lives in `ModuleVerifier`; JIT
-uses the same semantic rows for lowering capability, runtime dependency, and
-ABI coverage instead of maintaining a second slot/layout verifier tree.
+direct semantic-matrix tests. VM-shared enforcement lives in `ModuleVerifier`;
+JIT uses the same semantic rows for lowering capability, runtime dependency,
+and ABI coverage instead of maintaining a second slot/layout verifier tree.
 
 Family verifiers should keep concrete layout shape, interface-pair,
 write-barrier, call-shape, and opcode-specific contracts. If a helper is shared

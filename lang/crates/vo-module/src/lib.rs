@@ -1,6 +1,5 @@
 pub mod artifact;
 pub mod async_install;
-mod async_solver;
 pub mod attestation;
 pub mod cache;
 pub mod digest;

@@ -1,4 +1,16 @@
+---
+date: 2026-08-10
+status: archived
+area: jit
+owner: volang
+supersedes: []
+superseded_by: []
+---
+
 # Hint 指令设计文档
+
+> 历史设计说明：下文的 loop flags 布局已经退役。当前 `HINT_LOOP` 要求低
+> 4 位为零，只保留 verifier 与 OSR 仍需要的结构深度和结束位置元数据。
 
 ## 概述
 

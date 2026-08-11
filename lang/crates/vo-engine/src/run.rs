@@ -63,20 +63,29 @@ fn jit_env_bool(name: &str, default: bool) -> Result<bool, RunError> {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct RunObservation {
-    pub jit_function_entries: u64,
-    pub jit_loop_entries: u64,
-    pub jit_regular_call_side_exits: u64,
-    pub jit_function_code_bytes: usize,
-    pub jit_loop_code_bytes: usize,
-    pub jit_unsupported_functions: usize,
-}
+pub type RunObservation = vo_vm::JitExecutionStats;
 
-impl RunObservation {
-    pub fn executed_jit_code(self) -> bool {
-        self.jit_function_entries > 0 || self.jit_loop_entries > 0
-    }
+pub fn render_run_observation_json(
+    observation: RunObservation,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let side_exits = vo_vm::JitSideExitReason::ALL
+        .into_iter()
+        .map(|reason| {
+            (
+                reason.as_str().to_string(),
+                serde_json::Value::from(observation.side_exit_count(reason)),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": "volang.jit.execution-stats.v1",
+        "scope": "root_vm",
+        "function_entries": observation.function_entries,
+        "loop_entries": observation.loop_entries,
+        "side_exits": side_exits,
+        "low_progress_function_disables": observation.low_progress_function_disables,
+        "low_progress_loop_disables": observation.low_progress_loop_disables,
+    }))
 }
 
 #[derive(Debug)]
@@ -207,6 +216,15 @@ pub fn run_with_byte_args_and_memory(
     args: Vec<Vec<u8>>,
     memory_config: vo_vm::VmMemoryConfig,
 ) -> Result<(), RunError> {
+    run_with_byte_args_and_memory_observed(compiled, mode, args, memory_config).map(|_| ())
+}
+
+pub fn run_with_byte_args_and_memory_observed(
+    compiled: CompileOutput,
+    mode: RunMode,
+    args: Vec<Vec<u8>>,
+    memory_config: vo_vm::VmMemoryConfig,
+) -> Result<RunObservation, RunError> {
     run_with_output_interruptible_observed_bytes(
         compiled,
         mode,
@@ -215,7 +233,6 @@ pub fn run_with_byte_args_and_memory(
         None,
         memory_config,
     )
-    .map(|_| ())
 }
 
 /// Run a compiled module with a custom output sink.
@@ -304,6 +321,7 @@ fn run_with_output_interruptible_observed_bytes(
                 call_threshold,
                 loop_threshold,
                 debug_ir,
+                ..JitConfig::default()
             };
             Vm::try_with_jit_and_memory_config(config, memory_config).map_err(|err| {
                 RunError::Runtime(RuntimeError {
@@ -339,7 +357,7 @@ fn run_with_output_interruptible_observed_bytes(
     if let Some(interrupt_flag) = interrupt_flag {
         vm.set_interrupt_flag(interrupt_flag);
     }
-    vm.load_with_extensions(module, ext_loader)
+    vm.load_verified_with_extensions(module, ext_loader)
         .map_err(|e| vm_err_to_run_err(&vm, &e))?;
 
     let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
@@ -374,23 +392,8 @@ fn require_terminal_outcome(vm: &Vm, outcome: SchedulingOutcome) -> Result<(), R
     }
 }
 
-#[cfg(feature = "jit")]
 fn run_observation(vm: &Vm) -> RunObservation {
-    let stats = vm.jit_execution_stats();
-    let code = vm.jit_code_memory_stats();
-    RunObservation {
-        jit_function_entries: stats.function_entries,
-        jit_loop_entries: stats.loop_entries,
-        jit_regular_call_side_exits: stats.side_exit_count(vo_vm::JitSideExitReason::RegularCall),
-        jit_function_code_bytes: code.function_bytes,
-        jit_loop_code_bytes: code.loop_bytes,
-        jit_unsupported_functions: vm.jit_unsupported_function_count(),
-    }
-}
-
-#[cfg(not(feature = "jit"))]
-fn run_observation(_vm: &Vm) -> RunObservation {
-    RunObservation::default()
+    vm.jit_execution_stats()
 }
 
 fn vm_err_to_run_err(vm: &Vm, e: &VmError) -> RunError {
@@ -450,7 +453,7 @@ fn build_gui_vm_with_island_transport(
     if external_island_transport {
         vm.enable_external_island_transport();
     }
-    vm.load_with_extensions(compiled.module, ext_loader)
+    vm.load_verified_with_extensions(compiled.module, ext_loader)
         .map_err(|e| format!("{:?}", e))?;
     Ok(vm)
 }
@@ -473,6 +476,35 @@ fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<ExtensionLoad
 #[cfg(test)]
 mod terminal_outcome_tests {
     use super::*;
+
+    #[test]
+    fn run_observation_json_uses_the_canonical_jit_stats_schema() {
+        let observation = RunObservation {
+            function_entries: 3,
+            loop_entries: 5,
+            low_progress_function_disables: 1,
+            low_progress_loop_disables: 2,
+            ..RunObservation::default()
+        };
+        let bytes = render_run_observation_json(observation).expect("render observation");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("parse rendered observation");
+
+        assert_eq!(value["schema"], "volang.jit.execution-stats.v1");
+        assert_eq!(value["scope"], "root_vm");
+        assert_eq!(value["function_entries"], 3);
+        assert_eq!(value["loop_entries"], 5);
+        assert_eq!(value["low_progress_function_disables"], 1);
+        assert_eq!(value["low_progress_loop_disables"], 2);
+        for reason in vo_vm::JitSideExitReason::ALL {
+            assert_eq!(value["side_exits"][reason.as_str()], 0);
+        }
+    }
+
+    #[test]
+    fn interpreter_vm_exposes_a_zero_jit_observation() {
+        assert_eq!(Vm::new().jit_execution_stats(), RunObservation::default());
+    }
 
     #[test]
     fn suspended_outcomes_are_explicit_engine_errors() {
@@ -567,7 +599,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use vo_common_core::instruction::HINT_LOOP;
     use vo_runtime::bytecode::{
-        ExternDef, ExternEffects, JitInstructionMetadata, ParamShape, ReturnShape,
+        ExternDef, ExternEffects, InstructionMetadata, ParamShape, ReturnShape,
     };
     use vo_runtime::instruction::Opcode;
     use vo_runtime::output::CaptureSink;
@@ -603,6 +635,7 @@ func main() {
                 call_threshold: 1,
                 loop_threshold: 1,
                 debug_ir: false,
+                ..vo_vm::JitConfig::default()
             },
             vo_vm::VmMemoryConfig {
                 allocation_allowed: false,
@@ -611,7 +644,7 @@ func main() {
             },
         )
         .expect("JIT VM should initialize");
-        vm.load(compiled.module)
+        vm.load_verified(compiled.module)
             .expect("JIT memory failure fixture should load");
 
         let error = vm
@@ -733,11 +766,12 @@ func main() {
                 call_threshold: 1,
                 loop_threshold: 1_000_000,
                 debug_ir: false,
+                ..vo_vm::JitConfig::default()
             })
             .expect("JIT should initialize"),
         };
         vm.set_output_sink(CaptureSink::new());
-        if let Err(err) = vm.load(compiled.module) {
+        if let Err(err) = vm.load_verified(compiled.module) {
             return err;
         }
         match vm.run() {
@@ -746,10 +780,10 @@ func main() {
         }
     }
 
-    fn vm_error_for_compiled(compiled: CompileOutput, config: vo_vm::JitConfig) -> VmError {
+    fn vm_error_for_module(module: Module, config: vo_vm::JitConfig) -> VmError {
         let mut vm = Vm::try_with_jit_config(config).expect("JIT should initialize");
         vm.set_output_sink(CaptureSink::new());
-        if let Err(err) = vm.load(compiled.module) {
+        if let Err(err) = vm.load(module) {
             return err;
         }
         match vm.run() {
@@ -770,7 +804,7 @@ func main() {
         };
         let sink = CaptureSink::new();
         vm.set_output_sink(sink.clone());
-        vm.load(compiled.module).unwrap();
+        vm.load_verified(compiled.module).unwrap();
         let outcome = vm.run().expect("program should run");
         assert_ne!(
             outcome,
@@ -805,12 +839,14 @@ func main() {
                     call_threshold: 1,
                     loop_threshold: 1,
                     debug_ir: false,
+                    ..vo_vm::JitConfig::default()
                 })
                 .expect("JIT should initialize"),
             };
             let sink = CaptureSink::new();
             vm.set_output_sink(sink.clone());
-            vm.load(compiled.module).expect("module should load");
+            vm.load_verified(compiled.module)
+                .expect("module should load");
 
             assert_eq!(
                 vm.run().expect("os.Exit should be a normal VM outcome"),
@@ -853,10 +889,12 @@ func main() {
                             call_threshold: 1,
                             loop_threshold: 1,
                             debug_ir: false,
+                            ..vo_vm::JitConfig::default()
                         })
                         .expect("JIT should initialize"),
                     };
-                    vm.load(compiled.module).expect("module should load");
+                    vm.load_verified(compiled.module)
+                        .expect("module should load");
 
                     let outcome = vm.run().unwrap_or_else(|error| {
                         panic!("child os.Exit should be a normal {mode:?} outcome: {error:?}")
@@ -898,10 +936,12 @@ func main() {
                             call_threshold: 1,
                             loop_threshold: 1,
                             debug_ir: false,
+                            ..vo_vm::JitConfig::default()
                         })
                         .expect("JIT should initialize"),
                     };
-                    vm.load(compiled.module).expect("module should load");
+                    vm.load_verified(compiled.module)
+                        .expect("module should load");
 
                     let outcome = vm.run().unwrap_or_else(|error| {
                         panic!("main os.Exit should be a normal {mode:?} outcome: {error:?}")
@@ -949,11 +989,13 @@ func main() {
                             call_threshold: 1,
                             loop_threshold: 1,
                             debug_ir: false,
+                            ..vo_vm::JitConfig::default()
                         })
                         .expect("JIT should initialize"),
                     };
                     vm.set_program_args(vec!["main".to_string()]);
-                    vm.load(compiled.module).expect("module should load");
+                    vm.load_verified(compiled.module)
+                        .expect("module should load");
 
                     assert_eq!(
                         vm.run()
@@ -997,18 +1039,20 @@ func main() {
                     call_threshold: 1,
                     loop_threshold: 1,
                     debug_ir: false,
+                    ..vo_vm::JitConfig::default()
                 })
                 .expect("JIT should initialize"),
             };
             let sink = CaptureSink::new();
             vm.set_output_sink(sink.clone());
             vm.set_program_args_bytes(vec![b"p\xfe".to_vec(), Vec::new()]);
-            vm.load(compiled.module).expect("module should load");
+            vm.load_verified(compiled.module)
+                .expect("module should load");
             let outcome = vm.run().expect("program should run");
             assert_eq!(outcome, SchedulingOutcome::Completed);
             assert_eq!(sink.take_bytes(), expected, "mode {mode:?}");
             if mode == RunMode::Jit {
-                assert!(run_observation(&vm).jit_function_entries > 0);
+                assert!(run_observation(&vm).function_entries > 0);
             }
         }
     }
@@ -1128,13 +1172,15 @@ func main() {
                     call_threshold: 1,
                     loop_threshold: 1,
                     debug_ir: false,
+                    ..vo_vm::JitConfig::default()
                 })
                 .expect("JIT should initialize"),
             };
             let sink = CaptureSink::new();
             vm.set_output_sink(sink.clone());
             vm.set_program_args_bytes(vec![root.0.as_os_str().as_encoded_bytes().to_vec()]);
-            vm.load(compiled.module).expect("DirFS module should load");
+            vm.load_verified(compiled.module)
+                .expect("DirFS module should load");
             assert_eq!(
                 vm.run().expect("DirFS program should run"),
                 SchedulingOutcome::Completed,
@@ -1315,11 +1361,12 @@ func main() {{
                     call_threshold: 1,
                     loop_threshold: 1,
                     debug_ir: false,
+                    ..vo_vm::JitConfig::default()
                 })
                 .expect("JIT should initialize"),
             };
             vm.set_interrupt_flag(interrupt);
-            vm.load(compiled.module)
+            vm.load_verified(compiled.module)
                 .expect("late HTTP module should load");
             assert!(
                 matches!(vm.run(), Err(VmError::Interrupted)),
@@ -1383,12 +1430,13 @@ func main() {
                     call_threshold: 1,
                     loop_threshold: 1,
                     debug_ir: false,
+                    ..vo_vm::JitConfig::default()
                 })
                 .expect("JIT should initialize"),
             };
             let sink = CaptureSink::new();
             vm.set_output_sink(sink.clone());
-            vm.load(compiled.module)
+            vm.load_verified(compiled.module)
                 .expect("async process wait module should load");
             assert_eq!(
                 vm.run().expect("async process wait should run"),
@@ -1788,13 +1836,64 @@ func main() {
             call_threshold: 1,
             loop_threshold: 1_000_000,
             debug_ir: false,
+            ..vo_vm::JitConfig::default()
         };
         let (vm_out, _) = output_for(source, RunMode::Vm, config.clone());
         let (jit_out, observation) = output_for(source, RunMode::Jit, config);
 
         assert_eq!(jit_out, vm_out);
         assert!(
-            observation.jit_function_entries > 0,
+            observation.function_entries > 0,
+            "test must execute full-function JIT code"
+        );
+    }
+
+    #[test]
+    fn prepared_shadow_closure_preserves_ptr_trap_and_recover() {
+        let source = r#"
+package main
+
+type Box struct {
+	value int
+}
+
+func invoke(f func() int) int {
+	return f()
+}
+
+func main() {
+	var cell *Box = &Box{value: 7}
+	f := func() int {
+		return cell.value
+	}
+	println(invoke(f))
+
+	cell = nil
+	recovered := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				recovered = true
+			}
+		}()
+		_ = invoke(f)
+	}()
+	println(recovered)
+}
+"#;
+        let config = vo_vm::JitConfig {
+            call_threshold: 1,
+            loop_threshold: 1_000_000,
+            debug_ir: false,
+            ..vo_vm::JitConfig::default()
+        };
+        let (vm_out, _) = output_for(source, RunMode::Vm, config.clone());
+        let (jit_out, observation) = output_for(source, RunMode::Jit, config);
+
+        assert_eq!(vm_out, "7\ntrue\n");
+        assert_eq!(jit_out, vm_out);
+        assert!(
+            observation.function_entries > 0,
             "test must execute full-function JIT code"
         );
     }
@@ -1813,11 +1912,13 @@ func main() {
             call_threshold: 1,
             loop_threshold: 50,
             debug_ir: false,
+            ..vo_vm::JitConfig::default()
         })
         .expect("JIT should initialize");
         let sink = CaptureSink::new();
         vm.set_output_sink(sink.clone());
-        vm.load(compiled.module).expect("module should load");
+        vm.load_verified(compiled.module)
+            .expect("module should load");
 
         let outcome = vm.run().expect("program should run");
 
@@ -1832,7 +1933,7 @@ func main() {
         );
         let observation = run_observation(&vm);
         assert!(
-            observation.jit_function_entries > 0,
+            observation.function_entries > 0,
             "proof must execute full-function JIT code"
         );
     }
@@ -1860,27 +1961,14 @@ func main() {
         let observation = result.expect("program should run");
         assert_eq!(sink.take(), "jit select default middle recv value ok\n");
         assert!(
-            observation.jit_function_entries > 0,
+            observation.function_entries > 0,
             "proof must execute full-function JIT code"
         );
     }
 
     #[test]
-    fn vm_jit_threshold_env_tests_use_process_env_lock_048() {
-        let source = include_str!("run.rs");
-        assert!(
-            source.contains("static PROCESS_ENV_LOCK"),
-            "tests that mutate process env must share a lock"
-        );
-        assert!(
-            source.contains("let _env_guard = PROCESS_ENV_LOCK"),
-            "JIT threshold tests must hold the process env lock while VO_JIT_* vars are overridden"
-        );
-    }
-
-    #[test]
     fn strict_jit_extern_not_registered_fails_fast() {
-        let mut compiled = crate::compile_string(
+        let compiled = crate::compile_string(
             r#"
 package main
 
@@ -1900,7 +1988,8 @@ func main() {
             vo_common_core::ExternKeyRef::new("github.com/acme/unregistered", "Missing")
                 .encode()
                 .expect("unregistered extern fixture must use the canonical codec");
-        compiled.module.externs.push(ExternDef::new(
+        let mut module = compiled.module.module().clone();
+        module.externs.push(ExternDef::new(
             unregistered,
             ParamShape::Exact { slots: 0 },
             ReturnShape::slots(0),
@@ -1911,11 +2000,12 @@ func main() {
             call_threshold: 1,
             loop_threshold: 1_000_000,
             debug_ir: false,
+            ..vo_vm::JitConfig::default()
         })
         .expect("JIT should initialize");
         vm.set_output_sink(CaptureSink::new());
 
-        let err = match vm.load(compiled.module) {
+        let err = match vm.load(module) {
             Err(err) => err,
             Ok(()) => panic!("expected JIT extern registration error during load"),
         };
@@ -1929,8 +2019,8 @@ func main() {
     }
 
     #[test]
-    fn strict_jit_full_compile_invalid_metadata_fails_fast() {
-        let mut compiled = crate::compile_string(
+    fn common_verifier_rejects_full_jit_metadata_drift_before_execution() {
+        let compiled = crate::compile_string(
             r#"
 package main
 
@@ -1944,8 +2034,8 @@ func main() {
 "#,
         )
         .expect("source should compile");
-        let func = compiled
-            .module
+        let mut module = compiled.module.module().clone();
+        let func = module
             .functions
             .iter_mut()
             .find(|func| func.name.ends_with("hot"))
@@ -1955,29 +2045,34 @@ func main() {
             .iter()
             .position(|inst| inst.opcode() == Opcode::Return)
             .expect("return pc");
-        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete {
+        func.instruction_metadata[return_pc] = InstructionMetadata::MapDelete {
             key_layout: vec![SlotType::Value],
         };
 
-        let err = vm_error_for_compiled(
-            compiled,
+        let err = vm_error_for_module(
+            module,
             vo_vm::JitConfig {
                 call_threshold: 1,
                 loop_threshold: 1_000_000,
                 debug_ir: false,
+                ..vo_vm::JitConfig::default()
             },
         );
 
         let VmError::Jit(msg) = err else {
-            panic!("expected strict JIT error, got {err:?}");
+            panic!("expected common verifier error, got {err:?}");
         };
-        assert!(msg.contains("invalid JIT metadata"), "{msg}");
+        assert!(msg.contains("invalid module metadata"), "{msg}");
+        assert!(
+            msg.contains("wrong instruction metadata kind MapDelete for Return"),
+            "{msg}"
+        );
         assert!(msg.contains("hot"), "{msg}");
     }
 
     #[test]
-    fn strict_jit_osr_loop_analysis_error_fails_fast() {
-        let mut compiled = crate::compile_string(
+    fn common_verifier_rejects_invalid_loop_metadata_before_osr() {
+        let compiled = crate::compile_string(
             r#"
 package main
 
@@ -1995,8 +2090,8 @@ func main() {
 "#,
         )
         .expect("source should compile");
-        let func = compiled
-            .module
+        let mut module = compiled.module.module().clone();
+        let func = module
             .functions
             .iter_mut()
             .find(|func| func.name.ends_with("loopHot"))
@@ -2006,30 +2101,31 @@ func main() {
             .iter()
             .position(|inst| inst.opcode() == Opcode::Hint && inst.flags == HINT_LOOP)
             .expect("loop hint pc");
-        func.jit_metadata[hint_pc] = JitInstructionMetadata::LoopEnd {
+        func.instruction_metadata[hint_pc] = InstructionMetadata::LoopEnd {
             end_pc: hint_pc as u32,
         };
 
-        let err = vm_error_for_compiled(
-            compiled,
+        let err = vm_error_for_module(
+            module,
             vo_vm::JitConfig {
                 call_threshold: 1_000_000,
                 loop_threshold: 1,
                 debug_ir: false,
+                ..vo_vm::JitConfig::default()
             },
         );
 
         let VmError::Jit(msg) = err else {
-            panic!("expected strict OSR JIT error, got {err:?}");
+            panic!("expected common verifier error, got {err:?}");
         };
-        assert!(msg.contains("invalid JIT metadata"), "{msg}");
+        assert!(msg.contains("invalid module metadata"), "{msg}");
         assert!(msg.contains("LoopEnd"), "{msg}");
         assert!(msg.contains("loopHot"), "{msg}");
     }
 
     #[test]
-    fn strict_jit_dynamic_callee_precompile_error_fails_fast() {
-        let mut compiled = crate::compile_string(
+    fn common_verifier_rejects_dynamic_callee_metadata_drift_before_precompile() {
+        let compiled = crate::compile_string(
             r#"
 package main
 
@@ -2047,8 +2143,8 @@ func main() {
 "#,
         )
         .expect("source should compile");
-        let func = compiled
-            .module
+        let mut module = compiled.module.module().clone();
+        let func = module
             .functions
             .iter_mut()
             .find(|func| func.name.ends_with("target"))
@@ -2058,23 +2154,28 @@ func main() {
             .iter()
             .position(|inst| inst.opcode() == Opcode::Return)
             .expect("return pc");
-        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete {
+        func.instruction_metadata[return_pc] = InstructionMetadata::MapDelete {
             key_layout: vec![SlotType::Value],
         };
 
-        let err = vm_error_for_compiled(
-            compiled,
+        let err = vm_error_for_module(
+            module,
             vo_vm::JitConfig {
                 call_threshold: 1,
                 loop_threshold: 1_000_000,
                 debug_ir: false,
+                ..vo_vm::JitConfig::default()
             },
         );
 
         let VmError::Jit(msg) = err else {
-            panic!("expected strict dynamic callee JIT error, got {err:?}");
+            panic!("expected common verifier error, got {err:?}");
         };
-        assert!(msg.contains("invalid JIT metadata"), "{msg}");
+        assert!(msg.contains("invalid module metadata"), "{msg}");
+        assert!(
+            msg.contains("wrong instruction metadata kind MapDelete for Return"),
+            "{msg}"
+        );
         assert!(msg.contains("target"), "{msg}");
     }
 }

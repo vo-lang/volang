@@ -1,8 +1,9 @@
 use super::*;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use vo_runtime::bytecode::{
-    InterfaceMeta, Itab, JitInstructionMetadata, MethodInfo, Module, NamedTypeMeta,
+    InstructionMetadata, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta,
 };
 use vo_runtime::ffi::SentinelErrorCache;
 use vo_runtime::gc::Gc;
@@ -32,7 +33,7 @@ fn func(has_defer: bool, has_calls: bool, has_call_extern: bool) -> FunctionDef 
         has_calls,
         has_call_extern,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types: Vec::new(),
         borrowed_scan_slots_prefix: Vec::new(),
         capture_types: Vec::new(),
@@ -96,34 +97,9 @@ fn assert_invalid_callback_state(ctx: &JitContext) {
 fn assert_trapped_prepared_call(out: &PreparedCall) {
     assert!(out.jit_func_ptr.is_null());
     assert!(out.callee_args_ptr.is_null());
-    assert!(out.ret_ptr.is_null());
+    assert!(out.ic_jit_func_ptr.is_null());
     assert_eq!(out.callee_local_slots, 0);
     assert_eq!(out.func_id, 0);
-    assert_eq!(out.arg_offset, 0);
-    assert_eq!(out.slot0_kind, DynCallIC::SLOT0_NONE);
-    assert_eq!(out.is_leaf, 0);
-}
-
-#[test]
-fn vm_jit_prepare_iface_call_validates_receiver_layout_before_frame_push_060() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../closure_call.rs"
-    ));
-    let iface_call = source
-        .split("pub extern \"C\" fn jit_prepare_iface_call(")
-        .nth(1)
-        .and_then(|rest| rest.split("/// Prepare").next())
-        .expect("jit_prepare_iface_call section");
-    let validate_pos = iface_call
-        .find("validate_iface_receiver_layout(")
-        .expect("JIT CallIface must validate receiver layout");
-    let push_pos = iface_call
-        .find("push_frame_fn(")
-        .expect("JIT CallIface must push a frame");
-    assert!(
-        validate_pos < push_pos,
-        "JIT CallIface must reject receiver layout drift before frame push"
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -132,7 +108,6 @@ fn test_context(
     module: &Module,
     itab_cache: &mut ItabCache,
     stack: &mut [u64],
-    safepoint_flag: &bool,
     panic_flag: &mut bool,
     is_user_panic: &mut bool,
     panic_msg: &mut InterfaceSlot,
@@ -141,10 +116,12 @@ fn test_context(
     output: &CaptureSink,
     host_output: &mut Option<Vec<u8>>,
 ) -> JitContext {
+    // The raw context outlives this helper call; retain the test-only image for
+    // the remainder of the process, matching the static callback fixtures.
+    let loaded_module = Arc::into_raw(crate::vm::test_loaded_module(module.clone()));
     JitContext {
         gc,
         globals: core::ptr::null_mut(),
-        safepoint_flag,
         panic_flag,
         is_user_panic,
         panic_msg,
@@ -155,21 +132,17 @@ fn test_context(
         runtime_trap_pc: u32::MAX,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
-        vm: core::ptr::null_mut::<c_void>(),
+        callback_state: core::ptr::null_mut::<c_void>(),
         fiber: core::ptr::null_mut::<c_void>(),
         itab_cache,
         extern_registry: core::ptr::null(),
-        call_extern_fn: None,
-        module,
+        callbacks: &vo_runtime::jit_api::JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
-        direct_call_table: core::ptr::null(),
-        direct_call_count: 0,
         program_args,
         sentinel_errors,
         output: output as *const dyn vo_runtime::output::OutputSink,
         host_output,
-        #[cfg(feature = "std")]
         io: core::ptr::null_mut(),
         call_func_id: 0,
         call_arg_start: 0,
@@ -177,7 +150,6 @@ fn test_context(
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
-        #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
         stack_ptr: stack.as_mut_ptr(),
@@ -191,20 +163,6 @@ fn test_context(
         pop_frame_fn: None,
         stack_overflow_fn: None,
         push_resume_point_fn: None,
-        create_island_fn: None,
-        queue_len_fn: None,
-        queue_cap_fn: None,
-        queue_close_fn: None,
-        queue_send_fn: None,
-        queue_recv_fn: None,
-        go_start_fn: None,
-        go_island_fn: None,
-        defer_push_fn: None,
-        recover_fn: None,
-        select_begin_fn: None,
-        select_send_fn: None,
-        select_recv_fn: None,
-        select_exec_fn: None,
         is_error_return: 0,
         ret_gcref_start: 0,
         ret_is_heap: 0,
@@ -213,15 +171,22 @@ fn test_context(
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        host_services_v2: core::ptr::null(),
+        loaded_module,
     }
 }
 
 #[test]
-fn vm_direct_call_lookup_predicate_uses_frame_elision_contract() {
-    assert!(can_use_direct_call_table_entry(&func(false, false, false)));
-    assert!(!can_use_direct_call_table_entry(&func(true, false, false)));
-    assert!(!can_use_direct_call_table_entry(&func(false, true, false)));
-    assert!(!can_use_direct_call_table_entry(&func(false, false, true)));
+fn vm_jit_table_lookup_requires_dispatch_eligibility() {
+    let leaf = func(false, false, false);
+    assert!(vo_jit::can_elide_frame_for_direct_jit(&leaf));
+
+    let entry = 1_usize as *const u8;
+    let table = [entry];
+    assert_eq!(lookup_jit_ptr(table.as_ptr(), 1, 0, true), entry);
+    assert!(lookup_jit_ptr(table.as_ptr(), 1, 0, false).is_null());
+    assert!(lookup_jit_ptr(table.as_ptr(), 1, 1, true).is_null());
+    assert!(lookup_jit_ptr(core::ptr::null(), 1, 0, true).is_null());
 
     let mut alloc = func(false, false, false);
     alloc.code = vec![vo_runtime::instruction::Instruction::new(
@@ -230,7 +195,11 @@ fn vm_direct_call_lookup_predicate_uses_frame_elision_contract() {
         1,
         1,
     )];
-    assert!(!can_use_direct_call_table_entry(&alloc));
+    assert!(!vo_jit::can_elide_frame_for_direct_jit(&alloc));
+    assert!(!vo_jit::can_enter_prepared_shadow_frame_for_jit(&alloc));
+    assert!(!vo_jit::can_enter_prepared_shadow_frame_for_jit(&func(
+        true, false, false
+    )));
 }
 
 #[test]
@@ -239,7 +208,6 @@ fn vm_jit_prepared_call_abi_012_nil_closure_rejects_null_out_before_trap() {
     let mut gc = Gc::new();
     let mut itab_cache = ItabCache::new();
     let mut stack = [0_u64; 4];
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -252,7 +220,6 @@ fn vm_jit_prepared_call_abi_012_nil_closure_rejects_null_out_before_trap() {
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -270,7 +237,6 @@ fn vm_jit_prepared_call_abi_012_nil_closure_rejects_null_out_before_trap() {
         1,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         core::ptr::null_mut(),
     );
 
@@ -286,7 +252,6 @@ fn vm_jit_prepared_call_abi_012_nil_iface_rejects_null_out_before_trap() {
     let mut gc = Gc::new();
     let mut itab_cache = ItabCache::new();
     let mut stack = [0_u64; 4];
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -299,7 +264,6 @@ fn vm_jit_prepared_call_abi_012_nil_iface_rejects_null_out_before_trap() {
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -319,7 +283,6 @@ fn vm_jit_prepared_call_abi_012_nil_iface_rejects_null_out_before_trap() {
         1,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         core::ptr::null_mut(),
     );
 
@@ -335,7 +298,6 @@ fn vm_jit_prepared_call_abi_013_nil_closure_rejects_zero_resume_pc_before_trap()
     let mut gc = Gc::new();
     let mut itab_cache = ItabCache::new();
     let mut stack = [0_u64; 4];
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -348,7 +310,6 @@ fn vm_jit_prepared_call_abi_013_nil_closure_rejects_zero_resume_pc_before_trap()
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -357,19 +318,9 @@ fn vm_jit_prepared_call_abi_013_nil_closure_rejects_zero_resume_pc_before_trap()
         &output,
         &mut host_output,
     );
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
-    let result = jit_prepare_closure_call(
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        core::ptr::null(),
-        0,
-        core::ptr::null_mut(),
-        &mut out,
-    );
+    let result = jit_prepare_closure_call(&mut ctx, 0, 0, 0, 0, core::ptr::null(), 0, &mut out);
 
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
@@ -383,7 +334,6 @@ fn vm_jit_prepared_call_abi_013_nil_iface_rejects_zero_resume_pc_before_trap() {
     let mut gc = Gc::new();
     let mut itab_cache = ItabCache::new();
     let mut stack = [0_u64; 4];
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -396,7 +346,6 @@ fn vm_jit_prepared_call_abi_013_nil_iface_rejects_zero_resume_pc_before_trap() {
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -405,21 +354,9 @@ fn vm_jit_prepared_call_abi_013_nil_iface_rejects_zero_resume_pc_before_trap() {
         &output,
         &mut host_output,
     );
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
-    let result = jit_prepare_iface_call(
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        core::ptr::null(),
-        0,
-        core::ptr::null_mut(),
-        &mut out,
-    );
+    let result = jit_prepare_iface_call(&mut ctx, 0, 0, 0, 0, 0, 0, core::ptr::null(), 0, &mut out);
 
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
@@ -433,7 +370,6 @@ fn vm_jit_prepared_call_abi_057_nil_closure_requires_active_caller_frame_before_
     let mut gc = Gc::new();
     let mut itab_cache = ItabCache::new();
     let mut stack = [0_u64; 4];
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -446,7 +382,6 @@ fn vm_jit_prepared_call_abi_057_nil_closure_requires_active_caller_frame_before_
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -457,19 +392,9 @@ fn vm_jit_prepared_call_abi_057_nil_closure_requires_active_caller_frame_before_
     );
     let mut fiber = Fiber::new(0);
     ctx.fiber = &mut fiber as *mut Fiber as *mut c_void;
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
-    let result = jit_prepare_closure_call(
-        &mut ctx,
-        0,
-        0,
-        0,
-        1,
-        core::ptr::null(),
-        0,
-        core::ptr::null_mut(),
-        &mut out,
-    );
+    let result = jit_prepare_closure_call(&mut ctx, 0, 0, 0, 1, core::ptr::null(), 0, &mut out);
 
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
@@ -483,7 +408,6 @@ fn vm_jit_prepared_call_abi_057_nil_iface_requires_active_caller_frame_before_tr
     let mut gc = Gc::new();
     let mut itab_cache = ItabCache::new();
     let mut stack = [0_u64; 4];
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -496,7 +420,6 @@ fn vm_jit_prepared_call_abi_057_nil_iface_requires_active_caller_frame_before_tr
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -507,21 +430,9 @@ fn vm_jit_prepared_call_abi_057_nil_iface_requires_active_caller_frame_before_tr
     );
     let mut fiber = Fiber::new(0);
     ctx.fiber = &mut fiber as *mut Fiber as *mut c_void;
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
-    let result = jit_prepare_iface_call(
-        &mut ctx,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        core::ptr::null(),
-        0,
-        core::ptr::null_mut(),
-        &mut out,
-    );
+    let result = jit_prepare_iface_call(&mut ctx, 0, 0, 0, 0, 0, 1, core::ptr::null(), 0, &mut out);
 
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
@@ -541,7 +452,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_arg_slot_drift
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -555,7 +465,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_arg_slot_drift
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -565,8 +474,7 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_arg_slot_drift
         &mut host_output,
     );
     let user_args = [11_u64];
-    let mut returns = [0_u64; 1];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -576,7 +484,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_arg_slot_drift
         10,
         user_args.as_ptr(),
         user_args.len() as u32,
-        returns.as_mut_ptr(),
         &mut out,
     );
 
@@ -596,8 +503,8 @@ fn vm_jit_prepared_call_frame_shape_062_closure_rejects_param_slots_beyond_local
     callee.param_slots = 2;
     callee.local_slots = 1;
     callee.slot_types = vec![SlotType::Value, SlotType::Value];
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
         arg_layout: vec![SlotType::Value, SlotType::Value],
         ret_layout: Vec::new(),
     };
@@ -606,7 +513,6 @@ fn vm_jit_prepared_call_frame_shape_062_closure_rejects_param_slots_beyond_local
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -620,7 +526,6 @@ fn vm_jit_prepared_call_frame_shape_062_closure_rejects_param_slots_beyond_local
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -634,7 +539,7 @@ fn vm_jit_prepared_call_frame_shape_062_closure_rejects_param_slots_beyond_local
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let user_args = [11_u64, 22_u64];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -644,7 +549,6 @@ fn vm_jit_prepared_call_frame_shape_062_closure_rejects_param_slots_beyond_local
         10,
         user_args.as_ptr(),
         user_args.len() as u32,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -660,8 +564,8 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_closure_rejects_b
     callee.local_slots = 1;
     callee.ret_slots = 1;
     callee.ret_slot_types = vec![SlotType::Value];
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: vec![SlotType::Value],
     };
@@ -670,7 +574,6 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_closure_rejects_b
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -684,7 +587,6 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_closure_rejects_b
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -697,8 +599,7 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_closure_rejects_b
     attach_current_frame(&mut ctx, &mut fiber, 0);
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
-    let mut returns = [0_u64; 1];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -708,7 +609,6 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_closure_rejects_b
         10,
         core::ptr::null(),
         0,
-        returns.as_mut_ptr(),
         &mut out,
     );
 
@@ -726,7 +626,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_non_closure_gc
     let mut gc = Gc::new();
     let wrong_ref = island::create(&mut gc, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -740,7 +639,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_non_closure_gc
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -749,7 +647,7 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_non_closure_gc
         &output,
         &mut host_output,
     );
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -759,7 +657,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_non_closure_gc
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -785,7 +682,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_capture_count_
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -799,7 +695,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_capture_count_
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -810,7 +705,7 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_capture_count_
     );
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -820,7 +715,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_capture_count_
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -848,7 +742,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_closure_alloca
     unsafe { vo_runtime::gc::Gc::header_mut(closure_ref) }.slots =
         (closure::HEADER_SLOTS + 1) as u16;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -862,7 +755,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_closure_alloca
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -873,7 +765,7 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_closure_alloca
     );
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -883,7 +775,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_closure_alloca
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -897,7 +788,7 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_closure_alloca
 }
 
 #[test]
-fn vm_jit_closure_canon_002_prepare_closure_call_stores_canonical_slot0() {
+fn vm_jit_closure_canon_002_prepared_frame_enters_compiled_closure_and_stores_canonical_slot0() {
     let mut module = Module::new("test".to_string());
     let mut callee = func(false, false, false);
     callee.is_closure = true;
@@ -908,8 +799,14 @@ fn vm_jit_closure_canon_002_prepare_closure_call_stores_canonical_slot0() {
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
     callee.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallLayout {
+    callee.code = vec![
+        vo_runtime::instruction::Instruction::new(vo_runtime::instruction::Opcode::PtrGet, 0, 0, 0),
+        vo_runtime::instruction::Instruction::new(vo_runtime::instruction::Opcode::Return, 0, 0, 0),
+    ];
+    assert!(!vo_jit::can_elide_frame_for_direct_jit(&callee));
+    assert!(vo_jit::can_enter_prepared_shadow_frame_for_jit(&callee));
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     };
@@ -919,7 +816,6 @@ fn vm_jit_closure_canon_002_prepare_closure_call_stores_canonical_slot0() {
     let closure_ref = closure::create(&mut gc, 0, 1);
     let interior_ref = unsafe { closure_ref.add(closure::HEADER_SLOTS) } as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -933,7 +829,6 @@ fn vm_jit_closure_canon_002_prepare_closure_call_stores_canonical_slot0() {
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -944,7 +839,11 @@ fn vm_jit_closure_canon_002_prepare_closure_call_stores_canonical_slot0() {
     );
     let mut fiber = Fiber::new(0);
     attach_current_frame(&mut ctx, &mut fiber, 0);
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let entry = 1_usize as *const u8;
+    let jit_table = [entry];
+    ctx.jit_func_table = jit_table.as_ptr();
+    ctx.jit_func_count = jit_table.len() as u32;
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -954,13 +853,13 @@ fn vm_jit_closure_canon_002_prepare_closure_call_stores_canonical_slot0() {
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
     assert_eq!(result, JitResult::Ok);
+    assert_eq!(out.jit_func_ptr, entry);
+    assert!(out.ic_jit_func_ptr.is_null());
     assert_eq!(stack[0], closure_ref as u64);
-    assert_eq!(out.arg_offset, 1);
 }
 
 #[test]
@@ -975,8 +874,8 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
     callee.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     };
@@ -986,7 +885,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
     let closure_ref = closure::create(&mut gc, 0, 1);
     let interior_ref = unsafe { closure_ref.add(closure::HEADER_SLOTS) } as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1000,7 +898,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1015,12 +912,9 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
     let mut out = PreparedCall {
         jit_func_ptr: 1 as *const u8,
         callee_args_ptr: 1 as *mut u64,
-        ret_ptr: 1 as *mut u64,
+        ic_jit_func_ptr: 1 as *const u8,
         callee_local_slots: 7,
         func_id: 7,
-        arg_offset: 7,
-        slot0_kind: DynCallIC::SLOT0_CLOSURE_REF,
-        is_leaf: 1,
     };
 
     let result = jit_prepare_closure_call(
@@ -1031,7 +925,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -1044,10 +937,10 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
 }
 
 #[test]
-fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
+fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_null_frame() {
     let mut module = Module::new("jit-iface-null-frame-test".to_string());
     let mut caller = func(false, false, false);
-    caller.jit_metadata = vec![JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata = vec![InstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
         method_idx: 0,
         arg_layout: Vec::new(),
@@ -1059,6 +952,12 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
     target.recv_slots = 1;
     target.local_slots = 1;
     target.slot_types = vec![SlotType::Value];
+    target.code = vec![
+        vo_runtime::instruction::Instruction::new(vo_runtime::instruction::Opcode::PtrGet, 0, 0, 0),
+        vo_runtime::instruction::Instruction::new(vo_runtime::instruction::Opcode::Return, 0, 0, 0),
+    ];
+    assert!(!vo_jit::can_elide_frame_for_direct_jit(&target));
+    assert!(vo_jit::can_enter_prepared_shadow_frame_for_jit(&target));
     module.functions.push(target);
     module
         .runtime_types
@@ -1089,7 +988,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
         iface_meta_id: 0,
         methods: vec![1],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1103,7 +1001,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1114,17 +1011,38 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
     );
     let mut fiber = Fiber::new(0);
     attach_current_frame(&mut ctx, &mut fiber, 0);
-    ctx.push_frame_fn = Some(failing_push_frame_with_infra_error);
+    let entry = 1_usize as *const u8;
+    let jit_table = [core::ptr::null(), entry];
+    ctx.jit_func_table = jit_table.as_ptr();
+    ctx.jit_func_count = jit_table.len() as u32;
     let slot0 = interface::pack_slot0(0, 1, ValueKind::Int64);
+    let mut out = PreparedCall::default();
+
+    let result = jit_prepare_iface_call(
+        &mut ctx,
+        slot0,
+        123,
+        0,
+        0,
+        0,
+        1,
+        core::ptr::null(),
+        0,
+        &mut out,
+    );
+
+    assert_eq!(result, JitResult::Ok);
+    assert_eq!(out.jit_func_ptr, entry);
+    assert!(out.ic_jit_func_ptr.is_null());
+    assert_eq!(stack[0], 123);
+
+    ctx.push_frame_fn = Some(failing_push_frame_with_infra_error);
     let mut out = PreparedCall {
         jit_func_ptr: 1 as *const u8,
         callee_args_ptr: 1 as *mut u64,
-        ret_ptr: 1 as *mut u64,
+        ic_jit_func_ptr: 1 as *const u8,
         callee_local_slots: 7,
         func_id: 7,
-        arg_offset: 7,
-        slot0_kind: DynCallIC::SLOT0_IFACE_RECEIVER,
-        is_leaf: 1,
     };
 
     let result = jit_prepare_iface_call(
@@ -1137,7 +1055,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_null_push_frame_is_fatal() {
         1,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -1159,8 +1076,8 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_slot_metadata_
     callee.ret_slots = 1;
     callee.slot_types = vec![SlotType::Value];
     callee.ret_slot_types = vec![SlotType::Value];
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
         arg_layout: vec![SlotType::GcRef],
         ret_layout: vec![SlotType::GcRef],
     };
@@ -1169,7 +1086,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_slot_metadata_
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1183,7 +1099,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_slot_metadata_
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1197,8 +1112,7 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_slot_metadata_
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let user_args = [11_u64];
-    let mut returns = [0_u64; 1];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_closure_call(
         &mut ctx,
@@ -1208,7 +1122,6 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_slot_metadata_
         10,
         user_args.as_ptr(),
         user_args.len() as u32,
-        returns.as_mut_ptr(),
         &mut out,
     );
 
@@ -1228,8 +1141,8 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_slot_metadata_dr
     callee.ret_slots = 1;
     callee.slot_types = vec![SlotType::Value, SlotType::Value];
     callee.ret_slot_types = vec![SlotType::Value];
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallLayout {
         arg_layout: vec![SlotType::GcRef],
         ret_layout: vec![SlotType::GcRef],
     };
@@ -1240,7 +1153,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_slot_metadata_dr
         iface_meta_id: 0,
         methods: vec![0],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1254,7 +1166,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_slot_metadata_dr
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1269,8 +1180,7 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_slot_metadata_dr
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let slot0 = interface::pack_slot0(0, 0, ValueKind::Pointer);
     let user_args = [22_u64];
-    let mut returns = [0_u64; 1];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_iface_call(
         &mut ctx,
@@ -1282,7 +1192,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_slot_metadata_dr
         10,
         user_args.as_ptr(),
         user_args.len() as u32,
-        returns.as_mut_ptr(),
         &mut out,
     );
 
@@ -1306,7 +1215,7 @@ fn vm_call_iface_contract_061_jit_prepare_rejects_foreign_same_receiver_same_sha
         methods: Vec::new(),
     });
     let mut caller = func(false, false, false);
-    caller.jit_metadata = vec![JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata = vec![InstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
         method_idx: 0,
         arg_layout: Vec::new(),
@@ -1328,7 +1237,6 @@ fn vm_call_iface_contract_061_jit_prepare_rejects_foreign_same_receiver_same_sha
             methods: vec![1],
         },
     ]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1342,7 +1250,6 @@ fn vm_call_iface_contract_061_jit_prepare_rejects_foreign_same_receiver_same_sha
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1356,7 +1263,7 @@ fn vm_call_iface_contract_061_jit_prepare_rejects_foreign_same_receiver_same_sha
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let slot0 = interface::pack_slot0(1, 0, ValueKind::Struct);
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_iface_call(
         &mut ctx,
@@ -1368,7 +1275,6 @@ fn vm_call_iface_contract_061_jit_prepare_rejects_foreign_same_receiver_same_sha
         1,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -1389,7 +1295,6 @@ fn vm_jit_prepared_call_abi_002_prepare_closure_call_rejects_null_out_before_fra
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0) as u64;
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1403,7 +1308,6 @@ fn vm_jit_prepared_call_abi_002_prepare_closure_call_rejects_null_out_before_fra
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1423,7 +1327,6 @@ fn vm_jit_prepared_call_abi_002_prepare_closure_call_rejects_null_out_before_fra
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         core::ptr::null_mut(),
     );
 
@@ -1451,7 +1354,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_arg_slot_drift()
         iface_meta_id: 0,
         methods: vec![0],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1465,7 +1367,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_arg_slot_drift()
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1476,8 +1377,7 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_arg_slot_drift()
     );
     let slot0 = interface::pack_slot0(0, 0, ValueKind::Pointer);
     let user_args = [22_u64];
-    let mut returns = [0_u64; 1];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_iface_call(
         &mut ctx,
@@ -1489,7 +1389,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_arg_slot_drift()
         10,
         user_args.as_ptr(),
         user_args.len() as u32,
-        returns.as_mut_ptr(),
         &mut out,
     );
 
@@ -1510,8 +1409,8 @@ fn vm_jit_prepared_call_frame_shape_062_iface_rejects_scan_slots_beyond_locals_b
     callee.local_slots = 1;
     callee.gc_scan_slots = 2;
     callee.slot_types = vec![SlotType::Value];
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallIfaceLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
         method_idx: 0,
         arg_layout: Vec::new(),
@@ -1544,7 +1443,6 @@ fn vm_jit_prepared_call_frame_shape_062_iface_rejects_scan_slots_beyond_locals_b
         iface_meta_id: 0,
         methods: vec![0],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1558,7 +1456,6 @@ fn vm_jit_prepared_call_frame_shape_062_iface_rejects_scan_slots_beyond_locals_b
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1572,7 +1469,7 @@ fn vm_jit_prepared_call_frame_shape_062_iface_rejects_scan_slots_beyond_locals_b
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let slot0 = interface::pack_slot0(0, 0, ValueKind::Int64);
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_iface_call(
         &mut ctx,
@@ -1584,7 +1481,6 @@ fn vm_jit_prepared_call_frame_shape_062_iface_rejects_scan_slots_beyond_locals_b
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -1603,8 +1499,8 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_iface_rejects_bef
     callee.ret_slots = 1;
     callee.slot_types = vec![SlotType::Value];
     callee.ret_slot_types = vec![SlotType::Value];
-    callee.jit_metadata = vec![JitInstructionMetadata::None; 10];
-    callee.jit_metadata[9] = JitInstructionMetadata::CallIfaceLayout {
+    callee.instruction_metadata = vec![InstructionMetadata::None; 10];
+    callee.instruction_metadata[9] = InstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
         method_idx: 0,
         arg_layout: Vec::new(),
@@ -1637,7 +1533,6 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_iface_rejects_bef
         iface_meta_id: 0,
         methods: vec![0],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1651,7 +1546,6 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_iface_rejects_bef
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1665,8 +1559,7 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_iface_rejects_bef
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let slot0 = interface::pack_slot0(0, 0, ValueKind::Int64);
-    let mut returns = [0_u64; 1];
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_iface_call(
         &mut ctx,
@@ -1678,7 +1571,6 @@ fn vm_jit_prepared_call_return_window_beyond_caller_locals_062_iface_rejects_bef
         10,
         core::ptr::null(),
         0,
-        returns.as_mut_ptr(),
         &mut out,
     );
 
@@ -1702,7 +1594,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_recv_slot_drift_
         iface_meta_id: 0,
         methods: vec![0],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1716,7 +1607,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_recv_slot_drift_
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1728,7 +1618,7 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_recv_slot_drift_
     ctx.push_frame_fn = Some(counting_push_frame);
     COUNTING_PUSH_FRAME_CALLS.store(0, Ordering::SeqCst);
     let slot0 = interface::pack_slot0(0, 0, ValueKind::Struct);
-    let mut out = PreparedCall::vm_materialization(0, 0);
+    let mut out = PreparedCall::default();
 
     let result = jit_prepare_iface_call(
         &mut ctx,
@@ -1740,7 +1630,6 @@ fn vm_closure_call_signature_002_jit_prepare_iface_call_rejects_recv_slot_drift_
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         &mut out,
     );
 
@@ -1767,7 +1656,6 @@ fn vm_jit_prepared_call_abi_002_prepare_iface_call_rejects_null_out_before_frame
         iface_meta_id: 0,
         methods: vec![0],
     }]);
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1781,7 +1669,6 @@ fn vm_jit_prepared_call_abi_002_prepare_iface_call_rejects_null_out_before_frame
         &module,
         &mut itab_cache,
         &mut stack,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1804,7 +1691,6 @@ fn vm_jit_prepared_call_abi_002_prepare_iface_call_rejects_null_out_before_frame
         10,
         core::ptr::null(),
         0,
-        core::ptr::null_mut(),
         core::ptr::null_mut(),
     );
 

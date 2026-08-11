@@ -1,6 +1,8 @@
 use super::malformed_single_instruction_module;
 use crate::vm::types::IslandThreadLifecycle;
 use crate::vm::{HostServicesUpdateError, IslandThread, Vm};
+#[cfg(feature = "jit")]
+use crate::{fiber::Fiber, vm::JitConfig};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use vo_runtime::host_services_v2::{
@@ -66,6 +68,31 @@ fn vm_validates_and_owns_v2_services_until_drop() {
     drop(vm);
     assert!(weak.upgrade().is_none());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(feature = "jit")]
+#[test]
+fn jit_context_captures_the_validated_v2_binding() {
+    let (services, _) = tracked_services_v2(Arc::new(AtomicUsize::new(0)), false);
+    let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("JIT VM");
+    vm.set_host_services_v2(services, caller())
+        .expect("install validated V2 services");
+    let expected = vm
+        .state
+        .host_services_v2
+        .as_ref()
+        .expect("host-services binding") as *const _;
+    let module = malformed_single_instruction_module(
+        "jit-host-services-v2-context",
+        vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        Vec::new(),
+    );
+    vm.finish_load(module);
+    let mut fiber = Fiber::new(0);
+
+    let ctx = crate::vm::jit::build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+
+    assert_eq!(ctx.ctx.host_services_v2, expected);
 }
 
 #[test]

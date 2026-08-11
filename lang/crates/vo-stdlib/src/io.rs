@@ -33,14 +33,5 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-    for (id, def) in externs.iter().enumerate() {
-        let id = id as u32;
-        for entry in REGISTERED_EXTERNS {
-            if def.name == entry.name() {
-                entry.try_register(registry, id)?;
-                break;
-            }
-        }
-    }
-    Ok(())
+    vo_runtime::ffi::register_stdlib_providers(registry, externs, REGISTERED_EXTERNS)
 }

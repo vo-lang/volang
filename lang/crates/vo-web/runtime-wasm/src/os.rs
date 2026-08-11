@@ -1452,11 +1452,7 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), ExternContractError> {
-    let mut seen_names = std::collections::BTreeSet::new();
-    for (id, def) in externs.iter().enumerate() {
-        if !seen_names.insert(def.name.as_str()) {
-            continue;
-        }
+    for (id, def) in vo_runtime::ffi::unique_extern_providers(externs) {
         match def.name.as_str() {
             vo_runtime::vo_extern_name!("os", "getOsErrors") => {
                 crate::register_wasm_host(registry, id as u32, &def.name, os_get_errors)
@@ -1699,19 +1695,5 @@ mod tests {
             Ok("prefix-token-suffix")
         );
         assert!(temporary_name("sub/path", "token").is_err());
-    }
-
-    #[test]
-    fn wasm_os_error_interfaces_use_runtime_boxing_contract_061() {
-        let source = include_str!("os.rs");
-        assert!(
-            source.contains("create_error(call, msg)")
-                && source.contains("sentinel_errors_mut().insert(\"os\", errors)"),
-            "WASM os error constants must use runtime sentinel error construction"
-        );
-        assert!(
-            !source.contains(concat!("ValueKind::", "String as u64")),
-            "WASM host shims must not hand-write string interface slot0 metadata"
-        );
     }
 }

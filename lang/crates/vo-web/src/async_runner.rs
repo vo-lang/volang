@@ -446,66 +446,178 @@ pub fn compile_and_run(source: &str, filename: Option<String>) -> js_sys::Promis
 pub fn preload_ext_module(
     module_path: &str,
     bytes: &[u8],
-    js_glue_url: Option<String>,
+    js_glue_source: Option<String>,
 ) -> js_sys::Promise {
     let module_path = module_path.to_string();
     let bytes = bytes.to_vec();
-    let js_glue_url = js_glue_url.unwrap_or_default();
+    let js_glue_source = js_glue_source.unwrap_or_default();
     wasm_bindgen_futures::future_to_promise(async move {
-        crate::vm::ext_bridge::load_wasm_ext_module(&module_path, &bytes, &js_glue_url)
+        crate::vm::ext_bridge::load_wasm_ext_module(&module_path, &bytes, &js_glue_source)
             .await
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(JsValue::UNDEFINED)
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler", target_arch = "wasm32"))]
 mod tests {
-    #[test]
-    fn vm_wasm_fetch_wake_key_002_async_fetch_wakes_with_host_wait_key() {
-        let src = include_str!("async_runner.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("async runner source should contain tests section");
-        assert!(
-            src.contains("fn fetch_host_wait_key"),
-            "fetch runner must resolve a complete HostWaitKey before await/wake"
-        );
-        assert!(
-            src.contains("vm.wake_host_event(key)"),
-            "fetch runner must wake through the HostWaitKey API"
-        );
-        assert!(
-            src.contains("HostWaitSource::replay(vo_runtime::ffi::HostEventReplaySource::Fetch)"),
-            "fetch runner must resolve the replay key with the Fetch host replay source"
-        );
-        assert!(
-            !src.contains("wake_host_event_legacy_replay_token"),
-            "fetch runner must not wake replay waiters through a legacy token"
-        );
+    use core::future::Future;
+    use core::task::{Context, Poll};
+
+    use futures_util::task::noop_waker_ref;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{run_vm_async, run_vm_async_owned, HttpRunCleanup};
+
+    #[wasm_bindgen(inline_js = r#"
+let voAsyncRunnerOriginalFetch;
+let voAsyncRunnerHadOwnFetch = false;
+let voAsyncRunnerFetchStartedCount = 0;
+let voAsyncRunnerFetchAbortedCount = 0;
+
+export function voAsyncRunnerInstallPendingFetch() {
+  voAsyncRunnerHadOwnFetch = Object.prototype.hasOwnProperty.call(globalThis, 'fetch');
+  voAsyncRunnerOriginalFetch = globalThis.fetch;
+  voAsyncRunnerFetchStartedCount = 0;
+  voAsyncRunnerFetchAbortedCount = 0;
+  globalThis.fetch = (_url, options) => {
+    voAsyncRunnerFetchStartedCount += 1;
+    return new Promise((_resolve, reject) => {
+      const signal = options && options.signal;
+      const abort = () => {
+        voAsyncRunnerFetchAbortedCount += 1;
+        reject(new Error('AbortError'));
+      };
+      if (signal.aborted) {
+        abort();
+      } else {
+        signal.addEventListener('abort', abort, { once: true });
+      }
+    });
+  };
+}
+
+export function voAsyncRunnerRestoreFetch() {
+  if (voAsyncRunnerHadOwnFetch) {
+    globalThis.fetch = voAsyncRunnerOriginalFetch;
+  } else {
+    delete globalThis.fetch;
+  }
+}
+
+export function voAsyncRunnerFetchStarted() {
+  return voAsyncRunnerFetchStartedCount;
+}
+
+export function voAsyncRunnerFetchAborted() {
+  return voAsyncRunnerFetchAbortedCount;
+}
+"#)]
+    extern "C" {
+        #[wasm_bindgen(js_name = voAsyncRunnerInstallPendingFetch)]
+        fn install_pending_fetch();
+
+        #[wasm_bindgen(js_name = voAsyncRunnerRestoreFetch)]
+        fn restore_fetch();
+
+        #[wasm_bindgen(js_name = voAsyncRunnerFetchStarted)]
+        fn fetch_started() -> u32;
+
+        #[wasm_bindgen(js_name = voAsyncRunnerFetchAborted)]
+        fn fetch_aborted() -> u32;
     }
 
-    #[test]
-    fn vm_wasm_fetch_replay_source_045_uses_fetch_source_identity() {
-        let src = include_str!("async_runner.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("async runner source should contain tests section");
-        assert!(
-            src.contains("HostWaitSource::replay(vo_runtime::ffi::HostEventReplaySource::Fetch)"),
-            "fetch wait-key lookup must not collapse Fetch replay into GUI or extension replay"
-        );
+    struct FetchMockGuard;
+
+    impl FetchMockGuard {
+        fn install() -> Self {
+            install_pending_fetch();
+            Self
+        }
     }
 
-    #[test]
-    fn fetch_and_timer_waits_are_driven_concurrently_and_owner_scoped() {
-        let src = include_str!("async_runner.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("async runner source should contain tests section");
-        assert!(src.contains("select(next_fetch, next_timer).await"));
-        assert!(src.contains("with_http_owner(owner"));
-        assert!(src.contains("cancel_http_requests_for_owner(self.owner)"));
-        assert!(src.contains("discard_fetch_result("));
+    impl Drop for FetchMockGuard {
+        fn drop(&mut self) {
+            restore_fetch();
+        }
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn fetch_and_timer_are_arbitrated_and_completed_owner_is_cleaned_up() {
+        let primary_source = r#"
+            package main
+
+            import (
+                "net/http"
+                "os"
+                "time"
+            )
+
+            func main() {
+                go func() {
+                    response, _ := http.Get("https://async-runner.test/pending")
+                    _ = response
+                }()
+                time.Sleep(0)
+                println("timer completed")
+                os.Exit(23)
+            }
+        "#;
+        let primary_bytecode = crate::compile::compile_source_with_std_fs(
+            primary_source,
+            "main.vo",
+            crate::compile::build_stdlib_fs(),
+        )
+        .expect("async fetch/timer fixture should compile");
+        let foreign_source = r#"
+            package main
+
+            import "net/http"
+
+            func main() {
+                response, _ := http.Get("https://async-runner.test/foreign-pending")
+                _ = response
+            }
+        "#;
+        let foreign_bytecode = crate::compile::compile_source_with_std_fs(
+            foreign_source,
+            "foreign.vo",
+            crate::compile::build_stdlib_fs(),
+        )
+        .expect("foreign pending-fetch fixture should compile");
+        let _fetch_mock = FetchMockGuard::install();
+        let mut foreign_vm = crate::vm::create_loaded_vm(&foreign_bytecode, |_, _| Ok(()))
+            .expect("foreign pending-fetch VM should load");
+        let foreign_owner = vo_web_runtime_wasm::net_http::allocate_http_owner()
+            .expect("foreign HTTP owner should allocate");
+        let foreign_cleanup = HttpRunCleanup {
+            owner: foreign_owner,
+        };
+        let mut foreign_run = Box::pin(run_vm_async_owned(&mut foreign_vm, foreign_owner));
+        let mut context = Context::from_waker(noop_waker_ref());
+
+        assert!(matches!(
+            foreign_run.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(fetch_started(), 1);
+        assert_eq!(fetch_aborted(), 0);
+
+        let (status, stdout, stderr, exit_code) = run_vm_async(&primary_bytecode).await;
+
+        assert_eq!(status, "exited", "stderr: {stderr}");
+        assert_eq!(stdout, "timer completed\n");
+        assert_eq!(exit_code, Some(23));
+        assert_eq!(fetch_started(), 2, "both owned fetches must have started");
+        assert_eq!(
+            fetch_aborted(),
+            1,
+            "finishing the primary VM must preserve the foreign owner's fetch"
+        );
+
+        drop(foreign_run);
+        drop(foreign_cleanup);
+        assert_eq!(fetch_aborted(), 2, "foreign cleanup must abort its fetch");
     }
 }

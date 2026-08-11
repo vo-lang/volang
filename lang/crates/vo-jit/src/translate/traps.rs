@@ -30,7 +30,7 @@ pub(in crate::translate) fn mark_runtime_trap_pc<'a>(e: &mut impl TrapEmitter<'a
 pub(in crate::translate) fn emit_jit_error_if_zero<'a>(e: &mut impl TrapEmitter<'a>, value: Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let failed = e.builder().ins().icmp(IntCC::Equal, value, zero);
-    let fail_block = e.builder().create_block();
+    let fail_block = crate::compile_common::cold_block(e.builder());
     let ok_block = e.builder().create_block();
     e.builder()
         .ins()

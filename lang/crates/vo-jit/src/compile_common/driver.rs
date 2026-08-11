@@ -102,17 +102,28 @@ pub(crate) fn execution_budget_regions(
         checkpoint += EXECUTION_BUDGET_REGION_INSTRUCTIONS;
     }
 
-    starts.extend(super::jump_targets_for_policy(code, policy)?);
-
     for pc in range.clone() {
         let inst = code.get(pc).ok_or(JitError::InvalidOsrTarget(pc))?;
         match inst.opcode() {
             Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
+                let target = super::checked_branch_target(
+                    policy.code_len(),
+                    pc,
+                    inst.imm32(),
+                    inst.opcode(),
+                )?;
+                if policy.compiled_target(target) {
+                    starts.insert(target);
+                }
                 if pc + 1 < range.end {
                     starts.insert(pc + 1);
                 }
             }
             Opcode::ForLoop => {
+                let target = super::checked_forloop_target(policy.code_len(), pc, inst)?;
+                if policy.compiled_target(target) {
+                    starts.insert(target);
+                }
                 if pc + 1 < range.end {
                     starts.insert(pc + 1);
                 }
@@ -126,14 +137,29 @@ pub(crate) fn execution_budget_regions(
         }
     }
 
-    let ordered: Vec<_> = starts.into_iter().collect();
     let mut regions = BTreeMap::new();
-    for (index, start) in ordered.iter().copied().enumerate() {
-        let end = ordered.get(index + 1).copied().unwrap_or(range.end);
+    let mut starts = starts.into_iter().peekable();
+    while let Some(start) = starts.next() {
+        let end = starts.peek().copied().unwrap_or(range.end);
         let cost = end.saturating_sub(start).try_into().unwrap_or(u32::MAX);
         if cost > 0 {
             regions.insert(start, cost);
         }
+    }
+    Ok(regions)
+}
+
+pub(crate) fn prepare_control_flow(
+    builder: &mut FunctionBuilder<'_>,
+    blocks: &mut HashMap<usize, Block>,
+    code: &[Instruction],
+    policy: ControlPolicy,
+) -> Result<BTreeMap<usize, u32>, JitError> {
+    let regions = execution_budget_regions(code, policy)?;
+    for start in regions.keys().copied() {
+        blocks
+            .entry(start)
+            .or_insert_with(|| builder.create_block());
     }
     Ok(regions)
 }
@@ -187,10 +213,8 @@ pub(crate) fn declare_variables(
     let ssa_slots = usize::from(memory_only_start).min(func_def.local_slots as usize);
     let mut vars = Vec::with_capacity(ssa_slots);
     for i in 0..ssa_slots {
-        let var = Variable::from_u32(i as u32);
         let ty = crate::compile_common::slot_ir_type(&func_def.slot_types, i as u16);
-        builder.declare_var(var, ty);
-        vars.push(var);
+        vars.push(builder.declare_var(ty));
     }
     vars
 }
@@ -221,7 +245,7 @@ mod tests {
         builder.switch_to_block(block);
         builder.seal_block(block);
         builder.ins().return_(&[]);
-        builder.finalize();
+        builder.finalize(crate::test_frontend_config());
     }
 
     #[test]
@@ -249,5 +273,18 @@ mod tests {
         assert_eq!(regions.get(&0), Some(&2));
         assert_eq!(regions.get(&2), Some(&1));
         assert_eq!(regions.get(&3), Some(&1));
+    }
+
+    #[test]
+    fn osr_regions_ignore_branch_targets_outside_the_compiled_loop() {
+        let code = vec![
+            Instruction::new(Opcode::Jump, 0, 2, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        let regions = execution_budget_regions(&code, ControlPolicy::loop_osr(0, 0, 1, code.len()))
+            .expect("OSR budget regions");
+
+        assert_eq!(regions, BTreeMap::from([(0, 1)]));
     }
 }

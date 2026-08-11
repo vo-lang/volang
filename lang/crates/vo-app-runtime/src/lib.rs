@@ -62,7 +62,6 @@ mod session_host;
 mod timer_wheel;
 mod voplay_engine_control;
 mod waker;
-mod web;
 
 pub use app_session::AppSession;
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
@@ -138,7 +137,7 @@ pub use fault_injection::{
     RuntimeFaultInjectionError, RuntimeFaultInjectionMetrics, RuntimeFaultInjector,
     RuntimeFaultPoint, RuntimeFaultRule, RuntimeInjectedFault,
 };
-pub use guest_runtime_session::GuestSession;
+pub use guest_runtime_session::{GuestSession, GuestSession as GuestRuntime};
 pub use gui_session::GuiAppSession;
 pub use haptics::{
     decode_haptic_request, encode_haptic_request, HapticEffect, HapticPayloadError,
@@ -210,7 +209,7 @@ pub use provider::{
 pub use render_buffer::RenderBuffer;
 #[cfg(feature = "std")]
 pub use render_buffer::SyncRenderBuffer;
-pub use render_island_session::RenderIslandSession;
+pub use render_island_session::{RenderIslandSession, RenderIslandSession as RenderIslandRuntime};
 pub use request::{
     RequestId, RequestOutcome, RequestRecord, RequestRegistry, RequestRegistryError, RequestState,
     TerminalRequest,
@@ -220,9 +219,8 @@ pub use runtime_plan::*;
 pub use scheduler::HostEventScheduler;
 pub use session::{
     advance_session, drain_outbound_island_frames, push_targeted_inbound_island_frame,
-    replay_event_wait_key, replay_event_wait_token, resume_waiting_event,
-    run_inbound_island_command, run_inbound_island_frame, validate_scheduling_outcome,
-    SessionError,
+    replay_event_wait_key, replay_event_wait_token, resume_waiting_event, run_inbound_island_frame,
+    validate_scheduling_outcome, SessionError,
 };
 pub use session_host::{SessionHostError, SessionHostInsertError, SessionHostMap};
 pub use timer_wheel::{ClosedTimer, TimerExpiration, TimerHandle, TimerWheel, TimerWheelError};
@@ -238,4 +236,3 @@ pub use voplay_engine_control::{
 #[cfg(feature = "std")]
 pub use waker::WakeCoalescer;
 pub use waker::WakeGeneration;
-pub use web::{GuestRuntime, RenderIslandRuntime};

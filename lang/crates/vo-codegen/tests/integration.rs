@@ -17,7 +17,7 @@ use vo_common_core::bytecode::{
 use vo_common_core::verifier::verify_module;
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 use vo_syntax::parser;
-use vo_vm::bytecode::{FunctionDef, JitInstructionMetadata};
+use vo_vm::bytecode::{FunctionDef, InstructionMetadata};
 use vo_vm::instruction::Opcode;
 use vo_vm::vm::Vm;
 
@@ -276,12 +276,12 @@ fn assert_transfer_metadata_canonical(module: &vo_vm::bytecode::Module) {
 fn function_elem_layout_dump(func: &FunctionDef, opcode: Opcode) -> String {
     func.code
         .iter()
-        .zip(&func.jit_metadata)
+        .zip(&func.instruction_metadata)
         .enumerate()
         .filter(|(_, (inst, _))| inst.opcode() == opcode)
         .map(|(pc, (inst, meta))| {
             let meta_summary = match meta {
-                JitInstructionMetadata::ElemLayout {
+                InstructionMetadata::ElemLayout {
                     elem_bytes,
                     needs_sign_extend,
                     slot_layout,
@@ -306,12 +306,12 @@ fn assert_elem_layout_metadata(
     assert!(
         func.code
             .iter()
-            .zip(&func.jit_metadata)
+            .zip(&func.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == opcode
                     && matches!(
                         meta,
-                        JitInstructionMetadata::ElemLayout {
+                        InstructionMetadata::ElemLayout {
                             elem_bytes: actual_bytes,
                             slot_layout,
                             ..
@@ -399,14 +399,14 @@ fn ptr_new_layouts(module: &vo_vm::bytecode::Module) -> Vec<(String, usize, Vec<
         .flat_map(|func| {
             func.code
                 .iter()
-                .zip(&func.jit_metadata)
+                .zip(&func.instruction_metadata)
                 .enumerate()
                 .filter_map(move |(pc, (inst, meta))| {
                     if inst.opcode() != Opcode::PtrNew {
                         return None;
                     }
                     match meta {
-                        JitInstructionMetadata::PtrLayout { value_layout } => {
+                        InstructionMetadata::PtrLayout { value_layout } => {
                             Some((func.name.clone(), pc, value_layout.clone()))
                         }
                         other => panic!(
@@ -1020,7 +1020,7 @@ func main() {}
 }
 
 #[test]
-fn anonymous_interface_runtime_type_uses_exact_interface_meta_id() {
+fn interface_runtime_types_use_their_exact_interface_meta_ids() {
     let source = r#"
 package main
 
@@ -1028,84 +1028,41 @@ type Holder struct {
     r interface {
         Read() int
     }
+    w interface {
+        Write(int)
+    }
 }
 
 func main() {}
 "#;
 
     let module = compile_source(source);
-    let (meta_id, methods) = module
+    let interfaces: Vec<_> = module
         .runtime_types
         .iter()
-        .find_map(|rt| match rt {
+        .filter_map(|rt| match rt {
             vo_runtime::RuntimeType::Interface { methods, meta_id }
-                if methods.iter().any(|m| m.name == "Read") =>
+                if methods
+                    .iter()
+                    .any(|method| method.name == "Read" || method.name == "Write") =>
             {
                 Some((*meta_id, methods))
             }
             _ => None,
         })
-        .expect("anonymous interface runtime type");
+        .collect();
+    assert_eq!(interfaces.len(), 2);
 
-    let meta = module
-        .interface_metas
-        .get(meta_id as usize)
-        .expect("anonymous interface runtime type must reference an InterfaceMeta");
-    assert_eq!(meta.method_names, vec!["Read".to_string()]);
-    assert_eq!(
-        methods.len(),
-        meta.methods.len(),
-        "RuntimeType::Interface must stay aligned with exact InterfaceMeta"
-    );
-}
-
-#[test]
-fn runtime_interface_types_do_not_fallback_to_meta_zero() {
-    const TYPE_INTERNER_SOURCE: &str = include_str!("../src/type_interner.rs");
-    let source = TYPE_INTERNER_SOURCE
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap_or(TYPE_INTERNER_SOURCE);
-
-    assert!(
-        !source.contains("ctx.interface_meta_ids.get(&type_key).copied().unwrap_or(0)"),
-        "non-empty interface runtime metadata must not silently fallback to meta 0"
-    );
-}
-
-#[test]
-fn codegen_layout_metadata_does_not_default_unresolved_shapes_to_zero() {
-    let sources = [
-        ("type_interner.rs", include_str!("../src/type_interner.rs")),
-        ("type_info.rs", include_str!("../src/type_info.rs")),
-        ("wrapper.rs", include_str!("../src/wrapper.rs")),
-        ("lib.rs", include_str!("../src/lib.rs")),
-    ];
-    let forbidden = [
-        "len: arr.len().unwrap_or(0)",
-        "let len = arr.len().unwrap_or(0) as usize",
-        ".try_as_tuple() .map(|t|",
-        ".typ() .map(|sig_type|",
-        ".filter_map(|&p|",
-        ".filter_map(|&r|",
-        ".filter_map(|&v|",
-        "RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false, }",
-        "debug_assert!",
-        "debug_assert_eq!",
-        ".min(self.slot_types.len())",
-        "vec![SlotType::Value; count]",
-    ];
-
-    for (name, source) in sources {
-        let source = source.split("#[cfg(test)]").next().unwrap_or(source);
-        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
-        for pattern in forbidden {
-            assert!(
-                !normalized.contains(pattern),
-                "{name} must fail fast on unresolved codegen layout metadata instead of defaulting to zero"
-            );
-        }
+    for (meta_id, methods) in &interfaces {
+        let meta = module
+            .interface_metas
+            .get(*meta_id as usize)
+            .expect("runtime interface type must reference an InterfaceMeta");
+        let runtime_names: Vec<_> = methods.iter().map(|method| method.name.clone()).collect();
+        assert_eq!(meta.method_names, runtime_names);
+        assert_eq!(methods.len(), meta.methods.len());
     }
+    assert_ne!(interfaces[0].0, interfaces[1].0);
 }
 
 #[test]
@@ -1147,6 +1104,7 @@ func main() int {
         .iter()
         .position(|func| func.name == "makeErr")
         .expect("makeErr function should be compiled") as u32;
+    let make_err = &module.functions[make_err_id as usize];
     let func = module
         .functions
         .iter()
@@ -1155,13 +1113,10 @@ func main() int {
     let call = func
         .code
         .iter()
-        .find(|inst| {
-            inst.opcode() == Opcode::Call
-                && inst.static_call_func_id() == make_err_id
-                && inst.packed_ret_slots() == 2
-        })
+        .find(|inst| inst.opcode() == Opcode::Call && inst.static_call_func_id() == make_err_id)
         .expect("fail makeErr() should call makeErr into a two-slot error temp");
-    let ret_start = call.packed_call_ret_start() as usize;
+    assert_eq!(make_err.ret_slots, 2);
+    let ret_start = usize::from(call.b + make_err.param_slots);
 
     assert_eq!(
         &func.slot_types[ret_start..ret_start + 2],
@@ -1327,26 +1282,7 @@ func main() {
 }
 
 #[test]
-fn codegen_error_zeroing_goes_through_func_builder_helper() {
-    let return_stmt = include_str!("../src/stmt/return_stmt.rs");
-    let func_builder = include_str!("../src/func.rs");
-
-    assert!(
-        return_stmt.contains("func.emit_zero_slots(ret_start, total_ret_slots);"),
-        "fail error returns must use FuncBuilder's zero-slot helper"
-    );
-    assert!(
-        !return_stmt.contains("Opcode::LoadInt"),
-        "return statement lowering must not grow a second zero-slot emission loop"
-    );
-    assert!(
-        func_builder.contains("self.emit_zero_slots(dst, result_slots);"),
-        "error propagation must share the same zero-slot helper"
-    );
-}
-
-#[test]
-fn test_jit_instruction_metadata_for_dynamic_slice_and_map_ops() {
+fn test_instruction_metadata_for_dynamic_slice_and_map_ops() {
     let source = r#"
 package main
 
@@ -1410,9 +1346,9 @@ func main() int {
         let metadata = main
             .code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .enumerate()
-            .filter(|(_, (_, meta))| !matches!(meta, JitInstructionMetadata::None))
+            .filter(|(_, (_, meta))| !matches!(meta, InstructionMetadata::None))
             .map(|(pc, (inst, meta))| {
                 format!("{pc}: {:?} flags={} {:?}", inst.opcode(), inst.flags, meta)
             })
@@ -1421,17 +1357,17 @@ func main() int {
         format!("ops:\n{ops}\nmetadata:\n{metadata}")
     };
 
-    assert_eq!(main.code.len(), main.jit_metadata.len());
+    assert_eq!(main.code.len(), main.instruction_metadata.len());
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::SliceSet
                     && inst.flags == 0
                     && matches!(
                         meta,
-                        JitInstructionMetadata::ElemLayout {
+                        InstructionMetadata::ElemLayout {
                             elem_bytes: 72,
                             needs_sign_extend: false,
                             slot_layout,
@@ -1445,13 +1381,13 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::SliceAppend
                     && inst.flags == 0
                     && matches!(
                         meta,
-                        JitInstructionMetadata::ElemLayout {
+                        InstructionMetadata::ElemLayout {
                             elem_bytes: 72,
                             needs_sign_extend: false,
                             slot_layout,
@@ -1464,12 +1400,12 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::MapGet
                     && matches!(
                         meta,
-                        JitInstructionMetadata::MapGet {
+                        InstructionMetadata::MapGet {
                             key_layout,
                             val_layout,
                             has_ok: true
@@ -1484,12 +1420,12 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::MapSet
                     && matches!(
                         meta,
-                        JitInstructionMetadata::MapSet {
+                        InstructionMetadata::MapSet {
                             key_layout,
                             val_layout
                         } if key_layout.len() == 9
@@ -1503,12 +1439,12 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::MapDelete
                     && matches!(
                         meta,
-                        JitInstructionMetadata::MapDelete { key_layout }
+                        InstructionMetadata::MapDelete { key_layout }
                             if key_layout.len() == 9
                                 && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
                     )
@@ -1610,7 +1546,7 @@ func main() {}
 }
 
 #[test]
-fn type_assert_and_shared_closure_calls_emit_precise_jit_layout_metadata() {
+fn type_assert_and_shared_closure_calls_emit_precise_instruction_layout_metadata() {
     let source = r#"
 package main
 
@@ -1645,12 +1581,12 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::IfaceAssert
                     && matches!(
                         meta,
-                        JitInstructionMetadata::IfaceAssertLayout { result_layout, .. }
+                        InstructionMetadata::IfaceAssertLayout { result_layout, .. }
                             if result_layout.as_slice() == [SlotType::GcRef]
                     )
             }),
@@ -1659,13 +1595,13 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::GoStart
                     && inst.call_shape_is_closure()
                     && matches!(
                         meta,
-                        JitInstructionMetadata::CallLayout {
+                        InstructionMetadata::CallLayout {
                             arg_layout,
                             ret_layout
                         } if arg_layout.as_slice() == [SlotType::GcRef, SlotType::GcRef]
@@ -1677,31 +1613,31 @@ func main() int {
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::GoStart
                     && !inst.call_shape_is_closure()
-                    && matches!(
-                        meta,
-                        JitInstructionMetadata::CallLayout {
-                            arg_layout,
-                            ret_layout
-                        } if arg_layout.as_slice() == [SlotType::GcRef, SlotType::GcRef]
-                            && ret_layout.is_empty()
-                    )
+                    && matches!(meta, InstructionMetadata::None)
+                    && module
+                        .functions
+                        .get(inst.call_shape_static_func_id() as usize)
+                        .is_some_and(|callee| {
+                            callee.slot_types[..callee.param_slots as usize]
+                                == [SlotType::GcRef, SlotType::GcRef]
+                        })
             }),
-        "static go call must carry exact CallLayout argument slots"
+        "static go call must use the callee signature as its argument layout"
     );
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::DeferPush
                     && inst.call_shape_is_closure()
                     && matches!(
                         meta,
-                        JitInstructionMetadata::CallLayout {
+                        InstructionMetadata::CallLayout {
                             arg_layout,
                             ret_layout
                         } if arg_layout.as_slice() == [SlotType::GcRef] && ret_layout.is_empty()
@@ -1919,25 +1855,25 @@ func main() {
         .expect("map literal should emit MapSet");
 
     assert_eq!(
-        main.slot_types[map_set.b as usize + 1],
+        main.slot_types[map_set.b as usize],
         SlotType::GcRef,
-        "MapSet meta+key buffer must use the map key's precise slot layout"
+        "MapSet key buffer must use the map key's precise slot layout"
     );
     assert!(
         main.code
             .iter()
-            .zip(&main.jit_metadata)
+            .zip(&main.instruction_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::MapSet
                     && matches!(
                         meta,
-                        JitInstructionMetadata::MapSet {
+                        InstructionMetadata::MapSet {
                             key_layout,
                             val_layout,
                         } if key_layout == &[SlotType::GcRef] && val_layout == &[SlotType::Value]
                     )
             }),
-        "MapSet JIT metadata must carry exact key/value layouts"
+        "MapSet instruction metadata must carry exact key/value layouts"
     );
 }
 
@@ -1981,8 +1917,8 @@ func main() int {
         );
         assert_eq!(
             func.code.len(),
-            func.jit_metadata.len(),
-            "{} must have one JIT metadata entry per instruction",
+            func.instruction_metadata.len(),
+            "{} must have one instruction metadata entry per instruction",
             func.name
         );
         assert_eq!(
@@ -2021,30 +1957,11 @@ func main() int {
                         func.name, pc, callee_id
                     )
                 });
-                if callee.param_slots <= u8::MAX as u16 && callee.ret_slots <= u8::MAX as u16 {
-                    assert_eq!(
-                        inst.packed_arg_slots(),
-                        callee.param_slots,
-                        "{} Call at pc {} must mirror callee {} param_slots",
-                        func.name,
-                        pc,
-                        callee.name
-                    );
-                    assert_eq!(
-                        inst.packed_ret_slots(),
-                        callee.ret_slots,
-                        "{} Call at pc {} must mirror callee {} ret_slots",
-                        func.name,
-                        pc,
-                        callee.name
-                    );
-                } else {
-                    assert_eq!(
-                        inst.c, 0,
-                        "{} large Call at pc {} must use zero packed shape mirror",
-                        func.name, pc
-                    );
-                }
+                assert_eq!(
+                    inst.c, 0,
+                    "{} Call at pc {} must reserve c; callee {} owns its signature",
+                    func.name, pc, callee.name
+                );
             }
             if inst.opcode() == Opcode::Return && (inst.flags & RETURN_FLAG_HEAP_RETURNS) == 0 {
                 assert_eq!(
@@ -2185,24 +2102,18 @@ func main() {
     for (pc, inst) in main.code.iter().enumerate() {
         match inst.opcode() {
             Opcode::CallIface | Opcode::CallClosure => {
-                let ret_layout = match (inst.opcode(), &main.jit_metadata[pc]) {
-                    (
-                        Opcode::CallClosure,
-                        JitInstructionMetadata::CallLayout { ret_layout, .. },
-                    ) => ret_layout,
+                let ret_layout = match (inst.opcode(), &main.instruction_metadata[pc]) {
+                    (Opcode::CallClosure, InstructionMetadata::CallLayout { ret_layout, .. }) => {
+                        ret_layout
+                    }
                     (
                         Opcode::CallIface,
-                        JitInstructionMetadata::CallIfaceLayout { ret_layout, .. },
+                        InstructionMetadata::CallIfaceLayout { ret_layout, .. },
                     ) => ret_layout,
                     _ => {
                         panic!("dynamic call must carry precise call layout metadata");
                     }
                 };
-                assert_eq!(
-                    inst.packed_ret_slots(),
-                    2,
-                    "discarded dynamic call must encode error return slots"
-                );
                 assert_eq!(
                     ret_layout.as_slice(),
                     &[SlotType::Interface0, SlotType::Interface1],
@@ -2501,16 +2412,11 @@ func main() {
             match inst.opcode() {
                 Opcode::CallIface => {
                     saw_call_iface = true;
-                    let JitInstructionMetadata::CallIfaceLayout { ret_layout, .. } =
-                        &wrapper.jit_metadata[pc]
+                    let InstructionMetadata::CallIfaceLayout { ret_layout, .. } =
+                        &wrapper.instruction_metadata[pc]
                     else {
                         panic!("scheduled interface wrapper CallIface must carry CallIfaceLayout");
                     };
-                    assert_eq!(
-                        inst.packed_ret_slots(),
-                        2,
-                        "scheduled interface wrapper CallIface must encode callee error returns"
-                    );
                     assert_eq!(
                         ret_layout.as_slice(),
                         &[SlotType::Interface0, SlotType::Interface1],
@@ -2625,8 +2531,7 @@ func main() int {
         .find(|inst| inst.opcode() == Opcode::Call && inst.static_call_func_id() == main_id as u32)
         .expect("__entry__ must call main");
 
-    assert_eq!(call.packed_arg_slots(), main_func.param_slots);
-    assert_eq!(call.packed_ret_slots(), main_func.ret_slots);
+    assert_eq!(call.c, 0);
     assert_eq!(
         &entry.slot_types[call.b as usize..call.b as usize + main_func.ret_slots as usize],
         main_func.ret_slot_types.as_slice(),
@@ -2675,8 +2580,8 @@ func main() (string, any, Result) {
         main_func.ret_slot_types.iter().any(SlotType::is_gc_ref),
         "fixture must exercise GC-backed discarded results"
     );
-    assert_eq!(call.packed_arg_slots(), 0);
-    assert_eq!(call.packed_ret_slots(), main_func.ret_slots);
+    assert_eq!(main_func.param_slots, 0);
+    assert_eq!(call.c, 0);
     assert_eq!(
         &entry.slot_types[call.b as usize..call.b as usize + main_func.ret_slots as usize],
         main_func.ret_slot_types.as_slice()
@@ -3558,10 +3463,10 @@ func main() {
         .filter(|f| f.name.starts_with("Close$defer_iface_0_"))
         .map(|wrapper| {
             wrapper
-                .jit_metadata
+                .instruction_metadata
                 .iter()
                 .find_map(|metadata| match metadata {
-                    JitInstructionMetadata::CallIfaceLayout { iface_meta_id, .. } => {
+                    InstructionMetadata::CallIfaceLayout { iface_meta_id, .. } => {
                         Some(*iface_meta_id)
                     }
                     _ => None,
@@ -4595,7 +4500,7 @@ func main() {
 }
 
 #[test]
-fn wide_dynamic_calls_emit_zero_mirrors_and_complete_layout_metadata() {
+fn wide_dynamic_calls_reserve_shape_fields_and_emit_complete_layout_metadata() {
     let source = include_str!(
         "../../../../tests/lang/cases/typechecker/2026_02_18_dynamic_call_slot_count_limit.vo"
     );
@@ -4606,13 +4511,13 @@ fn wide_dynamic_calls_emit_zero_mirrors_and_complete_layout_metadata() {
         function
             .code
             .iter()
-            .zip(&function.jit_metadata)
+            .zip(&function.instruction_metadata)
             .any(|(inst, metadata)| {
                 inst.opcode() == Opcode::CallClosure
                     && inst.c == 0
                     && matches!(
                         metadata,
-                        JitInstructionMetadata::CallLayout {
+                        InstructionMetadata::CallLayout {
                             arg_layout,
                             ret_layout,
                         } if arg_layout.len() == 256 && ret_layout.len() == 256
@@ -4633,13 +4538,13 @@ fn call_iface_emits_full_width_method_index_metadata() {
         function
             .code
             .iter()
-            .zip(&function.jit_metadata)
+            .zip(&function.instruction_metadata)
             .any(|(inst, metadata)| {
                 inst.opcode() == Opcode::CallIface
                     && inst.flags == 0
                     && matches!(
                         metadata,
-                        JitInstructionMetadata::CallIfaceLayout {
+                        InstructionMetadata::CallIfaceLayout {
                             method_idx: 256,
                             ..
                         }

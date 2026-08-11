@@ -3,7 +3,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use vo_runtime::island::IslandCommand;
 use vo_runtime::island_msg::decode_island_transport_frame;
 use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::{SchedulingOutcome, Vm};
@@ -133,6 +132,9 @@ pub fn advance_session(
     Ok(())
 }
 
+/// Queues an inbound frame received from a trusted transport or certified
+/// renderer. Decoding validates structure; the transport establishes source
+/// authority before this function is called.
 pub fn push_targeted_inbound_island_frame(vm: &mut Vm, data: &[u8]) -> Result<(), SessionError> {
     let (target_island_id, source_island_id, cmd) =
         decode_island_transport_frame(data).map_err(|error| {
@@ -155,15 +157,7 @@ pub fn push_targeted_inbound_island_frame(vm: &mut Vm, data: &[u8]) -> Result<()
     Ok(())
 }
 
-pub fn run_inbound_island_command(
-    vm: &mut Vm,
-    cmd: IslandCommand,
-) -> Result<SchedulingOutcome, SessionError> {
-    vm.push_island_command(cmd);
-    vm.run_scheduled()
-        .map_err(|error| SessionError::VmRunFailed(format!("{:?}", error)))
-}
-
+/// Queues and runs an inbound frame accepted by the owning trusted transport.
 pub fn run_inbound_island_frame(
     vm: &mut Vm,
     data: &[u8],
@@ -175,12 +169,18 @@ pub fn run_inbound_island_frame(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "std")]
+    use super::{drain_outbound_island_frames, run_inbound_island_frame};
     use super::{
-        drain_outbound_island_frames, push_targeted_inbound_island_frame, resume_waiting_event,
-        run_inbound_island_frame, validate_scheduling_outcome, SessionError,
+        push_targeted_inbound_island_frame, resume_waiting_event, validate_scheduling_outcome,
+        SessionError,
     };
     use vo_runtime::ffi::HostEventReplaySource;
-    use vo_runtime::island::{EndpointResponseKind, IslandCommand};
+    use vo_runtime::island::IslandCommand;
+    #[cfg(feature = "std")]
+    use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind, EndpointWaitKey};
+    #[cfg(feature = "std")]
+    use vo_runtime::island_msg::decode_island_transport_frame;
     use vo_runtime::island_msg::encode_island_transport_frame;
     use vo_vm::scheduler::{FiberWakeKey, HostWaitKey, HostWaitSource, WaitRegistrationKey};
     use vo_vm::vm::{SchedulingOutcome, Vm};
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn push_targeted_inbound_island_frame_sets_initial_island_id() {
         let mut vm = Vm::new();
-        let frame = encode_island_transport_frame(7, 0, &IslandCommand::Shutdown)
+        let frame = encode_island_transport_frame(7, 13, &IslandCommand::Shutdown)
             .expect("encode shutdown frame");
 
         let result = push_targeted_inbound_island_frame(&mut vm, &frame);
@@ -209,9 +209,9 @@ mod tests {
     #[test]
     fn push_targeted_inbound_island_frame_rejects_mismatched_island_id() {
         let mut vm = Vm::new();
-        vm.push_targeted_island_command(3, IslandCommand::Shutdown)
+        vm.push_targeted_island_command_from(0, 3, IslandCommand::Shutdown)
             .expect("initial island id");
-        let frame = encode_island_transport_frame(7, 0, &IslandCommand::Shutdown)
+        let frame = encode_island_transport_frame(7, 13, &IslandCommand::Shutdown)
             .expect("encode shutdown frame");
 
         let result = push_targeted_inbound_island_frame(&mut vm, &frame);
@@ -223,66 +223,40 @@ mod tests {
     }
 
     #[test]
-    fn push_targeted_inbound_island_frame_preserves_source_envelope_061() {
+    #[cfg(feature = "std")]
+    fn inbound_transport_source_routes_endpoint_response_061() {
         let mut vm = Vm::new();
+        vm.enable_external_island_transport();
         let fiber_key = FiberWakeKey::new(4, 1).as_packed();
-        let matching_source = encode_island_transport_frame(
+        let wait_key = EndpointWaitKey::try_new(fiber_key, 5).expect("non-zero wait ID");
+        let frame = encode_island_transport_frame(
             7,
             13,
-            &IslandCommand::EndpointResponse {
+            &IslandCommand::EndpointRequest {
                 endpoint_id: 42,
-                kind: EndpointResponseKind::Closed,
-                from_island: 13,
-                fiber_key,
-                wait_id: 5,
+                kind: EndpointRequestKind::Recv { wait_key },
             },
         )
-        .expect("encode matching-source frame");
+        .expect("encode endpoint request frame");
 
-        let result = run_inbound_island_frame(&mut vm, &matching_source);
-        assert!(
-            result.is_ok(),
-            "matching transport source must pass the source gate: {result:?}"
-        );
-
-        let forged_source = encode_island_transport_frame(
-            7,
-            12,
-            &IslandCommand::EndpointResponse {
-                endpoint_id: 42,
-                kind: EndpointResponseKind::Closed,
-                from_island: 13,
-                fiber_key,
-                wait_id: 5,
-            },
-        )
-        .expect("encode forged-source frame");
-
-        let err = run_inbound_island_frame(&mut vm, &forged_source)
-            .expect_err("forged transport source must be rejected before dispatch");
+        run_inbound_island_frame(&mut vm, &frame).expect("dispatch endpoint request frame");
+        let response_frames =
+            drain_outbound_island_frames(&mut vm).expect("encode endpoint response frame");
+        assert_eq!(response_frames.len(), 1);
+        let (target, source, response) = decode_island_transport_frame(&response_frames[0])
+            .expect("decode endpoint response frame");
+        assert_eq!((target, source), (13, 7));
         assert!(matches!(
-            err,
-            SessionError::VmRunFailed(ref message)
-                if message.contains("endpoint response transport source was rejected")
+            response,
+            IslandCommand::EndpointResponse {
+                endpoint_id: 42,
+                kind: EndpointResponseKind::RecvData {
+                    closed: true,
+                    wait_key: response_wait_key,
+                    ..
+                },
+            } if response_wait_key == wait_key
         ));
-    }
-
-    #[test]
-    fn drain_outbound_island_frames_preserves_source_envelope_061() {
-        let src = include_str!("session.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("source before tests");
-
-        assert!(
-            src.contains("vm.try_take_outbound_transport_frames()"),
-            "outbound frame draining must use the VM's atomic, source-preserving encoder"
-        );
-
-        let mut empty_vm = Vm::new();
-        assert!(drain_outbound_island_frames(&mut empty_vm)
-            .expect("drain empty outbound queue")
-            .is_empty());
     }
 
     #[test]

@@ -134,8 +134,8 @@ impl VoVm {
         }
     }
 
-    /// Push an island command (encoded as transport frame bytes) into the VM.
-    /// The frame is decoded and queued for processing.
+    /// Push a frame received from the host's trusted island transport into the
+    /// VM. Decoding alone does not authenticate the frame source.
     #[wasm_bindgen(js_name = "pushIslandCommand")]
     pub fn push_island_command(&mut self, frame: &[u8]) -> Result<(), JsValue> {
         let (target_island_id, source_island_id, cmd) = decode_island_transport_frame(frame)
@@ -149,7 +149,7 @@ impl VoVm {
     }
 
     /// Take all pending outbound island commands.
-    /// Returns an array of transport frame bytes (each frame includes target island ID).
+    /// Returns transport frames containing target and source island IDs.
     #[wasm_bindgen(js_name = "takeOutboundCommands")]
     pub fn take_outbound_commands(&mut self) -> Result<js_sys::Array, JsValue> {
         let frames = self
@@ -217,28 +217,33 @@ impl VoVm {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn vm_web_island_frame_source_envelope_061_source_contract() {
-        let src = include_str!("island.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("source before tests");
+    use super::*;
+    use vo_runtime::island::IslandCommand;
+    use vo_runtime::island_msg::encode_island_transport_frame;
 
-        assert!(
-            src.contains(
-                "let (target_island_id, source_island_id, cmd) = decode_island_transport_frame(frame)"
-            ),
-            "pushIslandCommand must decode the transport-owned source island id"
-        );
-        assert!(
-            src.contains(
-                ".push_targeted_island_command_from(source_island_id, target_island_id, cmd)"
-            ),
-            "pushIslandCommand must forward the decoded source into the VM envelope"
-        );
-        assert!(
-            src.contains(".try_take_outbound_transport_frames()"),
-            "takeOutboundCommands must use the VM's atomic, source-preserving encoder"
-        );
+    #[test]
+    fn inbound_transport_distinguishes_source_from_target() {
+        const TARGET_ISLAND_ID: u32 = 17;
+        const SOURCE_ISLAND_ID: u32 = 29;
+
+        let adopt_target = encode_island_transport_frame(
+            TARGET_ISLAND_ID,
+            TARGET_ISLAND_ID,
+            &IslandCommand::Shutdown,
+        )
+        .expect("target-adoption frame must encode");
+        let distinct_source = encode_island_transport_frame(
+            TARGET_ISLAND_ID,
+            SOURCE_ISLAND_ID,
+            &IslandCommand::Shutdown,
+        )
+        .expect("test transport frame must encode");
+        let mut vm = VoVm { inner: Vm::new() };
+
+        vm.push_island_command(&adopt_target)
+            .expect("first frame must establish the target island");
+        vm.push_island_command(&distinct_source)
+            .expect("source identity must not be mistaken for the established target");
+        assert_eq!(vm.inner.current_island_id(), TARGET_ISLAND_ID);
     }
 }

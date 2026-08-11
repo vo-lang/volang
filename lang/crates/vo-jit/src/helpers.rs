@@ -3,16 +3,40 @@
 //!
 //! Runtime helper signatures are generated from `vo-runtime`'s
 //! `runtime_helper_abi_fields()` manifest. This keeps the C ABI, Cranelift
-//! imports, effect policy, and contract graph on one executable source of
+//! imports, effect policy, and lowering tests on one executable source of
 //! truth instead of hand-synchronizing duplicate signatures.
 
-use cranelift_codegen::ir::{types, AbiParam, Signature, Type};
+use cranelift_codegen::ir::{types, AbiParam, FuncRef, Signature, Type};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
 use vo_runtime::jit_api::{runtime_helper_abi_fields, JitAbiType, JitRuntimeHelperAbi};
 
-use crate::translator::HelperFuncs;
 use crate::JitError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeHelperId {
+    func_id: cranelift_module::FuncId,
+    requires_frame_sync: bool,
+}
+
+/// A Cranelift import paired with the frame policy from the runtime ABI
+/// manifest. Lowering cannot call a runtime helper without carrying its
+/// authoritative effect policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeHelper {
+    func_ref: FuncRef,
+    requires_frame_sync: bool,
+}
+
+impl RuntimeHelper {
+    pub(crate) fn func_ref(self) -> FuncRef {
+        self.func_ref
+    }
+
+    pub(crate) fn requires_frame_sync(self) -> bool {
+        self.requires_frame_sync
+    }
+}
 
 fn helper_sig(module: &JITModule) -> Signature {
     Signature::new(module.target_config().default_call_conv)
@@ -74,10 +98,13 @@ fn declare_runtime_helper(
     module: &mut JITModule,
     name: &str,
     ptr: Type,
-) -> Result<cranelift_module::FuncId, JitError> {
+) -> Result<RuntimeHelperId, JitError> {
     let abi = runtime_helper_abi(name)?;
     let sig = signature_from_runtime_helper_abi(module, ptr, abi)?;
-    Ok(declare_import(module, name, sig)?)
+    Ok(RuntimeHelperId {
+        func_id: declare_import(module, name, sig)?,
+        requires_frame_sync: abi.requires_frame_sync(),
+    })
 }
 
 macro_rules! runtime_helper_table {
@@ -87,12 +114,67 @@ macro_rules! runtime_helper_table {
             &[$($name),+]
         }
 
-        #[derive(Clone, Copy)]
-        pub struct HelperFuncIds {
-            $(pub $field: cranelift_module::FuncId,)+
+        #[cfg(test)]
+        fn declared_helper_frame_policies(
+            ids: &HelperFuncIds,
+        ) -> Vec<(&'static str, bool)> {
+            vec![$(($name, ids.$field.requires_frame_sync)),+]
         }
 
-        pub fn declare_helpers(
+        #[derive(Clone, Copy)]
+        pub(crate) struct HelperFuncIds {
+            $($field: RuntimeHelperId,)+
+        }
+
+        #[derive(Clone, Copy)]
+        #[allow(dead_code, non_camel_case_types)]
+        pub enum HelperKind {
+            $($field,)+
+        }
+
+        pub(crate) struct HelperRefs<'a> {
+            module: &'a mut JITModule,
+            ids: HelperFuncIds,
+            $($field: Option<RuntimeHelper>,)+
+        }
+
+        impl<'a> HelperRefs<'a> {
+            pub(crate) fn new(module: &'a mut JITModule, ids: HelperFuncIds) -> Self {
+                Self {
+                    module,
+                    ids,
+                    $($field: None,)+
+                }
+            }
+
+            pub(crate) fn resolve(
+                &mut self,
+                kind: HelperKind,
+                func: &mut cranelift_codegen::ir::Function,
+            ) -> RuntimeHelper {
+                match kind {
+                    $(HelperKind::$field => {
+                        if let Some(helper) = self.$field {
+                            return helper;
+                        }
+                        let id = self.ids.$field;
+                        let helper = RuntimeHelper {
+                            func_ref: self.module.declare_func_in_func(id.func_id, func),
+                            requires_frame_sync: id.requires_frame_sync,
+                        };
+                        self.$field = Some(helper);
+                        helper
+                    },)+
+                }
+            }
+
+            #[cfg(test)]
+            fn resolved_count(&self) -> usize {
+                0 $(+ usize::from(self.$field.is_some()))+
+            }
+        }
+
+        pub(crate) fn declare_helpers(
             module: &mut JITModule,
             ptr: cranelift_codegen::ir::Type,
         ) -> Result<HelperFuncIds, JitError> {
@@ -101,16 +183,12 @@ macro_rules! runtime_helper_table {
             })
         }
 
-        pub fn get_helper_refs(
-            module: &mut JITModule,
+        #[cfg(test)]
+        fn resolve_all_helper_frame_policies(
+            helpers: &mut HelperRefs<'_>,
             func: &mut cranelift_codegen::ir::Function,
-            ids: &HelperFuncIds,
-        ) -> HelperFuncs {
-            let mut declare_ref = |id| Some(module.declare_func_in_func(id, func));
-
-            HelperFuncs {
-                $($field: declare_ref(ids.$field),)+
-            }
+        ) -> Vec<(&'static str, bool)> {
+            vec![$(($name, helpers.resolve(HelperKind::$field, func).requires_frame_sync())),+]
         }
     };
 }
@@ -119,7 +197,6 @@ runtime_helper_table! {
     gc_alloc => "vo_gc_alloc",
     write_barrier => "vo_gc_write_barrier",
     typed_write_barrier_by_meta => "vo_gc_typed_write_barrier_by_meta",
-    gc_safepoint => "vo_gc_safepoint",
     panic => "vo_panic",
     runtime_trap => "vo_runtime_trap",
     call_extern => "vo_call_extern",
@@ -131,7 +208,6 @@ runtime_helper_table! {
     str_eq => "vo_str_eq",
     str_cmp => "vo_str_cmp",
     str_decode_rune => "vo_str_decode_rune",
-    ptr_clone => "vo_ptr_clone",
     closure_new => "vo_closure_new",
     queue_new_checked => "vo_queue_new_checked",
     queue_len => "vo_chan_len",
@@ -141,13 +217,20 @@ runtime_helper_table! {
     slice_new_checked => "vo_slice_new_checked",
     slice_len => "vo_slice_len",
     slice_cap => "vo_slice_cap",
-    slice_append => "vo_slice_append",
     slice_slice => "vo_slice_slice",
     slice_slice3 => "vo_slice_slice3",
+    slice_append => "vo_slice_append",
     slice_from_array => "vo_slice_from_array",
     slice_from_array3 => "vo_slice_from_array3",
     slice_from_inline_array => "vo_slice_from_inline_array",
     slice_from_inline_array3 => "vo_slice_from_inline_array3",
+    iface_pack_slot0 => "vo_iface_pack_slot0",
+    iface_to_iface => "vo_iface_to_iface",
+    iface_eq => "vo_iface_eq",
+    iface_assert => "vo_iface_assert",
+    set_call_request => "vo_set_call_request",
+    copy_frame_slots => "vo_jit_copy_frame_slots",
+    ptr_clone => "vo_ptr_clone",
     map_new => "vo_map_new",
     map_len => "vo_map_len",
     map_get => "vo_map_get",
@@ -155,12 +238,6 @@ runtime_helper_table! {
     map_delete => "vo_map_delete",
     map_iter_init => "vo_map_iter_init",
     map_iter_next => "vo_map_iter_next",
-    iface_pack_slot0 => "vo_iface_pack_slot0",
-    iface_assert => "vo_iface_assert",
-    iface_to_iface => "vo_iface_to_iface",
-    iface_eq => "vo_iface_eq",
-    set_call_request => "vo_set_call_request",
-    copy_frame_slots => "vo_jit_copy_frame_slots",
     island_new => "vo_island_new",
     queue_close => "vo_chan_close",
     queue_send => "vo_chan_send",
@@ -236,5 +313,40 @@ mod tests {
                     panic!("{name} import signature drifted from ABI manifest: {err}")
                 });
         }
+    }
+
+    #[test]
+    fn resolved_helpers_carry_the_manifest_frame_policy() {
+        let mut module = test_module();
+        let ptr = module.target_config().pointer_type();
+        let ids = declare_helpers(&mut module, ptr).expect("declare helpers from ABI manifest");
+        let expected: Vec<_> = runtime_helper_abi_fields()
+            .iter()
+            .map(|abi| (abi.name, abi.requires_frame_sync()))
+            .collect();
+        assert_eq!(declared_helper_frame_policies(&ids), expected);
+
+        let mut context = module.make_context();
+        let mut helpers = HelperRefs::new(&mut module, ids);
+        assert_eq!(helpers.resolved_count(), 0);
+        assert_eq!(
+            resolve_all_helper_frame_policies(&mut helpers, &mut context.func),
+            expected
+        );
+        assert_eq!(helpers.resolved_count(), declared_helper_names().len());
+    }
+
+    #[test]
+    fn helper_refs_are_declared_once_and_only_on_demand() {
+        let mut module = test_module();
+        let ptr = module.target_config().pointer_type();
+        let ids = declare_helpers(&mut module, ptr).expect("declare helpers from ABI manifest");
+        let mut context = module.make_context();
+        let mut helpers = HelperRefs::new(&mut module, ids);
+
+        let first = helpers.resolve(HelperKind::str_index, &mut context.func);
+        let second = helpers.resolve(HelperKind::str_index, &mut context.func);
+        assert_eq!(first, second);
+        assert_eq!(helpers.resolved_count(), 1);
     }
 }

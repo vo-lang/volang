@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn vm_runtime_transition_preflights_all_spawn_storage_before_publish() {
+    let per_spawn_bytes = crate::fiber::MIN_STACK_SLOTS * core::mem::size_of::<u64>()
+        + 4 * core::mem::size_of::<crate::fiber::CallFrame>();
+    let limits = crate::fiber::VmResourceLimits {
+        max_total_fiber_storage_bytes: per_spawn_bytes,
+        ..crate::fiber::VmResourceLimits::default()
+    };
+    let mut vm = Vm::try_with_resource_limits(limits).expect("resource-limited VM");
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::None,
+    );
+    transition
+        .spawns
+        .push(PendingSpawn::try_new(0, 1, 0, 0, Vec::new()).expect("valid first spawn"));
+    transition
+        .spawns
+        .push(PendingSpawn::try_new(0, 1, 0, 0, Vec::new()).expect("valid second spawn"));
+
+    let error = vm
+        .apply_runtime_transition(None, transition)
+        .expect_err("aggregate storage must reject the complete spawn batch");
+
+    assert!(matches!(
+        error,
+        VmError::Resource(crate::VmResourceError::Limit {
+            resource: "fiber stack",
+            ..
+        })
+    ));
+    assert!(vm.scheduler.fibers.is_empty());
+    assert!(vm.scheduler.ready_queue.is_empty());
+}
+
+#[test]
 fn vm_runtime_transition_pending_response_overflow_is_rejected_before_commit() {
     let mut vm = Vm::new();
     vm.state.pending_island_responses = u32::MAX;
@@ -14,9 +50,7 @@ fn vm_runtime_transition_pending_response_overflow_is_rejected_before_commit() {
         .push(IslandCommandEffect::endpoint_recv_request(
             7,
             42,
-            vm.state.current_island_id,
-            1,
-            1,
+            endpoint_wait_key(0x0000_0001_0000_0001, 1),
         ));
 
     let error = vm
@@ -93,11 +127,9 @@ fn vm_runtime_transition_remote_endpoint_send_failure_is_transactional_058() {
     assert_eq!(vm.scheduler.schedule_next(), Some(fid));
 
     let endpoint_id = 42;
-    let (fiber_key, wait_id) = {
+    let wait_key = {
         let fiber = vm.scheduler.current_fiber_mut().expect("current fiber");
-        let fiber_key = fiber.endpoint_response_key();
-        let wait_id = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
-        (fiber_key, wait_id)
+        fiber.begin_remote_endpoint_recv_wait(endpoint_id)
     };
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Block(BlockReason::Queue),
@@ -109,9 +141,7 @@ fn vm_runtime_transition_remote_endpoint_send_failure_is_transactional_058() {
         .push(IslandCommandEffect::endpoint_recv_request(
             7,
             endpoint_id,
-            vm.state.current_island_id,
-            fiber_key,
-            wait_id,
+            wait_key,
         ));
 
     let err = vm
@@ -144,9 +174,9 @@ fn vm_runtime_transition_remote_wake_send_failure_returns_error_058() {
         ResumePolicy::PreserveFramePc,
         GcRootEffect::None,
     );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(QueueWaiter::simple(7, 99)));
+    transition.wakes.push(WakeCommand::queue_waiter(
+        QueueWaiter::try_queue(7, 99, 0x1000, SelectWaitKind::Recv).unwrap(),
+    ));
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.apply_runtime_transition(Some(current), transition)
@@ -168,6 +198,17 @@ fn vm_runtime_transition_remote_wake_batch_failure_is_transactional_058() {
     let blocked = vm.scheduler.spawn(Fiber::new(0));
     let blocked_key = vm.scheduler.get_fiber(blocked).wake_key_packed();
     assert_eq!(vm.scheduler.schedule_next(), Some(blocked));
+    let blocked_waiter = QueueWaiter::try_queue(
+        vm.state.current_island_id,
+        blocked_key,
+        0x1000,
+        SelectWaitKind::Recv,
+    )
+    .unwrap();
+    vm.scheduler
+        .current_fiber_mut()
+        .unwrap()
+        .begin_queue_wait(&blocked_waiter);
     vm.scheduler.block_for_queue();
     assert_eq!(
         vm.scheduler.get_fiber(blocked).state,
@@ -184,13 +225,10 @@ fn vm_runtime_transition_remote_wake_batch_failure_is_transactional_058() {
     );
     transition
         .wakes
-        .push(WakeCommand::queue_waiter(QueueWaiter::simple(
-            vm.state.current_island_id,
-            blocked_key,
-        )));
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(QueueWaiter::simple(7, 99)));
+        .push(WakeCommand::queue_waiter(blocked_waiter));
+    transition.wakes.push(WakeCommand::queue_waiter(
+        QueueWaiter::try_queue(7, 99, 0x1000, SelectWaitKind::Recv).unwrap(),
+    ));
 
     let err = vm
         .apply_runtime_transition(Some(current), transition)
@@ -214,6 +252,17 @@ fn vm_runtime_transition_local_spawn_command_failure_is_transactional_058() {
     let blocked = vm.scheduler.spawn(Fiber::new(0));
     let blocked_key = vm.scheduler.get_fiber(blocked).wake_key_packed();
     assert_eq!(vm.scheduler.schedule_next(), Some(blocked));
+    let blocked_waiter = QueueWaiter::try_queue(
+        vm.state.current_island_id,
+        blocked_key,
+        0x1000,
+        SelectWaitKind::Recv,
+    )
+    .unwrap();
+    vm.scheduler
+        .current_fiber_mut()
+        .unwrap()
+        .begin_queue_wait(&blocked_waiter);
     vm.scheduler.block_for_queue();
     assert_eq!(
         vm.scheduler.get_fiber(blocked).state,
@@ -230,10 +279,7 @@ fn vm_runtime_transition_local_spawn_command_failure_is_transactional_058() {
     );
     transition
         .wakes
-        .push(WakeCommand::queue_waiter(QueueWaiter::simple(
-            vm.state.current_island_id,
-            blocked_key,
-        )));
+        .push(WakeCommand::queue_waiter(blocked_waiter));
     transition
         .island_commands
         .push(IslandCommandEffect::spawn_fiber(
@@ -281,18 +327,14 @@ fn vm_runtime_transition_remote_command_batch_failure_is_transactional_058() {
             7,
             100,
             Vec::new(),
-            vm.state.current_island_id,
-            0x0000_0001_0000_0001,
-            1,
+            endpoint_wait_key(0x0000_0001_0000_0001, 1),
         ));
     transition
         .island_commands
         .push(IslandCommandEffect::endpoint_recv_request(
             8,
             101,
-            vm.state.current_island_id,
-            0x0000_0001_0000_0002,
-            2,
+            endpoint_wait_key(0x0000_0001_0000_0002, 2),
         ));
 
     let err = vm
@@ -331,18 +373,14 @@ fn vm_runtime_transition_remote_command_batch_late_send_failure_is_transactional
             7,
             100,
             Vec::new(),
-            vm.state.current_island_id,
-            0x0000_0001_0000_0001,
-            1,
+            endpoint_wait_key(0x0000_0001_0000_0001, 1),
         ));
     transition
         .island_commands
         .push(IslandCommandEffect::endpoint_recv_request(
             8,
             101,
-            vm.state.current_island_id,
-            0x0000_0001_0000_0002,
-            2,
+            endpoint_wait_key(0x0000_0001_0000_0002, 2),
         ));
 
     let err = vm
@@ -373,12 +411,13 @@ fn vm_runtime_transition_remote_publish_waits_for_closed_sender_replay_preflight
         assert_eq!(fiber.current_frame().expect("sender frame").pc, 0);
     }
     let sender_key = vm.scheduler.get_fiber(sender).wake_key_packed();
-    let sender_waiter = QueueWaiter::simple_queue(
+    let sender_waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         sender_key,
         0x2000,
         SelectWaitKind::Send,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .current_fiber_mut()
         .expect("sender fiber")
@@ -394,11 +433,7 @@ fn vm_runtime_transition_remote_publish_waits_for_closed_sender_replay_preflight
     );
     transition
         .island_commands
-        .push(IslandCommandEffect::endpoint_close_request(
-            7,
-            200,
-            vm.state.current_island_id,
-        ));
+        .push(IslandCommandEffect::endpoint_close_request(7, 200));
     transition
         .wakes
         .push(WakeCommand::queue_closed_sender(sender_waiter, None));

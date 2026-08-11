@@ -1,93 +1,32 @@
 //! Shared IR generation interface.
 
-use cranelift_codegen::ir::{FuncRef, Value};
+use cranelift_codegen::ir::{
+    types, AliasRegionData, InstBuilder, MemFlagsData as MemFlags, StackSlot, StackSlotData,
+    StackSlotKind, Type, Value,
+};
 use cranelift_frontend::FunctionBuilder;
-use vo_runtime::bytecode::{JitInstructionMetadata, Module as VoModule, ResolvedExtern};
+use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule, ResolvedExtern};
 use vo_runtime::instruction::Instruction;
+use vo_runtime::jit_api::JitContextField;
 
-use crate::JitError;
+use crate::{JitCompileEnv, JitError};
 
 mod helper_calls;
 mod reg_const_facts;
 
-pub use helper_calls::{
-    emit_funcref_call, emit_funcref_call_raw, emit_funcref_call_with_effect, HelperCallEffect,
-};
-pub use reg_const_facts::compute_reg_const_facts_with_context;
+pub(crate) use crate::helpers::HelperRefs;
+pub use crate::helpers::{HelperKind, RuntimeHelper};
+pub use helper_calls::{emit_funcref_call_raw, emit_runtime_helper_call};
+pub(crate) use reg_const_facts::try_compute_reg_const_facts_with_context;
+pub use reg_const_facts::RegConstFacts;
 
 /// Translation result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranslateResult {
     /// Instruction handled
     Completed,
-    /// Block terminated (e.g. panic)
-    Terminated,
     /// Needs compiler-specific handling
     Unhandled,
-}
-
-/// Runtime helper function references
-#[derive(Default, Clone, Copy)]
-pub struct HelperFuncs {
-    pub gc_alloc: Option<FuncRef>,
-    pub write_barrier: Option<FuncRef>,
-    pub typed_write_barrier_by_meta: Option<FuncRef>,
-    pub gc_safepoint: Option<FuncRef>,
-    pub panic: Option<FuncRef>,
-    pub runtime_trap: Option<FuncRef>,
-    pub call_extern: Option<FuncRef>,
-    pub str_new: Option<FuncRef>,
-    pub str_len: Option<FuncRef>,
-    pub str_index: Option<FuncRef>,
-    pub str_concat: Option<FuncRef>,
-    pub str_slice: Option<FuncRef>,
-    pub str_eq: Option<FuncRef>,
-    pub str_cmp: Option<FuncRef>,
-    pub str_decode_rune: Option<FuncRef>,
-    pub ptr_clone: Option<FuncRef>,
-    pub closure_new: Option<FuncRef>,
-    pub queue_new_checked: Option<FuncRef>,
-    pub queue_len: Option<FuncRef>,
-    pub queue_cap: Option<FuncRef>,
-    pub array_new: Option<FuncRef>,
-    pub array_len: Option<FuncRef>,
-    pub slice_new_checked: Option<FuncRef>,
-    pub slice_len: Option<FuncRef>,
-    pub slice_cap: Option<FuncRef>,
-    pub slice_append: Option<FuncRef>,
-    pub slice_slice: Option<FuncRef>,
-    pub slice_slice3: Option<FuncRef>,
-    pub slice_from_array: Option<FuncRef>,
-    pub slice_from_array3: Option<FuncRef>,
-    pub slice_from_inline_array: Option<FuncRef>,
-    pub slice_from_inline_array3: Option<FuncRef>,
-    pub map_new: Option<FuncRef>,
-    pub map_len: Option<FuncRef>,
-    pub map_get: Option<FuncRef>,
-    pub map_set: Option<FuncRef>,
-    pub map_delete: Option<FuncRef>,
-    pub map_iter_init: Option<FuncRef>,
-    pub map_iter_next: Option<FuncRef>,
-    pub iface_pack_slot0: Option<FuncRef>,
-    pub iface_assert: Option<FuncRef>,
-    pub iface_to_iface: Option<FuncRef>,
-    pub iface_eq: Option<FuncRef>,
-    pub set_call_request: Option<FuncRef>,
-    pub copy_frame_slots: Option<FuncRef>,
-    pub island_new: Option<FuncRef>,
-    pub queue_close: Option<FuncRef>,
-    pub queue_send: Option<FuncRef>,
-    pub queue_recv: Option<FuncRef>,
-    pub go_start: Option<FuncRef>,
-    pub go_island: Option<FuncRef>,
-    // Defer/Recover
-    pub defer_push: Option<FuncRef>,
-    pub recover: Option<FuncRef>,
-    // Select Statement
-    pub select_begin: Option<FuncRef>,
-    pub select_send: Option<FuncRef>,
-    pub select_recv: Option<FuncRef>,
-    pub select_exec: Option<FuncRef>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,10 +40,122 @@ pub enum SelectSyncCase {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum JitMemoryRegion {
+    Context,
+    Globals,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JitMemoryFlags {
+    context: MemFlags,
+    globals: MemFlags,
+}
+
+impl JitMemoryFlags {
+    pub(crate) fn new(builder: &mut FunctionBuilder<'_>) -> Self {
+        let regions = &mut builder.func.dfg.alias_regions;
+        let context = regions.insert(AliasRegionData {
+            user_id: 0x564f_0001,
+            description: "vo jit context".into(),
+        });
+        let globals = regions.insert(AliasRegionData {
+            user_id: 0x564f_0002,
+            description: "vo globals".into(),
+        });
+        Self {
+            context: MemFlags::trusted().with_alias_region(Some(context)),
+            globals: MemFlags::trusted().with_alias_region(Some(globals)),
+        }
+    }
+
+    fn get(self, region: JitMemoryRegion) -> MemFlags {
+        match region {
+            JitMemoryRegion::Context => self.context,
+            JitMemoryRegion::Globals => self.globals,
+        }
+    }
+}
+
 /// Mutable access to the Cranelift function builder.
 pub trait IrBuilder<'a> {
     /// Get FunctionBuilder
     fn builder(&mut self) -> &mut FunctionBuilder<'a>;
+
+    #[doc(hidden)]
+    fn jit_memory_flags(&self) -> JitMemoryFlags;
+
+    fn load_trusted(
+        &mut self,
+        region: JitMemoryRegion,
+        ty: Type,
+        base: Value,
+        offset: i32,
+    ) -> Value {
+        let flags = self.jit_memory_flags().get(region);
+        self.builder().ins().load(ty, flags, base, offset)
+    }
+
+    fn store_trusted(&mut self, region: JitMemoryRegion, value: Value, base: Value, offset: i32) {
+        let flags = self.jit_memory_flags().get(region);
+        self.builder().ins().store(flags, value, base, offset);
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub enum NativeScratchKind {
+    StaticArgs,
+    StaticReturns,
+    DynamicReturns,
+    DynamicIcArgs,
+    DynamicUserArgs,
+    DynamicPreparedCall,
+    ExternArgs,
+    ExternReturns,
+}
+
+impl NativeScratchKind {
+    const COUNT: usize = 8;
+
+    #[inline]
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[doc(hidden)]
+pub struct NativeScratchSlots {
+    slots: [Option<StackSlot>; NativeScratchKind::COUNT],
+}
+
+impl Default for NativeScratchSlots {
+    fn default() -> Self {
+        Self {
+            slots: [None; NativeScratchKind::COUNT],
+        }
+    }
+}
+
+pub trait ScratchAccess<'a>: IrBuilder<'a> {
+    #[doc(hidden)]
+    fn native_scratch_slots(&mut self) -> &mut NativeScratchSlots;
+
+    fn native_scratch_slot(&mut self, kind: NativeScratchKind, bytes: usize) -> StackSlot {
+        let size = u32::try_from(bytes.max(1)).expect("verified JIT scratch size must fit u32");
+        if let Some(slot) = self.native_scratch_slots().slots[kind.index()] {
+            let data = &mut self.builder().func.sized_stack_slots[slot];
+            data.size = data.size.max(size);
+            return slot;
+        }
+        let slot = self.builder().create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        self.native_scratch_slots().slots[kind.index()] = Some(slot);
+        slot
+    }
 }
 
 /// Slot storage operations for the current compiled frame.
@@ -118,9 +169,6 @@ pub trait SlotAccess<'a>: IrBuilder<'a> {
     /// Get memory address of a variable slot.
     /// Used by SlotGet/SlotSet for stack array access.
     fn var_addr(&mut self, slot: u16) -> Value;
-
-    /// Synchronize the requested SSA-visible slots to frame memory.
-    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError>;
 
     /// Get the number of local variable slots.
     fn local_slot_count(&self) -> usize;
@@ -147,11 +195,25 @@ pub trait RuntimeContext<'a>: IrBuilder<'a> {
     /// Get ctx parameter
     fn ctx_param(&mut self) -> Value;
 
+    fn load_context_field(&mut self, ty: Type, field: JitContextField) -> Value {
+        let ctx = self.ctx_param();
+        self.load_trusted(JitMemoryRegion::Context, ty, ctx, field.offset())
+    }
+
+    fn store_context_field(&mut self, value: Value, field: JitContextField) {
+        let ctx = self.ctx_param();
+        self.store_trusted(JitMemoryRegion::Context, value, ctx, field.offset());
+    }
+
     /// Load GC pointer
-    fn gc_ptr(&mut self) -> Value;
+    fn gc_ptr(&mut self) -> Value {
+        self.load_context_field(types::I64, JitContextField::Gc)
+    }
 
     /// Load globals pointer
-    fn globals_ptr(&mut self) -> Value;
+    fn globals_ptr(&mut self) -> Value {
+        self.load_context_field(types::I64, JitContextField::Globals)
+    }
 }
 
 /// Module, function, and instruction metadata needed during lowering.
@@ -159,55 +221,72 @@ pub trait MetadataAccess {
     /// Get Vo module
     fn vo_module(&self) -> &VoModule;
 
-    fn resolved_extern(&self, extern_id: u32) -> Result<&ResolvedExtern, JitError>;
+    fn compile_env(&self) -> JitCompileEnv<'_>;
+
+    fn resolved_extern(&self, extern_id: u32) -> Result<&ResolvedExtern, JitError> {
+        let env = self.compile_env();
+        let resolved = env.externs.get(extern_id).ok_or_else(|| {
+            JitError::Internal(format!("CallExtern missing resolved extern {extern_id}"))
+        })?;
+        if matches!(
+            resolved.jit_route,
+            vo_runtime::bytecode::ExternJitRoute::DirectHelper
+        ) && !env.backend_caps.extern_suspend
+            && !resolved.effective_effects.is_empty()
+        {
+            return Err(JitError::Internal(format!(
+                "CallExtern extern {extern_id} requires extern suspend support"
+            )));
+        }
+        Ok(resolved)
+    }
+
+    fn function_def(&self) -> &FunctionDef;
 
     /// Get current PC
     fn current_pc(&self) -> usize;
 
-    /// Get the function ID being compiled.
-    fn func_id(&self) -> u32;
+    /// Dense verified index of the dynamic callsite at `pc`.
+    fn dynamic_callsite_index(&self, pc: usize) -> Option<u32>;
 
     /// Get JIT metadata attached to the instruction at current_pc, if present.
-    fn current_jit_metadata(&self) -> Option<&JitInstructionMetadata> {
-        None
+    fn current_instruction_metadata(&self) -> Option<&InstructionMetadata> {
+        self.function_def()
+            .instruction_metadata
+            .get(self.current_pc())
     }
 
     /// Resolve typed array/slice element metadata for JIT lowering.
-    fn elem_layout(
-        &self,
-        flags: u8,
-        _dynamic_bytes_slot: u16,
-    ) -> Option<crate::metadata::ElemLayout> {
-        self.current_jit_metadata()
+    fn elem_layout(&self) -> Option<crate::metadata::ElemLayout> {
+        self.current_instruction_metadata()
             .and_then(crate::metadata::elem_layout_from_instruction)
-            .or_else(|| (flags != 0).then(|| crate::metadata::elem_layout_from_flags(flags)))
     }
 
     /// Resolve typed map-get metadata for JIT lowering.
     fn map_get_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapGetLayout> {
         let _ = inst;
-        self.current_jit_metadata()
+        self.current_instruction_metadata()
             .and_then(crate::metadata::map_get_layout_from_instruction)
     }
 
     /// Resolve typed map-new metadata for JIT lowering.
     fn map_new_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapNewLayout> {
         let _ = inst;
-        self.current_jit_metadata()
+        self.current_instruction_metadata()
             .and_then(crate::metadata::map_new_layout_from_instruction)
     }
 
     /// Resolve typed map-set metadata for JIT lowering.
     fn map_set_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapSetLayout> {
         let _ = inst;
-        self.current_jit_metadata()
+        self.current_instruction_metadata()
             .and_then(crate::metadata::map_set_layout_from_instruction)
     }
 
     /// Resolve typed map-delete metadata for JIT lowering.
     fn map_delete_key_slots(&self, inst: &Instruction) -> Option<u16> {
         let _ = inst;
-        self.current_jit_metadata()
+        self.current_instruction_metadata()
             .and_then(crate::metadata::map_delete_key_slots_from_instruction)
     }
 
@@ -218,7 +297,7 @@ pub trait MetadataAccess {
     ) -> Option<crate::metadata::MapIterNextLayout> {
         crate::metadata::map_iter_next_layout(
             inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
         )
     }
 
@@ -229,7 +308,7 @@ pub trait MetadataAccess {
     ) -> Option<crate::metadata::IfaceAssertLayout> {
         crate::metadata::iface_assert_layout(
             inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
         )
     }
 
@@ -237,7 +316,7 @@ pub trait MetadataAccess {
     fn queue_elem_slots(&self, inst: &Instruction) -> Option<u16> {
         crate::metadata::queue_elem_slots(
             inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
         )
     }
 
@@ -245,15 +324,23 @@ pub trait MetadataAccess {
     fn slot_elem_slots(&self, inst: &Instruction) -> Option<u16> {
         crate::metadata::slot_elem_slots(
             inst,
-            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+            crate::metadata::MetadataFacts::from_instruction(self.current_instruction_metadata()),
         )
+    }
+
+    /// Resolve pointer allocation/access layout from PtrLayout metadata.
+    fn ptr_layout(&self) -> Option<&[vo_runtime::SlotType]> {
+        match self.current_instruction_metadata() {
+            Some(InstructionMetadata::PtrLayout { value_layout }) => Some(value_layout.as_slice()),
+            _ => None,
+        }
     }
 }
 
 /// Runtime helper function references.
 pub trait HelperAccess {
-    /// Get helper function references
-    fn helpers(&self) -> &HelperFuncs;
+    /// Resolve one helper import in the current Cranelift function.
+    fn helper(&mut self, kind: HelperKind) -> RuntimeHelper;
 }
 
 /// Compile-time constant facts tracked while emitting a block.
@@ -264,9 +351,6 @@ pub trait RegConstAccess {
     /// Get register constant
     fn get_reg_const(&self, reg: u16) -> Option<i64>;
 
-    /// Clear compile-time constant state for a slot after non-constant writes.
-    fn clear_reg_const(&mut self, reg: u16);
-
     /// Clear all compile-time constant state at control-flow and helper-call
     /// boundaries where a single linear fact map is no longer sound.
     fn clear_reg_consts(&mut self);
@@ -274,9 +358,6 @@ pub trait RegConstAccess {
 
 /// Slow-path frame publication and JitResult return semantics.
 pub trait FrameBoundary {
-    /// Panic return value (FunctionCompiler=1, LoopCompiler=LOOP_RESULT_PANIC)
-    fn panic_return_value(&self) -> i32;
-
     /// Spill all SSA variables to memory.
     /// Called before returning non-Ok JitResult so VM can see/restore state.
     fn spill_all_vars(&mut self);
@@ -316,6 +397,67 @@ pub trait FlowFacts {
     fn mark_checked_non_nil(&mut self, slot: u16);
 }
 
+macro_rules! impl_shared_compiler_traits {
+    ($compiler:ty) => {
+        impl $crate::translator::MetadataAccess for $compiler {
+            fn vo_module(&self) -> &vo_runtime::bytecode::Module {
+                self.core.vo_module
+            }
+
+            fn compile_env(&self) -> $crate::JitCompileEnv<'_> {
+                self.core.env
+            }
+
+            fn function_def(&self) -> &vo_runtime::bytecode::FunctionDef {
+                self.core.func_def
+            }
+
+            fn current_pc(&self) -> usize {
+                self.core.current_pc
+            }
+
+            fn dynamic_callsite_index(&self, pc: usize) -> Option<u32> {
+                self.core.analysis.dynamic_callsite_index(pc)
+            }
+        }
+
+        impl $crate::translator::HelperAccess for $compiler {
+            fn helper(
+                &mut self,
+                kind: $crate::translator::HelperKind,
+            ) -> $crate::translator::RuntimeHelper {
+                self.core.helpers.resolve(kind, self.builder.func)
+            }
+        }
+
+        impl $crate::translator::RegConstAccess for $compiler {
+            fn set_reg_const(&mut self, reg: u16, val: i64) {
+                self.core.reg_consts.insert(reg, val);
+            }
+
+            fn get_reg_const(&self, reg: u16) -> Option<i64> {
+                self.core.reg_consts.get(&reg).copied()
+            }
+
+            fn clear_reg_consts(&mut self) {
+                self.core.reg_consts.clear();
+            }
+        }
+
+        impl $crate::translator::FlowFacts for $compiler {
+            fn is_checked_non_nil(&self, slot: u16) -> bool {
+                self.core.checked_non_nil.contains(&slot)
+            }
+
+            fn mark_checked_non_nil(&mut self, slot: u16) {
+                self.core.checked_non_nil.insert(slot);
+            }
+        }
+    };
+}
+
+pub(crate) use impl_shared_compiler_traits;
+
 /// Call boundary values used by direct JIT and prepared-call lowering.
 pub trait CallBoundary<'a>: IrBuilder<'a> {
     /// Caller bp value to record for a call boundary.
@@ -339,6 +481,7 @@ pub trait StackRefresh {
 /// genuinely cross most lowering boundaries.
 pub trait IrEmitter<'a>:
     IrBuilder<'a>
+    + ScratchAccess<'a>
     + SlotAccess<'a>
     + RuntimeContext<'a>
     + MetadataAccess
@@ -354,6 +497,7 @@ pub trait IrEmitter<'a>:
 
 impl<'a, T> IrEmitter<'a> for T where
     T: IrBuilder<'a>
+        + ScratchAccess<'a>
         + SlotAccess<'a>
         + RuntimeContext<'a>
         + MetadataAccess
@@ -425,7 +569,25 @@ impl<'a, T> RuntimeOpsEmitter<'a> for T where
 
 #[cfg(test)]
 mod tests {
-    use super::SelectSyncCase;
+    use super::{JitMemoryFlags, JitMemoryRegion, SelectSyncCase};
+
+    #[test]
+    fn context_and_globals_use_stable_disjoint_alias_regions() {
+        let mut func = cranelift_codegen::ir::Function::new();
+        let mut func_ctx = cranelift_frontend::FunctionBuilderContext::new();
+        let mut builder = cranelift_frontend::FunctionBuilder::new(&mut func, &mut func_ctx);
+        let first = JitMemoryFlags::new(&mut builder);
+        let second = JitMemoryFlags::new(&mut builder);
+
+        assert_ne!(
+            first.get(JitMemoryRegion::Context).alias_region(),
+            first.get(JitMemoryRegion::Globals).alias_region()
+        );
+        assert_eq!(
+            first.get(JitMemoryRegion::Context).alias_region(),
+            second.get(JitMemoryRegion::Context).alias_region()
+        );
+    }
 
     #[test]
     fn vm_select_source_case_sync_contract_017_recv_carries_source_case_index() {

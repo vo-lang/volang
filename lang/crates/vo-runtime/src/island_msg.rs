@@ -8,9 +8,8 @@ use alloc::vec::Vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::gc_types::try_typed_write_barrier;
-use crate::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
+use crate::island::{EndpointRequestKind, EndpointResponseKind, EndpointWaitKey, IslandCommand};
 use crate::objects::array;
-use crate::objects::queue_state::{QueueWaiter, SelectInfo, SelectWaitKind};
 use crate::pack::{
     pack_slots_with_named_type_metas_and_cache_limited,
     unpack_slots_expected_with_queue_handle_resolver_and_object_cache,
@@ -96,7 +95,9 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 pub enum IslandCommandDecodeError {
     UnexpectedEof,
     InvalidTag,
+    InvalidWaitId,
     TrailingBytes,
+    LengthOverflow { len: usize, max: usize },
     AllocationFailed { requested: usize },
 }
 
@@ -105,7 +106,11 @@ impl core::fmt::Display for IslandCommandDecodeError {
         match self {
             Self::UnexpectedEof => f.write_str("unexpected end of island command"),
             Self::InvalidTag => f.write_str("invalid or reserved island command tag"),
+            Self::InvalidWaitId => f.write_str("endpoint wait identity must be non-zero"),
             Self::TrailingBytes => f.write_str("trailing bytes after island command"),
+            Self::LengthOverflow { len, max } => {
+                write!(f, "island command length {len} exceeds the maximum {max}")
+            }
             Self::AllocationFailed { requested } => write!(
                 f,
                 "failed to reserve {requested} bytes while decoding island command"
@@ -143,6 +148,10 @@ pub enum SpawnPayloadUnpackError {
     HeaderMismatch,
     TrailingBytes,
     SizeOverflow,
+    LengthOverflow {
+        len: usize,
+        max: usize,
+    },
     AllocationFailed {
         field: &'static str,
         requested: usize,
@@ -158,6 +167,9 @@ impl core::fmt::Display for SpawnPayloadUnpackError {
             Self::HeaderMismatch => f.write_str("spawn payload header does not match its bytes"),
             Self::TrailingBytes => f.write_str("trailing bytes after spawn payload"),
             Self::SizeOverflow => f.write_str("spawn payload slot count exceeds addressable memory"),
+            Self::LengthOverflow { len, max } => {
+                write!(f, "spawn payload length {len} exceeds the maximum {max}")
+            }
             Self::AllocationFailed { field, requested } => write!(
                 f,
                 "failed to reserve {requested} capacity units for {field} while unpacking spawn payload"
@@ -201,22 +213,6 @@ fn read_u32_checked(data: &[u8], offset: &mut usize) -> Result<u32, IslandComman
     Ok(value)
 }
 
-fn read_u16_checked(data: &[u8], offset: &mut usize) -> Result<u16, IslandCommandDecodeError> {
-    let end = offset
-        .checked_add(2)
-        .ok_or(IslandCommandDecodeError::UnexpectedEof)?;
-    let bytes = data
-        .get(*offset..end)
-        .ok_or(IslandCommandDecodeError::UnexpectedEof)?;
-    let value = u16::from_le_bytes(
-        bytes
-            .try_into()
-            .map_err(|_| IslandCommandDecodeError::UnexpectedEof)?,
-    );
-    *offset = end;
-    Ok(value)
-}
-
 fn read_u64_checked(data: &[u8], offset: &mut usize) -> Result<u64, IslandCommandDecodeError> {
     let end = offset
         .checked_add(8)
@@ -233,68 +229,13 @@ fn read_u64_checked(data: &[u8], offset: &mut usize) -> Result<u64, IslandComman
     Ok(value)
 }
 
-fn encode_queue_waiter(buf: &mut Vec<u8>, waiter: &QueueWaiter) {
-    buf.extend_from_slice(&waiter.island_id.to_le_bytes());
-    buf.extend_from_slice(&waiter.fiber_key.to_le_bytes());
-    buf.extend_from_slice(&waiter.registration_id.to_le_bytes());
-    buf.extend_from_slice(&waiter.endpoint_wait_id.to_le_bytes());
-    buf.extend_from_slice(&waiter.queue_ref.to_le_bytes());
-    match waiter.kind {
-        Some(kind) => {
-            buf.push(1);
-            buf.push(kind.to_raw());
-        }
-        None => buf.push(0),
-    }
-    match waiter.select.as_ref() {
-        Some(select) => {
-            buf.push(1);
-            buf.extend_from_slice(&select.case_index.to_le_bytes());
-            buf.extend_from_slice(&select.select_id.to_le_bytes());
-            buf.extend_from_slice(&select.queue_ref.to_le_bytes());
-            buf.push(select.kind.to_raw());
-        }
-        None => buf.push(0),
-    }
-}
-
-fn decode_queue_waiter(
+fn decode_endpoint_wait_key(
     data: &[u8],
     offset: &mut usize,
-) -> Result<QueueWaiter, IslandCommandDecodeError> {
-    let island_id = read_u32_checked(data, offset)?;
+) -> Result<EndpointWaitKey, IslandCommandDecodeError> {
     let fiber_key = read_u64_checked(data, offset)?;
-    let registration_id = read_u64_checked(data, offset)?;
-    let endpoint_wait_id = read_u64_checked(data, offset)?;
-    let queue_ref = read_u64_checked(data, offset)?;
-    let kind = match read_byte(data, offset)? {
-        0 => None,
-        1 => Some(
-            SelectWaitKind::from_raw(read_byte(data, offset)?)
-                .ok_or(IslandCommandDecodeError::InvalidTag)?,
-        ),
-        _ => return Err(IslandCommandDecodeError::InvalidTag),
-    };
-    let select = match read_byte(data, offset)? {
-        0 => None,
-        1 => Some(SelectInfo {
-            case_index: read_u16_checked(data, offset)?,
-            select_id: read_u64_checked(data, offset)?,
-            queue_ref: read_u64_checked(data, offset)?,
-            kind: SelectWaitKind::from_raw(read_byte(data, offset)?)
-                .ok_or(IslandCommandDecodeError::InvalidTag)?,
-        }),
-        _ => return Err(IslandCommandDecodeError::InvalidTag),
-    };
-    Ok(QueueWaiter {
-        island_id,
-        fiber_key,
-        registration_id,
-        endpoint_wait_id,
-        queue_ref,
-        kind,
-        select,
-    })
+    let wait_id = read_u64_checked(data, offset)?;
+    EndpointWaitKey::try_new(fiber_key, wait_id).ok_or(IslandCommandDecodeError::InvalidWaitId)
 }
 
 fn read_bytes(
@@ -336,6 +277,12 @@ fn validate_variable_payload_extent(
 }
 
 pub const HEADER_SIZE: usize = 10;
+/// Hard ceiling for one encoded cross-Island command, including its envelope.
+/// Island messages live outside the managed heap, so they need an independent
+/// finite budget even when the owning collector permits growth.
+pub const MAX_ISLAND_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// Payload ceiling leaves room for the largest endpoint/routing envelope.
+pub const MAX_ISLAND_PAYLOAD_BYTES: usize = MAX_ISLAND_MESSAGE_BYTES - 64;
 
 #[inline]
 fn wire_len_u16(len: usize, field: &'static str) -> Result<u16, IslandMessageEncodeError> {
@@ -370,6 +317,13 @@ fn try_vec_with_capacity(
     capacity: usize,
     field: &'static str,
 ) -> Result<Vec<u8>, IslandMessageEncodeError> {
+    if capacity > MAX_ISLAND_MESSAGE_BYTES {
+        return Err(IslandMessageEncodeError::LengthOverflow {
+            field,
+            len: capacity,
+            max: MAX_ISLAND_MESSAGE_BYTES,
+        });
+    }
     let mut buf = Vec::new();
     buf.try_reserve_exact(capacity)
         .map_err(|_| IslandMessageEncodeError::AllocationFailed {
@@ -385,6 +339,13 @@ fn reserve_append(
     field: &'static str,
 ) -> Result<(), IslandMessageEncodeError> {
     let requested = checked_encoded_size(buf.len(), additional, field)?;
+    if requested > MAX_ISLAND_MESSAGE_BYTES {
+        return Err(IslandMessageEncodeError::LengthOverflow {
+            field,
+            len: requested,
+            max: MAX_ISLAND_MESSAGE_BYTES,
+        });
+    }
     if buf.capacity().saturating_sub(buf.len()) >= additional {
         return Ok(());
     }
@@ -1005,6 +966,12 @@ pub struct SpawnPayload {
 }
 
 pub fn decode_spawn_header(data: &[u8]) -> Result<SpawnPayload, SpawnPayloadUnpackError> {
+    if data.len() > MAX_ISLAND_PAYLOAD_BYTES {
+        return Err(SpawnPayloadUnpackError::LengthOverflow {
+            len: data.len(),
+            max: MAX_ISLAND_PAYLOAD_BYTES,
+        });
+    }
     if data.len() < HEADER_SIZE {
         return Err(SpawnPayloadUnpackError::UnexpectedEof);
     }
@@ -1643,11 +1610,6 @@ where
     Ok((captures, args))
 }
 
-fn queue_waiter_encoded_len(waiter: &QueueWaiter) -> usize {
-    // Five identity fields, two option tags, and the optional payloads.
-    36 + 1 + usize::from(waiter.kind.is_some()) + 1 + if waiter.select.is_some() { 19 } else { 0 }
-}
-
 fn island_command_encoded_len(cmd: &IslandCommand) -> Result<usize, IslandMessageEncodeError> {
     let size = match cmd {
         IslandCommand::SpawnFiber { closure_data } => {
@@ -1662,31 +1624,30 @@ fn island_command_encoded_len(cmd: &IslandCommand) -> Result<usize, IslandMessag
             wire_len_u32(data.len(), "host wake payload")?;
             checked_encoded_size(13, data.len(), "island command")?
         }
-        IslandCommand::WakeFiber { waiter } => {
-            checked_encoded_size(1, queue_waiter_encoded_len(waiter), "island command")?
-        }
         IslandCommand::Shutdown => 1,
         IslandCommand::EndpointRequest { kind, .. } => {
             let kind_len = match kind {
-                EndpointRequestKind::Send { data } => {
+                EndpointRequestKind::Send { data, .. } => {
                     wire_len_u32(data.len(), "endpoint send payload")?;
-                    checked_encoded_size(5, data.len(), "endpoint request")?
+                    checked_encoded_size(21, data.len(), "endpoint request")?
                 }
-                EndpointRequestKind::Recv | EndpointRequestKind::Close => 1,
+                EndpointRequestKind::Recv { .. } => 17,
+                EndpointRequestKind::Close => 1,
                 EndpointRequestKind::Transfer { .. } => 5,
             };
-            checked_encoded_size(29, kind_len, "island command")?
+            checked_encoded_size(9, kind_len, "island command")?
         }
         IslandCommand::EndpointResponse { kind, .. } => {
             let kind_len = match kind {
-                EndpointResponseKind::SendAck { .. } => 2,
+                EndpointResponseKind::SendAck { .. } => 18,
                 EndpointResponseKind::RecvData { data, .. } => {
                     wire_len_u32(data.len(), "endpoint receive payload")?;
-                    checked_encoded_size(6, data.len(), "endpoint response")?
+                    checked_encoded_size(22, data.len(), "endpoint response")?
                 }
-                EndpointResponseKind::Closed | EndpointResponseKind::RecvError => 1,
+                EndpointResponseKind::Closed => 1,
+                EndpointResponseKind::RecvError { .. } => 17,
             };
-            checked_encoded_size(29, kind_len, "island command")?
+            checked_encoded_size(9, kind_len, "island command")?
         }
     };
     Ok(size)
@@ -1730,45 +1691,24 @@ fn encode_island_command_into(
             buf.extend_from_slice(&wire_len_u32(data.len(), "host wake payload")?.to_le_bytes());
             buf.extend_from_slice(data);
         }
-        IslandCommand::WakeFiber { waiter } => {
-            buf.push(1);
-            encode_queue_waiter(buf, waiter);
-        }
         IslandCommand::Shutdown => {
             buf.push(2);
         }
-        IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        } => {
+        IslandCommand::EndpointRequest { endpoint_id, kind } => {
             buf.push(3);
             buf.extend_from_slice(&endpoint_id.to_le_bytes());
             encode_endpoint_request_kind(buf, kind)?;
-            buf.extend_from_slice(&from_island.to_le_bytes());
-            buf.extend_from_slice(&fiber_key.to_le_bytes());
-            buf.extend_from_slice(&wait_id.to_le_bytes());
         }
-        IslandCommand::EndpointResponse {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        } => {
+        IslandCommand::EndpointResponse { endpoint_id, kind } => {
             buf.push(4);
             buf.extend_from_slice(&endpoint_id.to_le_bytes());
             encode_endpoint_response_kind(buf, kind)?;
-            buf.extend_from_slice(&from_island.to_le_bytes());
-            buf.extend_from_slice(&fiber_key.to_le_bytes());
-            buf.extend_from_slice(&wait_id.to_le_bytes());
         }
     }
     Ok(())
 }
 
+/// Encodes the transport-owned routing envelope and command bytes.
 pub fn encode_island_transport_frame(
     target_island_id: u32,
     source_island_id: u32,
@@ -1789,14 +1729,18 @@ fn encode_endpoint_request_kind(
     kind: &EndpointRequestKind,
 ) -> Result<(), IslandMessageEncodeError> {
     match kind {
-        EndpointRequestKind::Send { data } => {
+        EndpointRequestKind::Send { data, wait_key } => {
             buf.push(0);
             buf.extend_from_slice(
                 &wire_len_u32(data.len(), "endpoint send payload")?.to_le_bytes(),
             );
             buf.extend_from_slice(data);
+            encode_endpoint_wait_key(buf, *wait_key);
         }
-        EndpointRequestKind::Recv => buf.push(1),
+        EndpointRequestKind::Recv { wait_key } => {
+            buf.push(1);
+            encode_endpoint_wait_key(buf, *wait_key);
+        }
         EndpointRequestKind::Close => buf.push(2),
         EndpointRequestKind::Transfer { new_peer } => {
             buf.push(3);
@@ -1811,25 +1755,45 @@ fn encode_endpoint_response_kind(
     kind: &EndpointResponseKind,
 ) -> Result<(), IslandMessageEncodeError> {
     match kind {
-        EndpointResponseKind::SendAck { closed } => {
+        EndpointResponseKind::SendAck { closed, wait_key } => {
             buf.push(0);
             buf.push(u8::from(*closed));
+            encode_endpoint_wait_key(buf, *wait_key);
         }
-        EndpointResponseKind::RecvData { data, closed } => {
+        EndpointResponseKind::RecvData {
+            data,
+            closed,
+            wait_key,
+        } => {
             buf.push(1);
             buf.push(u8::from(*closed));
             buf.extend_from_slice(
                 &wire_len_u32(data.len(), "endpoint receive payload")?.to_le_bytes(),
             );
             buf.extend_from_slice(data);
+            encode_endpoint_wait_key(buf, *wait_key);
         }
         EndpointResponseKind::Closed => buf.push(2),
-        EndpointResponseKind::RecvError => buf.push(3),
+        EndpointResponseKind::RecvError { wait_key } => {
+            buf.push(3);
+            encode_endpoint_wait_key(buf, *wait_key);
+        }
     }
     Ok(())
 }
 
+fn encode_endpoint_wait_key(buf: &mut Vec<u8>, wait_key: EndpointWaitKey) {
+    buf.extend_from_slice(&wait_key.fiber_key().to_le_bytes());
+    buf.extend_from_slice(&wait_key.wait_id().get().to_le_bytes());
+}
+
 pub fn decode_island_command(data: &[u8]) -> Result<IslandCommand, IslandCommandDecodeError> {
+    if data.len() > MAX_ISLAND_MESSAGE_BYTES {
+        return Err(IslandCommandDecodeError::LengthOverflow {
+            len: data.len(),
+            max: MAX_ISLAND_MESSAGE_BYTES,
+        });
+    }
     let mut offset = 0usize;
     let tag = read_byte(data, &mut offset)?;
     let command = match tag {
@@ -1841,37 +1805,16 @@ pub fn decode_island_command(data: &[u8]) -> Result<IslandCommand, IslandCommand
                 closure_data: PackedValue::from_data(payload),
             })
         }
-        1 => Ok(IslandCommand::WakeFiber {
-            waiter: decode_queue_waiter(data, &mut offset)?,
-        }),
         2 => Ok(IslandCommand::Shutdown),
         3 => {
             let endpoint_id = read_u64_checked(data, &mut offset)?;
             let kind = decode_endpoint_request_kind(data, &mut offset)?;
-            let from_island = read_u32_checked(data, &mut offset)?;
-            let fiber_key = read_u64_checked(data, &mut offset)?;
-            let wait_id = read_u64_checked(data, &mut offset)?;
-            Ok(IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            })
+            Ok(IslandCommand::EndpointRequest { endpoint_id, kind })
         }
         4 => {
             let endpoint_id = read_u64_checked(data, &mut offset)?;
             let kind = decode_endpoint_response_kind(data, &mut offset)?;
-            let from_island = read_u32_checked(data, &mut offset)?;
-            let fiber_key = read_u64_checked(data, &mut offset)?;
-            let wait_id = read_u64_checked(data, &mut offset)?;
-            Ok(IslandCommand::EndpointResponse {
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            })
+            Ok(IslandCommand::EndpointResponse { endpoint_id, kind })
         }
         5 => {
             let launch_token = read_u64_checked(data, &mut offset)?;
@@ -1900,6 +1843,10 @@ pub fn decode_island_command(data: &[u8]) -> Result<IslandCommand, IslandCommand
     Ok(command)
 }
 
+/// Decodes the transport-owned routing envelope and command bytes.
+///
+/// Decoding establishes structure only. Callers must accept frames exclusively
+/// from a trusted transport or certified renderer before using the source ID.
 pub fn decode_island_transport_frame(
     data: &[u8],
 ) -> Result<(u32, u32, IslandCommand), IslandTransportFrameDecodeError> {
@@ -1920,11 +1867,17 @@ fn decode_endpoint_request_kind(
     match read_byte(data, offset)? {
         0 => {
             let len = read_u32_checked(data, offset)? as usize;
-            validate_variable_payload_extent(data, *offset, len, 20)?;
-            let data = read_bytes(data, offset, len)?;
-            Ok(EndpointRequestKind::Send { data })
+            validate_variable_payload_extent(data, *offset, len, 16)?;
+            let payload = read_bytes(data, offset, len)?;
+            let wait_key = decode_endpoint_wait_key(data, offset)?;
+            Ok(EndpointRequestKind::Send {
+                data: payload,
+                wait_key,
+            })
         }
-        1 => Ok(EndpointRequestKind::Recv),
+        1 => Ok(EndpointRequestKind::Recv {
+            wait_key: decode_endpoint_wait_key(data, offset)?,
+        }),
         2 => Ok(EndpointRequestKind::Close),
         3 => Ok(EndpointRequestKind::Transfer {
             new_peer: read_u32_checked(data, offset)?,
@@ -1938,18 +1891,27 @@ fn decode_endpoint_response_kind(
     offset: &mut usize,
 ) -> Result<EndpointResponseKind, IslandCommandDecodeError> {
     match read_byte(data, offset)? {
-        0 => Ok(EndpointResponseKind::SendAck {
-            closed: read_bool(data, offset)?,
-        }),
+        0 => {
+            let closed = read_bool(data, offset)?;
+            let wait_key = decode_endpoint_wait_key(data, offset)?;
+            Ok(EndpointResponseKind::SendAck { closed, wait_key })
+        }
         1 => {
             let closed = read_bool(data, offset)?;
             let len = read_u32_checked(data, offset)? as usize;
-            validate_variable_payload_extent(data, *offset, len, 20)?;
-            let data = read_bytes(data, offset, len)?;
-            Ok(EndpointResponseKind::RecvData { data, closed })
+            validate_variable_payload_extent(data, *offset, len, 16)?;
+            let payload = read_bytes(data, offset, len)?;
+            let wait_key = decode_endpoint_wait_key(data, offset)?;
+            Ok(EndpointResponseKind::RecvData {
+                data: payload,
+                closed,
+                wait_key,
+            })
         }
         2 => Ok(EndpointResponseKind::Closed),
-        3 => Ok(EndpointResponseKind::RecvError),
+        3 => Ok(EndpointResponseKind::RecvError {
+            wait_key: decode_endpoint_wait_key(data, offset)?,
+        }),
         _ => Err(IslandCommandDecodeError::InvalidTag),
     }
 }
@@ -1964,12 +1926,6 @@ mod tests {
     #[test]
     fn checked_readers_reject_offset_arithmetic_overflow() {
         let mut offset = usize::MAX;
-        assert_eq!(
-            read_u16_checked(&[], &mut offset),
-            Err(IslandCommandDecodeError::UnexpectedEof)
-        );
-        assert_eq!(offset, usize::MAX);
-
         assert_eq!(
             read_u32_checked(&[], &mut offset),
             Err(IslandCommandDecodeError::UnexpectedEof)
@@ -2535,53 +2491,32 @@ mod tests {
                 assert_eq!(at, bt);
                 assert_eq!(ad, bd);
             }
-            (IslandCommand::WakeFiber { waiter: a }, IslandCommand::WakeFiber { waiter: b }) => {
-                assert_eq!(a, b)
-            }
             (IslandCommand::Shutdown, IslandCommand::Shutdown) => {}
             (
                 IslandCommand::EndpointRequest {
                     endpoint_id: ae,
                     kind: ak,
-                    from_island: af,
-                    fiber_key: afi,
-                    wait_id: aw,
                 },
                 IslandCommand::EndpointRequest {
                     endpoint_id: be,
                     kind: bk,
-                    from_island: bf,
-                    fiber_key: bfi,
-                    wait_id: bw,
                 },
             ) => {
                 assert_eq!(ae, be);
-                assert_eq!(af, bf);
-                assert_eq!(afi, bfi);
-                assert_eq!(aw, bw);
-                assert_request_kind_eq(&ak, &bk);
+                assert_eq!(ak, bk);
             }
             (
                 IslandCommand::EndpointResponse {
                     endpoint_id: ae,
                     kind: ak,
-                    from_island: af,
-                    fiber_key: afi,
-                    wait_id: aw,
                 },
                 IslandCommand::EndpointResponse {
                     endpoint_id: be,
                     kind: bk,
-                    from_island: bf,
-                    fiber_key: bfi,
-                    wait_id: bw,
                 },
             ) => {
                 assert_eq!(ae, be);
-                assert_eq!(af, bf);
-                assert_eq!(afi, bfi);
-                assert_eq!(aw, bw);
-                assert_response_kind_eq(&ak, &bk);
+                assert_eq!(ak, bk);
             }
             _ => panic!("decoded command variant mismatch"),
         }
@@ -2647,10 +2582,13 @@ mod tests {
         assert_eq!(unsafe { string::to_bytes(flattened[0] as GcRef) }, b"left");
         assert_eq!(unsafe { string::to_bytes(flattened[1] as GcRef) }, b"right");
 
+        let facts =
+            vo_common_core::bytecode::RuntimeTypeFacts::from_module_parts(&[], &[], &runtime_types)
+                .expect("valid array facts");
         let mut visited = Vec::new();
         trace_object_children_with_context(
             capture_box,
-            GcScanContext::from_module_parts(&[], &[], &runtime_types),
+            GcScanContext::with_runtime_type_facts(&[], &facts),
             &|_| ClosureScanLayout::default(),
             |child| visited.push(child),
         );
@@ -2838,96 +2776,58 @@ mod tests {
                 assert_eq!(at, bt);
                 assert_eq!(ad, bd);
             }
-            (IslandCommand::WakeFiber { waiter: a }, IslandCommand::WakeFiber { waiter: b }) => {
-                assert_eq!(a, b)
-            }
             (IslandCommand::Shutdown, IslandCommand::Shutdown) => {}
             (
                 IslandCommand::EndpointRequest {
                     endpoint_id: ae,
                     kind: ak,
-                    from_island: af,
-                    fiber_key: afi,
-                    wait_id: aw,
                 },
                 IslandCommand::EndpointRequest {
                     endpoint_id: be,
                     kind: bk,
-                    from_island: bf,
-                    fiber_key: bfi,
-                    wait_id: bw,
                 },
             ) => {
                 assert_eq!(ae, be);
-                assert_eq!(af, bf);
-                assert_eq!(afi, bfi);
-                assert_eq!(aw, bw);
-                assert_request_kind_eq(&ak, &bk);
+                assert_eq!(ak, bk);
             }
             (
                 IslandCommand::EndpointResponse {
                     endpoint_id: ae,
                     kind: ak,
-                    from_island: af,
-                    fiber_key: afi,
-                    wait_id: aw,
                 },
                 IslandCommand::EndpointResponse {
                     endpoint_id: be,
                     kind: bk,
-                    from_island: bf,
-                    fiber_key: bfi,
-                    wait_id: bw,
                 },
             ) => {
                 assert_eq!(ae, be);
-                assert_eq!(af, bf);
-                assert_eq!(afi, bfi);
-                assert_eq!(aw, bw);
-                assert_response_kind_eq(&ak, &bk);
+                assert_eq!(ak, bk);
             }
             _ => panic!("decoded frame command variant mismatch"),
         }
     }
 
-    fn assert_request_kind_eq(a: &EndpointRequestKind, b: &EndpointRequestKind) {
-        match (a, b) {
-            (EndpointRequestKind::Send { data: ad }, EndpointRequestKind::Send { data: bd }) => {
-                assert_eq!(ad, bd)
-            }
-            (EndpointRequestKind::Recv, EndpointRequestKind::Recv) => {}
-            (EndpointRequestKind::Close, EndpointRequestKind::Close) => {}
-            (
-                EndpointRequestKind::Transfer { new_peer: a },
-                EndpointRequestKind::Transfer { new_peer: b },
-            ) => assert_eq!(a, b),
-            _ => panic!("request kind mismatch"),
-        }
+    fn wait_key(fiber_key: u64, wait_id: u64) -> EndpointWaitKey {
+        EndpointWaitKey::try_new(fiber_key, wait_id).expect("non-zero endpoint wait ID")
     }
 
-    fn assert_response_kind_eq(a: &EndpointResponseKind, b: &EndpointResponseKind) {
-        match (a, b) {
-            (
-                EndpointResponseKind::SendAck { closed: a },
-                EndpointResponseKind::SendAck { closed: b },
-            ) => assert_eq!(a, b),
-            (
-                EndpointResponseKind::RecvData {
-                    data: ad,
-                    closed: ac,
-                },
-                EndpointResponseKind::RecvData {
-                    data: bd,
-                    closed: bc,
-                },
-            ) => {
-                assert_eq!(ad, bd);
-                assert_eq!(ac, bc);
-            }
-            (EndpointResponseKind::Closed, EndpointResponseKind::Closed) => {}
-            (EndpointResponseKind::RecvError, EndpointResponseKind::RecvError) => {}
-            _ => panic!("response kind mismatch"),
-        }
+    #[test]
+    fn endpoint_wait_key_rejects_zero_and_exposes_typed_identity() {
+        assert!(EndpointWaitKey::try_new(7, 0).is_none());
+
+        let key = wait_key(7, 9);
+        assert_eq!(key.fiber_key(), 7);
+        assert_eq!(key.wait_id().get(), 9);
+        assert_eq!(
+            EndpointRequestKind::Recv { wait_key: key }.wait_key(),
+            Some(key)
+        );
+        assert_eq!(EndpointRequestKind::Close.wait_key(), None);
+        assert_eq!(
+            EndpointResponseKind::RecvError { wait_key: key }.wait_key(),
+            Some(key)
+        );
+        assert_eq!(EndpointResponseKind::Closed.wait_key(), None);
     }
 
     #[test]
@@ -2944,130 +2844,76 @@ mod tests {
             token: 23,
             data: vec![8, 5, 3],
         });
-        roundtrip(IslandCommand::WakeFiber {
-            waiter: QueueWaiter::simple(2, 0x0000_0002_0000_002a),
-        });
-        roundtrip(IslandCommand::WakeFiber {
-            waiter: QueueWaiter::selecting(
-                2,
-                0x0000_0003_0000_002b,
-                4,
-                55,
-                0x0000_00aa_0000_00bb,
-                SelectWaitKind::Recv,
-            ),
-        });
         roundtrip(IslandCommand::Shutdown);
         roundtrip(IslandCommand::EndpointRequest {
             endpoint_id: 99,
             kind: EndpointRequestKind::Send {
                 data: vec![7, 8, 9],
+                wait_key: wait_key(1234, 1),
             },
-            from_island: 3,
-            fiber_key: 1234,
-            wait_id: 1,
         });
         roundtrip(IslandCommand::EndpointRequest {
             endpoint_id: 100,
-            kind: EndpointRequestKind::Recv,
-            from_island: 4,
-            fiber_key: 1235,
-            wait_id: 2,
+            kind: EndpointRequestKind::Recv {
+                wait_key: wait_key(1235, 2),
+            },
         });
         roundtrip(IslandCommand::EndpointRequest {
             endpoint_id: 101,
             kind: EndpointRequestKind::Close,
-            from_island: 5,
-            fiber_key: 1236,
-            wait_id: 0,
         });
         roundtrip(IslandCommand::EndpointRequest {
             endpoint_id: 102,
             kind: EndpointRequestKind::Transfer { new_peer: 8 },
-            from_island: 6,
-            fiber_key: 1237,
-            wait_id: 0,
         });
         roundtrip(IslandCommand::EndpointResponse {
             endpoint_id: 103,
-            kind: EndpointResponseKind::SendAck { closed: true },
-            from_island: 6,
-            fiber_key: 2234,
-            wait_id: 3,
+            kind: EndpointResponseKind::SendAck {
+                closed: true,
+                wait_key: wait_key(2234, 3),
+            },
         });
         roundtrip(IslandCommand::EndpointResponse {
             endpoint_id: 104,
             kind: EndpointResponseKind::RecvData {
                 data: vec![10, 11],
                 closed: false,
+                wait_key: wait_key(2235, 4),
             },
-            from_island: 6,
-            fiber_key: 2235,
-            wait_id: 4,
         });
         roundtrip(IslandCommand::EndpointResponse {
             endpoint_id: 105,
             kind: EndpointResponseKind::Closed,
-            from_island: 6,
-            fiber_key: 2236,
-            wait_id: 0,
         });
         roundtrip(IslandCommand::EndpointResponse {
             endpoint_id: 106,
-            kind: EndpointResponseKind::RecvError,
-            from_island: 6,
-            fiber_key: 2237,
-            wait_id: 5,
+            kind: EndpointResponseKind::RecvError {
+                wait_key: wait_key(2237, 5),
+            },
         });
     }
 
     #[test]
-    fn island_command_codec_rejects_trailing_bytes_and_preserves_queue_identity_060() {
-        let waiter = QueueWaiter::simple_queue(
-            2,
-            0x0000_0002_0000_002a,
-            0x0000_00aa_0000_00bb,
-            SelectWaitKind::Recv,
-        );
-        let encoded = encode_island_command(&IslandCommand::WakeFiber {
-            waiter: waiter.clone(),
-        })
-        .expect("encode queue wake");
-        let decoded = decode_island_command(&encoded).expect("decode simple queue wake");
-        let IslandCommand::WakeFiber {
-            waiter: decoded_waiter,
-        } = decoded
-        else {
-            panic!("expected wake command");
-        };
-        assert_eq!(decoded_waiter.registration_id, waiter.registration_id);
-        assert_eq!(decoded_waiter.queue_ref, waiter.queue_ref);
-        assert_eq!(decoded_waiter.kind, waiter.kind);
-
+    fn island_command_codec_rejects_trailing_bytes_060() {
         let commands = [
             IslandCommand::SpawnFiber {
                 closure_data: PackedValue::from_data(vec![1, 2, 3, 4]),
             },
-            IslandCommand::WakeFiber { waiter },
             IslandCommand::Shutdown,
             IslandCommand::EndpointRequest {
                 endpoint_id: 99,
                 kind: EndpointRequestKind::Send {
                     data: vec![7, 8, 9],
+                    wait_key: wait_key(1234, 1),
                 },
-                from_island: 3,
-                fiber_key: 1234,
-                wait_id: 1,
             },
             IslandCommand::EndpointResponse {
                 endpoint_id: 104,
                 kind: EndpointResponseKind::RecvData {
                     data: vec![10, 11],
                     closed: false,
+                    wait_key: wait_key(2235, 4),
                 },
-                from_island: 6,
-                fiber_key: 2235,
-                wait_id: 4,
             },
         ];
 
@@ -3092,7 +2938,7 @@ mod tests {
     }
 
     #[test]
-    fn island_transport_frame_roundtrips_target_and_command() {
+    fn island_transport_frame_roundtrips_routing_envelope_and_command() {
         roundtrip_frame(
             7,
             IslandCommand::SpawnFiber {
@@ -3104,23 +2950,242 @@ mod tests {
             IslandCommand::EndpointRequest {
                 endpoint_id: 44,
                 kind: EndpointRequestKind::Transfer { new_peer: 12 },
-                from_island: 3,
-                fiber_key: 99,
-                wait_id: 0,
             },
         );
     }
 
     #[test]
+    fn island_transport_frame_contains_routing_envelope_and_command() {
+        let command = IslandCommand::EndpointRequest {
+            endpoint_id: 44,
+            kind: EndpointRequestKind::Recv {
+                wait_key: wait_key(99, 7),
+            },
+        };
+        let encoded_command = encode_island_command(&command).expect("encode endpoint command");
+        let encoded_frame =
+            encode_island_transport_frame(11, 7, &command).expect("encode endpoint frame");
+
+        assert_eq!(encoded_command.len(), 26);
+        assert_eq!(encoded_frame.len(), 8 + encoded_command.len());
+        assert_eq!(&encoded_frame[..4], &11u32.to_le_bytes());
+        assert_eq!(&encoded_frame[4..8], &7u32.to_le_bytes());
+        assert_eq!(&encoded_frame[8..], encoded_command.as_slice());
+    }
+
+    #[test]
+    fn endpoint_command_codec_uses_compact_typed_wait_layout() {
+        let commands = [
+            (
+                IslandCommand::EndpointRequest {
+                    endpoint_id: 1,
+                    kind: EndpointRequestKind::Send {
+                        data: vec![1, 2, 3],
+                        wait_key: wait_key(7, 9),
+                    },
+                },
+                33,
+                3,
+                0,
+            ),
+            (
+                IslandCommand::EndpointRequest {
+                    endpoint_id: 2,
+                    kind: EndpointRequestKind::Recv {
+                        wait_key: wait_key(8, 10),
+                    },
+                },
+                26,
+                3,
+                1,
+            ),
+            (
+                IslandCommand::EndpointRequest {
+                    endpoint_id: 3,
+                    kind: EndpointRequestKind::Close,
+                },
+                10,
+                3,
+                2,
+            ),
+            (
+                IslandCommand::EndpointRequest {
+                    endpoint_id: 4,
+                    kind: EndpointRequestKind::Transfer { new_peer: 5 },
+                },
+                14,
+                3,
+                3,
+            ),
+            (
+                IslandCommand::EndpointResponse {
+                    endpoint_id: 5,
+                    kind: EndpointResponseKind::SendAck {
+                        closed: false,
+                        wait_key: wait_key(11, 12),
+                    },
+                },
+                27,
+                4,
+                0,
+            ),
+            (
+                IslandCommand::EndpointResponse {
+                    endpoint_id: 6,
+                    kind: EndpointResponseKind::RecvData {
+                        data: vec![4, 5],
+                        closed: true,
+                        wait_key: wait_key(13, 14),
+                    },
+                },
+                33,
+                4,
+                1,
+            ),
+            (
+                IslandCommand::EndpointResponse {
+                    endpoint_id: 7,
+                    kind: EndpointResponseKind::Closed,
+                },
+                10,
+                4,
+                2,
+            ),
+            (
+                IslandCommand::EndpointResponse {
+                    endpoint_id: 8,
+                    kind: EndpointResponseKind::RecvError {
+                        wait_key: wait_key(15, 16),
+                    },
+                },
+                26,
+                4,
+                3,
+            ),
+        ];
+
+        for (command, command_len, command_tag, kind_tag) in commands {
+            let encoded = encode_island_command(&command).expect("encode endpoint command");
+            let frame = encode_island_transport_frame(17, 19, &command)
+                .expect("encode endpoint transport frame");
+            assert_eq!(encoded.len(), command_len);
+            assert_eq!(frame.len(), command_len + 8);
+            assert_eq!(encoded[0], command_tag);
+            assert_eq!(encoded[9], kind_tag);
+        }
+    }
+
+    #[test]
     fn island_command_codec_rejects_truncated_payload() {
-        let encoded = encode_island_command(&IslandCommand::WakeFiber {
-            waiter: QueueWaiter::simple(1, 7),
+        let encoded = encode_island_command(&IslandCommand::SpawnFiber {
+            closure_data: PackedValue::from_data(vec![1, 2, 3]),
         })
-        .expect("encode queue wake");
+        .expect("encode spawn command");
         let truncated = &encoded[..encoded.len() - 1];
         match decode_island_command(truncated) {
             Err(IslandCommandDecodeError::UnexpectedEof) => {}
             other => panic!("expected UnexpectedEof, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn endpoint_command_codec_rejects_every_truncated_wait_key() {
+        let commands = [
+            IslandCommand::EndpointRequest {
+                endpoint_id: 41,
+                kind: EndpointRequestKind::Send {
+                    data: vec![1, 2, 3],
+                    wait_key: wait_key(7, 9),
+                },
+            },
+            IslandCommand::EndpointResponse {
+                endpoint_id: 42,
+                kind: EndpointResponseKind::SendAck {
+                    closed: true,
+                    wait_key: wait_key(10, 12),
+                },
+            },
+            IslandCommand::EndpointRequest {
+                endpoint_id: 43,
+                kind: EndpointRequestKind::Recv {
+                    wait_key: wait_key(8, 10),
+                },
+            },
+            IslandCommand::EndpointResponse {
+                endpoint_id: 44,
+                kind: EndpointResponseKind::RecvData {
+                    data: vec![4, 5, 6],
+                    closed: false,
+                    wait_key: wait_key(11, 13),
+                },
+            },
+            IslandCommand::EndpointResponse {
+                endpoint_id: 45,
+                kind: EndpointResponseKind::RecvError {
+                    wait_key: wait_key(12, 14),
+                },
+            },
+        ];
+
+        for command in commands {
+            let encoded = encode_island_command(&command).expect("encode endpoint command");
+            let identity_tail_start = encoded.len() - 16;
+            for end in identity_tail_start..encoded.len() {
+                assert!(matches!(
+                    decode_island_command(&encoded[..end]),
+                    Err(IslandCommandDecodeError::UnexpectedEof)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_command_codec_rejects_zero_wait_ids() {
+        let commands = [
+            IslandCommand::EndpointRequest {
+                endpoint_id: 41,
+                kind: EndpointRequestKind::Send {
+                    data: vec![1, 2, 3],
+                    wait_key: wait_key(7, 9),
+                },
+            },
+            IslandCommand::EndpointRequest {
+                endpoint_id: 42,
+                kind: EndpointRequestKind::Recv {
+                    wait_key: wait_key(8, 10),
+                },
+            },
+            IslandCommand::EndpointResponse {
+                endpoint_id: 43,
+                kind: EndpointResponseKind::SendAck {
+                    closed: false,
+                    wait_key: wait_key(9, 11),
+                },
+            },
+            IslandCommand::EndpointResponse {
+                endpoint_id: 44,
+                kind: EndpointResponseKind::RecvData {
+                    data: vec![4, 5],
+                    closed: true,
+                    wait_key: wait_key(10, 12),
+                },
+            },
+            IslandCommand::EndpointResponse {
+                endpoint_id: 45,
+                kind: EndpointResponseKind::RecvError {
+                    wait_key: wait_key(11, 13),
+                },
+            },
+        ];
+
+        for command in commands {
+            let mut encoded = encode_island_command(&command).expect("encode endpoint command");
+            let wait_id_start = encoded.len() - 8;
+            encoded[wait_id_start..].fill(0);
+            assert!(matches!(
+                decode_island_command(&encoded),
+                Err(IslandCommandDecodeError::InvalidWaitId)
+            ));
         }
     }
 
@@ -3131,11 +3196,8 @@ mod tests {
             Err(IslandCommandDecodeError::InvalidTag)
         ));
 
-        let mut invalid_waiter_option = vec![1];
-        invalid_waiter_option.extend_from_slice(&[0; 36]);
-        invalid_waiter_option.push(2);
         assert!(matches!(
-            decode_island_command(&invalid_waiter_option),
+            decode_island_command(&[1]),
             Err(IslandCommandDecodeError::InvalidTag)
         ));
 
@@ -3170,6 +3232,21 @@ mod tests {
         match decode_island_transport_frame(&[1, 2, 3]) {
             Err(IslandTransportFrameDecodeError::UnexpectedEof) => {}
             other => panic!("expected UnexpectedEof, got {:?}", other),
+        }
+
+        assert!(matches!(
+            decode_island_transport_frame(&7u32.to_le_bytes()),
+            Err(IslandTransportFrameDecodeError::UnexpectedEof)
+        ));
+
+        let mut envelope_only = Vec::new();
+        envelope_only.extend_from_slice(&7u32.to_le_bytes());
+        envelope_only.extend_from_slice(&3u32.to_le_bytes());
+        match decode_island_transport_frame(&envelope_only) {
+            Err(IslandTransportFrameDecodeError::InvalidCommand(
+                IslandCommandDecodeError::UnexpectedEof,
+            )) => {}
+            other => panic!("expected an empty-command error, got {:?}", other),
         }
     }
 }

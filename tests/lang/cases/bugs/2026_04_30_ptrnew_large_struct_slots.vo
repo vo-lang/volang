@@ -1,6 +1,5 @@
-// Regression: PtrNew must encode the full heap slot count for structs larger
-// than 255 slots. A u8 slot-count encoding truncated this object to 5 slots,
-// which later corrupted nearby GC objects.
+// Regression: PtrNew metadata must preserve the full heap layout for structs
+// larger than 255 slots. The formatter reads that same authoritative layout.
 package main
 
 import (

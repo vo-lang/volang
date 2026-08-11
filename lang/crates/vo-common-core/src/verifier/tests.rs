@@ -77,7 +77,7 @@ fn function_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
@@ -90,7 +90,7 @@ fn iface_assert_layout_module(
     name: &str,
     assert_kind: u8,
     target_id: u16,
-    target_slots: u16,
+    _target_slots: u16,
     slot_types: Vec<SlotType>,
     result_layout: Vec<SlotType>,
     runtime_type: RuntimeType,
@@ -104,17 +104,9 @@ fn iface_assert_layout_module(
             methods: Vec::new(),
         });
     }
-    let flags = crate::instruction::pack_iface_assert_flags(assert_kind, false, target_slots)
-        .expect("valid IfaceAssert flags");
     let mut func = function_with_slot_types(slot_types);
-    func.code = vec![Instruction::with_flags(
-        Opcode::IfaceAssert,
-        flags,
-        0,
-        2,
-        target_id,
-    )];
-    func.jit_metadata = vec![JitInstructionMetadata::IfaceAssertLayout {
+    func.code = vec![Instruction::new(Opcode::IfaceAssert, 0, 2, 0)];
+    func.instruction_metadata = vec![InstructionMetadata::IfaceAssertLayout {
         assert_kind,
         target_id: u32::from(target_id),
         result_layout,
@@ -145,19 +137,19 @@ fn map_iter_next_module_039(
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),
-        Instruction::new(Opcode::MapNew, 0, 1, (1 << 8) | 1),
+        Instruction::new(Opcode::MapNew, 0, 1, 0),
         Instruction::new(Opcode::MapIterInit, 3, 0, 0),
         next_inst,
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::MapNew {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
             val_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::MapIterNext {
+        InstructionMetadata::None,
+        InstructionMetadata::MapIterNext {
             key_layout: vec![SlotType::Value],
             val_layout: vec![SlotType::Value],
         },
@@ -176,7 +168,7 @@ fn verifier_fuzz_base_module(case_id: usize) -> Module {
         SlotType::Float,
     ]);
     func.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
     module
 }
@@ -185,7 +177,7 @@ fn verifier_fuzz_case(case_id: usize) -> Module {
     let mut module = verifier_fuzz_base_module(case_id);
     match case_id % 10 {
         0 => {}
-        1 => module.functions[0].jit_metadata.clear(),
+        1 => module.functions[0].instruction_metadata.clear(),
         2 => {
             module.functions[0].code[0] = Instruction {
                 op: 254,
@@ -220,7 +212,7 @@ fn verifier_fuzz_case(case_id: usize) -> Module {
             .push(RuntimeType::Slice(ValueRttid::new(99, ValueKind::Struct))),
         _ => {
             module.functions[0].code = vec![Instruction::new(Opcode::LoadConst, 0, 99, 0)];
-            module.functions[0].jit_metadata = vec![JitInstructionMetadata::None];
+            module.functions[0].instruction_metadata = vec![InstructionMetadata::None];
         }
     }
     module
@@ -293,12 +285,12 @@ fn struct_key_map_new_module(key_meta: ValueMeta, key_rttid_const: i64) -> Modul
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),
-        Instruction::new(Opcode::MapNew, 0, 1, (1 << 8) | 1),
+        Instruction::new(Opcode::MapNew, 0, 1, 0),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::MapNew {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
             val_layout: vec![SlotType::Value],
         },

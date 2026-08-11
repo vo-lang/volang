@@ -10,8 +10,6 @@ use crate::Error;
 pub const SOURCE_ARCHIVE_ASSET_NAME: &str = "source.tar.gz";
 pub const SOURCE_ARCHIVE_TOP_LEVEL_DIR: &str = "source";
 pub const SOURCE_ARCHIVE_ROOT_DIR: &str = "source";
-pub const SOURCE_TREE_MANIFEST_NAME: &str = "vo.tree.json";
-
 /// Immutable registry descriptor. Transport provenance stays outside this
 /// language-level object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

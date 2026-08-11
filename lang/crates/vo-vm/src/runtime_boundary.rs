@@ -1,17 +1,21 @@
-use crate::fiber::{BlockReason, Fiber, SelectState, SelectWokenResult};
+use crate::fiber::{BlockReason, Fiber, PendingSpawn, SelectState, SelectWokenResult};
 #[cfg(feature = "std")]
 use crate::scheduler::IoWaitKey;
-use crate::scheduler::{FiberId, FiberWakeKey, HostWaitKey, WaitRegistrationKey, WaitSource};
+use crate::scheduler::{FiberId, FiberWakeKey, HostWaitKey};
 use crate::vm::{
-    EndpointRegistrySnapshot, ExecResult, GcRootEffect, SchedulingOutcome, Vm, VmError, VmState,
+    scheduler_error_to_vm_error, EndpointRegistryUndo, ExecResult, GcRootEffect, SchedulingOutcome,
+    Vm, VmError, VmState,
 };
+use hashbrown::{HashMap, HashSet};
 use vo_runtime::gc::GcRef;
-use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind, IslandCommand};
+use vo_runtime::island::{
+    EndpointRequestKind, EndpointResponseKind, EndpointWaitKey, IslandCommand,
+};
 #[cfg(feature = "std")]
 use vo_runtime::island_transport::IslandSendReservation;
 use vo_runtime::objects::{
     queue,
-    queue_state::{LocalQueueState, QueueWaiter, SelectWaitKind},
+    queue_state::{QueueMessage, QueueWaitTarget, QueueWaiter, SelectWaitKind},
 };
 
 #[cfg(not(feature = "std"))]
@@ -20,6 +24,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(test)]
+use std::collections::VecDeque;
 #[cfg(feature = "std")]
 use std::string::String;
 #[cfg(feature = "std")]
@@ -126,18 +132,48 @@ pub struct RuntimeTransition {
     pub gc_roots: GcRootEffect,
     pub island_commands: Vec<IslandCommandEffect>,
     pub endpoint_tombstones: Vec<EndpointTombstone>,
-    pub spawns: Vec<Fiber>,
+    pub(crate) spawns: Vec<PendingSpawn>,
+    queue_closes: Vec<GcRef>,
+    queue_close_handles: HashSet<usize>,
     rollback: Option<RuntimeRollback>,
+    queue_close_wake_keys: Option<HashSet<SelectActivationWakeKey>>,
     #[cfg(feature = "jit")]
     pub pending_terminal_policy: PendingTransitionTerminalPolicy,
 }
 
+/// Fully validated transition with every cross-Island send reservation staged.
+/// Constructing this value is the last fallible phase before local mutation.
+struct PreparedRuntimeTransition {
+    boundary: RuntimeBoundary,
+    resume: ResumePolicy,
+    wakes: Vec<WakeCommand>,
+    gc_roots: GcRootEffect,
+    island_commands: Vec<IslandCommandEffect>,
+    remote_island_commands: Vec<RemoteIslandCommandCommit>,
+    endpoint_tombstones: Vec<EndpointTombstone>,
+    spawns: Vec<PendingSpawn>,
+    queue_closes: Vec<GcRef>,
+}
+
 #[derive(Debug)]
 pub(crate) enum RuntimeRollback {
+    LocalQueueClose {
+        ch: GcRef,
+        closed: bool,
+    },
+    #[cfg(test)]
     LocalQueue {
         ch: GcRef,
-        state: LocalQueueState,
-        endpoint_registry: EndpointRegistrySnapshot,
+        closed: bool,
+        waiting_senders: VecDeque<(QueueWaiter, QueueMessage)>,
+        waiting_receivers: VecDeque<QueueWaiter>,
+        stack_slots: Vec<(usize, u64)>,
+        select_state: Option<Option<SelectState>>,
+    },
+    LocalQueueRecv {
+        ch: GcRef,
+        buffered_payload: Option<QueueMessage>,
+        sender: (QueueWaiter, QueueMessage),
         stack_slots: Vec<(usize, u64)>,
         select_state: Option<Option<SelectState>>,
     },
@@ -146,19 +182,32 @@ pub(crate) enum RuntimeRollback {
         endpoint_id: u64,
         home_island: u32,
         closed: bool,
-        endpoint_registry: EndpointRegistrySnapshot,
     },
     EndpointTransfer {
-        endpoint_registry: EndpointRegistrySnapshot,
-        home_infos: Vec<(GcRef, Option<queue::HomeInfoSnapshot>)>,
+        endpoint_registry: EndpointRegistryUndo,
+        home_infos: Vec<(GcRef, queue::HomeInfoUndo)>,
+    },
+    DirectQueueReceiver {
+        ch: GcRef,
+        waiter: QueueWaiter,
+        stack_slots: Vec<(usize, u64)>,
+        select_state: Option<Option<SelectState>>,
     },
     #[cfg(feature = "jit")]
     SelectWaiters {
         fiber_key: u64,
         select_state: Option<SelectState>,
-        queues: Vec<(GcRef, LocalQueueState)>,
+        queues: Vec<SelectQueueWaiterUndo>,
     },
     Composite(Vec<RuntimeRollback>),
+}
+
+#[cfg(feature = "jit")]
+#[derive(Debug)]
+pub(crate) struct SelectQueueWaiterUndo {
+    ch: GcRef,
+    senders: Vec<(usize, QueueWaiter, QueueMessage)>,
+    receivers: Vec<(usize, QueueWaiter)>,
 }
 
 impl RuntimeRollback {
@@ -175,38 +224,39 @@ impl RuntimeRollback {
         Self::Composite(combined)
     }
 
-    pub(crate) fn local_queue(vm_state: &VmState, ch: GcRef) -> Self {
-        Self::local_queue_with_stack_slots(vm_state, ch, Vec::new())
-    }
-
-    pub(crate) fn local_queue_from_snapshot(
-        ch: GcRef,
-        state: LocalQueueState,
-        endpoint_registry: EndpointRegistrySnapshot,
-    ) -> Self {
+    #[cfg(test)]
+    pub(crate) fn local_queue(_vm_state: &VmState, ch: GcRef) -> Self {
+        let state = unsafe { queue::local_state(ch) };
         Self::LocalQueue {
             ch,
-            state,
-            endpoint_registry,
+            closed: state.closed,
+            waiting_senders: state.waiting_senders.clone(),
+            waiting_receivers: state.waiting_receivers.clone(),
             stack_slots: Vec::new(),
             select_state: None,
         }
     }
 
-    pub(crate) fn remote_queue_proxy(vm_state: &VmState, ch: GcRef) -> Self {
+    pub(crate) fn local_queue_close(ch: GcRef) -> Self {
+        Self::LocalQueueClose {
+            ch,
+            closed: unsafe { queue::is_closed(ch) },
+        }
+    }
+
+    pub(crate) fn remote_queue_proxy(_vm_state: &VmState, ch: GcRef) -> Self {
         let proxy = unsafe { queue::remote_proxy(ch) };
         Self::RemoteQueueProxy {
             ch,
             endpoint_id: proxy.endpoint_id,
             home_island: proxy.home_island,
             closed: proxy.closed,
-            endpoint_registry: vm_state.endpoint_registry.snapshot(),
         }
     }
 
     pub(crate) fn endpoint_transfer(
-        endpoint_registry: EndpointRegistrySnapshot,
-        home_infos: Vec<(GcRef, Option<queue::HomeInfoSnapshot>)>,
+        endpoint_registry: EndpointRegistryUndo,
+        home_infos: Vec<(GcRef, queue::HomeInfoUndo)>,
     ) -> Self {
         Self::EndpointTransfer {
             endpoint_registry,
@@ -214,15 +264,30 @@ impl RuntimeRollback {
         }
     }
 
+    pub(crate) fn direct_queue_receiver(ch: GcRef, waiter: QueueWaiter) -> Self {
+        Self::DirectQueueReceiver {
+            ch,
+            waiter,
+            stack_slots: Vec::new(),
+            select_state: None,
+        }
+    }
+
     pub(crate) fn local_queue_with_stack_slots(
-        vm_state: &VmState,
+        _vm_state: &VmState,
         ch: GcRef,
         stack_slots: Vec<(usize, u64)>,
     ) -> Self {
-        Self::LocalQueue {
+        let state = unsafe { queue::local_state(ch) };
+        let sender = state
+            .waiting_senders
+            .front()
+            .cloned()
+            .expect("queue recv rollback requires a pending endpoint sender");
+        Self::LocalQueueRecv {
             ch,
-            state: unsafe { queue::local_state(ch) }.clone(),
-            endpoint_registry: vm_state.endpoint_registry.snapshot(),
+            buffered_payload: state.buffer.front().cloned(),
+            sender,
             stack_slots,
             select_state: None,
         }
@@ -230,9 +295,19 @@ impl RuntimeRollback {
 
     pub(crate) fn push_stack_slot(&mut self, index: usize, value: u64) {
         match self {
-            Self::LocalQueue { stack_slots, .. } => stack_slots.push((index, value)),
+            Self::LocalQueueClose { .. } => {}
+            #[cfg(test)]
+            Self::LocalQueue { stack_slots, .. } => {
+                stack_slots.push((index, value));
+            }
+            Self::LocalQueueRecv { stack_slots, .. } => {
+                stack_slots.push((index, value));
+            }
             Self::RemoteQueueProxy { .. } => {}
             Self::EndpointTransfer { .. } => {}
+            Self::DirectQueueReceiver { stack_slots, .. } => {
+                stack_slots.push((index, value));
+            }
             #[cfg(feature = "jit")]
             Self::SelectWaiters { .. } => {}
             Self::Composite(rollbacks) => {
@@ -245,9 +320,15 @@ impl RuntimeRollback {
 
     pub(crate) fn set_select_state(&mut self, state: Option<SelectState>) {
         match self {
+            Self::LocalQueueClose { .. } => {}
+            #[cfg(test)]
             Self::LocalQueue { select_state, .. } => *select_state = Some(state),
+            Self::LocalQueueRecv { select_state, .. } => *select_state = Some(state),
             Self::RemoteQueueProxy { .. } => {}
             Self::EndpointTransfer { .. } => {}
+            Self::DirectQueueReceiver { select_state, .. } => {
+                *select_state = Some(state);
+            }
             #[cfg(feature = "jit")]
             Self::SelectWaiters { .. } => {}
             Self::Composite(rollbacks) => {
@@ -262,7 +343,7 @@ impl RuntimeRollback {
     fn select_waiters(
         fiber_key: u64,
         select_state: Option<SelectState>,
-        queues: Vec<(GcRef, LocalQueueState)>,
+        queues: Vec<SelectQueueWaiterUndo>,
     ) -> Self {
         Self::SelectWaiters {
             fiber_key,
@@ -278,20 +359,55 @@ impl RuntimeRollback {
         current_fiber: Option<FiberId>,
     ) {
         match self {
+            Self::LocalQueueClose { ch, closed } => unsafe {
+                queue::with_local_state(ch, |state| state.closed = closed)
+            },
+            #[cfg(test)]
             Self::LocalQueue {
                 ch,
-                state,
-                endpoint_registry,
+                closed,
+                waiting_senders,
+                waiting_receivers,
                 stack_slots,
                 select_state,
             } => {
                 // Safety: rollback retains the live queue handle captured at mutation time.
                 unsafe {
                     queue::with_local_state(ch, |local_state| {
-                        *local_state = state;
+                        local_state.closed = closed;
+                        local_state.waiting_senders = waiting_senders;
+                        local_state.waiting_receivers = waiting_receivers;
                     })
                 };
-                vm_state.endpoint_registry.restore(endpoint_registry);
+                if let Some(fiber) = current_fiber.and_then(|fid| scheduler.try_get_fiber_mut(fid))
+                {
+                    for (index, value) in stack_slots {
+                        if let Some(slot) = fiber.stack.get_mut(index) {
+                            *slot = value;
+                        }
+                    }
+                    if let Some(select_state) = select_state {
+                        fiber.select_state = select_state;
+                    }
+                }
+            }
+            Self::LocalQueueRecv {
+                ch,
+                buffered_payload,
+                sender,
+                stack_slots,
+                select_state,
+            } => {
+                // Safety: rollback retains the live queue handle captured at mutation time.
+                unsafe {
+                    queue::with_local_state(ch, |local_state| {
+                        if let Some(payload) = buffered_payload {
+                            let _promoted_sender_payload = local_state.buffer.pop_back();
+                            local_state.buffer.push_front(payload);
+                        }
+                        local_state.waiting_senders.push_front(sender);
+                    })
+                };
                 if let Some(fiber) = current_fiber.and_then(|fid| scheduler.try_get_fiber_mut(fid))
                 {
                     for (index, value) in stack_slots {
@@ -309,22 +425,39 @@ impl RuntimeRollback {
                 endpoint_id,
                 home_island,
                 closed,
-                endpoint_registry,
             } => {
                 let proxy = unsafe { queue::remote_proxy_mut(ch) };
                 proxy.endpoint_id = endpoint_id;
                 proxy.home_island = home_island;
                 proxy.closed = closed;
-                vm_state.endpoint_registry.restore(endpoint_registry);
             }
             Self::EndpointTransfer {
                 endpoint_registry,
                 home_infos,
             } => {
-                for (ch, snapshot) in home_infos {
-                    unsafe { queue::restore_home_info_snapshot(ch, snapshot) };
+                for (ch, undo) in home_infos {
+                    unsafe { queue::restore_home_info_undo(ch, undo) };
                 }
-                vm_state.endpoint_registry.restore(endpoint_registry);
+                endpoint_registry.restore(&mut vm_state.endpoint_registry);
+            }
+            Self::DirectQueueReceiver {
+                ch,
+                waiter,
+                stack_slots,
+                select_state,
+            } => {
+                unsafe { queue::restore_direct_receiver(ch, waiter) };
+                if let Some(fiber) = current_fiber.and_then(|fid| scheduler.try_get_fiber_mut(fid))
+                {
+                    for (index, value) in stack_slots {
+                        if let Some(slot) = fiber.stack.get_mut(index) {
+                            *slot = value;
+                        }
+                    }
+                    if let Some(select_state) = select_state {
+                        fiber.select_state = select_state;
+                    }
+                }
             }
             #[cfg(feature = "jit")]
             Self::SelectWaiters {
@@ -332,10 +465,23 @@ impl RuntimeRollback {
                 select_state,
                 queues,
             } => {
-                for (ch, state) in queues {
+                for queue_undo in queues {
                     unsafe {
-                        queue::with_local_state(ch, |local_state| {
-                            *local_state = state;
+                        queue::with_local_state(queue_undo.ch, |local_state| {
+                            for (index, waiter, message) in queue_undo.senders {
+                                if !local_state
+                                    .waiting_senders
+                                    .iter()
+                                    .any(|(queued, _)| queued == &waiter)
+                                {
+                                    local_state.waiting_senders.insert(index, (waiter, message));
+                                }
+                            }
+                            for (index, waiter) in queue_undo.receivers {
+                                if !local_state.waiting_receivers.contains(&waiter) {
+                                    local_state.waiting_receivers.insert(index, waiter);
+                                }
+                            }
                         })
                     };
                 }
@@ -393,7 +539,10 @@ impl RuntimeTransition {
             island_commands: Vec::new(),
             endpoint_tombstones: Vec::new(),
             spawns: Vec::new(),
+            queue_closes: Vec::new(),
+            queue_close_handles: HashSet::new(),
             rollback: None,
+            queue_close_wake_keys: None,
             #[cfg(feature = "jit")]
             pending_terminal_policy: PendingTransitionTerminalPolicy::CommitOnLanguagePanic,
         }
@@ -416,7 +565,17 @@ impl RuntimeTransition {
     }
 
     pub(crate) fn push_queue_close_wake(&mut self, wake: WakeCommand) {
-        push_queue_close_wake(&mut self.wakes, wake);
+        debug_assert!(wake.is_queue_close_wake());
+        if let Some(key) = wake.select_activation_key() {
+            if !self
+                .queue_close_wake_keys
+                .get_or_insert_with(HashSet::new)
+                .insert(key)
+            {
+                return;
+            }
+        }
+        self.wakes.push(wake);
     }
 
     pub(crate) fn set_rollback(&mut self, rollback: RuntimeRollback) {
@@ -424,6 +583,19 @@ impl RuntimeTransition {
             Some(existing) => RuntimeRollback::combine(existing, rollback),
             None => rollback,
         });
+    }
+
+    pub(crate) fn prepare_queue_close(&mut self, ch: GcRef) {
+        let key = ch as usize;
+        if self.queue_close_handles.contains(&key) {
+            return;
+        }
+        if self.queue_close_handles.try_reserve(1).is_ok() {
+            self.queue_close_handles.insert(key);
+            self.queue_closes.push(ch);
+        } else if !self.queue_closes.contains(&ch) {
+            self.queue_closes.push(ch);
+        }
     }
 
     #[cfg(feature = "jit")]
@@ -452,38 +624,34 @@ impl RuntimeTransition {
                 self.wakes.push(wake);
             }
         }
-        self.island_commands.append(&mut other.island_commands);
-        self.endpoint_tombstones
-            .append(&mut other.endpoint_tombstones);
-        self.spawns.append(&mut other.spawns);
+        merge_vec(&mut self.island_commands, &mut other.island_commands);
+        merge_vec(
+            &mut self.endpoint_tombstones,
+            &mut other.endpoint_tombstones,
+        );
+        merge_vec(&mut self.spawns, &mut other.spawns);
+        for ch in other.queue_closes.drain(..) {
+            self.prepare_queue_close(ch);
+        }
         if let Some(rollback) = other.rollback.take() {
             self.set_rollback(rollback);
         }
     }
 
     #[cfg(feature = "jit")]
-    pub(crate) fn discard_pending_response_island_commands(&mut self) {
+    pub(crate) fn discard_response_awaiting_island_commands(&mut self) {
         self.island_commands
-            .retain(|effect| !effect.pending_response);
+            .retain(|effect| !effect.expects_response());
     }
 }
 
-pub(crate) fn push_queue_close_wake(wakes: &mut Vec<WakeCommand>, wake: WakeCommand) {
-    debug_assert!(matches!(
-        wake.payload,
-        RuntimePayload::QueueWake(
-            QueueRuntimeWake::ClosedReceiver { .. } | QueueRuntimeWake::ClosedSender { .. }
-        )
-    ));
-    if let Some(key) = wake.select_activation_key() {
-        if wakes
-            .iter()
-            .any(|existing| existing.select_activation_key() == Some(key))
-        {
-            return;
-        }
+#[cfg(feature = "jit")]
+fn merge_vec<T>(target: &mut Vec<T>, source: &mut Vec<T>) {
+    if target.is_empty() {
+        core::mem::swap(target, source);
+    } else {
+        target.append(source);
     }
-    wakes.push(wake);
 }
 
 fn merge_gc_root_effects(left: GcRootEffect, right: GcRootEffect) -> GcRootEffect {
@@ -509,655 +677,7 @@ pub enum RuntimeBoundary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WakeCommand {
-    pub source: WaitSource,
-    pub wake_key: FiberWakeKey,
-    pub registration: WaitRegistrationKey,
-    pub payload: RuntimePayload,
-    pub gc_roots: GcRootEffect,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SelectActivationWakeKey {
-    island_id: u32,
-    fiber_key: u64,
-    endpoint_wait_id: u64,
-    select_id: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueueActivationWakeKey {
-    source: WaitSource,
-    wake_key: FiberWakeKey,
-    island_id: u32,
-    registration_id: u64,
-    endpoint_wait_id: u64,
-    queue_ref: u64,
-    kind: Option<SelectWaitKind>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EndpointResponseActivationKey {
-    endpoint_id: u64,
-    fiber_key: u64,
-    wait_id: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EndpointResponseAuthorizationSource {
-    endpoint_id: u64,
-    from_island: u32,
-    target_island: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EndpointRequestActivationKey {
-    endpoint_id: u64,
-    fiber_key: u64,
-    wait_id: u64,
-}
-
-fn endpoint_request_expects_pending_response(kind: &EndpointRequestKind) -> bool {
-    matches!(
-        kind,
-        EndpointRequestKind::Send { .. } | EndpointRequestKind::Recv
-    )
-}
-
-fn validate_endpoint_request_pending_response(
-    kind: &EndpointRequestKind,
-    pending_response: bool,
-) -> Result<(), VmError> {
-    if pending_response == endpoint_request_expects_pending_response(kind) {
-        return Ok(());
-    }
-    Err(VmError::Jit(
-        "EndpointRequest pending-response contract was rejected".to_string(),
-    ))
-}
-
-fn validate_non_request_pending_response(
-    command_name: &str,
-    pending_response: bool,
-) -> Result<(), VmError> {
-    if !pending_response {
-        return Ok(());
-    }
-    Err(VmError::Jit(format!(
-        "{command_name} pending-response contract was rejected"
-    )))
-}
-
-fn validate_same_island_endpoint_request_source(
-    current_island: u32,
-    from_island: u32,
-) -> Result<(), VmError> {
-    if from_island == current_island {
-        return Ok(());
-    }
-    Err(VmError::Jit(
-        "same-island EndpointRequest source was rejected".to_string(),
-    ))
-}
-
-fn validate_same_island_endpoint_response_source(
-    current_island: u32,
-    from_island: u32,
-) -> Result<(), VmError> {
-    if from_island == current_island {
-        return Ok(());
-    }
-    Err(VmError::Jit(
-        "same-island EndpointResponse source was rejected".to_string(),
-    ))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WakeActivationKey {
-    Select(SelectActivationWakeKey),
-    Queue(QueueActivationWakeKey),
-}
-
-#[derive(Debug)]
-pub struct IslandCommandEffect {
-    pub island_id: u32,
-    pub command: IslandCommand,
-    pub pending_response: bool,
-}
-
-impl IslandCommandEffect {
-    pub fn spawn_fiber(island_id: u32, closure_data: vo_runtime::pack::PackedValue) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::SpawnFiber { closure_data },
-            pending_response: false,
-        }
-    }
-
-    pub fn endpoint_send_request(
-        island_id: u32,
-        endpoint_id: u64,
-        data: Vec<u8>,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-    ) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind: EndpointRequestKind::Send { data },
-                from_island,
-                fiber_key,
-                wait_id,
-            },
-            pending_response: true,
-        }
-    }
-
-    pub fn endpoint_recv_request(
-        island_id: u32,
-        endpoint_id: u64,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-    ) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind: EndpointRequestKind::Recv,
-                from_island,
-                fiber_key,
-                wait_id,
-            },
-            pending_response: true,
-        }
-    }
-
-    pub fn endpoint_transfer_request(
-        island_id: u32,
-        endpoint_id: u64,
-        new_peer: u32,
-        from_island: u32,
-    ) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind: EndpointRequestKind::Transfer { new_peer },
-                from_island,
-                fiber_key: 0,
-                wait_id: 0,
-            },
-            pending_response: false,
-        }
-    }
-
-    pub fn endpoint_close_request(island_id: u32, endpoint_id: u64, from_island: u32) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind: EndpointRequestKind::Close,
-                from_island,
-                fiber_key: 0,
-                wait_id: 0,
-            },
-            pending_response: false,
-        }
-    }
-
-    pub fn endpoint_response(
-        island_id: u32,
-        from_island: u32,
-        endpoint_id: u64,
-        kind: EndpointResponseKind,
-        fiber_key: u64,
-        wait_id: u64,
-    ) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::EndpointResponse {
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            },
-            pending_response: false,
-        }
-    }
-
-    pub fn endpoint_recv_data_response(
-        island_id: u32,
-        from_island: u32,
-        endpoint_id: u64,
-        data: Vec<u8>,
-        fiber_key: u64,
-        wait_id: u64,
-    ) -> Self {
-        Self {
-            island_id,
-            command: IslandCommand::EndpointResponse {
-                endpoint_id,
-                kind: EndpointResponseKind::RecvData {
-                    data,
-                    closed: false,
-                },
-                from_island,
-                fiber_key,
-                wait_id,
-            },
-            pending_response: false,
-        }
-    }
-}
-
-struct RemoteIslandCommandCommit {
-    island_id: u32,
-    command: IslandCommand,
-    pending_response: bool,
-    #[cfg(feature = "std")]
-    reservation: Option<Box<dyn IslandSendReservation>>,
-}
-
-impl WakeCommand {
-    pub fn queue_waiter(waiter: QueueWaiter) -> Self {
-        let select_result = match waiter.select.as_ref().map(|select| select.kind) {
-            Some(SelectWaitKind::Send) => Some(SelectWokenResult::SendAccepted),
-            _ => None,
-        };
-        Self::queue(QueueRuntimeWake::Waiter {
-            waiter,
-            select_result,
-        })
-    }
-
-    pub fn queue_waiter_with_result(waiter: QueueWaiter, select_result: SelectWokenResult) -> Self {
-        Self::queue(QueueRuntimeWake::Waiter {
-            waiter,
-            select_result: Some(select_result),
-        })
-    }
-
-    pub fn queue_closed_receiver(waiter: QueueWaiter, endpoint_id: Option<u64>) -> Self {
-        Self::queue(QueueRuntimeWake::ClosedReceiver {
-            waiter,
-            endpoint_id,
-        })
-    }
-
-    pub fn queue_closed_sender(waiter: QueueWaiter, endpoint_id: Option<u64>) -> Self {
-        Self::queue(QueueRuntimeWake::ClosedSender {
-            waiter,
-            endpoint_id,
-        })
-    }
-
-    fn queue(wake: QueueRuntimeWake) -> Self {
-        let source = wake.source();
-        let wake_key = FiberWakeKey::from_packed(wake.waiter().fiber_key());
-        let registration = queue_wake_registration(source, &wake);
-        Self {
-            source,
-            wake_key,
-            registration,
-            payload: RuntimePayload::QueueWake(wake),
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-
-    fn select_activation_key(&self) -> Option<SelectActivationWakeKey> {
-        match &self.payload {
-            RuntimePayload::QueueWake(wake) => wake.select_activation_key(),
-            _ => None,
-        }
-    }
-
-    fn activation_key(&self) -> Option<WakeActivationKey> {
-        if let Some(select_key) = self.select_activation_key() {
-            return Some(WakeActivationKey::Select(select_key));
-        }
-        match &self.payload {
-            RuntimePayload::QueueWake(wake) => {
-                let waiter = wake.waiter();
-                Some(WakeActivationKey::Queue(QueueActivationWakeKey {
-                    source: self.source,
-                    wake_key: self.wake_key,
-                    island_id: waiter.island_id,
-                    registration_id: waiter.registration_id,
-                    endpoint_wait_id: waiter.endpoint_wait_id(),
-                    queue_ref: waiter.queue_ref,
-                    kind: waiter.kind,
-                }))
-            }
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "jit")]
-    fn is_queue_close_wake(&self) -> bool {
-        matches!(
-            self.payload,
-            RuntimePayload::QueueWake(
-                QueueRuntimeWake::ClosedReceiver { .. } | QueueRuntimeWake::ClosedSender { .. }
-            )
-        )
-    }
-
-    fn validate_queue_identity(&self, wake: &QueueRuntimeWake) -> Result<(), String> {
-        let expected_source = wake.source();
-        let expected_wake_key = FiberWakeKey::from_packed(wake.waiter().fiber_key());
-        let expected_registration = queue_wake_registration(expected_source, wake);
-        validate_queue_waiter_identity(wake.waiter())?;
-        if self.source != expected_source {
-            return Err(format!(
-                "queue wake source mismatch: got {:?}, expected {:?}",
-                self.source, expected_source
-            ));
-        }
-        if self.wake_key != expected_wake_key {
-            return Err("queue wake fiber key mismatch".to_string());
-        }
-        if self.registration != expected_registration || self.registration.token == 0 {
-            return Err("queue wake registration mismatch".to_string());
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCommand {
-    pub source: WaitSource,
-    pub target: RuntimeCommandTarget,
-    pub wake_key: Option<FiberWakeKey>,
-    pub registration: Option<WaitRegistrationKey>,
-    pub source_token: SourceWakeToken,
-    pub resume: ResumePolicy,
-    pub payload: RuntimePayload,
-    pub gc_roots: GcRootEffect,
-}
-
-impl RuntimeCommand {
-    pub fn host_event_wake(key: HostWaitKey) -> Self {
-        Self {
-            source: key.source.wait_source(),
-            target: RuntimeCommandTarget::HostEvent { key },
-            wake_key: Some(key.wake_key),
-            registration: Some(key.registration),
-            source_token: SourceWakeToken::HostEvent(key),
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::None,
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-
-    pub fn host_event_replay_wake(key: HostWaitKey) -> Self {
-        Self {
-            source: key.source.wait_source(),
-            target: RuntimeCommandTarget::HostEvent { key },
-            wake_key: Some(key.wake_key),
-            registration: Some(key.registration),
-            source_token: SourceWakeToken::HostEvent(key),
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::None,
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-
-    pub fn host_event_wake_with_data(key: HostWaitKey, data: Vec<u8>) -> Self {
-        Self {
-            source: key.source.wait_source(),
-            target: RuntimeCommandTarget::HostEvent { key },
-            wake_key: Some(key.wake_key),
-            registration: Some(key.registration),
-            source_token: SourceWakeToken::HostEvent(key),
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::HostEventData(data),
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-
-    #[cfg(feature = "std")]
-    pub fn io_ready(key: IoWaitKey) -> Self {
-        Self {
-            source: WaitSource::Io,
-            target: RuntimeCommandTarget::Io { key },
-            wake_key: Some(key.wake_key),
-            registration: Some(key.registration),
-            source_token: SourceWakeToken::Io(key),
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::None,
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-
-    pub fn endpoint_response(
-        endpoint_id: u64,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-        kind: EndpointResponseKind,
-    ) -> Self {
-        Self {
-            source: WaitSource::IslandEndpoint,
-            target: RuntimeCommandTarget::EndpointResponse {
-                endpoint_id,
-                from_island,
-                fiber_key,
-                wait_id,
-            },
-            wake_key: Some(FiberWakeKey::new(
-                fiber_key as u32,
-                (fiber_key >> 32) as u32,
-            )),
-            registration: None,
-            source_token: SourceWakeToken::EndpointResponse {
-                endpoint_id,
-                from_island,
-                fiber_key,
-                wait_id,
-            },
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::EndpointResponse(EndpointRuntimeResponse::from(kind)),
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-
-    pub fn endpoint_closed_response(endpoint_id: u64, from_island: u32) -> Self {
-        Self {
-            source: WaitSource::IslandEndpoint,
-            target: RuntimeCommandTarget::EndpointClosed {
-                endpoint_id,
-                from_island,
-            },
-            wake_key: None,
-            registration: None,
-            source_token: SourceWakeToken::EndpointClosed {
-                endpoint_id,
-                from_island,
-            },
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::EndpointResponse(EndpointRuntimeResponse::Closed),
-            gc_roots: GcRootEffect::None,
-        }
-    }
-
-    pub fn island_wake(waiter: QueueWaiter) -> Self {
-        let fiber_key = waiter.fiber_key();
-        let registration = queue_wake_registration(
-            WaitSource::IslandWake,
-            &QueueRuntimeWake::Waiter {
-                waiter: waiter.clone(),
-                select_result: None,
-            },
-        );
-        Self {
-            source: WaitSource::IslandWake,
-            target: RuntimeCommandTarget::IslandWake {
-                waiter: waiter.clone(),
-            },
-            wake_key: Some(FiberWakeKey::from_packed(fiber_key)),
-            registration: Some(registration),
-            source_token: SourceWakeToken::IslandWake(waiter),
-            resume: ResumePolicy::PreserveFramePc,
-            payload: RuntimePayload::None,
-            gc_roots: GcRootEffect::AllRootsDirty,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeCommandTarget {
-    HostEvent {
-        key: HostWaitKey,
-    },
-    #[cfg(feature = "std")]
-    Io {
-        key: IoWaitKey,
-    },
-    EndpointResponse {
-        endpoint_id: u64,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-    },
-    EndpointClosed {
-        endpoint_id: u64,
-        from_island: u32,
-    },
-    IslandWake {
-        waiter: QueueWaiter,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceWakeToken {
-    None,
-    HostEvent(HostWaitKey),
-    #[cfg(feature = "std")]
-    Io(IoWaitKey),
-    EndpointResponse {
-        endpoint_id: u64,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-    },
-    EndpointClosed {
-        endpoint_id: u64,
-        from_island: u32,
-    },
-    IslandWake(QueueWaiter),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimePayload {
-    None,
-    HostEventData(Vec<u8>),
-    EndpointResponse(EndpointRuntimeResponse),
-    QueueWake(QueueRuntimeWake),
-}
-
-impl QueueRuntimeWake {
-    fn waiter(&self) -> &QueueWaiter {
-        match self {
-            Self::Waiter { waiter, .. }
-            | Self::ClosedReceiver { waiter, .. }
-            | Self::ClosedSender { waiter, .. } => waiter,
-        }
-    }
-
-    fn source(&self) -> WaitSource {
-        if self.waiter().select.is_some() {
-            WaitSource::Select
-        } else {
-            WaitSource::Queue
-        }
-    }
-
-    fn select_activation_key(&self) -> Option<SelectActivationWakeKey> {
-        let waiter = self.waiter();
-        let select = waiter.select.as_ref()?;
-        Some(SelectActivationWakeKey {
-            island_id: waiter.island_id,
-            fiber_key: waiter.fiber_key(),
-            endpoint_wait_id: waiter.endpoint_wait_id(),
-            select_id: select.select_id,
-        })
-    }
-}
-
-fn queue_wake_registration(source: WaitSource, wake: &QueueRuntimeWake) -> WaitRegistrationKey {
-    fn mix(mut state: u64, value: u64) -> u64 {
-        state ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        state = state.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
-        state
-    }
-
-    let waiter = wake.waiter();
-    let mut token = mix(0xcbf2_9ce4_8422_2325, source as u64);
-    token = mix(token, waiter.island_id as u64);
-    token = mix(token, waiter.fiber_key());
-    token = mix(token, waiter.registration_id);
-    token = mix(token, waiter.endpoint_wait_id());
-    token = mix(token, waiter.queue_ref);
-    token = mix(
-        token,
-        waiter
-            .kind
-            .map(|kind| kind.to_raw() as u64 + 1)
-            .unwrap_or(0),
-    );
-    if let Some(select) = waiter.select.as_ref() {
-        token = mix(token, select.case_index as u64);
-        token = mix(token, select.select_id);
-        token = mix(token, select.queue_ref);
-        token = mix(token, select.kind.to_raw() as u64);
-    }
-    token = match wake {
-        QueueRuntimeWake::Waiter { .. } => mix(token, 1),
-        QueueRuntimeWake::ClosedReceiver { endpoint_id, .. } => {
-            mix(mix(token, 2), endpoint_id.unwrap_or(0))
-        }
-        QueueRuntimeWake::ClosedSender { endpoint_id, .. } => {
-            mix(mix(token, 3), endpoint_id.unwrap_or(0))
-        }
-    };
-    if token == 0 {
-        token = 1;
-    }
-    WaitRegistrationKey { token }
-}
-
-fn validate_queue_waiter_identity(waiter: &QueueWaiter) -> Result<(), String> {
-    if waiter.endpoint_wait_id() != 0 {
-        return Ok(());
-    }
-    if let Some(select) = waiter.select.as_ref() {
-        if waiter.registration_id == 0 {
-            return Err("queue wake missing wait registration identity".to_string());
-        }
-        if waiter.queue_ref != select.queue_ref || waiter.kind != Some(select.kind) {
-            return Err("queue wake select identity mismatch".to_string());
-        }
-        return Ok(());
-    }
-    if waiter.kind.is_some() && waiter.registration_id != 0 {
-        return Ok(());
-    }
-    Err("queue wake missing wait registration identity".to_string())
-}
-
-pub(crate) fn validate_canonical_fiber_key(key: u64, context: &str) -> Result<(), String> {
-    if FiberWakeKey::from_packed(key).generation == 0 {
-        return Err(format!("{context} used raw fiber slot identity"));
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueueRuntimeWake {
+pub enum WakeCommand {
     Waiter {
         waiter: QueueWaiter,
         select_result: Option<SelectWokenResult>,
@@ -1172,41 +692,291 @@ pub enum QueueRuntimeWake {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EndpointRuntimeResponse {
-    SendAck { closed: bool },
-    RecvData { data: Vec<u8>, closed: bool },
-    RecvError,
-    Closed,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SelectActivationWakeKey {
+    island_id: u32,
+    fiber_key: u64,
+    select_id: u64,
 }
 
-impl From<EndpointResponseKind> for EndpointRuntimeResponse {
-    fn from(kind: EndpointResponseKind) -> Self {
-        match kind {
-            EndpointResponseKind::SendAck { closed } => Self::SendAck { closed },
-            EndpointResponseKind::RecvData { data, closed } => Self::RecvData { data, closed },
-            EndpointResponseKind::RecvError => Self::RecvError,
-            EndpointResponseKind::Closed => Self::Closed,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct QueueActivationWakeKey {
+    wake_key: FiberWakeKey,
+    island_id: u32,
+    target: QueueWaitTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct EndpointActivationKey {
+    endpoint_id: u64,
+    wait_key: EndpointWaitKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct EndpointResponseAuthorizationSource {
+    endpoint_id: u64,
+    from_island: u32,
+    target_island: u32,
+}
+
+#[inline]
+fn island_command_expects_response(command: &IslandCommand) -> bool {
+    matches!(
+        command,
+        IslandCommand::EndpointRequest { kind, .. }
+            if kind.wait_key().is_some()
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum WakeActivationKey {
+    Select(SelectActivationWakeKey),
+    Queue(QueueActivationWakeKey),
+}
+
+#[derive(Debug)]
+pub struct IslandCommandEffect {
+    pub island_id: u32,
+    pub command: IslandCommand,
+}
+
+impl IslandCommandEffect {
+    #[inline]
+    fn expects_response(&self) -> bool {
+        island_command_expects_response(&self.command)
+    }
+
+    pub fn spawn_fiber(island_id: u32, closure_data: vo_runtime::pack::PackedValue) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::SpawnFiber { closure_data },
+        }
+    }
+
+    pub fn endpoint_send_request(
+        island_id: u32,
+        endpoint_id: u64,
+        data: Vec<u8>,
+        wait_key: EndpointWaitKey,
+    ) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind: EndpointRequestKind::Send { data, wait_key },
+            },
+        }
+    }
+
+    pub fn endpoint_recv_request(
+        island_id: u32,
+        endpoint_id: u64,
+        wait_key: EndpointWaitKey,
+    ) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind: EndpointRequestKind::Recv { wait_key },
+            },
+        }
+    }
+
+    pub fn endpoint_transfer_request(island_id: u32, endpoint_id: u64, new_peer: u32) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind: EndpointRequestKind::Transfer { new_peer },
+            },
+        }
+    }
+
+    pub fn endpoint_close_request(island_id: u32, endpoint_id: u64) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind: EndpointRequestKind::Close,
+            },
+        }
+    }
+
+    pub fn endpoint_response(island_id: u32, endpoint_id: u64, kind: EndpointResponseKind) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointResponse { endpoint_id, kind },
+        }
+    }
+
+    pub fn endpoint_recv_data_response(
+        island_id: u32,
+        endpoint_id: u64,
+        data: Vec<u8>,
+        wait_key: EndpointWaitKey,
+    ) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointResponse {
+                endpoint_id,
+                kind: EndpointResponseKind::RecvData {
+                    data,
+                    closed: false,
+                    wait_key,
+                },
+            },
         }
     }
 }
 
-impl EndpointRuntimeResponse {
-    fn into_endpoint_response_kind(self) -> EndpointResponseKind {
+struct RemoteIslandCommandCommit {
+    island_id: u32,
+    command: IslandCommand,
+    #[cfg(feature = "std")]
+    reservation: Option<Box<dyn IslandSendReservation>>,
+}
+
+impl WakeCommand {
+    pub fn queue_waiter(waiter: QueueWaiter) -> Self {
+        let select_result = match waiter.select_info().map(|select| select.kind) {
+            Some(SelectWaitKind::Send) => Some(SelectWokenResult::SendAccepted),
+            _ => None,
+        };
+        Self::Waiter {
+            waiter,
+            select_result,
+        }
+    }
+
+    pub fn queue_waiter_with_result(waiter: QueueWaiter, select_result: SelectWokenResult) -> Self {
+        Self::Waiter {
+            waiter,
+            select_result: Some(select_result),
+        }
+    }
+
+    pub fn queue_closed_receiver(waiter: QueueWaiter, endpoint_id: Option<u64>) -> Self {
+        Self::ClosedReceiver {
+            waiter,
+            endpoint_id,
+        }
+    }
+
+    pub fn queue_closed_sender(waiter: QueueWaiter, endpoint_id: Option<u64>) -> Self {
+        Self::ClosedSender {
+            waiter,
+            endpoint_id,
+        }
+    }
+
+    fn select_activation_key(&self) -> Option<SelectActivationWakeKey> {
+        let waiter = self.waiter();
+        let select = waiter.select_info()?;
+        Some(SelectActivationWakeKey {
+            island_id: waiter.island_id(),
+            fiber_key: waiter.fiber_key(),
+            select_id: select.select_id,
+        })
+    }
+
+    fn activation_key(&self) -> WakeActivationKey {
+        if let Some(select_key) = self.select_activation_key() {
+            return WakeActivationKey::Select(select_key);
+        }
+        let waiter = self.waiter();
+        WakeActivationKey::Queue(QueueActivationWakeKey {
+            wake_key: FiberWakeKey::from_packed(waiter.fiber_key()),
+            island_id: waiter.island_id(),
+            target: *waiter.target(),
+        })
+    }
+
+    fn waiter(&self) -> &QueueWaiter {
         match self {
-            Self::SendAck { closed } => EndpointResponseKind::SendAck { closed },
-            Self::RecvData { data, closed } => EndpointResponseKind::RecvData { data, closed },
-            Self::RecvError => EndpointResponseKind::RecvError,
-            Self::Closed => EndpointResponseKind::Closed,
+            Self::Waiter { waiter, .. }
+            | Self::ClosedReceiver { waiter, .. }
+            | Self::ClosedSender { waiter, .. } => waiter,
         }
     }
+
+    pub(crate) fn is_queue_close_wake(&self) -> bool {
+        matches!(
+            self,
+            Self::ClosedReceiver { .. } | Self::ClosedSender { .. }
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCommand {
+    HostEvent {
+        key: HostWaitKey,
+        data: Option<Vec<u8>>,
+    },
+    #[cfg(feature = "std")]
+    IoReady {
+        key: IoWaitKey,
+    },
+    EndpointResponse {
+        endpoint_id: u64,
+        from_island: u32,
+        kind: EndpointResponseKind,
+    },
+    EndpointClosed {
+        endpoint_id: u64,
+        from_island: u32,
+    },
+}
+
+impl RuntimeCommand {
+    pub fn host_event_wake(key: HostWaitKey) -> Self {
+        Self::HostEvent { key, data: None }
+    }
+
+    pub fn host_event_wake_with_data(key: HostWaitKey, data: Vec<u8>) -> Self {
+        Self::HostEvent {
+            key,
+            data: Some(data),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn io_ready(key: IoWaitKey) -> Self {
+        Self::IoReady { key }
+    }
+
+    pub fn endpoint_response(
+        endpoint_id: u64,
+        from_island: u32,
+        kind: EndpointResponseKind,
+    ) -> Self {
+        Self::EndpointResponse {
+            endpoint_id,
+            from_island,
+            kind,
+        }
+    }
+
+    pub fn endpoint_closed_response(endpoint_id: u64, from_island: u32) -> Self {
+        Self::EndpointClosed {
+            endpoint_id,
+            from_island,
+        }
+    }
+}
+
+pub(crate) fn validate_canonical_fiber_key(key: u64, context: &str) -> Result<(), String> {
+    if FiberWakeKey::from_packed(key).generation == 0 {
+        return Err(format!("{context} used raw fiber slot identity"));
+    }
+    Ok(())
 }
 
 fn endpoint_response_kind_is_closed(kind: &EndpointResponseKind) -> bool {
     matches!(
         kind,
         EndpointResponseKind::Closed
-            | EndpointResponseKind::SendAck { closed: true }
+            | EndpointResponseKind::SendAck { closed: true, .. }
             | EndpointResponseKind::RecvData { closed: true, .. }
     )
 }
@@ -1224,13 +994,13 @@ impl Vm {
             transition.set_rollback(rollback);
         }
         self.cancel_select_sibling_waiters_for_transition(&transition);
-        self.state.pending_runtime_transitions.push(transition);
+        self.pending_runtime_transitions.push(transition);
     }
 
     #[cfg(feature = "jit")]
-    pub(crate) fn discard_pending_response_island_commands_from_pending_transitions(&mut self) {
-        for pending in &mut self.state.pending_runtime_transitions {
-            pending.discard_pending_response_island_commands();
+    pub(crate) fn discard_response_awaiting_island_commands_from_pending_transitions(&mut self) {
+        for pending in &mut self.pending_runtime_transitions {
+            pending.discard_response_awaiting_island_commands();
         }
     }
 
@@ -1243,9 +1013,12 @@ impl Vm {
 
     #[cfg(feature = "jit")]
     fn discard_pending_runtime_transitions(&mut self) {
-        for pending in core::mem::take(&mut self.state.pending_runtime_transitions) {
+        let mut pending_transitions = core::mem::take(&mut self.pending_runtime_transitions);
+        for pending in pending_transitions.drain(..) {
             self.restore_pending_runtime_transition_rollback(pending);
         }
+        debug_assert!(self.pending_runtime_transitions.is_empty());
+        self.pending_runtime_transitions = pending_transitions;
     }
 
     #[cfg(feature = "jit")]
@@ -1255,7 +1028,8 @@ impl Vm {
         should_commit: impl Fn(PendingTransitionTerminalPolicy) -> bool,
     ) -> bool {
         let mut committed_any = false;
-        for pending in core::mem::take(&mut self.state.pending_runtime_transitions) {
+        let mut pending_transitions = core::mem::take(&mut self.pending_runtime_transitions);
+        for pending in pending_transitions.drain(..) {
             if should_commit(pending.pending_terminal_policy) {
                 transition.merge_side_effects_from(pending);
                 committed_any = true;
@@ -1263,12 +1037,14 @@ impl Vm {
                 self.restore_pending_runtime_transition_rollback(pending);
             }
         }
+        debug_assert!(self.pending_runtime_transitions.is_empty());
+        self.pending_runtime_transitions = pending_transitions;
         committed_any
     }
 
     #[cfg(feature = "jit")]
     pub(crate) fn attach_pending_runtime_transitions(&mut self, result: ExecResult) -> ExecResult {
-        if self.state.pending_runtime_transitions.is_empty() {
+        if self.pending_runtime_transitions.is_empty() {
             return result;
         }
         match result {
@@ -1363,6 +1139,15 @@ impl Vm {
         boundary: RuntimeBoundary,
         resume: ResumePolicy,
     ) -> ExecResult {
+        if self.pending_runtime_transitions.len() == 1 {
+            let mut transition = self
+                .pending_runtime_transitions
+                .pop()
+                .expect("single pending transition disappeared");
+            transition.boundary = boundary;
+            transition.resume = resume;
+            return ExecResult::Transition(transition);
+        }
         let mut transition = RuntimeTransition::new(boundary, resume, GcRootEffect::None);
         self.drain_pending_runtime_transitions_into(&mut transition, |_| true);
         ExecResult::Transition(transition)
@@ -1384,6 +1169,19 @@ impl Vm {
             );
         }
 
+        if matches!(&transition.boundary, RuntimeBoundary::Continue)
+            && transition.resume == ResumePolicy::PreserveFramePc
+            && transition.wakes.is_empty()
+            && transition.island_commands.is_empty()
+            && transition.endpoint_tombstones.is_empty()
+            && transition.spawns.is_empty()
+            && transition.queue_closes.is_empty()
+            && transition.rollback.is_none()
+        {
+            self.apply_gc_root_effect(transition.gc_roots, current_fiber);
+            return Ok(None);
+        }
+
         if let Err(err) = self.preflight_runtime_transition(current_fiber, &transition) {
             return self.reject_runtime_transition_before_commit(
                 current_fiber,
@@ -1392,55 +1190,30 @@ impl Vm {
             );
         }
 
-        let RuntimeTransition {
+        let PreparedRuntimeTransition {
             boundary,
             resume,
             wakes,
             gc_roots,
             island_commands,
+            remote_island_commands,
             endpoint_tombstones,
             spawns,
-            rollback,
-            #[cfg(feature = "jit")]
-                pending_terminal_policy: _,
-        } = transition;
-        let mut rollback = rollback;
+            queue_closes,
+        } = self.prepare_runtime_transition_after_preflight(current_fiber, transition)?;
 
-        let (wakes, remote_wake_commands) =
-            match self.split_remote_wake_commands_before_commit(wakes) {
-                Ok(staged) => staged,
-                Err(err) => {
-                    if let Some(rollback) = rollback.take() {
-                        self.restore_runtime_rollback(current_fiber, rollback);
-                    }
-                    return Err(err);
-                }
-            };
-        let mut island_commands = island_commands;
-        island_commands.extend(remote_wake_commands);
+        self.apply_resume_policy(current_fiber, resume, "runtime transition")
+            .expect("prepared runtime transition resume policy must remain valid");
 
-        let (island_commands, remote_island_commands) =
-            match self.stage_remote_island_commands_before_commit(current_fiber, island_commands) {
-                Ok(staged) => staged,
-                Err(err) => {
-                    if let Some(rollback) = rollback.take() {
-                        self.restore_runtime_rollback(current_fiber, rollback);
-                    }
-                    return Err(err);
-                }
-            };
-
-        self.apply_resume_policy(current_fiber, resume, "runtime transition")?;
-
-        let gc_roots = if spawns.is_empty() && endpoint_tombstones.is_empty() {
-            gc_roots
-        } else {
-            merge_gc_root_effects(gc_roots, GcRootEffect::AllRootsDirty)
-        };
+        for ch in queue_closes {
+            debug_assert!(unsafe { queue::is_closed(ch) });
+            drop(unsafe { queue::take_waiting_receivers(ch) });
+            drop(unsafe { queue::take_waiting_senders(ch) });
+        }
 
         for wake in wakes {
-            self.apply_gc_root_effect(wake.gc_roots, current_fiber);
-            self.apply_runtime_wake(wake)?;
+            self.apply_runtime_wake(wake)
+                .expect("prepared runtime transition wake must remain applicable");
         }
         self.apply_gc_root_effect(gc_roots, current_fiber);
         for tombstone in endpoint_tombstones {
@@ -1452,12 +1225,15 @@ impl Vm {
                 );
         }
         if let RuntimeBoundary::Block(reason) = &boundary {
-            self.apply_block_boundary(reason.clone())?;
+            self.apply_block_boundary(reason.clone())
+                .expect("prepared runtime transition block registration must remain available");
         }
         for command in island_commands {
-            self.apply_island_command_effect(command)?;
+            self.apply_island_command_effect(command)
+                .expect("prepared local island command must remain applicable");
         }
-        self.apply_pending_spawns(spawns)?;
+        self.apply_pending_spawns(spawns)
+            .expect("prepared runtime transition spawn capacity must remain available");
         self.commit_remote_island_commands(remote_island_commands);
         match boundary {
             RuntimeBoundary::Continue => Ok(None),
@@ -1479,6 +1255,95 @@ impl Vm {
                 Err(VmError::Jit(message))
             }
         }
+    }
+
+    fn prepare_runtime_transition_after_preflight(
+        &mut self,
+        current_fiber: Option<FiberId>,
+        transition: RuntimeTransition,
+    ) -> Result<PreparedRuntimeTransition, VmError> {
+        let RuntimeTransition {
+            boundary,
+            resume,
+            wakes,
+            gc_roots,
+            island_commands,
+            endpoint_tombstones,
+            spawns,
+            queue_closes,
+            queue_close_handles: _,
+            rollback,
+            queue_close_wake_keys: _,
+            #[cfg(feature = "jit")]
+                pending_terminal_policy: _,
+        } = transition;
+        let mut rollback = rollback;
+        let endpoint_capacity = endpoint_tombstones
+            .len()
+            .saturating_add(wakes.len())
+            .saturating_add(island_commands.len());
+        if self
+            .state
+            .endpoint_registry
+            .try_reserve_live(endpoint_capacity)
+            .is_err()
+        {
+            if let Some(rollback) = rollback.take() {
+                self.restore_runtime_rollback(current_fiber, rollback);
+            }
+            return Err(VmError::Jit(
+                "runtime transition endpoint capacity allocation failed".into(),
+            ));
+        }
+        let (wakes, remote_wake_commands) =
+            match self.split_remote_wake_commands_before_commit(wakes) {
+                Ok(staged) => staged,
+                Err(err) => {
+                    if let Some(rollback) = rollback.take() {
+                        self.restore_runtime_rollback(current_fiber, rollback);
+                    }
+                    return Err(err);
+                }
+            };
+        let mut island_commands = island_commands;
+        if island_commands
+            .try_reserve(remote_wake_commands.len())
+            .is_err()
+        {
+            if let Some(rollback) = rollback.take() {
+                self.restore_runtime_rollback(current_fiber, rollback);
+            }
+            return Err(VmError::Jit(
+                "runtime transition command plan allocation failed".into(),
+            ));
+        }
+        island_commands.extend(remote_wake_commands);
+        let (island_commands, remote_island_commands) =
+            match self.stage_remote_island_commands_before_commit(current_fiber, island_commands) {
+                Ok(staged) => staged,
+                Err(err) => {
+                    if let Some(rollback) = rollback.take() {
+                        self.restore_runtime_rollback(current_fiber, rollback);
+                    }
+                    return Err(err);
+                }
+            };
+        let gc_roots = if spawns.is_empty() && endpoint_tombstones.is_empty() && wakes.is_empty() {
+            gc_roots
+        } else {
+            merge_gc_root_effects(gc_roots, GcRootEffect::AllRootsDirty)
+        };
+        Ok(PreparedRuntimeTransition {
+            boundary,
+            resume,
+            wakes,
+            gc_roots,
+            island_commands,
+            remote_island_commands,
+            endpoint_tombstones,
+            spawns,
+            queue_closes,
+        })
     }
 
     fn reject_runtime_transition_before_commit(
@@ -1581,100 +1446,46 @@ impl Vm {
         &mut self,
         command: RuntimeCommand,
     ) -> RuntimeCommandOutcome {
-        let gc_roots = command.gc_roots;
-        match command.target {
-            RuntimeCommandTarget::HostEvent { key } => {
-                if command.source != key.source.wait_source()
-                    || command.wake_key != Some(key.wake_key)
-                    || command.registration != Some(key.registration)
-                    || command.source_token != SourceWakeToken::HostEvent(key)
-                {
-                    return RuntimeCommandOutcome {
-                        applied: false,
+        match command {
+            RuntimeCommand::HostEvent { key, data } => match data {
+                None => {
+                    self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
+                    let applied = self.scheduler.wake_host_event(key);
+                    RuntimeCommandOutcome {
+                        applied,
                         payload_accepted: false,
-                    };
-                }
-                match command.payload {
-                    RuntimePayload::None => {
-                        self.apply_gc_root_effect(gc_roots, None);
-                        let applied = self.scheduler.wake_host_event(key);
-                        RuntimeCommandOutcome {
-                            applied,
-                            payload_accepted: false,
-                        }
-                    }
-                    RuntimePayload::HostEventData(data) => {
-                        self.apply_gc_root_effect(gc_roots, None);
-                        let payload_accepted = self.scheduler.wake_host_event_with_data(key, data);
-                        RuntimeCommandOutcome {
-                            applied: payload_accepted,
-                            payload_accepted,
-                        }
-                    }
-                    RuntimePayload::EndpointResponse(_) | RuntimePayload::QueueWake(_) => {
-                        RuntimeCommandOutcome {
-                            applied: false,
-                            payload_accepted: false,
-                        }
                     }
                 }
-            }
+                Some(data) => {
+                    self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
+                    let payload_accepted = self.scheduler.wake_host_event_with_data(key, data);
+                    RuntimeCommandOutcome {
+                        applied: payload_accepted,
+                        payload_accepted,
+                    }
+                }
+            },
             #[cfg(feature = "std")]
-            RuntimeCommandTarget::Io { key } => {
-                if !matches!(command.source, WaitSource::Io)
-                    || command.wake_key != Some(key.wake_key)
-                    || command.registration != Some(key.registration)
-                    || command.source_token != SourceWakeToken::Io(key)
-                {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                self.apply_gc_root_effect(gc_roots, None);
+            RuntimeCommand::IoReady { key } => {
+                self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
                 let applied = self.scheduler.wake_io(key);
                 RuntimeCommandOutcome {
                     applied,
                     payload_accepted: applied,
                 }
             }
-            RuntimeCommandTarget::EndpointResponse {
+            RuntimeCommand::EndpointResponse {
                 endpoint_id,
                 from_island,
-                fiber_key,
-                wait_id,
+                kind,
             } => {
-                if !matches!(command.source, WaitSource::IslandEndpoint)
-                    || command.wake_key != Some(FiberWakeKey::from_packed(fiber_key))
-                {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                if !matches!(
-                    command.source_token,
-                    SourceWakeToken::EndpointResponse {
-                        endpoint_id: source_endpoint_id,
-                        from_island: source_from_island,
-                        fiber_key: source_fiber_key,
-                        wait_id: source_wait_id,
-                    } if source_endpoint_id == endpoint_id
-                        && source_from_island == from_island
-                        && source_fiber_key == fiber_key
-                        && source_wait_id == wait_id
-                ) {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                let RuntimePayload::EndpointResponse(response) = command.payload else {
+                let Some(wait_key) = kind.wait_key() else {
                     return RuntimeCommandOutcome {
                         applied: false,
                         payload_accepted: false,
                     };
                 };
+                let fiber_key = wait_key.fiber_key();
                 if self.state.pending_island_responses == 0 {
                     return RuntimeCommandOutcome {
                         applied: false,
@@ -1713,9 +1524,8 @@ impl Vm {
                             payload_accepted: false,
                         };
                     }
-                    let kind = response.into_endpoint_response_kind();
                     let replay_closed_send = match &kind {
-                        EndpointResponseKind::SendAck { closed } => *closed,
+                        EndpointResponseKind::SendAck { closed, .. } => *closed,
                         _ => false,
                     };
                     let resume = if replay_closed_send {
@@ -1734,7 +1544,7 @@ impl Vm {
                     } else {
                         None
                     };
-                    if !fiber.apply_endpoint_response(endpoint_id, wait_id, &kind) {
+                    if !fiber.apply_endpoint_response(endpoint_id, kind) {
                         return RuntimeCommandOutcome {
                             applied: false,
                             payload_accepted: false,
@@ -1761,7 +1571,7 @@ impl Vm {
                         payload_accepted: false,
                     };
                 };
-                self.apply_gc_root_effect(gc_roots, None);
+                self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
                 self.state.pending_island_responses -= 1;
                 let applied = self.scheduler.try_wake_fiber(fid);
                 RuntimeCommandOutcome {
@@ -1769,26 +1579,10 @@ impl Vm {
                     payload_accepted: applied,
                 }
             }
-            RuntimeCommandTarget::EndpointClosed {
+            RuntimeCommand::EndpointClosed {
                 endpoint_id,
                 from_island,
             } => {
-                if command.source != WaitSource::IslandEndpoint
-                    || command.source_token
-                        != (SourceWakeToken::EndpointClosed {
-                            endpoint_id,
-                            from_island,
-                        })
-                    || command.wake_key.is_some()
-                    || command.registration.is_some()
-                    || command.payload
-                        != RuntimePayload::EndpointResponse(EndpointRuntimeResponse::Closed)
-                {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
                 if !crate::vm::endpoint_response_from_authorized_source(
                     self,
                     endpoint_id,
@@ -1799,7 +1593,6 @@ impl Vm {
                         payload_accepted: false,
                     };
                 }
-                self.apply_gc_root_effect(gc_roots, None);
                 if let Some(ch) = self.state.endpoint_registry.get_live(endpoint_id) {
                     if unsafe { queue::is_remote(ch) } {
                         unsafe { queue::mark_remote_closed(ch) };
@@ -1814,55 +1607,11 @@ impl Vm {
                     payload_accepted: true,
                 }
             }
-            RuntimeCommandTarget::IslandWake { waiter } => {
-                let expected_registration = queue_wake_registration(
-                    WaitSource::IslandWake,
-                    &QueueRuntimeWake::Waiter {
-                        waiter: waiter.clone(),
-                        select_result: None,
-                    },
-                );
-                if !matches!(command.source, WaitSource::IslandWake)
-                    || command.wake_key != Some(FiberWakeKey::from_packed(waiter.fiber_key()))
-                    || command.registration != Some(expected_registration)
-                    || command.source_token != SourceWakeToken::IslandWake(waiter.clone())
-                    || waiter.island_id != self.state.current_island_id
-                    || waiter.select.is_some()
-                    || validate_queue_waiter_identity(&waiter).is_err()
-                {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                let wake_key = FiberWakeKey::from_packed(waiter.fiber_key());
-                let target_fiber = self.scheduler.try_get_fiber(wake_key.fiber_id());
-                if waiter.endpoint_wait_id() != 0
-                    || target_fiber.is_none_or(|fiber| {
-                        fiber.generation != wake_key.generation
-                            || fiber.remote_endpoint_wait.is_some()
-                    })
-                {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                self.apply_gc_root_effect(gc_roots, None);
-                let applied = self.scheduler.wake_queue_waiter(&waiter);
-                if applied {
-                    self.cancel_select_sibling_waiters_for_wake(&waiter);
-                }
-                RuntimeCommandOutcome {
-                    applied,
-                    payload_accepted: applied,
-                }
-            }
         }
     }
 
     fn preflight_runtime_transition(
-        &self,
+        &mut self,
         current_fiber: Option<FiberId>,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
@@ -1879,12 +1628,9 @@ impl Vm {
                 "scheduler wait registration identity space exhausted".to_string(),
             ));
         }
-        if !self.scheduler.has_spawn_capacity(transition.spawns.len()) {
-            return Err(VmError::Jit(
-                "scheduler fiber slot identity space exhausted before transition commit"
-                    .to_string(),
-            ));
-        }
+        self.scheduler
+            .try_preflight_spawns(&transition.spawns)
+            .map_err(scheduler_error_to_vm_error)?;
         self.validate_resume_policy(current_fiber, transition.resume, "runtime transition")?;
         self.preflight_unique_wake_activations(transition)?;
         self.preflight_unique_endpoint_response_activations(transition)?;
@@ -1908,7 +1654,7 @@ impl Vm {
         let additions = transition
             .island_commands
             .iter()
-            .filter(|effect| effect.pending_response)
+            .filter(|effect| effect.expects_response())
             .count();
         let additions = u32::try_from(additions).map_err(|_| {
             VmError::Jit(
@@ -1931,71 +1677,54 @@ impl Vm {
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
-        let mut seen = Vec::new();
+        let mut seen = HashSet::new();
+        seen.try_reserve(transition.wakes.len())
+            .map_err(|_| VmError::Jit("wake activation plan allocation failed".into()))?;
         for wake in &transition.wakes {
-            let Some(key) = wake.activation_key() else {
-                continue;
-            };
-            if seen.contains(&key) {
+            let key = wake.activation_key();
+            if !seen.insert(key) {
                 return Err(VmError::Jit(
                     "runtime transition contains duplicate wake activation".to_string(),
                 ));
             }
-            seen.push(key);
-        }
-        for effect in &transition.island_commands {
-            let Some(key) = self.wake_activation_key_for_island_command(effect) else {
-                continue;
-            };
-            if seen.contains(&key) {
-                return Err(VmError::Jit(
-                    "runtime transition contains duplicate wake activation".to_string(),
-                ));
-            }
-            seen.push(key);
         }
         Ok(())
-    }
-
-    fn wake_activation_key_for_island_command(
-        &self,
-        effect: &IslandCommandEffect,
-    ) -> Option<WakeActivationKey> {
-        let IslandCommand::WakeFiber { waiter } = &effect.command else {
-            return None;
-        };
-        WakeCommand::queue_waiter(waiter.clone()).activation_key()
     }
 
     fn preflight_unique_endpoint_response_activations(
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
-        let mut seen = Vec::new();
+        let mut seen = HashSet::new();
+        seen.try_reserve(
+            transition
+                .wakes
+                .len()
+                .saturating_add(transition.island_commands.len()),
+        )
+        .map_err(|_| VmError::Jit("endpoint activation plan allocation failed".into()))?;
         for wake in &transition.wakes {
             let Some(key) = self.endpoint_response_activation_key_for_wake(wake) else {
                 continue;
             };
-            if seen.contains(&key) {
+            if !seen.insert(key) {
                 return Err(VmError::Jit(
                     "runtime transition contains duplicate endpoint response activation"
                         .to_string(),
                 ));
             }
-            seen.push(key);
         }
         for command in &transition.island_commands {
             let Some(key) = self.endpoint_response_activation_key_for_island_command(command)
             else {
                 continue;
             };
-            if seen.contains(&key) {
+            if !seen.insert(key) {
                 return Err(VmError::Jit(
                     "runtime transition contains duplicate endpoint response activation"
                         .to_string(),
                 ));
             }
-            seen.push(key);
         }
         Ok(())
     }
@@ -2034,75 +1763,59 @@ impl Vm {
     fn endpoint_response_activation_key_for_wake(
         &self,
         wake: &WakeCommand,
-    ) -> Option<EndpointResponseActivationKey> {
-        let RuntimePayload::QueueWake(
-            QueueRuntimeWake::ClosedReceiver {
-                waiter,
-                endpoint_id,
-            }
-            | QueueRuntimeWake::ClosedSender {
-                waiter,
-                endpoint_id,
-            },
-        ) = &wake.payload
+    ) -> Option<EndpointActivationKey> {
+        let (WakeCommand::ClosedReceiver {
+            waiter,
+            endpoint_id,
+        }
+        | WakeCommand::ClosedSender {
+            waiter,
+            endpoint_id,
+        }) = wake
         else {
             return None;
         };
-        if waiter.endpoint_wait_id() == 0 {
-            return None;
-        }
-        Some(EndpointResponseActivationKey {
+        Some(EndpointActivationKey {
             endpoint_id: (*endpoint_id)?,
-            fiber_key: waiter.fiber_key(),
-            wait_id: waiter.endpoint_wait_id(),
+            wait_key: waiter.endpoint_wait_key()?,
         })
     }
 
     fn endpoint_response_activation_key_for_island_command(
         &self,
         effect: &IslandCommandEffect,
-    ) -> Option<EndpointResponseActivationKey> {
-        let IslandCommand::EndpointResponse {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        } = &effect.command
-        else {
+    ) -> Option<EndpointActivationKey> {
+        let IslandCommand::EndpointResponse { endpoint_id, kind } = &effect.command else {
             return None;
         };
-        if matches!(kind, EndpointResponseKind::Closed)
-            || *from_island != self.state.current_island_id
-        {
-            return None;
-        }
+        let wait_key = kind.wait_key()?;
         if effect.island_id != self.state.current_island_id
             && !crate::vm::endpoint_response_from_authorized_source(
                 self,
                 *endpoint_id,
-                *from_island,
+                self.state.current_island_id,
             )
         {
             return None;
         }
-        Some(EndpointResponseActivationKey {
+        Some(EndpointActivationKey {
             endpoint_id: *endpoint_id,
-            fiber_key: *fiber_key,
-            wait_id: *wait_id,
+            wait_key,
         })
     }
 
     fn local_endpoint_response_consumption_key_for_wake(
         &self,
         wake: &WakeCommand,
-    ) -> Option<EndpointResponseActivationKey> {
+    ) -> Option<EndpointActivationKey> {
         let key = self.endpoint_response_activation_key_for_wake(wake)?;
-        match &wake.payload {
-            RuntimePayload::QueueWake(
-                QueueRuntimeWake::ClosedReceiver { waiter, .. }
-                | QueueRuntimeWake::ClosedSender { waiter, .. },
-            ) if waiter.island_id == self.state.current_island_id => Some(key),
+        match wake {
+            WakeCommand::ClosedReceiver { waiter, .. }
+            | WakeCommand::ClosedSender { waiter, .. }
+                if waiter.island_id() == self.state.current_island_id =>
+            {
+                Some(key)
+            }
             _ => None,
         }
     }
@@ -2110,24 +1823,20 @@ impl Vm {
     fn local_endpoint_response_consumption_key_for_island_command(
         &self,
         effect: &IslandCommandEffect,
-    ) -> Option<EndpointResponseActivationKey> {
+    ) -> Option<EndpointActivationKey> {
         let key = self.endpoint_response_activation_key_for_island_command(effect)?;
         let IslandCommand::EndpointResponse {
-            endpoint_id,
-            kind,
-            from_island,
-            ..
+            endpoint_id, kind, ..
         } = &effect.command
         else {
             return None;
         };
         if effect.island_id != self.state.current_island_id
-            || *from_island != self.state.current_island_id
             || matches!(kind, EndpointResponseKind::Closed)
             || !crate::vm::endpoint_response_from_authorized_source(
                 self,
                 *endpoint_id,
-                *from_island,
+                self.state.current_island_id,
             )
         {
             return None;
@@ -2139,11 +1848,20 @@ impl Vm {
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
+        let mut sources = HashSet::new();
+        sources
+            .try_reserve(
+                transition
+                    .wakes
+                    .len()
+                    .saturating_add(transition.island_commands.len()),
+            )
+            .map_err(|_| VmError::Jit("endpoint authorization plan allocation failed".into()))?;
         for wake in &transition.wakes {
             let Some(source) = self.endpoint_response_authorization_source_for_wake(wake) else {
                 continue;
             };
-            self.preflight_endpoint_response_authorization_stable(source, transition)?;
+            sources.insert(source);
         }
         for effect in &transition.island_commands {
             let Some(source) =
@@ -2151,7 +1869,97 @@ impl Vm {
             else {
                 continue;
             };
-            self.preflight_endpoint_response_authorization_stable(source, transition)?;
+            sources.insert(source);
+        }
+        if sources.is_empty() {
+            return Ok(());
+        }
+
+        let mut local_closed_wakes = HashSet::new();
+        local_closed_wakes
+            .try_reserve(transition.wakes.len())
+            .map_err(|_| VmError::Jit("endpoint authorization plan allocation failed".into()))?;
+        for wake in &transition.wakes {
+            let (WakeCommand::ClosedReceiver {
+                waiter,
+                endpoint_id,
+            }
+            | WakeCommand::ClosedSender {
+                waiter,
+                endpoint_id,
+            }) = wake
+            else {
+                continue;
+            };
+            if waiter.island_id() == self.state.current_island_id
+                && waiter.endpoint_wait_key().is_some()
+            {
+                if let Some(endpoint_id) = endpoint_id {
+                    local_closed_wakes.insert(*endpoint_id);
+                }
+            }
+        }
+
+        let mut close_handoffs = HashSet::new();
+        close_handoffs
+            .try_reserve(transition.island_commands.len())
+            .map_err(|_| VmError::Jit("endpoint authorization plan allocation failed".into()))?;
+        for effect in &transition.island_commands {
+            if let IslandCommand::EndpointRequest {
+                endpoint_id,
+                kind: EndpointRequestKind::Close,
+            } = effect.command
+            {
+                close_handoffs.insert((endpoint_id, effect.island_id));
+            }
+        }
+
+        let mut tombstones = HashMap::<u64, Vec<Option<u32>>>::new();
+        tombstones
+            .try_reserve(transition.endpoint_tombstones.len())
+            .map_err(|_| VmError::Jit("endpoint authorization plan allocation failed".into()))?;
+        for tombstone in &transition.endpoint_tombstones {
+            let entries = tombstones.entry(tombstone.endpoint_id).or_default();
+            entries.try_reserve(1).map_err(|_| {
+                VmError::Jit("endpoint authorization plan allocation failed".into())
+            })?;
+            entries.push(tombstone.response_source);
+        }
+
+        for source in sources {
+            let before = crate::vm::endpoint_response_from_authorized_source(
+                self,
+                source.endpoint_id,
+                source.from_island,
+            );
+            let mut projected = self
+                .state
+                .endpoint_registry
+                .tombstone_response_source(source.endpoint_id);
+            if local_closed_wakes.contains(&source.endpoint_id) {
+                projected = Some(Some(self.state.current_island_id));
+            }
+            if let Some(entries) = tombstones.get(&source.endpoint_id) {
+                for response_source in entries {
+                    let is_close_handoff = source.from_island == self.state.current_island_id
+                        && *response_source == Some(source.target_island)
+                        && close_handoffs.contains(&(source.endpoint_id, source.target_island));
+                    if is_close_handoff {
+                        continue;
+                    }
+                    projected = Some(response_source.or(projected.flatten()));
+                }
+            }
+            let after = match projected {
+                Some(Some(owner)) => owner == source.from_island,
+                Some(None) => source.from_island == self.state.current_island_id,
+                None => before,
+            };
+            if before != after {
+                return Err(VmError::Jit(
+                    "runtime transition endpoint response authorization drift".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -2161,15 +1969,15 @@ impl Vm {
         wake: &WakeCommand,
     ) -> Option<EndpointResponseAuthorizationSource> {
         let key = self.endpoint_response_activation_key_for_wake(wake)?;
-        match &wake.payload {
-            RuntimePayload::QueueWake(
-                QueueRuntimeWake::ClosedReceiver { waiter, .. }
-                | QueueRuntimeWake::ClosedSender { waiter, .. },
-            ) if waiter.island_id != self.state.current_island_id => {
+        match wake {
+            WakeCommand::ClosedReceiver { waiter, .. }
+            | WakeCommand::ClosedSender { waiter, .. }
+                if waiter.island_id() != self.state.current_island_id =>
+            {
                 Some(EndpointResponseAuthorizationSource {
                     endpoint_id: key.endpoint_id,
                     from_island: self.state.current_island_id,
-                    target_island: waiter.island_id,
+                    target_island: waiter.island_id(),
                 })
             }
             _ => None,
@@ -2180,120 +1988,13 @@ impl Vm {
         &self,
         effect: &IslandCommandEffect,
     ) -> Option<EndpointResponseAuthorizationSource> {
-        let IslandCommand::EndpointResponse {
-            endpoint_id,
-            from_island,
-            ..
-        } = &effect.command
-        else {
+        let IslandCommand::EndpointResponse { endpoint_id, .. } = &effect.command else {
             return None;
         };
         Some(EndpointResponseAuthorizationSource {
             endpoint_id: *endpoint_id,
-            from_island: *from_island,
+            from_island: self.state.current_island_id,
             target_island: effect.island_id,
-        })
-    }
-
-    fn preflight_endpoint_response_authorization_stable(
-        &self,
-        source: EndpointResponseAuthorizationSource,
-        transition: &RuntimeTransition,
-    ) -> Result<(), VmError> {
-        let before = crate::vm::endpoint_response_from_authorized_source(
-            self,
-            source.endpoint_id,
-            source.from_island,
-        );
-        let after = self.endpoint_response_authorized_after_pre_island_effects(source, transition);
-        if before != after {
-            return Err(VmError::Jit(
-                "runtime transition endpoint response authorization drift".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn endpoint_response_authorized_after_pre_island_effects(
-        &self,
-        source: EndpointResponseAuthorizationSource,
-        transition: &RuntimeTransition,
-    ) -> bool {
-        let mut tombstone_response_source = self
-            .state
-            .endpoint_registry
-            .tombstone_response_source(source.endpoint_id);
-        for wake in &transition.wakes {
-            let RuntimePayload::QueueWake(
-                QueueRuntimeWake::ClosedReceiver {
-                    waiter,
-                    endpoint_id: wake_endpoint_id,
-                }
-                | QueueRuntimeWake::ClosedSender {
-                    waiter,
-                    endpoint_id: wake_endpoint_id,
-                },
-            ) = &wake.payload
-            else {
-                continue;
-            };
-            let Some(wake_endpoint_id) = wake_endpoint_id else {
-                continue;
-            };
-            if *wake_endpoint_id != source.endpoint_id
-                || waiter.island_id != self.state.current_island_id
-                || waiter.endpoint_wait_id() == 0
-            {
-                continue;
-            }
-            tombstone_response_source = Some(Some(self.state.current_island_id));
-        }
-        for tombstone in &transition.endpoint_tombstones {
-            if tombstone.endpoint_id != source.endpoint_id {
-                continue;
-            }
-            if self.endpoint_response_tombstone_is_close_handoff(tombstone, source, transition) {
-                continue;
-            }
-            let preserved_source = tombstone_response_source.flatten();
-            tombstone_response_source = Some(tombstone.response_source.or(preserved_source));
-        }
-        match tombstone_response_source {
-            Some(Some(owner)) => owner == source.from_island,
-            Some(None) => source.from_island == self.state.current_island_id,
-            None => crate::vm::endpoint_response_from_authorized_source(
-                self,
-                source.endpoint_id,
-                source.from_island,
-            ),
-        }
-    }
-
-    fn endpoint_response_tombstone_is_close_handoff(
-        &self,
-        tombstone: &EndpointTombstone,
-        source: EndpointResponseAuthorizationSource,
-        transition: &RuntimeTransition,
-    ) -> bool {
-        if source.from_island != self.state.current_island_id
-            || tombstone.response_source != Some(source.target_island)
-        {
-            return false;
-        }
-        transition.island_commands.iter().any(|effect| {
-            if effect.island_id != source.target_island {
-                return false;
-            }
-            matches!(
-                &effect.command,
-                IslandCommand::EndpointRequest {
-                    endpoint_id,
-                    kind: EndpointRequestKind::Close,
-                    from_island,
-                    ..
-                } if *endpoint_id == source.endpoint_id
-                    && *from_island == self.state.current_island_id
-            )
         })
     }
 
@@ -2301,18 +2002,19 @@ impl Vm {
         &self,
         transition: &RuntimeTransition,
     ) -> Result<(), VmError> {
-        let mut seen = Vec::new();
+        let mut seen = HashSet::new();
+        seen.try_reserve(transition.island_commands.len())
+            .map_err(|_| VmError::Jit("endpoint request plan allocation failed".into()))?;
         for command in &transition.island_commands {
             let Some(key) = self.endpoint_request_activation_key_for_island_command(command)?
             else {
                 continue;
             };
-            if seen.contains(&key) {
+            if !seen.insert(key) {
                 return Err(VmError::Jit(
                     "runtime transition contains duplicate endpoint request activation".to_string(),
                 ));
             }
-            seen.push(key);
         }
         Ok(())
     }
@@ -2320,55 +2022,37 @@ impl Vm {
     fn endpoint_request_activation_key_for_island_command(
         &self,
         effect: &IslandCommandEffect,
-    ) -> Result<Option<EndpointRequestActivationKey>, VmError> {
-        let IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind,
-            fiber_key,
-            wait_id,
-            ..
-        } = &effect.command
-        else {
+    ) -> Result<Option<EndpointActivationKey>, VmError> {
+        let IslandCommand::EndpointRequest { endpoint_id, kind } = &effect.command else {
             return Ok(None);
         };
-        if !endpoint_request_expects_pending_response(kind) {
+        let Some(wait_key) = kind.wait_key() else {
             return Ok(None);
-        }
-        if *fiber_key == 0 || *wait_id == 0 {
-            return Err(VmError::Jit(
-                "endpoint request activation missing response wait identity".to_string(),
-            ));
-        }
-        validate_canonical_fiber_key(*fiber_key, "endpoint request activation")
+        };
+        validate_canonical_fiber_key(wait_key.fiber_key(), "endpoint request activation")
             .map_err(VmError::Jit)?;
-        Ok(Some(EndpointRequestActivationKey {
+        Ok(Some(EndpointActivationKey {
             endpoint_id: *endpoint_id,
-            fiber_key: *fiber_key,
-            wait_id: *wait_id,
+            wait_key,
         }))
     }
 
     fn preflight_runtime_wake(&self, wake: &WakeCommand) -> Result<(), VmError> {
-        if let RuntimePayload::QueueWake(ref queue_wake) = wake.payload {
-            wake.validate_queue_identity(queue_wake)
-                .map_err(VmError::Jit)?;
-            self.validate_queue_wake_payload(queue_wake)
-                .map_err(VmError::Jit)?;
-        }
-        match &wake.payload {
-            RuntimePayload::QueueWake(QueueRuntimeWake::Waiter {
+        self.validate_queue_wake_payload(wake)
+            .map_err(VmError::Jit)?;
+        match wake {
+            WakeCommand::Waiter {
                 waiter,
                 select_result,
-            }) => self.preflight_queue_waiter_wake(waiter, select_result.as_ref()),
-            RuntimePayload::QueueWake(QueueRuntimeWake::ClosedReceiver {
+            } => self.preflight_queue_waiter_wake(waiter, select_result.as_ref()),
+            WakeCommand::ClosedReceiver {
                 waiter,
                 endpoint_id,
-            }) => self.preflight_closed_receiver_wake(waiter, *endpoint_id),
-            RuntimePayload::QueueWake(QueueRuntimeWake::ClosedSender {
+            } => self.preflight_closed_receiver_wake(waiter, *endpoint_id),
+            WakeCommand::ClosedSender {
                 waiter,
                 endpoint_id,
-            }) => self.preflight_closed_sender_wake(waiter, *endpoint_id),
-            _ => Ok(()),
+            } => self.preflight_closed_sender_wake(waiter, *endpoint_id),
         }
     }
 
@@ -2377,12 +2061,12 @@ impl Vm {
         waiter: &QueueWaiter,
         select_result: Option<&SelectWokenResult>,
     ) -> Result<(), VmError> {
-        if waiter.endpoint_wait_id() != 0 {
+        if waiter.endpoint_wait_key().is_some() {
             return Err(VmError::Jit(
                 "runtime queue waiter wake was rejected".to_string(),
             ));
         }
-        if waiter.island_id == self.state.current_island_id {
+        if waiter.island_id() == self.state.current_island_id {
             if self
                 .scheduler
                 .can_wake_queue_waiter_with_result(waiter, select_result)
@@ -2398,22 +2082,15 @@ impl Vm {
         ))
     }
 
-    fn preflight_remote_wake_fiber_command(&self, waiter: &QueueWaiter) -> Result<(), VmError> {
-        let _ = waiter;
-        Err(VmError::Jit(
-            "remote WakeFiber command must use an endpoint response".to_string(),
-        ))
-    }
-
     fn preflight_remote_select_wake_shape(&self, waiter: &QueueWaiter) -> Result<(), VmError> {
-        if waiter.select.is_some() {
+        if waiter.select_info().is_some() {
             return Err(VmError::Jit(
                 "remote select wake cannot be represented without select payload".to_string(),
             ));
         }
         validate_canonical_fiber_key(waiter.fiber_key(), "remote queue waiter wake")
             .map_err(VmError::Jit)?;
-        self.preflight_island_route(waiter.island_id)
+        self.preflight_island_route(waiter.island_id())
     }
 
     fn preflight_local_closed_queue_waiter(
@@ -2421,9 +2098,11 @@ impl Vm {
         waiter: &QueueWaiter,
         context: &str,
     ) -> Result<(), VmError> {
-        let ch =
-            crate::exec::validate_queue_handle(&self.state.gc, waiter.queue_ref as GcRef, context)
-                .map_err(VmError::Jit)?;
+        let Some((queue_ref, _)) = waiter.queue_identity() else {
+            return Err(VmError::Jit(format!("{context} missing queue identity")));
+        };
+        let ch = crate::exec::validate_queue_handle(&self.state.gc, queue_ref as GcRef, context)
+            .map_err(VmError::Jit)?;
         if unsafe { queue::is_closed(ch) } {
             return Ok(());
         }
@@ -2435,7 +2114,7 @@ impl Vm {
         waiter: &QueueWaiter,
         endpoint_id: Option<u64>,
     ) -> Result<(), VmError> {
-        if waiter.endpoint_wait_id() != 0 {
+        if let Some(wait_key) = waiter.endpoint_wait_key() {
             let Some(endpoint_id) = endpoint_id else {
                 return Err(VmError::Jit(
                     "closed endpoint receiver wake missing endpoint id".to_string(),
@@ -2447,10 +2126,11 @@ impl Vm {
                 &EndpointResponseKind::RecvData {
                     data: Vec::new(),
                     closed: true,
+                    wait_key,
                 },
             );
         }
-        if waiter.island_id == self.state.current_island_id {
+        if waiter.island_id() == self.state.current_island_id {
             self.preflight_local_closed_queue_waiter(waiter, "closed receiver wake")?;
             if self
                 .scheduler
@@ -2472,7 +2152,7 @@ impl Vm {
         waiter: &QueueWaiter,
         endpoint_id: Option<u64>,
     ) -> Result<(), VmError> {
-        if waiter.endpoint_wait_id() != 0 {
+        if let Some(wait_key) = waiter.endpoint_wait_key() {
             let Some(endpoint_id) = endpoint_id else {
                 return Err(VmError::Jit(
                     "closed endpoint sender wake missing endpoint id".to_string(),
@@ -2481,13 +2161,16 @@ impl Vm {
             return self.preflight_endpoint_response_for_waiter(
                 waiter,
                 endpoint_id,
-                &EndpointResponseKind::SendAck { closed: true },
+                &EndpointResponseKind::SendAck {
+                    closed: true,
+                    wait_key,
+                },
             );
         }
-        if waiter.island_id == self.state.current_island_id {
+        if waiter.island_id() == self.state.current_island_id {
             self.preflight_local_closed_queue_waiter(waiter, "closed sender wake")?;
             if self.scheduler.can_wake_queue_sender_closed(waiter) {
-                if waiter.select.is_none() {
+                if waiter.select_info().is_none() {
                     let key = FiberWakeKey::from_packed(waiter.fiber_key());
                     let Some(fiber) = self.scheduler.try_get_fiber_by_wake_key(key) else {
                         return Err(VmError::Jit(
@@ -2514,7 +2197,7 @@ impl Vm {
         endpoint_id: u64,
         kind: &EndpointResponseKind,
     ) -> Result<(), VmError> {
-        if waiter.island_id != self.state.current_island_id {
+        if waiter.island_id() != self.state.current_island_id {
             if !crate::vm::endpoint_response_from_authorized_source(
                 self,
                 endpoint_id,
@@ -2526,15 +2209,10 @@ impl Vm {
             }
             validate_canonical_fiber_key(waiter.fiber_key(), "remote endpoint wake response")
                 .map_err(VmError::Jit)?;
-            return self.preflight_island_route(waiter.island_id);
+            return self.preflight_island_route(waiter.island_id());
         }
         self.preflight_same_island_endpoint_wake_response_source(endpoint_id, kind)?;
-        if self.can_accept_endpoint_response(
-            waiter.fiber_key(),
-            endpoint_id,
-            waiter.endpoint_wait_id(),
-            kind,
-        ) {
+        if self.can_accept_endpoint_response(endpoint_id, kind) {
             return Ok(());
         }
         Err(VmError::Jit(
@@ -2578,19 +2256,16 @@ impl Vm {
         Ok(())
     }
 
-    fn can_accept_endpoint_response(
-        &self,
-        fiber_key: u64,
-        endpoint_id: u64,
-        wait_id: u64,
-        kind: &EndpointResponseKind,
-    ) -> bool {
+    fn can_accept_endpoint_response(&self, endpoint_id: u64, kind: &EndpointResponseKind) -> bool {
         if self.state.pending_island_responses == 0 {
             return false;
         }
+        let Some(wait_key) = kind.wait_key() else {
+            return false;
+        };
         let Some(fiber) = self
             .scheduler
-            .try_get_fiber_by_endpoint_response_key(fiber_key)
+            .try_get_fiber_by_endpoint_response_key(wait_key.fiber_key())
         else {
             return false;
         };
@@ -2600,30 +2275,30 @@ impl Vm {
         ) {
             return false;
         }
-        if matches!(kind, EndpointResponseKind::SendAck { closed: true })
+        if matches!(kind, EndpointResponseKind::SendAck { closed: true, .. })
             && replay_current_instruction_policy(fiber, "endpoint closed send response").is_err()
         {
             return false;
         }
-        fiber.can_apply_endpoint_response(endpoint_id, wait_id, kind)
+        fiber.can_apply_endpoint_response(endpoint_id, kind)
     }
 
     fn preflight_same_island_endpoint_response_command(
         &self,
         endpoint_id: u64,
         kind: &EndpointResponseKind,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
     ) -> Result<(), VmError> {
-        validate_same_island_endpoint_response_source(self.state.current_island_id, from_island)?;
-        if !crate::vm::endpoint_response_from_authorized_source(self, endpoint_id, from_island) {
+        if !crate::vm::endpoint_response_from_authorized_source(
+            self,
+            endpoint_id,
+            self.state.current_island_id,
+        ) {
             return Ok(());
         }
         if matches!(kind, EndpointResponseKind::Closed) {
             return Ok(());
         }
-        if self.can_accept_endpoint_response(fiber_key, endpoint_id, wait_id, kind) {
+        if self.can_accept_endpoint_response(endpoint_id, kind) {
             return Ok(());
         }
         Err(VmError::Jit(
@@ -2650,52 +2325,17 @@ impl Vm {
                         "same-island WakeHostEvent commands must use the host wake API".to_string(),
                     ));
                 }
-                IslandCommand::EndpointRequest {
-                    endpoint_id,
-                    kind,
-                    from_island,
-                    fiber_key,
-                    wait_id,
-                } => {
-                    validate_same_island_endpoint_request_source(
-                        self.state.current_island_id,
-                        *from_island,
-                    )?;
-                    validate_endpoint_request_pending_response(kind, effect.pending_response)?;
+                IslandCommand::EndpointRequest { endpoint_id, kind } => {
                     self.preflight_endpoint_request_command(
                         *endpoint_id,
                         kind,
-                        *from_island,
-                        *fiber_key,
-                        *wait_id,
+                        self.state.current_island_id,
                     )?;
                 }
-                IslandCommand::EndpointResponse {
-                    endpoint_id,
-                    kind,
-                    from_island,
-                    fiber_key,
-                    wait_id,
-                } => {
-                    validate_non_request_pending_response(
-                        "EndpointResponse",
-                        effect.pending_response,
-                    )?;
-                    self.preflight_same_island_endpoint_response_command(
-                        *endpoint_id,
-                        kind,
-                        *from_island,
-                        *fiber_key,
-                        *wait_id,
-                    )?;
+                IslandCommand::EndpointResponse { endpoint_id, kind } => {
+                    self.preflight_same_island_endpoint_response_command(*endpoint_id, kind)?;
                 }
-                IslandCommand::WakeFiber { waiter } => {
-                    validate_non_request_pending_response("WakeFiber", effect.pending_response)?;
-                    self.preflight_same_island_wake_fiber_command(waiter)?;
-                }
-                IslandCommand::Shutdown => {
-                    validate_non_request_pending_response("Shutdown", effect.pending_response)?;
-                }
+                IslandCommand::Shutdown => {}
             }
             return Ok(());
         }
@@ -2711,54 +2351,20 @@ impl Vm {
             IslandCommand::SpawnFiber { .. }
             | IslandCommand::StartEntry { .. }
             | IslandCommand::WakeHostEvent { .. }
-            | IslandCommand::Shutdown => {
-                if effect.pending_response {
-                    return Err(VmError::Jit(
-                        "remote island command pending-response contract was rejected".to_string(),
-                    ));
-                }
-            }
-            IslandCommand::WakeFiber { waiter } => {
-                if waiter.island_id != effect.island_id || effect.pending_response {
-                    return Err(VmError::Jit(
-                        "remote WakeFiber command was rejected".to_string(),
-                    ));
-                }
-                self.preflight_remote_wake_fiber_command(waiter)?;
-            }
-            IslandCommand::EndpointRequest {
-                kind, from_island, ..
-            } => {
-                if *from_island != self.state.current_island_id {
-                    return Err(VmError::Jit(
-                        "remote EndpointRequest command was rejected".to_string(),
-                    ));
-                }
-                validate_endpoint_request_pending_response(kind, effect.pending_response)?;
-            }
-            IslandCommand::EndpointResponse {
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            } => {
-                if *from_island != self.state.current_island_id
-                    || effect.pending_response
-                    || (!matches!(kind, EndpointResponseKind::Closed)
-                        && (*fiber_key == 0
-                            || *wait_id == 0
-                            || validate_canonical_fiber_key(
-                                *fiber_key,
-                                "remote EndpointResponse command",
-                            )
-                            .is_err()))
-                    || !crate::vm::endpoint_response_from_authorized_source(
-                        self,
-                        *endpoint_id,
-                        *from_island,
+            | IslandCommand::Shutdown
+            | IslandCommand::EndpointRequest { .. } => {}
+            IslandCommand::EndpointResponse { endpoint_id, kind } => {
+                if (kind.wait_key().is_some_and(|wait_key| {
+                    validate_canonical_fiber_key(
+                        wait_key.fiber_key(),
+                        "remote EndpointResponse command",
                     )
-                {
+                    .is_err()
+                })) || !crate::vm::endpoint_response_from_authorized_source(
+                    self,
+                    *endpoint_id,
+                    self.state.current_island_id,
+                ) {
                     return Err(VmError::Jit(
                         "remote EndpointResponse command was rejected".to_string(),
                     ));
@@ -2766,33 +2372,6 @@ impl Vm {
             }
         }
         Ok(())
-    }
-
-    fn preflight_same_island_wake_fiber_command(
-        &self,
-        waiter: &QueueWaiter,
-    ) -> Result<(), VmError> {
-        if waiter.island_id != self.state.current_island_id
-            || waiter.endpoint_wait_id() != 0
-            || waiter.select.is_some()
-            || validate_queue_waiter_identity(waiter).is_err()
-        {
-            return Err(VmError::Jit(
-                "same-island WakeFiber command was rejected".to_string(),
-            ));
-        }
-        let wake_key = FiberWakeKey::from_packed(waiter.fiber_key());
-        let Some(fiber) = self.scheduler.try_get_fiber_by_wake_key(wake_key) else {
-            return Err(VmError::Jit(
-                "same-island WakeFiber command was rejected".to_string(),
-            ));
-        };
-        if fiber.remote_endpoint_wait.is_some() {
-            return Err(VmError::Jit(
-                "same-island WakeFiber command was rejected".to_string(),
-            ));
-        }
-        self.preflight_queue_waiter_wake(waiter, None)
     }
 
     fn preflight_island_route(&self, island_id: u32) -> Result<(), VmError> {
@@ -2815,6 +2394,12 @@ impl Vm {
     ) -> Result<(Vec<WakeCommand>, Vec<IslandCommandEffect>), VmError> {
         let mut local_wakes = Vec::new();
         let mut remote_commands = Vec::new();
+        local_wakes
+            .try_reserve(wakes.len())
+            .map_err(|_| VmError::Jit("runtime wake plan allocation failed".into()))?;
+        remote_commands
+            .try_reserve(wakes.len())
+            .map_err(|_| VmError::Jit("runtime wake plan allocation failed".into()))?;
         for wake in wakes {
             match self.remote_wake_command(&wake)? {
                 Some(command) => remote_commands.push(command),
@@ -2828,22 +2413,19 @@ impl Vm {
         &self,
         wake: &WakeCommand,
     ) -> Result<Option<IslandCommandEffect>, VmError> {
-        let RuntimePayload::QueueWake(queue_wake) = &wake.payload else {
-            return Ok(None);
-        };
-        let waiter = queue_wake.waiter();
-        if waiter.island_id == self.state.current_island_id {
+        let waiter = wake.waiter();
+        if waiter.island_id() == self.state.current_island_id {
             return Ok(None);
         }
 
-        let effect = match queue_wake {
-            QueueRuntimeWake::Waiter { waiter, .. } => {
+        let effect = match wake {
+            WakeCommand::Waiter { waiter, .. } => {
                 self.preflight_remote_select_wake_shape(waiter)?;
                 return Err(VmError::Jit(
                     "remote queue waiter wake must use an endpoint response".to_string(),
                 ));
             }
-            QueueRuntimeWake::ClosedReceiver {
+            WakeCommand::ClosedReceiver {
                 waiter,
                 endpoint_id,
             } => {
@@ -2852,19 +2434,22 @@ impl Vm {
                         "closed endpoint receiver wake missing endpoint id".to_string(),
                     ));
                 };
+                let Some(wait_key) = waiter.endpoint_wait_key() else {
+                    return Err(VmError::Jit(
+                        "closed endpoint receiver wake missing wait identity".to_string(),
+                    ));
+                };
                 IslandCommandEffect::endpoint_response(
-                    waiter.island_id,
-                    self.state.current_island_id,
+                    waiter.island_id(),
                     endpoint_id,
                     EndpointResponseKind::RecvData {
                         data: Vec::new(),
                         closed: true,
+                        wait_key,
                     },
-                    waiter.fiber_key(),
-                    waiter.endpoint_wait_id(),
                 )
             }
-            QueueRuntimeWake::ClosedSender {
+            WakeCommand::ClosedSender {
                 waiter,
                 endpoint_id,
             } => {
@@ -2873,13 +2458,18 @@ impl Vm {
                         "closed endpoint sender wake missing endpoint id".to_string(),
                     ));
                 };
+                let Some(wait_key) = waiter.endpoint_wait_key() else {
+                    return Err(VmError::Jit(
+                        "closed endpoint sender wake missing wait identity".to_string(),
+                    ));
+                };
                 IslandCommandEffect::endpoint_response(
-                    waiter.island_id,
-                    self.state.current_island_id,
+                    waiter.island_id(),
                     endpoint_id,
-                    EndpointResponseKind::SendAck { closed: true },
-                    waiter.fiber_key(),
-                    waiter.endpoint_wait_id(),
+                    EndpointResponseKind::SendAck {
+                        closed: true,
+                        wait_key,
+                    },
                 )
             }
         };
@@ -2893,12 +2483,7 @@ impl Vm {
     ) -> Option<RuntimeRollback> {
         let mut rollbacks = Vec::new();
         for wake in &transition.wakes {
-            let RuntimePayload::QueueWake(queue_wake) = &wake.payload else {
-                continue;
-            };
-            if let Some(rollback) =
-                self.select_waiter_rollback_for_pending_wake(queue_wake.waiter())
-            {
+            if let Some(rollback) = self.select_waiter_rollback_for_pending_wake(wake.waiter()) {
                 rollbacks.push(rollback);
             }
         }
@@ -2912,8 +2497,8 @@ impl Vm {
         &self,
         waiter: &QueueWaiter,
     ) -> Option<RuntimeRollback> {
-        let select = waiter.select.as_ref()?;
-        if waiter.endpoint_wait_id() != 0 || waiter.island_id != self.state.current_island_id {
+        let select = waiter.select_info()?;
+        if waiter.island_id() != self.state.current_island_id {
             return None;
         }
         let wake_key = FiberWakeKey::from_packed(waiter.fiber_key());
@@ -2922,18 +2507,35 @@ impl Vm {
         if select_state.select_id != select.select_id {
             return None;
         }
-        let queues = select_state
-            .registered_queues
-            .iter()
-            .filter(|registered| !registered.queue.is_null())
-            .map(|registered| {
-                // Safety: select registration owns a rooted live local queue until cancellation.
-                (
-                    registered.queue,
-                    unsafe { queue::local_state_ref(registered.queue) }.clone(),
-                )
-            })
-            .collect();
+        let fiber_key = waiter.fiber_key();
+        let mut seen_queues = HashSet::new();
+        let mut queues = Vec::new();
+        for registered in &select_state.registered_queues {
+            if registered.queue.is_null() || !seen_queues.insert(registered.queue as usize) {
+                continue;
+            }
+            // Safety: select registration owns a rooted live local queue until cancellation.
+            let state = unsafe { queue::local_state_ref(registered.queue) };
+            let senders = state
+                .waiting_senders
+                .iter()
+                .enumerate()
+                .filter(|(_, (queued, _))| queued.is_select_for(fiber_key, select.select_id))
+                .map(|(index, (waiter, message))| (index, waiter.clone(), message.clone()))
+                .collect();
+            let receivers = state
+                .waiting_receivers
+                .iter()
+                .enumerate()
+                .filter(|(_, queued)| queued.is_select_for(fiber_key, select.select_id))
+                .map(|(index, queued)| (index, queued.clone()))
+                .collect();
+            queues.push(SelectQueueWaiterUndo {
+                ch: registered.queue,
+                senders,
+                receivers,
+            });
+        }
         Some(RuntimeRollback::select_waiters(
             waiter.fiber_key(),
             fiber.select_state.clone(),
@@ -2944,19 +2546,16 @@ impl Vm {
     #[cfg(feature = "jit")]
     fn cancel_select_sibling_waiters_for_transition(&mut self, transition: &RuntimeTransition) {
         for wake in &transition.wakes {
-            let RuntimePayload::QueueWake(queue_wake) = &wake.payload else {
-                continue;
-            };
-            self.cancel_select_sibling_waiters_for_pending_wake(queue_wake.waiter());
+            self.cancel_select_sibling_waiters_for_pending_wake(wake.waiter());
         }
     }
 
     #[cfg(feature = "jit")]
     fn cancel_select_sibling_waiters_for_pending_wake(&mut self, waiter: &QueueWaiter) {
-        let Some(select) = waiter.select.as_ref() else {
+        let Some(select) = waiter.select_info() else {
             return;
         };
-        if waiter.endpoint_wait_id() != 0 || waiter.island_id != self.state.current_island_id {
+        if waiter.island_id() != self.state.current_island_id {
             return;
         }
         let wake_key = FiberWakeKey::from_packed(waiter.fiber_key());
@@ -2969,14 +2568,19 @@ impl Vm {
         if select_state.select_id != select.select_id {
             return;
         }
+        let mut registered_queues = core::mem::take(&mut select_state.registered_queues);
+        registered_queues.sort_unstable_by_key(|registered| registered.queue as usize);
         let mut selected = Vec::new();
-        for registered in core::mem::take(&mut select_state.registered_queues) {
+        let mut cancelled_queue = None;
+        for registered in registered_queues {
             let is_selected = registered.case_index == select.case_index
                 && registered.queue as u64 == select.queue_ref
                 && registered.kind.wait_kind() == select.kind;
             if is_selected {
                 selected.push(registered);
-            } else if !registered.queue.is_null() {
+            } else if !registered.queue.is_null()
+                && cancelled_queue != Some(registered.queue as usize)
+            {
                 // Safety: the select state keeps every registered queue rooted and live.
                 unsafe {
                     queue::cancel_select_waiters(
@@ -2985,16 +2589,17 @@ impl Vm {
                         select.select_id,
                     );
                 }
+                cancelled_queue = Some(registered.queue as usize);
             }
         }
         select_state.registered_queues = selected;
     }
 
     fn cancel_select_sibling_waiters_for_wake(&mut self, waiter: &QueueWaiter) {
-        let Some(select) = waiter.select.as_ref() else {
+        let Some(select) = waiter.select_info() else {
             return;
         };
-        if waiter.endpoint_wait_id() != 0 || waiter.island_id != self.state.current_island_id {
+        if waiter.island_id() != self.state.current_island_id {
             return;
         }
         let wake_key = FiberWakeKey::from_packed(waiter.fiber_key());
@@ -3010,17 +2615,13 @@ impl Vm {
     }
 
     fn apply_runtime_wake(&mut self, wake: WakeCommand) -> Result<(), VmError> {
-        if let RuntimePayload::QueueWake(ref queue_wake) = wake.payload {
-            wake.validate_queue_identity(queue_wake)
-                .map_err(VmError::Jit)?;
-            self.validate_queue_wake_payload(queue_wake)
-                .map_err(VmError::Jit)?;
-        }
-        match wake.payload {
-            RuntimePayload::QueueWake(QueueRuntimeWake::Waiter {
+        self.validate_queue_wake_payload(&wake)
+            .map_err(VmError::Jit)?;
+        match wake {
+            WakeCommand::Waiter {
                 waiter,
                 select_result,
-            }) => {
+            } => {
                 if !self
                     .state
                     .wake_waiter(&waiter, select_result, &mut self.scheduler)
@@ -3033,11 +2634,11 @@ impl Vm {
                 self.cancel_select_sibling_waiters_for_wake(&waiter);
                 Ok(())
             }
-            RuntimePayload::QueueWake(QueueRuntimeWake::ClosedReceiver {
+            WakeCommand::ClosedReceiver {
                 waiter,
                 endpoint_id,
-            }) => {
-                if waiter.endpoint_wait_id() != 0 {
+            } => {
+                if let Some(wait_key) = waiter.endpoint_wait_key() {
                     let Some(endpoint_id) = endpoint_id else {
                         return Err(VmError::Jit(
                             "closed endpoint receiver wake missing endpoint id".to_string(),
@@ -3049,6 +2650,7 @@ impl Vm {
                         EndpointResponseKind::RecvData {
                             data: Vec::new(),
                             closed: true,
+                            wait_key,
                         },
                     )?;
                     return Ok(());
@@ -3065,11 +2667,11 @@ impl Vm {
                 self.cancel_select_sibling_waiters_for_wake(&waiter);
                 Ok(())
             }
-            RuntimePayload::QueueWake(QueueRuntimeWake::ClosedSender {
+            WakeCommand::ClosedSender {
                 waiter,
                 endpoint_id,
-            }) => {
-                if waiter.endpoint_wait_id() != 0 {
+            } => {
+                if let Some(wait_key) = waiter.endpoint_wait_key() {
                     let Some(endpoint_id) = endpoint_id else {
                         return Err(VmError::Jit(
                             "closed endpoint sender wake missing endpoint id".to_string(),
@@ -3078,12 +2680,15 @@ impl Vm {
                     self.apply_endpoint_response_for_waiter(
                         &waiter,
                         endpoint_id,
-                        EndpointResponseKind::SendAck { closed: true },
+                        EndpointResponseKind::SendAck {
+                            closed: true,
+                            wait_key,
+                        },
                     )?;
                     return Ok(());
                 }
-                let local_simple_sender =
-                    waiter.island_id == self.state.current_island_id && waiter.select.is_none();
+                let local_simple_sender = waiter.island_id() == self.state.current_island_id
+                    && waiter.select_info().is_none();
                 let woke = self
                     .state
                     .wake_closed_sender(&waiter, endpoint_id, &mut self.scheduler)
@@ -3109,9 +2714,6 @@ impl Vm {
                 }
                 Ok(())
             }
-            RuntimePayload::None
-            | RuntimePayload::HostEventData(_)
-            | RuntimePayload::EndpointResponse(_) => Ok(()),
         }
     }
 
@@ -3121,20 +2723,15 @@ impl Vm {
         endpoint_id: u64,
         kind: EndpointResponseKind,
     ) -> Result<(), VmError> {
-        if waiter.island_id == self.state.current_island_id {
+        if waiter.island_id() == self.state.current_island_id {
             let from_island = self.state.current_island_id;
-            let endpoint_registry_snapshot = if endpoint_response_kind_is_closed(&kind)
+            let endpoint_registry_undo = if endpoint_response_kind_is_closed(&kind)
                 && !crate::vm::endpoint_response_from_authorized_source(
                     self,
                     endpoint_id,
                     from_island,
                 ) {
-                if !self.can_accept_endpoint_response(
-                    waiter.fiber_key(),
-                    endpoint_id,
-                    waiter.endpoint_wait_id(),
-                    &kind,
-                ) {
+                if !self.can_accept_endpoint_response(endpoint_id, &kind) {
                     return Err(VmError::Jit(
                         "same-island endpoint wake response was rejected".to_string(),
                     ));
@@ -3154,11 +2751,21 @@ impl Vm {
                     Some(Some(source)) if source != from_island
                 );
                 if !foreign_live_remote && !foreign_tombstone {
-                    let snapshot = self.state.endpoint_registry.snapshot();
+                    let mut undo = EndpointRegistryUndo::default();
+                    undo.try_reserve(1).map_err(|_| {
+                        VmError::Jit("endpoint response rollback allocation failed".into())
+                    })?;
+                    self.state
+                        .endpoint_registry
+                        .try_reserve_live(1)
+                        .map_err(|_| {
+                            VmError::Jit("endpoint response registry allocation failed".into())
+                        })?;
+                    undo.record(&self.state.endpoint_registry, endpoint_id);
                     self.state
                         .endpoint_registry
                         .mark_tombstone_with_response_source(endpoint_id, Some(from_island));
-                    Some(snapshot)
+                    Some(undo)
                 } else {
                     None
                 }
@@ -3168,13 +2775,11 @@ impl Vm {
             let outcome = self.apply_runtime_command(RuntimeCommand::endpoint_response(
                 endpoint_id,
                 from_island,
-                waiter.fiber_key(),
-                waiter.endpoint_wait_id(),
                 kind,
             ));
             if !outcome.applied || !outcome.payload_accepted {
-                if let Some(snapshot) = endpoint_registry_snapshot {
-                    self.state.endpoint_registry.restore(snapshot);
+                if let Some(undo) = endpoint_registry_undo {
+                    undo.restore(&mut self.state.endpoint_registry);
                 }
                 return Err(VmError::Jit(
                     "same-island endpoint wake response was rejected".to_string(),
@@ -3183,24 +2788,21 @@ impl Vm {
             return Ok(());
         }
         self.apply_island_command_effect(IslandCommandEffect::endpoint_response(
-            waiter.island_id,
-            self.state.current_island_id,
+            waiter.island_id(),
             endpoint_id,
             kind,
-            waiter.fiber_key(),
-            waiter.endpoint_wait_id(),
         ))
     }
 
-    fn validate_queue_wake_payload(&self, wake: &QueueRuntimeWake) -> Result<(), String> {
-        let QueueRuntimeWake::Waiter {
+    fn validate_queue_wake_payload(&self, wake: &WakeCommand) -> Result<(), String> {
+        let WakeCommand::Waiter {
             waiter,
             select_result,
         } = wake
         else {
             return Ok(());
         };
-        match (waiter.select.as_ref(), select_result) {
+        match (waiter.select_info(), select_result) {
             (None, None) => Ok(()),
             (None, Some(_)) => Err("select wake payload attached to non-select waiter".to_string()),
             (Some(select), None) if select.kind == SelectWaitKind::Recv => {
@@ -3210,8 +2812,7 @@ impl Vm {
                 Err("select send wake missing payload".to_string())
             }
             (Some(select), Some(SelectWokenResult::SendAccepted))
-                if select.kind == SelectWaitKind::Send
-                    && waiter.kind == Some(SelectWaitKind::Send) =>
+                if select.kind == SelectWaitKind::Send =>
             {
                 Ok(())
             }
@@ -3222,16 +2823,16 @@ impl Vm {
                     slot_types,
                     closed,
                 }),
-            ) if select.kind == SelectWaitKind::Recv
-                && waiter.kind == Some(SelectWaitKind::Recv) =>
-            {
+            ) if select.kind == SelectWaitKind::Recv => {
                 let ch = crate::exec::validate_queue_handle(
                     &self.state.gc,
                     select.queue_ref as vo_runtime::gc::GcRef,
                     "select wake recv payload",
                 )?;
-                let expected_slot_types =
-                    crate::exec::queue::select_woken_recv_slot_types(ch, self.module.as_deref())?;
+                let expected_slot_types = crate::exec::queue::select_woken_recv_slot_types(
+                    ch,
+                    self.module_runtime_metadata(),
+                )?;
                 crate::exec::queue::validate_select_woken_recv_payload_layout(
                     data.len(),
                     slot_types,
@@ -3250,8 +2851,9 @@ impl Vm {
     }
 
     fn apply_island_command_effect(&mut self, effect: IslandCommandEffect) -> Result<(), VmError> {
+        let expects_response = effect.expects_response();
         if effect.island_id == self.state.current_island_id {
-            if effect.pending_response {
+            if expects_response {
                 self.state.pending_island_responses = self
                     .state
                     .pending_island_responses
@@ -3264,7 +2866,7 @@ impl Vm {
                     })?;
             }
             let result = self.dispatch_island_command(effect.command);
-            if result.is_err() && effect.pending_response {
+            if result.is_err() && expects_response {
                 self.state.pending_island_responses =
                     self.state.pending_island_responses.saturating_sub(1);
             }
@@ -3297,7 +2899,7 @@ impl Vm {
                 ),
             ));
         }
-        if effect.pending_response {
+        if expects_response {
             self.state.pending_island_responses = self
                 .state
                 .pending_island_responses
@@ -3319,6 +2921,12 @@ impl Vm {
     ) -> Result<(Vec<IslandCommandEffect>, Vec<RemoteIslandCommandCommit>), VmError> {
         let mut local_commands = Vec::new();
         let mut remote_commands = Vec::new();
+        local_commands
+            .try_reserve(island_commands.len())
+            .map_err(|_| VmError::Jit("runtime command plan allocation failed".into()))?;
+        remote_commands
+            .try_reserve(island_commands.len())
+            .map_err(|_| VmError::Jit("runtime command plan allocation failed".into()))?;
         for effect in island_commands {
             if effect.island_id == self.state.current_island_id {
                 local_commands.push(effect);
@@ -3341,7 +2949,6 @@ impl Vm {
             remote_commands.push(RemoteIslandCommandCommit {
                 island_id: effect.island_id,
                 command: effect.command,
-                pending_response: effect.pending_response,
                 #[cfg(feature = "std")]
                 reservation,
             });
@@ -3351,6 +2958,7 @@ impl Vm {
 
     fn commit_remote_island_commands(&mut self, remote_commands: Vec<RemoteIslandCommandCommit>) {
         for effect in remote_commands {
+            let expects_response = island_command_expects_response(&effect.command);
             #[cfg(feature = "std")]
             {
                 if let Some(reservation) = effect.reservation {
@@ -3375,7 +2983,7 @@ impl Vm {
                     ),
                 ));
             }
-            if effect.pending_response {
+            if expects_response {
                 self.state.pending_island_responses = self
                     .state
                     .pending_island_responses
@@ -3403,11 +3011,11 @@ impl Vm {
         self.mark_gc_all_roots_dirty();
     }
 
-    fn apply_pending_spawns(&mut self, spawns: Vec<Fiber>) -> Result<(), VmError> {
-        for fiber in spawns {
+    fn apply_pending_spawns(&mut self, spawns: Vec<PendingSpawn>) -> Result<(), VmError> {
+        for spawn in spawns {
             self.scheduler
-                .try_spawn(fiber)
-                .map_err(|err| VmError::Jit(err.to_string()))?;
+                .try_spawn_pending(spawn)
+                .map_err(scheduler_error_to_vm_error)?;
         }
         Ok(())
     }

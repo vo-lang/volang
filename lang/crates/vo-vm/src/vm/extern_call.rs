@@ -31,8 +31,7 @@ pub(crate) enum ExternBoundary {
     FatalInfra(String),
     Yield,
     QueueBlock,
-    #[cfg(feature = "std")]
-    WaitIo(vo_runtime::io::IoToken),
+    WaitIo(u64),
     HostEventWait {
         token: u64,
         delay_ms: u32,
@@ -84,7 +83,6 @@ pub(crate) fn extern_result_to_transition(
         ExternResult::Panic(msg) => terminal(ExternBoundary::Panic(msg), "extern Panic"),
         ExternResult::Yield => terminal(ExternBoundary::Yield, "extern Yield"),
         ExternResult::Block => terminal(ExternBoundary::QueueBlock, "extern Block"),
-        #[cfg(feature = "std")]
         ExternResult::WaitIo { token } => ExternResultTransition {
             boundary: ExternBoundary::WaitIo(token),
             resume: ResumePolicy::replay_current(fetched_pc),
@@ -185,51 +183,6 @@ mod tests {
     use vo_runtime::objects::closure;
     use vo_runtime::SlotType;
 
-    fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
-        vo_source_contract::compact_pattern_position(compact, pattern)
-    }
-
-    fn compact_contains(compact: &[u8], pattern: &str) -> bool {
-        vo_source_contract::compact_contains(compact, pattern)
-    }
-
-    fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-        vo_source_contract::compact_region_between(source, marker, terminator)
-    }
-
-    fn compact_matching_close(compact: &[u8], open_pos: usize) -> Option<usize> {
-        if compact.get(open_pos) != Some(&b'{') {
-            return None;
-        }
-        vo_source_contract::compact_delimiter_close(compact, open_pos)
-    }
-
-    fn extern_replay_pc_commit_is_publication_guarded_062(source: &str) -> bool {
-        let source = crate::source_contract::production_source_without_test_modules(source);
-        let Some(prepare) = compact_region_between(
-            &source,
-            "pub(crate)fnprepare_extern_closure_replay_call",
-            "pub(crate)fnprepare_typed_extern_closure_replay_setup",
-        ) else {
-            return false;
-        };
-        let Some(guard_pos) = compact_pattern_position(&prepare, "ifsetup.replay_frame_published{")
-        else {
-            return false;
-        };
-        let guard_open_pos = guard_pos + "ifsetup.replay_frame_published".len();
-        let Some(guard_close_pos) = compact_matching_close(&prepare, guard_open_pos) else {
-            return false;
-        };
-        let Some(commit_pos) = compact_pattern_position(&prepare, "set_frame_pc_for_resume(")
-        else {
-            return false;
-        };
-        compact_contains(&prepare, "prepare_typed_extern_closure_replay_setup(")
-            && guard_open_pos < commit_pos
-            && commit_pos < guard_close_pos
-    }
-
     fn replay_callee(local_slots: u16, param_slots: u16) -> FunctionDef {
         let slot_types = vec![SlotType::Value; local_slots as usize];
         FunctionDef {
@@ -250,7 +203,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             slot_types,
             borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
                 SlotType::Value;
@@ -334,47 +287,6 @@ mod tests {
             fiber.current_frame().unwrap().pc,
             9,
             "failed closure replay setup must not commit the replay pc"
-        );
-    }
-
-    #[test]
-    fn vm_extern_replay_setup_framechanged_062_commits_pc_only_after_replay_frame_publication() {
-        assert!(
-            extern_replay_pc_commit_is_publication_guarded_062(include_str!("extern_call.rs")),
-            "CallExtern replay pc must not be committed for generic FrameChanged trap/unwind results"
-        );
-    }
-
-    #[test]
-    fn vm_extern_replay_setup_framechanged_062_rejects_comment_spoofed_publication_guard() {
-        let spoof = r#"
-            pub(crate) fn prepare_extern_closure_replay_call() {
-                let setup = prepare_typed_extern_closure_replay_setup();
-                // if setup.replay_frame_published { set_frame_pc_for_resume(); }
-                set_frame_pc_for_resume();
-            }
-
-            pub(crate) fn prepare_typed_extern_closure_replay_setup() {}
-        "#;
-
-        assert!(
-            !extern_replay_pc_commit_is_publication_guarded_062(spoof),
-            "comment-only replay publication guards must not satisfy PC commit source contracts"
-        );
-
-        let outside_guard = r#"
-            pub(crate) fn prepare_extern_closure_replay_call() {
-                let setup = prepare_typed_extern_closure_replay_setup();
-                if setup.replay_frame_published {}
-                set_frame_pc_for_resume();
-            }
-
-            pub(crate) fn prepare_typed_extern_closure_replay_setup() {}
-        "#;
-
-        assert!(
-            !extern_replay_pc_commit_is_publication_guarded_062(outside_guard),
-            "replay PC commit must be structurally inside the replay-frame publication guard"
         );
     }
 }

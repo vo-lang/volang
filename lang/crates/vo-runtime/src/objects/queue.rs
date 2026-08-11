@@ -14,10 +14,12 @@
 //! access, len/close/is_closed, send_or_block/recv_or_block, GC drop_inner.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{alloc as heap_alloc, boxed::Box, vec::Vec};
 
 #[cfg(feature = "std")]
-use std::{boxed::Box, vec::Vec};
+use std::{alloc as heap_alloc, boxed::Box, vec::Vec};
+
+use core::alloc::Layout;
 
 use crate::gc::{Gc, GcRef};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
@@ -43,6 +45,31 @@ pub struct HomeInfoSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueEndpointError {
     MissingHomeInfo,
+    AllocationFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeInfoUndo {
+    remove_home_info: bool,
+    peer_island: u32,
+    remove_peer: bool,
+}
+
+fn try_box<T>(value: T) -> Result<Box<T>, ()> {
+    let layout = Layout::new::<T>();
+    let raw = if layout.size() == 0 {
+        core::ptr::NonNull::<T>::dangling().as_ptr()
+    } else {
+        let raw = unsafe { heap_alloc::alloc(layout) }.cast::<T>();
+        if raw.is_null() {
+            return Err(());
+        }
+        raw
+    };
+    unsafe {
+        raw.write(value);
+        Ok(Box::from_raw(raw))
+    }
 }
 
 impl LocalQueueState {
@@ -63,7 +90,14 @@ pub fn create(
     elem_slots: u16,
     cap: usize,
 ) -> GcRef {
-    let state = Box::new(LocalQueueState::new(cap));
+    let Ok(state) = LocalQueueState::try_new(cap) else {
+        gc.record_system_allocation_failure();
+        return core::ptr::null_mut();
+    };
+    let Ok(state) = try_box(state) else {
+        gc.record_system_allocation_failure();
+        return core::ptr::null_mut();
+    };
     create_with_state(gc, kind, elem_meta, elem_rttid, elem_slots, cap, state)
 }
 
@@ -102,7 +136,11 @@ fn create_fallible(
     elem_slots: u16,
     cap: usize,
 ) -> Result<GcRef, i32> {
-    let state = Box::new(LocalQueueState::try_new(cap).map_err(|_| super::alloc_error::OVERFLOW)?);
+    let state = LocalQueueState::try_new(cap).map_err(|_| super::alloc_error::OVERFLOW)?;
+    let state = try_box(state).map_err(|_| {
+        gc.record_system_allocation_failure();
+        super::alloc_error::OVERFLOW
+    })?;
     Ok(create_with_state(
         gc, kind, elem_meta, elem_rttid, elem_slots, cap, state,
     ))
@@ -143,15 +181,18 @@ pub fn create_remote_proxy_with_closed(
     closed: bool,
 ) -> GcRef {
     let kind = QueueKind::Port;
+    let Ok(proxy) = try_box(RemoteProxy {
+        endpoint_id,
+        home_island,
+        closed,
+    }) else {
+        gc.record_system_allocation_failure();
+        return core::ptr::null_mut();
+    };
     let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
     if chan.is_null() {
         return chan;
     }
-    let proxy = Box::new(RemoteProxy {
-        endpoint_id,
-        home_island,
-        closed,
-    });
     // Safety: `chan` is freshly allocated and not visible to the collector yet.
     let data = unsafe { QueueData::as_mut(chan) };
     data.state = 0; // no ChannelState for REMOTE
@@ -370,13 +411,50 @@ pub unsafe fn restore_home_info_snapshot(chan: GcRef, snapshot: Option<HomeInfoS
 
 pub unsafe fn add_home_peer(chan: GcRef, peer_island: u32) -> Result<u64, QueueEndpointError> {
     let info = unsafe { home_info_mut(chan) }.ok_or(QueueEndpointError::MissingHomeInfo)?;
-    info.peers.insert(peer_island);
+    if !info.peers.contains(&peer_island) {
+        info.peers
+            .try_reserve(1)
+            .map_err(|_| QueueEndpointError::AllocationFailed)?;
+        info.peers.insert(peer_island);
+    }
     Ok(info.endpoint_id)
+}
+
+pub unsafe fn home_info_undo(chan: GcRef, peer_island: u32) -> HomeInfoUndo {
+    let info = unsafe { home_info(chan) };
+    HomeInfoUndo {
+        remove_home_info: info.is_none(),
+        peer_island,
+        remove_peer: info.is_some_and(|info| !info.peers.contains(&peer_island)),
+    }
+}
+
+pub unsafe fn restore_home_info_undo(chan: GcRef, undo: HomeInfoUndo) {
+    let data = unsafe { QueueData::as_mut(chan) };
+    if undo.remove_home_info {
+        if data.endpoint_ptr != 0 {
+            unsafe { drop(Box::from_raw(data.endpoint_ptr as *mut HomeInfo)) };
+            data.endpoint_ptr = 0;
+        }
+    } else if undo.remove_peer {
+        if let Some(info) = unsafe { home_info_mut(chan) } {
+            info.peers.remove(&undo.peer_island);
+        }
+    }
 }
 
 /// Install HomeInfo on a LOCAL channel for first-time cross-island transfer.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
+    unsafe { try_install_home_info(chan, endpoint_id, home_island) }
+        .expect("HomeInfo allocation failed");
+}
+
+pub unsafe fn try_install_home_info(
+    chan: GcRef,
+    endpoint_id: u64,
+    home_island: u32,
+) -> Result<(), QueueEndpointError> {
     // Safety: `chan` is a live local queue object. The mutation installs a
     // non-GC HomeInfo pointer and does not publish GC-visible references.
     let data = unsafe { QueueData::as_mut(chan) };
@@ -389,12 +467,14 @@ pub unsafe fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32)
         kind(chan) == QueueKind::Port,
         "install_home_info: chan cannot cross islands"
     );
-    let info = Box::new(HomeInfo {
+    let info = try_box(HomeInfo {
         endpoint_id,
         home_island,
         peers: hashbrown::HashSet::new(),
-    });
+    })
+    .map_err(|_| QueueEndpointError::AllocationFailed)?;
     data.endpoint_ptr = ptr_to_slot(Box::into_raw(info) as *mut u8);
+    Ok(())
 }
 
 /// Get channel metadata for cross-island transfer.
@@ -423,7 +503,9 @@ pub unsafe fn next_remote_direct_receiver(chan: GcRef, local_island: u32) -> Opt
     unsafe { local_state(chan) }
         .waiting_receivers
         .front()
-        .filter(|receiver| receiver.island_id != local_island || receiver.endpoint_wait_id() != 0)
+        .filter(|receiver| {
+            receiver.island_id() != local_island || receiver.endpoint_wait_key().is_some()
+        })
         .cloned()
 }
 
@@ -447,11 +529,6 @@ pub unsafe fn next_local_select_recv_receiver(
 }
 
 #[inline]
-pub unsafe fn next_send_would_remote_direct(chan: GcRef, local_island: u32) -> bool {
-    next_remote_direct_receiver(chan, local_island).is_some()
-}
-
-#[inline]
 pub unsafe fn next_recv_endpoint_sender(chan: GcRef) -> Option<QueueWaiter> {
     if is_remote(chan) {
         return None;
@@ -460,7 +537,7 @@ pub unsafe fn next_recv_endpoint_sender(chan: GcRef) -> Option<QueueWaiter> {
         .waiting_senders
         .front()
         .map(|(sender, _)| sender)
-        .filter(|sender| sender.endpoint_wait_id() != 0)
+        .filter(|sender| sender.endpoint_wait_key().is_some())
         .cloned()
 }
 
@@ -473,11 +550,11 @@ pub unsafe fn has_endpoint_waiters(chan: GcRef) -> bool {
     state
         .waiting_receivers
         .iter()
-        .any(|waiter| waiter.endpoint_wait_id() != 0)
+        .any(|waiter| waiter.endpoint_wait_key().is_some())
         || state
             .waiting_senders
             .iter()
-            .any(|(waiter, _)| waiter.endpoint_wait_id() != 0)
+            .any(|(waiter, _)| waiter.endpoint_wait_key().is_some())
 }
 
 #[inline]
@@ -539,6 +616,11 @@ pub unsafe fn register_receiver(chan: GcRef, waiter: QueueWaiter) {
 }
 
 #[inline]
+pub unsafe fn restore_direct_receiver(chan: GcRef, waiter: QueueWaiter) {
+    with_local_state(chan, |s| s.restore_direct_receiver(waiter))
+}
+
+#[inline]
 pub unsafe fn cancel_select_waiters(chan: GcRef, fiber_key: u64, select_id: u64) {
     with_local_state(chan, |s| s.cancel_select_waiters(fiber_key, select_id))
 }
@@ -575,12 +657,39 @@ pub unsafe fn send_or_block_resolved(
     })
 }
 
+#[inline]
+pub unsafe fn try_send_or_block_resolved_with<E, F>(
+    chan: GcRef,
+    value: QueueMessage,
+    make_waiter: F,
+    local_island: u32,
+) -> Result<ResolvedSendResult<QueueWaiter, QueueMessage>, E>
+where
+    F: FnOnce() -> Result<QueueWaiter, E>,
+{
+    let cap = super::queue_state::capacity(chan);
+    with_local_state(chan, |state| {
+        state.try_send_or_block_resolved_with(value, cap, make_waiter, local_island)
+    })
+}
+
 /// Atomic recv: try to receive, if would block, register waiter in same operation.
 pub unsafe fn recv_or_block(
     chan: GcRef,
     waiter: QueueWaiter,
 ) -> BlockingRecvResult<QueueWaiter, QueueMessage> {
     with_local_state(chan, |s| s.recv_or_block(waiter))
+}
+
+#[inline]
+pub unsafe fn try_recv_or_block_with<E, F>(
+    chan: GcRef,
+    make_waiter: F,
+) -> Result<BlockingRecvResult<QueueWaiter, QueueMessage>, E>
+where
+    F: FnOnce() -> Result<QueueWaiter, E>,
+{
+    with_local_state(chan, |state| state.try_recv_or_block_with(make_waiter))
 }
 
 /// Take all waiting receivers (for close notification).

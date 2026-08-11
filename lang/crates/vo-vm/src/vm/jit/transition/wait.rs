@@ -1,8 +1,7 @@
 use vo_runtime::bytecode::Module;
 
 use crate::fiber::{Fiber, JitExternSuspend};
-use crate::vm::jit_mgr::JitSideExitReason;
-use crate::vm::Vm;
+use crate::vm::{JitSideExitReason, Vm};
 
 use super::super::bridge_result::{JitBridgeMode, JitBridgeTransition};
 use super::super::context::JitContextWrapper;
@@ -10,29 +9,21 @@ use super::super::materialize::materialize_jit_frames;
 use super::super::side_exit;
 
 pub(super) fn handle_wait_io_transition(
-    mode: JitBridgeMode,
     vm: &mut Vm,
     fiber: &mut Fiber,
     module: &Module,
     ctx: &JitContextWrapper,
 ) -> JitBridgeTransition {
-    #[cfg(feature = "std")]
-    let _ = mode;
-
     if let Some(err) = materialize_resume_frames(fiber, module, ctx) {
         return err;
     }
 
-    #[cfg(feature = "std")]
-    {
-        let io_token = ctx.wait_io_token();
-        side_exit::record(vm, JitSideExitReason::WaitIo);
-        fiber.resume_io_token = Some(io_token);
-        JitBridgeTransition::WaitIo(io_token)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        JitBridgeTransition::JitError(mode.wait_io_error().into())
+    let io_token = ctx.wait_io_token();
+    side_exit::record(vm, JitSideExitReason::WaitIo);
+    fiber.resume_io_token = Some(io_token);
+    JitBridgeTransition::WaitIo {
+        token: io_token,
+        staged_io_roots_added: false,
     }
 }
 
@@ -61,6 +52,22 @@ pub(super) fn handle_replay_transition(
     }
     side_exit::record(vm, JitSideExitReason::Replay);
     JitBridgeTransition::FrameChanged
+}
+
+pub(super) fn handle_runtime_transition(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    ctx: &JitContextWrapper,
+) -> JitBridgeTransition {
+    materialize_at_pc_and_record(
+        vm,
+        fiber,
+        module,
+        ctx.call_resume_pc(),
+        JitSideExitReason::Yield,
+        JitBridgeTransition::TimesliceExpired,
+    )
 }
 
 pub(super) fn handle_extern_suspend_transition(
@@ -103,18 +110,22 @@ pub(super) fn handle_extern_suspend_transition(
             );
             clear_extern_suspend_after_materialize(fiber, transition)
         }
-        #[cfg(feature = "std")]
-        JitExternSuspend::WaitIo { token, replay_pc } => {
-            match materialize_jit_frames(fiber, module, replay_pc) {
-                Ok(()) => {
-                    fiber.jit_extern_suspend = None;
-                    side_exit::record(vm, JitSideExitReason::WaitIo);
-                    fiber.resume_io_token = Some(token);
-                    JitBridgeTransition::WaitIo(token)
+        JitExternSuspend::WaitIo {
+            token,
+            replay_pc,
+            staged_io_roots_added,
+        } => match materialize_jit_frames(fiber, module, replay_pc) {
+            Ok(()) => {
+                fiber.jit_extern_suspend = None;
+                side_exit::record(vm, JitSideExitReason::WaitIo);
+                fiber.resume_io_token = Some(token);
+                JitBridgeTransition::WaitIo {
+                    token,
+                    staged_io_roots_added,
                 }
-                Err(err) => JitBridgeTransition::FrameMaterializeError(err),
             }
-        }
+            Err(err) => JitBridgeTransition::FrameMaterializeError(err),
+        },
         JitExternSuspend::HostWait {
             token,
             delay_ms,
@@ -243,7 +254,7 @@ fn cleanup_unmaterialized_wait_queue_state(vm: &mut Vm, fiber: &mut Fiber) {
     }
     fiber.select_state = None;
     fiber.remote_endpoint_wait = None;
-    vm.discard_pending_response_island_commands_from_pending_transitions();
+    vm.discard_response_awaiting_island_commands_from_pending_transitions();
 }
 
 #[cfg(test)]

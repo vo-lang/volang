@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use toml::Value;
-use vo_common::vfs::{read_binary_file, read_text_file, RealFs};
+use vo_common::vfs::{normalize_fs_path, read_text_file, RealFs};
 use vo_module::project;
 use vo_module::resolved_extension::{AssetRef, AssetRoot};
 use vo_module::schema::lockfile::LockedModule;
@@ -26,6 +26,14 @@ use crate::browser_runtime::{
 const BROWSER_WASM_TARGET: &str = "wasm32-unknown-unknown";
 const MAX_BROWSER_BUILD_SCAN_ENTRIES: usize = 100_000;
 const MAX_BROWSER_BUILD_CANDIDATES: usize = 10_000;
+const PROJECT_SNAPSHOT_EXCLUDED_DIRECTORIES: &[&str] = &[
+    ".cache",
+    ".git",
+    ".vo-cache",
+    ".volang",
+    "node_modules",
+    "target",
+];
 static GENERATED_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -90,7 +98,7 @@ pub fn debug_local_project_browser_runtime_plan_from_fs(
         )
     })?;
     let project_vfs_root = browser_snapshot_vfs_path_from_fs(&project_root)?;
-    browser_runtime_plan_from_manifest(&project_vfs_root, Some(module.as_str()), manifest)
+    browser_runtime_plan_from_manifest(&project_vfs_root, module, manifest)
 }
 
 /// Native Studio GUI runtime discovery for local development paths.
@@ -175,7 +183,7 @@ pub fn native_gui_browser_runtime_plan_from_fs(
         let module_vfs_root = browser_snapshot_vfs_path_from_fs(&module_root)?;
         plans.push(browser_runtime_plan_from_manifest(
             &module_vfs_root,
-            Some(module.as_str()),
+            module,
             manifest,
         )?);
     }
@@ -302,10 +310,32 @@ pub fn execute_browser_artifact_plan(plan: &BrowserArtifactPlan) -> Result<(), S
     Ok(())
 }
 
-pub fn materialized_browser_artifacts_from_fs(
+#[derive(Debug)]
+pub struct MaterializedBrowserRuntimeSnapshot {
+    pub artifacts: Vec<MaterializedBrowserArtifact>,
+    pub files: Vec<BrowserSnapshotFile>,
+}
+
+struct CapturedBrowserSnapshot {
+    files: Vec<BrowserSnapshotFile>,
+    source_indices: BTreeMap<PathBuf, usize>,
+}
+
+impl CapturedBrowserSnapshot {
+    fn source(&self, source_path: &Path) -> Option<(usize, &[u8])> {
+        let index = *self.source_indices.get(source_path)?;
+        Some((index, self.files.get(index)?.bytes.as_slice()))
+    }
+}
+
+pub fn materialize_browser_runtime_snapshot_from_fs(
     intent: &BrowserArtifactIntent,
     runtime: &BrowserRuntimePlan,
-) -> Result<Vec<MaterializedBrowserArtifact>, String> {
+    snapshot: &BrowserSnapshotPlan,
+    project_root: Option<&Path>,
+    entry_path: &Path,
+) -> Result<MaterializedBrowserRuntimeSnapshot, String> {
+    let captured = capture_browser_snapshot_from_fs(snapshot, runtime, project_root, entry_path)?;
     if intent.required_artifacts.len() > MAX_BROWSER_RUNTIME_ITEMS {
         return Err(format!(
             "browser artifact intent contains more than {MAX_BROWSER_RUNTIME_ITEMS} required artifacts"
@@ -313,26 +343,39 @@ pub fn materialized_browser_artifacts_from_fs(
     }
     let mut output = Vec::new();
     let mut identities = BTreeSet::new();
-    let mut source_paths = BTreeSet::new();
+    let mut artifact_sources = BTreeSet::new();
     for artifact in &intent.required_artifacts {
-        materialize_browser_artifact_file(
-            artifact,
-            runtime,
+        let family = match artifact.family {
+            BrowserArtifactFamily::StandaloneWasm => {
+                MaterializedBrowserArtifactFamily::StandaloneWasm
+            }
+            BrowserArtifactFamily::BindgenIsland => {
+                MaterializedBrowserArtifactFamily::BindgenIsland
+            }
+        };
+        let assets = std::iter::once((
             MaterializedBrowserArtifactRole::WasmModule,
             &artifact.wasm.runtime_asset,
-            &mut output,
-            &mut identities,
-            &mut source_paths,
-        )?;
-        if let Some(js_glue) = &artifact.js_glue {
-            materialize_browser_artifact_file(
-                artifact,
-                runtime,
+        ))
+        .chain(artifact.js_glue.iter().map(|js_glue| {
+            (
                 MaterializedBrowserArtifactRole::JavaScriptGlue,
                 &js_glue.runtime_asset,
+            )
+        }));
+        for (role, asset) in assets {
+            materialize_browser_artifact_identity(
+                runtime,
+                &artifact.module_key,
+                &artifact.extension_name,
+                family,
+                role,
+                &artifact.runtime_roles,
+                asset,
                 &mut output,
                 &mut identities,
-                &mut source_paths,
+                &mut artifact_sources,
+                &captured,
             )?;
         }
     }
@@ -353,7 +396,8 @@ pub fn materialized_browser_artifacts_from_fs(
                 asset,
                 &mut output,
                 &mut identities,
-                &mut source_paths,
+                &mut artifact_sources,
+                &captured,
             )?;
         }
     }
@@ -362,34 +406,10 @@ pub fn materialized_browser_artifacts_from_fs(
             .cmp(&right.artifact_identity)
             .then_with(|| left.role.cmp(&right.role))
     });
-    Ok(output)
-}
-
-fn materialize_browser_artifact_file(
-    artifact: &RequiredBrowserArtifact,
-    runtime: &BrowserRuntimePlan,
-    role: MaterializedBrowserArtifactRole,
-    asset: &AssetRef,
-    output: &mut Vec<MaterializedBrowserArtifact>,
-    identities: &mut BTreeSet<[u8; 32]>,
-    source_paths: &mut BTreeSet<PathBuf>,
-) -> Result<(), String> {
-    let family = match artifact.family {
-        BrowserArtifactFamily::StandaloneWasm => MaterializedBrowserArtifactFamily::StandaloneWasm,
-        BrowserArtifactFamily::BindgenIsland => MaterializedBrowserArtifactFamily::BindgenIsland,
-    };
-    materialize_browser_artifact_identity(
-        runtime,
-        &artifact.module_key,
-        &artifact.extension_name,
-        family,
-        role,
-        &artifact.runtime_roles,
-        asset,
-        output,
-        identities,
-        source_paths,
-    )
+    Ok(MaterializedBrowserRuntimeSnapshot {
+        artifacts: output,
+        files: captured.files,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -403,19 +423,22 @@ fn materialize_browser_artifact_identity(
     asset: &AssetRef,
     output: &mut Vec<MaterializedBrowserArtifact>,
     identities: &mut BTreeSet<[u8; 32]>,
-    source_paths: &mut BTreeSet<PathBuf>,
+    artifact_sources: &mut BTreeSet<usize>,
+    snapshot: &CapturedBrowserSnapshot,
 ) -> Result<(), String> {
-    let source_path = resolve_snapshot_asset_path_from_fs(runtime, asset)?;
-    let source_path =
-        canonical_existing_regular_file(&source_path, "materialized browser artifact")?;
-    if !source_paths.insert(source_path.clone()) {
+    let source_path = normalize_fs_path(&resolve_snapshot_asset_path_from_fs(runtime, asset)?);
+    let (source_index, bytes) = snapshot.source(&source_path).ok_or_else(|| {
+        format!(
+            "browser runtime artifact {} is absent from its renderer snapshot",
+            source_path.display()
+        )
+    })?;
+    if !artifact_sources.insert(source_index) {
         return Err(format!(
             "multiple browser artifact identities resolve to {}",
             source_path.display()
         ));
     }
-    let bytes = read_binary_file(&source_path, MAX_GENERATED_OUTPUT_BYTES)
-        .map_err(|error| format!("{}: {}", source_path.display(), error))?;
     if bytes.is_empty() {
         return Err(format!(
             "materialized browser artifact is empty: {}",
@@ -430,7 +453,7 @@ fn materialize_browser_artifact_identity(
         runtime_roles,
         asset,
         source_path.to_string_lossy().into_owned(),
-        &bytes,
+        bytes,
     )?;
     if !identities.insert(materialized.artifact_identity) {
         return Err(format!(
@@ -445,13 +468,14 @@ fn materialize_browser_artifact_identity(
     Ok(())
 }
 
-pub fn materialize_browser_snapshot_from_fs(
+fn capture_browser_snapshot_from_fs(
     snapshot: &BrowserSnapshotPlan,
     runtime: &BrowserRuntimePlan,
     project_root: Option<&Path>,
     entry_path: &Path,
-) -> Result<Vec<BrowserSnapshotFile>, String> {
+) -> Result<CapturedBrowserSnapshot, String> {
     let mut files = Vec::new();
+    let mut source_indices = BTreeMap::new();
     let mut claimed_paths = BTreeMap::new();
     let mut budget = BrowserSnapshotBudget::new(snapshot.mounts.len())?;
     for mount in &snapshot.mounts {
@@ -463,6 +487,7 @@ pub fn materialize_browser_snapshot_from_fs(
                 project_root,
                 entry_path,
                 &mut files,
+                &mut source_indices,
                 &mut claimed_paths,
                 &mut budget,
             )?,
@@ -472,12 +497,16 @@ pub fn materialize_browser_snapshot_from_fs(
                 project_root,
                 entry_path,
                 &mut files,
+                &mut source_indices,
                 &mut claimed_paths,
                 &mut budget,
             )?,
         }
     }
-    Ok(files)
+    Ok(CapturedBrowserSnapshot {
+        files,
+        source_indices,
+    })
 }
 
 /// Convert a native filesystem path into the canonical path understood by the
@@ -621,6 +650,7 @@ struct FsSnapshotDirectoryMaterializer<'a> {
     project_root: Option<&'a Path>,
     entry_path: &'a Path,
     files: &'a mut Vec<BrowserSnapshotFile>,
+    source_indices: &'a mut BTreeMap<PathBuf, usize>,
     claimed_paths: &'a mut BTreeMap<String, String>,
     budget: &'a mut BrowserSnapshotBudget,
 }
@@ -636,20 +666,28 @@ impl FsSnapshotDirectoryMaterializer<'_> {
         for entry in fs::read_dir(dir).map_err(|error| format!("{}: {}", dir.display(), error))? {
             let entry = entry.map_err(|error| format!("{}: {}", dir.display(), error))?;
             let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("{}: {}", path.display(), error))?;
+            if file_type.is_dir()
+                && matches!(&self.mount.source, BrowserSnapshotSourceRef::ProjectRoot)
+                && PROJECT_SNAPSHOT_EXCLUDED_DIRECTORIES
+                    .iter()
+                    .any(|name| entry.file_name() == std::ffi::OsStr::new(name))
+            {
+                continue;
+            }
             let source_path = normalize_snapshot_output_path(&path)?;
             self.budget.record_entry(&source_path)?;
             entries
                 .try_reserve(1)
                 .map_err(|_| format!("failed to reserve directory entry for {source_path:?}"))?;
-            entries.push((source_path, entry));
+            entries.push((source_path, entry, file_type));
         }
         entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
 
-        for (source_path, entry) in entries {
+        for (source_path, entry, file_type) in entries {
             let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("{}: {}", path.display(), error))?;
             if file_type.is_dir() {
                 let child_depth = depth.checked_add(1).ok_or_else(|| {
                     format!("browser snapshot directory depth overflow at {source_path:?}")
@@ -669,16 +707,23 @@ impl FsSnapshotDirectoryMaterializer<'_> {
             )?;
             if claim_browser_snapshot_output(self.claimed_paths, &output_path, &source_path)? {
                 let read_limit = self.budget.next_file_limit(&source_path)?;
-                let bytes = read_binary_file(&path, read_limit)
-                    .map_err(|error| format!("{}: {}", path.display(), error))?;
+                let source_key = normalize_fs_path(&path);
+                let bytes = captured_or_read_browser_file(
+                    &source_key,
+                    read_limit,
+                    self.files,
+                    self.source_indices,
+                )?;
                 self.budget.record_file(&source_path, bytes.len())?;
                 self.files.try_reserve(1).map_err(|_| {
                     format!("failed to reserve browser snapshot entry for {source_path:?}")
                 })?;
+                let index = self.files.len();
                 self.files.push(BrowserSnapshotFile {
                     path: output_path,
                     bytes,
                 });
+                self.source_indices.entry(source_key).or_insert(index);
             }
         }
         Ok(())
@@ -691,6 +736,7 @@ fn materialize_snapshot_directory_mount_from_fs(
     project_root: Option<&Path>,
     entry_path: &Path,
     files: &mut Vec<BrowserSnapshotFile>,
+    source_indices: &mut BTreeMap<PathBuf, usize>,
     claimed_paths: &mut BTreeMap<String, String>,
     budget: &mut BrowserSnapshotBudget,
 ) -> Result<(), String> {
@@ -702,6 +748,7 @@ fn materialize_snapshot_directory_mount_from_fs(
         project_root,
         entry_path,
         files,
+        source_indices,
         claimed_paths,
         budget,
     }
@@ -714,6 +761,7 @@ fn materialize_snapshot_file_mount_from_fs(
     project_root: Option<&Path>,
     entry_path: &Path,
     files: &mut Vec<BrowserSnapshotFile>,
+    source_indices: &mut BTreeMap<PathBuf, usize>,
     claimed_paths: &mut BTreeMap<String, String>,
     budget: &mut BrowserSnapshotBudget,
 ) -> Result<(), String> {
@@ -725,18 +773,49 @@ fn materialize_snapshot_file_mount_from_fs(
     budget.record_entry(&source_path)?;
     if claim_browser_snapshot_output(claimed_paths, &output_path, &source_path)? {
         let read_limit = budget.next_file_limit(&source_path)?;
-        let bytes = read_binary_file(&path, read_limit)
-            .map_err(|error| format!("{}: {}", path.display(), error))?;
+        let source_key = normalize_fs_path(&path);
+        let bytes = captured_or_read_browser_file(&source_key, read_limit, files, source_indices)?;
         budget.record_file(&source_path, bytes.len())?;
         files
             .try_reserve(1)
             .map_err(|_| format!("failed to reserve browser snapshot entry for {source_path:?}"))?;
+        let index = files.len();
         files.push(BrowserSnapshotFile {
             path: output_path,
             bytes,
         });
+        source_indices.entry(source_key).or_insert(index);
     }
     Ok(())
+}
+
+fn captured_or_read_browser_file(
+    path: &Path,
+    max_bytes: usize,
+    files: &[BrowserSnapshotFile],
+    source_indices: &BTreeMap<PathBuf, usize>,
+) -> Result<Vec<u8>, String> {
+    if let Some(bytes) = source_indices
+        .get(path)
+        .and_then(|index| files.get(*index))
+        .map(|file| file.bytes.as_slice())
+    {
+        if bytes.len() > max_bytes {
+            return Err(format!(
+                "browser snapshot file {:?} has {} bytes and exceeds its remaining {}-byte budget",
+                path,
+                bytes.len(),
+                max_bytes,
+            ));
+        }
+        return Ok(bytes.to_vec());
+    }
+    read_stable_browser_file(path, max_bytes)
+}
+
+fn read_stable_browser_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    vo_module::workspace::read_stable_host_regular_file(path, max_bytes, "browser snapshot input")
+        .map_err(|error| format!("{}: {}", path.display(), error))
 }
 
 fn materialized_snapshot_path_from_fs(

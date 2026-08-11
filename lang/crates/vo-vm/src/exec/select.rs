@@ -13,12 +13,11 @@ use alloc::{
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
 
-use crate::bytecode::Module;
-use crate::runtime_boundary::IslandCommandEffect;
+use vo_common_core::bytecode::ModuleRuntimeMetadata;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::queue;
 use vo_runtime::objects::queue::RecvResult;
-use vo_runtime::objects::queue_state::{self, QueueKind, QueueMessage, QueueWaiter};
+use vo_runtime::objects::queue_state::{self, QueueKind, QueueWaiter};
 use vo_runtime::slot::Slot;
 
 use crate::fiber::{
@@ -40,28 +39,8 @@ pub enum SelectResult {
     /// Send on closed channel - triggers panic.
     SendOnClosed,
     UnsupportedRemotePort,
-    /// A waiter was woken by an immediate send or recv case.
-    Wake {
-        waiter: QueueWaiter,
-        payload: Option<SelectWokenResult>,
-    },
-    RemoteSendAck {
-        endpoint_id: u64,
-        target_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-        closed: bool,
-        rollback: Option<crate::runtime_boundary::RuntimeRollback>,
-    },
-    RemoteRecvData {
-        endpoint_id: u64,
-        target_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
-        data: Vec<u8>,
-        island_effects: Vec<IslandCommandEffect>,
-        rollback: Option<crate::runtime_boundary::RuntimeRollback>,
-    },
+    /// A validated queue side effect shared with ordinary queue execution.
+    Queue(super::QueueAction),
     /// Malformed bytecode or callback state violated the select state machine.
     Malformed(String),
 }
@@ -72,7 +51,7 @@ pub struct SelectExecContext<'a> {
     pub island_id: u32,
     pub fiber_key: u64,
     pub vm_state: &'a mut crate::vm::VmState,
-    pub module: Option<&'a Module>,
+    pub module: Option<ModuleRuntimeMetadata<'a>>,
 }
 
 /// Initialize a new select statement.
@@ -83,35 +62,26 @@ pub fn exec_select_begin(
     has_default: bool,
 ) -> Result<(), crate::fiber::FiberIdentityExhausted> {
     let select_id = fiber.try_alloc_select_id()?;
+    let mut cases = Vec::new();
+    cases
+        .try_reserve_exact(case_count as usize)
+        .map_err(|_| crate::fiber::FiberIdentityExhausted::HostAllocation("select cases"))?;
+    let mut registered_queues = Vec::new();
+    registered_queues
+        .try_reserve_exact(case_count as usize)
+        .map_err(|_| {
+            crate::fiber::FiberIdentityExhausted::HostAllocation("select registrations")
+        })?;
     fiber.select_state = Some(SelectState {
-        cases: Vec::with_capacity(case_count as usize),
+        cases,
         expected_cases: case_count,
         has_default,
         woken_index: None,
         woken_result: None,
         select_id,
-        registered_queues: Vec::new(),
+        registered_queues,
     });
     Ok(())
-}
-
-/// Add a send case to the current select.
-#[inline]
-pub fn exec_select_send(
-    select_state: &mut Option<SelectState>,
-    queue_reg: u16,
-    val_reg: u16,
-    elem_slots: u16,
-    result_index: u16,
-) -> Result<(), String> {
-    exec_select_send_with_layout(
-        select_state,
-        queue_reg,
-        val_reg,
-        elem_slots,
-        None,
-        result_index,
-    )
 }
 
 #[inline]
@@ -142,27 +112,6 @@ pub fn exec_select_send_with_layout(
         has_ok: false,
     });
     Ok(())
-}
-
-/// Add a recv case to the current select.
-#[inline]
-pub fn exec_select_recv(
-    select_state: &mut Option<SelectState>,
-    dst_reg: u16,
-    queue_reg: u16,
-    elem_slots: u16,
-    has_ok: bool,
-    result_index: u16,
-) -> Result<(), String> {
-    exec_select_recv_with_layout(
-        select_state,
-        dst_reg,
-        queue_reg,
-        elem_slots,
-        None,
-        has_ok,
-        result_index,
-    )
 }
 
 #[inline]
@@ -251,49 +200,50 @@ pub fn exec_select_exec(
     };
 
     match ready {
-        ReadyCase::Send {
-            result_index,
-            ch,
-            elem_slots,
-            elem_layout,
-            val_reg,
-        } => execute_send_case(
-            stack,
-            bp,
-            result_reg,
-            result_index,
-            island_id,
-            fiber_key,
-            ch,
-            elem_slots,
-            elem_layout.as_deref(),
-            val_reg,
-            vm_state,
-            module,
-            select_state,
-        ),
-        ReadyCase::Recv {
-            result_index,
-            ch,
-            elem_slots,
-            elem_layout,
-            val_reg,
-            has_ok,
-        } => execute_recv_case(
-            stack,
-            bp,
-            result_reg,
-            result_index,
-            ch,
-            elem_slots,
-            elem_layout,
-            val_reg,
-            has_ok,
-            island_id,
-            vm_state,
-            module,
-            select_state,
-        ),
+        ReadyCase::Case { case_index, ch } => {
+            let Some(case) = select_state
+                .as_ref()
+                .and_then(|state| state.cases.get(case_index))
+                .cloned()
+            else {
+                *select_state = None;
+                return SelectResult::Malformed(
+                    "ready select case disappeared before execution".to_string(),
+                );
+            };
+            match case.kind {
+                SelectCaseKind::Send => execute_send_case(
+                    stack,
+                    bp,
+                    result_reg,
+                    case.result_index,
+                    island_id,
+                    fiber_key,
+                    ch,
+                    case.elem_slots as usize,
+                    case.elem_layout.as_deref(),
+                    case.val_reg,
+                    vm_state,
+                    module,
+                    select_state,
+                ),
+                SelectCaseKind::Recv => execute_recv_case(
+                    stack,
+                    bp,
+                    result_reg,
+                    case.result_index,
+                    ch,
+                    case.elem_slots as usize,
+                    case.elem_layout,
+                    case.val_reg,
+                    case.has_ok,
+                    island_id,
+                    vm_state,
+                    module,
+                    select_state,
+                ),
+            }
+        }
         ReadyCase::Default => {
             stack_set(stack, bp + result_reg as usize, u64::MAX);
             *select_state = None;
@@ -335,21 +285,7 @@ enum ReadyCase {
     Default,
     UnsupportedRemotePort,
     Malformed(String),
-    Send {
-        result_index: u16,
-        ch: GcRef,
-        elem_slots: usize,
-        elem_layout: Option<Vec<vo_runtime::SlotType>>,
-        val_reg: u16,
-    },
-    Recv {
-        result_index: u16,
-        ch: GcRef,
-        elem_slots: usize,
-        elem_layout: Option<Vec<vo_runtime::SlotType>>,
-        val_reg: u16,
-        has_ok: bool,
-    },
+    Case { case_index: usize, ch: GcRef },
 }
 
 /// Find a ready case. If multiple are ready, randomly select one (Go semantics).
@@ -360,9 +296,10 @@ fn find_ready_case(
     rng: &mut fastrand::Rng,
     state: &SelectState,
 ) -> ReadyCase {
-    let mut ready_cases: Vec<ReadyCase> = Vec::new();
+    let mut ready = None;
+    let mut ready_count = 0;
 
-    for case in &state.cases {
+    for (case_index, case) in state.cases.iter().enumerate() {
         let ch = stack_get(stack, bp + case.queue_reg as usize) as GcRef;
         if ch.is_null() {
             continue;
@@ -388,35 +325,17 @@ fn find_ready_case(
         };
 
         if is_ready {
-            let ready = match case.kind {
-                SelectCaseKind::Send => ReadyCase::Send {
-                    result_index: case.result_index,
-                    ch,
-                    elem_slots: case.elem_slots as usize,
-                    elem_layout: case.elem_layout.clone(),
-                    val_reg: case.val_reg,
-                },
-                SelectCaseKind::Recv => ReadyCase::Recv {
-                    result_index: case.result_index,
-                    ch,
-                    elem_slots: case.elem_slots as usize,
-                    elem_layout: case.elem_layout.clone(),
-                    val_reg: case.val_reg,
-                    has_ok: case.has_ok,
-                },
-            };
-            ready_cases.push(ready);
+            ready_count += 1;
+            if ready_count == 1 || rng.usize(..ready_count) == 0 {
+                ready = Some((case_index, ch));
+            }
         }
     }
 
-    match ready_cases.len() {
-        0 if state.has_default => ReadyCase::Default,
-        0 => ReadyCase::None,
-        1 => ready_cases.pop().unwrap_or(ReadyCase::None),
-        n => {
-            let chosen = rng.usize(..n);
-            ready_cases.swap_remove(chosen)
-        }
+    match ready {
+        Some((case_index, ch)) => ReadyCase::Case { case_index, ch },
+        None if state.has_default => ReadyCase::Default,
+        None => ReadyCase::None,
     }
 }
 
@@ -424,33 +343,11 @@ fn find_ready_case(
 // Internal: Case execution
 // =============================================================================
 
-#[inline]
-fn barrier_select_send_value(
-    vm_state: &mut crate::vm::VmState,
-    ch: GcRef,
-    value: &[u64],
-    module: Option<&Module>,
-) -> Result<(), String> {
-    // Safety: select execution validates the queue handle before this helper.
-    let elem_meta = unsafe { queue_state::elem_meta(ch) };
-    if elem_meta.value_kind().may_contain_gc_refs() {
-        vo_runtime::gc_types::try_typed_write_barrier_by_meta(
-            &mut vm_state.gc,
-            ch,
-            value,
-            elem_meta,
-            module,
-        )
-        .map_err(|err| err.to_string())?;
-    }
-    Ok(())
-}
-
 fn complete_woken_case(
     stack: *mut Slot,
     bp: usize,
     vm_state: &crate::vm::VmState,
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     result_reg: u16,
     idx: usize,
     fiber_key: u64,
@@ -646,7 +543,7 @@ fn execute_send_case(
     elem_layout: Option<&[vo_runtime::SlotType]>,
     val_reg: u16,
     vm_state: &mut crate::vm::VmState,
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     let val_start = bp + val_reg as usize;
@@ -659,12 +556,17 @@ fn execute_send_case(
         *select_state = None;
         return SelectResult::Malformed(msg);
     }
-    let value: QueueMessage = (0..elem_slots)
-        .map(|i| stack_get(stack, val_start + i))
-        .collect();
-    let struct_metas = module.map(|m| m.struct_metas.as_slice()).unwrap_or(&[]);
-    let runtime_types = module.map(|m| m.runtime_types.as_slice()).unwrap_or(&[]);
-    let action = super::queue_send_owned_core_with_layout(
+    // Safety: select bytecode validation guarantees this stack span, and the
+    // queue helper consumes it synchronously without retaining the borrow.
+    let value = unsafe { core::slice::from_raw_parts(stack.add(val_start), elem_slots) };
+    let raw_module = module.map(ModuleRuntimeMetadata::module);
+    let struct_metas = raw_module
+        .map(|module| module.struct_metas.as_slice())
+        .unwrap_or(&[]);
+    let runtime_types = raw_module
+        .map(|module| module.runtime_types.as_slice())
+        .unwrap_or(&[]);
+    let action = super::queue_send_core_with_layout(
         ch,
         value,
         elem_layout,
@@ -715,7 +617,7 @@ fn execute_recv_case(
     has_ok: bool,
     island_id: u32,
     vm_state: &crate::vm::VmState,
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     // Use try_recv so that waiting senders are properly woken when the buffer
@@ -751,14 +653,8 @@ fn finish_selected_queue_action(
     mut action: super::QueueAction,
 ) -> SelectResult {
     match &mut action {
-        super::QueueAction::RemoteSendAck {
-            rollback: Some(rollback),
-            ..
-        }
-        | super::QueueAction::RemoteRecvData {
-            rollback: Some(rollback),
-            ..
-        } => {
+        super::QueueAction::RemoteSendAck { rollback, .. }
+        | super::QueueAction::RemoteRecvData { rollback, .. } => {
             rollback.push_stack_slot(
                 bp + result_reg as usize,
                 stack_get(stack, bp + result_reg as usize),
@@ -771,39 +667,9 @@ fn finish_selected_queue_action(
     *select_state = None;
     match action {
         super::QueueAction::Continue => SelectResult::Continue,
-        super::QueueAction::Wake { waiter, payload } => SelectResult::Wake { waiter, payload },
-        super::QueueAction::RemoteSendAck {
-            endpoint_id,
-            target_island,
-            fiber_key,
-            wait_id,
-            closed,
-            rollback,
-        } => SelectResult::RemoteSendAck {
-            endpoint_id,
-            target_island,
-            fiber_key,
-            wait_id,
-            closed,
-            rollback,
-        },
-        super::QueueAction::RemoteRecvData {
-            endpoint_id,
-            target_island,
-            fiber_key,
-            wait_id,
-            data,
-            island_effects,
-            rollback,
-        } => SelectResult::RemoteRecvData {
-            endpoint_id,
-            target_island,
-            fiber_key,
-            wait_id,
-            data,
-            island_effects,
-            rollback,
-        },
+        action @ (super::QueueAction::Wake { .. }
+        | super::QueueAction::RemoteSendAck { .. }
+        | super::QueueAction::RemoteRecvData { .. }) => SelectResult::Queue(action),
         super::QueueAction::Malformed(msg) => SelectResult::Malformed(msg),
         other => SelectResult::Malformed(format!("unexpected select queue action: {other:?}")),
     }
@@ -819,7 +685,7 @@ fn recv_case_wake(
     has_ok: bool,
     island_id: u32,
     vm_state: &crate::vm::VmState,
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     blocked_message: &'static str,
 ) -> Result<super::QueueAction, String> {
     if ch.is_null() {
@@ -831,7 +697,7 @@ fn recv_case_wake(
         super::validate_queue_payload_slots(ch, elem_slots, "SelectRecv")?;
     }
     let _ = island_id;
-    super::preflight_queue_recv_routes(vm_state, ch)?;
+    super::preflight_queue_recv_routes_validated(vm_state, ch)?;
     let dst_start = bp + val_reg as usize;
     let remote_sender_rollback = if !ch.is_null()
         && !unsafe { queue::is_remote(ch) }
@@ -882,7 +748,7 @@ fn register_select_waiters(
     island_id: u32,
     fiber_key: u64,
     vm_state: &mut crate::vm::VmState,
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     state: &mut SelectState,
 ) -> Result<(), String> {
     let select_id = state.select_id;
@@ -917,14 +783,23 @@ fn register_select_waiters(
                     cancel_select_waiters(state, fiber_key);
                     return Err(msg);
                 }
-                let value: QueueMessage = (0..elem_slots)
-                    .map(|i| stack_get(stack, val_start + i))
-                    .collect();
-                if let Err(msg) = barrier_select_send_value(vm_state, ch, value.as_ref(), module) {
-                    cancel_select_waiters(state, fiber_key);
-                    return Err(msg);
-                }
-                let waiter = match QueueWaiter::try_selecting(
+                // Safety: select bytecode validation guarantees this stack
+                // span; the payload is copied before waiter registration.
+                let src = unsafe { core::slice::from_raw_parts(stack.add(val_start), elem_slots) };
+                let value = match super::prepare_local_queue_payload(
+                    vm_state,
+                    ch,
+                    src,
+                    module,
+                    "SelectSend",
+                ) {
+                    Ok((value, _)) => value,
+                    Err(msg) => {
+                        cancel_select_waiters(state, fiber_key);
+                        return Err(msg);
+                    }
+                };
+                let waiter = match QueueWaiter::try_select(
                     island_id,
                     fiber_key,
                     idx as u16,
@@ -950,7 +825,7 @@ fn register_select_waiters(
                     cancel_select_waiters(state, fiber_key);
                     return Err(msg);
                 }
-                let waiter = match QueueWaiter::try_selecting(
+                let waiter = match QueueWaiter::try_select(
                     island_id,
                     fiber_key,
                     idx as u16,
@@ -980,6 +855,12 @@ fn register_select_waiters(
 /// Cancel waiters on all registered channels.
 pub(crate) fn cancel_select_waiters(state: &mut SelectState, fiber_key: u64) {
     let select_id = state.select_id;
+    state
+        .registered_queues
+        .sort_unstable_by_key(|registered| registered.queue as usize);
+    state
+        .registered_queues
+        .dedup_by_key(|registered| registered.queue as usize);
     for registered in &state.registered_queues {
         let ch = registered.queue;
         if !ch.is_null() {

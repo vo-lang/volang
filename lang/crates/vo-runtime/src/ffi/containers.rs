@@ -1095,18 +1095,16 @@ mod tests {
         let mut host_output = None;
         let mut io = IoRuntime::new().expect("test I/O runtime");
         let mut stack = [];
-        let world = ExternWorld {
+        let world = ExternWorld::new(
             gc,
-            module: &module,
-            itab_cache: &mut itab_cache,
-            vm_opaque: core::ptr::null_mut(),
-            program_args: &[],
-            output: &*output,
-            sentinel_errors: &mut sentinel_errors,
-            host_output: &mut host_output,
-            host_services_v2: None,
-            io: &mut io,
-        };
+            (&module).into(),
+            &mut itab_cache,
+            &[],
+            &*output,
+            &mut sentinel_errors,
+            &mut host_output,
+        )
+        .with_io(&mut io);
         let invoke = ExternInvoke {
             extern_id: 0,
             bp: 0,
@@ -1115,14 +1113,7 @@ mod tests {
             ret_start: 0,
             ret_slots: 0,
         };
-        let fiber_inputs = ExternFiberInputs {
-            fiber_opaque: core::ptr::null_mut(),
-            resume_io_token: None,
-            resume_host_event_token: None,
-            resume_host_event_data: None,
-            replay_results: Vec::new(),
-            replay_panic_message: None,
-        };
+        let fiber_inputs = ExternFiberInputs::default();
         let mut ctx = ExternCallContext::new(&mut stack, invoke, world, fiber_inputs);
         f(&mut ctx)
     }
@@ -1221,32 +1212,23 @@ mod tests {
         assert_eq!(unsafe { Gc::read_slot(flat_owner, 2) }, 1);
     }
 
+    #[cfg(feature = "std")]
     #[test]
-    fn vo_array_bounds_are_release_checked() {
-        let src = vo_source_contract::production_source_without_test_modules(include_str!(
-            "containers.rs"
-        ));
-        let start = src
-            .find("impl<T: VoElem, const N: usize> VoArray<T, N>")
-            .expect("VoArray impl");
-        let end = src[start..]
-            .find("/// Cursor for iterating over VoArray.")
-            .map(|offset| start + offset)
-            .expect("VoArray cursor marker");
-        let vo_array = &src[start..end];
+    fn vo_array_accessors_reject_out_of_bounds_before_mutation() {
+        let mut gc = Gc::new();
+        let array_ref = array::create(&mut gc, ValueMeta::new(0, ValueKind::Int64), 8, 1);
+        unsafe { array::set(array_ref, 0, 41, 8) };
+        let array = unsafe { VoArray::<i64, 1>::from_ref(array_ref) };
 
-        assert!(
-            !vo_array.contains(concat!("debug_assert!", "(idx < N")),
-            "VoArray get/set bounds must be checked in release builds before unsafe array access"
-        );
-        assert!(
-            vo_array.matches("assert!(idx < N").count() >= 2,
-            "VoArray get and set must both fail fast on out-of-bounds indices"
-        );
-        assert!(
-            !src.contains("debug_assert_eq!(T::ELEM_BYTES, 8)"),
-            "GC element write-barrier width must be checked in release builds"
-        );
+        assert!(std::panic::catch_unwind(|| array.get(1)).is_err());
+        let set_result = with_extern_context(&mut gc, |ctx| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                array.set(ctx, 1, 99);
+            }))
+        });
+
+        assert!(set_result.is_err());
+        assert_eq!(unsafe { array::get(array_ref, 0, 8) }, 41);
     }
 
     #[cfg(feature = "std")]
@@ -1265,18 +1247,16 @@ mod tests {
             let mut host_output = None;
             let mut io = IoRuntime::new().expect("test I/O runtime");
             let mut stack = [];
-            let world = ExternWorld {
-                gc: &mut gc,
-                module: &module,
-                itab_cache: &mut itab_cache,
-                vm_opaque: core::ptr::null_mut(),
-                program_args: &[],
-                output: &*output,
-                sentinel_errors: &mut sentinel_errors,
-                host_output: &mut host_output,
-                host_services_v2: None,
-                io: &mut io,
-            };
+            let world = ExternWorld::new(
+                &mut gc,
+                (&module).into(),
+                &mut itab_cache,
+                &[],
+                &*output,
+                &mut sentinel_errors,
+                &mut host_output,
+            )
+            .with_io(&mut io);
             let invoke = ExternInvoke {
                 extern_id: 0,
                 bp: 0,
@@ -1285,14 +1265,7 @@ mod tests {
                 ret_start: 0,
                 ret_slots: 0,
             };
-            let fiber_inputs = ExternFiberInputs {
-                fiber_opaque: core::ptr::null_mut(),
-                resume_io_token: None,
-                resume_host_event_token: None,
-                resume_host_event_data: None,
-                replay_results: Vec::new(),
-                replay_panic_message: None,
-            };
+            let fiber_inputs = ExternFiberInputs::default();
             let mut ctx = ExternCallContext::new(&mut stack, invoke, world, fiber_inputs);
             let slice = unsafe { VoSlice::<i64>::from_ref(slice_ref) };
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1444,48 +1417,38 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
     #[test]
-    fn ffi_slice_and_array_set_barriers_precede_mutation_053() {
-        let src = vo_source_contract::production_source_without_test_modules(include_str!(
-            "containers.rs"
-        ));
+    fn ffi_array_reference_set_shades_a_white_child_of_a_black_parent() {
+        let mut gc = Gc::new();
+        let array_ref = array::create(&mut gc, ValueMeta::new(0, ValueKind::Pointer), 8, 1);
+        let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+        gc.gc_request_major();
+        for _ in 0..16 {
+            if gc.is_black(array_ref) {
+                break;
+            }
+            unsafe {
+                gc.step_with_scanners_budget(
+                    crate::gc::GcRootState::MayHaveChanged,
+                    1,
+                    |gc, _, _| {
+                        gc.mark_gray(array_ref);
+                        crate::gc::GcRootScanChunk::complete(crate::slot::SLOT_BYTES)
+                    },
+                    |_, _, _, _| crate::gc::GcObjectScanChunk::complete(crate::slot::SLOT_BYTES),
+                    |_| {},
+                );
+            }
+        }
+        assert!(gc.is_black(array_ref));
+        assert!(unsafe { Gc::header(child) }.is_white());
 
-        let slice_start = src
-            .find("impl<T: VoElem> VoSlice<T>")
-            .expect("VoSlice impl");
-        let slice_end = src[slice_start..]
-            .find("/// Cursor for iterating over VoSlice.")
-            .map(|offset| slice_start + offset)
-            .expect("VoSlice cursor marker");
-        let vo_slice = &src[slice_start..slice_end];
-        let slice_barrier = vo_slice
-            .find("apply_element_write_barrier::<T>")
-            .expect("VoSlice set barrier");
-        let slice_mutation = vo_slice
-            .find("T::write_to_slice")
-            .expect("VoSlice set mutation");
-        assert!(
-            slice_barrier < slice_mutation,
-            "VoSlice::set must run the element write barrier before publishing the slot write"
-        );
+        with_extern_context(&mut gc, |ctx| {
+            unsafe { VoArray::<GcRef, 1>::from_ref(array_ref) }.set(ctx, 0, child);
+        });
 
-        let array_start = src
-            .find("impl<T: VoElem, const N: usize> VoArray<T, N>")
-            .expect("VoArray impl");
-        let array_end = src[array_start..]
-            .find("/// Cursor for iterating over VoArray.")
-            .map(|offset| array_start + offset)
-            .expect("VoArray cursor marker");
-        let vo_array = &src[array_start..array_end];
-        let array_barrier = vo_array
-            .find("apply_element_write_barrier::<T>")
-            .expect("VoArray set barrier");
-        let array_mutation = vo_array
-            .find("T::write_to_array")
-            .expect("VoArray set mutation");
-        assert!(
-            array_barrier < array_mutation,
-            "VoArray::set must run the element write barrier before publishing the slot write"
-        );
+        assert!(unsafe { Gc::header(child) }.is_gray());
+        assert_eq!(unsafe { array::get(array_ref, 0, 8) }, child as u64);
     }
 }

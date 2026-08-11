@@ -12,7 +12,6 @@ pub mod method_value;
 pub mod pointer;
 pub mod selector;
 
-use vo_common_core::instruction::pack_iface_assert_flags;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
@@ -575,7 +574,6 @@ fn compile_type_assert(
         .as_ref()
         .map(|ty| info.type_expr_type(ty.id))
         .expect("type assertion must have target type");
-    let target_slots = info.type_slot_count(target_type);
     let result_type = info.expr_type(expr.id);
     let has_ok = info.is_tuple(result_type);
 
@@ -588,9 +586,6 @@ fn compile_type_assert(
         (0, rttid)
     };
 
-    pack_iface_assert_flags(assert_kind, has_ok, target_slots).ok_or_else(|| {
-        CodegenError::Internal("invalid interface assertion target kind/layout".to_string())
-    })?;
     let result_layout = if assert_kind == 1 {
         vec![SlotType::Interface0, SlotType::Interface1]
     } else {

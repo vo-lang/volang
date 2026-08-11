@@ -1,5 +1,5 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::instruction::{conv_f2i_width_bits, CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED};
 use vo_runtime::jit_api::JitRuntimeTrapKind;

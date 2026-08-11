@@ -1,10 +1,11 @@
-import type { WorkspaceService } from '../services/workspace_service';
+import type { Backend } from '../backend/backend';
+import type { DiscoveredProject } from '../types';
 import type { ManagedProject } from './types';
 
-export async function discoverLocalProjects(workspace: WorkspaceService, root: string): Promise<ManagedProject[]> {
-  let discovered = [] as Awaited<ReturnType<WorkspaceService['discoverProjects']>>;
+export async function discoverWorkspaceProjects(backend: Backend): Promise<ManagedProject[]> {
+  let discovered: DiscoveredProject[];
   try {
-    discovered = await workspace.discoverProjects(root);
+    discovered = await backend.discoverWorkspaceProjects();
   } catch {
     return [];
   }
@@ -12,18 +13,7 @@ export async function discoverLocalProjects(workspace: WorkspaceService, root: s
   return mapDiscovered(discovered);
 }
 
-export async function discoverWorkspaceProjects(workspace: WorkspaceService): Promise<ManagedProject[]> {
-  let discovered = [] as Awaited<ReturnType<WorkspaceService['discoverWorkspaceProjects']>>;
-  try {
-    discovered = await workspace.discoverWorkspaceProjects();
-  } catch {
-    return [];
-  }
-
-  return mapDiscovered(discovered);
-}
-
-function mapDiscovered(discovered: Awaited<ReturnType<WorkspaceService['discoverProjects']>>): ManagedProject[] {
+function mapDiscovered(discovered: DiscoveredProject[]): ManagedProject[] {
   return discovered.map((entry) => ({
     name: entry.name,
     type: entry.type as ManagedProject['type'],
@@ -39,32 +29,32 @@ function mapDiscovered(discovered: Awaited<ReturnType<WorkspaceService['discover
   }));
 }
 
-export async function collectLocalProjectFiles(workspace: WorkspaceService, project: ManagedProject): Promise<Record<string, string>> {
+export async function collectLocalProjectFiles(backend: Backend, project: ManagedProject): Promise<Record<string, string>> {
   if (!project.localPath) return {};
   if (project.type === 'single') {
-    const content = await workspace.readFile(project.localPath);
+    const content = await backend.readFile(project.localPath);
     return { [`${project.name}.vo`]: content };
   }
-  return collectDirectoryFiles(workspace, project.localPath);
+  return collectDirectoryFiles(backend, project.localPath);
 }
 
-export async function collectDirectoryFiles(workspace: WorkspaceService, dirPath: string): Promise<Record<string, string>> {
+export async function collectDirectoryFiles(backend: Backend, dirPath: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
-  await walkDirectory(workspace, dirPath, '', result);
+  await walkDirectory(backend, dirPath, '', result);
   return result;
 }
 
 const SKIP_DIR_NAMES = new Set(['.volang', '.vo-cache', '.git', 'node_modules']);
 
 async function walkDirectory(
-  workspace: WorkspaceService,
+  backend: Backend,
   dirPath: string,
   prefix: string,
   result: Record<string, string>,
 ): Promise<void> {
-  let entries = [] as Awaited<ReturnType<WorkspaceService['list']>>;
+  let entries: Awaited<ReturnType<Backend['listDir']>>;
   try {
-    entries = await workspace.list(dirPath);
+    entries = await backend.listDir(dirPath);
   } catch {
     return;
   }
@@ -74,17 +64,17 @@ async function walkDirectory(
     if (entry.isDir) {
       if (SKIP_DIR_NAMES.has(entry.name)) continue;
       const nextPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
-      await walkDirectory(workspace, entry.path, nextPrefix, result);
+      await walkDirectory(backend, entry.path, nextPrefix, result);
       continue;
     }
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-    result[relativePath] = await safeReadFile(workspace, entry.path);
+    result[relativePath] = await safeReadFile(backend, entry.path);
   }
 }
 
-async function safeReadFile(workspace: WorkspaceService, path: string): Promise<string> {
+async function safeReadFile(backend: Backend, path: string): Promise<string> {
   try {
-    return await workspace.readFile(path);
+    return await backend.readFile(path);
   } catch {
     return '';
   }

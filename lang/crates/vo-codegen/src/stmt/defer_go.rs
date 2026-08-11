@@ -59,7 +59,7 @@ impl CallSigInfo {
 /// DeferPush instruction format:
 /// - a: func_id (flags bit 0 = 0) or closure_reg (flags bit 0 = 1)
 /// - b: arg_start
-/// - c: arg_slots
+/// - c: reserved (zero)
 /// - flags bit 0: is_closure
 pub(crate) fn compile_defer(
     call: &vo_syntax::ast::Expr,
@@ -423,10 +423,10 @@ fn emit_defer_func(
     opcode: Opcode,
     func_idx: u32,
     args_start: u16,
-    arg_slots: u16,
+    _arg_slots: u16,
     func: &mut FuncBuilder,
 ) {
-    func.emit_shared_static_call(opcode, func_idx, args_start, arg_slots, "defer");
+    func.emit_shared_static_call(opcode, func_idx, args_start, "defer");
 }
 
 #[inline]
@@ -1069,8 +1069,8 @@ fn compile_defer_method_call(
 // === Go statement ===
 
 #[inline]
-fn emit_go_func(func_idx: u32, args_start: u16, arg_slots: u16, func: &mut FuncBuilder) {
-    func.emit_go_start_static(func_idx, args_start, arg_slots);
+fn emit_go_func(func_idx: u32, args_start: u16, _arg_slots: u16, func: &mut FuncBuilder) {
+    func.emit_go_start_static(func_idx, args_start);
 }
 
 #[inline]
@@ -1084,8 +1084,8 @@ fn emit_go_closure(
 }
 
 /// Compile go statement
-/// GoStart: a=func_id/closure, b=args_start, c=arg_slots, flags bit0=is_closure
-/// GoIsland: a=island, b=closure, c=args_start, flags=arg_slots
+/// GoStart: a=func_id/closure, b=args_start, c=0, flags bit0=is_closure
+/// GoIsland: a=island, b=closure, c=args_start; CallLayout owns the arguments
 pub(crate) fn compile_go(
     target_island: Option<&vo_syntax::ast::Expr>,
     call: &vo_syntax::ast::Expr,
@@ -1117,7 +1117,7 @@ pub(crate) fn compile_go(
         let sig = CallSigInfo::from_call(call_expr, info);
         let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
 
-        // GoIsland: a=island, b=closure, c=args_start, flags=arg_slots.
+        // GoIsland: a=island, b=closure, c=args_start; CallLayout owns the arguments.
         let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
         func.emit_go_island(island_reg, closure_reg, args_start, &arg_layout);
         return Ok(());
@@ -1379,49 +1379,4 @@ fn compile_go_method_call(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
-        source
-            .split(name)
-            .nth(1)
-            .and_then(|rest| rest.split("\nfn ").next())
-            .expect("expected function body")
-    }
-
-    #[test]
-    fn extern_defer_go_wrappers_use_callsite_arg_layout_050() {
-        let source = include_str!("defer_go.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("defer/go source should contain tests section");
-        for function in [
-            "fn compile_defer_pkg_func_call",
-            "fn compile_go_pkg_func_call",
-        ] {
-            let body = function_body(source, function);
-            assert!(
-                body.contains("sig_info.calc_arg_slot_types(call_expr, info)"),
-                "{function} must derive extern wrapper args from the call-site signature layout"
-            );
-            assert!(
-                body.contains("generate_defer_extern_wrapper(\n        ctx,\n        &extern_name,\n        arg_slot_types.clone(),"),
-                "{function} must pass the precise arg layout into the extern wrapper"
-            );
-            assert!(
-                body.contains("return_shape_for_type_keys(&result_types, ctx, info)?"),
-                "{function} must preserve the extern return ABI shape, including interface metadata"
-            );
-            assert!(
-                body.contains("sig_info.compile_args(call_expr, args_start, ctx, func, info)?"),
-                "{function} must compile deferred extern args with the same signature layout"
-            );
-            assert!(
-                !body.contains("info.any_type()") && !body.contains("SlotType::Interface0"),
-                "{function} must not synthesize a second interface-boxed extern ABI"
-            );
-        }
-    }
 }

@@ -180,21 +180,6 @@ pub(crate) fn generate_lock(root_mod: &ModFile, graph: &ResolvedGraph) -> Result
     Ok(lock_file)
 }
 
-pub(crate) fn generate_lock_for_target(
-    root_mod: &ModFile,
-    graph: &ResolvedGraph,
-    target: &str,
-    toolchain: &str,
-) -> Result<LockFile, Error> {
-    generate_lock_for_target_with_policy(
-        root_mod,
-        graph,
-        target,
-        toolchain,
-        crate::profile::SourceBuildPolicy::Deny,
-    )
-}
-
 pub(crate) fn generate_lock_for_target_with_policy(
     root_mod: &ModFile,
     graph: &ResolvedGraph,

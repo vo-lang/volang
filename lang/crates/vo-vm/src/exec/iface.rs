@@ -21,7 +21,7 @@ use vo_runtime::RuntimeType;
 use vo_runtime::ValueKind;
 
 use crate::bytecode::{Constant, Module, IFACE_ASSIGN_NO_ITAB};
-use crate::instruction::{Instruction, IFACE_ASSERT_MAX_TARGET_SLOTS};
+use crate::instruction::{Instruction, IFACE_ASSERT_HAS_OK_FLAG};
 use crate::vm::helpers::{stack_get, stack_set};
 use crate::vm::ExecResult;
 
@@ -148,9 +148,8 @@ pub fn exec_iface_assign(
     Ok(())
 }
 
-/// IfaceAssert: a=dst, b=src_iface (2 slots), c=target-id mirror/sentinel
-/// flags = assert-kind mirror | (has_ok << 2) | (result-slot mirror << 3)
-/// Full target identity and result layout come from `IfaceAssertLayout` metadata.
+/// IfaceAssert: a=dst, b=src_iface (2 slots), flags bit 0 = comma-ok.
+/// Target identity, assertion kind, and result layout come from metadata.
 /// assert_kind: 0=rttid comparison, 1=interface method check
 /// For struct/array (determined by src_vk), copies value from GcRef to dst registers
 /// For interface (assert_kind=1), returns new interface with itab for target interface
@@ -164,38 +163,14 @@ pub fn exec_iface_assert(
     itab_cache: &mut ItabCache,
     module: &Module,
 ) -> ExecResult {
+    let Ok(logical_result_slots) = u16::try_from(result_layout.len()) else {
+        return ExecResult::JitError("IfaceAssert result layout exceeds u16 slots".to_string());
+    };
     let slot0 = stack_get(stack, bp + inst.b as usize);
     let slot1 = stack_get(stack, bp + inst.b as usize + 1);
 
     let assert_kind = metadata_assert_kind;
-    let has_ok = ((inst.flags >> 2) & 0x1) != 0;
-    if inst.flags & 0x3 != assert_kind {
-        return ExecResult::JitError(format!(
-            "IfaceAssert kind mirror {} does not match metadata kind {assert_kind}",
-            inst.flags & 0x3
-        ));
-    }
-    let Ok(logical_result_slots) = u16::try_from(result_layout.len()) else {
-        return ExecResult::JitError("IfaceAssert result layout exceeds u16 slots".to_string());
-    };
-    let expected_slot_mirror = if logical_result_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
-        logical_result_slots
-    } else {
-        0
-    };
-    if u16::from(inst.flags >> 3) != expected_slot_mirror {
-        return ExecResult::JitError(format!(
-            "IfaceAssert result-slot mirror {} does not match metadata width {logical_result_slots}",
-            inst.flags >> 3
-        ));
-    }
-    let expected_target_mirror = u16::try_from(target_id).unwrap_or(u16::MAX);
-    if inst.c != expected_target_mirror {
-        return ExecResult::JitError(format!(
-            "IfaceAssert target mirror {} does not match metadata target {target_id}",
-            inst.c
-        ));
-    }
+    let has_ok = (inst.flags & IFACE_ASSERT_HAS_OK_FLAG) != 0;
 
     let src_rttid = interface::unpack_rttid(slot0);
     let src_vk = interface::unpack_value_kind(slot0);
@@ -348,7 +323,7 @@ pub fn exec_iface_eq(
 mod tests {
     use super::*;
     use crate::bytecode::InterfaceMeta;
-    use crate::instruction::{pack_iface_assert_flags, Opcode};
+    use crate::instruction::{Opcode, IFACE_ASSERT_HAS_OK_FLAG};
 
     #[test]
     fn exec_iface_assert_has_ok_does_not_write_ok_before_success_materialization_061() {
@@ -366,8 +341,7 @@ mod tests {
             method_names: Vec::new(),
             methods: Vec::new(),
         });
-        let flags = pack_iface_assert_flags(1, true, 2).expect("valid IfaceAssert flags");
-        let inst = Instruction::with_flags(Opcode::IfaceAssert, flags, 2, 0, 1);
+        let inst = Instruction::with_flags(Opcode::IfaceAssert, IFACE_ASSERT_HAS_OK_FLAG, 2, 0, 0);
         let mut itab_cache = ItabCache::new();
         let source_slot0 = interface::pack_slot0(0, 0, ValueKind::String);
         let mut stack = [source_slot0, 0xfeed_u64, 0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
@@ -410,9 +384,7 @@ mod tests {
             let backing = [0_u64; 2];
             let source_slot1 = backing.as_ptr() as u64;
 
-            let single_flags =
-                pack_iface_assert_flags(0, false, 0).expect("valid zero-sized assertion flags");
-            let single = Instruction::with_flags(Opcode::IfaceAssert, single_flags, 2, 0, 0);
+            let single = Instruction::with_flags(Opcode::IfaceAssert, 0, 2, 0, 0);
             let mut single_stack = [source_slot0, source_slot1, 0xfeed_u64];
             assert!(matches!(
                 exec_iface_assert(
@@ -429,9 +401,8 @@ mod tests {
             ));
             assert_eq!(single_stack[2], 0xfeed, "{value_kind:?}");
 
-            let comma_ok_flags =
-                pack_iface_assert_flags(0, true, 0).expect("valid zero-sized comma-ok flags");
-            let comma_ok = Instruction::with_flags(Opcode::IfaceAssert, comma_ok_flags, 2, 0, 0);
+            let comma_ok =
+                Instruction::with_flags(Opcode::IfaceAssert, IFACE_ASSERT_HAS_OK_FLAG, 2, 0, 0);
             let mut comma_ok_stack = [source_slot0, source_slot1, 0xfeed_u64, 0xbeef_u64];
             assert!(matches!(
                 exec_iface_assert(
@@ -451,10 +422,9 @@ mod tests {
     }
 
     #[test]
-    fn exec_iface_assert_uses_metadata_to_disambiguate_u16_target_mirror_collision() {
+    fn exec_iface_assert_uses_full_width_metadata_target_id() {
         let module = Module::new("iface-assert-target-boundary".to_string());
-        let flags = pack_iface_assert_flags(0, true, 1).expect("comma-ok scalar assertion flags");
-        let inst = Instruction::with_flags(Opcode::IfaceAssert, flags, 2, 0, u16::MAX);
+        let inst = Instruction::with_flags(Opcode::IfaceAssert, IFACE_ASSERT_HAS_OK_FLAG, 2, 0, 0);
 
         for target_id in [u32::from(u16::MAX), u32::from(u16::MAX) + 1] {
             let source_slot0 = interface::pack_slot0(0, target_id, ValueKind::Int64);

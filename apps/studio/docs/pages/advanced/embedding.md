@@ -57,7 +57,9 @@ let output = vo_engine::compile(path)?;
 let output = vo_engine::compile_with_auto_install(path)?;
 ```
 
-All return a `CompileOutput` containing the bytecode `Module`, source root, extension manifests, and locked dependency metadata.
+All return a `CompileOutput` containing an `Arc<LoadedModule>` verified bytecode
+image, source root, extension manifests, and locked dependency metadata. Cloning
+the output shares the immutable module and its derived runtime type facts.
 
 Project compilation is frozen with respect to dependency intent: these APIs do
 not solve the graph or rewrite `vo.mod`/`vo.lock`.
@@ -185,13 +187,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let module = compiled.module;
 
     // Register stdlib + your externs
-    vo_stdlib::register_externs(&mut vm.state.extern_registry, &module.externs);
-    register_externs(&mut vm.state.extern_registry, &module.externs);
+    let registry = vm.extern_registry_mut().ok_or("VM already loaded")?;
+    vo_stdlib::register_externs(registry, &module.externs)?;
+    register_externs(registry, &module.externs);
 
-    vm.load(module).map_err(|e| format!("{:?}", e))?;
+    vm.load_verified_with_embedder_externs(module)
+        .map_err(|e| format!("{:?}", e))?;
 
     let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
-    assert_eq!(outcome, SchedulingOutcome::Done);
+    assert_eq!(outcome, SchedulingOutcome::Completed);
     Ok(())
 }
 ```

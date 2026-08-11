@@ -12,11 +12,13 @@ pub(crate) fn clear_flow_facts(
 
 pub(crate) fn apply_reg_const_facts(
     reg_consts: &mut HashMap<u16, i64>,
-    reg_const_facts: &[HashMap<u16, i64>],
+    reg_const_facts: &[Box<[(u16, i64)]>],
     pc: usize,
 ) -> Result<(), JitError> {
-    *reg_consts = reg_const_facts.get(pc).cloned().ok_or_else(|| {
+    let facts = reg_const_facts.get(pc).ok_or_else(|| {
         JitError::Internal(format!("missing per-PC register-constant facts at pc {pc}"))
     })?;
+    reg_consts.clear();
+    reg_consts.extend(facts.iter().copied());
     Ok(())
 }

@@ -1,132 +1,29 @@
-//! Verifier for bytecode facts consumed by the JIT.
+//! JIT entry adapter over the common bytecode verifier.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+#[cfg(test)]
+use std::cell::Cell;
+
 use vo_common_core::verifier as module_verifier;
-use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 #[cfg(test)]
-use vo_runtime::instruction::Opcode;
-mod errors;
-mod metadata_checks;
+use vo_runtime::bytecode::Module as VoModule;
 
-pub use errors::JitMetadataError;
-use metadata_checks::verify_metadata_kind;
+pub(crate) use module_verifier::ModuleVerificationError as JitMetadataError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ModuleDigest {
-    hash: u64,
-    serialized_len: usize,
-    function_count: usize,
+#[cfg(test)]
+thread_local! {
+    static COMMON_MODULE_VERIFICATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
-impl ModuleDigest {
-    fn for_module(vo_module: &VoModule) -> Result<Self, JitMetadataError> {
-        let bytes =
-            vo_module
-                .serialize()
-                .map_err(|error| JitMetadataError::ModuleSerialization {
-                    detail: error.to_string(),
-                })?;
-        let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        Ok(Self {
-            hash: hasher.finish(),
-            serialized_len: bytes.len(),
-            function_count: vo_module.functions.len(),
-        })
-    }
+#[cfg(test)]
+pub(crate) fn verification_work_counts_for_test() -> (usize, usize) {
+    (COMMON_MODULE_VERIFICATIONS.with(Cell::get), 0)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerifiedModule {
-    digest: ModuleDigest,
-}
-
-impl VerifiedModule {
-    pub fn matches(self, vo_module: &VoModule) -> Result<bool, JitMetadataError> {
-        Ok(self.digest == ModuleDigest::for_module(vo_module)?)
-    }
-}
-
-fn forloop_target_i64(pc: usize, offset: i16) -> i64 {
-    pc as i64 + 1 + i64::from(offset)
-}
-
-pub fn verify_jit_metadata(
-    func: &FunctionDef,
+#[cfg(test)]
+pub(crate) fn verify_module(
     vo_module: &VoModule,
-) -> Result<(), JitMetadataError> {
-    let common_result =
-        module_verifier::verify_function(func, vo_module).map_err(JitMetadataError::from);
-    let strict_result = verify_strict_jit_metadata_only(func);
-
-    match (common_result, strict_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(common), _) if common_error_precedes_jit_metadata(&common) => Err(common),
-        (_, Err(strict)) => Err(strict),
-        (Err(common), Ok(())) => Err(common),
-    }
+) -> Result<module_verifier::VerifiedModule<'_>, JitMetadataError> {
+    #[cfg(test)]
+    COMMON_MODULE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+    module_verifier::verify_module(vo_module)
 }
-
-fn common_error_precedes_jit_metadata(error: &JitMetadataError) -> bool {
-    matches!(
-        error,
-        JitMetadataError::InvalidOpcode { .. }
-            | JitMetadataError::MissingExtern { .. }
-            | JitMetadataError::MissingConstant { .. }
-            | JitMetadataError::MissingFunction { .. }
-            | JitMetadataError::SlotRangeOverflow { .. }
-            | JitMetadataError::SlotOutOfRange { .. }
-            | JitMetadataError::GlobalSlotOutOfRange { .. }
-    )
-}
-
-fn verify_strict_jit_metadata_only(func: &FunctionDef) -> Result<(), JitMetadataError> {
-    if func.code.len() != func.jit_metadata.len() {
-        return Err(JitMetadataError::LengthMismatch {
-            func: func.name.clone(),
-            code_len: func.code.len(),
-            metadata_len: func.jit_metadata.len(),
-        });
-    }
-
-    for (pc, inst) in func.code.iter().enumerate() {
-        let opcode = inst.opcode();
-        if opcode == vo_runtime::instruction::Opcode::Invalid {
-            return Err(JitMetadataError::InvalidOpcode {
-                func: func.name.clone(),
-                pc,
-                raw: inst.op,
-            });
-        }
-        verify_metadata_kind(
-            func,
-            pc,
-            opcode,
-            func.code[pc].flags,
-            &func.jit_metadata[pc],
-        )?;
-    }
-
-    Ok(())
-}
-
-pub fn verify_module(vo_module: &VoModule) -> Result<VerifiedModule, JitMetadataError> {
-    let verified = module_verifier::verify_module(vo_module).map_err(JitMetadataError::from)?;
-    verify_module_after_common(verified)
-}
-
-pub fn verify_module_after_common(
-    verified: module_verifier::VerifiedModule<'_>,
-) -> Result<VerifiedModule, JitMetadataError> {
-    let vo_module = verified.module();
-    for func in &vo_module.functions {
-        verify_strict_jit_metadata_only(func)?;
-    }
-    Ok(VerifiedModule {
-        digest: ModuleDigest::for_module(vo_module)?,
-    })
-}
-
-#[cfg(test)]
-mod tests;

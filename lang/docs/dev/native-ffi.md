@@ -196,7 +196,7 @@ ABI-v10 dynamic extensions may use these `ExternCallContext` groups:
 | Frame and output | `available_slots`, `arg_count`/`arg_slots`, `arg_start`, `ret_start`, `ret_slots`, `extern_id`, `slot`, `set_slot`, `write_output*`, `writeln_output*` |
 | Typed arguments | scalar `arg_*`, `arg_ref`, `arg_str`/`try_arg_str`, arbitrary-byte string and byte-slice readers, `arg_any`, `arg_error`, and `arg_any_as_*` |
 | Typed returns | scalar `ret_*`, `ret_ref`, `ret_nil`, string/byte helpers, `ret_any`, `ret_error`, `ret_interface_pair`, `ret_nil_error`, and `ret_error_msg` |
-| Replay and result payloads | host-event token/data helpers, `resume_closure_result`, `set_host_output`, and the `set_ext_*` helpers used by generated trampolines |
+| Replay and result payloads | host-event token/data helpers, `resume_closure_result`, `set_host_output`, and generated panic/exit/closure/host-event payload helpers |
 | Allocator-neutral GC | `gc`, string/byte/slice allocation, string-slice allocation, `gc_alloc_raw`, `alloc_and_copy_slots`, `gc_lease`, `gc_lease_root`, `gc_release_lease`, and the typed container accessors described below |
 
 Low-level GC allocation must use canonical `ValueMeta`, the exact host module
@@ -226,6 +226,12 @@ Generated trampolines contain provider panics and translate ABI-facade misuse
 to a failed native call. Extension code should treat the table above as the
 public contract instead of relying on same-image runtime methods that happen to
 be visible on the Rust type.
+
+The direct-I/O compatibility surface fails closed without probing host-owned
+state: `try_io_mut`, `take_resume_io_token`, and `resume_io_token` return
+`None` on a dynamic-extension facade. `io_mut` remains a same-image convenience
+and will panic when called by an extension. Native asynchronous I/O uses
+HostServices V2 and `HostEventWaitAndReplay`.
 
 ### Argument and Return Windows
 
@@ -270,13 +276,20 @@ The native extension trampoline maps `ExternResult` variants to
 `vo_runtime::ffi::ext_abi::RESULT_*` codes. Panic messages, host-event tokens,
 and closure callback payloads are stored on `ExternCallContext`.
 
+`ExternResult::WaitIo` is reserved for same-image runtime and stdlib providers.
+ABI v10 keeps raw result code `RESULT_WAIT_IO = 3` and the `set_wait_io`
+callback at their historical locations so existing binaries retain the same C
+layout. New trampolines report a contract violation and return
+`RESULT_ABI_ERROR`; an older binary that calls the callback or returns the raw
+result code receives the same structured rejection.
+
 Effectful manual functions must declare their provider effects in the macro:
 
 | Result variant | Required effect |
 |---|---|
 | `Yield` | `MAY_YIELD` |
 | `Block` | `MAY_QUEUE_BLOCK` |
-| `WaitIo { .. }` | `MAY_WAIT_IO_REPLAY` |
+| `WaitIo { .. }` | Rejected for native extensions; same-image providers use `MAY_WAIT_IO_REPLAY` |
 | `HostEventWait { .. }` | `MAY_HOST_WAIT` |
 | `HostEventWaitAndReplay { .. }` | `MAY_HOST_REPLAY` |
 | `CallClosure { .. }` | `MAY_CALL_CLOSURE_REPLAY` |

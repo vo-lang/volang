@@ -21,16 +21,15 @@ fn vm_queue_close_endpoint_late_reservation_failure_rolls_back_local_state_059()
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     queue::add_home_peer(ch, peer);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
-    queue::register_receiver(ch, QueueWaiter::endpoint(peer, 0x0000_0002_0000_0003, 11));
+    queue::register_receiver(ch, endpoint_waiter(peer, 0x0000_0002_0000_0003, 11));
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(peer, 0x0000_0004_0000_0005, 12),
+        endpoint_waiter(peer, 0x0000_0004_0000_0005, 12),
         vec![123].into_boxed_slice().into(),
     );
 
-    crate::exec::preflight_queue_close_routes(&vm.state, ch)
-        .expect("preflight should pass before late reservation failure");
     let crate::exec::QueueAction::Close {
+        ch: close_ch,
         receivers,
         senders,
         endpoint_id: close_endpoint_id,
@@ -43,14 +42,15 @@ fn vm_queue_close_endpoint_late_reservation_failure_rolls_back_local_state_059()
         queue::is_closed(ch),
         "core close should create the rollback window"
     );
-    assert!(queue::take_waiting_receivers(ch).is_empty());
-    assert!(queue::take_waiting_senders(ch).is_empty());
+    assert_eq!(queue::local_state(ch).waiting_receivers.len(), 1);
+    assert_eq!(queue::local_state(ch).waiting_senders.len(), 1);
 
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::CurrentFiberDirty,
     );
+    transition.prepare_queue_close(close_ch);
     transition.set_rollback(rollback);
     for waiter in receivers {
         transition.push_queue_close_wake(WakeCommand::queue_closed_receiver(
@@ -67,7 +67,6 @@ fn vm_queue_close_endpoint_late_reservation_failure_rolls_back_local_state_059()
         .push(IslandCommandEffect::endpoint_close_request(
             peer,
             endpoint_id,
-            vm.state.current_island_id,
         ));
     transition
         .endpoint_tombstones
@@ -107,8 +106,6 @@ fn vm_queue_close_remote_proxy_late_reservation_failure_rolls_back_closed_059() 
         1,
     );
 
-    crate::exec::preflight_queue_close_routes(&vm.state, ch)
-        .expect("preflight should pass before late reservation failure");
     let crate::exec::QueueAction::RemoteClose {
         endpoint_id,
         home_island,
@@ -133,7 +130,6 @@ fn vm_queue_close_remote_proxy_late_reservation_failure_rolls_back_closed_059() 
         .push(IslandCommandEffect::endpoint_close_request(
             home_island,
             endpoint_id,
-            vm.state.current_island_id,
         ));
     transition
         .endpoint_tombstones
@@ -151,6 +147,70 @@ fn vm_queue_close_remote_proxy_late_reservation_failure_rolls_back_closed_059() 
         "failed remote close transition must roll back proxy closed bit"
     );
     assert!(vm.state.outbound_commands.is_empty());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn vm_direct_receiver_late_publish_failure_restores_select_and_queue_order() {
+    let mut vm = Vm::new();
+    let peer = 7;
+    vm.state.island_senders.insert(
+        peer,
+        std::sync::Arc::new(PreflightOkThenFailingIslandSender::default()),
+    );
+    let ch = queue::create(
+        &mut vm.state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(0, ValueKind::Int64),
+        1,
+        1,
+    );
+    let claimed = endpoint_waiter(peer, 0x0000_0002_0000_0003, 11);
+    let next = endpoint_waiter(peer, 0x0000_0004_0000_0005, 12);
+    queue::register_receiver(ch, next.clone());
+
+    let original_select = select_send_state_for_queue_061(ch);
+    let mut fiber = Fiber::new(1);
+    fiber.stack.push(17);
+    fiber.select_state = Some(original_select.clone());
+    let current = vm.scheduler.spawn(fiber);
+    assert_eq!(vm.scheduler.schedule_next(), Some(current));
+    vm.scheduler.get_fiber_mut(current).stack[0] = 99;
+    vm.scheduler.get_fiber_mut(current).select_state = None;
+
+    let mut rollback = RuntimeRollback::direct_queue_receiver(ch, claimed.clone());
+    rollback.push_stack_slot(0, 17);
+    rollback.set_select_state(Some(original_select));
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Yield,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::CurrentFiberDirty,
+    );
+    transition.set_rollback(rollback);
+    transition
+        .island_commands
+        .push(IslandCommandEffect::endpoint_close_request(peer, 200));
+
+    let err = vm
+        .apply_runtime_transition(Some(current), transition)
+        .expect_err("late publication failure must trigger direct-receiver rollback");
+    assert!(format!("{err:?}").contains("Disconnected"), "{err:?}");
+    assert_eq!(
+        queue::local_state(ch)
+            .waiting_receivers
+            .iter()
+            .collect::<Vec<_>>(),
+        vec![&claimed, &next]
+    );
+    let fiber = vm.scheduler.get_fiber(current);
+    assert_eq!(fiber.stack[0], 17);
+    let restored = fiber
+        .select_state
+        .as_ref()
+        .expect("select state must be restored");
+    assert_eq!(restored.select_id, 61);
+    assert_eq!(restored.registered_queues.len(), 1);
 }
 
 #[test]
@@ -206,10 +266,9 @@ fn vm_endpoint_response_command_bridge_061_rejects_non_home_targeted_response_be
     vm.state.endpoint_registry.register_live(endpoint_id, _ch);
     let fid = vm.scheduler.spawn(Fiber::new(0));
     vm.scheduler.schedule_next().unwrap();
-    let (fiber_key, wait_id) = {
+    let wait_key = {
         let fiber = vm.scheduler.current_fiber_mut().unwrap();
-        let wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
-        (fiber.endpoint_response_key(), wait_id)
+        fiber.begin_remote_endpoint_send_wait(endpoint_id)
     };
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 1;
@@ -217,9 +276,10 @@ fn vm_endpoint_response_command_bridge_061_rejects_non_home_targeted_response_be
     let outcome = vm.apply_runtime_command(RuntimeCommand::endpoint_response(
         endpoint_id,
         vm.state.current_island_id,
-        fiber_key,
-        wait_id,
-        EndpointResponseKind::SendAck { closed: false },
+        EndpointResponseKind::SendAck {
+            closed: false,
+            wait_key,
+        },
     ));
 
     assert!(!outcome.applied);
@@ -293,7 +353,7 @@ fn vm_remote_send_transfer_txn_061_late_publish_failure_rolls_back_local_endpoin
         Some(payload_port)
     );
 
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(current)
         .begin_remote_endpoint_send_wait(endpoint_id);
@@ -309,9 +369,7 @@ fn vm_remote_send_transfer_txn_061_late_publish_failure_rolls_back_local_endpoin
             send_home_island,
             endpoint_id,
             data,
-            vm.state.current_island_id,
-            fiber_key,
-            wait_id,
+            wait_key,
         ));
     transition.set_rollback(
         transfer_commit

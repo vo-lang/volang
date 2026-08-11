@@ -120,11 +120,11 @@ jobs:
 
       - name: Run pull request language targets
         if: matrix.shard == 'smoke'
-        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets both,compile
+        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets native,gc-vm,gc-osr,compile
 
       - name: Run native language shard
         if: matrix.shard != 'smoke'
-        run: ./target/debug/vo-dev test run --suite lang --targets native,gc,embed,compile --shard '${{ matrix.shard }}'
+        run: ./target/debug/vo-dev test run --suite lang --targets native,gc,gc-osr,embed,compile --shard '${{ matrix.shard }}'
 
   wasm_web:
     name: wasm-web
@@ -226,7 +226,7 @@ jobs:
   studio_native:
     name: studio-native (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -249,6 +249,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run native language smoke matrix
+        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets native,gc-vm,gc-osr
 
       - name: Run Studio native Clippy
         run: cargo clippy --manifest-path apps/studio/src-tauri/Cargo.toml --all-targets --locked -- -D warnings

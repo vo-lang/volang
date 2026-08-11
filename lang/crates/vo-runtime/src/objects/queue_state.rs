@@ -24,39 +24,49 @@ use std::{
     vec::Vec,
 };
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use hashbrown::HashSet;
 
 use crate::gc::{Gc, GcRef, MemoryError};
+use crate::island::EndpointWaitKey;
 use crate::slot::{slot_to_usize, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 
 static QUEUE_WAIT_REGISTRATION_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueueWaitRegistrationExhausted;
+pub enum QueueWaiterError {
+    RegistrationExhausted,
+    ZeroQueueRef,
+}
 
-impl core::fmt::Display for QueueWaitRegistrationExhausted {
+impl core::fmt::Display for QueueWaiterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("queue wait registration identity space exhausted")
+        match self {
+            Self::RegistrationExhausted => {
+                f.write_str("queue wait registration identity space exhausted")
+            }
+            Self::ZeroQueueRef => f.write_str("queue waiter requires a non-zero queue reference"),
+        }
     }
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for QueueWaitRegistrationExhausted {}
+impl std::error::Error for QueueWaiterError {}
 
 /// Allocates a process-unique, non-zero queue waiter identity.
 ///
 /// Zero is a permanent exhausted sentinel.  Publishing it with the successful
 /// allocation of `usize::MAX` prevents every later caller from reusing an old
 /// identity, including when several threads race at the boundary.
-fn next_queue_wait_registration_id_from(
-    counter: &AtomicUsize,
-) -> Result<u64, QueueWaitRegistrationExhausted> {
+fn next_queue_wait_registration_id_from(counter: &AtomicUsize) -> Result<u64, QueueWaiterError> {
     let mut current = counter.load(Ordering::Relaxed);
     loop {
         if current == 0 {
-            return Err(QueueWaitRegistrationExhausted);
+            return Err(QueueWaiterError::RegistrationExhausted);
         }
         let next = current.checked_add(1).unwrap_or(0);
         match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
@@ -66,8 +76,9 @@ fn next_queue_wait_registration_id_from(
     }
 }
 
-fn next_queue_wait_registration_id() -> Result<u64, QueueWaitRegistrationExhausted> {
-    next_queue_wait_registration_id_from(&QUEUE_WAIT_REGISTRATION_COUNTER)
+fn next_queue_wait_registration_id() -> Result<NonZeroU64, QueueWaiterError> {
+    let registration_id = next_queue_wait_registration_id_from(&QUEUE_WAIT_REGISTRATION_COUNTER)?;
+    NonZeroU64::new(registration_id).ok_or(QueueWaiterError::RegistrationExhausted)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,11 +176,6 @@ pub unsafe fn elem_meta(q: GcRef) -> ValueMeta {
 }
 
 #[inline]
-pub unsafe fn elem_kind(q: GcRef) -> ValueKind {
-    elem_meta(q).value_kind()
-}
-
-#[inline]
 pub unsafe fn elem_slots(q: GcRef) -> u16 {
     unsafe { QueueData::as_ref(q) }.elem_slots
 }
@@ -189,11 +195,6 @@ pub unsafe fn backing(q: GcRef) -> QueueBacking {
     QueueBacking::from_raw(unsafe { QueueData::as_ref(q) }.backing)
 }
 
-#[inline]
-pub unsafe fn is_port(q: GcRef) -> bool {
-    kind(q) == QueueKind::Port
-}
-
 // =============================================================================
 // Type aliases for channel states
 // =============================================================================
@@ -203,7 +204,7 @@ pub unsafe fn is_port(q: GcRef) -> bool {
 /// Guest sends use `Managed`: payload slots live in a runtime-backing object
 /// owned and charged by the Island heap. `Owned` remains available at
 /// transport/test boundaries where bytes arrive before a destination Island
-/// is selected; production queue insertion promotes it before persistence.
+/// is selected; production queue insertion copies it into `Managed` storage.
 #[derive(Debug)]
 pub enum QueueMessage {
     Managed { backing: GcRef, len: usize },
@@ -241,33 +242,8 @@ impl QueueMessage {
         }
     }
 
-    #[inline]
-    pub fn is_managed(&self) -> bool {
-        matches!(self, Self::Managed { .. })
-    }
-
-    pub fn promote(self, gc: &mut Gc) -> Result<Self, MemoryError> {
-        match self {
-            Self::Managed { .. } => Ok(self),
-            Self::Owned(slots) => Self::managed(gc, &slots),
-        }
-    }
-
     pub fn into_vec(self) -> Vec<u64> {
         self.as_ref().to_vec()
-    }
-
-    pub fn into_boxed_slice(self) -> Box<[u64]> {
-        match self {
-            Self::Owned(slots) => slots,
-            Self::Managed { backing, len } => {
-                if len == 0 {
-                    Box::new([])
-                } else {
-                    unsafe { core::slice::from_raw_parts(backing, len) }.into()
-                }
-            }
-        }
     }
 }
 
@@ -332,13 +308,8 @@ impl From<&[u64]> for QueueMessage {
     }
 }
 
-impl core::iter::FromIterator<u64> for QueueMessage {
-    fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {
-        Self::from(iter.into_iter().collect::<Vec<_>>())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Copyable projection of a select waiter target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectInfo {
     pub case_index: u16,
     pub select_id: u64,
@@ -346,143 +317,154 @@ pub struct SelectInfo {
     pub kind: SelectWaitKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelectWaitKind {
     Send,
     Recv,
 }
 
-impl SelectWaitKind {
-    #[inline]
-    pub fn to_raw(self) -> u8 {
-        match self {
-            Self::Send => 1,
-            Self::Recv => 2,
-        }
-    }
-
-    #[inline]
-    pub fn from_raw(raw: u8) -> Option<Self> {
-        match raw {
-            1 => Some(Self::Send),
-            2 => Some(Self::Recv),
-            _ => None,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QueueWaitTarget {
+    Queue {
+        registration_id: NonZeroU64,
+        queue_ref: NonZeroU64,
+        kind: SelectWaitKind,
+    },
+    Select {
+        case_index: u16,
+        select_id: u64,
+        queue_ref: NonZeroU64,
+        kind: SelectWaitKind,
+    },
+    Endpoint {
+        wait_id: NonZeroU64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueWaiter {
-    pub island_id: u32,
-    pub fiber_key: u64,
-    pub registration_id: u64,
-    pub endpoint_wait_id: u64,
-    pub queue_ref: u64,
-    pub kind: Option<SelectWaitKind>,
-    pub select: Option<SelectInfo>,
+    island_id: u32,
+    fiber_key: u64,
+    target: QueueWaitTarget,
 }
 
 impl QueueWaiter {
+    #[inline]
+    pub fn island_id(&self) -> u32 {
+        self.island_id
+    }
+
     #[inline]
     pub fn fiber_key(&self) -> u64 {
         self.fiber_key
     }
 
     #[inline]
-    pub fn endpoint_wait_id(&self) -> u64 {
-        self.endpoint_wait_id
+    pub fn target(&self) -> &QueueWaitTarget {
+        &self.target
     }
 
     #[inline]
-    pub fn simple(island_id: u32, fiber_key: u64) -> Self {
-        Self {
-            island_id,
-            fiber_key,
-            registration_id: 0,
-            endpoint_wait_id: 0,
-            queue_ref: 0,
-            kind: None,
-            select: None,
+    pub fn registration_id(&self) -> Option<NonZeroU64> {
+        match self.target {
+            QueueWaitTarget::Queue {
+                registration_id, ..
+            } => Some(registration_id),
+            QueueWaitTarget::Select { .. } | QueueWaitTarget::Endpoint { .. } => None,
         }
     }
 
     #[inline]
-    pub fn simple_queue(
-        island_id: u32,
-        fiber_key: u64,
-        queue_ref: u64,
-        kind: SelectWaitKind,
-    ) -> Self {
-        Self::try_simple_queue(island_id, fiber_key, queue_ref, kind)
-            .expect("queue wait registration identity space exhausted")
-    }
-
-    #[inline]
-    pub fn try_simple_queue(
-        island_id: u32,
-        fiber_key: u64,
-        queue_ref: u64,
-        kind: SelectWaitKind,
-    ) -> Result<Self, QueueWaitRegistrationExhausted> {
-        Ok(Self {
-            island_id,
-            fiber_key,
-            registration_id: next_queue_wait_registration_id()?,
-            endpoint_wait_id: 0,
-            queue_ref,
-            kind: Some(kind),
-            select: None,
-        })
-    }
-
-    #[inline]
-    pub fn endpoint(island_id: u32, fiber_key: u64, endpoint_wait_id: u64) -> Self {
-        Self {
-            island_id,
-            fiber_key,
-            registration_id: 0,
-            endpoint_wait_id,
-            queue_ref: 0,
-            kind: None,
-            select: None,
+    pub fn endpoint_wait_key(&self) -> Option<EndpointWaitKey> {
+        match self.target {
+            QueueWaitTarget::Endpoint { wait_id } => {
+                Some(EndpointWaitKey::new(self.fiber_key, wait_id))
+            }
+            QueueWaitTarget::Queue { .. } | QueueWaitTarget::Select { .. } => None,
         }
     }
 
     #[inline]
-    pub fn selecting(
-        island_id: u32,
-        fiber_key: u64,
-        case_index: u16,
-        select_id: u64,
-        queue_ref: u64,
-        kind: SelectWaitKind,
-    ) -> Self {
-        Self::try_selecting(island_id, fiber_key, case_index, select_id, queue_ref, kind)
-            .expect("queue wait registration identity space exhausted")
+    pub fn queue_identity(&self) -> Option<(u64, SelectWaitKind)> {
+        match self.target {
+            QueueWaitTarget::Queue {
+                queue_ref, kind, ..
+            }
+            | QueueWaitTarget::Select {
+                queue_ref, kind, ..
+            } => Some((queue_ref.get(), kind)),
+            QueueWaitTarget::Endpoint { .. } => None,
+        }
     }
 
     #[inline]
-    pub fn try_selecting(
-        island_id: u32,
-        fiber_key: u64,
-        case_index: u16,
-        select_id: u64,
-        queue_ref: u64,
-        kind: SelectWaitKind,
-    ) -> Result<Self, QueueWaitRegistrationExhausted> {
-        Ok(Self {
-            island_id,
-            fiber_key,
-            registration_id: next_queue_wait_registration_id()?,
-            endpoint_wait_id: 0,
-            queue_ref,
-            kind: Some(kind),
-            select: Some(SelectInfo {
+    pub fn select_info(&self) -> Option<SelectInfo> {
+        match self.target {
+            QueueWaitTarget::Select {
                 case_index,
                 select_id,
                 queue_ref,
                 kind,
+                ..
+            } => Some(SelectInfo {
+                case_index,
+                select_id,
+                queue_ref: queue_ref.get(),
+                kind,
             }),
+            QueueWaitTarget::Queue { .. } | QueueWaitTarget::Endpoint { .. } => None,
+        }
+    }
+
+    #[inline]
+    pub fn try_queue(
+        island_id: u32,
+        fiber_key: u64,
+        queue_ref: u64,
+        kind: SelectWaitKind,
+    ) -> Result<Self, QueueWaiterError> {
+        let queue_ref = NonZeroU64::new(queue_ref).ok_or(QueueWaiterError::ZeroQueueRef)?;
+        Ok(Self {
+            island_id,
+            fiber_key,
+            target: QueueWaitTarget::Queue {
+                registration_id: next_queue_wait_registration_id()?,
+                queue_ref,
+                kind,
+            },
+        })
+    }
+
+    #[inline]
+    pub fn endpoint(island_id: u32, wait_key: EndpointWaitKey) -> Self {
+        Self {
+            island_id,
+            fiber_key: wait_key.fiber_key(),
+            target: QueueWaitTarget::Endpoint {
+                wait_id: wait_key.wait_id(),
+            },
+        }
+    }
+
+    #[inline]
+    pub fn try_select(
+        island_id: u32,
+        fiber_key: u64,
+        case_index: u16,
+        select_id: u64,
+        queue_ref: u64,
+        kind: SelectWaitKind,
+    ) -> Result<Self, QueueWaiterError> {
+        let queue_ref = NonZeroU64::new(queue_ref).ok_or(QueueWaiterError::ZeroQueueRef)?;
+        Ok(Self {
+            island_id,
+            fiber_key,
+            target: QueueWaitTarget::Select {
+                case_index,
+                select_id,
+                queue_ref,
+                kind,
+            },
         })
     }
 
@@ -490,8 +472,7 @@ impl QueueWaiter {
     pub fn is_select_for(&self, fiber_key: u64, select_id: u64) -> bool {
         self.fiber_key == fiber_key
             && self
-                .select
-                .as_ref()
+                .select_info()
                 .is_some_and(|info| info.select_id == select_id)
     }
 
@@ -499,8 +480,7 @@ impl QueueWaiter {
     pub fn is_local_select_recv(&self, local_island: u32) -> bool {
         self.island_id == local_island
             && self
-                .select
-                .as_ref()
+                .select_info()
                 .is_some_and(|info| info.kind == SelectWaitKind::Recv)
     }
 }
@@ -554,7 +534,7 @@ pub enum SendResult<W, M> {
 pub enum BlockingSendResult<W, M> {
     DirectSend { receiver: W, payload: M },
     Buffered,
-    Blocked,
+    Blocked(W),
     Closed,
 }
 
@@ -563,7 +543,7 @@ pub enum ResolvedSendResult<W, M> {
     Wake { receiver: W, payload: Option<M> },
     RemoteDirect { receiver: W, payload: M },
     Buffered,
-    Blocked,
+    Blocked(W),
     Closed,
 }
 
@@ -583,7 +563,7 @@ pub enum RecvResult<W, M> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockingRecvResult<W, M> {
     Success { woke_sender: Option<W>, payload: M },
-    Blocked,
+    Blocked(W),
     Closed,
 }
 
@@ -670,26 +650,55 @@ impl<W, M> QueueState<W, M> {
         }
     }
 
-    /// Atomic send: try to send, if would block, register waiter in same operation.
-    /// This avoids TOCTOU race between try_send and register_sender.
-    pub fn send_or_block(&mut self, value: M, cap: usize, waiter: W) -> BlockingSendResult<W, M> {
-        match self.try_send(value, cap) {
+    /// Atomic send: try to send, then create and register a waiter only when
+    /// immediate progress is unavailable.
+    pub fn try_send_or_block_with<E, F>(
+        &mut self,
+        value: M,
+        cap: usize,
+        make_waiter: F,
+    ) -> Result<BlockingSendResult<W, M>, E>
+    where
+        W: Clone,
+        F: FnOnce() -> Result<W, E>,
+    {
+        Ok(match self.try_send(value, cap) {
             SendResult::DirectSend { receiver, payload } => {
                 BlockingSendResult::DirectSend { receiver, payload }
             }
             SendResult::Buffered => BlockingSendResult::Buffered,
             SendResult::WouldBlock(value) => {
-                self.waiting_senders.push_back((waiter, value));
-                BlockingSendResult::Blocked
+                let waiter = make_waiter()?;
+                self.waiting_senders.push_back((waiter.clone(), value));
+                BlockingSendResult::Blocked(waiter)
             }
             SendResult::Closed => BlockingSendResult::Closed,
+        })
+    }
+
+    /// Eager compatibility wrapper for callers that already own a waiter.
+    pub fn send_or_block(&mut self, value: M, cap: usize, waiter: W) -> BlockingSendResult<W, M>
+    where
+        W: Clone,
+    {
+        match self.try_send_or_block_with(value, cap, || Ok::<W, core::convert::Infallible>(waiter))
+        {
+            Ok(result) => result,
+            Err(never) => match never {},
         }
     }
 
-    /// Atomic recv: try to receive, if would block, register waiter in same operation.
-    /// This avoids TOCTOU race between try_recv and register_receiver.
-    pub fn recv_or_block(&mut self, waiter: W) -> BlockingRecvResult<W, M> {
-        match self.try_recv() {
+    /// Atomic receive: try to receive, then create and register a waiter only
+    /// when immediate progress is unavailable.
+    pub fn try_recv_or_block_with<E, F>(
+        &mut self,
+        make_waiter: F,
+    ) -> Result<BlockingRecvResult<W, M>, E>
+    where
+        W: Clone,
+        F: FnOnce() -> Result<W, E>,
+    {
+        Ok(match self.try_recv() {
             RecvResult::Success {
                 woke_sender,
                 payload,
@@ -698,10 +707,22 @@ impl<W, M> QueueState<W, M> {
                 payload,
             },
             RecvResult::WouldBlock => {
-                self.waiting_receivers.push_back(waiter);
-                BlockingRecvResult::Blocked
+                let waiter = make_waiter()?;
+                self.waiting_receivers.push_back(waiter.clone());
+                BlockingRecvResult::Blocked(waiter)
             }
             RecvResult::Closed => BlockingRecvResult::Closed,
+        })
+    }
+
+    /// Eager compatibility wrapper for callers that already own a waiter.
+    pub fn recv_or_block(&mut self, waiter: W) -> BlockingRecvResult<W, M>
+    where
+        W: Clone,
+    {
+        match self.try_recv_or_block_with(|| Ok::<W, core::convert::Infallible>(waiter)) {
+            Ok(result) => result,
+            Err(never) => match never {},
         }
     }
 
@@ -713,6 +734,10 @@ impl<W, M> QueueState<W, M> {
         self.waiting_receivers.push_back(waiter);
     }
 
+    pub fn restore_direct_receiver(&mut self, waiter: W) {
+        self.waiting_receivers.push_front(waiter);
+    }
+
     pub fn close(&mut self) {
         self.closed = true;
     }
@@ -721,12 +746,8 @@ impl<W, M> QueueState<W, M> {
         self.closed
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.buffer.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
     }
 
     pub fn take_waiting_receivers(&mut self) -> Vec<W> {
@@ -747,19 +768,73 @@ impl<M> QueueState<QueueWaiter, M> {
         match kind {
             SelectWaitKind::Send => {
                 self.waiting_senders.retain(|(waiter, _)| {
-                    waiter.fiber_key != fiber_key
-                        || waiter.kind != Some(SelectWaitKind::Send)
-                        || waiter.select.is_some()
+                    waiter.fiber_key() != fiber_key
+                        || !matches!(
+                            waiter.target(),
+                            QueueWaitTarget::Queue {
+                                kind: SelectWaitKind::Send,
+                                ..
+                            }
+                        )
                 });
             }
             SelectWaitKind::Recv => {
                 self.waiting_receivers.retain(|waiter| {
-                    waiter.fiber_key != fiber_key
-                        || waiter.kind != Some(SelectWaitKind::Recv)
-                        || waiter.select.is_some()
+                    waiter.fiber_key() != fiber_key
+                        || !matches!(
+                            waiter.target(),
+                            QueueWaitTarget::Queue {
+                                kind: SelectWaitKind::Recv,
+                                ..
+                            }
+                        )
                 });
             }
         }
+    }
+
+    pub fn try_send_or_block_resolved_with<E, F>(
+        &mut self,
+        value: M,
+        cap: usize,
+        make_waiter: F,
+        local_island: u32,
+    ) -> Result<ResolvedSendResult<QueueWaiter, M>, E>
+    where
+        F: FnOnce() -> Result<QueueWaiter, E>,
+    {
+        Ok(
+            match self.try_send_or_block_with(value, cap, make_waiter)? {
+                BlockingSendResult::DirectSend { receiver, payload } => {
+                    if receiver.endpoint_wait_key().is_none()
+                        && receiver.island_id() == local_island
+                    {
+                        if receiver
+                            .select_info()
+                            .is_some_and(|select| select.kind == SelectWaitKind::Recv)
+                        {
+                            ResolvedSendResult::Wake {
+                                receiver,
+                                payload: Some(payload),
+                            }
+                        } else {
+                            // A simple local receiver replays the ordinary receive path,
+                            // so publish the payload to the queue before waking it.
+                            self.buffer.push_back(payload);
+                            ResolvedSendResult::Wake {
+                                receiver,
+                                payload: None,
+                            }
+                        }
+                    } else {
+                        ResolvedSendResult::RemoteDirect { receiver, payload }
+                    }
+                }
+                BlockingSendResult::Buffered => ResolvedSendResult::Buffered,
+                BlockingSendResult::Blocked(waiter) => ResolvedSendResult::Blocked(waiter),
+                BlockingSendResult::Closed => ResolvedSendResult::Closed,
+            },
+        )
     }
 
     pub fn send_or_block_resolved(
@@ -769,34 +844,14 @@ impl<M> QueueState<QueueWaiter, M> {
         waiter: QueueWaiter,
         local_island: u32,
     ) -> ResolvedSendResult<QueueWaiter, M> {
-        match self.send_or_block(value, cap, waiter) {
-            BlockingSendResult::DirectSend { receiver, payload } => {
-                if receiver.endpoint_wait_id() == 0 && receiver.island_id == local_island {
-                    if receiver
-                        .select
-                        .as_ref()
-                        .is_some_and(|select| select.kind == SelectWaitKind::Recv)
-                    {
-                        ResolvedSendResult::Wake {
-                            receiver,
-                            payload: Some(payload),
-                        }
-                    } else {
-                        // A simple local receiver replays the ordinary receive path,
-                        // so publish the payload to the queue before waking it.
-                        self.buffer.push_back(payload);
-                        ResolvedSendResult::Wake {
-                            receiver,
-                            payload: None,
-                        }
-                    }
-                } else {
-                    ResolvedSendResult::RemoteDirect { receiver, payload }
-                }
-            }
-            BlockingSendResult::Buffered => ResolvedSendResult::Buffered,
-            BlockingSendResult::Blocked => ResolvedSendResult::Blocked,
-            BlockingSendResult::Closed => ResolvedSendResult::Closed,
+        match self.try_send_or_block_resolved_with(
+            value,
+            cap,
+            || Ok::<QueueWaiter, core::convert::Infallible>(waiter),
+            local_island,
+        ) {
+            Ok(result) => result,
+            Err(never) => match never {},
         }
     }
 
@@ -833,7 +888,7 @@ mod tests {
         );
         assert_eq!(
             next_queue_wait_registration_id_from(&counter),
-            Err(QueueWaitRegistrationExhausted)
+            Err(QueueWaiterError::RegistrationExhausted)
         );
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
@@ -861,10 +916,40 @@ mod tests {
         assert_eq!(
             results
                 .iter()
-                .filter(|result| **result == Err(QueueWaitRegistrationExhausted))
+                .filter(|result| **result == Err(QueueWaiterError::RegistrationExhausted))
                 .count(),
             7
         );
+    }
+
+    #[test]
+    fn queue_waiter_constructors_reject_zero_target_identity() {
+        assert_eq!(
+            QueueWaiter::try_queue(0, 1, 0, SelectWaitKind::Recv),
+            Err(QueueWaiterError::ZeroQueueRef)
+        );
+        assert_eq!(
+            QueueWaiter::try_select(0, 1, 0, 0, 0, SelectWaitKind::Recv),
+            Err(QueueWaiterError::ZeroQueueRef)
+        );
+    }
+
+    #[test]
+    fn select_waiter_has_no_queue_registration_identity() {
+        let waiter = QueueWaiter::try_select(3, 9, 1, 11, 0x1000, SelectWaitKind::Recv)
+            .expect("select waiter");
+
+        assert_eq!(waiter.registration_id(), None);
+        assert!(matches!(
+            waiter.target(),
+            QueueWaitTarget::Select {
+                case_index: 1,
+                select_id: 11,
+                queue_ref,
+                kind: SelectWaitKind::Recv,
+            } if queue_ref.get() == 0x1000
+        ));
+        assert!(core::mem::size_of::<QueueWaiter>() <= 40);
     }
 
     #[test]
@@ -937,7 +1022,85 @@ mod tests {
         }
 
         // Subsequent recv must block (buffer empty, no senders).
-        assert_eq!(q.recv_or_block(100), BlockingRecvResult::Blocked);
+        assert_eq!(q.recv_or_block(100), BlockingRecvResult::Blocked(100));
+    }
+
+    #[test]
+    fn immediate_send_and_recv_do_not_create_waiters() {
+        let calls = std::cell::Cell::new(0);
+        let mut q = TestQueue::new(1);
+
+        let send = q
+            .try_send_or_block_with(vec![42], 1, || {
+                calls.set(calls.get() + 1);
+                Ok::<u32, &'static str>(7)
+            })
+            .expect("buffered send");
+        assert_eq!(send, BlockingSendResult::Buffered);
+        assert_eq!(calls.get(), 0);
+
+        let recv = q
+            .try_recv_or_block_with(|| {
+                calls.set(calls.get() + 1);
+                Ok::<u32, &'static str>(8)
+            })
+            .expect("immediate recv");
+        assert_eq!(
+            recv,
+            BlockingRecvResult::Success {
+                woke_sender: None,
+                payload: vec![42],
+            }
+        );
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn blocked_send_and_recv_create_one_waiter_each() {
+        let send_calls = std::cell::Cell::new(0);
+        let mut send_queue = TestQueue::new(0);
+        let send = send_queue
+            .try_send_or_block_with(vec![42], 0, || {
+                send_calls.set(send_calls.get() + 1);
+                Ok::<u32, &'static str>(7)
+            })
+            .expect("blocked send");
+        assert_eq!(send, BlockingSendResult::Blocked(7));
+        assert_eq!(send_calls.get(), 1);
+        assert_eq!(send_queue.waiting_senders.front(), Some(&(7, vec![42])));
+
+        let recv_calls = std::cell::Cell::new(0);
+        let mut recv_queue = TestQueue::new(0);
+        let recv = recv_queue
+            .try_recv_or_block_with(|| {
+                recv_calls.set(recv_calls.get() + 1);
+                Ok::<u32, &'static str>(8)
+            })
+            .expect("blocked recv");
+        assert_eq!(recv, BlockingRecvResult::Blocked(8));
+        assert_eq!(recv_calls.get(), 1);
+        assert_eq!(recv_queue.waiting_receivers.front(), Some(&8));
+    }
+
+    #[test]
+    fn waiter_factory_error_leaves_queue_state_unchanged() {
+        let mut send_queue = TestQueue::new(0);
+        assert_eq!(
+            send_queue.try_send_or_block_with(vec![42], 0, || Err::<u32, _>("exhausted")),
+            Err("exhausted")
+        );
+        assert!(send_queue.buffer.is_empty());
+        assert!(send_queue.waiting_senders.is_empty());
+        assert!(send_queue.waiting_receivers.is_empty());
+
+        let mut recv_queue = TestQueue::new(0);
+        assert_eq!(
+            recv_queue.try_recv_or_block_with(|| Err::<u32, _>("exhausted")),
+            Err("exhausted")
+        );
+        assert!(recv_queue.buffer.is_empty());
+        assert!(recv_queue.waiting_senders.is_empty());
+        assert!(recv_queue.waiting_receivers.is_empty());
     }
 
     #[test]
@@ -988,7 +1151,8 @@ mod tests {
         // the value goes into waiting_senders, not buffer. No phantom issue.
         let mut q = TestQueue::new(0); // unbuffered, no receiver
         match q.send_or_block(vec![99u64], 0, 1) {
-            BlockingSendResult::Blocked => {
+            BlockingSendResult::Blocked(waiter) => {
+                assert_eq!(waiter, 1);
                 assert_eq!(q.buffer.len(), 0);
                 assert_eq!(q.waiting_senders.len(), 1);
             }
@@ -1013,17 +1177,19 @@ mod tests {
     #[test]
     fn resolved_direct_send_to_remote_waiter_extracts_payload() {
         let mut q = LocalQueueState::new(0);
-        q.register_receiver(QueueWaiter::simple(9, 99));
+        q.register_receiver(
+            QueueWaiter::try_queue(9, 99, 0x1000, SelectWaitKind::Recv).expect("receiver waiter"),
+        );
 
         match q.send_or_block_resolved(
             vec![42u64].into_boxed_slice().into(),
             0,
-            QueueWaiter::simple(7, 1),
+            QueueWaiter::try_queue(7, 1, 0x1000, SelectWaitKind::Send).expect("sender waiter"),
             7,
         ) {
             ResolvedSendResult::RemoteDirect { receiver, payload } => {
-                assert_eq!(receiver.island_id, 9);
-                assert_eq!(receiver.fiber_key, 99);
+                assert_eq!(receiver.island_id(), 9);
+                assert_eq!(receiver.fiber_key(), 99);
                 assert_eq!(payload.as_ref(), &[42u64]);
                 assert_eq!(q.buffer.len(), 0);
             }
@@ -1034,18 +1200,19 @@ mod tests {
     #[test]
     fn same_island_endpoint_receiver_uses_endpoint_response_path() {
         let mut q = LocalQueueState::new(0);
-        q.register_receiver(QueueWaiter::endpoint(7, 99, 11));
+        let wait_key = EndpointWaitKey::try_new(99, 11).unwrap();
+        q.register_receiver(QueueWaiter::endpoint(7, wait_key));
 
         match q.send_or_block_resolved(
             vec![42u64].into_boxed_slice().into(),
             0,
-            QueueWaiter::simple(7, 1),
+            QueueWaiter::try_queue(7, 1, 0x1000, SelectWaitKind::Send).expect("sender waiter"),
             7,
         ) {
             ResolvedSendResult::RemoteDirect { receiver, payload } => {
-                assert_eq!(receiver.island_id, 7);
-                assert_eq!(receiver.fiber_key, 99);
-                assert_eq!(receiver.endpoint_wait_id(), 11);
+                assert_eq!(receiver.island_id(), 7);
+                assert_eq!(receiver.fiber_key(), 99);
+                assert_eq!(receiver.endpoint_wait_key(), Some(wait_key));
                 assert_eq!(payload.as_ref(), &[42u64]);
                 assert_eq!(q.buffer.len(), 0);
             }
@@ -1063,22 +1230,28 @@ mod tests {
         let first_fiber_key = 0x0000_0001_0000_0001;
         let second_fiber_key = 0x0000_0002_0000_0001;
 
-        q.register_receiver(QueueWaiter::selecting(
-            0,
-            first_fiber_key,
-            0,
-            select_id,
-            queue_ref,
-            SelectWaitKind::Recv,
-        ));
-        q.register_receiver(QueueWaiter::selecting(
-            0,
-            second_fiber_key,
-            0,
-            select_id,
-            queue_ref,
-            SelectWaitKind::Recv,
-        ));
+        q.register_receiver(
+            QueueWaiter::try_select(
+                0,
+                first_fiber_key,
+                0,
+                select_id,
+                queue_ref,
+                SelectWaitKind::Recv,
+            )
+            .expect("first select waiter"),
+        );
+        q.register_receiver(
+            QueueWaiter::try_select(
+                0,
+                second_fiber_key,
+                0,
+                select_id,
+                queue_ref,
+                SelectWaitKind::Recv,
+            )
+            .expect("second select waiter"),
+        );
 
         q.cancel_select_waiters(first_fiber_key, select_id);
 

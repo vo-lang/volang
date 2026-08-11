@@ -11,7 +11,9 @@ use crate::gc::GcRef;
 use crate::objects::{array, string};
 use crate::{RuntimeType, ValueKind, ValueRttid};
 use hashbrown::HashSet;
+#[cfg(test)]
 use vo_common_core::bytecode::Module;
+use vo_common_core::bytecode::RuntimeTypeMetadata;
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -88,13 +90,13 @@ pub(crate) fn float_key_hash(kind: ValueKind, bits: u64) -> u64 {
         .rotate_left(5)
 }
 
-fn array_elem_rttid(rttid: u32, module: &Module) -> Option<ValueRttid> {
+fn array_elem_rttid(rttid: u32, module: RuntimeTypeMetadata<'_>) -> Option<ValueRttid> {
     array_type_info(rttid, module).map(|(_, elem)| elem)
 }
 
-fn array_type_info(rttid: u32, module: &Module) -> Option<(u64, ValueRttid)> {
+fn array_type_info(rttid: u32, module: RuntimeTypeMetadata<'_>) -> Option<(u64, ValueRttid)> {
     let (_, runtime_type) = module
-        .runtime_type_resolver()
+        .resolver()
         .resolve_value_rttid(ValueRttid::new(rttid, ValueKind::Array))?;
     let RuntimeType::Array { len, elem } = runtime_type else {
         return None;
@@ -102,7 +104,7 @@ fn array_type_info(rttid: u32, module: &Module) -> Option<(u64, ValueRttid)> {
     Some((*len, *elem))
 }
 
-fn value_rttid_is_comparable(value: ValueRttid, module: &Module) -> bool {
+fn value_rttid_is_comparable(value: ValueRttid, module: RuntimeTypeMetadata<'_>) -> bool {
     enum Task {
         Visit(ValueRttid),
         Exit(u32),
@@ -162,11 +164,17 @@ fn value_rttid_is_comparable(value: ValueRttid, module: &Module) -> bool {
 ///
 /// Interface values need this static check first, then nested dynamic checks
 /// for interface-typed fields/elements during equality and hashing.
-pub fn value_is_comparable(rttid: u32, vk: ValueKind, module: &Module) -> bool {
+pub fn value_is_comparable<'a>(
+    rttid: u32,
+    vk: ValueKind,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
+) -> bool {
+    let module = module.into();
     value_rttid_is_comparable(ValueRttid::new(rttid, vk), module)
 }
 
-pub fn iface_is_hashable(slot0: u64, module: &Module) -> bool {
+pub fn iface_is_hashable<'a>(slot0: u64, module: impl Into<RuntimeTypeMetadata<'a>>) -> bool {
+    let module = module.into();
     let vk = ValueKind::from_u8((slot0 & 0xFF) as u8);
     let rttid = ((slot0 >> 8) & 0xFFFFFF) as u32;
     value_is_comparable(rttid, vk, module)
@@ -175,11 +183,12 @@ pub fn iface_is_hashable(slot0: u64, module: &Module) -> bool {
 /// Deep hash of inline struct data (key slots), considering string fields by content.
 /// For map keys with struct type containing string fields.
 /// `key` is the struct field data laid out directly in the key slots.
-pub unsafe fn deep_hash_struct_inline_checked(
+pub unsafe fn deep_hash_struct_inline_checked<'a>(
     key: &[u64],
     rttid: u32,
-    module: &Module,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
 ) -> Result<u64, UnhashableType> {
+    let module = module.into();
     unsafe {
         deep_hash_value_inline_checked(key, ValueRttid::new(rttid, ValueKind::Struct), module)
     }
@@ -188,14 +197,18 @@ pub unsafe fn deep_hash_struct_inline_checked(
 /// Deep hash of inline struct data (key slots), considering string fields by content.
 /// For map keys with struct type containing string fields.
 /// `key` is the struct field data laid out directly in the key slots.
-pub unsafe fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 {
+pub unsafe fn deep_hash_struct_inline<'a>(
+    key: &[u64],
+    rttid: u32,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
+) -> u64 {
     deep_hash_struct_inline_checked(key, rttid, module).unwrap_or_else(|_| shallow_hash_inline(key))
 }
 
 unsafe fn deep_hash_struct_ref_checked(
     ptr: GcRef,
     rttid: u32,
-    module: &Module,
+    module: RuntimeTypeMetadata<'_>,
 ) -> Result<u64, UnhashableType> {
     if ptr.is_null() {
         return Ok(HASH_SEED.rotate_left(5));
@@ -216,11 +229,12 @@ unsafe fn deep_hash_struct_ref_checked(
     }
 }
 
-pub(crate) unsafe fn deep_hash_value_inline_checked(
+pub(crate) unsafe fn deep_hash_value_inline_checked<'a>(
     key: &[u64],
     value: ValueRttid,
-    module: &Module,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
 ) -> Result<u64, UnhashableType> {
+    let module = module.into();
     enum HashTask<'a> {
         Value {
             key: &'a [u64],
@@ -261,7 +275,7 @@ pub(crate) unsafe fn deep_hash_value_inline_checked(
         return Err(UnhashableType);
     }
 
-    let resolver = module.runtime_type_resolver();
+    let resolver = module.resolver();
     let mut pending = vec![HashTask::Value {
         key,
         value,
@@ -483,13 +497,14 @@ fn try_shallow_eq(a: u64, b: u64) -> Option<bool> {
 
 /// Compare two interface values for equality.
 /// Returns: 0 = not equal, 1 = equal, 2 = panic (uncomparable type)
-pub unsafe fn iface_eq(
+pub unsafe fn iface_eq<'a>(
     b_slot0: u64,
     b_slot1: u64,
     c_slot0: u64,
     c_slot1: u64,
-    module: &Module,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
 ) -> u64 {
+    let module = module.into();
     // slot0 format: [itab_id:32 | rttid:24 | vk:8]
     // Compare only rttid + vk (low 32 bits), NOT itab_id
     let b_type = (b_slot0 & 0xFFFFFFFF) as u32;
@@ -544,9 +559,12 @@ pub unsafe fn iface_eq(
 }
 
 /// Resolve rttid to StructMeta, returning None if not found.
-fn get_struct_meta(rttid: u32, module: &Module) -> Option<&vo_common_core::bytecode::StructMeta> {
+fn get_struct_meta(
+    rttid: u32,
+    module: RuntimeTypeMetadata<'_>,
+) -> Option<&vo_common_core::bytecode::StructMeta> {
     let meta = module
-        .runtime_type_resolver()
+        .resolver()
         .canonical_value_meta_for_value_rttid(ValueRttid::new(rttid, ValueKind::Struct))?;
     module.struct_metas.get(meta.meta_id() as usize)
 }
@@ -555,7 +573,7 @@ unsafe fn deep_eq_value_inline_result(
     a: &[u64],
     b: &[u64],
     value: ValueRttid,
-    module: &Module,
+    module: RuntimeTypeMetadata<'_>,
 ) -> EqResult {
     if a.len() != b.len() {
         return EqResult::NotEqual;
@@ -587,7 +605,7 @@ unsafe fn deep_eq_value_inline_result(
         },
     }
 
-    let resolver = module.runtime_type_resolver();
+    let resolver = module.resolver();
     let mut pending = vec![EqTask::Value {
         a,
         b,
@@ -756,12 +774,13 @@ unsafe fn deep_eq_value_inline_result(
     EqResult::Equal
 }
 
-pub(crate) unsafe fn deep_eq_value_inline(
+pub(crate) unsafe fn deep_eq_value_inline<'a>(
     a: &[u64],
     b: &[u64],
     value: ValueRttid,
-    module: &Module,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
 ) -> bool {
+    let module = module.into();
     matches!(
         unsafe { deep_eq_value_inline_result(a, b, value, module) },
         EqResult::Equal
@@ -769,11 +788,21 @@ pub(crate) unsafe fn deep_eq_value_inline(
 }
 
 /// Deep comparison of two inline struct key data.
-pub unsafe fn deep_eq_struct_inline(a: &[u64], b: &[u64], rttid: u32, module: &Module) -> bool {
+pub unsafe fn deep_eq_struct_inline<'a>(
+    a: &[u64],
+    b: &[u64],
+    rttid: u32,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
+) -> bool {
     unsafe { deep_eq_value_inline(a, b, ValueRttid::new(rttid, ValueKind::Struct), module) }
 }
 
-unsafe fn deep_eq_struct_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqResult {
+unsafe fn deep_eq_struct_result(
+    a: GcRef,
+    b: GcRef,
+    rttid: u32,
+    module: RuntimeTypeMetadata<'_>,
+) -> EqResult {
     if a.is_null() || b.is_null() {
         return if a == b {
             EqResult::Equal
@@ -802,7 +831,13 @@ unsafe fn deep_eq_struct_result(a: GcRef, b: GcRef, rttid: u32, module: &Module)
 }
 
 /// Deep comparison of two struct values on heap.
-pub unsafe fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
+pub unsafe fn deep_eq_struct<'a>(
+    a: GcRef,
+    b: GcRef,
+    rttid: u32,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
+) -> bool {
+    let module = module.into();
     matches!(
         unsafe { deep_eq_struct_result(a, b, rttid, module) },
         EqResult::Equal
@@ -812,11 +847,12 @@ pub unsafe fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) ->
 /// Deep comparison of two array values.
 /// Hash an interface value for use as map key.
 /// Uses content-based hashing for comparable types (string, struct, array, primitives).
-pub unsafe fn iface_hash_checked(
+pub unsafe fn iface_hash_checked<'a>(
     slot0: u64,
     slot1: u64,
-    module: &Module,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
 ) -> Result<u64, UnhashableType> {
+    let module = module.into();
     let vk = ValueKind::from_u8((slot0 & 0xFF) as u8);
     let rttid = ((slot0 >> 8) & 0xFFFFFF) as u32;
     if !value_is_comparable(rttid, vk, module) {
@@ -862,7 +898,11 @@ pub unsafe fn iface_hash_checked(
     Ok(h.rotate_left(5))
 }
 
-pub unsafe fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
+pub unsafe fn iface_hash<'a>(
+    slot0: u64,
+    slot1: u64,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
+) -> u64 {
     iface_hash_checked(slot0, slot1, module)
         .unwrap_or_else(|_| shallow_hash_inline(&[slot0, slot1]))
 }
@@ -870,7 +910,7 @@ pub unsafe fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
 unsafe fn deep_hash_array_checked(
     arr: GcRef,
     rttid: u32,
-    module: &Module,
+    module: RuntimeTypeMetadata<'_>,
 ) -> Result<u64, UnhashableType> {
     if arr.is_null() {
         return Ok(HASH_SEED.rotate_left(5));
@@ -886,7 +926,7 @@ unsafe fn deep_hash_array_checked(
     if usize::try_from(declared_len).ok() != Some(len) {
         return Err(UnhashableType);
     }
-    let Some(elem_meta) = module.canonical_value_meta_for_value_rttid(elem) else {
+    let Some(elem_meta) = module.resolver().canonical_value_meta_for_value_rttid(elem) else {
         return Err(UnhashableType);
     };
     if array::elem_meta(arr) != elem_meta {
@@ -896,9 +936,9 @@ unsafe fn deep_hash_array_checked(
     let Ok(elem_layout) = crate::pack::sequence_element_layout(
         elem_meta,
         elem_bytes,
-        &module.struct_metas,
-        &module.named_type_metas,
-        &module.runtime_types,
+        module.struct_metas,
+        module.named_type_metas,
+        module.runtime_types,
     ) else {
         return Err(UnhashableType);
     };
@@ -930,7 +970,12 @@ unsafe fn deep_hash_array_checked(
     Ok(h.rotate_left(5))
 }
 
-unsafe fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqResult {
+unsafe fn deep_eq_array_result(
+    a: GcRef,
+    b: GcRef,
+    rttid: u32,
+    module: RuntimeTypeMetadata<'_>,
+) -> EqResult {
     if a.is_null() || b.is_null() {
         return if a == b {
             EqResult::Equal
@@ -951,7 +996,7 @@ unsafe fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) 
     if usize::try_from(declared_len).ok() != Some(a_len) {
         return EqResult::Uncomparable;
     }
-    let Some(elem_meta) = module.canonical_value_meta_for_value_rttid(elem) else {
+    let Some(elem_meta) = module.resolver().canonical_value_meta_for_value_rttid(elem) else {
         return EqResult::Uncomparable;
     };
     if array::elem_meta(a) != elem_meta || array::elem_meta(b) != elem_meta {
@@ -964,9 +1009,9 @@ unsafe fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) 
     let Ok(elem_layout) = crate::pack::sequence_element_layout(
         elem_meta,
         elem_bytes,
-        &module.struct_metas,
-        &module.named_type_metas,
-        &module.runtime_types,
+        module.struct_metas,
+        module.named_type_metas,
+        module.runtime_types,
     ) else {
         return EqResult::Uncomparable;
     };
@@ -1003,7 +1048,13 @@ unsafe fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) 
     EqResult::Equal
 }
 
-pub unsafe fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
+pub unsafe fn deep_eq_array<'a>(
+    a: GcRef,
+    b: GcRef,
+    rttid: u32,
+    module: impl Into<RuntimeTypeMetadata<'a>>,
+) -> bool {
+    let module = module.into();
     matches!(deep_eq_array_result(a, b, rttid, module), EqResult::Equal)
 }
 
@@ -1271,7 +1322,7 @@ mod tests {
         let arr = array::create(&mut gc, ValueMeta::new(0, ValueKind::Struct), 0, len);
         assert!(!arr.is_null());
         assert_eq!(
-            unsafe { deep_hash_array_checked(arr, 1, &module) },
+            unsafe { deep_hash_array_checked(arr, 1, (&module).into()) },
             Ok(repeat_hash_fold(HASH_SEED, HASH_SEED, len).rotate_left(5))
         );
     }

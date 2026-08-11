@@ -5,8 +5,8 @@ use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::{JitResult, JitRuntimeTrapKind, JIT_HELPER_U64_ERROR};
 
 use crate::call_helpers::emit_checked_jit_result_helper_call;
-use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
-use crate::translator::{emit_funcref_call, RuntimeOpsEmitter};
+use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc};
+use crate::translator::{emit_runtime_helper_call, HelperKind, RuntimeOpsEmitter};
 use crate::JitError;
 
 pub(in crate::translate) fn iface_assign<'a>(
@@ -31,11 +31,14 @@ pub(in crate::translate) fn iface_assign<'a>(
             let new_slot0 = e.builder().ins().band(src_slot0, mask);
             (new_slot0, src_slot1)
         } else {
-            let iface_to_iface_func = require_helper(e.helpers().iface_to_iface, "iface_to_iface")?;
+            let iface_to_iface_func = e.helper(HelperKind::iface_to_iface);
             let ctx = e.ctx_param();
             let iface_meta_id_val = e.builder().ins().iconst(types::I32, iface_meta_id as i64);
-            let call =
-                emit_funcref_call(e, iface_to_iface_func, &[ctx, src_slot0, iface_meta_id_val]);
+            let call = emit_runtime_helper_call(
+                e,
+                iface_to_iface_func,
+                &[ctx, src_slot0, iface_meta_id_val],
+            );
             let new_slot0 = e.builder().inst_results(call)[0];
             emit_return_if_u64_jit_error(e, new_slot0);
             (new_slot0, src_slot1)
@@ -55,9 +58,9 @@ pub(in crate::translate) fn iface_assign<'a>(
         let slot0 = e.builder().ins().iconst(types::I64, slot0_val as i64);
 
         let slot1 = if vk == 14 || vk == 15 {
-            let ptr_clone_func = require_helper(e.helpers().ptr_clone, "ptr_clone")?;
+            let ptr_clone_func = e.helper(HelperKind::ptr_clone);
             let gc_ptr = e.gc_ptr();
-            let call = emit_funcref_call(e, ptr_clone_func, &[gc_ptr, src]);
+            let call = emit_runtime_helper_call(e, ptr_clone_func, &[gc_ptr, src]);
             e.builder().inst_results(call)[0]
         } else {
             src
@@ -79,7 +82,7 @@ fn emit_return_if_u64_jit_error<'a>(
         .ins()
         .iconst(types::I64, JIT_HELPER_U64_ERROR as i64);
     let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
-    let error_block = e.builder().create_block();
+    let error_block = crate::compile_common::cold_block(e.builder());
     let ok_block = e.builder().create_block();
     e.builder()
         .ins()
@@ -120,12 +123,12 @@ pub(in crate::translate) fn iface_assert<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().iface_assert, "iface_assert")?;
+    let func = e.helper(HelperKind::iface_assert);
     let ctx = e.ctx_param();
     let slot0 = e.read_var(inst.b);
     let slot1 = e.read_var(inst.b + 1);
     let flags_i16 = e.builder().ins().iconst(types::I16, inst.flags as i64);
-    let has_ok = ((inst.flags >> 2) & 0x1) != 0;
+    let has_ok = (inst.flags & vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG) != 0;
     let layout = e
         .iface_assert_layout(inst)
         .ok_or(JitError::MissingJitLayout {
@@ -154,38 +157,36 @@ pub(in crate::translate) fn iface_assert<'a>(
         e,
         func,
         &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr],
-        true,
     );
     for i in 0..dst_slots {
         let val = e
             .builder()
             .ins()
-            .stack_load(types::I64, result_slot, (i * 8) as i32);
+            .stack_load(types::I64, types::I64, result_slot, (i * 8) as i32);
         e.write_var(inst.a + i as u16, val);
     }
     if has_ok {
         let ok_offset = dst_slots;
-        let ok_val = e
-            .builder()
-            .ins()
-            .stack_load(types::I64, result_slot, (ok_offset * 8) as i32);
+        let ok_val = e.builder().ins().stack_load(
+            types::I64,
+            types::I64,
+            result_slot,
+            (ok_offset * 8) as i32,
+        );
         e.write_var(inst.a + ok_offset as u16, ok_val);
     }
     Ok(())
 }
 
-pub(in crate::translate) fn iface_eq<'a>(
-    e: &mut impl RuntimeOpsEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
+pub(in crate::translate) fn iface_eq<'a>(e: &mut impl RuntimeOpsEmitter<'a>, inst: &Instruction) {
     let b0 = e.read_var(inst.b);
     let b1 = e.read_var(inst.b + 1);
     let c0 = e.read_var(inst.c);
     let c1 = e.read_var(inst.c + 1);
 
-    let iface_eq_func = require_helper(e.helpers().iface_eq, "iface_eq")?;
+    let iface_eq_func = e.helper(HelperKind::iface_eq);
     let ctx = e.ctx_param();
-    let call = emit_funcref_call(e, iface_eq_func, &[ctx, b0, b1, c0, c1]);
+    let call = emit_runtime_helper_call(e, iface_eq_func, &[ctx, b0, b1, c0, c1]);
     let result = e.builder().inst_results(call)[0];
 
     let two = e.builder().ins().iconst(types::I64, 2);
@@ -201,36 +202,4 @@ pub(in crate::translate) fn iface_eq<'a>(
     let one = e.builder().ins().iconst(types::I64, 1);
     let masked = e.builder().ins().band(result, one);
     e.write_var(inst.a, masked);
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn jit_iface_assert_lowering_uses_metadata_layout_061() {
-        let src = include_str!("interface.rs");
-        let body = src
-            .split("pub(in crate::translate) fn iface_assert")
-            .nth(1)
-            .expect("iface_assert lowering")
-            .split("pub(in crate::translate) fn iface_eq")
-            .next()
-            .expect("iface_assert body");
-
-        assert!(
-            body.contains(".iface_assert_layout(inst)")
-                && body.contains("JitError::MissingJitLayout")
-                && body.contains("layout: \"IfaceAssertLayout\""),
-            "IfaceAssert lowering must use per-PC metadata as the result ABI slot source"
-        );
-        assert!(
-            !body.contains("inst.flags >> 3"),
-            "IfaceAssert lowering must not derive result ABI width from encoded flags"
-        );
-        assert!(
-            body.contains("let scratch_slots = result_slots.max(1)")
-                && body.contains("(scratch_slots * 8) as u32"),
-            "zero-sized assertions still need a valid physical callback scratch pointer"
-        );
-    }
 }

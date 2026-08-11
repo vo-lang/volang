@@ -7,23 +7,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use vo_common::vfs::{FileSystem, RealFs};
 
 use crate::artifact::required_artifacts_for_target;
-use crate::async_solver::RootRequirement;
 use crate::cache::install::ExtractedSourceFile;
 use crate::cache::layout::{relative_module_dir, SOURCE_DIGEST_MARKER, VERSION_MARKER};
 use crate::cache::validate::{
-    validate_installed_artifact_at_relative_path, validate_installed_module,
+    validate_installed_artifact_from_metadata_at_relative_path, validate_installed_module,
     validate_installed_module_with_metadata, InstalledModuleError, InstalledModuleMetadata,
 };
 use crate::digest::{verify_size_and_digest, Digest};
 use crate::identity::{ArtifactId, ModulePath};
-use crate::lock::{locked_module_from_manifest_raw, validate_locked_module_against_manifest};
+use crate::lock::validate_locked_module_against_manifest;
 use crate::project;
-use crate::readiness::{check_module_readiness, ModuleReadiness, ReadinessFailure, ReadyModule};
-use crate::schema::lockfile::{LockFile, LockedModule};
+use crate::readiness::{
+    check_module_readiness_from_metadata, check_module_readiness_with_budget,
+    validate_ready_target, ReadinessFailure, ReadyModule,
+};
+use crate::schema::lockfile::LockedModule;
 use crate::schema::manifest::{ManifestArtifact, ReleaseManifest};
-use crate::schema::modfile::ModFile;
 use crate::schema::TreeManifest;
-use crate::version::{DepConstraint, ExactVersion};
+use crate::version::ExactVersion;
 use crate::{Error, Result};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -37,24 +38,7 @@ pub enum SourcePayload {
     },
 }
 
-/// One frozen async solve, its canonical lock, and the exact materialization
-/// result installed from the same manifest bytes.
-#[derive(Debug)]
-pub struct ResolvedModFileInstall {
-    /// The canonical lock for a non-empty external graph. Dependency-free
-    /// modules have no lockfile by protocol.
-    pub lock_file: Option<LockFile>,
-    pub ready: Vec<ReadyModule>,
-}
-
 pub trait AsyncRegistry {
-    /// List untrusted published release candidates. Callers must validate a
-    /// candidate's raw manifest before selecting it.
-    fn list_version_candidates<'a>(
-        &'a self,
-        module: &'a ModulePath,
-    ) -> BoxFuture<'a, Result<Vec<ExactVersion>>>;
-
     fn fetch_manifest_raw<'a>(
         &'a self,
         module: &'a ModulePath,
@@ -393,84 +377,32 @@ struct PreparedSourceTree {
     tree_raw: Vec<u8>,
 }
 
-pub async fn resolve_latest_version<R: AsyncRegistry>(
-    registry: &R,
-    module: &ModulePath,
-) -> Result<ExactVersion> {
-    resolve_direct_request_version(registry, module, None).await
+/// One authenticated cache view retained for the complete ensure operation.
+/// Native surfaces keep the shared cache lease that excludes cleanup; virtual
+/// surfaces have no independent cache-clean mutation protocol.
+struct AuthenticatedInstalledModule {
+    metadata: InstalledModuleMetadata,
+    mutation_lock: Option<crate::cache::mutation_lock::CacheMutationLock>,
 }
 
-pub async fn resolve_version_with_constraint<R: AsyncRegistry>(
-    registry: &R,
-    module: &ModulePath,
-    constraint: &DepConstraint,
-) -> Result<ExactVersion> {
-    resolve_direct_request_version(registry, module, Some(constraint.clone())).await
-}
-
-/// A direct-version query still solves the selected release's complete graph.
-/// This keeps candidate validity, infrastructure-error handling, snapshot
-/// stability, and aggregate work budgets identical to installation requests.
-async fn resolve_direct_request_version<R: AsyncRegistry>(
-    registry: &R,
-    module: &ModulePath,
-    constraint: Option<DepConstraint>,
-) -> Result<ExactVersion> {
-    let requirement = RootRequirement {
-        module: module.clone(),
-        constraint,
-    };
-    let mut graph = crate::async_solver::solve(
-        "direct module version request",
-        None,
-        &[requirement],
-        registry,
-        &BTreeMap::new(),
-    )
-    .await?;
-    graph
-        .modules
-        .remove(module)
-        .map(|resolved| resolved.version)
-        .ok_or_else(|| Error::NoSatisfyingVersion {
-            module: module.as_str().to_string(),
-            detail: "resolved graph omitted the directly requested module".to_string(),
-        })
-}
-
-async fn ensure_resolved_graph<S: InstallSurface, R: AsyncRegistry>(
-    surface: &S,
-    registry: &R,
-    graph: crate::solver::ResolvedGraph,
-    target: &str,
-) -> Result<Vec<ReadyModule>> {
-    let mut budget = crate::registry::MaterializedGraphBudget::default();
-    let mut ready = Vec::new();
-    ready
-        .try_reserve(graph.modules.len())
-        .map_err(|_| Error::ResolutionLimitExceeded {
-            resource: "ready module graph allocation".to_string(),
-            limit: crate::MAX_MODULE_DEPENDENCIES,
-        })?;
-    for (_, resolved) in graph.modules {
-        let manifest = ManifestSnapshot {
-            manifest: resolved.manifest,
-            raw: resolved.manifest_raw,
-        };
-        let locked = locked_module_from_manifest_raw(&manifest.manifest, &manifest.raw);
-        ready.push(
-            ensure_locked_module_ready_with_budget(
-                surface,
-                registry,
-                &locked,
-                target,
-                Some(manifest),
-                &mut budget,
-            )
-            .await?,
-        );
+impl std::fmt::Debug for AuthenticatedInstalledModule {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedInstalledModule")
+            .field("metadata", &self.metadata)
+            .field("holds_mutation_lock", &self.mutation_lock.is_some())
+            .finish()
     }
-    Ok(ready)
+}
+
+fn retain_authenticated(
+    metadata: InstalledModuleMetadata,
+    mutation_lock: Option<crate::cache::mutation_lock::CacheMutationLock>,
+) -> AuthenticatedInstalledModule {
+    AuthenticatedInstalledModule {
+        metadata,
+        mutation_lock,
+    }
 }
 
 pub async fn ensure_project_plan<S: InstallSurface, R: AsyncRegistry>(
@@ -479,19 +411,20 @@ pub async fn ensure_project_plan<S: InstallSurface, R: AsyncRegistry>(
     project_plan: &project::ProjectPlan,
     target: &str,
 ) -> Result<Vec<ReadyModule>> {
-    if !project_plan.has_mod_file() || project_plan.locked_modules().is_empty() {
+    let locked_modules = project_plan.locked_modules();
+    if locked_modules.is_empty() {
         return Ok(Vec::new());
     }
-    let normalized = normalize_locked_modules(project_plan.locked_modules().to_vec())?;
     let mut budget = crate::registry::MaterializedGraphBudget::default();
+    let mut registry_awaited = false;
     let mut ready = Vec::new();
     ready
-        .try_reserve(normalized.len())
+        .try_reserve(locked_modules.len())
         .map_err(|_| Error::ResolutionLimitExceeded {
             resource: "ready module graph allocation".to_string(),
             limit: crate::MAX_MODULE_DEPENDENCIES,
         })?;
-    for locked in &normalized {
+    for locked in locked_modules {
         if locked.origin == crate::schema::lockfile::LockOrigin::Workspace {
             continue;
         }
@@ -503,100 +436,44 @@ pub async fn ensure_project_plan<S: InstallSurface, R: AsyncRegistry>(
                 target,
                 None,
                 &mut budget,
+                &mut registry_awaited,
             )
             .await?,
         );
     }
-    Ok(ready)
+    if registry_awaited {
+        drop(ready);
+        authenticate_registry_modules(surface, locked_modules, target)
+    } else {
+        Ok(ready)
+    }
 }
 
-pub async fn ensure_mod_file_dependencies<S: InstallSurface, R: AsyncRegistry>(
+fn authenticate_registry_modules<S: InstallSurface>(
     surface: &S,
-    registry: &R,
-    mod_file: &ModFile,
+    locked_modules: &[LockedModule],
     target: &str,
 ) -> Result<Vec<ReadyModule>> {
-    Ok(
-        resolve_mod_file_lock_and_ensure(surface, registry, mod_file, target)
-            .await?
-            .ready,
-    )
-}
-
-/// Solve, lock, and materialize a root module from one frozen registry graph.
-/// The returned lock is generated before the graph is consumed by install, so
-/// cache metadata and nested dependency locks cannot influence selection.
-pub async fn resolve_mod_file_lock_and_ensure<S: InstallSurface, R: AsyncRegistry>(
-    surface: &S,
-    registry: &R,
-    mod_file: &ModFile,
-    target: &str,
-) -> Result<ResolvedModFileInstall> {
-    mod_file.validate()?;
-    if mod_file.dependencies.is_empty() {
-        return Ok(ResolvedModFileInstall {
-            lock_file: None,
-            ready: Vec::new(),
-        });
-    }
-    let requirements = mod_file
-        .dependencies
-        .iter()
-        .map(|req| RootRequirement {
-            module: req.module.clone(),
-            constraint: Some(req.constraint.clone()),
-        })
-        .collect::<Vec<_>>();
-    let preferred_versions = BTreeMap::new();
-    let graph = crate::async_solver::solve(
-        mod_file.module.as_str(),
-        Some(&mod_file.vo),
-        &requirements,
-        registry,
-        &preferred_versions,
-    )
-    .await?;
-    let lock_file =
-        crate::lock::generate_lock_for_target(mod_file, &graph, target, crate::TOOLCHAIN_VERSION)?;
-    let ready = ensure_resolved_graph(surface, registry, graph, target).await?;
-    Ok(ResolvedModFileInstall {
-        lock_file: Some(lock_file),
-        ready,
-    })
-}
-
-fn normalize_locked_modules(locked_modules: Vec<LockedModule>) -> Result<Vec<LockedModule>> {
-    if locked_modules.len() > crate::MAX_MODULE_DEPENDENCIES {
-        return Err(Error::ResolutionLimitExceeded {
-            resource: "locked module graph".to_string(),
+    // This is a new accounting pass over one final graph generation. Reusing
+    // the install-pass budget would double-charge the same releases.
+    let mut budget = crate::registry::MaterializedGraphBudget::default();
+    let mut ready = Vec::new();
+    ready
+        .try_reserve(locked_modules.len())
+        .map_err(|_| Error::ResolutionLimitExceeded {
+            resource: "ready module graph allocation".to_string(),
             limit: crate::MAX_MODULE_DEPENDENCIES,
-        });
-    }
-    let mut selected = BTreeMap::<ModulePath, LockedModule>::new();
+        })?;
     for locked in locked_modules {
-        match selected.get(&locked.path) {
-            Some(existing) if existing.version != locked.version => {
-                return Err(Error::SelectedVersionConflict {
-                    module: locked.path.to_string(),
-                    existing: existing.version.to_string(),
-                    requested: locked.version.to_string(),
-                });
-            }
-            Some(existing) if existing != &locked => {
-                return Err(Error::LockFileParse(format!(
-                    "conflicting duplicate lock metadata for {} {}",
-                    locked.path, locked.version
-                )));
-            }
-            Some(_) => continue,
-            None => {
-                selected.insert(locked.path.clone(), locked);
-            }
+        if locked.origin == crate::schema::lockfile::LockOrigin::Workspace {
+            continue;
         }
+        ready.push(
+            check_module_readiness_with_budget(surface, locked, target, &mut budget)
+                .map_err(readiness_failure_to_error)?,
+        );
     }
-    let normalized = selected.into_values().collect::<Vec<_>>();
-    crate::schema::lockfile::validate_materialized_module_limits(&normalized)?;
-    Ok(normalized)
+    Ok(ready)
 }
 
 #[cfg(test)]
@@ -608,15 +485,29 @@ async fn ensure_locked_module_ready<S: InstallSurface, R: AsyncRegistry>(
     prefetched_manifest: Option<ManifestSnapshot>,
 ) -> Result<ReadyModule> {
     let mut budget = crate::registry::MaterializedGraphBudget::default();
-    ensure_locked_module_ready_with_budget(
+    let mut registry_awaited = false;
+    let ready = ensure_locked_module_ready_with_budget(
         surface,
         registry,
         locked,
         target,
         prefetched_manifest,
         &mut budget,
+        &mut registry_awaited,
     )
-    .await
+    .await?;
+    if registry_awaited {
+        drop(ready);
+        authenticate_registry_modules(surface, std::slice::from_ref(locked), target).map(
+            |mut modules| {
+                modules
+                    .pop()
+                    .expect("one registry module was authenticated")
+            },
+        )
+    } else {
+        Ok(ready)
+    }
 }
 
 async fn ensure_locked_module_ready_with_budget<S: InstallSurface, R: AsyncRegistry>(
@@ -626,16 +517,18 @@ async fn ensure_locked_module_ready_with_budget<S: InstallSurface, R: AsyncRegis
     target: &str,
     prefetched_manifest: Option<ManifestSnapshot>,
     budget: &mut crate::registry::MaterializedGraphBudget,
+    registry_awaited: &mut bool,
 ) -> Result<ReadyModule> {
+    validate_ready_target(target).map_err(Error::InvalidReleaseMetadata)?;
     let module_dir = relative_module_dir(&locked.path, &locked.version);
     let (installed, module_kind) = inspect_surface_module(surface, &module_dir, locked)?;
-    let metadata = match installed {
-        Ok(metadata) => {
+    let authenticated = match installed {
+        Ok(authenticated) => {
             budget.charge_release(
-                metadata.release_manifest_bytes,
-                metadata.release.artifacts.len(),
+                authenticated.metadata.release_manifest_bytes,
+                authenticated.metadata.release.artifacts.len(),
             )?;
-            metadata
+            authenticated
         }
         Err(error) => {
             if module_kind != vo_common::vfs::FileSystemEntryKind::Missing {
@@ -646,27 +539,32 @@ async fn ensure_locked_module_ready_with_budget<S: InstallSurface, R: AsyncRegis
             }
             let manifest = match prefetched_manifest {
                 Some(manifest) => manifest,
-                None => fetch_locked_manifest(registry, locked).await?,
+                None => {
+                    let manifest = fetch_locked_manifest(registry, locked).await?;
+                    *registry_awaited = true;
+                    manifest
+                }
             };
             budget.charge_release(manifest.raw.len(), manifest.manifest.artifacts.len())?;
-            install_source(surface, registry, locked, &manifest).await?;
-            let (installed, _) = inspect_surface_module(surface, &module_dir, locked)?;
-            installed.map_err(installed_module_error_to_error)?
+            let installed = install_source(surface, registry, locked, &manifest).await?;
+            *registry_awaited = true;
+            installed
         }
     };
 
     for required_artifact in required_artifacts_for_target(
         locked,
-        &metadata.release.artifacts,
-        metadata.extension.as_ref(),
+        &authenticated.metadata.release.artifacts,
+        authenticated.metadata.extension.as_ref(),
         target,
     )? {
         let artifact_path = module_dir.join(&required_artifact.cache_relative_path);
         let (installed, artifact_kind) = inspect_surface_artifact(
             surface,
+            authenticated.mutation_lock.as_ref(),
             &module_dir,
             locked,
-            &required_artifact.artifact.id,
+            required_artifact.artifact,
             &artifact_path,
         )?;
         if installed.is_ok() {
@@ -686,6 +584,7 @@ async fn ensure_locked_module_ready_with_budget<S: InstallSurface, R: AsyncRegis
                 &required_artifact.artifact.id,
             )
             .await?;
+        *registry_awaited = true;
         verify_size_and_digest(
             &bytes,
             required_artifact.artifact.size,
@@ -697,6 +596,7 @@ async fn ensure_locked_module_ready_with_budget<S: InstallSurface, R: AsyncRegis
         )?;
         commit_prepared_artifact(
             surface,
+            authenticated.mutation_lock.as_ref(),
             &module_dir,
             locked,
             required_artifact.artifact,
@@ -705,42 +605,49 @@ async fn ensure_locked_module_ready_with_budget<S: InstallSurface, R: AsyncRegis
         )?;
     }
 
-    match check_module_readiness(surface, locked, target) {
-        ModuleReadiness::Ready(ready) => Ok(*ready),
-        ModuleReadiness::NotReady(failure) => Err(readiness_failure_to_error(failure)),
-    }
+    check_module_readiness_from_metadata(surface, locked, target, authenticated.metadata)
+        .map_err(readiness_failure_to_error)
 }
 
 fn commit_prepared_artifact<S: InstallSurface>(
     surface: &S,
+    mutation_lock: Option<&crate::cache::mutation_lock::CacheMutationLock>,
     module_dir: &Path,
     locked: &LockedModule,
     artifact: &ManifestArtifact,
     artifact_path: &Path,
     bytes: &[u8],
 ) -> Result<()> {
-    let mutation_lock = acquire_surface_mutation_lock(surface)?;
     let _identity_lock = acquire_surface_identity_lock(
-        mutation_lock.as_ref(),
+        mutation_lock,
         &format!(
             "artifact:{}@{}:{}",
             locked.path, locked.version, artifact.id
         ),
     )?;
-    validate_surface_module(surface, mutation_lock.as_ref(), module_dir, locked)?;
+    // The retained native lease excludes cleanup during the artifact fetch.
+    // Virtual surfaces still get a live publication-anchor check here.
+    let module_kind = surface_entry_kind(surface, mutation_lock, module_dir)?;
+    if module_kind != vo_common::vfs::FileSystemEntryKind::Directory {
+        return Err(Error::SourceScan(format!(
+            "module cache destination {} changed to {module_kind:?} while fetching artifact {}",
+            module_dir.display(),
+            artifact.id,
+        )));
+    }
     if validate_surface_artifact(
         surface,
-        mutation_lock.as_ref(),
+        mutation_lock,
         module_dir,
         locked,
-        &artifact.id,
+        artifact,
         artifact_path,
     )
     .is_ok()
     {
         return Ok(());
     }
-    let destination_kind = surface_entry_kind(surface, mutation_lock.as_ref(), artifact_path)?;
+    let destination_kind = surface_entry_kind(surface, mutation_lock, artifact_path)?;
     if destination_kind != vo_common::vfs::FileSystemEntryKind::Missing {
         return Err(Error::SourceScan(format!(
             "artifact cache destination {} already contains invalid {destination_kind:?} data; clean the module cache before installing",
@@ -749,7 +656,7 @@ fn commit_prepared_artifact<S: InstallSurface>(
     }
     let mut transaction = SurfaceTransaction::begin(
         surface,
-        mutation_lock.as_ref(),
+        mutation_lock,
         "artifact",
         &format!("{}@{}:{}", locked.path, locked.version, artifact.id),
     )?;
@@ -757,10 +664,10 @@ fn commit_prepared_artifact<S: InstallSurface>(
     transaction.verify(Path::new("payload"), bytes)?;
     if validate_surface_artifact(
         surface,
-        mutation_lock.as_ref(),
+        mutation_lock,
         module_dir,
         locked,
-        &artifact.id,
+        artifact,
         artifact_path,
     )
     .is_ok()
@@ -774,8 +681,8 @@ fn commit_prepared_artifact<S: InstallSurface>(
             artifact_path.display(),
         ))
     })?;
-    ensure_surface_directory(surface, mutation_lock.as_ref(), parent)?;
-    let destination_kind = surface_entry_kind(surface, mutation_lock.as_ref(), artifact_path)?;
+    ensure_surface_directory(surface, mutation_lock, parent)?;
+    let destination_kind = surface_entry_kind(surface, mutation_lock, artifact_path)?;
     if destination_kind != vo_common::vfs::FileSystemEntryKind::Missing {
         transaction.cleanup()?;
         return Err(Error::SourceScan(format!(
@@ -787,10 +694,10 @@ fn commit_prepared_artifact<S: InstallSurface>(
         if is_publication_collision(&error)
             && validate_surface_artifact(
                 surface,
-                mutation_lock.as_ref(),
+                mutation_lock,
                 module_dir,
                 locked,
-                &artifact.id,
+                artifact,
                 artifact_path,
             )
             .is_ok()
@@ -802,13 +709,13 @@ fn commit_prepared_artifact<S: InstallSurface>(
     }
     validate_surface_artifact(
         surface,
-        mutation_lock.as_ref(),
+        mutation_lock,
         module_dir,
         locked,
-        &artifact.id,
+        artifact,
         artifact_path,
     )?;
-    if surface_entry_kind(surface, mutation_lock.as_ref(), artifact_path)?
+    if surface_entry_kind(surface, mutation_lock, artifact_path)?
         != vo_common::vfs::FileSystemEntryKind::RegularFile
     {
         return Err(Error::SourceScan(format!(
@@ -838,7 +745,7 @@ async fn install_source<S: InstallSurface, R: AsyncRegistry>(
     registry: &R,
     locked: &LockedModule,
     manifest: &ManifestSnapshot,
-) -> Result<()> {
+) -> Result<AuthenticatedInstalledModule> {
     let source = registry
         .fetch_source(
             &locked.path,
@@ -1107,7 +1014,7 @@ fn commit_prepared_source<S: InstallSurface>(
     prepared: PreparedSourceTree,
     locked: &LockedModule,
     manifest: &ManifestSnapshot,
-) -> Result<()> {
+) -> Result<AuthenticatedInstalledModule> {
     let mutation_lock = acquire_surface_mutation_lock(surface)?;
     let _identity_lock = acquire_surface_identity_lock(
         mutation_lock.as_ref(),
@@ -1120,8 +1027,10 @@ fn commit_prepared_source<S: InstallSurface>(
             module_dir.display(),
         ))
     })?;
-    if validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked).is_ok() {
-        return Ok(());
+    if let Ok(metadata) =
+        validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked)
+    {
+        return Ok(retain_authenticated(metadata, mutation_lock));
     }
     let existing_kind = surface_entry_kind(surface, mutation_lock.as_ref(), &module_dir)?;
     if existing_kind != vo_common::vfs::FileSystemEntryKind::Missing {
@@ -1171,9 +1080,11 @@ fn commit_prepared_source<S: InstallSurface>(
     stage_result?;
 
     // A concurrent installer may have completed while this tree was staged.
-    if validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked).is_ok() {
+    if let Ok(metadata) =
+        validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked)
+    {
         transaction.cleanup()?;
-        return Ok(());
+        return Ok(retain_authenticated(metadata, mutation_lock));
     }
     ensure_surface_directory(surface, mutation_lock.as_ref(), module_parent)?;
 
@@ -1186,16 +1097,18 @@ fn commit_prepared_source<S: InstallSurface>(
         )));
     }
     if let Err(error) = transaction.publish_tree(&module_dir) {
-        if is_publication_collision(&error)
-            && validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked).is_ok()
-        {
-            let _ = transaction.cleanup();
-            return Ok(());
+        if is_publication_collision(&error) {
+            if let Ok(metadata) =
+                validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked)
+            {
+                let _ = transaction.cleanup();
+                return Ok(retain_authenticated(metadata, mutation_lock));
+            }
         }
         return Err(error);
     }
 
-    validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked)?;
+    let metadata = validate_surface_module(surface, mutation_lock.as_ref(), &module_dir, locked)?;
     if surface_entry_kind(surface, mutation_lock.as_ref(), &module_dir)?
         != vo_common::vfs::FileSystemEntryKind::Directory
     {
@@ -1204,7 +1117,7 @@ fn commit_prepared_source<S: InstallSurface>(
             module_dir.display(),
         )));
     }
-    Ok(())
+    Ok(retain_authenticated(metadata, mutation_lock))
 }
 
 fn acquire_surface_mutation_lock<S: InstallSurface>(
@@ -1229,7 +1142,7 @@ fn inspect_surface_module<S: InstallSurface>(
     module_dir: &Path,
     locked: &LockedModule,
 ) -> Result<(
-    std::result::Result<InstalledModuleMetadata, InstalledModuleError>,
+    std::result::Result<AuthenticatedInstalledModule, InstalledModuleError>,
     vo_common::vfs::FileSystemEntryKind,
 )> {
     let mutation_lock = acquire_surface_mutation_lock(surface)?;
@@ -1242,29 +1155,33 @@ fn inspect_surface_module<S: InstallSurface>(
         validate_installed_module_with_metadata(&mutation_lock.file_system(), module_dir, locked)
     } else {
         validate_installed_module_with_metadata(surface, module_dir, locked)
-    };
+    }
+    .map(|metadata| scope_installed_metadata(surface, module_dir, metadata));
     let kind = surface_entry_kind(surface, mutation_lock.as_ref(), module_dir)?;
-    Ok((validation, kind))
+    Ok((
+        validation.map(|metadata| retain_authenticated(metadata, mutation_lock)),
+        kind,
+    ))
 }
 
 fn inspect_surface_artifact<S: InstallSurface>(
     surface: &S,
+    mutation_lock: Option<&crate::cache::mutation_lock::CacheMutationLock>,
     module_dir: &Path,
     locked: &LockedModule,
-    artifact: &ArtifactId,
+    artifact: &ManifestArtifact,
     artifact_path: &Path,
 ) -> Result<(
     std::result::Result<(), InstalledModuleError>,
     vo_common::vfs::FileSystemEntryKind,
 )> {
-    let mutation_lock = acquire_surface_mutation_lock(surface)?;
     let validation = if surface.supports_anchored_transactions() {
-        let mutation_lock = mutation_lock.as_ref().ok_or_else(|| {
+        let mutation_lock = mutation_lock.ok_or_else(|| {
             Error::Io(std::io::Error::other(
                 "anchored install surface is missing its cache mutation lock",
             ))
         })?;
-        validate_installed_artifact_at_relative_path(
+        validate_installed_artifact_from_metadata_at_relative_path(
             &mutation_lock.file_system(),
             module_dir,
             locked,
@@ -1278,7 +1195,7 @@ fn inspect_surface_artifact<S: InstallSurface>(
             })?,
         )
     } else {
-        validate_installed_artifact_at_relative_path(
+        validate_installed_artifact_from_metadata_at_relative_path(
             surface,
             module_dir,
             locked,
@@ -1292,7 +1209,7 @@ fn inspect_surface_artifact<S: InstallSurface>(
             })?,
         )
     };
-    let kind = surface_entry_kind(surface, mutation_lock.as_ref(), artifact_path)?;
+    let kind = surface_entry_kind(surface, mutation_lock, artifact_path)?;
     Ok((validation, kind))
 }
 
@@ -1339,17 +1256,33 @@ fn validate_surface_module<S: InstallSurface>(
     mutation_lock: Option<&crate::cache::mutation_lock::CacheMutationLock>,
     module_dir: &Path,
     locked: &LockedModule,
-) -> Result<()> {
-    if surface.supports_anchored_transactions() {
+) -> Result<InstalledModuleMetadata> {
+    let metadata = if surface.supports_anchored_transactions() {
         let mutation_lock = mutation_lock.ok_or_else(|| {
             Error::Io(std::io::Error::other(
                 "anchored install surface is missing its cache mutation lock",
             ))
         })?;
-        return validate_installed_module(&mutation_lock.file_system(), module_dir, locked)
-            .map_err(installed_module_error_to_error);
+        validate_installed_module_with_metadata(&mutation_lock.file_system(), module_dir, locked)
+    } else {
+        validate_installed_module_with_metadata(surface, module_dir, locked)
     }
-    validate_installed_module(surface, module_dir, locked).map_err(installed_module_error_to_error)
+    .map_err(installed_module_error_to_error)?;
+    Ok(scope_installed_metadata(surface, module_dir, metadata))
+}
+
+fn scope_installed_metadata<S: InstallSurface>(
+    surface: &S,
+    module_dir: &Path,
+    mut metadata: InstalledModuleMetadata,
+) -> InstalledModuleMetadata {
+    if let Some(extension) = metadata.extension.as_mut() {
+        let manifest_path = module_dir.join("vo.mod");
+        extension.manifest_path = surface
+            .root()
+            .map_or(manifest_path.clone(), |root| root.join(manifest_path));
+    }
+    metadata
 }
 
 fn validate_surface_artifact<S: InstallSurface>(
@@ -1357,7 +1290,7 @@ fn validate_surface_artifact<S: InstallSurface>(
     mutation_lock: Option<&crate::cache::mutation_lock::CacheMutationLock>,
     module_dir: &Path,
     locked: &LockedModule,
-    artifact: &ArtifactId,
+    artifact: &ManifestArtifact,
     artifact_path: &Path,
 ) -> Result<()> {
     if surface.supports_anchored_transactions() {
@@ -1366,7 +1299,7 @@ fn validate_surface_artifact<S: InstallSurface>(
                 "anchored install surface is missing its cache mutation lock",
             ))
         })?;
-        return validate_installed_artifact_at_relative_path(
+        return validate_installed_artifact_from_metadata_at_relative_path(
             &mutation_lock.file_system(),
             module_dir,
             locked,
@@ -1381,7 +1314,7 @@ fn validate_surface_artifact<S: InstallSurface>(
         )
         .map_err(installed_module_error_to_error);
     }
-    validate_installed_artifact_at_relative_path(
+    validate_installed_artifact_from_metadata_at_relative_path(
         surface,
         module_dir,
         locked,
@@ -1737,8 +1670,10 @@ fn readiness_failure_to_error(failure: ReadinessFailure) -> Error {
 mod tests {
     use super::*;
     use crate::digest::Digest;
+    use crate::lock::locked_module_from_manifest_raw;
     use crate::schema::manifest::{ManifestArtifact, ManifestSource, ReleaseManifest};
-    use crate::version::{DepConstraint, ToolchainConstraint};
+    use crate::schema::modfile::ModFile;
+    use crate::version::ToolchainConstraint;
     use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
@@ -1938,6 +1873,7 @@ mod tests {
         _root: tempfile::TempDir,
         fs: RealFs,
         mutations: Mutex<Vec<PathBuf>>,
+        reads: Mutex<Vec<PathBuf>>,
         writes_before_failure: Mutex<Option<usize>>,
     }
 
@@ -1950,6 +1886,7 @@ mod tests {
                 _root: root,
                 fs,
                 mutations: Mutex::new(Vec::new()),
+                reads: Mutex::new(Vec::new()),
                 writes_before_failure: Mutex::new(None),
             }
         }
@@ -1958,6 +1895,26 @@ mod tests {
     impl RecordingSurface {
         fn mutations(&self) -> Vec<PathBuf> {
             self.mutations.lock().unwrap().clone()
+        }
+
+        fn successful_reads(&self, path: &Path) -> usize {
+            self.reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| read.as_path() == path)
+                .count()
+        }
+
+        fn clear_reads(&self) {
+            self.reads.lock().unwrap().clear();
+        }
+
+        fn record_read<T>(&self, path: &Path, result: std::io::Result<T>) -> std::io::Result<T> {
+            if result.is_ok() {
+                self.reads.lock().unwrap().push(path.to_path_buf());
+            }
+            result
         }
 
         fn seed_text(&self, path: &Path, content: &str) {
@@ -1974,15 +1931,15 @@ mod tests {
 
     impl FileSystem for RecordingSurface {
         fn read_file(&self, path: &Path) -> std::io::Result<String> {
-            self.fs.read_file(path)
+            self.record_read(path, self.fs.read_file(path))
         }
 
         fn read_bytes(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-            self.fs.read_bytes(path)
+            self.record_read(path, self.fs.read_bytes(path))
         }
 
         fn read_bytes_limited(&self, path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
-            self.fs.read_bytes_limited(path, max_bytes)
+            self.record_read(path, self.fs.read_bytes_limited(path, max_bytes))
         }
 
         fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -2046,15 +2003,12 @@ mod tests {
     struct FilesRegistry {
         source_files: Vec<ExtractedSourceFile>,
         tree_raw: Vec<u8>,
+        artifact: Option<(ArtifactId, Vec<u8>)>,
+        artifact_fetch_tamper: Option<(PathBuf, Vec<u8>)>,
     }
 
     struct PackageRegistry {
         source_package: Vec<u8>,
-    }
-
-    struct CandidateRegistry {
-        candidates: Vec<ExactVersion>,
-        manifests: BTreeMap<ExactVersion, Vec<u8>>,
     }
 
     #[derive(Default)]
@@ -2073,18 +2027,6 @@ mod tests {
     }
 
     impl AsyncRegistry for NoFetchRegistry {
-        fn list_version_candidates<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-        ) -> BoxFuture<'a, Result<Vec<ExactVersion>>> {
-            self.record("list_version_candidates");
-            Box::pin(async {
-                Err(Error::RegistryError(
-                    "unexpected version-list fetch".to_string(),
-                ))
-            })
-        }
-
         fn fetch_manifest_raw<'a>(
             &'a self,
             _module: &'a ModulePath,
@@ -2123,65 +2065,7 @@ mod tests {
         }
     }
 
-    impl AsyncRegistry for CandidateRegistry {
-        fn list_version_candidates<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-        ) -> BoxFuture<'a, Result<Vec<ExactVersion>>> {
-            let candidates = self.candidates.clone();
-            Box::pin(async move { Ok(candidates) })
-        }
-
-        fn fetch_manifest_raw<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-            version: &'a ExactVersion,
-        ) -> BoxFuture<'a, Result<Vec<u8>>> {
-            let result = self.manifests.get(version).cloned().ok_or_else(|| {
-                Error::RegistryError(format!("missing candidate manifest for {version}"))
-            });
-            Box::pin(async move { result })
-        }
-
-        fn fetch_source<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-            _version: &'a ExactVersion,
-            _asset_name: &'a str,
-        ) -> BoxFuture<'a, Result<SourcePayload>> {
-            Box::pin(async {
-                Err(Error::RegistryError(
-                    "unexpected candidate source fetch".to_string(),
-                ))
-            })
-        }
-
-        fn fetch_artifact<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-            _version: &'a ExactVersion,
-            _artifact: &'a ArtifactId,
-        ) -> BoxFuture<'a, Result<Vec<u8>>> {
-            Box::pin(async {
-                Err(Error::RegistryError(
-                    "unexpected candidate artifact fetch".to_string(),
-                ))
-            })
-        }
-    }
-
     impl AsyncRegistry for FilesRegistry {
-        fn list_version_candidates<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-        ) -> BoxFuture<'a, Result<Vec<ExactVersion>>> {
-            Box::pin(async {
-                Err(Error::RegistryError(
-                    "unexpected list_version_candidates call".to_string(),
-                ))
-            })
-        }
-
         fn fetch_manifest_raw<'a>(
             &'a self,
             _module: &'a ModulePath,
@@ -2214,28 +2098,26 @@ mod tests {
             &'a self,
             _module: &'a ModulePath,
             _version: &'a ExactVersion,
-            _artifact: &'a ArtifactId,
+            artifact: &'a ArtifactId,
         ) -> BoxFuture<'a, Result<Vec<u8>>> {
-            Box::pin(async {
-                Err(Error::RegistryError(
-                    "unexpected fetch_artifact call".to_string(),
-                ))
+            let result = self
+                .artifact
+                .as_ref()
+                .filter(|(expected, _)| expected == artifact)
+                .map(|(_, bytes)| bytes.clone())
+                .ok_or_else(|| Error::RegistryError(format!("unexpected artifact {artifact}")));
+            let tamper = self.artifact_fetch_tamper.clone();
+            Box::pin(async move {
+                let bytes = result?;
+                if let Some((path, replacement)) = tamper {
+                    std::fs::write(path, replacement).map_err(Error::Io)?;
+                }
+                Ok(bytes)
             })
         }
     }
 
     impl AsyncRegistry for PackageRegistry {
-        fn list_version_candidates<'a>(
-            &'a self,
-            _module: &'a ModulePath,
-        ) -> BoxFuture<'a, Result<Vec<ExactVersion>>> {
-            Box::pin(async {
-                Err(Error::RegistryError(
-                    "unexpected list_version_candidates call".to_string(),
-                ))
-            })
-        }
-
         fn fetch_manifest_raw<'a>(
             &'a self,
             _module: &'a ModulePath,
@@ -2279,31 +2161,6 @@ mod tests {
             Poll::Ready(output) => output,
             Poll::Pending => panic!("test future unexpectedly returned Pending"),
         }
-    }
-
-    #[test]
-    fn dependency_free_async_resolution_returns_no_lock_without_registry_or_cache_work() {
-        let surface = RecordingSurface::default();
-        let registry = CandidateRegistry {
-            candidates: Vec::new(),
-            manifests: BTreeMap::new(),
-        };
-        let mod_file = ModFile::parse_project(
-            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
-        )
-        .unwrap();
-
-        let resolved = poll_ready(resolve_mod_file_lock_and_ensure(
-            &surface,
-            &registry,
-            &mod_file,
-            "wasm32-unknown-unknown",
-        ))
-        .unwrap();
-
-        assert!(resolved.lock_file.is_none());
-        assert!(resolved.ready.is_empty());
-        assert!(surface.mutations().is_empty());
     }
 
     fn tree_bytes(files: &[ExtractedSourceFile]) -> Vec<u8> {
@@ -2363,29 +2220,39 @@ mod tests {
     }
 
     fn native_artifact_browser_fixture() -> NativeArtifactBrowserFixture {
-        let artifact_bytes = b"native-artifact".to_vec();
+        native_artifact_browser_fixture_for("github.com/acme/pkg", "libpkg.dylib")
+    }
+
+    fn native_artifact_browser_fixture_for(
+        module_path: &str,
+        artifact_name: &str,
+    ) -> NativeArtifactBrowserFixture {
+        let extension_name = module_path.rsplit('/').next().unwrap();
+        let artifact_bytes = format!("native-artifact-{extension_name}").into_bytes();
         let artifact = ManifestArtifact {
             id: ArtifactId {
                 kind: "extension-native".to_string(),
                 target: "aarch64-apple-darwin".to_string(),
-                name: "libpkg.dylib".to_string(),
+                name: artifact_name.to_string(),
             },
             size: artifact_bytes.len() as u64,
             digest: Digest::from_sha256(&artifact_bytes),
         };
-        let mod_content = concat!(
-            "format = 1\nmodule = \"github.com/acme/pkg\"\nversion = \"0.1.0\"\n",
-            "vo = \"0.1.0\"\n\n",
-            "[extension]\n",
-            "name = \"pkg\"\n\n",
-            "[extension.native]\n",
-            "targets = [\"aarch64-apple-darwin\"]\n",
+        let mod_content = format!(
+            concat!(
+                "format = 1\nmodule = \"{}\"\nversion = \"0.1.0\"\n",
+                "vo = \"0.1.0\"\n\n",
+                "[extension]\n",
+                "name = \"{}\"\n\n",
+                "[extension.native]\n",
+                "targets = [\"aarch64-apple-darwin\"]\n",
+            ),
+            module_path, extension_name,
         )
-        .as_bytes()
-        .to_vec();
+        .into_bytes();
         let files = vec![regular_file("vo.mod", mod_content.clone())];
         let tree_raw = tree_bytes(&files);
-        let module = ModulePath::parse("github.com/acme/pkg").unwrap();
+        let module = ModulePath::parse(module_path).unwrap();
         let version = ExactVersion::parse("0.1.0").unwrap();
         let mod_file = ModFile::parse_project(std::str::from_utf8(&mod_content).unwrap()).unwrap();
         let manifest = ReleaseManifest {
@@ -2420,64 +2287,146 @@ mod tests {
         }
     }
 
-    #[test]
-    fn candidate_selection_skips_newer_invalid_release_manifests() {
-        let module = ModulePath::parse("github.com/acme/pkg").unwrap();
-        let invalid_version = ExactVersion::parse("0.1.1").unwrap();
-        let valid_version = ExactVersion::parse("0.1.0").unwrap();
-        let (_, valid_manifest, _) = browser_manifest_fixture(&browser_source_files());
-        let registry = CandidateRegistry {
-            candidates: vec![valid_version.clone(), invalid_version.clone()],
-            manifests: BTreeMap::from([
-                (invalid_version, b"{}".to_vec()),
-                (valid_version.clone(), valid_manifest.raw),
-            ]),
+    fn project_plan_for_locked(locked_modules: Vec<LockedModule>) -> project::ProjectPlan {
+        let dependencies = locked_modules
+            .iter()
+            .map(|locked| format!("\"{}\" = \"{}\"\n", locked.path, locked.version))
+            .collect::<String>();
+        let mod_content = format!(
+            concat!(
+                "format = 1\nmodule = \"github.com/acme/root\"\n",
+                "version = \"0.1.0\"\nvo = \"0.1.0\"\n\n",
+                "[dependencies]\n{}",
+            ),
+            dependencies,
+        );
+        let mod_file = ModFile::parse_project(&mod_content).unwrap();
+        let lock = crate::schema::lockfile::LockFile {
+            format: crate::schema::lockfile::LOCK_FILE_VERSION,
+            root: crate::lock::module_intent_digest(&mod_file).unwrap(),
+            modules: locked_modules,
         };
-
-        assert_eq!(
-            poll_ready(resolve_latest_version(&registry, &module)).unwrap(),
-            valid_version
-        );
-        assert_eq!(
-            poll_ready(resolve_version_with_constraint(
-                &registry,
-                &module,
-                &DepConstraint::parse("^0.1.0").unwrap(),
-            ))
-            .unwrap(),
-            valid_version
-        );
+        let lock_content = lock.render().unwrap();
+        project::read_inline_project_plan(&mod_content, Some(&lock_content)).unwrap()
     }
 
     #[test]
-    fn latest_version_requires_an_explicit_prerelease_constraint() {
-        let module = ModulePath::parse("github.com/acme/pkg").unwrap();
-        let stable_version = ExactVersion::parse("0.1.0").unwrap();
-        let prerelease_version = ExactVersion::parse("0.1.1-alpha.1").unwrap();
-        let (_, stable_manifest, _) = browser_manifest_fixture(&browser_source_files());
-        let mut prerelease_manifest = stable_manifest.manifest.clone();
-        prerelease_manifest.version = prerelease_version.clone();
-        let prerelease_raw = prerelease_manifest.render().unwrap().into_bytes();
-        let registry = CandidateRegistry {
-            candidates: vec![stable_version.clone(), prerelease_version.clone()],
-            manifests: BTreeMap::from([
-                (stable_version.clone(), stable_manifest.raw),
-                (prerelease_version.clone(), prerelease_raw),
-            ]),
+    fn ensure_ready_reauthenticates_only_after_registry_await() {
+        let NativeArtifactBrowserFixture {
+            source_files,
+            locked,
+            manifest,
+            tree_raw,
+            artifact,
+            artifact_bytes,
+        } = native_artifact_browser_fixture();
+        let surface = RecordingSurface::default();
+        let module_dir = relative_module_dir(&locked.path, &locked.version);
+        let release_path = module_dir.join("vo.release.json");
+        let mod_path = module_dir.join("vo.mod");
+        let registry = FilesRegistry {
+            source_files,
+            tree_raw,
+            artifact: Some((artifact.id, artifact_bytes)),
+            artifact_fetch_tamper: None,
         };
 
+        let ready = poll_ready(ensure_locked_module_ready(
+            &surface,
+            &registry,
+            &locked,
+            "aarch64-apple-darwin",
+            Some(manifest),
+        ))
+        .unwrap();
+
+        assert_eq!(ready.artifacts().len(), 1);
         assert_eq!(
-            poll_ready(resolve_latest_version(&registry, &module)).unwrap(),
-            stable_version
+            ready.ext_manifest().unwrap().manifest_path,
+            surface.root().unwrap().join(&mod_path)
         );
-        assert_eq!(
-            poll_ready(resolve_version_with_constraint(
+        assert_eq!(surface.successful_reads(&release_path), 2);
+        assert_eq!(surface.successful_reads(&mod_path), 2);
+
+        surface.clear_reads();
+        let registry = NoFetchRegistry::default();
+        let ready = poll_ready(ensure_locked_module_ready(
+            &surface,
+            &registry,
+            &locked,
+            "aarch64-apple-darwin",
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(ready.artifacts().len(), 1);
+        assert!(registry.calls().is_empty(), "{:?}", registry.calls());
+        assert_eq!(surface.successful_reads(&release_path), 1);
+        assert_eq!(surface.successful_reads(&mod_path), 1);
+    }
+
+    #[test]
+    fn project_ensure_reauthenticates_earlier_modules_after_later_fetch() {
+        let first = native_artifact_browser_fixture_for("github.com/acme/first", "libfirst.dylib");
+        let second =
+            native_artifact_browser_fixture_for("github.com/acme/second", "libsecond.dylib");
+        let surface = RecordingSurface::default();
+
+        for fixture in [&first, &second] {
+            let registry = FilesRegistry {
+                source_files: fixture.source_files.clone(),
+                tree_raw: fixture.tree_raw.clone(),
+                artifact: None,
+                artifact_fetch_tamper: None,
+            };
+            poll_ready(install_source(
+                &surface,
                 &registry,
-                &module,
-                &DepConstraint::parse("0.1.1-alpha.1").unwrap(),
+                &fixture.locked,
+                &fixture.manifest,
             ))
-            .unwrap(),
-            prerelease_version
+            .unwrap();
+        }
+
+        let first_module_dir = relative_module_dir(&first.locked.path, &first.locked.version);
+        let first_artifact_path = first_module_dir
+            .join(crate::artifact::artifact_relative_path(&first.artifact.id).unwrap());
+        let mutation_lock = acquire_surface_mutation_lock(&surface).unwrap();
+        commit_prepared_artifact(
+            &surface,
+            mutation_lock.as_ref(),
+            &first_module_dir,
+            &first.locked,
+            &first.artifact,
+            &first_artifact_path,
+            &first.artifact_bytes,
+        )
+        .unwrap();
+        drop(mutation_lock);
+
+        let plan = project_plan_for_locked(vec![first.locked.clone(), second.locked.clone()]);
+        let tamper_path = surface
+            .root()
+            .unwrap()
+            .join(first_module_dir.join("vo.mod"));
+        let registry = FilesRegistry {
+            source_files: Vec::new(),
+            tree_raw: Vec::new(),
+            artifact: Some((second.artifact.id.clone(), second.artifact_bytes.clone())),
+            artifact_fetch_tamper: Some((tamper_path, b"format = 1\n".to_vec())),
+        };
+
+        let error = poll_ready(ensure_project_plan(
+            &surface,
+            &registry,
+            &plan,
+            "aarch64-apple-darwin",
+        ))
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(first.locked.path.as_str()),
+            "{error}"
         );
     }
 
@@ -2508,6 +2457,8 @@ mod tests {
             let registry = FilesRegistry {
                 source_files: files,
                 tree_raw: tree_raw.clone(),
+                artifact: None,
+                artifact_fetch_tamper: None,
             };
             let error =
                 poll_ready(install_source(&surface, &registry, &locked, &manifest)).unwrap_err();
@@ -2551,6 +2502,8 @@ mod tests {
         let registry = FilesRegistry {
             source_files: files,
             tree_raw,
+            artifact: None,
+            artifact_fetch_tamper: None,
         };
         let module_dir = relative_module_dir(&locked.path, &locked.version);
         let stale_path = module_dir.join("stale.vo");
@@ -2607,6 +2560,8 @@ mod tests {
         let source_registry = FilesRegistry {
             source_files,
             tree_raw,
+            artifact: None,
+            artifact_fetch_tamper: None,
         };
         poll_ready(install_source(
             &surface,
@@ -2650,6 +2605,8 @@ mod tests {
         let registry = FilesRegistry {
             source_files,
             tree_raw,
+            artifact: None,
+            artifact_fetch_tamper: None,
         };
 
         let error =
@@ -2670,6 +2627,8 @@ mod tests {
         let registry = FilesRegistry {
             source_files,
             tree_raw,
+            artifact: None,
+            artifact_fetch_tamper: None,
         };
 
         let error =
@@ -2693,6 +2652,8 @@ mod tests {
         let registry = FilesRegistry {
             source_files,
             tree_raw,
+            artifact: None,
+            artifact_fetch_tamper: None,
         };
         let module_dir = relative_module_dir(&locked.path, &locked.version);
         crate::cache::mutation_lock::fail_publication_sync_for_test(&root.path().join(&module_dir));
@@ -2725,6 +2686,8 @@ mod tests {
         let registry = FilesRegistry {
             source_files,
             tree_raw,
+            artifact: None,
+            artifact_fetch_tamper: None,
         };
         poll_ready(install_source(&surface, &registry, &locked, &manifest)).unwrap();
         let module_dir = relative_module_dir(&locked.path, &locked.version);
@@ -2733,9 +2696,11 @@ mod tests {
         crate::cache::mutation_lock::fail_publication_sync_for_test(
             &root.path().join(&artifact_path),
         );
+        let mutation_lock = acquire_surface_mutation_lock(&surface).unwrap();
 
         let error = commit_prepared_artifact(
             &surface,
+            mutation_lock.as_ref(),
             &module_dir,
             &locked,
             &artifact,
@@ -2758,6 +2723,7 @@ mod tests {
         .unwrap();
         commit_prepared_artifact(
             &surface,
+            mutation_lock.as_ref(),
             &module_dir,
             &locked,
             &artifact,

@@ -99,21 +99,13 @@ pub(crate) fn validate_iface_receiver_layout(
 
 #[inline]
 fn probe_call_iface_ic(
-    fiber: &Fiber,
-    caller_func_id: u32,
-    callsite_pc: u32,
-    itab_id: u32,
-    method_idx: u32,
+    entry: &vo_runtime::DynCallIC,
+    receiver_slot0: u64,
 ) -> Option<CallIfaceTarget> {
-    if fiber.call_iface_ic_table.is_empty() {
-        return None;
-    }
-    let index = Fiber::call_iface_ic_index(caller_func_id, callsite_pc);
-    let entry = &fiber.call_iface_ic_table[index];
-    if entry.matches(caller_func_id, callsite_pc, itab_id, method_idx) {
+    if entry.valid != 0 && entry.receiver_slot0 == receiver_slot0 {
         Some(CallIfaceTarget {
             func_id: entry.func_id,
-            local_slots: entry.local_slots,
+            local_slots: u16::try_from(entry.local_slots).ok()?,
             gc_scan_slots: entry.gc_scan_slots,
         })
     } else {
@@ -123,25 +115,18 @@ fn probe_call_iface_ic(
 
 #[inline]
 fn fill_call_iface_ic(
-    fiber: &mut Fiber,
-    caller_func_id: u32,
-    callsite_pc: u32,
-    itab_id: u32,
-    method_idx: u32,
+    entry: &mut vo_runtime::DynCallIC,
+    receiver_slot0: u64,
     target: CallIfaceTarget,
 ) {
-    let index = Fiber::call_iface_ic_index(caller_func_id, callsite_pc);
-    let table = fiber.ensure_call_iface_ic_table();
-    table[index] = crate::fiber::CallIfaceICEntry {
-        caller_func_id,
-        callsite_pc,
-        itab_id,
-        method_idx,
-        valid: true,
-        local_slots: target.local_slots,
-        gc_scan_slots: target.gc_scan_slots,
-        func_id: target.func_id,
-    };
+    if entry.receiver_slot0 != receiver_slot0 || entry.func_id != target.func_id {
+        entry.jit_func_ptr = 0;
+    }
+    entry.receiver_slot0 = receiver_slot0;
+    entry.local_slots = u32::from(target.local_slots);
+    entry.gc_scan_slots = target.gc_scan_slots;
+    entry.func_id = target.func_id;
+    entry.valid = 1;
 }
 
 pub(crate) fn resolve_iface_call_target(
@@ -365,6 +350,28 @@ pub fn exec_call_iface(
     module: &Module,
     itab_cache: &ItabCache,
 ) -> ExecResult {
+    exec_call_iface_impl(gc, fiber, inst, module, itab_cache, None)
+}
+
+pub(crate) fn exec_call_iface_cached(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    module: &Module,
+    itab_cache: &ItabCache,
+    ic_entry: &mut vo_runtime::DynCallIC,
+) -> ExecResult {
+    exec_call_iface_impl(gc, fiber, inst, module, itab_cache, Some(ic_entry))
+}
+
+fn exec_call_iface_impl(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    module: &Module,
+    itab_cache: &ItabCache,
+    ic_entry: Option<&mut vo_runtime::DynCallIC>,
+) -> ExecResult {
     let caller_frame = fiber.frames.last().copied().ok_or_else(|| {
         ExecResult::JitError("CallIface requested without an active caller frame".to_string())
     });
@@ -431,19 +438,20 @@ pub fn exec_call_iface(
     ) {
         return ExecResult::JitError(err);
     }
-    let (target, fill_ic_after_validation) =
-        match probe_call_iface_ic(fiber, caller_func_id, callsite_pc, itab_id, method_idx_u32) {
-            Some(target) => (target, false),
-            None => {
-                let target =
-                    match resolve_call_iface_target(fiber, module, itab_cache, itab_id, method_idx)
-                    {
-                        Ok(target) => target,
-                        Err(result) => return result,
-                    };
-                (target, true)
-            }
-        };
+    let (target, fill_ic_after_validation) = match ic_entry
+        .as_deref()
+        .and_then(|entry| probe_call_iface_ic(entry, slot0))
+    {
+        Some(target) => (target, false),
+        None => {
+            let target =
+                match resolve_call_iface_target(fiber, module, itab_cache, itab_id, method_idx) {
+                    Ok(target) => target,
+                    Err(result) => return result,
+                };
+            (target, true)
+        }
+    };
     let Some(target_func) = module.functions.get(target.func_id as usize) else {
         return ExecResult::JitError(format!(
             "CallIface cached target function id {} out of bounds",
@@ -518,14 +526,9 @@ pub fn exec_call_iface(
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     };
     if fill_ic_after_validation {
-        fill_call_iface_ic(
-            fiber,
-            caller_func_id,
-            callsite_pc,
-            itab_id,
-            method_idx_u32,
-            target,
-        );
+        if let Some(entry) = ic_entry {
+            fill_call_iface_ic(entry, slot0, target);
+        }
     }
     fiber.zero_slots_tail_at(new_bp, target.gc_scan_slots as usize, arg_slots);
     let stack = fiber.stack_ptr();

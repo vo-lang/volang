@@ -223,8 +223,6 @@ fn compile_stmt_inner(
 
         // === Defer ===
         StmtKind::Defer(defer_stmt) => {
-            // Mark current loop (if any) as containing defer
-            func.mark_loop_has_defer();
             defer_go::compile_defer(&defer_stmt.call, ctx, func, info)?;
         }
 

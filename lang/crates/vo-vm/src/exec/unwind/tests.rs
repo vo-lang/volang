@@ -21,7 +21,7 @@ fn func_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types,
         borrowed_scan_slots_prefix: Vec::new(),
         capture_types: Vec::new(),
@@ -808,4 +808,90 @@ fn execute_next_defer_empty_pending_is_jit_error_instead_of_remove_panic() {
         ExecResult::JitError(msg)
             if msg.contains("unwind state has no pending defer to execute")
     ));
+}
+
+fn ordering_defer(frame_depth: usize, func_id: u32, is_errdefer: bool) -> DeferEntry {
+    DeferEntry {
+        frame_depth,
+        func_id,
+        closure: core::ptr::null_mut(),
+        args: core::ptr::null_mut(),
+        arg_layout: crate::fiber::DeferArgLayout {
+            slot_types: Vec::new(),
+        },
+        is_closure: false,
+        is_errdefer,
+        registered_at_generation: func_id as u64,
+    }
+}
+
+#[test]
+fn large_defer_collection_keeps_next_entry_at_tail() {
+    const DEFER_COUNT: u32 = 16_384;
+    const FRAME_DEPTH: usize = 7;
+
+    let mut defer_stack = (0..DEFER_COUNT)
+        .map(|func_id| ordering_defer(FRAME_DEPTH, func_id, false))
+        .collect::<Vec<_>>();
+    let mut pending = collect_defers(&mut defer_stack, FRAME_DEPTH, true);
+
+    assert!(defer_stack.is_empty());
+    assert_eq!(pending.first().map(|entry| entry.func_id), Some(0));
+    assert_eq!(
+        pending.last().map(|entry| entry.func_id),
+        Some(DEFER_COUNT - 1)
+    );
+    for expected in (0..DEFER_COUNT).rev() {
+        assert_eq!(pending.pop().map(|entry| entry.func_id), Some(expected));
+    }
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn nested_defers_stack_ahead_of_older_pending_without_reordering_recovery_filter() {
+    const OUTER_COUNT: u32 = 8_192;
+    const NESTED_BATCHES: u32 = 128;
+    const NESTED_PER_BATCH: u32 = 16;
+
+    let mut outer_stack = (0..OUTER_COUNT)
+        .map(|func_id| ordering_defer(1, func_id, func_id % 11 == 0))
+        .collect::<Vec<_>>();
+    let mut pending = collect_defers(&mut outer_stack, 1, true);
+
+    for batch in 0..NESTED_BATCHES {
+        let base = OUTER_COUNT + batch * NESTED_PER_BATCH;
+        let mut nested_stack = (0..NESTED_PER_BATCH)
+            .map(|offset| ordering_defer(2, base + offset, false))
+            .collect::<Vec<_>>();
+        collect_and_stack_nested_defers(&mut nested_stack, &mut pending, 2, true);
+        assert!(nested_stack.is_empty());
+        for expected in (base..base + NESTED_PER_BATCH).rev() {
+            assert_eq!(pending.pop().map(|entry| entry.func_id), Some(expected));
+        }
+    }
+
+    let mut state = UnwindingState {
+        pending,
+        target_depth: 0,
+        mode: UnwindingMode::Panic,
+        current_defer_generation: 0,
+        panic_context: None,
+        return_values: None,
+        return_func_id: 0,
+        return_pc: 0,
+        caller_ret_reg: 0,
+        caller_ret_count: 0,
+        resume_parent_after_recovery: false,
+        is_closure_replay: false,
+    };
+    state.switch_to_return_mode();
+
+    assert_eq!(state.mode, UnwindingMode::Return);
+    for expected in (0..OUTER_COUNT).rev().filter(|func_id| func_id % 11 != 0) {
+        assert_eq!(
+            state.pending.pop().map(|entry| entry.func_id),
+            Some(expected)
+        );
+    }
+    assert!(state.pending.is_empty());
 }

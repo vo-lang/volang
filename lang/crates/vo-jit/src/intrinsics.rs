@@ -6,7 +6,7 @@
 //! Note: math.Abs, Min, Max, Copysign are implemented in Vo (not externs),
 //! so they are handled by normal Call, not CallExtern.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 
 use vo_runtime::ffi::{
     MATH_CEIL_EXTERN_NAME, MATH_FLOOR_EXTERN_NAME, MATH_FMA_EXTERN_NAME, MATH_SQRT_EXTERN_NAME,

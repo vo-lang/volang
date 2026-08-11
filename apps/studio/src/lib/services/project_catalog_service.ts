@@ -30,7 +30,6 @@ import { hashContent, hashFiles, projectKey, syncStateFromHashes } from '../proj
 import type { Backend } from '../backend/backend';
 import { buildGitHubRepoShareInfo } from '../session_share';
 import type { SessionInfo, ShareInfo, StudioMode } from '../types';
-import type { WorkspaceService } from './workspace_service';
 import { formatError } from '../format_error';
 import { compareUtf8 } from '../utf8_order';
 import { portableCaseKey } from '../portable_path_key';
@@ -66,10 +65,7 @@ export class ProjectCatalogService {
   private refreshGeneration = 0;
   private manifestPersistQueue: Promise<void> = Promise.resolve();
 
-  constructor(
-    private readonly backend: Backend,
-    private readonly workspace: WorkspaceService,
-  ) {
+  constructor(private readonly backend: Backend) {
     this.github = { subscribe: this.githubStore.subscribe };
     this.catalog = { subscribe: this.catalogStore.subscribe };
     this.remote = new GitHubRemoteClient(backend);
@@ -87,7 +83,7 @@ export class ProjectCatalogService {
 
     this.githubStore.update((state) => ({ ...state, token, connecting: true, error: '' }));
     const [localProjects] = await Promise.all([
-      discoverWorkspaceProjects(this.workspace)
+      discoverWorkspaceProjects(this.backend)
         .then((projects) => mergeRecentIntoLocal(projects, root))
         .then((projects) => this.applyStoredConfigToLocals(projects, previousProjects))
         .catch((): ManagedProject[] => []),
@@ -173,7 +169,7 @@ export class ProjectCatalogService {
 
     let localProjects: ManagedProject[];
     try {
-      const discovered = await discoverWorkspaceProjects(this.workspace);
+      const discovered = await discoverWorkspaceProjects(this.backend);
       localProjects = this.applyStoredConfigToLocals(
         mergeRecentIntoLocal(discovered, root),
         previousProjects,
@@ -262,12 +258,7 @@ export class ProjectCatalogService {
     const root = location ?? this.requireRoot();
     const filePath = `${root}/${projectName}.vo`;
     const isExternal = location != null && normalizePath(root) !== normalizePath(this.catalogSnapshot().root);
-    const shouldBypassWrite = normalizePath(root) !== normalizePath(this.workspace.root);
-    if (shouldBypassWrite) {
-      await this.backend.createProjectFiles([{ path: filePath, content: singleFileTemplate(projectName) }]);
-    } else {
-      await this.workspace.writeFile(filePath, singleFileTemplate(projectName));
-    }
+    await this.backend.createProjectFile(filePath, singleFileTemplate(projectName));
     const project: ManagedProject = {
       name: projectName,
       type: 'single',
@@ -404,7 +395,7 @@ export class ProjectCatalogService {
       let nextProject = project;
 
       if (project.type === 'single') {
-        const content = await this.workspace.readFile(project.localPath);
+        const content = await this.backend.readFile(project.localPath);
         const filename = basename(project.localPath);
         const contentHash = hashContent(content);
         if (project.remote?.kind === 'gist' && project.remote.gistId) {
@@ -415,7 +406,7 @@ export class ProjectCatalogService {
         }
         nextProject = stampProject(nextProject, contentHash, now);
       } else {
-        const files = await collectLocalProjectFiles(this.workspace, project);
+        const files = await collectLocalProjectFiles(this.backend, project);
         const contentHash = hashFiles(files);
         if (project.remote?.kind === 'repo' && project.remote.owner && project.remote.repo) {
           await this.remote.pushRepoFiles(token, project.remote.owner, project.remote.repo, files);
@@ -455,9 +446,9 @@ export class ProjectCatalogService {
         const targetPath = `${root}/${project.name}.vo`;
         const content = files[`${project.name}.vo`];
         if (project.localPath && project.localPath !== targetPath) {
-          await removeIfExists(this.workspace, project.localPath, false);
+          await removeIfExists(this.backend, project.localPath, false);
         }
-        await this.workspace.writeFile(targetPath, content);
+        await this.backend.writeFile(targetPath, content);
         const contentHash = hashContent(content);
         nextProject = stampProject({
           ...project,
@@ -468,9 +459,9 @@ export class ProjectCatalogService {
         const files = await this.remote.pullRepoFiles(token, project.remote.owner, project.remote.repo);
         const dirPath = `${root}/${project.name}`;
         if (project.localPath && project.localPath !== dirPath) {
-          await removeIfExists(this.workspace, project.localPath, true);
+          await removeIfExists(this.backend, project.localPath, true);
         }
-        const written = await replaceRepoFiles(this.workspace, dirPath, files);
+        const written = await replaceRepoFiles(this.backend, dirPath, files);
         const contentHash = hashFiles(files);
         nextProject = stampProject({
           ...project,
@@ -510,7 +501,7 @@ export class ProjectCatalogService {
       }
 
       if (project.localPath) {
-        const renamed = await renameLocalProject(this.workspace, project, targetName);
+        const renamed = await renameLocalProject(this.backend, project, targetName);
         this.remapEditorPaths(project, renamed.localPath ?? project.localPath);
         nextProject = { ...nextProject, ...renamed };
       }
@@ -529,7 +520,7 @@ export class ProjectCatalogService {
         deleteStoredProjectConfig(projectConfigKey(project));
       }
       if (project.localPath) {
-        await this.workspace.remove(project.localPath, project.type === 'module');
+        await this.backend.removeEntry(project.localPath, project.type === 'module');
       }
 
       if (project.remote) {
@@ -588,7 +579,7 @@ export class ProjectCatalogService {
       }
 
       if (project.localPath) {
-        await this.workspace.remove(project.localPath, project.type === 'module');
+        await this.backend.removeEntry(project.localPath, project.type === 'module');
       }
 
       this.catalogStore.update((state) => ({
@@ -612,7 +603,7 @@ export class ProjectCatalogService {
     const token = this.requireToken();
     const [localFiles, remoteFiles] = await Promise.all([
       project.localPath
-        ? collectLocalProjectFiles(this.workspace, project)
+        ? collectLocalProjectFiles(this.backend, project)
         : Promise.resolve<Record<string, string>>({}),
       this.remote.fetchRemoteContent(token, project).then((files) => normalizeRemoteProjectFiles(project, files)),
     ]);
@@ -672,7 +663,7 @@ export class ProjectCatalogService {
       ? current.activeFilePath === project.localPath
       : project.localPath != null && current.activeFilePath.startsWith(`${project.localPath}/`);
     if (!matches) return;
-    await this.workspace.writeFile(current.activeFilePath, current.code);
+    await this.backend.writeFile(current.activeFilePath, current.code);
     editorMarkSaved();
   }
 
@@ -796,9 +787,9 @@ export class ProjectCatalogService {
   private async computeLocalProjectHash(project: ManagedProject): Promise<string> {
     if (!project.localPath) throw new Error('Project has no local files');
     if (project.type === 'single') {
-      return hashContent(await this.workspace.readFile(project.localPath));
+      return hashContent(await this.backend.readFile(project.localPath));
     }
-    return hashFiles(await collectLocalProjectFiles(this.workspace, project));
+    return hashFiles(await collectLocalProjectFiles(this.backend, project));
   }
 
   private applyStoredConfigToLocals(
@@ -1010,23 +1001,23 @@ function chooseSingleRemoteFile(files: Record<string, string>): string {
   return preferred;
 }
 
-async function ensureDirectory(workspace: WorkspaceService, dirPath: string): Promise<void> {
+async function ensureDirectory(backend: Backend, dirPath: string): Promise<void> {
   try {
-    await workspace.mkdir(dirPath);
+    await backend.mkdir(dirPath);
   } catch {
     return;
   }
 }
 
-async function removeIfExists(workspace: WorkspaceService, path: string, recursive: boolean): Promise<void> {
+async function removeIfExists(backend: Backend, path: string, recursive: boolean): Promise<void> {
   try {
-    await workspace.remove(path, recursive);
+    await backend.removeEntry(path, recursive);
   } catch {
     return;
   }
 }
 
-async function writeRepoFiles(workspace: WorkspaceService, dirPath: string, files: Record<string, string>): Promise<string[]> {
+async function writeRepoFiles(backend: Backend, dirPath: string, files: Record<string, string>): Promise<string[]> {
   const written: string[] = [];
   for (const [relativePath, content] of Object.entries(files)) {
     const safePath = assertSafeRelativeRepoPath(relativePath);
@@ -1035,18 +1026,18 @@ async function writeRepoFiles(workspace: WorkspaceService, dirPath: string, file
     let currentDir = dirPath;
     for (let i = 0; i < parts.length - 1; i += 1) {
       currentDir += `/${parts[i]}`;
-      await ensureDirectory(workspace, currentDir);
+      await ensureDirectory(backend, currentDir);
     }
-    await workspace.writeFile(absolutePath, content);
+    await backend.writeFile(absolutePath, content);
     written.push(safePath);
   }
   return written;
 }
 
-async function replaceRepoFiles(workspace: WorkspaceService, dirPath: string, files: Record<string, string>): Promise<string[]> {
-  await removeIfExists(workspace, dirPath, true);
-  await ensureDirectory(workspace, dirPath);
-  return writeRepoFiles(workspace, dirPath, files);
+async function replaceRepoFiles(backend: Backend, dirPath: string, files: Record<string, string>): Promise<string[]> {
+  await removeIfExists(backend, dirPath, true);
+  await ensureDirectory(backend, dirPath);
+  return writeRepoFiles(backend, dirPath, files);
 }
 
 function chooseModuleEntryPath(files: string[], dirPath: string): string {
@@ -1067,7 +1058,7 @@ function normalizeRemoteProjectFiles(
 }
 
 async function renameLocalProject(
-  workspace: WorkspaceService,
+  backend: Backend,
   project: ManagedProject,
   nextName: string,
 ): Promise<Pick<ManagedProject, 'localPath' | 'entryPath'>> {
@@ -1078,7 +1069,7 @@ async function renameLocalProject(
   const nextLocalPath = project.type === 'single'
     ? `${parent}/${nextName}.vo`
     : `${parent}/${nextName}`;
-  await workspace.rename(project.localPath, nextLocalPath);
+  await backend.renameEntry(project.localPath, nextLocalPath);
   return {
     localPath: nextLocalPath,
     entryPath: project.type === 'single'

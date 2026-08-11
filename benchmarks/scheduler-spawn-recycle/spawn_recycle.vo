@@ -1,0 +1,25 @@
+package main
+
+const spawnBatch = 64
+
+const spawnRounds = 4096
+
+func spawnWorker(value int, done chan int) {
+	done <- value
+}
+
+func main() {
+	done := make(chan int, spawnBatch)
+	checksum := 0
+	for round := 0; round < spawnRounds; round++ {
+		for i := 0; i < spawnBatch; i++ {
+			go spawnWorker(i + 1, done)
+		}
+		for i := 0; i < spawnBatch; i++ {
+			checksum += <-done
+		}
+	}
+	expected := spawnRounds * (spawnBatch * (spawnBatch + 1) / 2)
+	assert(checksum == expected, "spawn/recycle checksum mismatch")
+	println(checksum)
+}

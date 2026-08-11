@@ -94,6 +94,14 @@ Vm
 
 子 Island 继承父 Island 的 admission 与 collector policy，拥有独立 heap、占用统计、root 和错误状态。
 
+### 已验证模块与扫描事实
+
+模块在进入 VM 前完成一次字节码验证，并同时生成紧凑的 `RuntimeTypeFacts`。父 VM 与其子 Island 通过一个不可拆分的继承程序镜像共享同一个 `LoadedModule`、冻结的 extern provider 快照和动态库生命周期所有者。创建子 Island 只增加共享引用，不再复制完整 provider 索引，也无法组合来自不同加载批次的模块、函数指针与动态库。
+
+provider 函数本身可以共享，调用上下文始终由目标 Island 现场构造，因此 heap、root、fiber、I/O、HostServices 和内存请求仍属于目标 Island。可被多个 Island 调用的 provider 必须自行同步其进程级可变状态。
+
+对象扫描和 typed barrier 只做常数时间的事实查询，不在 GC 热路径重建递归类型布局，也不为单次扫描分配临时容器。数组链在验证阶段折叠为元素周期与最终扫描形态，因此深层和宽数组的推进成本都与实际扫描 slot 数线性相关。事实缺失、类型种类漂移或 slot 宽度不一致会拒绝扫描，不根据未验证元数据猜测布局。
+
 ## SpanHeap
 
 ### 布局
@@ -154,6 +162,7 @@ Pause
 - remembered-set card、sweep object 和 reclaim block 都计费；
 - `gc_step_units(N)` 的完成量不会超过请求上限；
 - `N=0` 不启动工作；
+- runtime type fact 查询不分配内存，也不隐藏递归布局遍历；
 - wall-clock 只作为平台 telemetry，核心正确性不依赖计时器精度。
 
 对象扫描使用 `GcTraceCursor` 保存：
@@ -214,6 +223,12 @@ Telemetry 分开报告：
 - allocation failure、cycle、work unit、dirty card/root、remark 和 lease 计数。
 
 hard limit 的强合同覆盖 SpanHeap committed bytes。宿主若要认证进程级或帧级总内存，还必须为 runtime native metadata、JIT code、GPU、音频、JS 和 provider memory 设置单独预算。
+
+Native JIT 为每个 Island family 设置独立的可执行页上限，默认 64MiB。构造期先创建同样有界的 Cranelift arena；平台无法保留该原生内存时，strict JIT 在执行 guest 代码前直接返回资源错误。Cranelift 生成机器码后，JIT 分别记录 emitted bytes 与按系统页取整的 charged bytes，并在提交可执行页前检查后者。完整 family 销毁时显式释放 arena，因此 Windows 也不会遗留 `VirtualAlloc` 区域。已经发布的函数指针持续有效到 family 销毁；预算不足的新函数或 OSR loop 会被缓存为资源拒绝状态，best-effort 模式回退解释器，strict 模式返回 JIT 错误。该策略避免在线淘汰所需的跨线程代码指针失效协议。
+
+函数分析另有默认 64MiB retained budget，单个编译任务另有 256MiB work budget。full JIT 与全部 OSR loop 共用一份 `FunctionAnalysis`；VM manager 不保存第二份 loop catalogue，使闲置分析可以按最近访问顺序回收。loop 的 memory-only 下界通过一次嵌套区间扫描计算，不再为每个函数创建线段树。
+
+VM 原生 Fiber 存储由 `VmResourceLimits` 约束：调度 Fiber 数量、单 Fiber stack slots、单 Fiber call frames，以及 family 内 Fiber stack/frame 的聚合字节数都有明确上限。批量 runtime transition 会先预留全部 Fiber identity、栈和 frame 容量，再开始发布 wake、spawn 等可见效果；任一资源失败都会拒绝整批 transition。完成 Fiber 的异常高水位栈和 frame 缓存会在空闲边界释放。
 
 ## 宿主 API
 

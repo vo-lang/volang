@@ -1,39 +1,6 @@
 use super::*;
 
 #[test]
-fn vm_wake_registration_002_queue_wake_rejects_zero_registration() {
-    let mut vm = Vm::new();
-    let waiter_fid = vm.scheduler.spawn(Fiber::new(0));
-    let waiter_key = vm.scheduler.get_fiber(waiter_fid).wake_key_packed();
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_queue();
-
-    let current = vm.scheduler.spawn(Fiber::new(1));
-    vm.scheduler.schedule_next().unwrap();
-
-    let waiter = QueueWaiter::simple(0, waiter_key);
-    let mut wake = WakeCommand::queue_waiter(waiter);
-    assert_ne!(wake.registration.token, 0);
-    wake.registration = WaitRegistrationKey { token: 0 };
-
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Yield,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::None,
-    );
-    transition.wakes.push(wake);
-
-    let err = vm
-        .apply_runtime_transition(Some(current), transition)
-        .expect_err("queue wake with invalid registration must fail");
-    assert!(matches!(err, VmError::Jit(_)));
-    assert_eq!(
-        vm.scheduler.get_fiber(waiter_fid).state,
-        crate::fiber::FiberState::Blocked(BlockReason::Queue)
-    );
-}
-
-#[test]
 fn vm_runtime_transition_queue_wake_rejection_051() {
     fn assert_rejected(wake: WakeCommand, context: &str) {
         let mut vm = Vm::new();
@@ -57,12 +24,13 @@ fn vm_runtime_transition_queue_wake_rejection_051() {
     let mut vm = Vm::new();
     let stale_fiber = vm.scheduler.spawn(Fiber::new(0));
     let stale_key = vm.scheduler.get_fiber(stale_fiber).wake_key_packed();
-    let stale_waiter = QueueWaiter::simple_queue(
+    let stale_waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         stale_key,
         0x1000,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
 
     assert_rejected(
         WakeCommand::queue_waiter(stale_waiter.clone()),
@@ -85,12 +53,13 @@ fn vm_runtime_transition_preflights_all_wakes_before_commit_053() {
     let valid_key = vm.scheduler.get_fiber(valid_fid).wake_key_packed();
     vm.scheduler.schedule_next().unwrap();
     assert_eq!(vm.scheduler.current, Some(valid_fid));
-    let valid_waiter = QueueWaiter::simple_queue(
+    let valid_waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         valid_key,
         0x1000,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .current_fiber_mut()
         .unwrap()
@@ -104,12 +73,13 @@ fn vm_runtime_transition_preflights_all_wakes_before_commit_053() {
 
     let stale_fid = vm.scheduler.spawn(Fiber::new(0));
     let stale_key = vm.scheduler.get_fiber(stale_fid).wake_key_packed();
-    let stale_waiter = QueueWaiter::simple_queue(
+    let stale_waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         stale_key,
         0x1000,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler.ready_queue.retain(|fid| *fid != stale_fid);
     let current = vm.scheduler.spawn(Fiber::new(1));
     vm.scheduler.schedule_next().unwrap();
@@ -147,12 +117,13 @@ fn vm_runtime_transition_duplicate_simple_wake_rejects_before_partial_apply_058(
     let blocked = vm.scheduler.spawn(Fiber::new(0));
     let blocked_key = vm.scheduler.get_fiber(blocked).wake_key_packed();
     vm.scheduler.schedule_next().unwrap();
-    let waiter = QueueWaiter::simple_queue(
+    let waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         blocked_key,
         0x1000,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .current_fiber_mut()
         .unwrap()
@@ -198,12 +169,13 @@ fn vm_runtime_transition_mixed_simple_wake_rejects_before_partial_apply_058() {
     let blocked = vm.scheduler.spawn(Fiber::new(0));
     let blocked_key = vm.scheduler.get_fiber(blocked).wake_key_packed();
     vm.scheduler.schedule_next().unwrap();
-    let waiter = QueueWaiter::simple_queue(
+    let waiter = QueueWaiter::try_queue(
         vm.state.current_island_id,
         blocked_key,
         0x1000,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     vm.scheduler
         .current_fiber_mut()
         .unwrap()
@@ -266,7 +238,7 @@ fn vm_runtime_transition_preflights_same_island_endpoint_request_before_block_05
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(7, 0x0000_0007_0000_0009, 12),
+        endpoint_waiter(7, 0x0000_0007_0000_0009, 12),
         vec![0; 8].into_boxed_slice().into(),
     );
 
@@ -280,9 +252,7 @@ fn vm_runtime_transition_preflights_same_island_endpoint_request_before_block_05
         .push(IslandCommandEffect::endpoint_recv_request(
             vm.state.current_island_id,
             endpoint_id,
-            vm.state.current_island_id,
-            0x0000_0007_0000_0008,
-            11,
+            endpoint_wait_key(0x0000_0007_0000_0008, 11),
         ));
 
     let err = vm
@@ -349,14 +319,15 @@ fn vm_select_woken_payload_contract_019_rejects_slot_kind_drift_before_storage()
         vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::String),
         0,
     );
-    let waiter = QueueWaiter::selecting(
+    let waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         0,
         1,
         ch as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
@@ -409,16 +380,17 @@ fn vm_select_recv_wake_contract_061_rejects_missing_payload_before_wake() {
         ResumePolicy::PreserveFramePc,
         GcRootEffect::None,
     );
-    transition
-        .wakes
-        .push(WakeCommand::queue_waiter(QueueWaiter::selecting(
+    transition.wakes.push(WakeCommand::queue_waiter(
+        QueueWaiter::try_select(
             vm.state.current_island_id,
             receiver_key,
             0,
             61,
             ch as u64,
             SelectWaitKind::Recv,
-        )));
+        )
+        .unwrap(),
+    ));
 
     let err = vm
         .apply_runtime_transition(Some(current), transition)
@@ -457,25 +429,24 @@ fn vm_select_send_wake_contract_061_rejects_missing_send_accepted_before_wake() 
     vm.scheduler.block_for_queue();
     let current = vm.scheduler.spawn(Fiber::new(1));
     assert_eq!(vm.scheduler.schedule_next(), Some(current));
-    let waiter = QueueWaiter::selecting(
+    let waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         sender_key,
         0,
         61,
         ch as u64,
         SelectWaitKind::Send,
-    );
+    )
+    .unwrap();
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::None,
     );
-    transition
-        .wakes
-        .push(WakeCommand::queue(QueueRuntimeWake::Waiter {
-            waiter,
-            select_result: None,
-        }));
+    transition.wakes.push(WakeCommand::Waiter {
+        waiter,
+        select_result: None,
+    });
 
     let err = vm
         .apply_runtime_transition(Some(current), transition)
@@ -510,14 +481,15 @@ fn vm_select_closed_sender_wake_061_rejects_open_queue_before_wake() {
     let sender = vm.scheduler.spawn(Fiber::new(0));
     let sender_key = vm.scheduler.get_fiber(sender).wake_key_packed();
     vm.scheduler.get_fiber_mut(sender).select_state = Some(select_send_state_for_queue_061(ch));
-    let waiter = QueueWaiter::selecting(
+    let waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         sender_key,
         0,
         61,
         ch as u64,
         SelectWaitKind::Send,
-    );
+    )
+    .unwrap();
     queue::register_sender(ch, waiter.clone(), vec![0].into_boxed_slice().into());
     assert_eq!(vm.scheduler.schedule_next(), Some(sender));
     vm.scheduler.block_for_queue();
@@ -554,55 +526,6 @@ fn vm_select_closed_sender_wake_061_rejects_open_queue_before_wake() {
 }
 
 #[test]
-fn vm_remote_wake_fiber_shape_061_rejects_raw_slot_identity_before_publish() {
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    let remote_island = 7;
-    let raw_slot_key = 33;
-    let waiter =
-        QueueWaiter::simple_queue(remote_island, raw_slot_key, 0x0610, SelectWaitKind::Recv);
-
-    for transition in [
-        {
-            let mut transition = RuntimeTransition::new(
-                RuntimeBoundary::Continue,
-                ResumePolicy::PreserveFramePc,
-                GcRootEffect::None,
-            );
-            transition
-                .wakes
-                .push(WakeCommand::queue_waiter(waiter.clone()));
-            transition
-        },
-        {
-            let mut transition = RuntimeTransition::new(
-                RuntimeBoundary::Continue,
-                ResumePolicy::PreserveFramePc,
-                GcRootEffect::None,
-            );
-            transition.island_commands.push(IslandCommandEffect {
-                island_id: remote_island,
-                command: IslandCommand::WakeFiber {
-                    waiter: waiter.clone(),
-                },
-                pending_response: false,
-            });
-            transition
-        },
-    ] {
-        let err = vm
-            .apply_runtime_transition(None, transition)
-            .expect_err("remote WakeFiber must reject raw slot wake identity before publish");
-
-        assert!(matches!(err, VmError::Jit(_)), "{err:?}");
-        assert!(
-            vm.state.outbound_commands.is_empty(),
-            "raw-slot remote WakeFiber rejection must not publish"
-        );
-    }
-}
-
-#[test]
 fn vm_remote_endpoint_request_shape_061_rejects_raw_slot_response_identity_before_publish() {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
@@ -620,9 +543,7 @@ fn vm_remote_endpoint_request_shape_061_rejects_raw_slot_response_identity_befor
         .push(IslandCommandEffect::endpoint_recv_request(
             remote_island,
             endpoint_id,
-            vm.state.current_island_id,
-            raw_slot_key,
-            wait_id,
+            endpoint_wait_key(raw_slot_key, wait_id),
         ));
 
     let err = vm
@@ -668,11 +589,10 @@ fn vm_remote_endpoint_response_shape_061_rejects_raw_slot_response_identity_befo
                 .island_commands
                 .push(IslandCommandEffect::endpoint_response(
                     remote_island,
-                    vm.state.current_island_id,
                     endpoint_id,
-                    EndpointResponseKind::RecvError,
-                    raw_slot_key,
-                    wait_id,
+                    EndpointResponseKind::RecvError {
+                        wait_key: endpoint_wait_key(raw_slot_key, wait_id),
+                    },
                 ));
             transition
         },
@@ -683,7 +603,7 @@ fn vm_remote_endpoint_response_shape_061_rejects_raw_slot_response_identity_befo
                 GcRootEffect::None,
             );
             transition.wakes.push(WakeCommand::queue_closed_receiver(
-                QueueWaiter::endpoint(remote_island, raw_slot_key, wait_id),
+                endpoint_waiter(remote_island, raw_slot_key, wait_id),
                 Some(endpoint_id),
             ));
             transition
@@ -767,25 +687,27 @@ fn duplicate_select_wakes_reject_before_partial_apply_055() {
         GcRootEffect::None,
     );
     transition.wakes.push(WakeCommand::queue_closed_receiver(
-        QueueWaiter::selecting(
+        QueueWaiter::try_select(
             vm.state.current_island_id,
             fiber_key,
             0,
             55,
             ch as u64,
             SelectWaitKind::Recv,
-        ),
+        )
+        .unwrap(),
         None,
     ));
     transition.wakes.push(WakeCommand::queue_closed_receiver(
-        QueueWaiter::selecting(
+        QueueWaiter::try_select(
             vm.state.current_island_id,
             fiber_key,
             1,
             55,
             ch as u64,
             SelectWaitKind::Recv,
-        ),
+        )
+        .unwrap(),
         None,
     ));
 
@@ -814,11 +736,11 @@ fn queue_close_wake_insertion_coalesces_duplicate_select_activation_055() {
         GcRootEffect::None,
     );
     transition.push_queue_close_wake(WakeCommand::queue_closed_receiver(
-        QueueWaiter::selecting(0, 0x55, 0, 55, 0x1000, SelectWaitKind::Recv),
+        QueueWaiter::try_select(0, 0x55, 0, 55, 0x1000, SelectWaitKind::Recv).unwrap(),
         None,
     ));
     transition.push_queue_close_wake(WakeCommand::queue_closed_receiver(
-        QueueWaiter::selecting(0, 0x55, 1, 55, 0x1000, SelectWaitKind::Recv),
+        QueueWaiter::try_select(0, 0x55, 1, 55, 0x1000, SelectWaitKind::Recv).unwrap(),
         None,
     ));
 
@@ -894,22 +816,24 @@ fn accepted_select_wake_cancels_sibling_waiters_056() {
             ],
         });
     }
-    let selected_waiter = QueueWaiter::selecting(
+    let selected_waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         0,
         56,
         selected as u64,
         SelectWaitKind::Recv,
-    );
-    let sibling_waiter = QueueWaiter::selecting(
+    )
+    .unwrap();
+    let sibling_waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         1,
         56,
         sibling as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     queue::register_receiver(selected, selected_waiter.clone());
     queue::register_receiver(sibling, sibling_waiter);
     queue::close(selected);

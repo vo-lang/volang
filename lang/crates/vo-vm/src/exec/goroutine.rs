@@ -2,7 +2,11 @@
 //! Goroutine instructions: GoStart
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::String};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 #[cfg(feature = "std")]
 use std::string::String;
 
@@ -11,20 +15,16 @@ use vo_runtime::slot::Slot;
 use vo_runtime::SlotType;
 
 use crate::bytecode::Module;
-use crate::fiber::Fiber;
+use crate::fiber::PendingSpawn;
 use crate::frame_call::{
     validate_closure_arg_shape, validate_closure_callsite_arg_layout, validate_closure_target,
     validate_function_arg_shape, validate_function_callsite_arg_layout,
 };
 use crate::instruction::Instruction;
 use crate::vm::helpers::{
-    stack_get, try_build_validated_closure_fiber_from_args_ptr, ClosureFiberBuildError,
+    stack_get, try_build_validated_closure_pending_spawn_from_args_ptr, ClosureFiberBuildError,
 };
 use crate::vm::RuntimeTrapKind;
-
-pub struct GoResult {
-    pub new_fiber: Fiber,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoStartError {
@@ -35,7 +35,7 @@ pub enum GoStartError {
 /// GoStart: Start goroutine
 /// - a: func_id_low (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
 /// - b: args_start
-/// - c: arg_slots
+/// - c: reserved (zero)
 /// - flags bit 0: is_closure, bits 1-7: func_id_high (when not closure)
 pub fn exec_go_start(
     gc: &Gc,
@@ -43,23 +43,22 @@ pub fn exec_go_start(
     bp: usize,
     inst: &Instruction,
     module: &Module,
-    next_fiber_id: u32,
     callsite_arg_layout: &[SlotType],
     callsite_ret_layout: &[SlotType],
-) -> Result<GoResult, GoStartError> {
+) -> Result<PendingSpawn, GoStartError> {
     let functions = module.functions.as_slice();
     let is_closure_call = inst.call_shape_is_closure();
     let args_start = inst.b;
-    let arg_slots = inst.c;
-
-    let arg_count = arg_slots as usize;
+    let arg_count = callsite_arg_layout.len();
+    let arg_slots = u32::try_from(arg_count)
+        .map_err(|_| GoStartError::Malformed("GoStart argument layout exceeds u32".to_string()))?;
     let src_start = bp + args_start as usize;
     if !callsite_ret_layout.is_empty() {
         return Err(GoStartError::Malformed(format!(
             "GoStart callsite return layout must be empty, got {callsite_ret_layout:?}"
         )));
     }
-    let new_fiber = if is_closure_call {
+    let spawn = if is_closure_call {
         let raw_ref = stack_get(stack, bp + inst.a as usize) as GcRef;
         if raw_ref.is_null() {
             return Err(GoStartError::Trap(RuntimeTrapKind::NilFuncCall));
@@ -71,11 +70,10 @@ pub fn exec_go_start(
         validate_closure_callsite_arg_layout("GoStart", &target, callsite_arg_layout)
             .map_err(GoStartError::Malformed)?;
         unsafe {
-            try_build_validated_closure_fiber_from_args_ptr(
-                next_fiber_id,
+            try_build_validated_closure_pending_spawn_from_args_ptr(
                 &target,
                 stack.add(src_start),
-                arg_slots as u32,
+                arg_slots,
             )
             .map_err(|err| match err {
                 ClosureFiberBuildError::Trap(kind) => GoStartError::Trap(kind),
@@ -100,18 +98,21 @@ pub fn exec_go_start(
             callsite_arg_layout,
         )
         .map_err(GoStartError::Malformed)?;
-        let mut new_fiber = Fiber::new(next_fiber_id);
-        new_fiber
-            .try_push_frame(func_id, func.local_slots, func.gc_scan_slots, 0, 0)
-            .map_err(|_| GoStartError::Trap(RuntimeTrapKind::StackOverflow))?;
-        let new_stack = new_fiber.stack_ptr();
+        let mut entry_slots = Vec::with_capacity(arg_count);
         for i in 0..arg_count {
-            unsafe { *new_stack.add(i) = stack_get(stack, src_start + i) };
+            entry_slots.push(stack_get(stack, src_start + i));
         }
-        new_fiber
+        PendingSpawn::try_new(
+            func_id,
+            func.local_slots,
+            func.gc_scan_slots,
+            0,
+            entry_slots,
+        )
+        .map_err(|_| GoStartError::Trap(RuntimeTrapKind::StackOverflow))?
     };
 
-    Ok(GoResult { new_fiber })
+    Ok(spawn)
 }
 
 #[cfg(test)]
@@ -142,7 +143,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
                 &slot_types,
             ),
@@ -162,7 +163,7 @@ mod tests {
         let module = Module::new("gostart-malformed-closure".to_string());
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exec_go_start(&gc, stack.as_ptr(), 0, &inst, &module, 1, &[], &[])
+            exec_go_start(&gc, stack.as_ptr(), 0, &inst, &module, &[], &[])
         }));
 
         match result {
@@ -194,7 +195,7 @@ mod tests {
         let stack = [closure_ref as Slot];
         let inst = Instruction::with_flags(Opcode::GoStart, 1, 0, 0, 0);
 
-        match exec_go_start(&gc, stack.as_ptr(), 0, &inst, &module, 1, &[], &[]) {
+        match exec_go_start(&gc, stack.as_ptr(), 0, &inst, &module, &[], &[]) {
             Err(GoStartError::Malformed(msg)) => {
                 assert!(
                     msg.contains("Go closure spawn arg slot count 0 does not match target 1"),
@@ -225,7 +226,6 @@ mod tests {
             0,
             &inst,
             &module,
-            1,
             &[SlotType::Value, SlotType::Value],
             &[],
         ) {
@@ -262,7 +262,6 @@ mod tests {
             0,
             &inst,
             &module,
-            1,
             &[SlotType::Value],
             &[],
         ) {

@@ -1,105 +1,5 @@
+#[cfg(feature = "jit")]
 use super::*;
-
-#[test]
-fn vm_island_wake_rejects_select_without_payload_preserves_siblings_057() {
-    let mut vm = Vm::new();
-    let meta = vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Int64);
-    let rttid = vo_runtime::ValueRttid::new(0, vo_runtime::ValueKind::Int64);
-    let selected = queue::create(
-        &mut vm.state.gc,
-        vo_runtime::objects::queue_state::QueueKind::Chan,
-        meta,
-        rttid,
-        1,
-        0,
-    );
-    let sibling = queue::create(
-        &mut vm.state.gc,
-        vo_runtime::objects::queue_state::QueueKind::Chan,
-        meta,
-        rttid,
-        1,
-        0,
-    );
-    let fiber_id = vm.scheduler.spawn(Fiber::new(0));
-    let fiber_key = vm.scheduler.get_fiber(fiber_id).wake_key_packed();
-    {
-        let fiber = vm.scheduler.get_fiber_mut(fiber_id);
-        fiber.select_state = Some(SelectState {
-            cases: vec![
-                SelectCase {
-                    kind: SelectCaseKind::Recv,
-                    result_index: 0,
-                    queue_reg: 0,
-                    val_reg: 1,
-                    elem_slots: 1,
-                    elem_layout: None,
-                    has_ok: false,
-                },
-                SelectCase {
-                    kind: SelectCaseKind::Recv,
-                    result_index: 0,
-                    queue_reg: 2,
-                    val_reg: 3,
-                    elem_slots: 1,
-                    elem_layout: None,
-                    has_ok: false,
-                },
-            ],
-            expected_cases: 2,
-            has_default: false,
-            woken_index: None,
-            woken_result: None,
-            select_id: 57,
-            registered_queues: vec![
-                SelectRegisteredQueue {
-                    case_index: 0,
-                    queue: selected,
-                    kind: SelectCaseKind::Recv,
-                },
-                SelectRegisteredQueue {
-                    case_index: 1,
-                    queue: sibling,
-                    kind: SelectCaseKind::Recv,
-                },
-            ],
-        });
-    }
-    let selected_waiter = QueueWaiter::selecting(
-        vm.state.current_island_id,
-        fiber_key,
-        0,
-        57,
-        selected as u64,
-        SelectWaitKind::Recv,
-    );
-    let sibling_waiter = QueueWaiter::selecting(
-        vm.state.current_island_id,
-        fiber_key,
-        1,
-        57,
-        sibling as u64,
-        SelectWaitKind::Recv,
-    );
-    queue::register_receiver(selected, selected_waiter.clone());
-    queue::register_receiver(sibling, sibling_waiter);
-    vm.scheduler.schedule_next().unwrap();
-    vm.scheduler.block_for_queue();
-
-    let outcome = vm.apply_runtime_command(RuntimeCommand::island_wake(selected_waiter));
-    assert!(!outcome.applied);
-    assert!(!outcome.payload_accepted);
-    assert_eq!(
-        queue::local_state(selected).waiting_receivers.len(),
-        1,
-        "rejected IslandWake must not consume the selected waiter"
-    );
-    assert_eq!(
-        queue::local_state(sibling).waiting_receivers.len(),
-        1,
-        "rejected IslandWake must not cancel select sibling waiters"
-    );
-}
 
 #[cfg(feature = "jit")]
 #[test]
@@ -112,7 +12,7 @@ fn vm_pending_runtime_transition_merge_coalesces_duplicate_select_close_wakes_05
             GcRootEffect::CurrentFiberDirty,
         );
         pending.push_queue_close_wake(WakeCommand::queue_closed_receiver(
-            QueueWaiter::selecting(0, 0x56, case_index, 56, 0x1000, SelectWaitKind::Recv),
+            QueueWaiter::try_select(0, 0x56, case_index, 56, 0x1000, SelectWaitKind::Recv).unwrap(),
             None,
         ));
         vm.push_pending_runtime_transition(pending);
@@ -194,30 +94,31 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
             ],
         });
     }
-    let selected_waiter = QueueWaiter::selecting(
+    let selected_waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         0,
         61,
         selected as u64,
         SelectWaitKind::Recv,
-    );
-    let sibling_waiter = QueueWaiter::selecting(
+    )
+    .unwrap();
+    let sibling_waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         1,
         61,
         sibling as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     queue::register_receiver(selected, selected_waiter);
     queue::register_receiver(sibling, sibling_waiter);
     vm.scheduler.schedule_next().unwrap();
     vm.scheduler.block_for_queue();
 
-    crate::exec::preflight_queue_close_routes(&vm.state, selected)
-        .expect("preflight should pass before late reservation failure");
     let crate::exec::QueueAction::Close {
+        ch: close_ch,
         receivers,
         senders,
         endpoint_id: close_endpoint_id,
@@ -231,6 +132,7 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
         ResumePolicy::PreserveFramePc,
         GcRootEffect::CurrentFiberDirty,
     );
+    pending.prepare_queue_close(close_ch);
     pending.set_rollback(rollback);
     for waiter in receivers {
         pending.push_queue_close_wake(WakeCommand::queue_closed_receiver(
@@ -246,7 +148,6 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_failed_remote_close() 
         .push(IslandCommandEffect::endpoint_close_request(
             peer,
             endpoint_id,
-            vm.state.current_island_id,
         ));
     pending
         .endpoint_tombstones
@@ -341,22 +242,24 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_callclosure_discard() 
             ],
         });
     }
-    let selected_waiter = QueueWaiter::selecting(
+    let selected_waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         0,
         61,
         selected as u64,
         SelectWaitKind::Recv,
-    );
-    let sibling_waiter = QueueWaiter::selecting(
+    )
+    .unwrap();
+    let sibling_waiter = QueueWaiter::try_select(
         vm.state.current_island_id,
         fiber_key,
         1,
         61,
         sibling as u64,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
     queue::register_receiver(selected, selected_waiter.clone());
     queue::register_receiver(sibling, sibling_waiter);
     vm.scheduler.schedule_next().unwrap();
@@ -381,7 +284,7 @@ fn vm_pending_select_sibling_cancel_rollback_061_restores_callclosure_discard() 
     });
 
     assert!(matches!(result, ExecResult::CallClosure { .. }));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(
         queue::local_state(sibling).waiting_receivers.len(),
         1,

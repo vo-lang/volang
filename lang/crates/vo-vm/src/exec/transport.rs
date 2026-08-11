@@ -10,7 +10,7 @@ use vo_runtime::gc::GcRef;
 use vo_runtime::objects::queue_state::{QueueBacking, QueueKind, QueueMessage};
 use vo_runtime::objects::{queue, queue_state};
 use vo_runtime::pack::{
-    try_pack_slots_with_named_type_metas,
+    try_pack_slots_with_named_type_metas_limited,
     validate_and_unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas,
     PackOutputError, QueueHandleInfo,
 };
@@ -32,6 +32,9 @@ pub enum QueueHandleMismatchField {
 pub enum QueueHandleValidationError {
     MalformedPayload,
     EndpointRecvRejected,
+    AllocationFailed {
+        endpoint_id: u64,
+    },
     UnsupportedKind {
         endpoint_id: u64,
         kind: QueueKind,
@@ -53,6 +56,10 @@ impl core::fmt::Display for QueueHandleValidationError {
         match self {
             Self::MalformedPayload => write!(f, "transport payload did not match receiver layout"),
             Self::EndpointRecvRejected => write!(f, "endpoint receive payload was rejected"),
+            Self::AllocationFailed { endpoint_id } => write!(
+                f,
+                "transport queue handle endpoint {endpoint_id} allocation failed"
+            ),
             Self::UnsupportedKind { endpoint_id, kind } => write!(
                 f,
                 "transport queue handle endpoint {} has unsupported kind {:?}",
@@ -79,6 +86,31 @@ impl core::fmt::Display for QueueHandleValidationError {
 
 impl core::error::Error for QueueHandleValidationError {}
 
+#[derive(Debug, Default)]
+pub(crate) struct EndpointRegistryInsertions {
+    inserted: Vec<(u64, GcRef)>,
+}
+
+impl EndpointRegistryInsertions {
+    fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
+        self.inserted.try_reserve(additional).map_err(|_| ())
+    }
+
+    pub(crate) fn absorb(&mut self, mut other: Self) {
+        if self.inserted.is_empty() {
+            self.inserted = other.inserted;
+            return;
+        }
+        self.inserted.append(&mut other.inserted);
+    }
+
+    pub(crate) fn rollback(&mut self, endpoint_registry: &mut crate::vm::EndpointRegistry) {
+        for (endpoint_id, queue_ref) in self.inserted.drain(..).rev() {
+            endpoint_registry.rollback_live_insertion(endpoint_id, queue_ref);
+        }
+    }
+}
+
 pub type QueueHandleValidationResult<T> = Result<T, QueueHandleValidationError>;
 
 /// Serializes a rooted queue payload for cross-island transport.
@@ -96,13 +128,14 @@ pub unsafe fn pack_transport_message(
     named_type_metas: &[NamedTypeMeta],
     runtime_types: &[RuntimeType],
 ) -> Result<Vec<u8>, PackOutputError> {
-    try_pack_slots_with_named_type_metas(
+    try_pack_slots_with_named_type_metas_limited(
         gc,
         src,
         elem_meta,
         struct_metas,
         named_type_metas,
         runtime_types,
+        vo_runtime::island_msg::MAX_ISLAND_PAYLOAD_BYTES,
     )
     .map(|packed| packed.into_data())
 }
@@ -237,6 +270,12 @@ pub fn try_resolve_unpacked_queue_handle(
         });
     }
 
+    endpoint_registry.try_reserve_live(1).map_err(|_| {
+        QueueHandleValidationError::AllocationFailed {
+            endpoint_id: handle.endpoint_id,
+        }
+    })?;
+
     let queue_ref = queue::create_remote_proxy_with_closed(
         gc,
         handle.endpoint_id,
@@ -247,17 +286,34 @@ pub fn try_resolve_unpacked_queue_handle(
         handle.elem_slots,
         handle.closed,
     );
+    if queue_ref.is_null() {
+        return Err(QueueHandleValidationError::AllocationFailed {
+            endpoint_id: handle.endpoint_id,
+        });
+    }
     endpoint_registry.register_live(handle.endpoint_id, queue_ref);
     Ok(queue_ref)
 }
 
-pub fn resolve_unpacked_queue_handle(
+pub(crate) fn try_resolve_unpacked_queue_handle_transactional(
     gc: &mut Gc,
     handle: QueueHandleInfo,
     endpoint_registry: &mut crate::vm::EndpointRegistry,
-) -> GcRef {
-    try_resolve_unpacked_queue_handle(gc, handle, endpoint_registry)
-        .unwrap_or(core::ptr::null_mut())
+    insertions: &mut EndpointRegistryInsertions,
+) -> QueueHandleValidationResult<GcRef> {
+    let was_missing = endpoint_registry.entry(handle.endpoint_id).is_none();
+    if was_missing {
+        insertions
+            .try_reserve(1)
+            .map_err(|_| QueueHandleValidationError::AllocationFailed {
+                endpoint_id: handle.endpoint_id,
+            })?;
+    }
+    let queue_ref = try_resolve_unpacked_queue_handle(gc, handle, endpoint_registry)?;
+    if was_missing {
+        insertions.inserted.push((handle.endpoint_id, queue_ref));
+    }
+    Ok(queue_ref)
 }
 
 pub fn unpack_transport_message(
@@ -271,9 +327,35 @@ pub fn unpack_transport_message(
     runtime_types: &[RuntimeType],
     endpoint_registry: &mut crate::vm::EndpointRegistry,
 ) -> QueueHandleValidationResult<QueueMessage> {
+    unpack_transport_message_transactional(
+        gc,
+        data,
+        elem_meta,
+        elem_rttid,
+        elem_slots,
+        struct_metas,
+        named_type_metas,
+        runtime_types,
+        endpoint_registry,
+    )
+    .map(|(message, _)| message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn unpack_transport_message_transactional(
+    gc: &mut Gc,
+    data: &[u8],
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: usize,
+    struct_metas: &[StructMeta],
+    named_type_metas: &[NamedTypeMeta],
+    runtime_types: &[RuntimeType],
+    endpoint_registry: &mut crate::vm::EndpointRegistry,
+) -> QueueHandleValidationResult<(QueueMessage, EndpointRegistryInsertions)> {
     let mut dst: Vec<u64> = vec![0; elem_slots];
     let mut error = None;
-    let registry_snapshot = endpoint_registry.snapshot();
+    let mut insertions = EndpointRegistryInsertions::default();
     // Safety: every successful resolver result is a live endpoint handle from
     // this registry. The façade validates the complete wire and destination
     // layout before invoking the resolver or mutating runtime state.
@@ -287,7 +369,12 @@ pub fn unpack_transport_message(
             struct_metas,
             named_type_metas,
             runtime_types,
-            |gc, handle| match try_resolve_unpacked_queue_handle(gc, handle, endpoint_registry) {
+            |gc, handle| match try_resolve_unpacked_queue_handle_transactional(
+                gc,
+                handle,
+                endpoint_registry,
+                &mut insertions,
+            ) {
                 Ok(queue_ref) => queue_ref,
                 Err(err) => {
                     if error.is_none() {
@@ -299,15 +386,15 @@ pub fn unpack_transport_message(
         )
     };
     if unpacked.is_err() {
-        endpoint_registry.restore(registry_snapshot);
+        insertions.rollback(endpoint_registry);
         return Err(QueueHandleValidationError::MalformedPayload);
     }
     match error {
         Some(err) => {
-            endpoint_registry.restore(registry_snapshot);
+            insertions.rollback(endpoint_registry);
             Err(err)
         }
-        None => Ok(dst.into()),
+        None => Ok((dst.into(), insertions)),
     }
 }
 
@@ -330,24 +417,6 @@ mod tests {
             elem_slots: 1,
             closed: false,
         }
-    }
-
-    #[test]
-    fn vm_transport_handle_validation_001_live_endpoint_mismatch_must_not_alias() {
-        let mut gc = Gc::new();
-        let mut endpoint_registry = EndpointRegistry::new();
-
-        let existing =
-            resolve_unpacked_queue_handle(&mut gc, base_handle(), &mut endpoint_registry);
-
-        let mut mismatched = base_handle();
-        mismatched.home_island = 8;
-        let resolved = resolve_unpacked_queue_handle(&mut gc, mismatched, &mut endpoint_registry);
-
-        assert_ne!(
-            resolved, existing,
-            "live endpoint handle metadata mismatch must be rejected, not aliased"
-        );
     }
 
     fn assert_live_endpoint_mismatch(
@@ -428,6 +497,26 @@ mod tests {
     }
 
     #[test]
+    fn vm_transport_handle_validation_063_allocation_failure_does_not_register_null_endpoint() {
+        let mut gc = Gc::new();
+        gc.memory_set_allocation_allowed(false);
+        let mut endpoint_registry = EndpointRegistry::new();
+        let handle = base_handle();
+
+        let err = try_resolve_unpacked_queue_handle(&mut gc, handle, &mut endpoint_registry)
+            .expect_err("remote proxy allocation failure must reject the handle");
+
+        assert_eq!(
+            err,
+            QueueHandleValidationError::AllocationFailed {
+                endpoint_id: handle.endpoint_id,
+            }
+        );
+        assert_eq!(endpoint_registry.get_live(handle.endpoint_id), None);
+        assert!(!endpoint_registry.has_live());
+    }
+
+    #[test]
     fn vm_transport_handle_validation_062_rejects_tombstoned_endpoint_rebind() {
         let mut gc = Gc::new();
         let mut endpoint_registry = EndpointRegistry::new();
@@ -472,6 +561,82 @@ mod tests {
         push_u32(data, handle.elem_rttid.to_raw());
         push_u16(data, handle.elem_slots);
         data.push(handle.closed as u8);
+    }
+
+    #[test]
+    fn vm_transport_handle_validation_063_unpack_oom_leaves_registry_clean() {
+        let handle = base_handle();
+        let mut data = Vec::new();
+        push_queue_handle(&mut data, handle);
+        let mut gc = Gc::new();
+        gc.memory_set_allocation_allowed(false);
+        let mut endpoint_registry = EndpointRegistry::new();
+        let runtime_types = [
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Port {
+                dir: vo_common_core::ChanDir::Both,
+                elem: handle.elem_rttid,
+            },
+        ];
+
+        unpack_transport_message(
+            &mut gc,
+            &data,
+            ValueMeta::new(0, ValueKind::Port),
+            ValueRttid::new(1, ValueKind::Port),
+            1,
+            &[],
+            &[],
+            &runtime_types,
+            &mut endpoint_registry,
+        )
+        .expect_err("remote proxy allocation failure must reject the payload");
+
+        assert_eq!(endpoint_registry.get_live(handle.endpoint_id), None);
+        assert!(!endpoint_registry.has_live());
+    }
+
+    #[test]
+    fn vm_transport_handle_validation_063_transaction_rolls_back_only_new_endpoints() {
+        let mut gc = Gc::new();
+        let mut endpoint_registry = EndpointRegistry::new();
+        let mut existing_handle = base_handle();
+        existing_handle.endpoint_id = 41;
+        let existing =
+            try_resolve_unpacked_queue_handle(&mut gc, existing_handle, &mut endpoint_registry)
+                .expect("existing endpoint");
+        let handle = base_handle();
+        let mut data = Vec::new();
+        push_queue_handle(&mut data, handle);
+        let runtime_types = [
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Port {
+                dir: vo_common_core::ChanDir::Both,
+                elem: handle.elem_rttid,
+            },
+        ];
+
+        let (_, mut insertions) = unpack_transport_message_transactional(
+            &mut gc,
+            &data,
+            ValueMeta::new(0, ValueKind::Port),
+            ValueRttid::new(1, ValueKind::Port),
+            1,
+            &[],
+            &[],
+            &runtime_types,
+            &mut endpoint_registry,
+        )
+        .expect("valid queue handle payload");
+        assert!(endpoint_registry.get_live(handle.endpoint_id).is_some());
+
+        insertions.rollback(&mut endpoint_registry);
+
+        assert_eq!(
+            endpoint_registry.get_live(existing_handle.endpoint_id),
+            Some(existing)
+        );
+        assert_eq!(endpoint_registry.get_live(handle.endpoint_id), None);
     }
 
     #[test]

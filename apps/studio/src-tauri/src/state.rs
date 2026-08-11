@@ -5,13 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vo_app_runtime::{
-    decode_bridge_frame, encode_bridge_frame, BridgeLane, BridgeRestartReport, BridgeTransport,
+    decode_bridge_frame, encode_bridge_frame, BridgeRestartReport, BridgeTransport,
     BridgeTransportConfig, BridgeTransportError, HostedAppRuntime, SessionHandle, SessionHostError,
     SessionHostMap, SyncRenderBuffer,
 };
 use vo_module::project::ProjectContextOptions;
 use vo_module::workspace::WorkspaceDiscovery;
-use vo_web::BrowserRuntimePlan;
 
 use crate::commands::pathing::is_module_root;
 use crate::gui_runtime::GuestHandle;
@@ -236,9 +235,6 @@ struct GuestRuntime {
     handle: GuestHandle,
     bridge: BridgeTransport,
     render_buffer: Arc<SyncRenderBuffer>,
-    browser_runtime: BrowserRuntimePlan,
-    browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
-    resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
     framework_provider_bindings: BTreeMap<String, crate::app_plan::FrameworkProviderBinding>,
 }
 
@@ -468,18 +464,11 @@ impl AppState {
         session: SessionHandle,
         guest: GuestHandle,
         render_buffer: Arc<SyncRenderBuffer>,
-        browser_runtime: BrowserRuntimePlan,
-        browser_artifacts: Vec<vo_web::MaterializedBrowserArtifact>,
-        resolved_plan: vo_app_runtime::ResolvedAppRuntimePlan,
+        framework_provider_bindings: BTreeMap<String, crate::app_plan::FrameworkProviderBinding>,
     ) -> Result<StudioSessionHandle, String> {
         let session_epoch = guest.session_epoch()?;
         let bridge = BridgeTransport::new(session, session_epoch, BridgeTransportConfig::default())
             .map_err(bridge_transport_error)?;
-        let framework_provider_bindings =
-            crate::app_plan::framework_provider_bindings(&browser_runtime, &resolved_plan)?
-                .into_iter()
-                .map(|binding| (binding.module_key.clone(), binding))
-                .collect();
         self.guest_runtimes
             .lock()
             .unwrap()
@@ -489,9 +478,6 @@ impl AppState {
                     handle: guest,
                     bridge,
                     render_buffer,
-                    browser_runtime,
-                    browser_artifacts,
-                    resolved_plan,
                     framework_provider_bindings,
                 },
             )
@@ -527,33 +513,6 @@ impl AppState {
         self.with_bridge_mut(preview, |bridge| bridge.attach_webview(bridge_epoch))
     }
 
-    pub fn enqueue_webview_bridge(
-        &self,
-        preview: StudioSessionHandle,
-        lane: BridgeLane,
-        coalesce_key: u64,
-        payload: Vec<u8>,
-    ) -> Result<(), String> {
-        self.with_bridge_mut(preview, |bridge| {
-            bridge
-                .enqueue_to_webview(lane, coalesce_key, payload)
-                .map(|_| ())
-        })
-    }
-
-    pub fn stage_webview_restart_snapshot(
-        &self,
-        preview: StudioSessionHandle,
-        snapshot_key: u64,
-        payload: Vec<u8>,
-    ) -> Result<(), String> {
-        self.with_bridge_mut(preview, |bridge| {
-            bridge
-                .enqueue_restart_snapshot(snapshot_key, payload)
-                .map(|_| ())
-        })
-    }
-
     pub fn webview_bridge_identity(
         &self,
         preview: StudioSessionHandle,
@@ -581,49 +540,6 @@ impl AppState {
     ) -> Result<(), String> {
         let frame = decode_bridge_frame(encoded).map_err(bridge_transport_error)?;
         self.with_bridge_mut(preview, |bridge| bridge.submit_from_webview(frame))
-    }
-
-    pub fn route_platform_input(
-        &self,
-        preview: StudioSessionHandle,
-        event: vo_app_runtime::PlatformInputEvent,
-    ) -> Result<vo_app_runtime::PlatformInputRoutingReport, String> {
-        let hosts = self.guest_runtimes.lock().unwrap();
-        let runtime = hosts.get(preview.into()).map_err(session_host_error)?;
-        if runtime.bridge.state() != vo_app_runtime::BridgeState::Running {
-            return Err(String::from(
-                "Studio WebView input is frozen until the current bridge epoch is attached",
-            ));
-        }
-        runtime.handle.route_platform_input(event)
-    }
-
-    pub fn take_webview_bridge_input(
-        &self,
-        preview: StudioSessionHandle,
-    ) -> Result<Vec<u8>, String> {
-        self.with_bridge_mut(preview, |bridge| {
-            bridge
-                .take_from_webview()
-                .map_or_else(|| Ok(Vec::new()), |frame| encode_bridge_frame(&frame))
-        })
-    }
-
-    pub fn restart_webview_bridge(
-        &self,
-        preview: StudioSessionHandle,
-    ) -> Result<BridgeRestartReport, String> {
-        let mut hosts = self.guest_runtimes.lock().unwrap();
-        let runtime = hosts.get_mut(preview.into()).map_err(session_host_error)?;
-        runtime
-            .bridge
-            .preflight_webview_restart()
-            .map_err(bridge_transport_error)?;
-        runtime.handle.restart_webview_frameworks()?;
-        runtime
-            .bridge
-            .begin_webview_restart()
-            .map_err(bridge_transport_error)
     }
 
     pub fn restart_webview_bridge_with_snapshots(
@@ -739,42 +655,6 @@ impl AppState {
         self.with_guest(preview, |handle| {
             handle.complete_platform_request(request_id, outcome, payload)
         })
-    }
-
-    pub fn browser_runtime(
-        &self,
-        preview: StudioSessionHandle,
-    ) -> Result<BrowserRuntimePlan, String> {
-        self.guest_runtimes
-            .lock()
-            .unwrap()
-            .get(preview.into())
-            .map(|runtime| runtime.browser_runtime.clone())
-            .map_err(session_host_error)
-    }
-
-    pub fn browser_artifacts(
-        &self,
-        preview: StudioSessionHandle,
-    ) -> Result<Vec<vo_web::MaterializedBrowserArtifact>, String> {
-        self.guest_runtimes
-            .lock()
-            .unwrap()
-            .get(preview.into())
-            .map(|runtime| runtime.browser_artifacts.clone())
-            .map_err(session_host_error)
-    }
-
-    pub fn resolved_app_plan(
-        &self,
-        preview: StudioSessionHandle,
-    ) -> Result<vo_app_runtime::ResolvedAppRuntimePlan, String> {
-        self.guest_runtimes
-            .lock()
-            .unwrap()
-            .get(preview.into())
-            .map(|runtime| runtime.resolved_plan.clone())
-            .map_err(session_host_error)
     }
 
     pub fn close_guest_runtime(&self, preview: StudioSessionHandle) -> Result<(), String> {

@@ -177,6 +177,8 @@ struct PlanResult {
     path: String,
     target: String,
     backend: String,
+    #[serde(skip)]
+    env: BTreeMap<String, String>,
     matrix: Option<String>,
     tags: Vec<String>,
     owner: Option<String>,
@@ -337,22 +339,29 @@ fn validate_differential_results(results: &mut [PlanResult]) {
 
     let mut baselines = Vec::new();
     let mut failures = Vec::new();
-    for targets in by_case.values() {
-        for (target, baseline_candidates) in [
-            ("jit", &["vm"][..]),
-            ("osr", &["vm"][..]),
-            ("gc-jit", &["gc-vm", "vm"][..]),
-        ] {
-            let Some(&target_index) = targets.get(target) else {
+    for case_results in by_case.values() {
+        for &target_index in case_results.values() {
+            if results[target_index].backend != "jit" {
+                continue;
+            }
+            let baseline_index = case_results
+                .values()
+                .copied()
+                .find(|&index| {
+                    results[index].backend == "vm"
+                        && same_gc_environment(&results[index].env, &results[target_index].env)
+                })
+                .or_else(|| {
+                    case_results
+                        .values()
+                        .copied()
+                        .find(|&index| results[index].backend == "vm")
+                });
+            let Some(baseline_index) = baseline_index else {
                 continue;
             };
-            let Some((&baseline_name, &baseline_index)) = baseline_candidates
-                .iter()
-                .find_map(|name| targets.get(*name).map(|index| (name, index)))
-            else {
-                continue;
-            };
-            baselines.push((target_index, baseline_name.to_string()));
+            let baseline_name = results[baseline_index].target.clone();
+            baselines.push((target_index, baseline_name.clone()));
 
             // A failed baseline cannot establish the expected observable
             // behavior. Keep the candidate's own result intact so one VM
@@ -383,6 +392,15 @@ fn validate_differential_results(results: &mut [PlanResult]) {
             result.error = format!("{}; {}", result.error.trim(), detail);
         }
     }
+}
+
+fn same_gc_environment(
+    baseline: &BTreeMap<String, String>,
+    candidate: &BTreeMap<String, String>,
+) -> bool {
+    RUNNER_OWNED_GC_ENV_KEYS
+        .iter()
+        .all(|key| baseline.get(*key) == candidate.get(*key))
 }
 
 fn differential_mismatch(baseline: &PlanResult, candidate: &PlanResult) -> Option<String> {
@@ -467,6 +485,7 @@ fn run_jobs_parallel(
                     path: job.path.clone(),
                     target: job.target.clone(),
                     backend: job.backend.clone(),
+                    env: job.env.clone(),
                     matrix: job.matrix.clone(),
                     tags: job.tags.clone(),
                     owner: job.owner.clone(),
@@ -523,6 +542,7 @@ fn run_jobs_parallel(
                     path: job.path.clone(),
                     target: job.target.clone(),
                     backend: job.backend.clone(),
+                    env: job.env.clone(),
                     matrix: job.matrix.clone(),
                     tags: job.tags.clone(),
                     owner: job.owner.clone(),
@@ -623,6 +643,7 @@ fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::E
         path: job.path.clone(),
         target: job.target.clone(),
         backend: job.backend.clone(),
+        env: job.env.clone(),
         matrix: job.matrix.clone(),
         tags: job.tags.clone(),
         owner: job.owner.clone(),
@@ -736,30 +757,60 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         print!("{output}");
     }
     let observation = result.map_err(|err| err.to_string())?;
-    if matches!(job.target.as_str(), "jit" | "gc-jit") && !observation.executed_jit_code() {
+    validate_jit_observation(job, observation)?;
+    Ok(())
+}
+
+fn validate_jit_observation(
+    job: &TestJob,
+    observation: vo_engine::RunObservation,
+) -> Result<(), String> {
+    if uses_eager_function_jit(job) && !observation.executed_jit_code() {
         return Err(
             "JIT backend completed without entering JIT-compiled function or loop code".to_string(),
         );
     }
-    if mode == vo_engine::RunMode::Jit {
-        if let Some(min) = job.expect.jit_loop_entries_min {
-            if observation.jit_loop_entries < min {
-                return Err(format!(
-                    "expected at least {min} JIT loop entries, got {}",
-                    observation.jit_loop_entries
-                ));
-            }
+
+    let loop_entries_min = if uses_loop_jit(job) {
+        match job.matrix.as_deref() {
+            Some("osr-contract") => job.expect.jit_loop_entries_min.unwrap_or(1).max(1),
+            _ => job.expect.jit_loop_entries_min.unwrap_or(0),
         }
+    } else {
+        0
+    };
+    if observation.loop_entries < loop_entries_min {
+        return Err(format!(
+            "expected at least {loop_entries_min} JIT loop entries, got {}",
+            observation.loop_entries
+        ));
+    }
+
+    if job.backend == "jit" {
         if let Some(min) = job.expect.jit_regular_call_side_exits_min {
-            if observation.jit_regular_call_side_exits < min {
+            let side_exits = observation.side_exit_count(vo_engine::JitSideExitReason::RegularCall);
+            if side_exits < min {
                 return Err(format!(
-                    "expected at least {min} JIT regular-call side exits, got {}",
-                    observation.jit_regular_call_side_exits
+                    "expected at least {min} JIT regular-call side exits, got {side_exits}"
                 ));
             }
         }
     }
     Ok(())
+}
+
+fn jit_threshold(job: &TestJob, key: &str) -> Option<u64> {
+    job.env.get(key)?.parse().ok()
+}
+
+fn uses_eager_function_jit(job: &TestJob) -> bool {
+    job.backend == "jit" && jit_threshold(job, "VO_JIT_CALL_THRESHOLD") == Some(1)
+}
+
+fn uses_loop_jit(job: &TestJob) -> bool {
+    job.backend == "jit"
+        && jit_threshold(job, "VO_JIT_LOOP_THRESHOLD") == Some(1)
+        && jit_threshold(job, "VO_JIT_CALL_THRESHOLD").is_some_and(|threshold| threshold > 1)
 }
 
 fn run_vo_embed(compiled: vo_engine::CompileOutput) -> Result<(), String> {
@@ -859,18 +910,22 @@ mod tests {
         }
     }
 
-    fn result(case_id: &str, target: &str, passed: bool, stdout: &str, error: &str) -> PlanResult {
+    fn result(
+        case_id: &str,
+        target: &str,
+        backend: &str,
+        passed: bool,
+        stdout: &str,
+        error: &str,
+    ) -> PlanResult {
         PlanResult {
             id: format!("{case_id}::{target}"),
             case_id: case_id.to_string(),
             kind: "file".to_string(),
             path: format!("tests/lang/cases/runtime/{case_id}.vo"),
             target: target.to_string(),
-            backend: if target == "vm" || target == "gc-vm" {
-                "vm".to_string()
-            } else {
-                "jit".to_string()
-            },
+            backend: backend.to_string(),
+            env: BTreeMap::new(),
             matrix: None,
             tags: Vec::new(),
             owner: None,
@@ -925,6 +980,100 @@ mod tests {
         .expect("expect schema should accept JIT loop-entry contract");
 
         assert_eq!(expect.jit_loop_entries_min, Some(1));
+    }
+
+    #[test]
+    fn vm_test_runner_osr_contract_requires_a_loop_entry_without_an_explicit_minimum_062() {
+        let mut job = test_job(
+            "gc-osr",
+            "jit",
+            &[
+                ("VO_GC_STRESS", "1"),
+                ("VO_GC_VERIFY", "1"),
+                ("VO_JIT_CALL_THRESHOLD", "1000"),
+                ("VO_JIT_LOOP_THRESHOLD", "1"),
+            ],
+        );
+        job.matrix = Some("osr-contract".to_string());
+
+        let error = validate_jit_observation(&job, vo_engine::RunObservation::default())
+            .expect_err("an osr-contract candidate must prove that loop JIT code ran");
+
+        assert!(error.contains("expected at least 1 JIT loop entries"));
+        validate_jit_observation(
+            &job,
+            vo_engine::RunObservation {
+                loop_entries: 1,
+                ..vo_engine::RunObservation::default()
+            },
+        )
+        .expect("one loop entry satisfies the implicit osr-contract candidate contract");
+    }
+
+    #[test]
+    fn vm_test_runner_ordinary_osr_allows_a_program_without_loops_062() {
+        let job = test_job(
+            "renamed-loop-jit",
+            "jit",
+            &[
+                ("VO_JIT_CALL_THRESHOLD", "1000"),
+                ("VO_JIT_LOOP_THRESHOLD", "1"),
+            ],
+        );
+
+        validate_jit_observation(&job, vo_engine::RunObservation::default())
+            .expect("ordinary OSR compatibility jobs may have no executed loop");
+    }
+
+    #[test]
+    fn vm_test_runner_osr_contract_preserves_a_higher_explicit_minimum_062() {
+        let mut job = test_job(
+            "renamed-loop-jit",
+            "jit",
+            &[
+                ("VO_JIT_CALL_THRESHOLD", "1000"),
+                ("VO_JIT_LOOP_THRESHOLD", "1"),
+            ],
+        );
+        job.matrix = Some("osr-contract".to_string());
+        job.expect.jit_loop_entries_min = Some(2);
+        let one_entry = vo_engine::RunObservation {
+            loop_entries: 1,
+            ..vo_engine::RunObservation::default()
+        };
+
+        let error = validate_jit_observation(&job, one_entry)
+            .expect_err("the explicit loop-entry minimum must take precedence");
+
+        assert!(error.contains("expected at least 2 JIT loop entries"));
+    }
+
+    #[test]
+    fn vm_test_runner_osr_contract_vm_baseline_does_not_require_a_loop_entry_062() {
+        let mut job = test_job("vm", "vm", &[]);
+        job.matrix = Some("osr-contract".to_string());
+        job.expect.jit_loop_entries_min = Some(2);
+
+        validate_jit_observation(&job, vo_engine::RunObservation::default())
+            .expect("the osr-contract VM baseline does not own the loop-entry contract");
+    }
+
+    #[test]
+    fn vm_test_runner_osr_contract_regular_jit_does_not_require_a_loop_entry_062() {
+        let mut job = test_job(
+            "renamed-function-jit",
+            "jit",
+            &[("VO_JIT_CALL_THRESHOLD", "1")],
+        );
+        job.matrix = Some("osr-contract".to_string());
+        job.expect.jit_loop_entries_min = Some(2);
+        let function_only = vo_engine::RunObservation {
+            function_entries: 1,
+            ..vo_engine::RunObservation::default()
+        };
+
+        validate_jit_observation(&job, function_only)
+            .expect("the regular JIT baseline does not own the loop-entry contract");
     }
 
     #[test]
@@ -1028,8 +1177,8 @@ mod tests {
     #[test]
     fn differential_runner_rejects_jit_stdout_divergence() {
         let mut results = vec![
-            result("case", "vm", true, "ok\n", ""),
-            result("case", "jit", true, "wrong\n", ""),
+            result("case", "reference", "vm", true, "ok\n", ""),
+            result("case", "candidate", "jit", true, "wrong\n", ""),
         ];
 
         validate_differential_results(&mut results);
@@ -1040,37 +1189,59 @@ mod tests {
     }
 
     #[test]
-    fn differential_runner_uses_gc_vm_baseline_for_gc_jit() {
+    fn differential_runner_matches_gc_osr_to_the_gc_vm_profile() {
+        let gc_env = BTreeMap::from([
+            ("VO_GC_STRESS".to_string(), "1".to_string()),
+            ("VO_GC_VERIFY".to_string(), "1".to_string()),
+        ]);
+        let mut gc_vm = result("case", "stress-reference", "vm", true, "gc\n", "");
+        gc_vm.env = gc_env.clone();
+        let mut gc_osr = result("case", "stress-candidate", "jit", true, "normal\n", "");
+        gc_osr.env = gc_env;
         let mut results = vec![
-            result("case", "vm", true, "normal\n", ""),
-            result("case", "gc-vm", true, "gc\n", ""),
-            result("case", "gc-jit", true, "normal\n", ""),
+            result("case", "reference", "vm", true, "normal\n", ""),
+            gc_vm,
+            gc_osr,
         ];
 
         validate_differential_results(&mut results);
 
         assert!(!results[2].passed);
-        assert_eq!(results[2].baseline.as_deref(), Some("gc-vm"));
-        assert!(results[2].error.contains("against gc-vm"));
+        assert_eq!(results[2].baseline.as_deref(), Some("stress-reference"));
+        assert!(results[2].error.contains("against stress-reference"));
     }
 
     #[test]
     fn differential_runner_does_not_cascade_a_failed_baseline() {
         let mut results = vec![
-            result("case", "vm", false, "", "runtime error: nil pointer"),
-            result("case", "osr", false, "", "runtime error: JIT panic"),
+            result(
+                "case",
+                "reference",
+                "vm",
+                false,
+                "",
+                "runtime error: nil pointer",
+            ),
+            result(
+                "case",
+                "candidate",
+                "jit",
+                false,
+                "",
+                "runtime error: JIT panic",
+            ),
         ];
 
         validate_differential_results(&mut results);
 
         assert!(!results[1].passed);
-        assert_eq!(results[1].baseline.as_deref(), Some("vm"));
+        assert_eq!(results[1].baseline.as_deref(), Some("reference"));
         assert_eq!(results[1].error, "runtime error: JIT panic");
     }
 
     #[test]
     fn json_result_job_includes_v1_schema_fields() {
-        let result = result("case", "jit", false, "", "boom");
+        let result = result("case", "candidate", "jit", false, "", "boom");
         let job = JsonJobResult {
             id: result.id.clone(),
             case_id: result.case_id.clone(),

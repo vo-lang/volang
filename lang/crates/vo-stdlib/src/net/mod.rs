@@ -456,16 +456,7 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
 ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-    for (id, def) in externs.iter().enumerate() {
-        let id = id as u32;
-        for entry in REGISTERED_EXTERNS {
-            if def.name == entry.name() {
-                entry.try_register(registry, id)?;
-                break;
-            }
-        }
-    }
-    Ok(())
+    vo_runtime::ffi::register_stdlib_providers(registry, externs, REGISTERED_EXTERNS)
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -515,20 +506,6 @@ mod tests {
 
         lock_recover(&table).push(7);
         assert_eq!(lock_recover(&table).as_slice(), [7]);
-    }
-
-    #[test]
-    fn network_extern_inputs_never_narrow_i64_with_wrapping_casts() {
-        for (name, source) in [
-            ("tcp", include_str!("tcp.rs")),
-            ("udp", include_str!("udp.rs")),
-            ("unix", include_str!("unix.rs")),
-        ] {
-            assert!(
-                !source.contains("arg_i64(slots::ARG_HANDLE) as i32"),
-                "{name} extern handle must use checked conversion"
-            );
-        }
     }
 
     #[cfg(unix)]

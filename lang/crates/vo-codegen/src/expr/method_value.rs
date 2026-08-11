@@ -273,7 +273,7 @@ fn compile_method_value_static(
     )?;
 
     func.emit_closure_new(dst, wrapper_id, 1);
-    func.emit_ptr_set_with_barrier(dst, 1, capture_box, 1, true);
+    func.emit_ptr_set(dst, 1, capture_box, 1);
     Ok(())
 }
 
@@ -319,7 +319,7 @@ fn emit_iface_method_value_closure(
     )?;
 
     func.emit_closure_new(dst, wrapper_id, 1);
-    func.emit_ptr_set_with_barrier(dst, 1, capture_box, 1, true);
+    func.emit_ptr_set(dst, 1, capture_box, 1);
     Ok(())
 }
 

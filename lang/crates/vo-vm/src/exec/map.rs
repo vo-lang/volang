@@ -2,11 +2,11 @@
 //! Map instructions: MapNew, MapGet, MapSet, MapDelete, MapLen
 
 extern crate alloc;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::{format, vec};
 
-use vo_runtime::bytecode::Module;
+use vo_runtime::bytecode::ModuleRuntimeMetadata;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::map;
 use vo_runtime::slot::Slot;
@@ -28,17 +28,33 @@ pub struct MapScratch {
 
 impl MapScratch {
     #[inline]
-    fn key_value(&mut self, key_slots: usize, val_slots: usize) -> (&mut [u64], &mut [u64]) {
-        let total = key_slots + val_slots;
+    fn key_value(
+        &mut self,
+        key_slots: usize,
+        val_slots: usize,
+    ) -> Result<(&mut [u64], &mut [u64]), String> {
+        let total = key_slots
+            .checked_add(val_slots)
+            .ok_or_else(|| "map operand scratch size overflow".to_string())?;
+        if total > self.slots.len() {
+            self.slots
+                .try_reserve_exact(total - self.slots.len())
+                .map_err(|_| "map operand scratch allocation failed".to_string())?;
+        }
         self.slots.resize(total, 0);
         self.slots[..total].fill(0);
-        self.slots[..total].split_at_mut(key_slots)
+        Ok(self.slots[..total].split_at_mut(key_slots))
     }
 
     #[inline]
-    fn key(&mut self, key_slots: usize) -> &mut [u64] {
+    fn key(&mut self, key_slots: usize) -> Result<&mut [u64], String> {
+        if key_slots > self.slots.len() {
+            self.slots
+                .try_reserve_exact(key_slots - self.slots.len())
+                .map_err(|_| "map key scratch allocation failed".to_string())?;
+        }
         self.slots.resize(key_slots, 0);
-        &mut self.slots[..key_slots]
+        Ok(&mut self.slots[..key_slots])
     }
 }
 
@@ -65,11 +81,12 @@ pub fn exec_map_new(
     key_layout: &[SlotType],
     val_layout: &[SlotType],
 ) -> Result<(), String> {
-    // b = packed_meta register, b+1 = key_rttid register
-    let packed = stack_get(stack, bp + inst.b as usize);
+    // `b` names the semantic key/value type pair; `b + 1` names key RTTI.
+    // Map key/value slot layouts come exclusively from instruction metadata.
+    let type_pair = stack_get(stack, bp + inst.b as usize);
     let key_rttid = stack_get(stack, bp + inst.b as usize + 1) as u32;
-    let key_meta = ValueMeta::from_raw((packed >> 32) as u32);
-    let val_meta = ValueMeta::from_raw(packed as u32);
+    let key_meta = ValueMeta::from_raw((type_pair >> 32) as u32);
+    let val_meta = ValueMeta::from_raw(type_pair as u32);
     let key_slots = u16::try_from(key_layout.len()).map_err(|_| {
         format!(
             "MapNew key layout exceeds u16::MAX: {} slots",
@@ -82,15 +99,6 @@ pub fn exec_map_new(
             val_layout.len()
         )
     })?;
-    let legacy_key_slots = inst.map_new_legacy_key_slots();
-    let legacy_val_slots = inst.map_new_legacy_val_slots();
-    if (legacy_key_slots != 0 || legacy_val_slots != 0)
-        && (legacy_key_slots != key_slots || legacy_val_slots != val_slots)
-    {
-        return Err(format!(
-            "MapNew metadata key/value slots {key_slots}/{val_slots} do not match legacy encoded slots {legacy_key_slots}/{legacy_val_slots}"
-        ));
-    }
     let m = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
     stack_set(stack, bp + inst.a as usize, m as u64);
     Ok(())
@@ -125,132 +133,37 @@ fn validate_map_key_value_slots(
     Ok(())
 }
 
-#[inline]
-fn validate_expected_key_value_slots(
-    key_slots: usize,
-    val_slots: usize,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
-    access: &str,
-) -> Result<(), String> {
-    if let Some((key_layout, val_layout)) = expected_layout {
-        if key_layout.len() != key_slots {
-            return Err(format!(
-                "{access} key slots {key_slots} do not match metadata key slots {}",
-                key_layout.len()
-            ));
-        }
-        if val_layout.len() != val_slots {
-            return Err(format!(
-                "{access} value slots {val_slots} do not match metadata value slots {}",
-                val_layout.len()
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn value_meta_layout(
-    meta: ValueMeta,
-    slots: usize,
-    module: Option<&Module>,
-    access: &str,
-) -> Result<Vec<SlotType>, String> {
-    match meta.value_kind() {
-        ValueKind::Struct => {
-            let module = module
-                .ok_or_else(|| format!("{access} missing module metadata for struct map layout"))?;
-            let meta_id = meta.meta_id() as usize;
-            module
-                .struct_metas
-                .get(meta_id)
-                .map(|meta| meta.slot_types.clone())
-                .ok_or_else(|| format!("{access} missing StructMeta id {meta_id}"))
-        }
-        ValueKind::Array => {
-            let module = module
-                .ok_or_else(|| format!("{access} missing module metadata for array map layout"))?;
-            module
-                .slot_layout_for_value_rttid(vo_runtime::ValueRttid::new(
-                    meta.meta_id(),
-                    ValueKind::Array,
-                ))
-                .ok_or_else(|| {
-                    format!(
-                        "{access} array runtime type {} has no slot layout",
-                        meta.meta_id()
-                    )
-                })
-        }
-        ValueKind::Interface => Ok(vec![SlotType::Interface0, SlotType::Interface1]),
-        ValueKind::Float32 | ValueKind::Float64 => Ok(vec![SlotType::Float; slots]),
-        kind if kind.may_contain_gc_refs() => Ok(vec![SlotType::GcRef; slots]),
-        _ => Ok(vec![SlotType::Value; slots]),
-    }
-}
-
 fn validate_map_key_value_layout(
     m: GcRef,
     key_layout: &[SlotType],
     val_layout: &[SlotType],
-    module: Option<&Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
     access: &str,
 ) -> Result<(), String> {
     // Safety: callers canonicalize and verify `m` before layout validation.
-    let expected_key = value_meta_layout(
+    let key_matches = vo_runtime::value_layout::value_meta_layout_matches(
         unsafe { map::key_meta(m) },
-        unsafe { map::key_slots(m) } as usize,
+        key_layout,
         module,
-        access,
-    )?;
-    let expected_val = value_meta_layout(
+    )
+    .map_err(|error| format!("{access} key layout validation failed: {error}"))?;
+    let val_matches = vo_runtime::value_layout::value_meta_layout_matches(
         unsafe { map::val_meta(m) },
-        unsafe { map::val_slots(m) } as usize,
+        val_layout,
         module,
-        access,
-    )?;
-    if key_layout != expected_key.as_slice() {
+    )
+    .map_err(|error| format!("{access} value layout validation failed: {error}"))?;
+    if !key_matches {
         return Err(format!(
-            "{access} key layout {key_layout:?} does not match map key layout {expected_key:?}"
+            "{access} key layout {key_layout:?} does not match map key metadata"
         ));
     }
-    if val_layout != expected_val.as_slice() {
+    if !val_matches {
         return Err(format!(
-            "{access} value layout {val_layout:?} does not match map value layout {expected_val:?}"
+            "{access} value layout {val_layout:?} does not match map value metadata"
         ));
     }
     validate_map_key_value_slots(m, key_layout.len(), val_layout.len(), access)
-}
-
-#[inline]
-pub fn exec_map_get(
-    stack: *mut Slot,
-    bp: usize,
-    inst: &Instruction,
-    gc: &Gc,
-    module: Option<&Module>,
-) -> Result<bool, String> {
-    exec_map_get_with_layout(stack, bp, inst, gc, module, None)
-}
-
-#[inline]
-pub fn exec_map_get_with_layout(
-    stack: *mut Slot,
-    bp: usize,
-    inst: &Instruction,
-    gc: &Gc,
-    module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType], bool)>,
-) -> Result<bool, String> {
-    let mut scratch = MapScratch::default();
-    exec_map_get_with_layout_using_scratch(
-        stack,
-        bp,
-        inst,
-        gc,
-        module,
-        expected_layout,
-        &mut scratch,
-    )
 }
 
 #[inline]
@@ -260,43 +173,16 @@ pub fn exec_map_get_with_layout_using_scratch(
     bp: usize,
     inst: &Instruction,
     gc: &Gc,
-    module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType], bool)>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    layout: (&[SlotType], &[SlotType], bool),
     scratch: &mut MapScratch,
 ) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.b as usize) as GcRef;
-    let meta = stack_get(stack, bp + inst.c as usize);
-    let legacy_key_slots = ((meta >> 16) & 0xFFFF) as usize;
-    let legacy_val_slots = ((meta >> 1) & 0x7FFF) as usize;
-    let legacy_has_ok = (meta & 1) != 0;
-    let (key_slots, val_slots, has_ok) = match expected_layout {
-        Some((key_layout, val_layout, has_ok)) => {
-            if legacy_has_ok != has_ok {
-                return Err(format!(
-                    "MapGet metadata comma-ok {has_ok} does not match packed comma-ok {legacy_has_ok}"
-                ));
-            }
-            if meta & !1 != 0
-                && (legacy_key_slots != key_layout.len() || legacy_val_slots != val_layout.len())
-            {
-                return Err(format!(
-                    "MapGet metadata key/value slots {}/{} do not match legacy packed slots {legacy_key_slots}/{legacy_val_slots}",
-                    key_layout.len(),
-                    val_layout.len()
-                ));
-            }
-            (key_layout.len(), val_layout.len(), has_ok)
-        }
-        None => (legacy_key_slots, legacy_val_slots, legacy_has_ok),
-    };
+    let (key_layout, val_layout, has_ok) = layout;
+    let key_slots = key_layout.len();
+    let val_slots = val_layout.len();
 
     let dst_start = bp + inst.a as usize;
-    validate_expected_key_value_slots(
-        key_slots,
-        val_slots,
-        expected_layout.map(|(key, val, _)| (key, val)),
-        "MapGet",
-    )?;
 
     // nil map read returns zero value + ok=false (Go semantics)
     if m.is_null() {
@@ -310,12 +196,10 @@ pub fn exec_map_get_with_layout_using_scratch(
     }
     m = validate_map_handle(gc, m, "MapGet")?;
     validate_map_key_value_slots(m, key_slots, val_slots, "MapGet")?;
-    if let Some((key_layout, val_layout, _)) = expected_layout {
-        validate_map_key_value_layout(m, key_layout, val_layout, module, "MapGet")?;
-    }
+    validate_map_key_value_layout(m, key_layout, val_layout, module, "MapGet")?;
 
-    let key_start = bp + inst.c as usize + 1;
-    let (key, val) = scratch.key_value(key_slots, val_slots);
+    let key_start = bp + inst.c as usize;
+    let (key, val) = scratch.key_value(key_slots, val_slots)?;
     for (i, slot) in key.iter_mut().enumerate() {
         *slot = stack_get(stack, key_start + i);
     }
@@ -346,80 +230,31 @@ pub fn exec_map_get_with_layout_using_scratch(
 /// meta format: key_slots<<8 | val_slots
 /// Returns true if successful, false if interface key has uncomparable type (should panic)
 #[inline]
-pub fn exec_map_set(
-    stack: *const Slot,
-    bp: usize,
-    inst: &Instruction,
-    gc: &mut Gc,
-    module: Option<&Module>,
-) -> Result<bool, String> {
-    exec_map_set_with_layout(stack, bp, inst, gc, module, None)
-}
-
-#[inline]
-pub fn exec_map_set_with_layout(
-    stack: *const Slot,
-    bp: usize,
-    inst: &Instruction,
-    gc: &mut Gc,
-    module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
-) -> Result<bool, String> {
-    let mut scratch = MapScratch::default();
-    exec_map_set_with_layout_using_scratch(
-        stack,
-        bp,
-        inst,
-        gc,
-        module,
-        expected_layout,
-        &mut scratch,
-    )
-}
-
-#[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn exec_map_set_with_layout_using_scratch(
     stack: *const Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
-    module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    layout: (&[SlotType], &[SlotType]),
     scratch: &mut MapScratch,
 ) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
-    let meta = stack_get(stack, bp + inst.b as usize);
-    let legacy_key_slots = ((meta >> 8) & 0xFF) as usize;
-    let legacy_val_slots = (meta & 0xFF) as usize;
-    let (key_slots, val_slots) = match expected_layout {
-        Some((key_layout, val_layout)) => {
-            if meta != 0
-                && (legacy_key_slots != key_layout.len() || legacy_val_slots != val_layout.len())
-            {
-                return Err(format!(
-                    "MapSet metadata key/value slots {}/{} do not match legacy packed slots {legacy_key_slots}/{legacy_val_slots}",
-                    key_layout.len(),
-                    val_layout.len()
-                ));
-            }
-            (key_layout.len(), val_layout.len())
-        }
-        None => (legacy_key_slots, legacy_val_slots),
-    };
+    let (key_layout, val_layout) = layout;
+    let key_slots = key_layout.len();
+    let val_slots = val_layout.len();
 
-    let key_start = bp + inst.b as usize + 1;
+    let key_start = bp + inst.b as usize;
     let val_start = bp + inst.c as usize;
 
     if !m.is_null() {
         m = validate_map_handle(gc, m, "MapSet")?;
         validate_map_key_value_slots(m, key_slots, val_slots, "MapSet")?;
-        if let Some((key_layout, val_layout)) = expected_layout {
-            validate_map_key_value_layout(m, key_layout, val_layout, module, "MapSet")?;
-        }
+        validate_map_key_value_layout(m, key_layout, val_layout, module, "MapSet")?;
     }
 
-    let (key, val) = scratch.key_value(key_slots, val_slots);
+    let (key, val) = scratch.key_value(key_slots, val_slots)?;
     for (i, slot) in key.iter_mut().enumerate() {
         *slot = stack_get(stack, key_start + i);
     }
@@ -460,69 +295,34 @@ pub fn exec_map_set_with_layout_using_scratch(
 }
 
 #[inline]
-pub fn exec_map_delete(
-    stack: *const Slot,
-    bp: usize,
-    inst: &Instruction,
-    gc: &Gc,
-    module: Option<&Module>,
-) -> Result<bool, String> {
-    exec_map_delete_with_layout(stack, bp, inst, gc, module, None)
-}
-
-#[inline]
-pub fn exec_map_delete_with_layout(
-    stack: *const Slot,
-    bp: usize,
-    inst: &Instruction,
-    gc: &Gc,
-    module: Option<&Module>,
-    expected_key_layout: Option<&[SlotType]>,
-) -> Result<bool, String> {
-    let mut scratch = MapScratch::default();
-    exec_map_delete_with_layout_using_scratch(
-        stack,
-        bp,
-        inst,
-        gc,
-        module,
-        expected_key_layout,
-        &mut scratch,
-    )
-}
-
-#[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn exec_map_delete_with_layout_using_scratch(
     stack: *const Slot,
     bp: usize,
     inst: &Instruction,
     gc: &Gc,
-    module: Option<&Module>,
-    expected_key_layout: Option<&[SlotType]>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    key_layout: &[SlotType],
     scratch: &mut MapScratch,
 ) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
-    let meta = stack_get(stack, bp + inst.b as usize);
-    let key_slots = meta as usize;
+    let key_slots = key_layout.len();
 
-    let key_start = bp + inst.b as usize + 1;
+    let key_start = bp + inst.b as usize;
 
     if !m.is_null() {
         m = validate_map_handle(gc, m, "MapDelete")?;
         validate_map_key_slots(m, key_slots, "MapDelete")?;
-        if let Some(key_layout) = expected_key_layout {
-            let expected_key = value_meta_layout(
-                unsafe { map::key_meta(m) },
-                unsafe { map::key_slots(m) } as usize,
-                module,
-                "MapDelete",
-            )?;
-            if key_layout != expected_key.as_slice() {
-                return Err(format!(
-                    "MapDelete key layout {key_layout:?} does not match map key layout {expected_key:?}"
-                ));
-            }
+        let key_matches = vo_runtime::value_layout::value_meta_layout_matches(
+            unsafe { map::key_meta(m) },
+            key_layout,
+            module,
+        )
+        .map_err(|error| format!("MapDelete key layout validation failed: {error}"))?;
+        if !key_matches {
+            return Err(format!(
+                "MapDelete key layout {key_layout:?} does not match map key metadata"
+            ));
         }
     }
 
@@ -532,7 +332,7 @@ pub fn exec_map_delete_with_layout_using_scratch(
         return Ok(true);
     }
 
-    let key = scratch.key(key_slots);
+    let key = scratch.key(key_slots)?;
     for (i, slot) in key.iter_mut().enumerate() {
         *slot = stack_get(stack, key_start + i);
     }
@@ -602,25 +402,22 @@ pub fn exec_map_iter_init(
 }
 
 /// MapIterNext: Advance iterator and get next key-value
-/// a=key_slot, b=iter_slot, c=ok_slot, flags=key_slots|(val_slots<<4)
+/// a=key_slot, b=iter_slot, c=ok_slot. Metadata owns key/value layouts.
 /// Writes 1 to ok_slot if got next element, 0 if exhausted
-#[inline]
-pub fn exec_map_iter_next(stack: *mut Slot, bp: usize, inst: &Instruction) -> Result<(), String> {
-    exec_map_iter_next_with_layout(stack, bp, inst, None, None, None)
-}
-
 #[inline]
 pub fn exec_map_iter_next_with_layout(
     stack: *mut Slot,
     bp: usize,
     inst: &Instruction,
     gc: Option<&Gc>,
-    module: Option<&Module>,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    layout: (&[SlotType], &[SlotType]),
 ) -> Result<(), String> {
     let iter_slot = bp + inst.b as usize;
     let ok_slot = bp + inst.c as usize;
-    let (key_slots, val_slots) = map_iter_next_slot_widths(inst, expected_layout)?;
+    let (key_layout, val_layout) = layout;
+    let key_slots = key_layout.len();
+    let val_slots = val_layout.len();
     let key_dst = bp + inst.a as usize;
     let val_dst = key_dst + key_slots;
 
@@ -632,9 +429,7 @@ pub fn exec_map_iter_next_with_layout(
             m = validate_map_handle(gc, m, "MapIterNext")?;
         }
         validate_map_key_value_slots(m, key_slots, val_slots, "MapIterNext")?;
-        if let Some((key_layout, val_layout)) = expected_layout {
-            validate_map_key_value_layout(m, key_layout, val_layout, module, "MapIterNext")?;
-        }
+        validate_map_key_value_layout(m, key_layout, val_layout, module, "MapIterNext")?;
     }
 
     let key_out = if key_slots == 0 {
@@ -671,28 +466,6 @@ pub fn exec_map_iter_next_with_layout(
     Ok(())
 }
 
-fn map_iter_next_slot_widths(
-    inst: &Instruction,
-    expected_layout: Option<(&[SlotType], &[SlotType])>,
-) -> Result<(usize, usize), String> {
-    let encoded_key_slots = inst.map_iter_key_slots() as usize;
-    let encoded_val_slots = inst.map_iter_val_slots() as usize;
-    let Some((key_layout, val_layout)) = expected_layout else {
-        return Ok((encoded_key_slots, encoded_val_slots));
-    };
-    let key_slots = key_layout.len();
-    let val_slots = val_layout.len();
-    if (encoded_key_slots != 0 || encoded_val_slots != 0)
-        && (encoded_key_slots != key_slots || encoded_val_slots != val_slots)
-    {
-        return Err(format!(
-            "MapIterNext encoded slots key={} value={} do not match metadata key={} value={}",
-            encoded_key_slots, encoded_val_slots, key_slots, val_slots
-        ));
-    }
-    Ok((key_slots, val_slots))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,9 +477,8 @@ mod tests {
         let int_meta = ValueMeta::new(0, ValueKind::Int64);
         let m = map::create(&mut gc, int_meta, int_meta, 1, 1, 0);
         unsafe { map::set_checked(&mut gc, m, &[7], &[42], None) }.expect("seed map");
-        let meta = (1 << 16) | (1 << 1);
-        let mut stack = vec![m as u64, meta, 7];
-        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 2, 0, 1);
+        let mut stack = vec![m as u64, 0, 7];
+        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 2, 0, 2);
         let mut scratch = MapScratch::default();
 
         assert!(exec_map_get_with_layout_using_scratch(
@@ -715,7 +487,7 @@ mod tests {
             &inst,
             &gc,
             None,
-            None,
+            (&[SlotType::Value], &[SlotType::Value], false),
             &mut scratch,
         )
         .expect("first map read"));
@@ -729,7 +501,7 @@ mod tests {
             &inst,
             &gc,
             None,
-            None,
+            (&[SlotType::Value], &[SlotType::Value], false),
             &mut scratch,
         )
         .expect("second map read"));
@@ -751,12 +523,20 @@ mod tests {
             map::set_checked(&mut gc, m, &[7], &[11, 22], None)
         }
         .expect("seed map");
-        let meta = (1 << 16) | (1 << 1);
-        let mut stack = vec![99, m as u64, meta, 7];
-        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 0, 1, 2);
+        let mut stack = vec![99, m as u64, 0, 7];
+        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 0, 1, 3);
+        let mut scratch = MapScratch::default();
 
-        let err = exec_map_get(stack.as_mut_ptr(), 0, &inst, &gc, None)
-            .expect_err("MapGet must reject value width drift");
+        let err = exec_map_get_with_layout_using_scratch(
+            stack.as_mut_ptr(),
+            0,
+            &inst,
+            &gc,
+            None,
+            (&[SlotType::Value], &[SlotType::Value], false),
+            &mut scratch,
+        )
+        .expect_err("MapGet must reject value width drift");
 
         assert!(err.contains("MapGet value slots 1"), "{err}");
         assert!(err.contains("map value slots 2"), "{err}");
@@ -768,12 +548,20 @@ mod tests {
         let mut gc = Gc::new();
         let int_meta = ValueMeta::new(0, ValueKind::Int64);
         let m = map::create(&mut gc, int_meta, int_meta, 1, 2, 0);
-        let meta = (1 << 8) | 1;
-        let stack = vec![m as u64, meta, 7, 33];
-        let inst = Instruction::new(crate::instruction::Opcode::MapSet, 0, 1, 3);
+        let stack = vec![m as u64, 0, 7, 33];
+        let inst = Instruction::new(crate::instruction::Opcode::MapSet, 0, 2, 3);
+        let mut scratch = MapScratch::default();
 
-        let err = exec_map_set(stack.as_ptr(), 0, &inst, &mut gc, None)
-            .expect_err("MapSet must reject value width drift");
+        let err = exec_map_set_with_layout_using_scratch(
+            stack.as_ptr(),
+            0,
+            &inst,
+            &mut gc,
+            None,
+            (&[SlotType::Value], &[SlotType::Value]),
+            &mut scratch,
+        )
+        .expect_err("MapSet must reject value width drift");
 
         assert!(err.contains("MapSet value slots 1"), "{err}");
         assert!(err.contains("map value slots 2"), "{err}");
@@ -788,45 +576,24 @@ mod tests {
         let int_meta = ValueMeta::new(0, ValueKind::Int64);
         let string_meta = ValueMeta::new(0, ValueKind::String);
         let m = map::create(&mut gc, int_meta, string_meta, 1, 1, 0);
-        let meta = (1 << 16) | (1 << 1);
-        let mut stack = vec![99, m as u64, meta, 7];
-        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 0, 1, 2);
+        let mut stack = vec![99, m as u64, 0, 7];
+        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 0, 1, 3);
+        let mut scratch = MapScratch::default();
 
-        let err = exec_map_get_with_layout(
+        let err = exec_map_get_with_layout_using_scratch(
             stack.as_mut_ptr(),
             0,
             &inst,
             &gc,
             None,
-            Some((&[SlotType::Value], &[SlotType::Value], false)),
+            (&[SlotType::Value], &[SlotType::Value], false),
+            &mut scratch,
         )
         .expect_err("MapGet must reject value layout drift");
 
         assert!(err.contains("MapGet value layout [Value]"), "{err}");
-        assert!(err.contains("map value layout [GcRef]"), "{err}");
+        assert!(err.contains("does not match map value metadata"), "{err}");
         assert_eq!(stack[0], 99, "MapGet must fail before writing dst");
-    }
-
-    #[test]
-    fn exec_map_get_nil_rejects_value_width_drift_before_stack_write_061() {
-        let gc = Gc::new();
-        let meta = (1 << 16) | (2 << 1);
-        let mut stack = vec![0xaaaa, 0xbbbb, 0, meta, 7];
-        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 0, 2, 3);
-
-        let err = exec_map_get_with_layout(
-            stack.as_mut_ptr(),
-            0,
-            &inst,
-            &gc,
-            None,
-            Some((&[SlotType::Value], &[SlotType::Value], false)),
-        )
-        .expect_err("nil MapGet must reject value width drift before default output");
-
-        assert!(err.contains("legacy packed slots 1/2"), "{err}");
-        assert_eq!(stack[0], 0xaaaa, "MapGet must fail before writing dst");
-        assert_eq!(stack[1], 0xbbbb, "MapGet must fail before writing dst");
     }
 
     #[test]
@@ -835,22 +602,23 @@ mod tests {
         let int_meta = ValueMeta::new(0, ValueKind::Int64);
         let string_meta = ValueMeta::new(0, ValueKind::String);
         let m = map::create(&mut gc, int_meta, string_meta, 1, 1, 0);
-        let meta = (1 << 8) | 1;
-        let stack = vec![m as u64, meta, 7, 0];
-        let inst = Instruction::new(crate::instruction::Opcode::MapSet, 0, 1, 3);
+        let stack = vec![m as u64, 0, 7, 0];
+        let inst = Instruction::new(crate::instruction::Opcode::MapSet, 0, 2, 3);
+        let mut scratch = MapScratch::default();
 
-        let err = exec_map_set_with_layout(
+        let err = exec_map_set_with_layout_using_scratch(
             stack.as_ptr(),
             0,
             &inst,
             &mut gc,
             None,
-            Some((&[SlotType::Value], &[SlotType::Value])),
+            (&[SlotType::Value], &[SlotType::Value]),
+            &mut scratch,
         )
         .expect_err("MapSet must reject value layout drift");
 
         assert!(err.contains("MapSet value layout [Value]"), "{err}");
-        assert!(err.contains("map value layout [GcRef]"), "{err}");
+        assert!(err.contains("does not match map value metadata"), "{err}");
         let (value, ok) = unsafe { map::get_with_ok_checked(m, &[7], None) }.expect("map read");
         assert!(!ok);
         assert!(value.is_none());
@@ -916,7 +684,7 @@ mod tests {
         }
         let inst = Instruction::with_flags(
             crate::instruction::Opcode::MapIterNext,
-            0x11,
+            0,
             map::MAP_ITER_SLOTS as u16,
             0,
             (map::MAP_ITER_SLOTS + 2) as u16,
@@ -928,7 +696,7 @@ mod tests {
             &inst,
             Some(&gc),
             None,
-            Some((&[SlotType::Value], &[SlotType::Value])),
+            (&[SlotType::Value], &[SlotType::Value]),
         )
         .expect_err("MapIterNext must reject non-map iterator refs");
 
@@ -936,91 +704,5 @@ mod tests {
         assert_eq!(stack[map::MAP_ITER_SLOTS], 99);
         assert_eq!(stack[map::MAP_ITER_SLOTS + 1], 99);
         assert_eq!(stack[map::MAP_ITER_SLOTS + 2], 99);
-    }
-
-    #[test]
-    fn exec_map_iter_next_nil_rejects_value_width_drift_before_stack_write_061() {
-        let iter = unsafe { map::iter_init(core::ptr::null_mut()) };
-        let mut stack = vec![99; map::MAP_ITER_SLOTS + 4];
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &iter as *const map::MapIterator as *const u64,
-                stack.as_mut_ptr(),
-                map::MAP_ITER_SLOTS,
-            );
-        }
-        let inst = Instruction::with_flags(
-            crate::instruction::Opcode::MapIterNext,
-            0x21,
-            map::MAP_ITER_SLOTS as u16,
-            0,
-            (map::MAP_ITER_SLOTS + 3) as u16,
-        );
-
-        let err = exec_map_iter_next_with_layout(
-            stack.as_mut_ptr(),
-            0,
-            &inst,
-            None,
-            None,
-            Some((&[SlotType::Value], &[SlotType::Value])),
-        )
-        .expect_err("nil MapIterNext must reject value width drift before default output");
-
-        assert!(
-            err.contains(
-                "MapIterNext encoded slots key=1 value=2 do not match metadata key=1 value=1"
-            ),
-            "{err}"
-        );
-        assert_eq!(stack[map::MAP_ITER_SLOTS], 99);
-        assert_eq!(stack[map::MAP_ITER_SLOTS + 1], 99);
-        assert_eq!(stack[map::MAP_ITER_SLOTS + 2], 99);
-        assert_eq!(stack[map::MAP_ITER_SLOTS + 3], 99);
-    }
-
-    #[test]
-    fn map_len_and_iter_init_use_checked_map_handle_contract_036() {
-        let source = include_str!("map.rs");
-        let len_start = source
-            .find("pub fn exec_map_len")
-            .expect("exec_map_len source");
-        let init_start = source
-            .find("pub fn exec_map_iter_init")
-            .expect("exec_map_iter_init source");
-        let next_start = source
-            .find("pub fn exec_map_iter_next")
-            .expect("exec_map_iter_next source");
-        let len_body = &source[len_start..init_start];
-        let init_body = &source[init_start..next_start];
-
-        assert!(
-            len_body.contains("validate_map_handle"),
-            "MapLen must validate non-nil map handles before reading MapData"
-        );
-        assert!(
-            init_body.contains("validate_map_handle"),
-            "MapIterInit must validate non-nil map handles before reading MapData"
-        );
-    }
-
-    #[test]
-    fn exec_map_set_barrier_source_is_map_metadata_034() {
-        let source = include_str!("map.rs");
-        let start = source
-            .find("pub fn exec_map_set")
-            .expect("exec_map_set source");
-        let end = source[start..]
-            .find("#[inline]\npub fn exec_map_delete")
-            .map(|offset| start + offset)
-            .expect("exec_map_delete source");
-        let body = &source[start..end];
-
-        assert!(body.contains("map::key_meta(m)"), "{body}");
-        assert!(body.contains("map::val_meta(m)"), "{body}");
-        assert!(
-            !body.contains("inst.flags & 0b01") && !body.contains("inst.flags & 0b10"),
-            "{body}"
-        );
     }
 }

@@ -6,9 +6,9 @@
 //! materialization for ordinary bytecode calls.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlags, SigRef, Value};
+use cranelift_codegen::ir::{types, Block, InstBuilder, SigRef, Value};
 
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::JitContextField;
 
 use crate::translator::IrEmitter;
 
@@ -22,17 +22,14 @@ mod vm_materialization;
 
 pub use callback_abi::{
     emit_checked_jit_result_indirect_callback_call, emit_raw_jit_context_callback_call,
-    emit_returning_jit_result_indirect_callback_call, jit_context_callback_callsites,
-    JitContextCallbackCallKind, CALL_DEPTH_OVERFLOW_CALLSITE, NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
-    NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE, PREPARED_CALL_POP_FRAME_CALLSITE,
-    PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE, PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE,
-    STACK_LIMIT_OVERFLOW_CALLSITE,
+    emit_returning_jit_result_indirect_callback_call, CALL_DEPTH_OVERFLOW_CALLSITE,
+    NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE, NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
+    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE, STACK_LIMIT_OVERFLOW_CALLSITE,
 };
 pub use dynamic::{emit_call_closure, emit_call_iface};
 pub use externs::{emit_call_extern, CallExternConfig};
-pub use plan::{
-    CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan, JitCallWithVmMaterializationConfig,
-};
+pub use plan::{CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan};
 pub use result_flow::{
     check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
     NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK, JIT_RESULT_REPLAY,
@@ -52,18 +49,13 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(
     ctx: Value,
     new_sp: Value,
 ) -> Result<(), crate::JitError> {
-    let limit = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_STACK_LIMIT,
-    );
+    let limit = emitter.load_context_field(types::I32, JitContextField::StackLimit);
     let overflow = emitter
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThan, new_sp, limit);
 
-    let overflow_block = emitter.builder().create_block();
+    let overflow_block = crate::compile_common::cold_block(emitter.builder());
     let ok_block = emitter.builder().create_block();
     emitter
         .builder()
@@ -72,13 +64,9 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(overflow_block);
     emitter.builder().seal_block(overflow_block);
-    mark_stack_overflow_pc(emitter, ctx);
-    let stack_overflow_fn_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_STACK_OVERFLOW_FN,
-    );
+    mark_stack_overflow_pc(emitter);
+    let stack_overflow_fn_ptr =
+        emitter.load_context_field(types::I64, JitContextField::StackOverflowFn);
     emit_returning_jit_result_indirect_callback_call(
         emitter,
         STACK_LIMIT_OVERFLOW_CALLSITE,
@@ -91,51 +79,25 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
-fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) {
+fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E) {
     let current_pc = emitter.current_pc() as i64;
     let pc_val = emitter.builder().ins().iconst(types::I32, current_pc);
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        pc_val,
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_PC,
-    );
+    emitter.store_context_field(pc_val, JitContextField::RuntimeTrapPc);
 }
 
-fn load_current_func_id<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) -> Value {
-    emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_CURRENT_FUNC_ID,
-    )
+fn load_current_func_id<'a, E: IrEmitter<'a>>(emitter: &mut E) -> Value {
+    emitter.load_context_field(types::I32, JitContextField::CurrentFuncId)
 }
 
 fn restore_caller_execution_context<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
-    ctx: Value,
     caller_bp: Value,
     old_fiber_sp: Value,
     caller_func_id: Value,
 ) {
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        caller_bp,
-        ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        old_fiber_sp,
-        ctx,
-        JitContext::OFFSET_FIBER_SP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        caller_func_id,
-        ctx,
-        JitContext::OFFSET_CURRENT_FUNC_ID,
-    );
+    emitter.store_context_field(caller_bp, JitContextField::JitBp);
+    emitter.store_context_field(old_fiber_sp, JitContextField::FiberSp);
+    emitter.store_context_field(caller_func_id, JitContextField::CurrentFuncId);
 }
 
 pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
@@ -145,19 +107,14 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
 ) -> Result<(Block, Block), crate::JitError> {
     emit_stack_limit_guard(emitter, ctx, new_sp)?;
 
-    let capacity = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_STACK_CAP,
-    );
+    let capacity = emitter.load_context_field(types::I32, JitContextField::StackCap);
     let exceeds_capacity =
         emitter
             .builder()
             .ins()
             .icmp(IntCC::UnsignedGreaterThan, new_sp, capacity);
 
-    let materialize_block = emitter.builder().create_block();
+    let materialize_block = crate::compile_common::cold_block(emitter.builder());
     let ok_block = emitter.builder().create_block();
     emitter
         .builder()
@@ -171,24 +128,14 @@ pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     ctx: Value,
 ) -> Result<Value, crate::JitError> {
-    let depth = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_CALL_DEPTH,
-    );
-    let limit = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_CALL_DEPTH_LIMIT,
-    );
+    let depth = emitter.load_context_field(types::I32, JitContextField::CallDepth);
+    let limit = emitter.load_context_field(types::I32, JitContextField::CallDepthLimit);
     let overflow = emitter
         .builder()
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, limit);
 
-    let overflow_block = emitter.builder().create_block();
+    let overflow_block = crate::compile_common::cold_block(emitter.builder());
     let ok_block = emitter.builder().create_block();
     emitter
         .builder()
@@ -197,13 +144,9 @@ pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(overflow_block);
     emitter.builder().seal_block(overflow_block);
-    mark_stack_overflow_pc(emitter, ctx);
-    let stack_overflow_fn_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_STACK_OVERFLOW_FN,
-    );
+    mark_stack_overflow_pc(emitter);
+    let stack_overflow_fn_ptr =
+        emitter.load_context_field(types::I64, JitContextField::StackOverflowFn);
     emit_returning_jit_result_indirect_callback_call(
         emitter,
         CALL_DEPTH_OVERFLOW_CALLSITE,
@@ -213,23 +156,13 @@ pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
-    let next_depth = emitter.builder().ins().iadd_imm(depth, 1);
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        next_depth,
-        ctx,
-        JitContext::OFFSET_CALL_DEPTH,
-    );
+    let next_depth = emitter.builder().ins().iadd_imm_s(depth, 1);
+    emitter.store_context_field(next_depth, JitContextField::CallDepth);
     Ok(depth)
 }
 
-pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, old_depth: Value) {
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        old_depth,
-        ctx,
-        JitContext::OFFSET_CALL_DEPTH,
-    );
+pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, old_depth: Value) {
+    emitter.store_context_field(old_depth, JitContextField::CallDepth);
 }
 
 /// Create signature for JIT function: (ctx, args_ptr, ret_ptr) -> JitResult
@@ -252,7 +185,6 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cranelift_codegen::ir::FuncRef;
     use vo_runtime::bytecode::FunctionDef;
     use vo_runtime::instruction::Instruction;
 
@@ -275,7 +207,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             slot_types: Vec::new(),
             borrowed_scan_slots_prefix: Vec::new(),
             capture_types: Vec::new(),
@@ -286,14 +218,14 @@ mod tests {
 
     #[test]
     fn gc_materialize_call_plan_routes_full_function_call_shapes() {
-        let self_plan = CallPlan::new(7, 2, &func(8, false), None);
+        let self_plan = CallPlan::new(7, 2, &func(8, false));
         assert_eq!(
             self_plan.route_for_full_function(7),
-            CallRoute::VmCallMaterialization,
-            "self recursion must use VM frames so stack overflow remains recoverable"
+            CallRoute::DynamicJitTable,
+            "self recursion uses the guarded JIT table path once its entry is published"
         );
 
-        let defer_self = CallPlan::new(7, 2, &func(8, true), None);
+        let defer_self = CallPlan::new(7, 2, &func(8, true));
         assert_eq!(
             defer_self.route_for_full_function(7),
             CallRoute::VmCallMaterialization
@@ -303,7 +235,6 @@ mod tests {
             7,
             2,
             &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
-            None,
         );
         assert_eq!(
             large.route_for_full_function(7),
@@ -311,11 +242,7 @@ mod tests {
         );
         assert_eq!(large.route_for_loop(), CallRoute::VmCallMaterialization);
 
-        let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
-        assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
-        assert_eq!(direct.route_for_loop(), CallRoute::KnownDirectJit);
-
-        let dynamic = CallPlan::new(8, 2, &func(8, false), None);
+        let dynamic = CallPlan::new(8, 2, &func(8, false));
         assert_eq!(
             dynamic.route_for_full_function(7),
             CallRoute::DynamicJitTable
@@ -329,7 +256,7 @@ mod tests {
             1,
             1,
         )];
-        let allocating_plan = CallPlan::new(8, 2, &allocating, Some(FuncRef::from_u32(4)));
+        let allocating_plan = CallPlan::new(8, 2, &allocating);
         assert_eq!(
             allocating_plan.route_for_full_function(7),
             CallRoute::VmCallMaterialization,
@@ -347,26 +274,5 @@ mod tests {
         assert_eq!(plan.ret_slots, 257);
         assert_eq!(plan.ret_reg, 310);
         assert_eq!(plan.resume_pc, 42);
-        assert_eq!(plan.route, CallRoute::DynamicInlineCache);
-    }
-
-    #[test]
-    fn vm_jit_current_func_metadata_037_restore_context_includes_current_func_id() {
-        let src = vo_source_contract::production_source_without_test_modules(include_str!(
-            "call_helpers.rs"
-        ));
-        let helper = src
-            .split("fn restore_caller_execution_context")
-            .nth(1)
-            .expect("caller context restore helper should exist")
-            .split("pub fn emit_stack_capacity_check")
-            .next()
-            .expect("caller context restore helper should precede stack capacity check");
-        assert!(
-            helper.contains("JitContext::OFFSET_JIT_BP")
-                && helper.contains("JitContext::OFFSET_FIBER_SP")
-                && helper.contains("JitContext::OFFSET_CURRENT_FUNC_ID"),
-            "caller context restore must cover bp, sp, and current_func_id together"
-        );
     }
 }

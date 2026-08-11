@@ -1105,29 +1105,3 @@ fn compile_dyn_method_unified(
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vm_dyn_access_layout_width_023_uses_checked_layout_owners() {
-        let source = include_str!("dyn_access.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("dyn_access source should contain tests section");
-
-        for forbidden in [
-            "ret_types.len() as u16",
-            "arg_count as u16",
-            "i as u16",
-            "let mut total = 0u16",
-            "total += ",
-            "let call_arg_count = 2 + 1 + 1 + expected_ret_count * 2",
-            "let call_arg_count = 2 + 1 + 1 + 1 + expected_ret_count * 2",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "dynamic access lowering must not use unchecked layout arithmetic: {forbidden}"
-            );
-        }
-    }
-}

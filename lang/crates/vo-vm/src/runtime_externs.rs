@@ -1,7 +1,6 @@
 //! VM-owned providers for the public `runtime` package.
 
 use crate::fiber::CallFrame;
-use crate::vm::Vm;
 use vo_common_core::bytecode::{ExternDef, Module};
 use vo_common_core::debug_info::SourceLoc;
 use vo_runtime::builtins::{
@@ -143,34 +142,15 @@ fn runtime_mem_read_stats(call: &mut ExternCallContext<'_>) -> ExternResult {
 }
 
 fn runtime_mem_gc_step(call: &mut ExternCallContext<'_>) -> ExternResult {
-    let vm = call.vm_ptr().cast::<Vm>();
-    if vm.is_null() {
-        call.ret_bool(0, false);
-        return ExternResult::Ok;
-    }
     let work_units = usize::try_from(call.arg_u64(0)).unwrap_or(usize::MAX);
-    // Safety: the call context borrows `VmState::gc`; this raw write targets a
-    // disjoint scalar request field. The scheduler consumes it only after the
-    // extern call and active fiber have returned to a safe boundary.
-    unsafe {
-        let pending = core::ptr::addr_of_mut!((*vm).state.pending_explicit_gc_work_units);
-        *pending = (*pending).max(work_units);
-    }
-    call.ret_bool(0, true);
+    let accepted = call.request_gc_step(work_units);
+    call.ret_bool(0, accepted);
     ExternResult::Ok
 }
 
 fn runtime_mem_gc_collect(call: &mut ExternCallContext<'_>) -> ExternResult {
-    let vm = call.vm_ptr().cast::<Vm>();
-    if vm.is_null() {
-        call.ret_bool(0, false);
-        return ExternResult::Ok;
-    }
-    // Safety: see runtime_mem_gc_step; this is a disjoint safe-boundary flag.
-    unsafe {
-        *core::ptr::addr_of_mut!((*vm).state.pending_explicit_gc_collect) = true;
-    }
-    call.ret_bool(0, true);
+    let accepted = call.request_gc_collect();
+    call.ret_bool(0, accepted);
     ExternResult::Ok
 }
 
@@ -178,7 +158,7 @@ pub(crate) fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), ExternContractError> {
-    for (id, def) in externs.iter().enumerate() {
+    for (id, def) in vo_runtime::ffi::unique_extern_providers(externs) {
         let provider = match def.name.as_str() {
             CALLER_EXTERN => runtime_caller,
             MEM_READ_STATS_EXTERN => runtime_mem_read_stats,
@@ -271,5 +251,39 @@ mod tests {
         let caller = resolved.get(0).expect("Caller entry");
         assert_eq!(caller.provider_effects, ExternEffects::NONE);
         assert_eq!(caller.jit_route, ExternJitRoute::VmMaterializeBeforeCall);
+    }
+
+    #[test]
+    fn runtime_mem_control_providers_require_vm_materialization() {
+        let externs = [
+            ExternDef {
+                name: MEM_GC_STEP_EXTERN.to_string(),
+                params: ParamShape::Exact { slots: 1 },
+                returns: ReturnShape::with_slot_types(vec![SlotType::Value]),
+                allowed_effects: ExternEffects::NONE,
+                param_kinds: Vec::new(),
+            },
+            ExternDef {
+                name: MEM_GC_COLLECT_EXTERN.to_string(),
+                params: ParamShape::Exact { slots: 0 },
+                returns: ReturnShape::with_slot_types(vec![SlotType::Value]),
+                allowed_effects: ExternEffects::NONE,
+                param_kinds: Vec::new(),
+            },
+        ];
+        let mut registry = ExternRegistry::new();
+        register_externs(&mut registry, &externs).expect("register runtime/mem providers");
+        let resolved = registry
+            .resolve_module_externs(&externs)
+            .expect("resolve runtime/mem providers");
+
+        for provider in resolved.entries() {
+            assert_eq!(
+                provider.jit_route,
+                ExternJitRoute::VmMaterializeBeforeCall,
+                "{} must reach the scheduler-bound request mailbox",
+                provider.name
+            );
+        }
     }
 }

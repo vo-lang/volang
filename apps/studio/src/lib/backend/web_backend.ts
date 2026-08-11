@@ -6,10 +6,6 @@ import type {
 } from './backend';
 import type {
   BootstrapContext,
-  BuildResult,
-  CheckResult,
-  CompileResult,
-  DiagnosticError,
   DiscoveredProject,
   DisplayPulseSubmission,
   DisplayTimingRequest,
@@ -18,16 +14,12 @@ import type {
   FrameworkLaneBinding,
   GitOp,
   GitResult,
-  GrepMatch,
-  GrepOpts,
   GuiRunOutput,
   HttpOpts,
   HttpResult,
   LaunchSpec,
   ProcEvent,
   PreparedSession,
-  ReadManyResult,
-  RendererBridgeVfsSnapshot,
   RunEvent,
   RunOpts,
   SessionInfo,
@@ -39,10 +31,12 @@ import {
   dropLoadedWasmExtensionsForSession,
   guestExitCode,
   loadStudioWasm,
+  resetLoadedWasmExtensions,
   setStudioDefaultHostLogSink,
   setStandaloneGuiEventDispatcher,
   setStudioWindowVfsBackendFactory,
   withHostBridgeSession,
+  withHostBridgeSessionSync,
   type StudioDiagnosticRecord,
   type StudioPreviewHandle,
   type StudioWasm,
@@ -473,6 +467,12 @@ export class WebBackend implements Backend {
   readonly platform = 'wasm' as const;
 
   private guiOperationChain: Promise<void> = Promise.resolve();
+  private nextConsoleOperationId = 0n;
+  private activeConsoleRun: {
+    operationId: string;
+    cancel: () => Promise<void>;
+  } | null = null;
+  private readonly guiStartupAborts = new Map<number, AbortController>();
   private readonly guiSession = new GuiSessionBinding();
   private readonly previewHandles = new Map<number, StudioPreviewHandle>();
   private readonly guiVfsRoots = new Map<number, string>();
@@ -1180,11 +1180,7 @@ export class WebBackend implements Backend {
   }
 
   async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
-    return this.discoverProjects(WORKSPACE_ROOT);
-  }
-
-  async discoverProjects(root: string): Promise<DiscoveredProject[]> {
-    const entries = await this.listDir(root);
+    const entries = await this.listDir(WORKSPACE_ROOT);
     const projects: DiscoveredProject[] = [];
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue;
@@ -1211,7 +1207,7 @@ export class WebBackend implements Backend {
     return listDirEntries(normalized);
   }
 
-  async statPath(path: string): Promise<FsStat> {
+  private async statPath(path: string): Promise<FsStat> {
     const normalized = normalizePath(path);
     const isDir = directories.has(normalized);
     const content = vfsFiles.get(normalized);
@@ -1230,16 +1226,6 @@ export class WebBackend implements Backend {
     const content = readTextFile(normalized);
     if (content === null) throw new Error(`File not found: ${normalized}`);
     return content;
-  }
-
-  async readMany(paths: string[]): Promise<ReadManyResult[]> {
-    return paths.map((path) => {
-      const normalized = normalizePath(path);
-      const content = readTextFile(normalized);
-      return content !== null
-        ? { path: normalized, content, error: null }
-        : { path, content: null, error: `File not found: ${path}` };
-    });
   }
 
   async writeFile(path: string, content: string): Promise<void> {
@@ -1264,91 +1250,64 @@ export class WebBackend implements Backend {
     throwPublicVfsError('rename entry', `${oldNorm} -> ${newNorm}`, vfsRename(oldNorm, newNorm));
   }
 
-  async copyEntry(src: string, dst: string): Promise<void> {
-    const srcNorm = checkedPublicVfsPath(src);
-    const dstNorm = checkedPublicVfsPath(dst);
-    throwPublicVfsError('copy entry', `${srcNorm} -> ${dstNorm}`, copyVfsEntryAtomically(srcNorm, dstNorm));
-  }
-
-  async grep(path: string, pattern: string, opts?: GrepOpts): Promise<GrepMatch[]> {
-    const results: GrepMatch[] = [];
-    const maxResults = opts?.maxResults ?? 500;
-    const caseSensitive = opts?.caseSensitive ?? false;
-    const patternCmp = caseSensitive ? pattern : pattern.toLowerCase();
-    for (const [filePath] of vfsFiles) {
-      if (!filePath.startsWith(normalizePath(path))) continue;
-      const content = readTextFile(filePath);
-      if (content === null) continue;
-      content.split('\n').forEach((line, idx) => {
-        if (results.length >= maxResults) return;
-        const lineCmp = caseSensitive ? line : line.toLowerCase();
-        const col = lineCmp.indexOf(patternCmp);
-        if (col >= 0) results.push({ path: filePath, line: idx + 1, column: col, text: line });
-      });
-    }
-    return results;
-  }
-
-  async checkVo(path: string): Promise<CheckResult> {
-    const normalized = normalizePath(path);
-    const result = await compileEntryForCommand(normalized, false);
-    return { ok: result.ok, errors: result.errors };
-  }
-
-  async compileVo(path: string): Promise<CompileResult> {
-    const normalized = normalizePath(path);
-    const result = await compileEntryForCommand(normalized, true);
-    if (!result.ok || !result.bytecode) {
-      return { ok: false, errors: result.errors, outputPath: undefined };
-    }
-    const outputPath = defaultCompilerOutputPath(normalized);
-    throwPublicVfsError('write compiler output', outputPath, vfsWriteFile(outputPath, result.bytecode, 0o644));
-    return { ok: true, errors: [], outputPath };
-  }
-
-  async formatVo(_path: string): Promise<string> {
-    throw new Error('vo format is not wired in WASM mode yet');
-  }
-
-  async buildVo(path: string, output?: string): Promise<BuildResult> {
-    const normalized = normalizePath(path);
-    const result = await compileEntryForCommand(normalized, true);
-    if (!result.ok || !result.bytecode) {
-      return { ok: false, errors: result.errors, outputPath: undefined };
-    }
-    const outputPath = output ? checkedPublicVfsPath(output) : defaultCompilerOutputPath(normalized);
-    throwPublicVfsError('write build output', outputPath, vfsWriteFile(outputPath, result.bytecode, 0o644));
-    return { ok: true, errors: [], outputPath };
-  }
-
   async dumpVo(path: string): Promise<string> {
     const normalized = normalizePath(path);
     const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
     const wasm = await getStudioWasm();
-    await wasm.prepareEntry(normalized, workspaceDiscovery);
-    return wasm.dumpEntry(normalized, workspaceDiscovery);
+    return withHostBridgeSession(0, () => wasm.dumpEntry(normalized, workspaceDiscovery));
   }
 
   async dumpGuiBytecode(path: string): Promise<string> {
     const normalized = normalizePath(path);
     const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
     const wasm = await getStudioWasm();
-    await wasm.prepareEntry(normalized, workspaceDiscovery);
-    return wasm.dumpGuiEntry(normalized, workspaceDiscovery);
+    return withHostBridgeSession(0, () => wasm.dumpGuiEntry(normalized, workspaceDiscovery));
   }
 
   runVo(path: string, _opts?: RunOpts): StreamHandle<RunEvent> {
     const normalized = normalizePath(path);
     const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
+    const previousRun = this.activeConsoleRun;
+    if (previousRun) {
+      void previousRun.cancel().catch((error) => {
+        console.error('[Vo Studio] failed to cancel superseded console run', error);
+      });
+    }
+    const operationId = `console:${++this.nextConsoleOperationId}`;
     return makeStreamHandleFromProducer<RunEvent>((emit, onDone, onError) => {
+      let stopped = false;
+      let cancelPromise: Promise<void> | null = null;
+      const cancel = (): Promise<void> => {
+        if (cancelPromise) return cancelPromise;
+        stopped = true;
+        emit({ kind: 'stopped' });
+        onDone();
+        cancelPromise = getStudioWasm().then((wasm) => {
+          wasm.cancelStudioOperation(operationId);
+        });
+        return cancelPromise;
+      };
+      this.activeConsoleRun = { operationId, cancel };
       (async () => {
         const start = performance.now();
         const wasm = await getStudioWasm();
-        await wasm.prepareEntry(normalized, workspaceDiscovery);
-        const result = withRuntimeVfsRoot(
+        if (stopped) {
+          wasm.cancelStudioOperation(operationId);
+          return;
+        }
+        const result = await this.serializeGuiOperation(() => withRuntimeVfsRoot(
           runtimeRootForEntry(normalized, workspaceDiscovery),
-          () => wasm.compileRunEntry(normalized, workspaceDiscovery),
-        );
+          () => withHostBridgeSession(0, async () => {
+            if (stopped) throw new Error('console run cancelled');
+            resetLoadedWasmExtensions();
+            try {
+              return await wasm.compileRunEntry(normalized, workspaceDiscovery, operationId);
+            } finally {
+              resetLoadedWasmExtensions();
+            }
+          }),
+        ));
+        if (stopped) return;
         if (result.output) {
           for (const line of result.output.split('\n')) {
             emit({ kind: 'stdout', text: line });
@@ -1358,14 +1317,20 @@ export class WebBackend implements Backend {
         emit({ kind: 'done', exitCode: result.exitCode, durationMs });
         onDone();
       })().catch((err) => {
+        if (stopped) return;
         emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
         onDone();
+      }).finally(() => {
+        if (this.activeConsoleRun?.operationId === operationId) {
+          this.activeConsoleRun = null;
+        }
       });
+      return () => { void cancel(); };
     });
   }
 
   async stopVoRun(): Promise<void> {
-    return;
+    await this.activeConsoleRun?.cancel();
   }
 
   async runGui(path: string, session: GuiSessionToken): Promise<GuiRunOutput> {
@@ -1373,6 +1338,9 @@ export class WebBackend implements Backend {
     const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
     const targetLabel = displayPath(normalized);
     const sessionId = session.id;
+    const startupAbort = new AbortController();
+    this.guiStartupAborts.get(sessionId)?.abort(new Error('GUI startup superseded'));
+    this.guiStartupAborts.set(sessionId, startupAbort);
     this.guiSession.activate(session);
     for (const [liveSessionId, host] of this.voguiSubscriptions) {
       host.setInteractive(liveSessionId === sessionId);
@@ -1392,30 +1360,24 @@ export class WebBackend implements Backend {
         consolePush('system', `Opening GUI ${targetLabel}`);
         const wasm = await getStudioWasm();
         this.assertGuiSessionCurrent(sessionId);
-        consolePush('system', `Preparing dependencies for ${targetLabel}...`);
-        const prepareStart = performance.now();
-        await wasm.prepareEntry(normalized, workspaceDiscovery);
-        const prepareDurationMs = performance.now() - prepareStart;
-        consolePush('system', `Prepared dependencies for ${targetLabel} in ${formatDurationMs(prepareDurationMs)}`);
-        this.assertGuiSessionCurrent(sessionId);
         this.installStandaloneGuiDispatcher(sessionId);
-        consolePush('system', `Compiling and starting GUI ${targetLabel}...`);
+        consolePush('system', `Preparing and compiling GUI ${targetLabel}...`);
         const compileStart = performance.now();
-        const compileResult = wasm.compileGui(normalized, workspaceDiscovery);
-        this.assertGuiSessionCurrent(sessionId);
+        const compileResult = await withHostBridgeSession(
+          0,
+          () => {
+            this.assertGuiSessionCurrent(sessionId);
+            return wasm.compileGui(normalized, workspaceDiscovery, `gui:${sessionId}`);
+          },
+        );
+        if (!this.guiSession.isActiveId(sessionId)) {
+          wasm.discardPreparedGuiLaunch(compileResult.launchToken);
+          throw new Error('GUI backend session superseded');
+        }
         const compileDurationMs = performance.now() - compileStart;
-        const wasmExtensionLabels = compileResult.wasmExtensions.map((ext) => `${ext.name}=>${ext.moduleKey ?? ext.name}`);
-        const wasmExtensionSummary = wasmExtensionLabels.length > 0 ? wasmExtensionLabels.join(', ') : 'none';
         if (shouldEmitVoplayPerfConsoleDiagnostics()) {
           console.info(`[studio-gui] compileGui ${normalized} ${Math.round(compileDurationMs)}ms`);
-          console.info(`[studio-gui] wasmExtensions ${normalized} count=${wasmExtensionLabels.length} names=${wasmExtensionSummary}`);
         }
-        consolePush(
-          'system',
-          wasmExtensionLabels.length > 0
-            ? `GUI compile discovered WASM extensions: ${wasmExtensionSummary}`
-            : 'GUI compile discovered no WASM extensions',
-        );
         this.assertGuiSessionCurrent(sessionId);
         const compiled: GuiCompileOutput = {
           bytecode: compileResult.bytecode,
@@ -1423,13 +1385,27 @@ export class WebBackend implements Backend {
           launchToken: compileResult.launchToken,
           framework: compileResult.framework,
           providerFrameworks: compileResult.providerFrameworks,
-          wasmExtensions: compileResult.wasmExtensions,
+          vfsSnapshot: compileResult.vfsSnapshot,
         };
         const assertCurrent = (id: number) => { this.assertGuiSessionCurrent(id); };
-        const output = await withHostBridgeSession(
-          sessionId,
-          () => executeGuiFromCompileOutput(compiled, this, wasm, sessionId, assertCurrent),
-        );
+        let output: Awaited<ReturnType<typeof executeGuiFromCompileOutput>>;
+        try {
+          output = await withHostBridgeSession(
+            sessionId,
+            () => executeGuiFromCompileOutput(
+              compiled,
+              wasm,
+              sessionId,
+              assertCurrent,
+              startupAbort.signal,
+            ),
+          );
+        } finally {
+          // The session wrapper can fail before invoking the GUI pipeline. In
+          // that case Rust still owns the one-shot payload behind this token.
+          // Discarding an already-consumed token is intentionally harmless.
+          wasm.discardPreparedGuiLaunch(compiled.launchToken);
+        }
         if (!this.guiSession.isActiveId(sessionId)) {
           wasm.stopGui(output.previewHandle.index, output.previewHandle.generation);
           throw new Error('GUI backend session superseded');
@@ -1497,6 +1473,10 @@ export class WebBackend implements Backend {
         }
       }
       throw error;
+    } finally {
+      if (this.guiStartupAborts.get(sessionId) === startupAbort) {
+        this.guiStartupAborts.delete(sessionId);
+      }
     }
   }
 
@@ -1514,19 +1494,6 @@ export class WebBackend implements Backend {
     session?: GuiSessionToken,
   ): Promise<void> {
     await this.dispatchGuiEventAsyncSerialized(handlerId, payload, this.guiSessionId(session));
-  }
-
-  async pushIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<void> {
-    const sessionId = this.guiSessionId(session);
-    await this.runGuiEventSerialized<void>(
-      (wasm) => {
-        const preview = this.previewHandle(sessionId);
-        wasm.pushIslandData(preview.index, preview.generation, data);
-        this.drainPendingGuiHostEvents(wasm, sessionId);
-      },
-      undefined,
-      sessionId,
-    );
   }
 
   async pushAndPollIslandTransport(
@@ -1867,6 +1834,27 @@ export class WebBackend implements Backend {
       this.rejectGuiFirstRenderWaiter(new Error('GUI session stopped'), session.id);
     }
     if (session) resetGuiHostBridge(session.id);
+    let extensionsDropped = false;
+    let earlyCleanupError: unknown;
+    if (session) {
+      this.guiStartupAborts.get(session.id)?.abort(new Error('GUI session stopped'));
+      // Break an extension-ready await before waiting for the serialized GUI
+      // lane; the Rust cancellation then drops dependency fetches as well.
+      try {
+        const wasm = await getStudioWasm();
+        wasm.cancelStudioOperation(`gui:${session.id}`);
+      } catch (error) {
+        earlyCleanupError = error;
+      }
+      try {
+        withHostBridgeSessionSync(session.id, () => {
+          dropLoadedWasmExtensionsForSession(session.id);
+        });
+        extensionsDropped = true;
+      } catch (error) {
+        earlyCleanupError ??= error;
+      }
+    }
     try {
       await this.serializeGuiOperation(async () => {
         if (!session) return;
@@ -1880,9 +1868,10 @@ export class WebBackend implements Backend {
           this.diagnosticDropped.delete(session.id);
           if (preview) wasm.stopGui(preview.index, preview.generation);
           if (preview) releaseBrowserPlatformSession(preview);
-          dropLoadedWasmExtensionsForSession(session.id);
+          if (!extensionsDropped) dropLoadedWasmExtensionsForSession(session.id);
         });
       });
+      if (earlyCleanupError) throw earlyCleanupError;
     } finally {
       const selected = this.guiSession.active;
       if (!selected) {
@@ -1894,31 +1883,6 @@ export class WebBackend implements Backend {
         this.installStandaloneGuiDispatcher(selected.id);
       }
     }
-  }
-
-  async getRendererBridgeVfsSnapshot(
-    path: string,
-    sessionId?: number,
-  ): Promise<RendererBridgeVfsSnapshot> {
-    const session = sessionId === undefined ? this.guiSession.active : this.guiSession.get(sessionId);
-    if (!session) throw new Error('GUI preview session is stale');
-    return this.runGuiEventSerialized(
-      (wasm) => {
-        const normalized = normalizePath(path);
-        const snapshot = wasm.getRenderIslandVfsSnapshot(
-          normalized,
-          workspaceDiscoveryForPath(normalized),
-        );
-        return snapshot;
-      },
-      null,
-      session.id,
-    ).then((snapshot) => {
-      if (snapshot === null) {
-        throw new Error('GUI preview session was superseded while reading renderer VFS');
-      }
-      return snapshot;
-    });
   }
 
   async voInit(path: string, module: string, mainContent: string): Promise<string> {
@@ -1946,11 +1910,6 @@ export class WebBackend implements Backend {
       );
     }
     return normalized;
-  }
-
-  async voVersion(): Promise<string> {
-    const wasm = await getStudioWasm();
-    return wasm.voVersion();
   }
 
   spawnProcess(_program: string, _args: string[], _cwd?: string, _env?: Record<string, string>): StreamHandle<ProcEvent> {
@@ -1986,11 +1945,14 @@ export class WebBackend implements Backend {
     }
   }
 
-  async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
-    if (files.length !== 1 || !files[0]?.path.endsWith('.vo')) {
-      throw new Error('External project creation requires exactly one .vo file');
-    }
-    await this.createWorkspaceFiles(files);
+  async createProjectFile(path: string, content: string): Promise<void> {
+    const normalized = checkedPublicVfsPath(path);
+    if (!normalized.endsWith('.vo')) throw new Error(`Project file must use the .vo extension: ${normalized}`);
+    throwPublicVfsError(
+      'create project file',
+      normalized,
+      vfsWriteFile(normalized, textEncoder.encode(content), 0o644, true),
+    );
   }
 
   async gitExec(_op: GitOp): Promise<GitResult> {
@@ -2039,167 +2001,6 @@ function throwPublicVfsError(operation: string, path: string, error: string | nu
   if (error) throw new Error(`Could not ${operation} ${path}: ${error}`);
 }
 
-function copyVfsEntryAtomically(src: string, dst: string): string | null {
-  if (src === ROOT || dst === ROOT) return ERR_PERMISSION;
-  const sourceIsFile = vfsFiles.has(src);
-  const sourceIsDirectory = directories.has(src);
-  if (!sourceIsFile && !sourceIsDirectory) return ERR_NOT_EXIST;
-  if (src === dst || (sourceIsDirectory && (vfsPathContains(src, dst) || vfsPathContains(dst, src)))) {
-    return invalidVfsArgument('source and destination trees overlap');
-  }
-  if (overlapsReadOnlyStaticTree(dst)) return ERR_PERMISSION;
-
-  type PlannedDirectory = { mode: number; modTime: number };
-  type PlannedFile = { bytes: Uint8Array; mode: number; modTime: number };
-  const directoryPlans = new Map<string, PlannedDirectory>();
-  const filePlans = new Map<string, PlannedFile>();
-  let plannedPathKeyBytes = 0;
-  const reservePlannedPath = (path: string, exists: boolean): boolean => {
-    if (exists) return true;
-    plannedPathKeyBytes += vfsPathKeyBytes(path);
-    return Number.isSafeInteger(plannedPathKeyBytes)
-      && plannedPathKeyBytes <= MAX_VFS_PATH_KEY_BYTES;
-  };
-
-  if (sourceIsFile) {
-    if (!reservePlannedPath(dst, filePlans.has(dst))) return ERR_OUT_OF_MEMORY;
-    filePlans.set(dst, {
-      bytes: vfsFiles.get(src)!,
-      mode: vfsFileModes.get(src) ?? 0o644,
-      modTime: vfsFileModTimes.get(src) ?? Date.now(),
-    });
-  } else {
-    for (const sourcePath of [...directories].filter((path) => vfsPathContains(src, path))) {
-      const targetPath = `${dst}${sourcePath.slice(src.length)}`;
-      if (!reservePlannedPath(targetPath, directoryPlans.has(targetPath))) return ERR_OUT_OF_MEMORY;
-      directoryPlans.set(targetPath, {
-        mode: vfsDirModes.get(sourcePath) ?? 0o755,
-        modTime: vfsDirModTimes.get(sourcePath) ?? Date.now(),
-      });
-    }
-    for (const [sourcePath, bytes] of [...vfsFiles].filter(([path]) => vfsPathContains(src, path))) {
-      const targetPath = `${dst}${sourcePath.slice(src.length)}`;
-      if (!reservePlannedPath(targetPath, filePlans.has(targetPath))) return ERR_OUT_OF_MEMORY;
-      filePlans.set(targetPath, {
-        bytes,
-        mode: vfsFileModes.get(sourcePath) ?? 0o644,
-        modTime: vfsFileModTimes.get(sourcePath) ?? Date.now(),
-      });
-    }
-  }
-
-  const addMissingAncestors = (path: string): string | null => {
-    let parent = dirname(path);
-    while (parent !== ROOT) {
-      if (vfsFiles.has(parent) || filePlans.has(parent)) return ERR_NOT_DIR;
-      if (!directories.has(parent) && !directoryPlans.has(parent)) {
-        if (!reservePlannedPath(parent, false)) return ERR_OUT_OF_MEMORY;
-        directoryPlans.set(parent, { mode: 0o755, modTime: Date.now() });
-      }
-      parent = dirname(parent);
-    }
-    return null;
-  };
-  for (const path of [...directoryPlans.keys(), ...filePlans.keys()]) {
-    const [checked, pathError] = checkedRuntimeVfsPath(path);
-    if (pathError || checked !== path) return pathError ?? ERR_INVALID;
-    const ancestorError = addMissingAncestors(path);
-    if (ancestorError) return ancestorError;
-  }
-
-  const finalDirectories = new Set(directories);
-  for (const path of directoryPlans.keys()) finalDirectories.add(path);
-  const finalFiles = new Map(vfsFiles);
-  for (const [path, plan] of filePlans) finalFiles.set(path, plan.bytes);
-  for (const path of finalFiles.keys()) {
-    if (finalDirectories.has(path)) return ERR_IS_DIR;
-  }
-  for (const path of directoryPlans.keys()) {
-    if (finalFiles.has(path)) return ERR_NOT_DIR;
-  }
-
-  for (const path of directoryPlans.keys()) {
-    if (directories.has(path)) continue;
-    const parent = dirname(path);
-    if (directories.has(parent) && !canMutateVfsDirectory(parent)) return ERR_PERMISSION;
-  }
-  for (const path of filePlans.keys()) {
-    const parent = dirname(path);
-    if (directories.has(parent) && !canMutateVfsDirectory(parent)) return ERR_PERMISSION;
-    const existingMode = vfsFileModes.get(path);
-    if (existingMode !== undefined && (existingMode & 0o222) === 0) return ERR_PERMISSION;
-  }
-
-  let finalBytes = liveVfsBytes;
-  for (const [path, plan] of filePlans) {
-    finalBytes += plan.bytes.byteLength - (vfsFiles.get(path)?.byteLength ?? 0);
-  }
-  if (
-    !Number.isSafeInteger(finalBytes)
-    || finalBytes + orphanVfsBytes > MAX_VFS_TOTAL_BYTES
-    || finalDirectories.size + finalFiles.size + orphanVfsNodes > MAX_VFS_NODES
-    || aggregateVfsPathKeyBytes(finalDirectories, finalFiles.keys())
-      + orphanVfsPathBytes
-      + openVfsPathBytes
-      > MAX_VFS_PATH_KEY_BYTES
-  ) {
-    return ERR_OUT_OF_MEMORY;
-  }
-  const childCounts = new Map<string, number>();
-  for (const path of finalDirectories) {
-    if (path !== ROOT) childCounts.set(dirname(path), (childCounts.get(dirname(path)) ?? 0) + 1);
-  }
-  for (const path of finalFiles.keys()) {
-    childCounts.set(dirname(path), (childCounts.get(dirname(path)) ?? 0) + 1);
-  }
-  if ([...childCounts.values()].some((count) => count > MAX_VFS_DIRECTORY_ENTRIES)) {
-    return 'directory contains too many entries';
-  }
-
-  const snapshot = {
-    directories: new Set(directories),
-    files: new Map(files),
-    vfsFiles: new Map(vfsFiles),
-    vfsFileModes: new Map(vfsFileModes),
-    vfsFileModTimes: new Map(vfsFileModTimes),
-    vfsDirModes: new Map(vfsDirModes),
-    vfsDirModTimes: new Map(vfsDirModTimes),
-    liveVfsBytes,
-    liveVfsPathBytes,
-    textCacheBytes,
-  };
-  try {
-    for (const [path, plan] of [...directoryPlans].sort(([left], [right]) => (
-      left.length - right.length || compareUtf8(left, right)
-    ))) {
-      if (directories.has(path)) continue;
-      addVfsDirectoryKey(path);
-      vfsDirModes.set(path, normalizedVfsMode(plan.mode));
-      vfsDirModTimes.set(path, plan.modTime);
-    }
-    for (const [path, plan] of filePlans) {
-      setVfsFile(path, plan.bytes, plan.mode, false);
-      vfsFileModTimes.set(path, plan.modTime);
-    }
-    if ([...directoryPlans.keys(), ...filePlans.keys()].some(isRuntimePersistPath)) {
-      persistRuntimeVfsSnapshot();
-    }
-    return null;
-  } catch (error) {
-    restoreMap(directories, snapshot.directories);
-    restoreMap(files, snapshot.files);
-    restoreMap(vfsFiles, snapshot.vfsFiles);
-    restoreMap(vfsFileModes, snapshot.vfsFileModes);
-    restoreMap(vfsFileModTimes, snapshot.vfsFileModTimes);
-    restoreMap(vfsDirModes, snapshot.vfsDirModes);
-    restoreMap(vfsDirModTimes, snapshot.vfsDirModTimes);
-    liveVfsBytes = snapshot.liveVfsBytes;
-    liveVfsPathBytes = snapshot.liveVfsPathBytes;
-    textCacheBytes = snapshot.textCacheBytes;
-    return error instanceof Error ? error.message : ERR_OUT_OF_MEMORY;
-  }
-}
-
 function setRuntimeVfsRoot(path: string): void {
   const [normalized, error] = checkedRuntimeVfsPath(normalizePath(path || ROOT));
   if (
@@ -2220,12 +2021,12 @@ function clearRuntimeVfsRoot(): void {
   runtimeVfsFloor = null;
 }
 
-function withRuntimeVfsRoot<T>(path: string, operation: () => T): T {
+async function withRuntimeVfsRoot<T>(path: string, operation: () => Promise<T>): Promise<T> {
   const previousRoot = runtimeVfsRoot;
   const previousFloor = runtimeVfsFloor;
   try {
     setRuntimeVfsRoot(path);
-    return operation();
+    return await operation();
   } finally {
     runtimeVfsRoot = previousRoot;
     runtimeVfsFloor = previousFloor;
@@ -2386,64 +2187,6 @@ function shouldEmitStudioLogDebug(): boolean {
   } catch {
     return false;
   }
-}
-
-async function compileEntryForCommand(
-  path: string,
-  includeBytecode: boolean,
-): Promise<{ ok: boolean; errors: DiagnosticError[]; bytecode: Uint8Array | null }> {
-  const normalized = normalizePath(path);
-  const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
-  try {
-    const wasm = await getStudioWasm();
-    await wasm.prepareEntry(normalized, workspaceDiscovery);
-    return includeBytecode
-      ? wasm.compileEntry(normalized, workspaceDiscovery)
-      : wasm.checkEntry(normalized, workspaceDiscovery);
-  } catch (error) {
-    return {
-      ok: false,
-      errors: [diagnosticFromError(normalized, 'compile', error)],
-      bytecode: null,
-    };
-  }
-}
-
-function diagnosticFromError(path: string, category: string, error: unknown): DiagnosticError {
-  return {
-    file: normalizePath(path),
-    line: 0,
-    column: 0,
-    message: error instanceof Error ? error.message : String(error),
-    category,
-    moduleStage: null,
-    moduleKind: null,
-    modulePath: null,
-    moduleVersion: null,
-  };
-}
-
-function defaultCompilerOutputPath(path: string): string {
-  return withExtension(compilerOutputBasePath(path), 'vob');
-}
-
-function compilerOutputBasePath(path: string): string {
-  const normalized = normalizePath(path);
-  if (directories.has(normalized)) {
-    return findProjectRoot(normalized) ?? normalized;
-  }
-  const parent = dirname(normalized);
-  return findProjectRoot(parent) ?? normalized;
-}
-
-function withExtension(path: string, extension: string): string {
-  const normalized = normalizePath(path);
-  const slash = normalized.lastIndexOf('/');
-  const dot = normalized.lastIndexOf('.');
-  if (dot > slash) {
-    return `${normalized.slice(0, dot + 1)}${extension}`;
-  }
-  return `${normalized}.${extension}`;
 }
 
 function ensureVfsBindings(): void {
@@ -3530,7 +3273,7 @@ function vfsReadFileLimited(path: string, maxBytes: number): [Uint8Array | null,
   return [new Uint8Array(bytes), null];
 }
 
-function vfsWriteFile(path: string, data: Uint8Array, mode: number): string | null {
+function vfsWriteFile(path: string, data: Uint8Array, mode: number, createOnly = false): string | null {
   if (!(data instanceof Uint8Array)) return invalidVfsArgument('data must be bytes');
   if (data.length > MAX_VFS_FILE_BYTES) return ERR_FILE_TOO_LARGE;
   if (!validVfsMode(mode)) return invalidVfsArgument('invalid file mode');
@@ -3541,6 +3284,7 @@ function vfsWriteFile(path: string, data: Uint8Array, mode: number): string | nu
   if (parentError) return parentError;
   if (normalized === ROOT) return ERR_IS_DIR;
   if (hasVfsTrailingSlash(path)) return ERR_NOT_DIR;
+  if (createOnly && (directories.has(normalized) || vfsFiles.has(normalized))) return ERR_EXIST;
   if (directories.has(normalized)) return ERR_IS_DIR;
   const parent = dirname(normalized);
   if (vfsFiles.has(parent)) return ERR_NOT_DIR;

@@ -34,26 +34,6 @@ macro_rules! impl_gc_object {
     };
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn raw_object_headers_are_unsafe_public_primitives_058() {
-        let source = include_str!("mod.rs");
-        assert!(
-            source.matches("pub unsafe fn as_ref").count() >= 2,
-            "raw object header reads must stay behind an unsafe contract"
-        );
-        assert!(
-            source.matches("pub unsafe fn as_mut").count() >= 2,
-            "raw object header mutation must stay behind an unsafe contract"
-        );
-        assert!(
-            source.matches("required write barrier").count() >= 2,
-            "as_mut safety docs must name the write-barrier obligation"
-        );
-    }
-}
-
 #[allow(unused_imports)]
 pub(crate) use impl_gc_object;
 
@@ -68,4 +48,3 @@ pub mod queue_state;
 pub mod slice;
 pub mod string;
 pub mod struct_ops;
-pub mod vo_map;

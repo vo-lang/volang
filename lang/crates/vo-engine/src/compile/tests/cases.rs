@@ -190,7 +190,16 @@ fn render_cached_release_manifest(
 ) -> String {
     let mod_content = fs::read_to_string(module_dir.join("vo.mod")).unwrap();
     let source_files = [("vo.mod", mod_content.as_bytes())];
-    let source_entries = canonical_test_package_entries(&source_files);
+    render_cached_release_manifest_with_files(locked, module_dir, &source_files, artifacts)
+}
+
+fn render_cached_release_manifest_with_files(
+    locked: &vo_module::schema::lockfile::LockedModule,
+    module_dir: &Path,
+    source_files: &[(&str, &[u8])],
+    artifacts: Vec<ManifestArtifact>,
+) -> String {
+    let source_entries = canonical_test_package_entries(source_files);
     let package_bytes = TreeManifest {
         format: 1,
         files: source_entries,
@@ -198,7 +207,12 @@ fn render_cached_release_manifest(
     .render()
     .unwrap();
     fs::write(module_dir.join("vo.tree.json"), &package_bytes).unwrap();
-    let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content).unwrap();
+    let mod_content = source_files
+        .iter()
+        .find_map(|(path, bytes)| (*path == "vo.mod").then_some(*bytes))
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .expect("cached release fixture requires UTF-8 vo.mod");
+    let mod_file = vo_module::schema::modfile::ModFile::parse(mod_content).unwrap();
     let dependencies = mod_file
         .dependencies
         .iter()
@@ -257,6 +271,77 @@ fn test_compile_source_without_external_modules() {
     assert_eq!(output.extensions.len(), 0);
 
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn compile_output_clones_share_the_verified_module_image() {
+    let root = temp_dir("vo_compile_shared_loaded_module");
+    fs::create_dir_all(&root).unwrap();
+
+    let output = compile_source_at("package main\nfunc main() {}\n", &root).unwrap();
+    let cloned = output.clone();
+
+    assert!(std::sync::Arc::ptr_eq(&output.module, &cloned.module));
+    assert!(core::ptr::eq(
+        output.module.runtime_type_facts(),
+        cloned.module.runtime_type_facts(),
+    ));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_auto_install_loads_bytecode_without_source_discovery() {
+    let root = temp_dir("vo_compile_auto_install_bytecode");
+    let mod_cache = root.join("mod-cache");
+    fs::create_dir_all(&root).unwrap();
+
+    let expected = compile_source_at("package main\nfunc main() {}\n", &root).unwrap();
+    let expected_bytes = expected.module.serialize().unwrap();
+    let registry = MockRegistry::new();
+
+    for name in ["program.vob", "program.voc", ".vob", ".voc"] {
+        let bytecode = root.join(name);
+        fs::write(&bytecode, &expected_bytes).unwrap();
+        let loaded = with_mod_cache_root_override(&mod_cache, || {
+            compile_with_auto_install_using_registry(
+                bytecode.to_string_lossy().as_ref(),
+                &registry,
+                &auto_workspace_options(),
+            )
+            .expect("bytecode must bypass source dependency discovery")
+        });
+
+        assert_eq!(loaded.module.serialize().unwrap(), expected_bytes);
+    }
+    assert_eq!(registry.source_fetches(), 0);
+    assert!(!mod_cache.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_path_auto_install_loads_non_utf8_bytecode_name() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = temp_dir("vo_compile_non_utf8_bytecode");
+    fs::create_dir_all(&root).unwrap();
+    let expected = compile_source_at("package main\nfunc main() {}\n", &root).unwrap();
+    let bytecode = root.join(std::ffi::OsString::from_vec(b"program-\xff.vob".to_vec()));
+    if let Err(error) = fs::write(&bytecode, expected.module.serialize().unwrap()) {
+        assert_eq!(error.raw_os_error(), Some(libc::EILSEQ));
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
+
+    let loaded = super::super::compile_path_with_auto_install(&bytecode).unwrap();
+    assert_eq!(
+        loaded.module.serialize().unwrap(),
+        expected.module.serialize().unwrap()
+    );
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1098,6 +1183,354 @@ fn test_resolve_extension_manifests_uses_cached_native_artifact_path() {
     assert_eq!(resolved[0].native_path, artifact_path);
 
     fs::remove_dir_all(&mod_root).unwrap();
+}
+
+#[test]
+fn test_compile_snapshot_uses_selected_profile_artifact_path() {
+    let root = temp_dir("vo_compile_selected_profile_artifact");
+    let app_root = root.join("app");
+    let mod_cache = root.join("mod-cache");
+    fs::create_dir_all(&app_root).unwrap();
+    drop(vo_module::cache::acquire_read_lease(&mod_cache).unwrap());
+
+    let module = vo_module::identity::ModulePath::parse("github.com/acme/profilelib").unwrap();
+    let version = ExactVersion::parse("1.0.0").unwrap();
+    let target = current_target_triple();
+    let artifact_bytes = b"selected-profile-artifact";
+    let artifact_digest = Digest::from_sha256(artifact_bytes);
+    let schema = Digest::from_sha256(b"profile-schema");
+    let abi = Digest::from_sha256(b"profile-abi");
+    let vo_graph = Digest::from_sha256(b"profile-vo-graph");
+    let rust_graph = Digest::from_sha256(b"profile-rust-graph");
+    let js_graph = Digest::from_sha256(b"profile-js-graph");
+    let recipe_graph = Digest::from_sha256(b"profile-recipe-graph");
+    let sbom = Digest::from_sha256(b"profile-sbom");
+    let capability_manifest = Digest::from_sha256(b"profile-capabilities");
+    let provenance = Digest::from_sha256(b"profile-provenance");
+    let lib_mod = format!(
+        concat!(
+            "format = 1\n",
+            "module = \"github.com/acme/profilelib\"\n",
+            "version = \"1.0.0\"\n",
+            "vo = \"0.1.0\"\n\n",
+            "[capabilities.render]\n\n",
+            "[profiles.full]\n",
+            "capabilities = [\"render\"]\n\n",
+            "[extension]\n",
+            "name = \"profilelib\"\n\n",
+            "[[extension.artifacts]]\n",
+            "profile = \"full\"\n",
+            "target = \"{target}\"\n",
+            "toolchain = \"0.1.0\"\n",
+            "schema = \"{schema}\"\n",
+            "abi = \"{abi}\"\n",
+            "vo_graph = \"{vo_graph}\"\n",
+            "rust_graph = \"{rust_graph}\"\n",
+            "js_graph = \"{js_graph}\"\n",
+            "recipe_graph = \"{recipe_graph}\"\n",
+            "roles = [{{ role = \"asset\", kind = \"extension-native\", name = \"selected.bin\", digest = \"{artifact_digest}\", sbom = \"{sbom}\", capability_manifest = \"{capability_manifest}\", provenance = \"{provenance}\" }}]\n",
+        ),
+        target = target,
+        schema = schema,
+        abi = abi,
+        vo_graph = vo_graph,
+        rust_graph = rust_graph,
+        js_graph = js_graph,
+        recipe_graph = recipe_graph,
+        artifact_digest = artifact_digest,
+        sbom = sbom,
+        capability_manifest = capability_manifest,
+        provenance = provenance,
+    );
+    let lib_source = "package profilelib\nconst Value = 7\n";
+    let mut locked = make_locked(
+        module.as_str(),
+        &version.to_string(),
+        "0.1.0",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    let module_dir = locked_module_cache_dir(&mod_cache, &locked);
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(module_dir.join("vo.mod"), &lib_mod).unwrap();
+    fs::write(module_dir.join("lib.vo"), lib_source).unwrap();
+    fs::write(
+        module_dir.join(vo_module::cache::layout::VERSION_MARKER),
+        format!("{version}\n"),
+    )
+    .unwrap();
+    let source_digest = Digest::from_sha256(b"profile-source-archive");
+    fs::write(
+        module_dir.join(vo_module::cache::layout::SOURCE_DIGEST_MARKER),
+        format!("{source_digest}\n"),
+    )
+    .unwrap();
+    let artifact = ManifestArtifact {
+        id: ArtifactId {
+            kind: "extension-native".to_string(),
+            target: target.to_string(),
+            name: "selected.bin".to_string(),
+        },
+        size: artifact_bytes.len() as u64,
+        digest: artifact_digest.clone(),
+    };
+    let release_raw = render_cached_release_manifest_with_files(
+        &locked,
+        &module_dir,
+        &[
+            ("lib.vo", lib_source.as_bytes()),
+            ("vo.mod", lib_mod.as_bytes()),
+        ],
+        vec![artifact],
+    );
+    fs::write(module_dir.join("vo.release.json"), &release_raw).unwrap();
+    locked.release = Some(Digest::from_sha256(release_raw.as_bytes()));
+    locked.selection = Some(vo_module::schema::lockfile::LockedCapabilitySelection {
+        requested_by: vec!["github.com/acme/app".to_string()],
+        capabilities: vec!["render".to_string()],
+        target: target.to_string(),
+        toolchain: "0.1.0".to_string(),
+        schema,
+        abi,
+        vo_graph,
+        rust_graph,
+        js_graph,
+        recipe_graph,
+        mode: vo_module::schema::lockfile::LockedArtifactMode::Published,
+        role_artifacts: vec![vo_module::schema::lockfile::LockedRoleArtifact {
+            role: vo_module::profile::ArtifactRole::Asset,
+            kind: "extension-native".to_string(),
+            name: "selected.bin".to_string(),
+            digest: artifact_digest,
+            sbom,
+            capability_manifest,
+            provenance,
+        }],
+        source_recipe: None,
+        source_outputs: Vec::new(),
+    });
+    let selected_path = vo_module::artifact::selected_artifact_relative_path(
+        &locked,
+        &locked.selection.as_ref().unwrap().role_artifacts[0],
+    )
+    .unwrap();
+    fs::create_dir_all(module_dir.join(&selected_path).parent().unwrap()).unwrap();
+    fs::write(module_dir.join(&selected_path), artifact_bytes).unwrap();
+    assert!(!module_dir
+        .join(
+            vo_module::artifact::artifact_relative_path(&ArtifactId {
+                kind: "extension-native".to_string(),
+                target: target.to_string(),
+                name: "selected.bin".to_string(),
+            })
+            .unwrap()
+        )
+        .exists());
+
+    let app_mod = concat!(
+        "format = 1\n",
+        "module = \"github.com/acme/app\"\n",
+        "version = \"0.1.0\"\n",
+        "vo = \"0.1.0\"\n\n",
+        "[dependencies]\n",
+        "\"github.com/acme/profilelib\" = { version = \"^1.0.0\", profile = \"full\" }\n",
+    );
+    fs::write(app_root.join("vo.mod"), app_mod).unwrap();
+    fs::write(
+        app_root.join("vo.lock"),
+        render_lock_with_modules(app_mod, std::slice::from_ref(&locked)),
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("main.vo"),
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/profilelib\"\n",
+            "var Value = profilelib.Value\n",
+            "func main() {}\n",
+        ),
+    )
+    .unwrap();
+
+    let output = with_mod_cache_root_override(&mod_cache, || {
+        compile_with_cache(app_root.to_string_lossy().as_ref())
+    })
+    .expect("compile snapshot must contain the selected profile artifact path");
+    assert_eq!(output.locked_modules, vec![locked]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_compile_snapshot_includes_source_recipe_attestation_and_outputs() {
+    let root = temp_dir("vo_compile_source_recipe_snapshot");
+    let app_root = root.join("app");
+    let mod_cache = root.join("mod-cache");
+    fs::create_dir_all(&app_root).unwrap();
+    drop(vo_module::cache::acquire_read_lease(&mod_cache).unwrap());
+
+    let target = current_target_triple();
+    let lib_mod = format!(
+        concat!(
+            "format = 1\n",
+            "module = \"github.com/acme/sourcelib\"\n",
+            "version = \"1.0.0\"\n",
+            "vo = \"0.1.0\"\n\n",
+            "[capabilities.render]\n\n",
+            "[extension]\n",
+            "name = \"sourcelib\"\n\n",
+            "[[extension.source_recipes]]\n",
+            "derive = true\n",
+            "capabilities = [\"render\"]\n",
+            "target = \"{target}\"\n",
+            "toolchain = \"0.1.0\"\n",
+            "schema_inputs = [\"schema-v1\"]\n",
+            "abi_inputs = [\"abi-v1\"]\n",
+            "role_outputs = [{{ role = \"asset\", kind = \"extension-native\", name = \"built.bin\" }}]\n",
+        ),
+        target = target,
+    );
+    let lib_source = "package sourcelib\nconst Value = 9\n";
+    let parsed_lib_mod = vo_module::schema::modfile::ModFile::parse(&lib_mod).unwrap();
+    let recipe = parsed_lib_mod.extension.as_ref().unwrap().source_recipes[0].clone();
+    let mut locked = make_locked(
+        "github.com/acme/sourcelib",
+        "1.0.0",
+        "0.1.0",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    let module_dir = locked_module_cache_dir(&mod_cache, &locked);
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(module_dir.join("vo.mod"), &lib_mod).unwrap();
+    fs::write(module_dir.join("lib.vo"), lib_source).unwrap();
+    fs::write(
+        module_dir.join(vo_module::cache::layout::VERSION_MARKER),
+        "1.0.0\n",
+    )
+    .unwrap();
+    let source_digest = Digest::from_sha256(b"source-recipe-archive");
+    fs::write(
+        module_dir.join(vo_module::cache::layout::SOURCE_DIGEST_MARKER),
+        format!("{source_digest}\n"),
+    )
+    .unwrap();
+    let release_raw = render_cached_release_manifest_with_files(
+        &locked,
+        &module_dir,
+        &[
+            ("lib.vo", lib_source.as_bytes()),
+            ("vo.mod", lib_mod.as_bytes()),
+        ],
+        Vec::new(),
+    );
+    fs::write(module_dir.join("vo.release.json"), &release_raw).unwrap();
+    locked.release = Some(Digest::from_sha256(release_raw.as_bytes()));
+    locked.selection = Some(vo_module::schema::lockfile::LockedCapabilitySelection {
+        requested_by: vec!["github.com/acme/app".to_string()],
+        capabilities: vec!["render".to_string()],
+        target: target.to_string(),
+        toolchain: recipe.toolchain.clone(),
+        schema: recipe.schema.clone(),
+        abi: recipe.abi.clone(),
+        vo_graph: recipe.vo_graph.clone(),
+        rust_graph: recipe.rust_graph.clone(),
+        js_graph: recipe.js_graph.clone(),
+        recipe_graph: recipe.recipe_graph.clone(),
+        mode: vo_module::schema::lockfile::LockedArtifactMode::SourceRecipe,
+        role_artifacts: Vec::new(),
+        source_recipe: Some(recipe.recipe.clone()),
+        source_outputs: recipe.role_outputs.clone(),
+    });
+
+    let output_bytes = b"materialized-source-profile";
+    let artifact = vo_module::attestation::AttestedRoleArtifact {
+        role: vo_module::profile::ArtifactRole::Asset,
+        kind: "extension-native".to_string(),
+        name: "built.bin".to_string(),
+        size: output_bytes.len() as u64,
+        content_digest: Digest::from_sha256(output_bytes),
+        detached_manifest_digest: Digest::from_sha256(b"pending-manifest"),
+    };
+    let detached = vo_module::attestation::DetachedArtifactManifest {
+        format: vo_module::attestation::DETACHED_ARTIFACT_MANIFEST_FORMAT,
+        module: locked.path.clone(),
+        version: locked.version.clone(),
+        role: artifact.role.clone(),
+        kind: artifact.kind.clone(),
+        name: artifact.name.clone(),
+        target: target.to_string(),
+        capabilities: vec!["render".to_string()],
+        schema: recipe.schema.clone(),
+        abi: recipe.abi.clone(),
+        content_digest: artifact.content_digest.clone(),
+        static_initializer_policy: vo_module::attestation::StaticInitializerPolicy::ProvenAbsent,
+        factories: vec![vo_module::attestation::DetachedProviderFactory {
+            factory_id: 1,
+            role: artifact.role.clone(),
+            export: "create".to_string(),
+            abi: recipe.abi,
+            schema: recipe.schema,
+            capability_digest: vo_module::profile::CapabilitySet::normalize(
+                ["render"],
+                "test capabilities",
+            )
+            .unwrap()
+            .digest(),
+        }],
+    }
+    .render(&locked, &artifact)
+    .unwrap();
+    let materialization = vo_module::attestation::prepare_dev_materialization(
+        &locked,
+        Digest::from_sha256(b"source-inputs"),
+        Digest::from_sha256(b"source-environment"),
+        vec![vo_module::attestation::MaterializationOutput {
+            role: artifact.role,
+            kind: artifact.kind,
+            name: artifact.name,
+            bytes: output_bytes.to_vec(),
+            detached_manifest: detached,
+        }],
+    )
+    .unwrap();
+    vo_module::attestation::publish_prepared_dev_materialization(
+        &mod_cache,
+        &locked,
+        &materialization,
+    )
+    .unwrap();
+
+    let app_mod = concat!(
+        "format = 1\n",
+        "module = \"github.com/acme/app\"\n",
+        "version = \"0.1.0\"\n",
+        "vo = \"0.1.0\"\n\n",
+        "[dependencies]\n",
+        "\"github.com/acme/sourcelib\" = { version = \"^1.0.0\", capabilities = [\"render\"] }\n",
+    );
+    fs::write(app_root.join("vo.mod"), app_mod).unwrap();
+    fs::write(
+        app_root.join("vo.lock"),
+        render_lock_with_modules(app_mod, std::slice::from_ref(&locked)),
+    )
+    .unwrap();
+    fs::write(
+        app_root.join("main.vo"),
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/sourcelib\"\n",
+            "var Value = sourcelib.Value\n",
+            "func main() {}\n",
+        ),
+    )
+    .unwrap();
+
+    let output = with_mod_cache_root_override(&mod_cache, || {
+        compile_with_cache(app_root.to_string_lossy().as_ref())
+    })
+    .expect("compile snapshot must contain source materialization authority and outputs");
+    assert_eq!(output.locked_modules, vec![locked]);
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -1,5 +1,9 @@
 use super::*;
 
+fn test_wait_key(fiber_key: u64, wait_id: u64) -> EndpointWaitKey {
+    EndpointWaitKey::try_new(fiber_key, wait_id).expect("non-zero endpoint wait ID")
+}
+
 #[test]
 fn vm_endpoint_send_remote_direct_txn_004_unpack_error_preserves_receiver_without_publication() {
     let mut vm_state = crate::vm::VmState::new();
@@ -17,10 +21,12 @@ fn vm_endpoint_send_remote_direct_txn_004_unpack_error_preserves_receiver_withou
     let mut responses = Vec::new();
     let mut local_wakes = Vec::new();
     let mut island_effects = Vec::new();
+    let mut queue_rollback = EndpointQueueRollback::None;
     let mut transfer_commit = crate::exec::QueueTransferCommit::default();
-    let remote_receiver = QueueWaiter::endpoint(7, 0x0000_0002_0000_0003, 11);
+    let remote_receiver = endpoint_waiter(7, 0x0000_0002_0000_0003, 11);
     queue::register_receiver(ch, remote_receiver);
     let data = Vec::new();
+    let mut endpoint_insertions = crate::exec::EndpointRegistryInsertions::default();
     let ctx = EndpointRequestCtx {
         ch,
         cap: test_queue_state::capacity(ch),
@@ -30,19 +36,22 @@ fn vm_endpoint_send_remote_direct_txn_004_unpack_error_preserves_receiver_withou
         elem_slots: 1,
         struct_metas: &module.struct_metas,
         runtime_types: &module.runtime_types,
-        module: &module,
+        module: (&module).into(),
     };
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         queue::with_local_state(ch, |state| {
+            let wait_key = test_wait_key(0x0000_0001_0000_0002, 3);
             handle_endpoint_request_inner(
                 &ctx,
                 state,
-                EndpointRequestKind::Send { data },
-                QueueWaiter::endpoint(5, 0x0000_0001_0000_0002, 3),
+                EndpointRequestKind::Send { data, wait_key },
+                Some(endpoint_waiter(5, 0x0000_0001_0000_0002, 3)),
                 &mut vm_state,
                 &mut responses,
                 &mut local_wakes,
+                &mut queue_rollback,
+                &mut endpoint_insertions,
                 &mut transfer_commit,
                 &mut island_effects,
             )
@@ -67,17 +76,167 @@ fn vm_endpoint_send_remote_direct_txn_004_unpack_error_preserves_receiver_withou
     assert_eq!(responses[0].0, 5);
     assert!(matches!(
         responses[0].1,
-        EndpointResponseKind::SendAck { closed: true }
+        EndpointResponseKind::SendAck { closed: true, .. }
     ));
     assert!(local_wakes.is_empty());
     assert!(island_effects.is_empty());
 }
 
 #[test]
+fn inbound_endpoint_send_persists_an_island_managed_payload() {
+    let mut vm_state = crate::vm::VmState::new();
+    let mut module = Module::new("endpoint-send-managed-payload".to_string());
+    module
+        .runtime_types
+        .push(vo_common_core::RuntimeType::Basic(ValueKind::Int64));
+    let ch = queue::create(
+        &mut vm_state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(0, ValueKind::Int64),
+        1,
+        1,
+    );
+    let data = unsafe {
+        crate::exec::pack_transport_message(
+            &vm_state.gc,
+            &[123],
+            ValueMeta::new(0, ValueKind::Int64),
+            &[],
+            &[],
+            &[],
+        )
+    }
+    .expect("endpoint payload should pack");
+    let mut endpoint_insertions = crate::exec::EndpointRegistryInsertions::default();
+    let ctx = EndpointRequestCtx {
+        ch,
+        cap: test_queue_state::capacity(ch),
+        home_island: 0,
+        elem_meta: ValueMeta::new(0, ValueKind::Int64),
+        elem_rttid: ValueRttid::new(0, ValueKind::Int64),
+        elem_slots: 1,
+        struct_metas: &module.struct_metas,
+        runtime_types: &module.runtime_types,
+        module: (&module).into(),
+    };
+    let wait_key = test_wait_key(0x0000_0001_0000_0002, 3);
+    let mut responses = Vec::new();
+    let mut local_wakes = Vec::new();
+    let mut queue_rollback = EndpointQueueRollback::None;
+    let mut transfer_commit = crate::exec::QueueTransferCommit::default();
+    let mut island_effects = Vec::new();
+
+    queue::with_local_state(ch, |state| {
+        handle_endpoint_request_inner(
+            &ctx,
+            state,
+            EndpointRequestKind::Send { data, wait_key },
+            Some(endpoint_waiter(
+                5,
+                wait_key.fiber_key(),
+                wait_key.wait_id().get(),
+            )),
+            &mut vm_state,
+            &mut responses,
+            &mut local_wakes,
+            &mut queue_rollback,
+            &mut endpoint_insertions,
+            &mut transfer_commit,
+            &mut island_effects,
+        )
+    })
+    .expect("endpoint send should buffer");
+
+    let queue_state = queue::local_state(ch);
+    let payload = queue_state.buffer.front().unwrap_or_else(|| {
+        panic!(
+            "endpoint payload was not buffered: cap={} senders={} responses={responses:?}",
+            test_queue_state::capacity(ch),
+            queue_state.waiting_senders.len()
+        )
+    });
+    assert_eq!(payload.as_ref(), &[123]);
+    assert!(matches!(
+        payload,
+        vo_runtime::objects::queue_state::QueueMessage::Managed { backing, len: 1 }
+            if !backing.is_null()
+    ));
+    assert!(matches!(
+        responses.as_slice(),
+        [(5, EndpointResponseKind::SendAck { closed: false, .. })]
+    ));
+    assert!(local_wakes.is_empty());
+}
+
+#[test]
+fn closed_endpoint_send_does_not_unpack_or_register_payload_handles() {
+    let mut vm = Vm::new();
+    vm.state.current_island_id = 3;
+    vm.state.external_island_transport = true;
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
+        "closed-endpoint-send-short-circuit".to_string(),
+    )));
+    let endpoint_id = 45;
+    let requester_island = 7;
+    let ch = queue::create(
+        &mut vm.state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Port),
+        ValueRttid::new(0, ValueKind::Port),
+        1,
+        1,
+    );
+    queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
+    queue::add_home_peer(ch, requester_island);
+    vm.state.endpoint_registry.register_live(endpoint_id, ch);
+    queue::close(ch);
+
+    let payload_endpoint_id = 900;
+    let payload_port = queue::create_remote_proxy(
+        &mut vm.state.gc,
+        payload_endpoint_id,
+        9,
+        1,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(0, ValueKind::Int64),
+        1,
+    );
+    let data = unsafe {
+        crate::exec::pack_transport_message(
+            &vm.state.gc,
+            &[payload_port as u64],
+            ValueMeta::new(0, ValueKind::Port),
+            &[],
+            &[],
+            &[],
+        )
+    }
+    .expect("port payload should pack");
+
+    handle_endpoint_request_command(
+        &mut vm,
+        endpoint_id,
+        EndpointRequestKind::Send {
+            data,
+            wait_key: test_wait_key(0x0000_0002_0000_0003, 11),
+        },
+        requester_island,
+    )
+    .expect("closed endpoint send should return a closed acknowledgement");
+
+    assert_eq!(
+        vm.state.endpoint_registry.get_live(payload_endpoint_id),
+        None
+    );
+    assert!(queue::local_state(ch).buffer.is_empty());
+}
+
+#[test]
 fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-close-local-home-waiters".to_string(),
     )));
     let endpoint_id = 44;
@@ -97,12 +256,13 @@ fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
     vm.scheduler.schedule_next().expect("receiver fiber");
     let receiver_waiter = {
         let fiber = vm.scheduler.current_fiber_mut().unwrap();
-        let waiter = QueueWaiter::simple_queue(
+        let waiter = QueueWaiter::try_queue(
             vm.state.current_island_id,
             fiber.endpoint_response_key(),
             ch as u64,
             SelectWaitKind::Recv,
-        );
+        )
+        .unwrap();
         fiber.begin_queue_wait(&waiter);
         waiter
     };
@@ -114,12 +274,13 @@ fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
         let fiber = vm.scheduler.current_fiber_mut().unwrap();
         fiber.push_frame(0, 1, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 3;
-        let waiter = QueueWaiter::simple_queue(
+        let waiter = QueueWaiter::try_queue(
             vm.state.current_island_id,
             fiber.endpoint_response_key(),
             ch as u64,
             SelectWaitKind::Send,
-        );
+        )
+        .unwrap();
         fiber.begin_queue_wait(&waiter);
         waiter
     };
@@ -128,7 +289,7 @@ fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
     queue::register_receiver(ch, receiver_waiter);
     queue::register_sender(ch, sender_waiter, vec![7].into_boxed_slice().into());
 
-    handle_endpoint_request_command(&mut vm, endpoint_id, EndpointRequestKind::Close, 9, 0, 0)
+    handle_endpoint_request_command(&mut vm, endpoint_id, EndpointRequestKind::Close, 9)
         .expect("endpoint close request should apply");
 
     assert_eq!(vm.state.pending_island_responses, 0);
@@ -152,7 +313,7 @@ fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
 fn vm_endpoint_transfer_owner_018_rejects_unknown_peer_transfer() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-transfer-owner".to_string(),
     )));
     let endpoint_id = 55;
@@ -173,8 +334,6 @@ fn vm_endpoint_transfer_owner_018_rejects_unknown_peer_transfer() {
         endpoint_id,
         EndpointRequestKind::Transfer { new_peer: 7 },
         99,
-        0,
-        0,
     )
     .expect("unauthorized transfer request should be ignored cleanly");
 
@@ -190,7 +349,7 @@ fn vm_endpoint_transfer_owner_018_rejects_unknown_peer_transfer() {
 fn vm_endpoint_request_owner_019_rejects_unknown_peer_close() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-request-owner-close".to_string(),
     )));
     let endpoint_id = 56;
@@ -209,7 +368,7 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_close() {
         state.buffer.push_back(vec![7].into_boxed_slice().into());
     });
 
-    handle_endpoint_request_command(&mut vm, endpoint_id, EndpointRequestKind::Close, 99, 0, 0)
+    handle_endpoint_request_command(&mut vm, endpoint_id, EndpointRequestKind::Close, 99)
         .expect("unauthorized close request should be ignored cleanly");
 
     let state = queue::local_state(ch);
@@ -222,12 +381,13 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_send() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
     vm.state.external_island_transport = true;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-request-owner-send".to_string(),
     )));
     let endpoint_id = 57;
     let fiber_key = 0x0000_0001_0000_0061;
     let wait_id = 13;
+    let wait_key = test_wait_key(fiber_key, wait_id);
     let ch = queue::create(
         &mut vm.state.gc,
         QueueKind::Port,
@@ -245,10 +405,9 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_send() {
         endpoint_id,
         EndpointRequestKind::Send {
             data: vec![7_u8; 8],
+            wait_key,
         },
         99,
-        fiber_key,
-        wait_id,
     )
     .expect("unauthorized send request should apply rejection response");
 
@@ -264,19 +423,14 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_send() {
     match command.command {
         vo_runtime::island::IslandCommand::EndpointResponse {
             endpoint_id: response_endpoint_id,
-            kind,
-            from_island,
-            fiber_key: response_fiber_key,
-            wait_id: response_wait_id,
+            kind:
+                EndpointResponseKind::SendAck {
+                    closed: true,
+                    wait_key: response_wait_key,
+                },
         } => {
             assert_eq!(response_endpoint_id, endpoint_id);
-            assert_eq!(from_island, vm.state.current_island_id);
-            assert!(matches!(
-                kind,
-                EndpointResponseKind::SendAck { closed: true }
-            ));
-            assert_eq!(response_fiber_key, fiber_key);
-            assert_eq!(response_wait_id, wait_id);
+            assert_eq!(response_wait_key, wait_key);
         }
         other => panic!("expected unauthorized send response, got {other:?}"),
     }
@@ -286,7 +440,7 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_send() {
 fn vm_endpoint_request_route_preflight_058_recv_missing_requester_route_preserves_queue() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-request-route-recv".to_string(),
     )));
     let endpoint_id = 158;
@@ -305,10 +459,10 @@ fn vm_endpoint_request_route_preflight_058_recv_missing_requester_route_preserve
     let err = handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Recv,
+        EndpointRequestKind::Recv {
+            wait_key: test_wait_key(0x0000_0002_0000_0003, 11),
+        },
         7,
-        0x0000_0002_0000_0003,
-        11,
     )
     .expect_err("missing requester route must reject before registering recv waiter");
 
@@ -333,7 +487,7 @@ fn vm_endpoint_request_route_preflight_058_recv_missing_requester_route_preserve
 fn vm_endpoint_request_route_preflight_058_send_missing_requester_route_preserves_queue() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-request-route-send".to_string(),
     )));
     let endpoint_id = 159;
@@ -352,10 +506,11 @@ fn vm_endpoint_request_route_preflight_058_send_missing_requester_route_preserve
     let err = handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Send { data: Vec::new() },
+        EndpointRequestKind::Send {
+            data: Vec::new(),
+            wait_key: test_wait_key(0x0000_0002_0000_0003, 11),
+        },
         7,
-        0x0000_0002_0000_0003,
-        11,
     )
     .expect_err("missing requester route must reject before send mutation");
 
@@ -383,18 +538,15 @@ fn vm_endpoint_request_route_preflight_058_send_missing_requester_route_preserve
 }
 
 #[test]
-fn vm_endpoint_request_target_061_rejects_raw_or_zero_response_identity_before_registering_waiter()
-{
+fn vm_endpoint_request_target_061_rejects_raw_fiber_identity_before_registering_waiter() {
     for (name, is_send, fiber_key, wait_id) in [
         ("recv raw slot", false, 0x21, 11),
-        ("recv zero wait", false, 0x0000_0001_0000_0021, 0),
         ("send raw slot", true, 0x22, 12),
-        ("send zero wait", true, 0x0000_0001_0000_0022, 0),
     ] {
         let mut vm = Vm::new();
         vm.state.current_island_id = 3;
         vm.state.external_island_transport = true;
-        vm.module = Some(std::sync::Arc::new(Module::new(format!(
+        vm.module = Some(crate::vm::test_loaded_module(Module::new(format!(
             "endpoint-request-target-identity-{name}"
         ))));
         let endpoint_id = 0x0610_0000_0000_0300;
@@ -410,6 +562,7 @@ fn vm_endpoint_request_target_061_rejects_raw_or_zero_response_identity_before_r
         queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
         queue::add_home_peer(ch, requester_island);
         vm.state.endpoint_registry.register_live(endpoint_id, ch);
+        let wait_key = test_wait_key(fiber_key, wait_id);
         let kind = if is_send {
             EndpointRequestKind::Send {
                 data: unsafe {
@@ -423,20 +576,14 @@ fn vm_endpoint_request_target_061_rejects_raw_or_zero_response_identity_before_r
                     )
                 }
                 .expect("request payload should pack"),
+                wait_key,
             }
         } else {
-            EndpointRequestKind::Recv
+            EndpointRequestKind::Recv { wait_key }
         };
 
-        let err = handle_endpoint_request_command(
-            &mut vm,
-            endpoint_id,
-            kind,
-            requester_island,
-            fiber_key,
-            wait_id,
-        )
-        .expect_err("malformed endpoint request identity must reject before queue mutation");
+        let err = handle_endpoint_request_command(&mut vm, endpoint_id, kind, requester_island)
+            .expect_err("malformed endpoint request identity must reject before queue mutation");
 
         assert!(matches!(err, VmError::Jit(_)), "{name}: {err:?}");
         let state = queue::local_state(ch);
@@ -462,7 +609,7 @@ fn vm_endpoint_request_target_061_rejects_raw_or_zero_response_identity_before_r
 fn vm_endpoint_request_send_route_reservation_failure_preserves_queue_state_058() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-request-route-reservation-send".to_string(),
     )));
     let endpoint_id = 161;
@@ -478,9 +625,10 @@ fn vm_endpoint_request_send_route_reservation_failure_preserves_queue_state_058(
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     queue::add_home_peer(ch, requester_island);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
-    vm.state
-        .island_senders
-        .insert(requester_island, Arc::new(FailSecondReserveSender::new()));
+    vm.state.island_senders.insert(
+        requester_island,
+        Arc::new(SucceedThenFailReserveSender::new(0)),
+    );
     let data = unsafe {
         crate::exec::pack_transport_message(
             &vm.state.gc,
@@ -496,12 +644,13 @@ fn vm_endpoint_request_send_route_reservation_failure_preserves_queue_state_058(
     let err = handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Send { data },
+        EndpointRequestKind::Send {
+            data,
+            wait_key: test_wait_key(0x0000_0002_0000_0003, 11),
+        },
         requester_island,
-        0x0000_0002_0000_0003,
-        11,
     )
-    .expect_err("held response reservation failure must reject before buffering send data");
+    .expect_err("response reservation failure must reject before buffering send data");
 
     match err {
         VmError::Jit(msg) => {
@@ -530,7 +679,7 @@ fn vm_endpoint_request_send_route_reservation_failure_preserves_queue_state_058(
 fn vm_endpoint_request_same_island_rejected_response_rolls_back_queue_state_060() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "same-island-endpoint-response-rollback".to_string(),
     )));
     let endpoint_id = 163;
@@ -545,14 +694,11 @@ fn vm_endpoint_request_same_island_rejected_response_rolls_back_queue_state_060(
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let (fiber_key, wait_id) = {
+    let wait_key = {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().expect("frame").pc = 1;
-        (
-            fiber.endpoint_response_key(),
-            fiber.begin_remote_endpoint_send_wait(endpoint_id),
-        )
+        fiber.begin_remote_endpoint_send_wait(endpoint_id)
     };
     vm.scheduler
         .schedule_next()
@@ -571,14 +717,16 @@ fn vm_endpoint_request_same_island_rejected_response_rolls_back_queue_state_060(
     }
     .expect("request payload should pack");
     let current_island_id = vm.state.current_island_id;
+    let stale_wait_key = test_wait_key(wait_key.fiber_key(), wait_key.wait_id().get() + 1);
 
     let err = handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Send { data },
+        EndpointRequestKind::Send {
+            data,
+            wait_key: stale_wait_key,
+        },
         current_island_id,
-        fiber_key,
-        wait_id + 1,
     )
     .expect_err("stale same-island response must reject the endpoint request transition");
 
@@ -600,7 +748,7 @@ fn vm_endpoint_request_same_island_rejected_response_rolls_back_queue_state_060(
 fn vm_queue_send_remote_direct_reservation_failure_rolls_back_receiver_058() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "queue-send-remote-direct-reservation".to_string(),
     )));
     let endpoint_id = 162;
@@ -615,7 +763,7 @@ fn vm_queue_send_remote_direct_reservation_failure_rolls_back_receiver_058() {
     );
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     queue::add_home_peer(ch, receiver_island);
-    let receiver = QueueWaiter::endpoint(receiver_island, 0x0000_0002_0000_0003, 11);
+    let receiver = endpoint_waiter(receiver_island, 0x0000_0002_0000_0003, 11);
     queue::register_receiver(ch, receiver);
     vm.state
         .island_senders
@@ -629,13 +777,12 @@ fn vm_queue_send_remote_direct_reservation_failure_rolls_back_receiver_058() {
         &mut vm.state,
         &[],
         &[],
-        vm.module.as_deref(),
+        vm.module.as_ref().map(|module| module.runtime_metadata()),
     );
     let crate::exec::QueueAction::RemoteRecvData {
         endpoint_id,
         target_island,
-        fiber_key,
-        wait_id,
+        wait_key,
         data,
         mut island_effects,
         rollback,
@@ -659,15 +806,11 @@ fn vm_queue_send_remote_direct_reservation_failure_rolls_back_receiver_058() {
         .island_commands
         .push(IslandCommandEffect::endpoint_recv_data_response(
             target_island,
-            vm.state.current_island_id,
             endpoint_id,
             data,
-            fiber_key,
-            wait_id,
+            wait_key,
         ));
-    if let Some(rollback) = rollback {
-        transition.set_rollback(rollback);
-    }
+    transition.set_rollback(rollback);
 
     vm.apply_runtime_transition(None, transition)
         .expect_err("held response reservation failure must roll back queue send mutation");
@@ -689,7 +832,7 @@ fn vm_queue_send_remote_direct_reservation_failure_rolls_back_receiver_058() {
 fn vm_remote_direct_transfer_txn_061_late_response_failure_rolls_back_payload_home_info() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "remote-direct-transfer-rollback".to_string(),
     )));
     let endpoint_id = 262;
@@ -713,11 +856,11 @@ fn vm_remote_direct_transfer_txn_061_late_response_failure_rolls_back_payload_ho
         1,
         1,
     );
-    let receiver = QueueWaiter::endpoint(receiver_island, 0x0000_0002_0000_0003, 11);
+    let receiver = endpoint_waiter(receiver_island, 0x0000_0002_0000_0003, 11);
     queue::register_receiver(ch, receiver);
     vm.state.island_senders.insert(
         receiver_island,
-        Arc::new(SucceedThenFailReserveSender::new(4)),
+        Arc::new(SucceedThenFailReserveSender::new(0)),
     );
 
     let action = crate::exec::queue_send_core(
@@ -728,13 +871,12 @@ fn vm_remote_direct_transfer_txn_061_late_response_failure_rolls_back_payload_ho
         &mut vm.state,
         &[],
         &[],
-        vm.module.as_deref(),
+        vm.module.as_ref().map(|module| module.runtime_metadata()),
     );
     let crate::exec::QueueAction::RemoteRecvData {
         endpoint_id,
         target_island,
-        fiber_key,
-        wait_id,
+        wait_key,
         data,
         mut island_effects,
         rollback,
@@ -760,15 +902,11 @@ fn vm_remote_direct_transfer_txn_061_late_response_failure_rolls_back_payload_ho
         .island_commands
         .push(IslandCommandEffect::endpoint_recv_data_response(
             target_island,
-            vm.state.current_island_id,
             endpoint_id,
             data,
-            fiber_key,
-            wait_id,
+            wait_key,
         ));
-    if let Some(rollback) = rollback {
-        transition.set_rollback(rollback);
-    }
+    transition.set_rollback(rollback);
 
     vm.apply_runtime_transition(None, transition)
         .expect_err("late response reservation failure must roll back remote-direct send");
@@ -791,7 +929,7 @@ fn vm_remote_direct_transfer_txn_061_late_response_failure_rolls_back_payload_ho
 fn vm_endpoint_recv_transfer_txn_061_late_response_failure_rolls_back_payload_home_info() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "endpoint-recv-transfer-rollback".to_string(),
     )));
     let endpoint_id = 263;
@@ -815,22 +953,36 @@ fn vm_endpoint_recv_transfer_txn_061_late_response_failure_rolls_back_payload_ho
         1,
         1,
     );
+    let promoted_payload_port = queue::create(
+        &mut vm.state.gc,
+        QueueKind::Port,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(0, ValueKind::Int64),
+        1,
+        1,
+    );
     match queue::try_send(ch, vec![payload_port as u64].into_boxed_slice().into()) {
         vo_runtime::objects::queue_state::SendResult::Buffered => {}
         other => panic!("expected buffered setup send, got {other:?}"),
     }
+    let sender = endpoint_waiter(requester_island, 0x0000_0004_0000_0005, 12);
+    queue::register_sender(
+        ch,
+        sender.clone(),
+        vec![promoted_payload_port as u64].into_boxed_slice().into(),
+    );
     vm.state.island_senders.insert(
         requester_island,
-        Arc::new(SucceedThenFailReserveSender::new(4)),
+        Arc::new(SucceedThenFailReserveSender::new(0)),
     );
 
     let err = handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Recv,
+        EndpointRequestKind::Recv {
+            wait_key: test_wait_key(0x0000_0002_0000_0003, 11),
+        },
         requester_island,
-        0x0000_0002_0000_0003,
-        11,
     )
     .expect_err("late response reservation failure must reject endpoint recv");
 
@@ -843,10 +995,17 @@ fn vm_endpoint_recv_transfer_txn_061_late_response_failure_rolls_back_payload_ho
         }
         other => panic!("expected route reservation VmError::Jit, got {other:?}"),
     }
+    let state = queue::local_state(ch);
+    assert_eq!(state.buffer.len(), 1);
     assert_eq!(
-        queue::local_state(ch).buffer.len(),
-        1,
-        "failed endpoint recv response must restore buffered payload"
+        state.buffer.front().unwrap().as_ref(),
+        &[payload_port as u64]
+    );
+    assert_eq!(state.waiting_senders.len(), 1);
+    assert_eq!(state.waiting_senders.front().unwrap().0, sender);
+    assert_eq!(
+        state.waiting_senders.front().unwrap().1.as_ref(),
+        &[promoted_payload_port as u64]
     );
     assert!(
         queue::home_info(payload_port).is_none(),
@@ -863,7 +1022,7 @@ fn vm_queue_recv_remote_ack_reservation_failure_rolls_back_sender_and_stack_058(
 
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "queue-recv-remote-ack-reservation".to_string(),
     )));
     let endpoint_id = 163;
@@ -879,7 +1038,7 @@ fn vm_queue_recv_remote_ack_reservation_failure_rolls_back_sender_and_stack_058(
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(sender_island, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(sender_island, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     vm.state
@@ -892,7 +1051,7 @@ fn vm_queue_recv_remote_ack_reservation_failure_rolls_back_sender_and_stack_058(
         fiber.sp = fiber.stack.len();
     }
 
-    let inst = Instruction::with_flags(Opcode::QueueRecv, 2, 0, 2, 0);
+    let inst = Instruction::with_flags(Opcode::QueueRecv, 0, 0, 2, 0);
     let stack = vm.scheduler.get_fiber_mut(fid).stack.as_mut_ptr();
     let action = crate::exec::exec_queue_recv(
         stack,
@@ -901,14 +1060,13 @@ fn vm_queue_recv_remote_ack_reservation_failure_rolls_back_sender_and_stack_058(
         vm.scheduler.get_fiber(fid).wake_key_packed(),
         &inst,
         &vm.state,
-        vm.module.as_deref(),
-        None,
+        vm.module.as_ref().map(|module| module.runtime_metadata()),
+        &[SlotType::Value],
     );
     let crate::exec::QueueAction::RemoteSendAck {
         endpoint_id,
         target_island,
-        fiber_key,
-        wait_id,
+        wait_key,
         closed,
         rollback,
     } = action
@@ -935,15 +1093,10 @@ fn vm_queue_recv_remote_ack_reservation_failure_rolls_back_sender_and_stack_058(
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             target_island,
-            vm.state.current_island_id,
             endpoint_id,
-            vo_runtime::island::EndpointResponseKind::SendAck { closed },
-            fiber_key,
-            wait_id,
+            vo_runtime::island::EndpointResponseKind::SendAck { closed, wait_key },
         ));
-    if let Some(rollback) = rollback {
-        transition.set_rollback(rollback);
-    }
+    transition.set_rollback(rollback);
 
     vm.apply_runtime_transition(Some(fid), transition)
         .expect_err("failed remote ack staging must roll back queue recv mutation");
@@ -967,7 +1120,7 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
 
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(std::sync::Arc::new(Module::new(
+    vm.module = Some(crate::vm::test_loaded_module(Module::new(
         "select-recv-remote-ack-reservation".to_string(),
     )));
     let endpoint_id = 164;
@@ -983,7 +1136,7 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     queue::register_sender(
         ch,
-        QueueWaiter::endpoint(sender_island, 0x0000_0002_0000_0003, 11),
+        endpoint_waiter(sender_island, 0x0000_0002_0000_0003, 11),
         vec![123].into_boxed_slice().into(),
     );
     vm.state
@@ -1023,20 +1176,19 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
             island_id: vm.state.current_island_id,
             fiber_key: vm.scheduler.get_fiber(fid).wake_key_packed(),
             vm_state: &mut vm.state,
-            module: vm.module.as_deref(),
+            module: vm.module.as_ref().map(|module| module.runtime_metadata()),
         },
         &mut select_state,
         2,
     );
     vm.scheduler.get_fiber_mut(fid).select_state = select_state;
-    let crate::exec::SelectResult::RemoteSendAck {
+    let crate::exec::SelectResult::Queue(crate::exec::QueueAction::RemoteSendAck {
         endpoint_id,
         target_island,
-        fiber_key,
-        wait_id,
+        wait_key,
         closed,
         rollback,
-    } = action
+    }) = action
     else {
         panic!("select recv should ack remote endpoint sender, got {action:?}");
     };
@@ -1064,15 +1216,10 @@ fn vm_select_recv_remote_ack_reservation_failure_rolls_back_sender_stack_and_sel
         .island_commands
         .push(IslandCommandEffect::endpoint_response(
             target_island,
-            vm.state.current_island_id,
             endpoint_id,
-            vo_runtime::island::EndpointResponseKind::SendAck { closed },
-            fiber_key,
-            wait_id,
+            vo_runtime::island::EndpointResponseKind::SendAck { closed, wait_key },
         ));
-    if let Some(rollback) = rollback {
-        transition.set_rollback(rollback);
-    }
+    transition.set_rollback(rollback);
 
     vm.apply_runtime_transition(Some(fid), transition)
         .expect_err("failed remote ack staging must roll back select recv mutation");

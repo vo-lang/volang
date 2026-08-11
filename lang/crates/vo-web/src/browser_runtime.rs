@@ -30,13 +30,6 @@ impl BrowserRuntimeContract {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrowserRuntimeModule {
-    pub module_key: String,
-    pub module_root: String,
-    pub contract: BrowserRuntimeContract,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrowserFrameworkId {
     pub module_key: String,
@@ -55,7 +48,7 @@ impl BrowserFrameworkId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserFrameworkBinding {
     pub framework_id: BrowserFrameworkId,
-    pub owner: Option<ExtensionOwner>,
+    pub owner: ExtensionOwner,
     pub module_assets: BTreeMap<String, AssetRef>,
 }
 
@@ -90,41 +83,32 @@ pub struct BrowserRuntimeGraph {
 }
 
 impl BrowserRuntimeGraph {
-    pub fn runtime_modules(&self) -> Vec<BrowserRuntimeModule> {
-        self.frameworks
-            .iter()
-            .map(project_browser_runtime_module)
-            .collect()
-    }
-
-    pub fn runtime_view(&self) -> BrowserRuntimeView {
-        browser_runtime_view_from_graph(self)
-    }
-
     pub fn primary_framework_split(&self) -> PrimaryFrameworkSplit {
-        split_primary_provider_view(&self.runtime_view())
+        let primary_id = self
+            .roles
+            .providers_for("protocol")
+            .first()
+            .or_else(|| self.roles.providers_for("host_bridge").first())
+            .or(self.roles.entry_framework.as_ref())
+            .or_else(|| self.frameworks.first().map(|framework| &framework.id));
+        let Some(primary_id) = primary_id else {
+            return PrimaryFrameworkSplit::default();
+        };
+
+        let mut primary_framework = None;
+        let mut provider_frameworks = Vec::new();
+        for framework in &self.frameworks {
+            if framework.id == *primary_id && primary_framework.is_none() {
+                primary_framework = Some(framework.contract.clone());
+            } else {
+                provider_frameworks.push(framework.contract.clone());
+            }
+        }
+        PrimaryFrameworkSplit {
+            primary_framework,
+            provider_frameworks,
+        }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrowserRuntimeViewFramework {
-    pub id: BrowserFrameworkId,
-    pub contract: BrowserRuntimeContract,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct BrowserRuntimeView {
-    pub frameworks: Vec<BrowserRuntimeViewFramework>,
-    pub roles: BrowserRoleIndex,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrowserWasmExtensionSpec {
-    pub name: String,
-    pub module_key: String,
-    pub module_root: String,
-    pub wasm_path: String,
-    pub js_glue_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +116,7 @@ pub struct BrowserWasmExtensionBinding {
     pub name: String,
     pub module_key: String,
     pub module_root: String,
-    pub owner: Option<ExtensionOwner>,
+    pub owner: ExtensionOwner,
     pub source: BrowserArtifactSource,
     pub kind: WasmExtensionKind,
     pub wasm_asset: AssetRef,
@@ -506,16 +490,10 @@ pub struct PrimaryFrameworkSplit {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BrowserRuntimePlan {
     pub graph: BrowserRuntimeGraph,
-    pub runtime_modules: Vec<BrowserRuntimeModule>,
     pub wasm_bindings: Vec<BrowserWasmExtensionBinding>,
-    pub wasm_extensions: Vec<BrowserWasmExtensionSpec>,
 }
 
 impl BrowserRuntimePlan {
-    pub fn runtime_view(&self) -> BrowserRuntimeView {
-        self.graph.runtime_view()
-    }
-
     pub fn primary_framework_split(&self) -> PrimaryFrameworkSplit {
         self.graph.primary_framework_split()
     }
@@ -687,24 +665,6 @@ fn browser_hex_nibble(byte: u8) -> u8 {
     }
 }
 
-pub fn browser_runtime_graph_from_manifest(
-    module_root: &str,
-    module_key: Option<&str>,
-    manifest: &ExtensionManifest,
-) -> std::result::Result<BrowserRuntimeGraph, String> {
-    manifest.validate().map_err(|error| error.to_string())?;
-    let framework = if let Some(owner) = module_key.and_then(parse_module_key_owner) {
-        let resolved =
-            resolve_extension_manifest(&owner, manifest).map_err(|error| error.to_string())?;
-        browser_framework_plan_from_resolved(module_root, module_key, &resolved)
-    } else {
-        browser_framework_plan_from_manifest_local(module_root, module_key, manifest)
-    };
-    Ok(browser_runtime_graph_from_frameworks(
-        framework.into_iter().collect(),
-    ))
-}
-
 pub fn ready_browser_runtime_graph(ready_modules: &[ReadyModule]) -> BrowserRuntimeGraph {
     ready_browser_runtime_graph_at(ready_modules, "")
 }
@@ -720,53 +680,11 @@ fn ready_browser_runtime_graph_at(
                 let resolved = resolve_ready_extension(ready)?;
                 browser_framework_plan_from_resolved(
                     &ready_module_root_at(ready, module_root_base),
-                    Some(ready.module().as_str()),
                     &resolved,
                 )
             })
             .collect(),
     )
-}
-
-pub fn browser_runtime_view_from_graph(graph: &BrowserRuntimeGraph) -> BrowserRuntimeView {
-    BrowserRuntimeView {
-        frameworks: graph
-            .frameworks
-            .iter()
-            .map(|framework| BrowserRuntimeViewFramework {
-                id: framework.id.clone(),
-                contract: framework.contract.clone(),
-            })
-            .collect(),
-        roles: graph.roles.clone(),
-    }
-}
-
-pub fn split_primary_provider_view(view: &BrowserRuntimeView) -> PrimaryFrameworkSplit {
-    let primary_id = view
-        .roles
-        .providers_for("protocol")
-        .first()
-        .or_else(|| view.roles.providers_for("host_bridge").first())
-        .or(view.roles.entry_framework.as_ref())
-        .or_else(|| view.frameworks.first().map(|framework| &framework.id));
-    let Some(primary_id) = primary_id else {
-        return PrimaryFrameworkSplit::default();
-    };
-
-    let mut primary_framework = None;
-    let mut provider_frameworks = Vec::new();
-    for framework in &view.frameworks {
-        if framework.id == *primary_id && primary_framework.is_none() {
-            primary_framework = Some(framework.contract.clone());
-        } else {
-            provider_frameworks.push(framework.contract.clone());
-        }
-    }
-    PrimaryFrameworkSplit {
-        primary_framework,
-        provider_frameworks,
-    }
 }
 
 pub fn merge_browser_runtime_graphs<I>(
@@ -831,13 +749,9 @@ where
 {
     let mut graphs = Vec::new();
     let mut wasm_bindings = Vec::new();
-    let mut wasm_extensions = Vec::new();
     let mut binding_by_root = BTreeMap::new();
-    let mut extension_by_root = BTreeMap::new();
     let mut binding_root_by_id = BTreeMap::new();
-    let mut extension_root_by_id = BTreeMap::new();
     let mut binding_inputs = 0usize;
-    let mut specification_inputs = 0usize;
     for (plan_index, plan) in plans.into_iter().enumerate() {
         if plan_index >= MAX_BROWSER_RUNTIME_ITEMS {
             return Err(format!(
@@ -885,164 +799,29 @@ where
                 }
             }
         }
-        for spec in plan.wasm_extensions {
-            validate_browser_runtime_module_root(&spec.module_root)?;
-            specification_inputs = specification_inputs.checked_add(1).ok_or_else(|| {
-                "browser runtime wasm specification input count overflow".to_string()
-            })?;
-            if specification_inputs > MAX_BROWSER_RUNTIME_ITEMS {
-                return Err(format!(
-                    "browser runtime merge contains more than {MAX_BROWSER_RUNTIME_ITEMS} wasm specification inputs"
-                ));
-            }
-            let specification_id = (spec.module_key.clone(), spec.name.clone());
-            if let Some(existing_root) = extension_root_by_id.get(&specification_id) {
-                if existing_root != &spec.module_root {
-                    return Err(format!(
-                        "browser wasm specification {:?} is bound to both {:?} and {:?}",
-                        specification_id, existing_root, spec.module_root
-                    ));
-                }
-            }
-            match extension_by_root.get(&spec.module_root) {
-                Some(existing) if existing == &spec => continue,
-                Some(_) => {
-                    return Err(format!(
-                        "conflicting browser wasm specifications reuse module root {:?}",
-                        spec.module_root
-                    ));
-                }
-                None => {
-                    wasm_extensions.try_reserve(1).map_err(|_| {
-                        "failed to reserve browser runtime wasm specifications".to_string()
-                    })?;
-                    extension_root_by_id.insert(specification_id, spec.module_root.clone());
-                    extension_by_root.insert(spec.module_root.clone(), spec.clone());
-                    wasm_extensions.push(spec);
-                }
-            }
-        }
-    }
-    let graph = merge_browser_runtime_graphs(graphs)?;
-    let projected_wasm_extensions = project_browser_wasm_extension_specs(&wasm_bindings);
-    if projected_wasm_extensions.is_empty() {
-        return Ok(browser_runtime_plan_from_parts(
-            graph,
-            wasm_bindings,
-            wasm_extensions,
-        ));
-    }
-    for spec in &wasm_extensions {
-        let Some(projected) = projected_wasm_extensions
-            .iter()
-            .find(|projected| projected.module_root == spec.module_root)
-        else {
-            return Err(format!(
-                "browser wasm specification for {:?} has no canonical binding",
-                spec.module_root
-            ));
-        };
-        if projected != spec {
-            return Err(format!(
-                "browser wasm specification for {:?} conflicts with its canonical binding",
-                spec.module_root
-            ));
-        }
     }
     Ok(browser_runtime_plan_from_parts(
-        graph,
+        merge_browser_runtime_graphs(graphs)?,
         wasm_bindings,
-        projected_wasm_extensions,
     ))
-}
-
-pub fn browser_runtime_module_from_manifest(
-    module_root: &str,
-    module_key: Option<&str>,
-    manifest: &ExtensionManifest,
-) -> std::result::Result<Option<BrowserRuntimeModule>, String> {
-    Ok(
-        browser_runtime_graph_from_manifest(module_root, module_key, manifest)?
-            .runtime_modules()
-            .into_iter()
-            .next(),
-    )
-}
-
-pub fn browser_wasm_extension_from_manifest(
-    module_root: &str,
-    module_key: Option<&str>,
-    manifest: &ExtensionManifest,
-) -> std::result::Result<Option<BrowserWasmExtensionSpec>, String> {
-    manifest.validate().map_err(|error| error.to_string())?;
-    let Some(owner) = module_key.and_then(parse_module_key_owner) else {
-        return Ok(browser_wasm_extension_from_manifest_local(
-            module_root,
-            module_key,
-            manifest,
-        ));
-    };
-    let resolved =
-        resolve_extension_manifest(&owner, manifest).map_err(|error| error.to_string())?;
-    Ok(
-        browser_wasm_binding_from_resolved(module_root, module_key, &resolved)
-            .map(|binding| project_browser_wasm_extension_spec(&binding)),
-    )
 }
 
 pub fn browser_runtime_plan_from_manifest(
     module_root: &str,
-    module_key: Option<&str>,
+    module: &ModulePath,
     manifest: &ExtensionManifest,
 ) -> std::result::Result<BrowserRuntimePlan, String> {
-    let graph = browser_runtime_graph_from_manifest(module_root, module_key, manifest)?;
-    let wasm_bindings = if let Some(owner) = module_key.and_then(parse_module_key_owner) {
-        let resolved =
-            resolve_extension_manifest(&owner, manifest).map_err(|error| error.to_string())?;
-        browser_wasm_binding_from_resolved(module_root, module_key, &resolved)
+    let resolved =
+        resolve_extension_manifest(module, manifest).map_err(|error| error.to_string())?;
+    let graph = browser_runtime_graph_from_frameworks(
+        browser_framework_plan_from_resolved(module_root, &resolved)
             .into_iter()
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let wasm_extensions = if wasm_bindings.is_empty() {
-        browser_wasm_extension_from_manifest(module_root, module_key, manifest)?
-            .into_iter()
-            .collect()
-    } else {
-        project_browser_wasm_extension_specs(&wasm_bindings)
-    };
-    Ok(browser_runtime_plan_from_parts(
-        graph,
-        wasm_bindings,
-        wasm_extensions,
-    ))
-}
-
-pub fn ready_browser_runtime_module(ready: &ReadyModule) -> Option<BrowserRuntimeModule> {
-    ready_browser_runtime_graph_at(std::slice::from_ref(ready), "")
-        .runtime_modules()
+            .collect(),
+    );
+    let wasm_bindings = browser_wasm_binding_from_resolved(module_root, &resolved)
         .into_iter()
-        .next()
-}
-
-pub fn ready_browser_runtime_modules(ready_modules: &[ReadyModule]) -> Vec<BrowserRuntimeModule> {
-    ready_browser_runtime_graph_at(ready_modules, "").runtime_modules()
-}
-
-pub fn ready_browser_wasm_extension(
-    ready: &ReadyModule,
-) -> std::result::Result<Option<BrowserWasmExtensionSpec>, String> {
-    Ok(ready_browser_wasm_binding(ready)?
-        .map(|binding| project_browser_wasm_extension_spec(&binding)))
-}
-
-pub fn ready_browser_wasm_extensions(
-    ready_modules: &[ReadyModule],
-) -> std::result::Result<Vec<BrowserWasmExtensionSpec>, String> {
-    Ok(project_browser_wasm_extension_specs(
-        &ready_browser_wasm_bindings_at(ready_modules, "")?,
-    ))
+        .collect();
+    Ok(browser_runtime_plan_from_parts(graph, wasm_bindings))
 }
 
 pub fn plan_ready_browser_runtime(
@@ -1058,8 +837,7 @@ pub fn plan_ready_browser_runtime_at(
     let wasm_bindings = ready_browser_wasm_bindings_at(ready_modules, module_root_base)?;
     Ok(browser_runtime_plan_from_parts(
         ready_browser_runtime_graph_at(ready_modules, module_root_base),
-        wasm_bindings.clone(),
-        project_browser_wasm_extension_specs(&wasm_bindings),
+        wasm_bindings,
     ))
 }
 
@@ -1083,12 +861,6 @@ fn ready_wasm_artifacts(
             ready.version(),
         )),
     }
-}
-
-fn ready_browser_wasm_binding(
-    ready: &ReadyModule,
-) -> std::result::Result<Option<BrowserWasmExtensionBinding>, String> {
-    ready_browser_wasm_binding_at(ready, "")
 }
 
 fn ready_browser_wasm_binding_at(
@@ -1129,7 +901,7 @@ fn ready_browser_wasm_binding_at(
         name,
         module_key: ready.module().as_str().to_string(),
         module_root,
-        owner: Some(owner),
+        owner,
         source: BrowserArtifactSource::ReadyModule,
         kind,
         wasm_asset: published_wasm_asset.clone(),
@@ -1169,14 +941,10 @@ fn browser_runtime_graph_from_frameworks(
 fn browser_runtime_plan_from_parts(
     graph: BrowserRuntimeGraph,
     wasm_bindings: Vec<BrowserWasmExtensionBinding>,
-    wasm_extensions: Vec<BrowserWasmExtensionSpec>,
 ) -> BrowserRuntimePlan {
-    let runtime_modules = graph.runtime_modules();
     BrowserRuntimePlan {
         graph,
-        runtime_modules,
         wasm_bindings,
-        wasm_extensions,
     }
 }
 
@@ -1186,7 +954,6 @@ pub fn browser_snapshot_plan_from_runtime_plan(
 ) -> std::result::Result<BrowserSnapshotPlan, String> {
     if runtime.graph.frameworks.len() > MAX_BROWSER_SNAPSHOT_MOUNTS
         || runtime.wasm_bindings.len() > MAX_BROWSER_SNAPSHOT_MOUNTS
-        || runtime.wasm_extensions.len() > MAX_BROWSER_SNAPSHOT_MOUNTS
     {
         return Err(format!(
             "browser runtime plan exceeds the {MAX_BROWSER_SNAPSHOT_MOUNTS}-item snapshot planning limit"
@@ -1235,11 +1002,6 @@ pub fn browser_snapshot_plan_from_runtime_plan(
         }
     }
 
-    if runtime.wasm_bindings.len() != runtime.wasm_extensions.len() {
-        return Err(
-            "browser runtime plan includes wasm extensions without canonical bindings".to_string(),
-        );
-    }
     let mut seen_virtual_wasm_paths = BTreeSet::new();
     for binding in &runtime.wasm_bindings {
         push_wasm_snapshot_mount(
@@ -1274,12 +1036,7 @@ pub fn browser_artifact_intent_from_runtime_plan(
     let mut required_artifacts = Vec::new();
     let mut seen = BTreeSet::new();
     for binding in &runtime.wasm_bindings {
-        let owner = binding.owner.clone().ok_or_else(|| {
-            format!(
-                "browser runtime wasm binding {} is missing canonical owner",
-                binding.module_key,
-            )
-        })?;
+        let owner = binding.owner.clone();
         let family = match binding.kind {
             WasmExtensionKind::Standalone => BrowserArtifactFamily::StandaloneWasm,
             WasmExtensionKind::Bindgen => BrowserArtifactFamily::BindgenIsland,
@@ -1324,7 +1081,7 @@ fn browser_runtime_roles_for_owner(
     let mut roles = BTreeSet::new();
     let mut role_inputs = 0usize;
     for framework in &graph.frameworks {
-        if framework.binding.owner.as_ref() != Some(owner) {
+        if &framework.binding.owner != owner {
             continue;
         }
         for role in framework.binding.module_assets.keys() {
@@ -1373,11 +1130,10 @@ fn build_browser_role_index(frameworks: &[BrowserFrameworkPlan]) -> BrowserRoleI
 
 fn browser_framework_plan_from_resolved(
     module_root: &str,
-    module_key: Option<&str>,
     resolved: &ResolvedExtension,
 ) -> Option<BrowserFrameworkPlan> {
     let web = resolved.web.as_ref()?;
-    let module_key = module_key.unwrap_or(&resolved.manifest.name).to_string();
+    let module_key = resolved.owner.as_module().as_str().to_string();
     let module_root = normalize_vfs_path(module_root);
     let id = BrowserFrameworkId::new(module_key.clone(), resolved.manifest.name.clone());
     let contract = BrowserRuntimeContract {
@@ -1401,7 +1157,7 @@ fn browser_framework_plan_from_resolved(
         contract,
         binding: BrowserFrameworkBinding {
             framework_id: id,
-            owner: Some(resolved.owner.clone()),
+            owner: resolved.owner.clone(),
             module_assets: web.js_modules.clone(),
         },
     })
@@ -1409,16 +1165,15 @@ fn browser_framework_plan_from_resolved(
 
 fn browser_wasm_binding_from_resolved(
     module_root: &str,
-    module_key: Option<&str>,
     resolved: &ResolvedExtension,
 ) -> Option<BrowserWasmExtensionBinding> {
     let wasm = resolved.wasm.as_ref()?;
     let module_root = normalize_vfs_path(module_root);
     Some(BrowserWasmExtensionBinding {
         name: resolved.manifest.name.clone(),
-        module_key: module_key.unwrap_or(&resolved.manifest.name).to_string(),
+        module_key: resolved.owner.as_module().as_str().to_string(),
         module_root,
-        owner: Some(resolved.owner.clone()),
+        owner: resolved.owner.clone(),
         source: BrowserArtifactSource::LocalManifest,
         kind: wasm.kind,
         wasm_asset: wasm.local_or_published_wasm().clone(),
@@ -1428,102 +1183,6 @@ fn browser_wasm_binding_from_resolved(
         local_wasm_asset: wasm.local_wasm.clone(),
         local_js_glue_asset: wasm.local_js_glue.clone(),
     })
-}
-
-fn project_browser_wasm_extension_spec(
-    binding: &BrowserWasmExtensionBinding,
-) -> BrowserWasmExtensionSpec {
-    BrowserWasmExtensionSpec {
-        name: binding.name.clone(),
-        module_key: binding.module_key.clone(),
-        module_root: binding.module_root.clone(),
-        wasm_path: resolve_asset_ref(&binding.module_root, &binding.wasm_asset),
-        js_glue_path: binding
-            .js_glue_asset
-            .as_ref()
-            .map(|asset| resolve_asset_ref(&binding.module_root, asset)),
-    }
-}
-
-fn project_browser_wasm_extension_specs(
-    bindings: &[BrowserWasmExtensionBinding],
-) -> Vec<BrowserWasmExtensionSpec> {
-    bindings
-        .iter()
-        .map(project_browser_wasm_extension_spec)
-        .collect()
-}
-
-fn browser_framework_plan_from_manifest_local(
-    module_root: &str,
-    module_key: Option<&str>,
-    manifest: &ExtensionManifest,
-) -> Option<BrowserFrameworkPlan> {
-    let web = manifest.web_runtime()?;
-    let module_key = module_key.unwrap_or(&manifest.name).to_string();
-    let module_root = normalize_vfs_path(module_root);
-    let id = BrowserFrameworkId::new(module_key.clone(), manifest.name.clone());
-    let contract = BrowserRuntimeContract {
-        module_key: module_key.clone(),
-        name: manifest.name.clone(),
-        entry: web.entry.clone(),
-        provider_role: web.provider_role,
-        provider_roles: web.effective_provider_roles(),
-        capabilities: web.capabilities.clone(),
-        roles: web.js_modules.keys().cloned().collect(),
-        js_modules: web
-            .js_modules
-            .iter()
-            .map(|(name, path)| (name.clone(), resolve_manifest_path(&module_root, path)))
-            .collect(),
-    };
-    Some(BrowserFrameworkPlan {
-        id: id.clone(),
-        module_key,
-        module_root,
-        contract,
-        binding: BrowserFrameworkBinding {
-            framework_id: id,
-            owner: None,
-            module_assets: BTreeMap::new(),
-        },
-    })
-}
-
-fn project_browser_runtime_module(framework: &BrowserFrameworkPlan) -> BrowserRuntimeModule {
-    BrowserRuntimeModule {
-        module_key: framework.module_key.clone(),
-        module_root: framework.module_root.clone(),
-        contract: framework.contract.clone(),
-    }
-}
-
-fn browser_wasm_extension_from_manifest_local(
-    module_root: &str,
-    module_key: Option<&str>,
-    manifest: &ExtensionManifest,
-) -> Option<BrowserWasmExtensionSpec> {
-    let wasm = manifest.wasm.as_ref()?;
-    let build = manifest
-        .build
-        .as_ref()
-        .and_then(|build| build.wasm.as_ref());
-    let module_root = normalize_vfs_path(module_root);
-    let wasm_path = build.map_or(wasm.wasm.as_str(), |build| build.wasm.as_str());
-    let js_glue_path = build
-        .and_then(|build| build.js.as_deref())
-        .or(wasm.js.as_deref());
-    Some(BrowserWasmExtensionSpec {
-        name: manifest.name.clone(),
-        module_key: module_key.unwrap_or(&manifest.name).to_string(),
-        module_root: module_root.clone(),
-        wasm_path: resolve_manifest_path(&module_root, wasm_path),
-        js_glue_path: js_glue_path.map(|path| resolve_manifest_path(&module_root, path)),
-    })
-}
-
-fn parse_module_key_owner(module_key: &str) -> Option<ModulePath> {
-    ModulePath::parse(module_key).ok()
 }
 
 fn push_snapshot_mount(
@@ -1615,7 +1274,7 @@ fn asset_parent_relative_path(asset: &AssetRef) -> String {
         .unwrap_or_default()
 }
 
-fn resolve_asset_ref(module_root: &str, asset: &AssetRef) -> String {
+pub(crate) fn resolve_asset_ref(module_root: &str, asset: &AssetRef) -> String {
     let relative_path = asset.portable_relative_path();
     if relative_path.is_empty() {
         return match asset.root() {
@@ -1695,8 +1354,8 @@ pub fn debug_local_project_browser_runtime_plan_from_vfs(
     let Some(manifest) = read_browser_runtime_vfs_ext_manifest(&mod_path)? else {
         return Ok(BrowserRuntimePlan::default());
     };
-    let module_key = browser_runtime_project_root_module_key_from_vfs(&project_root)?;
-    browser_runtime_plan_from_manifest(&project_root, Some(&module_key), &manifest)
+    let module = browser_runtime_project_root_module_from_vfs(&project_root)?;
+    browser_runtime_plan_from_manifest(&project_root, &module, &manifest)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1749,9 +1408,9 @@ fn read_browser_runtime_vfs_ext_manifest(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn browser_runtime_project_root_module_key_from_vfs(
+fn browser_runtime_project_root_module_from_vfs(
     project_root: &str,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<ModulePath, String> {
     let mod_path = join_vfs_path(project_root, "vo.mod");
     let mod_content = read_browser_runtime_vfs_text(&mod_path)?;
     let mod_file = vo_module::schema::modfile::ModFile::parse(&mod_content)
@@ -1760,7 +1419,7 @@ fn browser_runtime_project_root_module_key_from_vfs(
         .module
         .as_public()
         .ok_or_else(|| format!("{}: root module must be a github module path", project_root))?;
-    Ok(module.as_str().to_string())
+    Ok(module.clone())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1815,6 +1474,10 @@ pub fn materialize_browser_snapshot_from_vfs(
 pub fn materialized_browser_artifacts_from_vfs(
     intent: &BrowserArtifactIntent,
     runtime: &BrowserRuntimePlan,
+    mut retain_payload: impl FnMut(
+        &MaterializedBrowserArtifact,
+        Vec<u8>,
+    ) -> std::result::Result<(), String>,
 ) -> std::result::Result<Vec<MaterializedBrowserArtifact>, String> {
     if intent.required_artifacts.len() > MAX_BROWSER_RUNTIME_ITEMS
         || runtime.graph.frameworks.len() > MAX_BROWSER_RUNTIME_ITEMS
@@ -1826,6 +1489,7 @@ pub fn materialized_browser_artifacts_from_vfs(
     let mut output = Vec::new();
     let mut identities = BTreeSet::new();
     let mut source_paths = BTreeSet::new();
+    let mut total_bytes = 0usize;
     for artifact in &intent.required_artifacts {
         let family = match artifact.family {
             BrowserArtifactFamily::StandaloneWasm => {
@@ -1846,6 +1510,8 @@ pub fn materialized_browser_artifacts_from_vfs(
             &mut output,
             &mut identities,
             &mut source_paths,
+            &mut total_bytes,
+            &mut retain_payload,
         )?;
         if let Some(js_glue) = &artifact.js_glue {
             materialize_browser_artifact_from_vfs(
@@ -1859,6 +1525,8 @@ pub fn materialized_browser_artifacts_from_vfs(
                 &mut output,
                 &mut identities,
                 &mut source_paths,
+                &mut total_bytes,
+                &mut retain_payload,
             )?;
         }
     }
@@ -1875,6 +1543,8 @@ pub fn materialized_browser_artifacts_from_vfs(
                 &mut output,
                 &mut identities,
                 &mut source_paths,
+                &mut total_bytes,
+                &mut retain_payload,
             )?;
         }
     }
@@ -1899,6 +1569,11 @@ fn materialize_browser_artifact_from_vfs(
     output: &mut Vec<MaterializedBrowserArtifact>,
     identities: &mut BTreeSet<[u8; 32]>,
     source_paths: &mut BTreeSet<String>,
+    total_bytes: &mut usize,
+    retain_payload: &mut dyn FnMut(
+        &MaterializedBrowserArtifact,
+        Vec<u8>,
+    ) -> std::result::Result<(), String>,
 ) -> std::result::Result<(), String> {
     if output.len() >= MAX_BROWSER_RUNTIME_ITEMS {
         return Err(format!(
@@ -1912,6 +1587,14 @@ fn materialize_browser_artifact_from_vfs(
         ));
     }
     let bytes = read_browser_snapshot_vfs_file(&source_path, MAX_BROWSER_SNAPSHOT_FILE_BYTES)?;
+    *total_bytes = total_bytes
+        .checked_add(bytes.len())
+        .ok_or_else(|| String::from("browser artifact byte count overflow"))?;
+    if *total_bytes > MAX_BROWSER_SNAPSHOT_BYTES {
+        return Err(format!(
+            "browser artifacts exceed the {MAX_BROWSER_SNAPSHOT_BYTES}-byte aggregate limit"
+        ));
+    }
     let materialized = materialized_browser_artifact_from_bytes(
         module_key,
         extension_name,
@@ -1927,6 +1610,7 @@ fn materialize_browser_artifact_from_vfs(
             "duplicate materialized browser artifact identity for {source_path:?}"
         ));
     }
+    retain_payload(&materialized, bytes)?;
     output
         .try_reserve(1)
         .map_err(|_| String::from("failed to reserve materialized browser artifacts"))?;
@@ -2118,12 +1802,12 @@ pub(crate) fn browser_runtime_module_root_for_owner(
     owner: &ExtensionOwner,
 ) -> std::result::Result<String, String> {
     for framework in &runtime.graph.frameworks {
-        if framework.binding.owner.as_ref() == Some(owner) {
+        if &framework.binding.owner == owner {
             return Ok(framework.module_root.clone());
         }
     }
     for binding in &runtime.wasm_bindings {
-        if binding.owner.as_ref() == Some(owner) {
+        if &binding.owner == owner {
             return Ok(binding.module_root.clone());
         }
     }

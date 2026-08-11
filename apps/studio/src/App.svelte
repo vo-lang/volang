@@ -442,7 +442,7 @@
     const nextExplorerEntries = nextSessionInfo.projectMode === 'module'
       ? candidate
         ? await registry.project.listPreparedSessionDir(candidate, nextSessionInfo.root)
-        : await registry.workspace.list(nextSessionInfo.root)
+        : await registry.backend.listDir(nextSessionInfo.root)
       : [];
     if (!isCurrent()) return null;
     const shouldOpenEntry = Boolean(
@@ -454,7 +454,7 @@
           path: nextSessionInfo.entryPath,
           content: candidate
             ? await registry.project.readPreparedSessionFile(candidate, nextSessionInfo.entryPath)
-            : await registry.workspace.readFile(nextSessionInfo.entryPath),
+            : await registry.backend.readFile(nextSessionInfo.entryPath),
         }
       : null;
     if (!isCurrent()) return null;
@@ -509,14 +509,14 @@
 
   async function refreshDirectory(path: string): Promise<void> {
     if (!registry) return;
-    explorerEntries = await registry.workspace.list(path);
+    explorerEntries = await registry.backend.listDir(path);
     currentDir = path;
   }
 
   async function openEntry(entry: FsEntry): Promise<void> {
     if (!registry) return;
     if (entry.isDir) { await refreshDirectory(entry.path); return; }
-    const content = await registry.workspace.readFile(entry.path);
+    const content = await registry.backend.readFile(entry.path);
     editorOpen(entry.path, content);
   }
 
@@ -533,7 +533,7 @@
       return true;
     }
     if (!$editor.dirty) return true;
-    await registry.workspace.writeFile(activeFilePath, $editor.code);
+    await registry.backend.writeFile(activeFilePath, $editor.code);
     editorMarkSaved();
     if (!options.quiet) {
       consolePush('system', `Saved ${activeFilePath.split('/').pop() ?? activeFilePath}`);

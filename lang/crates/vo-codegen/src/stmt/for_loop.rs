@@ -246,11 +246,10 @@ fn compile_simple_for(
     let end_jump = func.emit_jump(Opcode::JumpIfNot, cmp_slot);
 
     // HINT_LOOP after bounds check
-    func.enter_loop(0, label);
+    func.enter_loop(label);
 
     // body_start is AFTER HINT_LOOP - this is where ForLoop will jump
     let body_start = func.current_pc();
-    func.set_loop_start(body_start);
 
     // Compile body
     compile_block(&for_stmt.body, ctx, func, info)?;
@@ -280,15 +279,8 @@ fn compile_simple_for(
     let exit_pc = func.current_pc();
     func.patch_jump(end_jump, exit_pc);
 
-    // Finalize HINT_LOOP with end_pc, exit_pc, and flags
-    func.finalize_loop_hint(
-        exit_info.hint_pc,
-        end_pc,
-        exit_pc,
-        exit_info.has_defer,
-        exit_info.has_labeled_break,
-        exit_info.has_labeled_continue,
-    );
+    // Finalize HINT_LOOP with end_pc and exit_pc.
+    func.finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
 
     for pc in exit_info.break_patches {
         func.patch_jump(pc, exit_pc);
@@ -408,9 +400,8 @@ pub(super) fn compile_for_cond(
     // while-style: for cond { } or infinite: for { }
 
     // Emit HINT_LOOP outside the loop
-    func.enter_loop(0, label);
+    func.enter_loop(label);
     let loop_start = func.current_pc();
-    func.set_loop_start(loop_start);
 
     let end_jump = if let Some(cond) = cond_opt {
         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
@@ -434,14 +425,7 @@ pub(super) fn compile_for_cond(
 
     // Finalize HINT_LOOP: exit_pc=0 for infinite loop, actual exit_pc otherwise
     let hint_exit_pc = if cond_opt.is_some() { exit_pc } else { 0 };
-    func.finalize_loop_hint(
-        exit_info.hint_pc,
-        end_pc,
-        hint_exit_pc,
-        exit_info.has_defer,
-        exit_info.has_labeled_break,
-        exit_info.has_labeled_continue,
-    );
+    func.finalize_loop_hint(exit_info.hint_pc, end_pc, hint_exit_pc);
 
     for pc in exit_info.break_patches {
         func.patch_jump(pc, exit_pc);
@@ -583,9 +567,8 @@ pub(super) fn compile_for_three(
     }
 
     // Emit HINT_LOOP outside the loop
-    func.enter_loop(0, label);
+    func.enter_loop(label);
     let loop_start = func.current_pc();
-    func.set_loop_start(loop_start);
 
     let end_jump = if let Some(cond) = cond {
         let cond_reg = crate::expr::compile_expr(cond, ctx, func, info)?;
@@ -617,15 +600,8 @@ pub(super) fn compile_for_three(
         func.patch_jump(j, exit_pc);
     }
 
-    // Finalize HINT_LOOP with end_pc, exit_pc, and flags
-    func.finalize_loop_hint(
-        exit_info.hint_pc,
-        end_pc,
-        exit_pc,
-        exit_info.has_defer,
-        exit_info.has_labeled_break,
-        exit_info.has_labeled_continue,
-    );
+    // Finalize HINT_LOOP with end_pc and exit_pc.
+    func.finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
 
     // Patch break jumps to after loop
     for pc in exit_info.break_patches {

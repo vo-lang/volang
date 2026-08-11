@@ -240,10 +240,7 @@ fn compile_builtin_call_impl(
                 let meta_reg = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
-                let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-                // When flags=0 (elem_bytes > 63), put elem_bytes in c+2
-                let num_regs = if flags == 0 { 3 } else { 2 };
-                let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
+                let len_cap_reg = func.alloc_slots(&[SlotType::Value; 2]);
 
                 if call.args.len() > 1 {
                     compile_expr_to(&call.args[1], len_cap_reg, ctx, func, info)?;
@@ -256,18 +253,11 @@ fn compile_builtin_call_impl(
                     // cap = len
                     func.emit_op(Opcode::Copy, len_cap_reg + 1, len_cap_reg, 0);
                 }
-                if flags == 0 {
-                    // Store elem_bytes in c+2 for dynamic case (use LoadConst so JIT can read from const table)
-                    let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
-                    func.emit_op(Opcode::LoadConst, len_cap_reg + 2, elem_bytes_idx, 0);
-                }
-
-                // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
+                // SliceNew: a=dst, b=elem_meta, c=len_cap_start.
                 func.emit_slice_new(
                     dst,
                     meta_reg,
                     len_cap_reg,
-                    flags,
                     ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
                 );
             } else if info.is_map(type_key) {
@@ -410,12 +400,8 @@ fn compile_builtin_call_impl(
                     elements.push(value);
                 }
 
-                let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-                // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
-                // When flags!=0: c=[elem_meta], c+1..=[elem]
-                // When flags==0: c=[elem_meta], c+1=[elem_bytes], c+2..=[elem]
-                let extra_slot = if flags == 0 { 1 } else { 0 };
-                let mut meta_elem_slot_types = vec![SlotType::Value; 1 + extra_slot as usize];
+                // SliceAppend: a=dst, b=slice, c=[elem_meta, elem...].
+                let mut meta_elem_slot_types = vec![SlotType::Value];
                 meta_elem_slot_types.extend(elem_slot_types.iter().cloned());
                 let meta_and_elem_reg = func.alloc_slots(&meta_elem_slot_types);
 
@@ -432,23 +418,14 @@ fn compile_builtin_call_impl(
                     };
 
                     func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
-                    if flags == 0 {
-                        let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
-                        func.emit_op(Opcode::LoadConst, meta_and_elem_reg + 1, elem_bytes_idx, 0);
-                        if !elem_slot_types.is_empty() {
-                            func.emit_copy(meta_and_elem_reg + 2, value, elem_slots);
-                        }
-                    } else {
-                        if !elem_slot_types.is_empty() {
-                            func.emit_copy(meta_and_elem_reg + 1, value, elem_slots);
-                        }
+                    if !elem_slot_types.is_empty() {
+                        func.emit_copy(meta_and_elem_reg + 1, value, elem_slots);
                     }
 
                     func.emit_slice_append(
                         append_dst,
                         current_slice,
                         meta_and_elem_reg,
-                        flags,
                         ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
                     );
                     current_slice = append_dst;
@@ -472,8 +449,7 @@ fn compile_builtin_call_impl(
             let map_reg = func.alloc_slots(&[SlotType::GcRef]);
             func.emit_copy(map_reg, map_value, 1);
 
-            // MapDelete expects: a=map, b=meta_and_key
-            // meta = key_slots, key at b+1
+            // MapDelete: a=map, b=key_start.
             let map_type = info.expr_type(call.args[0].id);
             let (key_type, _) = info.map_key_val_types(map_type);
             let key_slot_types = info.type_slot_types(key_type);
@@ -481,17 +457,12 @@ fn compile_builtin_call_impl(
                 .checked_slot_count(key_slot_types.len())
                 .map_err(CodegenError::Internal)?;
 
-            let mut delete_slot_types = vec![SlotType::Value]; // meta
-            delete_slot_types.extend(key_slot_types.iter().copied()); // key
-            let meta_and_key_reg = func.alloc_slots(&delete_slot_types);
-            let meta_idx = ctx.const_int(key_slots as i64);
-            func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
-
             // Compile key - use compile_map_key_expr for unified interface key boxing
             let key_reg = compile_map_key_expr(&call.args[1], key_type, ctx, func, info)?;
-            func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
+            let key_start = func.alloc_slots(&key_slot_types);
+            func.emit_copy(key_start, key_reg, key_slots);
 
-            func.emit_map_delete(map_reg, meta_and_key_reg, &key_slot_types);
+            func.emit_map_delete(map_reg, key_start, &key_slot_types);
         }
         "close" => {
             if call.args.len() != 1 {

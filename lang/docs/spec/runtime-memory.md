@@ -45,6 +45,29 @@ The runtime managed heap uses 64KiB blocks.
 not include JIT code, Rust collector metadata, host memory, GPU memory, audio
 memory, JavaScript objects, or extension-provider allocations.
 
+Native JIT code MUST have a finite executable-page budget per Island family.
+The JIT memory provider MUST reserve a bounded arena during construction and
+release that arena when the complete Island family is destroyed. The artifact
+budget check MUST use page-granular committed bytes after machine-code
+generation and before executable allocation. Telemetry MUST report emitted
+bytes separately from charged page bytes. Published entry points remain valid
+until family destruction, so budget exhaustion disables the new artifact
+without evicting live code. Best-effort JIT execution falls back to the
+interpreter; strict JIT execution reports a typed resource rejection. Arena
+reservation failure MUST fail strict JIT construction before guest execution.
+
+JIT analysis retention and per-artifact compiler work MUST have independent
+finite limits. Full-function and loop-OSR compilation MUST share one immutable
+function analysis. Evictable analysis state MUST NOT be pinned by a second VM
+manager cache.
+
+Each VM MUST also enforce finite limits for scheduled Fiber identities, stack
+slots per Fiber, call frames per Fiber, and aggregate native Fiber stack/frame
+storage. A runtime transition that publishes multiple spawns MUST reserve all
+identities and all required Fiber storage before it publishes the first spawn.
+Allocation or limit failure MUST reject the whole transition without a
+partially visible spawn batch.
+
 `initial_reserve_bytes` MUST be admitted before guest execution starts. Reserve
 is rounded to the allocator's block granularity.
 
@@ -74,7 +97,20 @@ root semantics, and failure contract.
 A mode change is valid only while the collector is idle. An attempted mode
 change during an active cycle MUST return `CollectorBusy`.
 
-### 4.1 Bounded work
+### 4.1 Verified runtime type metadata
+
+Before a module becomes executable, bytecode verification MUST produce the
+runtime type facts used by object tracing and typed write barriers. The module,
+its type metadata, and those facts MUST remain one immutable unit. Parent and
+child Islands in one VM family MUST share that unit; their heaps, roots,
+collectors, and mutable execution state remain Island-local.
+
+A tracing or barrier operation MUST use the verified facts without rebuilding
+a recursive type layout or allocating temporary storage. Missing facts, type
+kind drift, and slot-width mismatches MUST fail closed instead of selecting an
+approximate layout.
+
+### 4.2 Bounded work
 
 `gc_step_units(N)` MUST complete at most `N` collector work units. A call with
 `N == 0` MUST perform no collector work.
@@ -83,17 +119,19 @@ The following work MUST be resumable:
 
 - root scanning;
 - object and nested inline-layout scanning;
-- gray and gray-again propagation;
-- remembered-card scanning;
+- gray propagation;
+- remembered-parent scanning and retirement;
 - atomic remark and fixed-point detection;
 - sweeping;
 - large-span reclaim.
 
 Collector cursors MUST survive between scheduler boundaries. A large object,
 deep inline array, large container, or large root set MUST NOT force one call
-to scan the complete structure.
+to scan the complete structure. Runtime type lookup MUST take constant time per
+physical slot and MUST NOT hide recursive layout work from the work-unit
+budget.
 
-### 4.2 Roots
+### 4.3 Roots
 
 The precise root set includes all live guest references in:
 
@@ -107,7 +145,7 @@ The precise root set includes all live guest references in:
 A root mutation during remark or sweep rescue MUST invalidate the affected
 root-domain scan and participate in fixed-point completion.
 
-### 4.3 Write barrier
+### 4.4 Write barrier
 
 Every heap mutation that stores a GC-bearing value MUST execute the typed
 new-value barrier.
@@ -194,7 +232,7 @@ The `Stats` layout is platform independent and includes:
 - free blocks, partial spans, fragmentation, and reclaim backlog;
 - externally reported bytes and unknown external-provider count;
 - allocation totals and failures;
-- minor/major cycle, work-unit, dirty-card/root, remark, and lease counters;
+- minor/major cycle, work-unit, remembered-parent/root, remark, and lease counters;
 - growth/allocation permissions, hard-limit presence, GC mode/state, and
   automatic-GC state;
 - WebAssembly current/maximum pages.

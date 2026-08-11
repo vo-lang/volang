@@ -6,6 +6,16 @@
 //! explicitly unsafe.
 #![allow(dead_code, unused_imports)]
 
+pub(crate) fn endpoint_waiter(
+    island_id: u32,
+    fiber_key: u64,
+    wait_id: u64,
+) -> vo_runtime::objects::queue_state::QueueWaiter {
+    let wait_key = vo_runtime::island::EndpointWaitKey::try_new(fiber_key, wait_id)
+        .expect("test endpoint wait id must be non-zero");
+    vo_runtime::objects::queue_state::QueueWaiter::endpoint(island_id, wait_key)
+}
+
 pub(crate) mod queue {
     use vo_runtime::gc::GcRef;
     use vo_runtime::objects::queue as raw;

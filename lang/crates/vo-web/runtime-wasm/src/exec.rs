@@ -46,11 +46,7 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), ExternContractError> {
-    let mut seen_names = std::collections::BTreeSet::new();
-    for (id, def) in externs.iter().enumerate() {
-        if !seen_names.insert(def.name.as_str()) {
-            continue;
-        }
+    for (id, def) in vo_runtime::ffi::unique_extern_providers(externs) {
         match def.name.as_str() {
             vo_runtime::vo_extern_name!("os/exec", "startProcess") => {
                 crate::register_wasm_host(registry, id as u32, &def.name, exec_start_process)?

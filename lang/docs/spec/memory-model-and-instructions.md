@@ -101,7 +101,7 @@ Reference types are always represented as a single GcRef slot pointing to a heap
 | Physical State | Semantic | Assignment |
 |----------------|----------|------------|
 | Stack struct/array | Value | `CopyN` (copy slots) |
-| Escaped struct/array (boxed) | Value | `PtrClone` (deep copy) |
+| Escaped struct/array (boxed) | Value | Allocate destination + typed copy |
 | Pointer *T (boxed) | Reference | `Copy` (copy pointer only) |
 
 **Key distinction**: Escaped struct and Pointer are both boxed (GcRef physically), but differ in semantics:
@@ -277,7 +277,8 @@ pub struct GcHeader {
 
 // Nested structs are flattened inline, not separate heap objects.
 // Only reference-type fields (string/slice/map/chan/closure/pointer) are GcRef.
-// Therefore, PtrClone (memcpy all slots) achieves correct value semantics:
+// Therefore, allocating a destination and copying all typed slots achieves
+// correct value semantics:
 // - Primitive/nested-struct fields: copied by value
 // - Reference-type fields: shared (reference semantics, as expected)
 ```
@@ -297,7 +298,7 @@ pub struct GcHeader {
 // GcHeader.value_kind = ValueKind::Array
 // GcHeader.meta_id = 0 (Array doesn't need meta_id, elem info in ArrayHeader)
 // ArrayHeader.elem_meta = element's ValueMeta (for GC scanning)
-// elem_slots provided by instruction flags, not stored in object
+// element width/layout comes from verified per-instruction metadata
 ```
 
 **Slice** (reference type, 4 slots):
@@ -426,7 +427,7 @@ p := &o.inner    // o escapes (not just inner)
 |------|-----------|-------------|
 | Primitive (int/float/bool) | `Copy` | Copy single slot |
 | Struct/Array (stack) | `CopyN` | Copy all slots |
-| Struct/Array (boxed) | `PtrClone` | Deep copy (value semantics) |
+| Struct/Array (boxed) | Allocate + typed copy | Deep copy (value semantics) |
 | Pointer (*T) | `Copy` | Copy pointer (reference semantics) |
 | Reference types (string/slice/map/chan/closure) | `Copy` | Copy GcRef (shared underlying) |
 
@@ -448,7 +449,7 @@ dst.slot1 = if vk == Struct || vk == Array {
 | Primitive | `Copy` |
 | Reference types | `Copy` |
 | Pointer | `Copy` |
-| **Struct/Array** | `PtrClone` (deep copy) |
+| **Struct/Array** | GC `ptr_clone` helper (deep copy; no bytecode opcode) |
 
 ---
 
@@ -480,14 +481,18 @@ pub struct Instruction {
 - Performance priority: Single-slot is the hot path
 
 #### 6.2.3 Unification Over Fragmentation
-- **Remove single-slot variants**: `ArrayGet` uses `flags=elem_slots` uniformly
-- Fewer opcodes, simpler VM and JIT implementation
-- When flags=1, compiler constant-folds, zero overhead
+- Array and slice element operations share `ElemLayout` metadata across create,
+  get, set, address, and append paths.
+- Fewer layout decoders keep VM and JIT behavior aligned.
+- Element widths remain compile-time constants, so JIT lowering can unroll
+  copies without runtime layout branches.
 
-#### 6.2.4 Extended Layout Metadata
-- When a compact instruction field cannot mirror the complete layout, per-instruction metadata is authoritative.
+#### 6.2.4 Layout Metadata
+- Per-instruction `InstructionMetadata` is the sole authority for variable-width
+  instruction layouts. Layout fields retired from the instruction must be zero.
 - Map/Iter: `slots[x]` = meta, `slots[x+1..]` = data.
-- Metadata removes compact-field limits; logical layouts still fit the VM's `u16` slot-address domain.
+- Metadata removes compact-field limits; logical layouts still fit the VM's
+  `u16` slot-address domain.
 
 #### 6.2.5 Static vs Dynamic Indexing
 
@@ -526,8 +531,8 @@ For stack-allocated arrays with dynamic indices.
 |--------|----------|-------------|
 | `SlotGet` | a, b, c | `slots[a] = slots[b + slots[c]]` |
 | `SlotSet` | a, b, c | `slots[a + slots[b]] = slots[c]` |
-| `SlotGetN` | a, b, c, flags | Copy one multi-slot element using `SlotLayout`; flags is a compact legacy mirror or zero sentinel |
-| `SlotSetN` | a, b, c, flags | Store one multi-slot element using `SlotLayout`; flags is a compact legacy mirror or zero sentinel |
+| `SlotGetN` | a, b, c, flags | Copy one multi-slot element using `SlotLayout`; flags=0 |
+| `SlotSetN` | a, b, c, flags | Store one multi-slot element using `SlotLayout`; flags=0 |
 
 #### 6.3.4 GLOBAL: Global Variable Access
 
@@ -542,13 +547,11 @@ For stack-allocated arrays with dynamic indices.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `PtrNew` | a, b, c, flags | `slots[a] = alloc(slots[b])`, b=meta_reg containing ValueMeta, c=slots, flags=reserved |
-| `PtrClone` | a, b | `slots[a] = clone(slots[b])` - allocate + memcpy |
+| `PtrNew` | a, b, c, flags | `slots[a] = alloc(slots[b])`, b=meta_reg containing ValueMeta, `PtrLayout` owns the heap layout, c=0, flags=0 |
 | `PtrGet` | a, b, c | `slots[a] = heap[slots[b]].offset[c]` (single slot) |
 | `PtrSet` | a, b, c | `heap[slots[a]].offset[b] = slots[c]` (single slot) |
-| `PtrGetN` | a, b, c, flags | `slots[a..a+flags] = heap[slots[b]].offset[c..]` |
-| `PtrSetN` | a, b, c, flags | `heap[slots[a]].offset[b..] = slots[c..c+flags]` |
-| `PtrAdd` | a, b, c | `slots[a] = slots[b] + slots[c] * 8` (pointer arithmetic) |
+| `PtrGetN` | a, b, c, flags | Load the `PtrLayout`-described value at offset c; flags=0 |
+| `PtrSetN` | a, b, c, flags | Store the `PtrLayout`-described value at offset b; flags=0 |
 | `PtrAdd` | a, b, c | `slots[a] = slots[b] + slots[c] * 8` (pointer arithmetic) |
 
 #### 6.3.6 ARITH: Integer Arithmetic
@@ -646,16 +649,16 @@ verifier rejects them.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `Call` | a, b, c, flags | Call `functions[a\|(flags<<16)]`, args at `b`; `c` is a compact shape mirror |
+| `Call` | a, b, c, flags | Call `functions[a\|(flags<<16)]`, args at `b`; the callee `FunctionDef` owns the ABI and c=0 |
 | `CallExtern` | a, b, c, flags | Return to `a`, call `externs[b]` with args at `c`; `CallExternLayout` owns the layouts |
 | `CallClosure` | a, b, c | Call closure at `slots[a]`, args at `b`; `CallLayout` owns the complete shape |
 | `CallIface` | a, b, c, flags | Call interface at `a` with args at `b`; `CallIfaceLayout` owns shape and full method index |
 | `Return` | a, b | Return values starting at `a`, ret_slots=`b` |
 
 `Call` encoding: func_id = `a | (flags << 16)` → 24 bits (max 16M functions).
-For dynamic, interface, extern, and island calls, compact counts/indexes are
-canonical mirrors. They become zero when the metadata value does not fit, and
-the VM/JIT always consume the complete per-PC metadata.
+Static `Call`, static `GoStart`, and static defer derive argument/return layouts
+from the target `FunctionDef`. Dynamic, interface, extern, island, and closure
+calls consume their complete per-PC metadata. Retired shape fields are zero.
 
 #### 6.3.15 STR: String Operations
 
@@ -680,55 +683,54 @@ For escaped arrays allocated on the heap.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `ArrayNew` | a, b, c, flags | `slots[a] = new array`, b=meta_reg, c=len_reg, flags=elem_slots |
-| `ArrayGet` | a, b, c, flags | `slots[a..a+flags] = arr[idx]`, b=arr, c=idx, flags=elem_slots |
-| `ArraySet` | a, b, c, flags | `arr[idx] = slots[c..c+flags]`, a=arr, b=idx, flags=elem_slots |
+| `ArrayNew` | a, b, c, flags | `slots[a] = new array`, b=meta_reg, c=len_reg, `ElemLayout` owns size/layout, flags=0 |
+| `ArrayGet` | a, b, c, flags | Load the `ElemLayout`-described `arr[idx]`, b=arr, c=idx, flags=0 |
+| `ArraySet` | a, b, c, flags | Store the `ElemLayout`-described value, a=arr, b=idx, c=value start, flags=0 |
 | `ArrayLen` | a, b | `slots[a] = len(slots[b])` |
-| `ArrayAddr` | a, b, c, flags | `slots[a] = &arr[idx]`, b=arr, c=idx, flags=elem_bytes |
+| `ArrayAddr` | a, b, c, flags | `slots[a] = &arr[idx]`, b=arr, c=idx, `ElemLayout` owns byte stride, flags=0 |
 
-`ArrayNew` encoding: `slots[b]` contains elem's `ValueMeta` (loaded via `LoadConst`), `slots[c]` contains length, `flags` contains elem_slots.
+`ArrayNew` encoding: `slots[b]` contains the element `ValueMeta` and `slots[c]`
+contains the length. The matching `ElemLayout` supplies `elem_bytes` and the
+logical slot layout.
 
 #### 6.3.17 SLICE: Slice Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `SliceNew` | a, b, c, flags | `slots[a] = make([]T, len, cap)`, b=meta_reg, c=params_start, flags=elem_slots |
-| `SliceGet` | a, b, c, flags | `slots[a..a+flags] = slice[idx]`, b=slice, c=idx, flags=elem_slots |
-| `SliceSet` | a, b, c, flags | `slice[idx] = slots[c..c+flags]`, a=slice, b=idx, flags=elem_slots |
+| `SliceNew` | a, b, c, flags | `slots[a] = make([]T, len, cap)`, b=meta_reg, c=params_start, `ElemLayout` owns size/layout, flags=0 |
+| `SliceGet` | a, b, c, flags | Load the `ElemLayout`-described `slice[idx]`, b=slice, c=idx, flags=0 |
+| `SliceSet` | a, b, c, flags | Store the `ElemLayout`-described value, a=slice, b=idx, c=value start, flags=0 |
 | `SliceLen` | a, b | `slots[a] = len(slots[b])` |
 | `SliceCap` | a, b | `slots[a] = cap(slots[b])` |
 | `SliceSlice` | a, b, c, flags | `slots[a] = slice[lo:hi:max]`, b=slice, c=params_start, flags: bit0=has_max. lo=slots[c], hi=slots[c+1], max=slots[c+2] if has_max else cap |
-| `SliceAppend` | a, b, c, flags | `slots[a] = append(slice, slots[c..c+flags])`, b=slice, flags=elem_slots |
-| `SliceAddr` | a, b, c, flags | `slots[a] = &slice[idx]`, b=slice, c=idx, flags=elem_bytes |
+| `SliceAppend` | a, b, c, flags | `slots[a] = append(slice, value)`, b=slice, c=element ValueMeta followed by value slots, `ElemLayout` owns size/layout, flags=0 |
+| `SliceAddr` | a, b, c, flags | `slots[a] = &slice[idx]`, b=slice, c=idx, `ElemLayout` owns byte stride, flags=0 |
 
-`SliceNew` encoding: `slots[b]` contains elem's `ValueMeta`, `slots[c]` contains length, `slots[c+1]` contains capacity, `flags` contains elem_slots.
+`SliceNew` encoding: `slots[b]` contains the element `ValueMeta`, `slots[c]`
+contains length, and `slots[c+1]` contains capacity. `ElemLayout` supplies the
+element size and logical layout.
 
 #### 6.3.18 MAP: Map Operations
 
 Uses per-instruction metadata for exact key/value layouts, bounded by the VM's
-`u16` slot address space. Compact fields remain compatibility mirrors.
+`u16` slot address space.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `MapNew` | a, b, c | `slots[a] = make(map[K]V)`, b=type_info_reg, `MapNew` metadata owns widths; c is a compact mirror or zero sentinel |
-| `MapGet` | a, b, c | `slots[a..] = map[key]`, b=map, c=meta_and_key |
-| `MapSet` | a, b, c | `map[key] = val`, a=map, b=meta_and_key, c=val_start |
-| `MapDelete` | a, b | `delete(map, key)`, a=map, b=meta_and_key |
+| `MapNew` | a, b, c | `slots[a] = make(map[K]V)`, b=type_info_reg, `MapNew` metadata owns layouts, c=0 |
+| `MapGet` | a, b, c | `slots[a..] = map[key]`, b=map, c=key_start; `MapGet` metadata owns layouts and comma-ok mode |
+| `MapSet` | a, b, c | `map[key] = val`, a=map, b=key_start, c=val_start; `MapSet` metadata owns layouts |
+| `MapDelete` | a, b, c | `delete(map, key)`, a=map, b=key_start, c=0; `MapDelete` metadata owns key layout |
 | `MapLen` | a, b | `slots[a] = len(slots[b])` |
 | `MapIterInit` | a, b | `slots[a] = new_iter(map)`, b=map |
-| `MapIterNext` | a, b, flags | `key, val = iter.next()`, a=key_dst, b=iter, flags=(key_slots \| val_slots << 4) |
-
-**Meta slot encoding**:
-- `MapGet`: metadata owns key/value widths and `has_ok`; `slots[c]` mirrors `(key_slots << 16) | (val_slots << 1) | has_ok` when representable. Zero width bits select metadata while preserving `has_ok`.
-- `MapSet`: metadata owns key/value widths; `slots[b]` mirrors `(key_slots << 8) | val_slots` when representable, and zero selects metadata.
-- `MapDelete`: `slots[b] = key_slots`, key=`slots[b+1..]`
+| `MapIterNext` | a, b, c, flags | `key, val = iter.next()`, a=key/value start, b=iterator, c=ok slot; `MapIterNext` metadata owns layouts and flags=0 |
 
 #### 6.3.19 CHAN: Channel Operations
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `ChanNew` | a, b, c, flags | `slots[a] = make(chan T, cap)`, b=meta_reg, c=cap_reg, QueueLayout=element layout, flags bit7=port |
-| `ChanSend` | a, b, flags | `chan <- slots[b..]`, a=chan, QueueLayout=element layout, flags width bits zero for new bytecode |
+| `ChanSend` | a, b, flags | `chan <- slots[b..]`, a=chan, QueueLayout=element layout, flags=0 |
 | `ChanRecv` | a, b, flags | `slots[a..] = <-chan`, b=chan, QueueLayout=element layout, flags bit0=has_ok |
 | `ChanClose` | a | `close(slots[a])` |
 | `ChanLen` | a, b | `slots[a] = len(slots[b])` |
@@ -747,17 +749,13 @@ Uses per-instruction metadata for exact key/value layouts, bounded by the VM's
 
 #### 6.3.21 ITER: Iterator (for-range)
 
-Uses complete metadata when compact fields cannot mirror key/value widths. Key/value
-layouts remain bounded by the VM's `u16` slot-address domain.
+Map iteration uses exact per-PC metadata. Key/value layouts remain bounded by
+the VM's `u16` slot-address domain.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `IterBegin` | a, b | Begin iteration, a=meta_and_container, b=type |
-| `IterNext` | a, b, c | `slots[a..], slots[b..] = next`, done_offset=`c`; slots count from IterState |
-| `IterEnd` | - | End iteration |
-
-**Meta slot encoding**:
-- `slots[a] = (key_slots << 8) | val_slots`, container=`slots[a+1]`
+| `MapIterInit` | a, b | Create iterator in `a`, map at `b` |
+| `MapIterNext` | a, b, c | Write key/value at `a`, iterator at `b`, comma-ok at `c`; layouts come from `MapIterNext` metadata |
 
 #### 6.3.22 CLOSURE: Closure Operations
 
@@ -771,7 +769,10 @@ layouts remain bounded by the VM's `u16` slot-address domain.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `GoStart` | a, b, c, flags | `go call`, a=func_id_low, b=args_start, c=arg_slots, flags=is_closure\|func_id_high |
+| `GoStart` | a, b, c, flags | `go call`, a=func_id_low/closure_reg, b=args_start, c=0; flags bit0 selects closure and remaining bits carry static func-id high bits |
+
+Static `GoStart` takes its argument layout from the callee `FunctionDef`.
+Closure `GoStart` takes it from `CallLayout`; return layout must be empty.
 | `Yield` | - | Yield current goroutine |
 
 #### 6.3.24 DEFER: Defer and Error Handling
@@ -788,7 +789,7 @@ layouts remain bounded by the VM's `u16` slot-address domain.
 | Opcode | Operands | Description |
 |--------|----------|-------------|
 | `IfaceAssign` | a, b, c, flags | Assign to interface: dst=`slots[a..a+2]`, src=`slots[b]`, c=`const_idx`, flags=`value_kind` |
-| `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`; `IfaceAssertLayout` owns kind, full target id, and result layout; `c` and width/kind flag bits are mirrors, while `has_ok` remains semantic |
+| `IfaceAssert` | a, b, c, flags | Type assert: dst=`a`, src_iface=`b`; `IfaceAssertLayout` owns kind, full target id, and result layout; c=0 and flags bit0 is comma-ok |
 | `IfaceEq` | a, b, c | `slots[a] = (slots[b..b+2] == slots[c..c+2])` (deep equality check) |
 
 **IfaceAssign Semantics**:
@@ -893,17 +894,9 @@ let (actual_named_type_id, actual_vk, itab_id) = if vk == ValueKind::Interface {
 // IfaceAssertLayout is authoritative at this PC.
 let IfaceAssertLayout { assert_kind, target_id, result_layout } = metadata_at(pc);
 let dst_slots = result_layout.len();
-let has_ok = ((flags >> 2) & 0x1) != 0;
-
-// Compact fields are canonical integrity mirrors. The result-width mirror is
-// zero above 31 slots; c is 0xffff above u16::MAX. Those values can also
-// represent genuine compact values, and metadata disambiguates the collision.
-let expected_kind_mirror = assert_kind;
-let expected_slot_mirror = if dst_slots <= 31 { dst_slots } else { 0 };
-let expected_target_mirror = u16::try_from(target_id).unwrap_or(0xffff);
-assert((flags & 0x3) == expected_kind_mirror);
-assert((flags >> 3) == expected_slot_mirror);
-assert(c == expected_target_mirror);
+let has_ok = (flags & IFACE_ASSERT_HAS_OK_FLAG) != 0;
+assert(c == 0);
+assert((flags & !IFACE_ASSERT_HAS_OK_FLAG) == 0);
 
 let src_slot0 = slots[b];
 let src_slot1 = slots[b + 1];

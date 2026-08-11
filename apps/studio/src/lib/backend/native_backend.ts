@@ -6,9 +6,6 @@ import type {
 } from './backend';
 import type {
   BootstrapContext,
-  BuildResult,
-  CheckResult,
-  CompileResult,
   DiscoveredProject,
   DisplayPulseSubmission,
   DisplayTimingRequest,
@@ -16,8 +13,6 @@ import type {
   FsStat,
   GitOp,
   GitResult,
-  GrepMatch,
-  GrepOpts,
   GuiRunOutput,
   HttpOpts,
   HttpResult,
@@ -26,8 +21,6 @@ import type {
   LaunchSpec,
   ProcEvent,
   PreparedSession,
-  ReadManyResult,
-  RendererBridgeVfsSnapshot,
   RunEvent,
   RunOpts,
   SessionInfo,
@@ -72,6 +65,10 @@ type NativeGuiRunResult = {
   entryPath: string;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
+  vfsSnapshot: {
+    rootPath: string;
+    files: Array<{ path: string; bytes: number[] }>;
+  };
 };
 
 function displayPath(path: string): string {
@@ -194,10 +191,6 @@ export class NativeBackend implements Backend {
     return this.invoke<string>('cmd_read_prepared_session_file', { candidate, path });
   }
 
-  async discoverProjects(root: string): Promise<DiscoveredProject[]> {
-    return this.invoke<DiscoveredProject[]>('cmd_discover_projects', { root });
-  }
-
   async discoverWorkspaceProjects(): Promise<DiscoveredProject[]> {
     return this.invoke<DiscoveredProject[]>('cmd_discover_workspace_projects');
   }
@@ -206,16 +199,8 @@ export class NativeBackend implements Backend {
     return this.invoke<FsEntry[]>('cmd_list_dir', { path });
   }
 
-  async statPath(path: string): Promise<FsStat> {
-    return this.invoke<FsStat>('cmd_stat_path', { path });
-  }
-
   async readFile(path: string): Promise<string> {
     return this.invoke<string>('cmd_read_file', { path });
-  }
-
-  async readMany(paths: string[]): Promise<ReadManyResult[]> {
-    return this.invoke<ReadManyResult[]>('cmd_read_many', { paths });
   }
 
   async writeFile(path: string, content: string): Promise<void> {
@@ -232,35 +217,6 @@ export class NativeBackend implements Backend {
 
   async renameEntry(oldPath: string, newPath: string): Promise<void> {
     await this.invoke<void>('cmd_rename_entry', { oldPath, newPath });
-  }
-
-  async copyEntry(src: string, dst: string): Promise<void> {
-    await this.invoke<void>('cmd_copy_entry', { src, dst });
-  }
-
-  async grep(path: string, pattern: string, opts?: GrepOpts): Promise<GrepMatch[]> {
-    return this.invoke<GrepMatch[]>('cmd_grep', {
-      path,
-      pattern,
-      caseSensitive: opts?.caseSensitive ?? false,
-      maxResults: opts?.maxResults ?? 500,
-    });
-  }
-
-  async checkVo(path: string): Promise<CheckResult> {
-    return this.invoke<CheckResult>('cmd_check_vo', { path });
-  }
-
-  async compileVo(path: string): Promise<CompileResult> {
-    return this.invoke<CompileResult>('cmd_compile_vo', { path });
-  }
-
-  async formatVo(path: string): Promise<string> {
-    return this.invoke<string>('cmd_format_vo', { path });
-  }
-
-  async buildVo(path: string, output?: string): Promise<BuildResult> {
-    return this.invoke<BuildResult>('cmd_build_vo', { path, output });
   }
 
   async dumpVo(path: string): Promise<string> {
@@ -339,6 +295,13 @@ export class NativeBackend implements Backend {
         entryPath: result.entryPath,
         framework: result.framework,
         providerFrameworks: result.providerFrameworks,
+        vfsSnapshot: {
+          rootPath: result.vfsSnapshot.rootPath,
+          files: result.vfsSnapshot.files.map((file) => ({
+            path: file.path,
+            bytes: new Uint8Array(file.bytes),
+          })),
+        },
       };
     } catch (error) {
       this.disposeVoguiSubscriptions(session);
@@ -387,19 +350,15 @@ export class NativeBackend implements Backend {
     await this.drainGuiPlatformRequests(session);
   }
 
-  async pushIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<void> {
+  async pushAndPollIslandTransport(
+    data: Uint8Array,
+    session?: GuiSessionToken,
+  ): Promise<Uint8Array[]> {
     await this.invoke<void>('cmd_push_island_transport', {
       previewHandle: this.activePreviewHandle(session),
       data: Array.from(data),
     });
     await this.drainGuiPlatformRequests(session);
-  }
-
-  async pushAndPollIslandTransport(
-    data: Uint8Array,
-    session?: GuiSessionToken,
-  ): Promise<Uint8Array[]> {
-    await this.pushIslandTransport(data, session);
     return [];
   }
 
@@ -703,24 +662,6 @@ export class NativeBackend implements Backend {
     this.bridgeOutboundSequences.set(session.id, sequence + 1n);
   }
 
-  async getRendererBridgeVfsSnapshot(
-    path: string,
-    sessionId?: number,
-  ): Promise<RendererBridgeVfsSnapshot> {
-    const session = sessionId === undefined ? undefined : this.guiSession.get(sessionId);
-    if (sessionId !== undefined && !session) {
-      throw new Error('GUI preview session is stale');
-    }
-    const raw = await this.invoke<{ rootPath: string; files: Array<{ path: string; bytes: number[] }> }>(
-      'cmd_get_renderer_bridge_vfs_snapshot',
-      { entryPath: path, previewHandle: this.activePreviewHandle(session ?? undefined) },
-    );
-    return {
-      rootPath: raw.rootPath,
-      files: raw.files.map((file) => ({ path: file.path, bytes: new Uint8Array(file.bytes) })),
-    };
-  }
-
   private activePreviewHandle(requested?: GuiSessionToken): StudioSessionHandle {
     const session = requested ?? this.guiSession.active;
     if (!session) throw new Error('No GUI preview is active');
@@ -829,10 +770,6 @@ export class NativeBackend implements Backend {
     return this.invoke<string>('cmd_vo_init', { path, module, mainContent });
   }
 
-  async voVersion(): Promise<string> {
-    return this.invoke<string>('cmd_vo_version');
-  }
-
   spawnProcess(
     program: string,
     args: string[],
@@ -864,8 +801,8 @@ export class NativeBackend implements Backend {
     await this.invoke<void>('cmd_create_workspace_files', { files });
   }
 
-  async createProjectFiles(files: { path: string; content: string }[]): Promise<void> {
-    await this.invoke<void>('cmd_create_project_files', { files });
+  async createProjectFile(path: string, content: string): Promise<void> {
+    await this.invoke<void>('cmd_create_project_file', { path, content });
   }
 
   async gitExec(op: GitOp): Promise<GitResult> {

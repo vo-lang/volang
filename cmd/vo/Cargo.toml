@@ -22,7 +22,7 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 vo-common-core = { path = "../../lang/crates/vo-common-core" }
 vo-common = { path = "../../lang/crates/vo-common" }
-vo-engine = { path = "../../lang/crates/vo-engine" }
+vo-engine = { path = "../../lang/crates/vo-engine", default-features = false }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-release = { path = "../../lang/crates/vo-release" }
 vo-schema-compiler = { path = "../../lang/crates/vo-schema-compiler" }

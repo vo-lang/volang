@@ -1,31 +1,45 @@
 //! Fiber (coroutine) and related structures.
 
+use core::num::NonZeroU64;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 #[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use vo_runtime::ffi::HostEventReplaySource;
 use vo_runtime::gc::GcRef;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
+use vo_runtime::island::{EndpointResponseKind, EndpointWaitKey};
 use vo_runtime::objects::interface::InterfaceSlot;
 
 use crate::vm::RuntimeTrapKind;
 
 #[derive(Debug, Clone)]
-pub struct RemoteRecvResponse {
-    pub data: Vec<u8>,
-    pub closed: bool,
-    pub rejected: bool,
+pub enum RemoteRecvResponse {
+    Data(Vec<u8>),
+    Closed,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteEndpointWait {
-    Send { endpoint_id: u64, wait_id: u64 },
-    Recv { endpoint_id: u64, wait_id: u64 },
+    Send {
+        endpoint_id: u64,
+        wait_id: NonZeroU64,
+    },
+    Recv {
+        endpoint_id: u64,
+        wait_id: NonZeroU64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +210,11 @@ pub enum UnwindingMode {
 /// 6. For Panic: no more frames → return ExecResult::Panic
 #[derive(Debug, Clone)]
 pub struct UnwindingState {
-    /// Defers remaining to execute (LIFO order, first = next to run).
+    /// Defers remaining to execute in registration order (`last()` runs next).
+    ///
+    /// Keeping the next defer at the tail makes each unwind step an O(1) pop and
+    /// lets defers registered by a running defer append without moving the older
+    /// pending tail.
     pub pending: Vec<DeferEntry>,
     /// Frame depth after the unwinding function was popped.
     /// Defer functions run at depth = target_depth + 1.
@@ -346,6 +364,11 @@ impl UnwindingStack {
     }
 
     #[inline]
+    pub fn get(&self, index: usize) -> Option<&UnwindingState> {
+        self.states.get(index)
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         self.states.len()
     }
@@ -485,6 +508,7 @@ pub enum JitExternSuspend {
     WaitIo {
         token: vo_runtime::io::IoToken,
         replay_pc: u32,
+        staged_io_roots_added: bool,
     },
     HostWait {
         token: u64,
@@ -724,8 +748,16 @@ impl ClosureReplayState {
     }
 }
 
-/// Initial stack capacity in slots (64KB = 8192 slots).
-const INITIAL_STACK_CAPACITY: usize = 8192;
+/// Minimum stack size after the first non-empty reservation (2 KiB).
+///
+/// This matches the JIT's maximum SSA-local budget, keeps fresh fibers cheap,
+/// and still lets larger stacks grow geometrically.
+pub(crate) const MIN_STACK_SLOTS: usize = 256;
+/// Largest completed-fiber stack retained across an idle boundary (32 KiB).
+///
+/// Active scheduling bursts can reuse larger stacks until the VM next waits,
+/// while idle VMs keep only a modest warm cache per reusable slot.
+pub(crate) const MAX_RETAINED_STACK_SLOTS: usize = 1 << 12;
 /// Maximum stack capacity per fiber in slots (8 MiB).
 ///
 /// Without a VM-owned limit, runaway recursion keeps doubling the Rust Vec
@@ -749,9 +781,79 @@ pub const MAX_JIT_CALL_DEPTH: usize = 512;
 /// only `frames`. Without a VM-owned frame limit, wasm eventually reports a raw
 /// `memory access out of bounds` from `RawVec::grow_one` in call-frame push.
 const MAX_CALL_FRAMES: usize = 1 << 15;
+/// Largest completed-fiber call-frame cache retained for slot reuse.
+///
+/// The direct JIT call-depth limit also bounds the idle materialized-frame cache.
+pub(crate) const MAX_RETAINED_CALL_FRAMES: usize = MAX_JIT_CALL_DEPTH;
 
-const CALL_IFACE_IC_TABLE_SIZE: usize = 64;
-const CALL_IFACE_IC_TABLE_MASK: u32 = (CALL_IFACE_IC_TABLE_SIZE - 1) as u32;
+/// VM-owned limits for native Fiber and scheduler storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmResourceLimits {
+    pub max_fibers: usize,
+    pub max_total_fiber_storage_bytes: usize,
+    pub max_stack_slots_per_fiber: usize,
+    pub max_call_frames_per_fiber: usize,
+}
+
+impl Default for VmResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_fibers: 16 * 1024,
+            max_total_fiber_storage_bytes: 512 * 1024 * 1024,
+            max_stack_slots_per_fiber: MAX_STACK_CAPACITY,
+            max_call_frames_per_fiber: MAX_CALL_FRAMES,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FiberStorageBudget {
+    limit_bytes: usize,
+    used_bytes: AtomicUsize,
+}
+
+impl FiberStorageBudget {
+    pub(crate) fn new(limit_bytes: usize) -> Self {
+        Self {
+            limit_bytes,
+            used_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_charge(&self, bytes: usize) -> bool {
+        let mut used = self.used_bytes.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(bytes) else {
+                return false;
+            };
+            if next > self.limit_bytes {
+                return false;
+            }
+            match self.used_bytes.compare_exchange_weak(
+                used,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => used = actual,
+            }
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        let previous = self.used_bytes.fetch_sub(bytes, Ordering::Relaxed);
+        debug_assert!(previous >= bytes);
+    }
+
+    pub(crate) fn used_bytes(&self) -> usize {
+        self.used_bytes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn limit_bytes(&self) -> usize {
+        self.limit_bytes
+    }
+}
 
 /// Resume point for JIT call chain suspension.
 ///
@@ -773,39 +875,24 @@ pub struct ResumePoint {
     pub ret_slots: u16,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CallIfaceICEntry {
-    pub caller_func_id: u32,
-    pub callsite_pc: u32,
-    pub itab_id: u32,
-    pub method_idx: u32,
-    pub valid: bool,
-    pub local_slots: u16,
-    pub gc_scan_slots: u16,
-    pub func_id: u32,
-}
-
-impl CallIfaceICEntry {
-    #[inline]
-    pub fn matches(
-        &self,
-        caller_func_id: u32,
-        callsite_pc: u32,
-        itab_id: u32,
-        method_idx: u32,
-    ) -> bool {
-        self.valid
-            && self.caller_func_id == caller_func_id
-            && self.callsite_pc == callsite_pc
-            && self.itab_id == itab_id
-            && self.method_idx == method_idx
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FiberCapacityError {
-    StackSlots { required: usize, limit: usize },
-    CallFrames { required: usize, limit: usize },
+    StackSlots {
+        required: usize,
+        limit: usize,
+    },
+    CallFrames {
+        required: usize,
+        limit: usize,
+    },
+    HostStorage {
+        resource: &'static str,
+        requested_bytes: usize,
+        limit_bytes: usize,
+    },
+    HostAllocation {
+        resource: &'static str,
+    },
 }
 
 impl FiberCapacityError {
@@ -819,6 +906,16 @@ impl FiberCapacityError {
                 "runtime error: stack overflow: required {} call frames exceeds limit {}",
                 required, limit
             ),
+            FiberCapacityError::HostStorage {
+                resource,
+                requested_bytes,
+                limit_bytes,
+            } => format!(
+                "runtime error: VM {resource} storage limit exceeded: requested {requested_bytes} bytes, limit {limit_bytes} bytes"
+            ),
+            FiberCapacityError::HostAllocation { resource } => {
+                format!("runtime error: VM {resource} host allocation failed")
+            }
         }
     }
 }
@@ -827,6 +924,7 @@ impl FiberCapacityError {
 pub enum FiberIdentityExhausted {
     Select,
     RemoteEndpointWait,
+    HostAllocation(&'static str),
 }
 
 impl core::fmt::Display for FiberIdentityExhausted {
@@ -835,6 +933,9 @@ impl core::fmt::Display for FiberIdentityExhausted {
             Self::Select => f.write_str("fiber select identity space exhausted"),
             Self::RemoteEndpointWait => {
                 f.write_str("fiber remote endpoint wait identity space exhausted")
+            }
+            Self::HostAllocation(resource) => {
+                write!(f, "fiber host allocation failed for {resource}")
             }
         }
     }
@@ -856,6 +957,9 @@ pub struct Fiber {
     /// Stack pointer - current stack top. stack[0..sp] is in use.
     pub sp: usize,
     pub frames: Vec<CallFrame>,
+    resource_limits: VmResourceLimits,
+    storage_budget: Arc<FiberStorageBudget>,
+    accounted_storage_bytes: usize,
     pub defer_stack: Vec<DeferEntry>,
     pub unwinding: UnwindingStack,
     pub queue_wait_state: Option<QueueWaitState>,
@@ -889,7 +993,6 @@ pub struct Fiber {
     pub resume_stack: Vec<ResumePoint>,
     #[cfg(feature = "jit")]
     pub jit_extern_suspend: Option<JitExternSuspend>,
-    pub call_iface_ic_table: Vec<CallIfaceICEntry>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
     /// Instructions still available in the current scheduler turn.
@@ -910,6 +1013,12 @@ pub struct Fiber {
     /// JIT infrastructure diagnostic message published by runtime callbacks.
     #[cfg(feature = "jit")]
     pub jit_infra_error_message: String,
+    /// Reused wide-result storage for VM-to-JIT calls.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_return_scratch: Vec<u64>,
+    /// Reused wide argument/result frame for JIT-to-extern callbacks.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_extern_scratch: Vec<u64>,
     /// Pending remote recv response data from home island.
     /// Set by handle_chan_response_command before waking fiber.
     /// Consumed by ChanRecv handler on retry.
@@ -923,15 +1032,97 @@ pub struct Fiber {
     next_remote_endpoint_wait_id: Option<u64>,
 }
 
+/// Validated entry state for a fiber whose scheduler identity is assigned at commit.
+///
+/// Keeping only the initialized frame prefix avoids growing a Fiber stack while
+/// a runtime transition is still pending.
+#[derive(Debug)]
+pub(crate) struct PendingSpawn {
+    func_id: u32,
+    local_slots: u16,
+    gc_scan_slots: u16,
+    ret_slots: u16,
+    entry_slots: Vec<u64>,
+}
+
+impl PendingSpawn {
+    pub(crate) fn try_new(
+        func_id: u32,
+        local_slots: u16,
+        gc_scan_slots: u16,
+        ret_slots: u16,
+        entry_slots: Vec<u64>,
+    ) -> Result<Self, FiberCapacityError> {
+        let initialized_slots = entry_slots.len();
+        if gc_scan_slots > local_slots || initialized_slots > local_slots as usize {
+            return Err(FiberCapacityError::StackSlots {
+                required: initialized_slots.max(gc_scan_slots as usize),
+                limit: local_slots as usize,
+            });
+        }
+        Ok(Self {
+            func_id,
+            local_slots,
+            gc_scan_slots,
+            ret_slots,
+            entry_slots,
+        })
+    }
+
+    pub(crate) fn initialize(self, fiber: &mut Fiber) -> Result<(), FiberCapacityError> {
+        debug_assert_eq!(fiber.sp, 0);
+        debug_assert!(fiber.frames.is_empty());
+        let bp = fiber.try_push_frame(
+            self.func_id,
+            self.local_slots,
+            self.gc_scan_slots,
+            0,
+            self.ret_slots,
+        )?;
+        fiber.copy_slots_from_slice(bp, &self.entry_slots);
+        Ok(())
+    }
+
+    /// Reserve every fallible Fiber allocation used by `initialize` without
+    /// publishing the spawn or changing its execution state.
+    pub(crate) fn preflight(&self, fiber: &mut Fiber) -> Result<(), FiberCapacityError> {
+        fiber.try_ensure_capacity(self.local_slots as usize)?;
+        fiber.try_reserve_call_frames(1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(func_id: u32) -> Self {
+        Self::try_new(func_id, 0, 0, 0, Vec::new()).expect("empty test spawn")
+    }
+}
+
 impl Fiber {
     pub fn new(id: u32) -> Self {
+        let limits = VmResourceLimits::default();
+        Self::new_with_resources(
+            id,
+            limits,
+            Arc::new(FiberStorageBudget::new(
+                limits.max_total_fiber_storage_bytes,
+            )),
+        )
+    }
+
+    pub(crate) fn new_with_resources(
+        id: u32,
+        resource_limits: VmResourceLimits,
+        storage_budget: Arc<FiberStorageBudget>,
+    ) -> Self {
         Self {
             id,
             generation: 1,
             state: FiberState::Runnable,
-            stack: Vec::with_capacity(INITIAL_STACK_CAPACITY),
+            stack: Vec::new(),
             sp: 0,
             frames: Vec::new(),
+            resource_limits,
+            storage_budget,
+            accounted_storage_bytes: 0,
             defer_stack: Vec::new(),
             unwinding: UnwindingStack::default(),
             queue_wait_state: None,
@@ -950,7 +1141,6 @@ impl Fiber {
             resume_stack: Vec::new(), // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
             jit_extern_suspend: None,
-            call_iface_ic_table: Vec::new(),
             closure_replay: ClosureReplayState::new(),
             execution_budget: 0,
             map_scratch: crate::exec::MapScratch::default(),
@@ -962,15 +1152,15 @@ impl Fiber {
             jit_panic_msg: InterfaceSlot::default(),
             #[cfg(feature = "jit")]
             jit_infra_error_message: String::new(),
+            #[cfg(feature = "jit")]
+            jit_return_scratch: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_extern_scratch: Vec::new(),
             remote_recv_response: None,
             remote_send_closed: false,
             remote_endpoint_wait: None,
             next_remote_endpoint_wait_id: Some(1),
         }
-    }
-
-    pub fn take_remote_recv_response(&mut self) -> Option<RemoteRecvResponse> {
-        self.remote_recv_response.take()
     }
 
     pub fn consume_remote_send_closed(&mut self) -> bool {
@@ -988,11 +1178,13 @@ impl Fiber {
     }
 
     pub fn begin_queue_wait(&mut self, waiter: &vo_runtime::objects::queue_state::QueueWaiter) {
-        self.queue_wait_state = waiter.kind.map(|kind| QueueWaitState {
-            queue_ref: waiter.queue_ref as GcRef,
-            kind,
-            registration_id: waiter.registration_id,
-        });
+        self.queue_wait_state = waiter.queue_identity().zip(waiter.registration_id()).map(
+            |((queue_ref, kind), registration_id)| QueueWaitState {
+                queue_ref: queue_ref as GcRef,
+                kind,
+                registration_id: registration_id.get(),
+            },
+        );
     }
 
     pub fn clear_queue_wait(&mut self) {
@@ -1003,14 +1195,17 @@ impl Fiber {
         &self,
         waiter: &vo_runtime::objects::queue_state::QueueWaiter,
     ) -> bool {
-        match (self.queue_wait_state, waiter.kind) {
-            (Some(state), Some(kind)) => {
-                state.queue_ref as u64 == waiter.queue_ref
+        match (
+            self.queue_wait_state,
+            waiter.queue_identity(),
+            waiter.registration_id(),
+        ) {
+            (Some(state), Some((queue_ref, kind)), Some(registration_id)) => {
+                state.queue_ref as u64 == queue_ref
                     && state.kind == kind
-                    && state.registration_id != 0
-                    && state.registration_id == waiter.registration_id
+                    && state.registration_id == registration_id.get()
             }
-            (None, None) => true,
+            (None, None, None) => true,
             _ => false,
         }
     }
@@ -1021,15 +1216,15 @@ impl Fiber {
         Ok(select_id)
     }
 
-    fn try_alloc_remote_endpoint_wait_id(&mut self) -> Result<u64, FiberIdentityExhausted> {
-        let wait_id = self
+    fn try_alloc_remote_endpoint_wait_id(&mut self) -> Result<NonZeroU64, FiberIdentityExhausted> {
+        let raw_wait_id = self
             .next_remote_endpoint_wait_id
             .ok_or(FiberIdentityExhausted::RemoteEndpointWait)?;
-        self.next_remote_endpoint_wait_id = wait_id.checked_add(1);
-        Ok(wait_id)
+        self.next_remote_endpoint_wait_id = raw_wait_id.checked_add(1);
+        NonZeroU64::new(raw_wait_id).ok_or(FiberIdentityExhausted::RemoteEndpointWait)
     }
 
-    pub fn begin_remote_endpoint_send_wait(&mut self, endpoint_id: u64) -> u64 {
+    pub fn begin_remote_endpoint_send_wait(&mut self, endpoint_id: u64) -> EndpointWaitKey {
         self.try_begin_remote_endpoint_send_wait(endpoint_id)
             .expect("fiber remote endpoint wait identity space exhausted")
     }
@@ -1037,16 +1232,16 @@ impl Fiber {
     pub fn try_begin_remote_endpoint_send_wait(
         &mut self,
         endpoint_id: u64,
-    ) -> Result<u64, FiberIdentityExhausted> {
+    ) -> Result<EndpointWaitKey, FiberIdentityExhausted> {
         let wait_id = self.try_alloc_remote_endpoint_wait_id()?;
         self.remote_endpoint_wait = Some(RemoteEndpointWait::Send {
             endpoint_id,
             wait_id,
         });
-        Ok(wait_id)
+        Ok(EndpointWaitKey::new(self.endpoint_response_key(), wait_id))
     }
 
-    pub fn begin_remote_endpoint_recv_wait(&mut self, endpoint_id: u64) -> u64 {
+    pub fn begin_remote_endpoint_recv_wait(&mut self, endpoint_id: u64) -> EndpointWaitKey {
         self.try_begin_remote_endpoint_recv_wait(endpoint_id)
             .expect("fiber remote endpoint wait identity space exhausted")
     }
@@ -1054,20 +1249,19 @@ impl Fiber {
     pub fn try_begin_remote_endpoint_recv_wait(
         &mut self,
         endpoint_id: u64,
-    ) -> Result<u64, FiberIdentityExhausted> {
+    ) -> Result<EndpointWaitKey, FiberIdentityExhausted> {
         let wait_id = self.try_alloc_remote_endpoint_wait_id()?;
         self.remote_endpoint_wait = Some(RemoteEndpointWait::Recv {
             endpoint_id,
             wait_id,
         });
-        Ok(wait_id)
+        Ok(EndpointWaitKey::new(self.endpoint_response_key(), wait_id))
     }
 
     pub fn apply_endpoint_response(
         &mut self,
         endpoint_id: u64,
-        wait_id: u64,
-        kind: &vo_runtime::island::EndpointResponseKind,
+        kind: EndpointResponseKind,
     ) -> bool {
         match (self.remote_endpoint_wait, kind) {
             (
@@ -1075,9 +1269,9 @@ impl Fiber {
                     endpoint_id: expected,
                     wait_id: expected_wait_id,
                 }),
-                vo_runtime::island::EndpointResponseKind::SendAck { closed },
-            ) if expected == endpoint_id && expected_wait_id == wait_id => {
-                if *closed {
+                EndpointResponseKind::SendAck { closed, wait_key },
+            ) if expected == endpoint_id && expected_wait_id == wait_key.wait_id() => {
+                if closed {
                     self.remote_send_closed = true;
                 }
                 self.remote_endpoint_wait = None;
@@ -1088,12 +1282,16 @@ impl Fiber {
                     endpoint_id: expected,
                     wait_id: expected_wait_id,
                 }),
-                vo_runtime::island::EndpointResponseKind::RecvData { data, closed },
-            ) if expected == endpoint_id && expected_wait_id == wait_id => {
-                self.remote_recv_response = Some(RemoteRecvResponse {
-                    data: data.clone(),
-                    closed: *closed,
-                    rejected: false,
+                EndpointResponseKind::RecvData {
+                    data,
+                    closed,
+                    wait_key,
+                },
+            ) if expected == endpoint_id && expected_wait_id == wait_key.wait_id() => {
+                self.remote_recv_response = Some(if closed {
+                    RemoteRecvResponse::Closed
+                } else {
+                    RemoteRecvResponse::Data(data)
                 });
                 self.remote_endpoint_wait = None;
                 true
@@ -1103,13 +1301,9 @@ impl Fiber {
                     endpoint_id: expected,
                     wait_id: expected_wait_id,
                 }),
-                vo_runtime::island::EndpointResponseKind::RecvError,
-            ) if expected == endpoint_id && expected_wait_id == wait_id => {
-                self.remote_recv_response = Some(RemoteRecvResponse {
-                    data: Vec::new(),
-                    closed: false,
-                    rejected: true,
-                });
+                EndpointResponseKind::RecvError { wait_key },
+            ) if expected == endpoint_id && expected_wait_id == wait_key.wait_id() => {
+                self.remote_recv_response = Some(RemoteRecvResponse::Rejected);
                 self.remote_endpoint_wait = None;
                 true
             }
@@ -1120,29 +1314,32 @@ impl Fiber {
     pub fn can_apply_endpoint_response(
         &self,
         endpoint_id: u64,
-        wait_id: u64,
-        kind: &vo_runtime::island::EndpointResponseKind,
+        kind: &EndpointResponseKind,
     ) -> bool {
-        matches!(
-            (self.remote_endpoint_wait, kind),
+        match (self.remote_endpoint_wait, kind) {
             (
                 Some(RemoteEndpointWait::Send {
                     endpoint_id: expected,
                     wait_id: expected_wait_id,
                 }),
-                vo_runtime::island::EndpointResponseKind::SendAck { .. },
-            ) if expected == endpoint_id && expected_wait_id == wait_id
-        ) || matches!(
-            (self.remote_endpoint_wait, kind),
-            (
+                EndpointResponseKind::SendAck { wait_key, .. },
+            )
+            | (
                 Some(RemoteEndpointWait::Recv {
                     endpoint_id: expected,
                     wait_id: expected_wait_id,
                 }),
-                vo_runtime::island::EndpointResponseKind::RecvData { .. }
-                    | vo_runtime::island::EndpointResponseKind::RecvError,
-            ) if expected == endpoint_id && expected_wait_id == wait_id
-        )
+                EndpointResponseKind::RecvData { wait_key, .. },
+            )
+            | (
+                Some(RemoteEndpointWait::Recv {
+                    endpoint_id: expected,
+                    wait_id: expected_wait_id,
+                }),
+                EndpointResponseKind::RecvError { wait_key },
+            ) => expected == endpoint_id && expected_wait_id == wait_key.wait_id(),
+            _ => false,
+        }
     }
 
     /// Reset fiber for reuse.
@@ -1172,15 +1369,6 @@ impl Fiber {
         {
             self.jit_extern_suspend = None;
         }
-        if !self.call_iface_ic_table.is_empty() {
-            unsafe {
-                core::ptr::write_bytes(
-                    self.call_iface_ic_table.as_mut_ptr(),
-                    0,
-                    self.call_iface_ic_table.len(),
-                );
-            }
-        }
         self.closure_replay.reset();
         self.execution_budget = 0;
         #[cfg(feature = "jit")]
@@ -1197,18 +1385,25 @@ impl Fiber {
     }
 
     #[inline]
-    pub fn call_iface_ic_index(caller_func_id: u32, callsite_pc: u32) -> usize {
-        ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc) & CALL_IFACE_IC_TABLE_MASK)
-            as usize
+    pub(crate) fn has_oversized_storage(&self) -> bool {
+        self.stack.capacity() > MAX_RETAINED_STACK_SLOTS
+            || self.frames.capacity() > MAX_RETAINED_CALL_FRAMES
     }
 
-    pub fn ensure_call_iface_ic_table(&mut self) -> &mut [CallIfaceICEntry] {
-        if self.call_iface_ic_table.is_empty() {
-            self.call_iface_ic_table = Vec::with_capacity(CALL_IFACE_IC_TABLE_SIZE);
-            self.call_iface_ic_table
-                .resize(CALL_IFACE_IC_TABLE_SIZE, CallIfaceICEntry::default());
+    /// Shed exceptional high-water storage while preserving scheduler identity.
+    pub(crate) fn release_oversized_storage(&mut self) {
+        debug_assert!(self.state.is_dead());
+        if !self.has_oversized_storage() {
+            return;
         }
-        self.call_iface_ic_table.as_mut_slice()
+        let mut fresh = Self::new_with_resources(
+            self.id,
+            self.resource_limits,
+            Arc::clone(&self.storage_budget),
+        );
+        fresh.generation = self.generation;
+        *self = fresh;
+        self.state = FiberState::Dead;
     }
 
     /// Check if current panic is recoverable and return the interface{} value if so.
@@ -1358,21 +1553,51 @@ impl Fiber {
     /// Grows by doubling if needed. Only call when sp might exceed capacity.
     #[inline]
     pub fn try_ensure_capacity(&mut self, required: usize) -> Result<(), FiberCapacityError> {
-        if required > MAX_STACK_CAPACITY {
+        let stack_limit = self
+            .resource_limits
+            .max_stack_slots_per_fiber
+            .min(MAX_STACK_CAPACITY);
+        if required > stack_limit {
             return Err(FiberCapacityError::StackSlots {
                 required,
-                limit: MAX_STACK_CAPACITY,
+                limit: stack_limit,
             });
         }
         if required > self.stack.len() {
             let new_cap = self
                 .stack
                 .len()
-                .max(INITIAL_STACK_CAPACITY)
+                .max(MIN_STACK_SLOTS)
                 .max(required)
                 .next_power_of_two()
-                .min(MAX_STACK_CAPACITY);
+                .min(stack_limit);
+            let additional_bytes = new_cap
+                .saturating_sub(self.stack.len())
+                .saturating_mul(core::mem::size_of::<u64>());
+            if !self.storage_budget.try_charge(additional_bytes) {
+                return Err(FiberCapacityError::HostStorage {
+                    resource: "fiber stack",
+                    requested_bytes: self
+                        .storage_budget
+                        .used_bytes()
+                        .saturating_add(additional_bytes),
+                    limit_bytes: self.storage_budget.limit_bytes(),
+                });
+            }
+            if self
+                .stack
+                .try_reserve_exact(new_cap.saturating_sub(self.stack.len()))
+                .is_err()
+            {
+                self.storage_budget.release(additional_bytes);
+                return Err(FiberCapacityError::HostAllocation {
+                    resource: "fiber stack",
+                });
+            }
             self.stack.resize(new_cap, 0);
+            self.accounted_storage_bytes = self
+                .accounted_storage_bytes
+                .saturating_add(additional_bytes);
         }
         Ok(())
     }
@@ -1417,26 +1642,61 @@ impl Fiber {
     }
 
     #[inline]
-    pub fn try_reserve_call_frames(&self, additional: usize) -> Result<(), FiberCapacityError> {
+    pub fn try_reserve_call_frames(&mut self, additional: usize) -> Result<(), FiberCapacityError> {
         let required =
             self.frames
                 .len()
                 .checked_add(additional)
                 .ok_or(FiberCapacityError::CallFrames {
                     required: usize::MAX,
-                    limit: MAX_CALL_FRAMES,
+                    limit: self.resource_limits.max_call_frames_per_fiber,
                 })?;
-        if required > MAX_CALL_FRAMES {
+        let frame_limit = self
+            .resource_limits
+            .max_call_frames_per_fiber
+            .min(MAX_CALL_FRAMES);
+        if required > frame_limit {
             return Err(FiberCapacityError::CallFrames {
                 required,
-                limit: MAX_CALL_FRAMES,
+                limit: frame_limit,
             });
+        }
+        if required > self.frames.capacity() {
+            let new_cap = (if self.frames.capacity() == 0 {
+                4
+            } else {
+                self.frames.capacity().saturating_mul(2)
+            })
+            .max(required)
+            .min(frame_limit);
+            let additional_frames = new_cap.saturating_sub(self.frames.capacity());
+            let additional_bytes =
+                additional_frames.saturating_mul(core::mem::size_of::<CallFrame>());
+            if !self.storage_budget.try_charge(additional_bytes) {
+                return Err(FiberCapacityError::HostStorage {
+                    resource: "fiber call frames",
+                    requested_bytes: self
+                        .storage_budget
+                        .used_bytes()
+                        .saturating_add(additional_bytes),
+                    limit_bytes: self.storage_budget.limit_bytes(),
+                });
+            }
+            if self.frames.try_reserve_exact(additional_frames).is_err() {
+                self.storage_budget.release(additional_bytes);
+                return Err(FiberCapacityError::HostAllocation {
+                    resource: "fiber call frames",
+                });
+            }
+            self.accounted_storage_bytes = self
+                .accounted_storage_bytes
+                .saturating_add(additional_bytes);
         }
         Ok(())
     }
 
     #[inline]
-    fn try_reserve_call_frame(&self) -> Result<(), FiberCapacityError> {
+    fn try_reserve_call_frame(&mut self) -> Result<(), FiberCapacityError> {
         self.try_reserve_call_frames(1)
     }
 
@@ -1773,16 +2033,26 @@ impl Fiber {
     }
 }
 
+impl Drop for Fiber {
+    fn drop(&mut self) {
+        if self.accounted_storage_bytes != 0 {
+            self.storage_budget.release(self.accounted_storage_bytes);
+            self.accounted_storage_bytes = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DeferArgLayout, Fiber, FiberCapacityError, FiberIdentityExhausted, PanicState,
-        UnwindingMode, UnwindingStack, UnwindingState, INITIAL_STACK_CAPACITY, MAX_CALL_FRAMES,
-        MAX_STACK_CAPACITY,
+        DeferArgLayout, Fiber, FiberCapacityError, FiberIdentityExhausted, FiberState, PanicState,
+        PendingSpawn, UnwindingMode, UnwindingStack, UnwindingState, MAX_CALL_FRAMES,
+        MAX_RETAINED_CALL_FRAMES, MAX_RETAINED_STACK_SLOTS, MAX_STACK_CAPACITY, MIN_STACK_SLOTS,
     };
-    use vo_runtime::island::EndpointResponseKind;
-    use vo_runtime::InterfaceSlot;
-    use vo_runtime::SlotType;
+    use crate::test_support::queue as test_queue;
+    use vo_runtime::island::{EndpointResponseKind, EndpointWaitKey};
+    use vo_runtime::objects::queue_state::QueueKind;
+    use vo_runtime::{InterfaceSlot, RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 
     fn unwind_state(
         target_depth: usize,
@@ -1843,13 +2113,81 @@ mod tests {
     }
 
     #[test]
-    fn ensure_capacity_grows_stack_within_limit() {
+    fn fresh_fiber_stack_is_lazy() {
+        let fiber = Fiber::new(1);
+
+        assert_eq!(fiber.stack.len(), 0);
+        assert_eq!(fiber.stack.capacity(), 0);
+    }
+
+    #[test]
+    fn ensure_capacity_uses_small_power_of_two_floor() {
         let mut fiber = Fiber::new(1);
 
-        fiber.ensure_capacity(INITIAL_STACK_CAPACITY + 1);
+        fiber.ensure_capacity(1);
+        assert_eq!(fiber.stack.len(), MIN_STACK_SLOTS);
 
-        assert!(fiber.stack.len() > INITIAL_STACK_CAPACITY);
-        assert!(fiber.stack.len() <= MAX_STACK_CAPACITY);
+        fiber.ensure_capacity(MIN_STACK_SLOTS + 1);
+        assert_eq!(fiber.stack.len(), MIN_STACK_SLOTS * 2);
+    }
+
+    #[test]
+    fn release_keeps_bounded_execution_storage_for_reuse() {
+        let mut fiber = Fiber::new(1);
+        fiber.generation = 7;
+        fiber.ensure_capacity(MAX_RETAINED_STACK_SLOTS);
+        for _ in 0..MAX_RETAINED_CALL_FRAMES {
+            fiber
+                .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
+                .unwrap();
+        }
+        let stack_ptr = fiber.stack.as_ptr();
+        let stack_capacity = fiber.stack.capacity();
+        let frames_ptr = fiber.frames.as_ptr();
+        let frames_capacity = fiber.frames.capacity();
+
+        fiber.state = FiberState::Dead;
+        fiber.release_oversized_storage();
+
+        assert!(fiber.state.is_dead());
+        assert_eq!((fiber.id, fiber.generation), (1, 7));
+        assert_eq!(
+            (fiber.stack.as_ptr(), fiber.stack.capacity()),
+            (stack_ptr, stack_capacity)
+        );
+        assert_eq!(
+            (fiber.frames.as_ptr(), fiber.frames.capacity()),
+            (frames_ptr, frames_capacity)
+        );
+    }
+
+    #[test]
+    fn release_drops_oversized_stack_or_call_frames() {
+        let mut stack_heavy = Fiber::new(2);
+        stack_heavy.generation = u32::MAX;
+        stack_heavy.ensure_capacity(MAX_RETAINED_STACK_SLOTS + 1);
+        stack_heavy.state = FiberState::Dead;
+        stack_heavy.release_oversized_storage();
+        assert!(stack_heavy.state.is_dead());
+        assert_eq!((stack_heavy.id, stack_heavy.generation), (2, u32::MAX));
+        assert_eq!(
+            (stack_heavy.stack.len(), stack_heavy.stack.capacity()),
+            (0, 0)
+        );
+
+        let mut frame_heavy = Fiber::new(3);
+        for _ in 0..=MAX_RETAINED_CALL_FRAMES {
+            frame_heavy
+                .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
+                .unwrap();
+        }
+        frame_heavy.state = FiberState::Dead;
+        frame_heavy.release_oversized_storage();
+        assert!(frame_heavy.state.is_dead());
+        assert_eq!(
+            (frame_heavy.frames.len(), frame_heavy.frames.capacity()),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -1863,6 +2201,17 @@ mod tests {
                 limit: MAX_STACK_CAPACITY,
             })
         );
+    }
+
+    #[test]
+    fn pending_spawn_rejects_entry_prefix_past_frame_capacity() {
+        assert!(matches!(
+            PendingSpawn::try_new(0, 1, 1, 0, vec![11, 22]),
+            Err(FiberCapacityError::StackSlots {
+                required: 2,
+                limit: 1,
+            })
+        ));
     }
 
     #[test]
@@ -1885,19 +2234,36 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_response_replay_is_not_bound_to_a_specific_wait_turn() {
+    fn endpoint_response_replay_is_bound_to_a_specific_wait_turn() {
         let mut fiber = Fiber::new(1);
-        let response = EndpointResponseKind::SendAck { closed: false };
 
-        let first_wait_id = fiber.begin_remote_endpoint_send_wait(42);
-        assert!(fiber.apply_endpoint_response(42, first_wait_id, &response));
+        let first_wait_key = fiber.begin_remote_endpoint_send_wait(42);
+        assert!(fiber.apply_endpoint_response(
+            42,
+            EndpointResponseKind::SendAck {
+                closed: false,
+                wait_key: first_wait_key,
+            },
+        ));
 
-        let second_wait_id = fiber.begin_remote_endpoint_send_wait(42);
+        let second_wait_key = fiber.begin_remote_endpoint_send_wait(42);
         assert!(
-            !fiber.apply_endpoint_response(42, first_wait_id, &response),
+            !fiber.apply_endpoint_response(
+                42,
+                EndpointResponseKind::SendAck {
+                    closed: false,
+                    wait_key: first_wait_key,
+                },
+            ),
             "a response accepted for one wait turn must not be accepted again for the next wait"
         );
-        assert!(fiber.apply_endpoint_response(42, second_wait_id, &response));
+        assert!(fiber.apply_endpoint_response(
+            42,
+            EndpointResponseKind::SendAck {
+                closed: false,
+                wait_key: second_wait_key,
+            },
+        ));
     }
 
     #[test]
@@ -1912,13 +2278,93 @@ mod tests {
         );
 
         fiber.next_remote_endpoint_wait_id = Some(u64::MAX);
-        assert_eq!(fiber.try_begin_remote_endpoint_send_wait(42), Ok(u64::MAX));
+        let expected_wait_key =
+            EndpointWaitKey::try_new(fiber.endpoint_response_key(), u64::MAX).unwrap();
+        assert_eq!(
+            fiber.try_begin_remote_endpoint_send_wait(42),
+            Ok(expected_wait_key)
+        );
         let established_wait = fiber.remote_endpoint_wait;
         assert_eq!(
             fiber.try_begin_remote_endpoint_recv_wait(43),
             Err(FiberIdentityExhausted::RemoteEndpointWait)
         );
         assert_eq!(fiber.remote_endpoint_wait, established_wait);
+    }
+
+    #[test]
+    fn remote_send_identity_exhaustion_restores_committed_endpoint_transfer() {
+        const TARGET_ISLAND: u32 = 7;
+
+        let mut vm = crate::vm::Vm::new();
+        vm.state.external_island_transport = true;
+        let runtime_types = [
+            RuntimeType::Port {
+                dir: vo_common_core::ChanDir::Both,
+                elem: ValueRttid::new(1, ValueKind::Int64),
+            },
+            RuntimeType::Basic(ValueKind::Int64),
+        ];
+        let port = test_queue::create(
+            &mut vm.state.gc,
+            QueueKind::Port,
+            ValueMeta::new(0, ValueKind::Int64),
+            ValueRttid::new(1, ValueKind::Int64),
+            1,
+            0,
+        );
+        assert!(test_queue::home_info(port).is_none());
+        assert!(!vm.state.endpoint_registry.has_live());
+
+        let mut island_effects = Vec::new();
+        let transfer_commit = crate::exec::prepare_value_queue_handles_for_transfer_with_commit(
+            &[port as u64],
+            ValueMeta::new(0, ValueKind::Port),
+            TARGET_ISLAND,
+            &[],
+            &[],
+            &runtime_types,
+            &mut vm.state,
+            &mut island_effects,
+        )
+        .expect("local port transfer must commit endpoint state");
+        assert!(transfer_commit.requires_terminal_commit());
+        assert!(island_effects.is_empty());
+        let endpoint_id = {
+            let home_info = test_queue::home_info(port).expect("committed HomeInfo");
+            assert!(home_info.peers.contains(&TARGET_ISLAND));
+            home_info.endpoint_id
+        };
+        assert_eq!(vm.state.endpoint_registry.get_live(endpoint_id), Some(port));
+
+        vm.state.gc_roots_dirty_all = false;
+        vm.state.clear_gc_dirty_fibers();
+        let mut fiber = Fiber::new(1);
+        fiber.next_remote_endpoint_wait_id = None;
+        let error = match crate::vm::prepare_queue_action(
+            &mut vm.state,
+            &mut fiber,
+            crate::exec::QueueAction::RemoteSend {
+                endpoint_id: 42,
+                home_island: TARGET_ISLAND,
+                data: vec![1, 2, 3],
+                island_effects,
+                transfer_commit,
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("exhausted remote wait identity must reject queue preparation"),
+        };
+
+        assert!(
+            error.contains("remote endpoint wait identity space exhausted"),
+            "{error}"
+        );
+        assert!(fiber.remote_endpoint_wait.is_none());
+        assert!(test_queue::home_info(port).is_none());
+        assert_eq!(vm.state.endpoint_registry.get_live(endpoint_id), None);
+        assert!(!vm.state.endpoint_registry.has_live());
+        assert!(vm.state.gc_roots_dirty_all);
     }
 
     #[test]
@@ -1930,7 +2376,11 @@ mod tests {
         fiber.reset();
 
         assert_eq!(fiber.try_alloc_select_id(), Ok(0));
-        assert_eq!(fiber.try_begin_remote_endpoint_recv_wait(7), Ok(1));
+        let expected_wait_key = EndpointWaitKey::try_new(fiber.endpoint_response_key(), 1).unwrap();
+        assert_eq!(
+            fiber.try_begin_remote_endpoint_recv_wait(7),
+            Ok(expected_wait_key)
+        );
     }
 
     #[test]

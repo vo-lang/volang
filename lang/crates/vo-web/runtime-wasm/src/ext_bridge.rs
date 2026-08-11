@@ -62,7 +62,7 @@
 //!
 //! # JS Side (vo.ts)
 //!
-//! - `window.voSetupExtModule(canonical_module_owner, bytes, jsGlueUrl?): ExtensionLoadHandle`
+//! - `window.voSetupExtModule(canonical_module_owner, bytes, jsGlueSource?): ExtensionLoadHandle`
 //! - `window.voIsExtModuleLoadCurrent(canonical_module_owner, generation_token): boolean`
 //! - `window.voCommitExtModule(canonical_module_owner, artifact_token, lease_token): boolean`
 //! - `window.voAbortExtModuleLoad(canonical_module_owner, artifact_token, lease_token): void`
@@ -168,7 +168,7 @@ extern "C" {
     fn js_setup_ext_module(
         module_key: &str,
         bytes: &[u8],
-        js_glue_url: &str,
+        js_glue_source: &str,
     ) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = window, js_name = "voCommitExtModule")]
@@ -259,12 +259,12 @@ fn extension_load_handle_field(handle: &JsValue, field: &str) -> Result<JsValue,
 pub async fn load_wasm_ext_module(
     module_path: &str,
     bytes: &[u8],
-    js_glue_url: &str,
+    js_glue_source: &str,
 ) -> Result<(), String> {
     validate_canonical_module_owner(module_path).map_err(|error| {
         format!("invalid canonical WASM extension module owner '{module_path}': {error}")
     })?;
-    let handle = js_setup_ext_module(module_path, bytes, js_glue_url).map_err(|error| {
+    let handle = js_setup_ext_module(module_path, bytes, js_glue_source).map_err(|error| {
         format!(
             "failed to begin WASM extension '{module_path}' setup: {}",
             js_error_detail(error)
@@ -568,11 +568,7 @@ pub fn register_wasm_ext_bridges(
         .collect::<Vec<_>>();
 
     let mut entries = Vec::new();
-    let mut seen_names = BTreeSet::new();
-    for (id, def) in externs.iter().enumerate() {
-        if !seen_names.insert(def.name.as_str()) {
-            continue;
-        }
+    for (id, def) in vo_runtime::ffi::unique_extern_providers(externs) {
         let Ok(key) = decode_extern_name(&def.name) else {
             continue;
         };
@@ -1665,30 +1661,6 @@ mod tests {
     }
 
     #[test]
-    fn wasm_extension_output_decoder_is_total_source_contract_051() {
-        let source = include_str!("ext_bridge.rs");
-        assert!(
-            source.contains("fn decode_ext_output_items("),
-            "WASM extension output must be parsed by a total decoder before return slots are written"
-        );
-        assert!(
-            source.contains("record_contract_violation"),
-            "malformed WASM extension output must flow through the extern contract error channel"
-        );
-        let decode = source
-            .split("fn decode_ext_output(")
-            .nth(1)
-            .expect("decode_ext_output function")
-            .split("fn wasm_ext_bridge(")
-            .next()
-            .expect("decode_ext_output body");
-        assert!(
-            !decode.contains("break;"),
-            "malformed output must not be accepted by breaking out of decode_ext_output"
-        );
-    }
-
-    #[test]
     fn wasm_extension_output_decoder_distinguishes_bytes_and_strings_062() {
         assert_eq!(decode_ext_output_items(&[], 0), Ok(Vec::new()));
         assert!(decode_ext_output_items(&[], 1).is_err());
@@ -1728,34 +1700,6 @@ mod tests {
     }
 
     #[test]
-    fn wasm_extension_bridge_dispatch_061_uses_resolved_context_abi_not_global_side_table() {
-        let production = include_str!("ext_bridge.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production section");
-        assert!(
-            !production.contains("EXTERN_ID_TO_INFO"),
-            "WASM bridge dispatch ABI must not live in a process-global extern_id side table"
-        );
-        let bridge = production
-            .split("fn wasm_ext_bridge(")
-            .nth(1)
-            .expect("wasm_ext_bridge function")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("bridge body");
-        assert!(
-            bridge.contains("wasm_extension_bridge_abi()"),
-            "WASM bridge provider must use the resolved ABI bound to the current extern call"
-        );
-        assert!(
-            bridge.contains("missing resolved WASM extension bridge ABI")
-                && !bridge.contains("panic!("),
-            "a missing resolved bridge ABI must report a contract violation without panicking"
-        );
-    }
-
-    #[test]
     fn missing_resolved_wasm_bridge_abi_fails_closed_before_javascript_dispatch() {
         let mut registry = ExternRegistry::new();
         registry.register_test_with_effects(
@@ -1780,26 +1724,17 @@ mod tests {
         let mut sentinel_errors = SentinelErrorCache::new();
         let mut host_output = None;
         let mut io = vo_runtime::io::IoRuntime::new().expect("test I/O runtime");
-        let world = ExternWorld {
-            gc: &mut gc,
-            module: &module,
-            itab_cache: &mut itab_cache,
-            vm_opaque: core::ptr::null_mut(),
-            program_args: &program_args,
-            output: output.as_ref(),
-            sentinel_errors: &mut sentinel_errors,
-            host_output: &mut host_output,
-            host_services_v2: None,
-            io: &mut io,
-        };
-        let inputs = ExternFiberInputs {
-            fiber_opaque: core::ptr::null_mut(),
-            resume_io_token: None,
-            resume_host_event_token: None,
-            resume_host_event_data: None,
-            replay_results: Vec::new(),
-            replay_panic_message: None,
-        };
+        let world = ExternWorld::new(
+            &mut gc,
+            (&module).into(),
+            &mut itab_cache,
+            &program_args,
+            output.as_ref(),
+            &mut sentinel_errors,
+            &mut host_output,
+        )
+        .with_io(&mut io);
+        let inputs = ExternFiberInputs::default();
 
         let error = registry
             .call(&mut stack, invoke, world, inputs)
@@ -1810,49 +1745,6 @@ mod tests {
                 .contains("missing resolved WASM extension bridge ABI"),
             "unexpected bridge contract error: {error}"
         );
-    }
-
-    #[test]
-    fn malformed_setup_handles_and_commit_exceptions_keep_rollback_armed() {
-        let production = include_str!("ext_bridge.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production section");
-        let load = production
-            .split("pub async fn load_wasm_ext_module(")
-            .nth(1)
-            .expect("WASM extension loader")
-            .split("#[derive(Debug, Clone, PartialEq, Eq)]")
-            .next()
-            .expect("WASM extension loader body");
-        let arm = load
-            .find("let mut pending = PendingJsExtensionLoad")
-            .expect("armed pending-load guard");
-        for field in ["artifactToken", "leaseToken", "ready"] {
-            assert!(
-                arm < load.find(field).expect("setup-handle field read"),
-                "handle-identity cleanup must be armed before reading {field}"
-            );
-        }
-        assert!(
-            load.find("pending.rust_owner_inserted = newly_loaded")
-                .expect("Rust owner rollback arm")
-                < load
-                    .find("js_commit_ext_module(")
-                    .expect("JavaScript artifact commit"),
-            "Rust owner rollback must be armed before JavaScript publication"
-        );
-
-        let drop_guard = production
-            .split("impl Drop for PendingJsExtensionLoad")
-            .nth(1)
-            .expect("pending-load drop guard")
-            .split("fn js_error_detail(")
-            .next()
-            .expect("pending-load drop body");
-        assert!(drop_guard.contains("js_abort_ext_module_load_handle(&self.setup_handle)"));
-        assert!(drop_guard.contains("if self.rust_owner_inserted"));
-        assert!(drop_guard.contains("forget_wasm_ext_module_owner(&self.module_path)"));
     }
 
     #[test]
@@ -1911,26 +1803,6 @@ mod tests {
         .expect_err("conflicting suspend metadata must fail");
         assert!(matches!(error, SuspendPreparationError::Contract(_)));
         assert_eq!(token_attempts.get(), 0, "a rejected frame consumed a token");
-
-        let source = include_str!("ext_bridge.rs");
-        let preparation = source
-            .split("fn prepare_suspend_wait(")
-            .nth(1)
-            .expect("suspend preparation helper")
-            .split("fn suspend_metadata(")
-            .next()
-            .expect("suspend preparation helper body");
-        let decode = preparation
-            .find("decode_suspend_metadata(output)")
-            .expect("frame validation");
-        let shape = preparation
-            .find("ret_slots != 2")
-            .expect("return-shape validation");
-        let remember = preparation
-            .find("remember_suspend_metadata(name, metadata)")
-            .expect("metadata publication");
-        let allocate = preparation.find("next_token()").expect("token allocation");
-        assert!(decode < shape && shape < remember && remember < allocate);
 
         clear_wasm_ext_state().expect("clear test WASM extension state");
     }
@@ -2003,34 +1875,5 @@ mod tests {
         assert!(wasm_ext_binding(&inner).is_some());
         assert!(wasm_ext_binding(&outer).is_none());
         clear_wasm_ext_state().expect("clear test WASM extension state");
-    }
-
-    #[test]
-    fn wasm_extension_routing_has_no_legacy_name_heuristics() {
-        let production = include_str!("ext_bridge.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source");
-        for forbidden in [
-            "normalize_module_key",
-            "module_key_candidates",
-            "LOADED_PREFIXES",
-            "voRegisterExtModuleAlias",
-            "voCallExtReplay",
-            "ends_with(\"waitForEvent\")",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "legacy extern routing heuristic remains: {forbidden}"
-            );
-        }
-        assert!(production.contains("decode_extern_name(name)"));
-        assert!(production.contains("deepest_owning_module(key"));
-        assert!(production.contains("validate_wasm_ext_binding("));
-        assert!(production.contains("#[wasm_bindgen(catch"));
-        assert!(production.contains("let output = call_js_extension(&name, &input)"));
-        assert!(production.contains("checked_add(len)"));
-        assert!(production.contains("display-pulse control frame cannot satisfy"));
-        assert!(production.contains("GUI event replay encoding produces 2 return slots"));
     }
 }

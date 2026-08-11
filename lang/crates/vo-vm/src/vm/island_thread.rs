@@ -2,13 +2,13 @@
 
 use std::sync::{atomic::AtomicBool, mpsc::Sender, Arc};
 
-use vo_runtime::ext_loader::{ExtensionLoader, NativeExtensionSpec};
 use vo_runtime::island::IslandCommand;
 use vo_runtime::island_transport::IslandTransport;
 
+use crate::fiber::VmResourceLimits;
+
 pub use super::types::IslandRegistry;
-use super::{island_shared, types::IslandThreadEvent, Vm};
-use crate::bytecode::Module;
+use super::{island_shared, types::IslandThreadEvent, InheritedProgramImage, Vm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IslandThreadOutcome {
@@ -18,59 +18,36 @@ pub(crate) enum IslandThreadOutcome {
 
 #[cfg(feature = "jit")]
 #[allow(clippy::result_large_err)]
-fn create_island_vm_with_initializer<F>(
-    jit_config: Option<super::JitConfig>,
-    memory_config: vo_runtime::gc::VmMemoryConfig,
-    init_jit_vm: F,
-) -> Result<Vm, super::VmConstructionError>
-where
-    F: FnOnce(
-        super::JitConfig,
-        vo_runtime::gc::VmMemoryConfig,
-    ) -> Result<Vm, super::VmConstructionError>,
-{
-    match jit_config {
-        Some(config) => init_jit_vm(config, memory_config),
-        None => Vm::try_with_memory_config(memory_config),
-    }
-}
-
-#[cfg(feature = "jit")]
-#[allow(clippy::result_large_err)]
 fn create_island_vm(
-    jit_config: Option<super::JitConfig>,
+    jit_mode: super::ChildJitMode,
     memory_config: vo_runtime::gc::VmMemoryConfig,
+    resource_limits: VmResourceLimits,
 ) -> Result<Vm, super::VmConstructionError> {
-    create_island_vm_with_initializer(
-        jit_config,
-        memory_config,
-        Vm::try_with_jit_and_memory_config,
-    )
+    Vm::try_with_child_jit_mode(jit_mode, memory_config, resource_limits)
 }
 
 /// Run an island thread - processes commands and executes fibers.
 #[cfg(feature = "jit")]
-pub(crate) fn run_island_thread(
+pub(super) fn run_island_thread(
     island_id: u32,
-    module: Arc<Module>,
+    image: InheritedProgramImage,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
-    extension_specs: Vec<NativeExtensionSpec>,
     host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
-    jit_config: Option<super::JitConfig>,
+    jit_mode: super::ChildJitMode,
     memory_config: vo_runtime::gc::VmMemoryConfig,
+    resource_limits: VmResourceLimits,
     interrupt_flag: Arc<AtomicBool>,
     event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     events: &Sender<IslandThreadEvent>,
 ) -> Result<IslandThreadOutcome, String> {
-    let mut vm = create_island_vm(jit_config, memory_config)
+    let mut vm = create_island_vm(jit_mode, memory_config, resource_limits)
         .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
     run_island_vm(
         island_id,
-        module,
+        image,
         transport,
         island_registry,
-        extension_specs,
         host_services_v2,
         &mut vm,
         interrupt_flag,
@@ -80,26 +57,25 @@ pub(crate) fn run_island_thread(
 }
 
 #[cfg(not(feature = "jit"))]
-pub(crate) fn run_island_thread(
+pub(super) fn run_island_thread(
     island_id: u32,
-    module: Arc<Module>,
+    image: InheritedProgramImage,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
-    extension_specs: Vec<NativeExtensionSpec>,
     host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
     memory_config: vo_runtime::gc::VmMemoryConfig,
+    resource_limits: VmResourceLimits,
     interrupt_flag: Arc<AtomicBool>,
     event_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     events: &Sender<IslandThreadEvent>,
 ) -> Result<IslandThreadOutcome, String> {
-    let mut vm = Vm::try_with_memory_config(memory_config)
+    let mut vm = Vm::try_with_memory_and_resource_limits(memory_config, resource_limits)
         .map_err(|err| format!("island {island_id}: VM construction failed: {err}"))?;
     run_island_vm(
         island_id,
-        module,
+        image,
         transport,
         island_registry,
-        extension_specs,
         host_services_v2,
         &mut vm,
         interrupt_flag,
@@ -110,10 +86,9 @@ pub(crate) fn run_island_thread(
 
 fn run_island_vm(
     island_id: u32,
-    module: Arc<Module>,
+    image: InheritedProgramImage,
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
-    extension_specs: Vec<NativeExtensionSpec>,
     host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
     vm: &mut Vm,
     interrupt_flag: Arc<AtomicBool>,
@@ -127,15 +102,7 @@ fn run_island_vm(
                 format!("island {island_id}: HostServices V2 installation failed: {error}")
             })?;
     }
-    let ext_loader = if extension_specs.is_empty() {
-        None
-    } else {
-        Some(
-            ExtensionLoader::from_specs(&extension_specs)
-                .map_err(|error| format!("island {island_id}: extension load failed: {error}"))?,
-        )
-    };
-    vm.load_shared_with_extensions(module, ext_loader)
+    vm.load_inherited_module(image)
         .map_err(|error| format!("island {island_id}: module load failed: {error:?}"))?;
     vm.state.island_registry = Some(island_registry);
     vm.state.current_island_id = island_id;
@@ -265,16 +232,19 @@ fn run_island_loop(
 #[cfg(all(test, feature = "std"))]
 mod loop_tests {
     use super::*;
+    use crate::bytecode::Module;
+    use crate::test_support::{queue, queue_state::QueueKind};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata};
+    use vo_runtime::bytecode::{FunctionDef, InstructionMetadata};
     use vo_runtime::host_services_v2::{
         CallerEndpointHandle, HostServicesV2, HostServicesV2Binding, SharedHostServicesV2,
         VoHostServicesV2,
     };
+    use vo_runtime::island::EndpointRequestKind;
     use vo_runtime::island_transport::IslandSender;
-    use vo_runtime::{Instruction, Opcode};
+    use vo_runtime::{Instruction, Opcode, ValueKind, ValueMeta, ValueRttid};
 
     struct MarkerServicesV2;
 
@@ -315,7 +285,7 @@ mod loop_tests {
             has_calls: false,
             has_call_extern: false,
             code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
-            jit_metadata: vec![JitInstructionMetadata::None],
+            instruction_metadata: vec![InstructionMetadata::None],
             slot_types: Vec::new(),
             borrowed_scan_slots_prefix: vec![0],
             capture_types: Vec::new(),
@@ -361,7 +331,68 @@ mod loop_tests {
     }
 
     #[test]
+    fn island_worker_uses_envelope_source_for_endpoint_transfer() {
+        const HOME_ISLAND: u32 = 3;
+        const AUTHORIZED_SOURCE: u32 = 7;
+        const UNAUTHORIZED_SOURCE: u32 = 99;
+        const REJECTED_NEW_PEER: u32 = 11;
+        const ACCEPTED_NEW_PEER: u32 = 12;
+        const ENDPOINT_ID: u64 = 55;
+
+        let mut vm = Vm::new();
+        vm.state.current_island_id = HOME_ISLAND;
+        let endpoint = queue::create(
+            &mut vm.state.gc,
+            QueueKind::Port,
+            ValueMeta::new(0, ValueKind::Int64),
+            ValueRttid::new(0, ValueKind::Int64),
+            1,
+            0,
+        );
+        queue::install_home_info(endpoint, ENDPOINT_ID, HOME_ISLAND);
+        queue::add_home_peer(endpoint, AUTHORIZED_SOURCE);
+        vm.state
+            .endpoint_registry
+            .register_live(ENDPOINT_ID, endpoint);
+
+        let (sender, transport) = vo_runtime::island_transport::InThreadTransport::new();
+        for (source_island_id, new_peer) in [
+            (UNAUTHORIZED_SOURCE, REJECTED_NEW_PEER),
+            (AUTHORIZED_SOURCE, ACCEPTED_NEW_PEER),
+        ] {
+            sender
+                .send_command(
+                    source_island_id,
+                    IslandCommand::EndpointRequest {
+                        endpoint_id: ENDPOINT_ID,
+                        kind: EndpointRequestKind::Transfer { new_peer },
+                    },
+                )
+                .expect("queue endpoint transfer");
+        }
+        sender
+            .send_command(HOME_ISLAND, IslandCommand::Shutdown)
+            .expect("queue island shutdown");
+        let (events, _event_rx) = std::sync::mpsc::channel();
+
+        assert_eq!(
+            run_island_loop(&mut vm, &transport, None, &events).expect("run island worker loop"),
+            IslandThreadOutcome::Shutdown
+        );
+        let peers = &queue::home_info(endpoint)
+            .expect("endpoint home info")
+            .peers;
+        assert!(!peers.contains(&REJECTED_NEW_PEER));
+        assert!(peers.contains(&ACCEPTED_NEW_PEER));
+    }
+
+    #[test]
     fn island_runner_installs_the_parent_service_owner_before_init() {
+        let mut parent = Vm::new();
+        parent.load(minimal_module()).expect("parent module load");
+        let image = parent
+            .inherited_program_image()
+            .expect("parent program image");
         let mut vm = Vm::new();
         let services_v2: SharedHostServicesV2 = Arc::new(MarkerServicesV2);
         let expected_v2 = Arc::clone(&services_v2);
@@ -375,10 +406,9 @@ mod loop_tests {
 
         let outcome = run_island_vm(
             1,
-            Arc::new(minimal_module()),
+            image,
             transport,
             registry,
-            Vec::new(),
             Some(services_v2),
             &mut vm,
             Arc::new(AtomicBool::new(false)),
@@ -401,64 +431,112 @@ mod loop_tests {
 
 #[cfg(all(test, feature = "jit"))]
 mod tests {
-    use super::*;
+    use super::super::{ChildJitMode, JitConfig, JitManager, VmJitState};
+    use super::create_island_vm;
+    use crate::fiber::VmResourceLimits;
 
     #[test]
-    #[allow(clippy::result_large_err)]
-    fn island_jit_config_init_error_is_propagated() {
-        let result = create_island_vm_with_initializer(
-            Some(super::super::JitConfig::default()),
-            vo_runtime::gc::VmMemoryConfig::default(),
-            |_, _| {
-                Err(super::super::VmConstructionError::Jit(
-                    vo_jit::JitError::Internal("forced island init failure".into()),
-                ))
-            },
-        );
-        let err = match result {
-            Err(err) => err,
-            Ok(_) => panic!("island JIT init error should propagate to caller"),
+    fn island_child_jit_mode_preserves_parent_policy() {
+        let best_effort_config = JitConfig {
+            call_threshold: 11,
+            loop_threshold: 12,
+            debug_ir: false,
+            code_memory_limit_bytes: 13,
+            analysis_memory_limit_bytes: 14,
+        };
+        let strict_config = JitConfig {
+            call_threshold: 21,
+            loop_threshold: 22,
+            debug_ir: false,
+            code_memory_limit_bytes: 23,
+            analysis_memory_limit_bytes: 24,
+        };
+        let child_modes = [
+            VmJitState::Disabled.child_mode(),
+            VmJitState::BestEffort(
+                JitManager::with_config(best_effort_config.clone())
+                    .expect("best-effort JIT manager"),
+            )
+            .child_mode(),
+            VmJitState::Strict(
+                JitManager::with_config(strict_config.clone()).expect("strict JIT manager"),
+            )
+            .child_mode(),
+        ];
+
+        let [ChildJitMode::Disabled, ChildJitMode::BestEffort {
+            config: child_best_effort,
+            shared_code: best_effort_code,
+        }, ChildJitMode::Strict {
+            config: child_strict,
+            shared_code: strict_code,
+        }] = &child_modes
+        else {
+            panic!("child JIT modes must preserve disabled, best-effort, and strict ordering");
         };
 
-        assert!(err.to_string().contains("forced island init failure"));
-    }
-}
+        assert_eq!(
+            child_best_effort.call_threshold,
+            best_effort_config.call_threshold
+        );
+        assert_eq!(
+            child_best_effort.loop_threshold,
+            best_effort_config.loop_threshold
+        );
+        assert_eq!(child_best_effort.debug_ir, best_effort_config.debug_ir);
+        assert_eq!(
+            child_best_effort.code_memory_limit_bytes,
+            best_effort_config.code_memory_limit_bytes
+        );
+        assert_eq!(
+            child_best_effort.analysis_memory_limit_bytes,
+            best_effort_config.analysis_memory_limit_bytes
+        );
+        assert_eq!(child_strict.call_threshold, strict_config.call_threshold);
+        assert_eq!(child_strict.loop_threshold, strict_config.loop_threshold);
+        assert_eq!(child_strict.debug_ir, strict_config.debug_ir);
+        assert_eq!(
+            child_strict.code_memory_limit_bytes,
+            strict_config.code_memory_limit_bytes
+        );
+        assert_eq!(
+            child_strict.analysis_memory_limit_bytes,
+            strict_config.analysis_memory_limit_bytes
+        );
 
-#[cfg(test)]
-mod source_contract_tests {
-    #[test]
-    fn island_thread_run_scheduled_errors_exit_loop_050() {
-        let source = crate::source_contract::production_source_without_test_modules(include_str!(
-            "island_thread.rs"
+        let best_effort_vm = create_island_vm(
+            ChildJitMode::BestEffort {
+                config: best_effort_config,
+                shared_code: best_effort_code.clone(),
+            },
+            vo_runtime::gc::VmMemoryConfig::default(),
+            VmResourceLimits::default(),
+        )
+        .expect("best-effort child VM");
+        let VmJitState::BestEffort(best_effort_manager) = &best_effort_vm.jit else {
+            panic!("best-effort child VM lost its JIT policy");
+        };
+        assert!(std::sync::Arc::ptr_eq(
+            &best_effort_manager.shared_code(),
+            best_effort_code
         ));
-        let (compact, _) = vo_source_contract::compact_rust_source_for_contract(&source);
-        assert!(
-            !vo_source_contract::compact_contains(&compact, "let_=vm.run_scheduled();"),
-            "island threads must not silently discard scheduler execution errors"
-        );
-        assert!(
-            (vo_source_contract::compact_contains(&compact, "vm.run_scheduled().map_err(|error|")
-                || source.contains("let outcome = match vm.run_scheduled()"))
-                && source.contains("return Err(format!(\"island scheduler failed: {error:?}\"))"),
-            "island threads must propagate run_scheduled errors through their terminal event"
-        );
-    }
 
-    #[test]
-    fn island_thread_reports_ready_only_after_completed_init_051() {
-        let source = crate::source_contract::production_source_without_test_modules(include_str!(
-            "island_thread.rs"
+        let strict_vm = create_island_vm(
+            ChildJitMode::Strict {
+                config: strict_config,
+                shared_code: strict_code.clone(),
+            },
+            vo_runtime::gc::VmMemoryConfig::default(),
+            VmResourceLimits::default(),
+        )
+        .expect("strict child VM");
+        let VmJitState::Strict(strict_manager) = &strict_vm.jit else {
+            panic!("strict child VM lost its JIT policy");
+        };
+        assert!(std::sync::Arc::ptr_eq(
+            &strict_manager.shared_code(),
+            strict_code
         ));
-        let completed = source
-            .find("super::SchedulingOutcome::Completed => {}")
-            .expect("island initialization must require a completed scheduler outcome");
-        let ready = source
-            .find(".send(IslandThreadEvent::Ready)")
-            .expect("island thread must report readiness");
-        assert!(
-            completed < ready,
-            "readiness must follow completed island initialization"
-        );
     }
 }
 
@@ -529,52 +607,17 @@ fn handle_command(
             }
             Ok(false)
         }
-        IslandCommand::WakeFiber { waiter } => {
-            let _ = (source_island_id, waiter);
-            Err("island wake failed: WakeFiber transport ingress was rejected".to_string())
-        }
-        IslandCommand::EndpointRequest {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        } => {
-            if source_island_id != from_island {
-                return Err(
-                    "island endpoint request failed: transport source was rejected".to_string(),
-                );
-            }
-            island_shared::handle_endpoint_request_command(
-                vm,
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            )
-            .map_err(|error| format!("island endpoint request failed: {error:?}"))?;
+        IslandCommand::EndpointRequest { endpoint_id, kind } => {
+            island_shared::handle_endpoint_request_command(vm, endpoint_id, kind, source_island_id)
+                .map_err(|error| format!("island endpoint request failed: {error:?}"))?;
             Ok(false)
         }
-        IslandCommand::EndpointResponse {
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        } => {
-            if source_island_id != from_island {
-                return Err(
-                    "island endpoint response failed: transport source was rejected".to_string(),
-                );
-            }
+        IslandCommand::EndpointResponse { endpoint_id, kind } => {
             island_shared::handle_endpoint_response_command(
                 vm,
                 endpoint_id,
                 kind,
-                from_island,
-                fiber_key,
-                wait_id,
+                source_island_id,
             )
             .map_err(|error| format!("island endpoint response failed: {error:?}"))?;
             Ok(false)
@@ -636,40 +679,4 @@ fn emit_entry_event(
         wake();
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod command_tests {
-    use super::*;
-    use crate::fiber::{BlockReason, FiberState};
-
-    #[test]
-    fn island_thread_wake_ingress_rejection_exits_loop_045() {
-        let mut vm = Vm::new();
-        let fid = vm.scheduler.spawn(crate::fiber::Fiber::new(0));
-        let key = vm.scheduler.get_fiber(fid).wake_key_packed();
-        vm.scheduler.schedule_next().unwrap();
-        vm.scheduler.block_for_queue();
-        let (events, _event_rx) = std::sync::mpsc::channel();
-        let mut pending_entry_launch = None;
-
-        let error = handle_command(
-            &mut vm,
-            1,
-            IslandCommand::WakeFiber {
-                waiter: vo_runtime::objects::queue_state::QueueWaiter::simple(1, key),
-            },
-            None,
-            &events,
-            &mut pending_entry_launch,
-        )
-        .expect_err("raw WakeFiber ingress must fail explicitly");
-
-        assert!(error.contains("WakeFiber transport ingress"));
-        assert_eq!(
-            vm.scheduler.get_fiber(fid).state,
-            FiberState::Blocked(BlockReason::Queue)
-        );
-        assert!(vm.scheduler.ready_queue.is_empty());
-    }
 }

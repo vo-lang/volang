@@ -1,5 +1,9 @@
 # Islands & Ports Implementation Plan
 
+> Historical note: this document records the initial implementation plan and
+> preserves API sketches from that phase. For the current VM/island contracts,
+> see `vm-runtime-boundary-architecture.md`.
+
 ## Overview
 
 | Phase | Description | Est. Days |
@@ -72,16 +76,16 @@
 
 ### 2.1 New Opcodes (0.5 days) ✓
 
-**File**: `vo-common-core/src/instruction.rs`
+**File**: `vo-common-core/src/bytecode.rs`
 
 **Implemented**:
 ```rust
 IslandNew,    // a=dst
-PortNew,      // a=dst, b=elem_meta, c=cap, flags=elem_slots
-PortSend,     // a=port, b=src, flags=elem_slots
-PortRecv,     // a=dst, b=port, flags=(elem_slots<<1)|has_ok
-PortClose,    // a=port
-GoIsland,     // a=island, b=closure, flags=capture_slots
+QueueNew,     // a=dst, b=elem_meta, c=cap; QueueLayout owns element layout, bit7=port
+QueueSend,    // a=queue/port, b=src; QueueLayout owns element layout
+QueueRecv,    // a=dst, b=queue/port; QueueLayout owns layout, bit0=has_ok
+QueueClose,   // a=queue/port
+GoIsland,     // a=island, b=closure, c=args_start; CallLayout owns argument layout
 ```
 
 **Also updated**:

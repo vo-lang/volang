@@ -1177,15 +1177,7 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
 ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-    for (id, def) in externs.iter().enumerate() {
-        for entry in REGISTERED_EXTERNS {
-            if def.name == entry.name() {
-                entry.try_register(registry, id as u32)?;
-                break;
-            }
-        }
-    }
-    Ok(())
+    vo_runtime::ffi::register_stdlib_providers(registry, externs, REGISTERED_EXTERNS)
 }
 
 #[cfg(not(feature = "std"))]

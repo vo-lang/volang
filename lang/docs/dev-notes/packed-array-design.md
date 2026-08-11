@@ -1,3 +1,12 @@
+---
+date: 2026-08-10
+status: implemented
+area: runtime
+owner: volang
+supersedes: []
+superseded_by: []
+---
+
 # Packed Array/Slice 设计方案
 
 ## 概述
@@ -270,13 +279,11 @@ let elem_meta = if s.is_null() {
 **解决方案**：SliceAppend 指令携带 elem_meta（连续栈模式，类似 MapSet）：
 
 ```
-// 旧格式
-SliceAppend: a=dst, b=slice, c=elem, flags=elem_slots
-
-// 新格式
-SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_bytes
+// 当前格式
+SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=0
 // c: [elem_meta (1 slot)]
 // c+1..: [elem (elem_slots)]
+// per-PC ElemLayout: elem_bytes + logical slot layout
 ```
 
 **Codegen**：

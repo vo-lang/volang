@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 #[cfg(unix)]
@@ -8,8 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use vo_common::stable_hash::StableHasher;
-use vo_common::vfs::{FileSystem, RealFs};
+#[cfg(test)]
+use vo_common::vfs::FileSystem;
+use vo_common::vfs::{normalize_fs_path, RealFs};
 use vo_module::ext_manifest::NativeBuildManifest;
 use vo_module::project::{
     ProjectAuthority, ProjectContextOptions, ProjectPlan, SingleFileSourceGeneration,
@@ -19,7 +23,9 @@ use vo_module::schema::modfile::ModFile;
 use vo_runtime::ext_loader::{NativeExtensionSpec, ABI_FINGERPRINT, ABI_VERSION};
 use vo_vm::bytecode::Module;
 
-use super::host_input::{HostDirectorySnapshot, HostEntryIdentity, HostEntryKind};
+use super::host_input::{
+    HostDirectoryCapability, HostDirectorySnapshot, HostEntryIdentity, HostEntryKind,
+};
 use super::native::current_target_triple;
 use super::snapshot::CompileInputSnapshot;
 use super::{
@@ -156,6 +162,154 @@ impl CapturedCompileInputs {
     }
 }
 
+trait CompileInputCaptureSink {
+    fn remaining_bytes(&self) -> usize;
+    fn remaining_files(&self) -> usize;
+    fn capture_file<'a>(&'a mut self, path: &Path) -> io::Result<CapturedInput<'a>>;
+    fn insert_consistent<'a>(
+        &'a mut self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    ) -> io::Result<CapturedInput<'a>>;
+}
+
+struct CapturedInput<'a> {
+    bytes: Cow<'a, [u8]>,
+    digest: [u8; 32],
+}
+
+impl CapturedInput<'_> {
+    fn hash(&self, hasher: &mut StableHasher, label: &str) {
+        hasher.update_bytes(label, &self.digest);
+    }
+}
+
+impl CompileInputCaptureSink for CompileInputSnapshot {
+    fn remaining_bytes(&self) -> usize {
+        CompileInputSnapshot::remaining_bytes(self)
+    }
+
+    fn remaining_files(&self) -> usize {
+        CompileInputSnapshot::remaining_files(self)
+    }
+
+    fn capture_file<'a>(&'a mut self, path: &Path) -> io::Result<CapturedInput<'a>> {
+        let bytes = CompileInputSnapshot::capture_file(self, path)?;
+        Ok(CapturedInput {
+            digest: Sha256::digest(bytes).into(),
+            bytes: Cow::Borrowed(bytes),
+        })
+    }
+
+    fn insert_consistent<'a>(
+        &'a mut self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    ) -> io::Result<CapturedInput<'a>> {
+        let bytes = CompileInputSnapshot::insert_consistent(self, path, bytes)?;
+        Ok(CapturedInput {
+            digest: Sha256::digest(bytes).into(),
+            bytes: Cow::Borrowed(bytes),
+        })
+    }
+}
+
+#[derive(Default)]
+struct FingerprintCaptureSink {
+    files: BTreeMap<PathBuf, FingerprintFile>,
+    total_bytes: usize,
+}
+
+#[derive(PartialEq, Eq)]
+struct FingerprintFile {
+    len: usize,
+    digest: [u8; 32],
+}
+
+impl FingerprintCaptureSink {
+    fn record(&mut self, path: &Path, bytes: &[u8]) -> io::Result<[u8; 32]> {
+        let path = normalize_fs_path(path);
+        super::snapshot::validate_compile_input_size(&path, bytes.len())?;
+        let digest = Sha256::digest(bytes).into();
+        let identity = FingerprintFile {
+            len: bytes.len(),
+            digest,
+        };
+        if let Some(existing) = self.files.get(&path) {
+            if existing != &identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "compile input at {} changed between overlapping capability walks",
+                        path.display()
+                    ),
+                ));
+            }
+            return Ok(identity.digest);
+        }
+        if self.files.len() >= super::snapshot::MAX_COMPILE_SNAPSHOT_FILES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "compile input snapshot exceeds the {}-file limit",
+                    super::snapshot::MAX_COMPILE_SNAPSHOT_FILES,
+                ),
+            ));
+        }
+        let total_bytes = self
+            .total_bytes
+            .checked_add(bytes.len())
+            .filter(|total| *total <= super::snapshot::MAX_COMPILE_SNAPSHOT_BYTES)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "compile input snapshot has size {} and exceeds the {}-byte limit",
+                        self.total_bytes.saturating_add(bytes.len()),
+                        super::snapshot::MAX_COMPILE_SNAPSHOT_BYTES,
+                    ),
+                )
+            })?;
+        self.files.insert(path, identity);
+        self.total_bytes = total_bytes;
+        Ok(digest)
+    }
+}
+
+impl CompileInputCaptureSink for FingerprintCaptureSink {
+    fn remaining_bytes(&self) -> usize {
+        super::snapshot::MAX_COMPILE_SNAPSHOT_BYTES.saturating_sub(self.total_bytes)
+    }
+
+    fn remaining_files(&self) -> usize {
+        super::snapshot::MAX_COMPILE_SNAPSHOT_FILES.saturating_sub(self.files.len())
+    }
+
+    fn capture_file<'a>(&'a mut self, path: &Path) -> io::Result<CapturedInput<'a>> {
+        let bytes = super::host_input::read_stable_regular_file(
+            path,
+            super::snapshot::compile_input_limit(path),
+        )?;
+        let digest = self.record(path, &bytes)?;
+        Ok(CapturedInput {
+            bytes: Cow::Owned(bytes),
+            digest,
+        })
+    }
+
+    fn insert_consistent<'a>(
+        &'a mut self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    ) -> io::Result<CapturedInput<'a>> {
+        let digest = self.record(&path, &bytes)?;
+        Ok(CapturedInput {
+            bytes: Cow::Owned(bytes),
+            digest,
+        })
+    }
+}
+
 pub(super) fn compile_cache_slot(root: &Path, single_file: Option<&OsStr>) -> CompileCacheSlot {
     let mut slot_hasher = StableHasher::new(COMPILE_CACHE_SLOT_NAMESPACE);
     if let Some(file_name) = single_file {
@@ -222,6 +376,12 @@ pub(super) fn capture_compile_inputs(
     capture_compile_inputs_with_between_scans(input, || {})
 }
 
+pub(super) fn capture_compile_input_fingerprint(
+    input: CompileInputCapture<'_>,
+) -> Result<String, CompileError> {
+    capture_compile_input_fingerprint_with_between_scans(input, || {})
+}
+
 fn capture_compile_inputs_with_between_scans<F>(
     input: CompileInputCapture<'_>,
     between_scans: F,
@@ -229,19 +389,39 @@ fn capture_compile_inputs_with_between_scans<F>(
 where
     F: FnOnce(),
 {
-    let first_fingerprint = capture_compile_inputs_once(input)
-        .map_err(classify_compile_input_error)?
-        .fingerprint;
+    let first_fingerprint =
+        capture_compile_input_fingerprint_once(input).map_err(classify_compile_input_error)?;
     between_scans();
     let second = capture_compile_inputs_once(input).map_err(classify_compile_input_error)?;
-    if first_fingerprint != second.fingerprint {
-        return Err(CompileError::ModuleSystem(super::ModuleSystemError::new(
-            super::ModuleSystemStage::CompileInputs,
-            super::ModuleSystemErrorKind::Mismatch,
-            "compile input closure changed between its two bounded captures; retry after concurrent source updates finish",
-        )));
-    }
+    ensure_stable_compile_input_capture(&first_fingerprint, &second.fingerprint)?;
     Ok(second)
+}
+
+fn capture_compile_input_fingerprint_with_between_scans<F>(
+    input: CompileInputCapture<'_>,
+    between_scans: F,
+) -> Result<String, CompileError>
+where
+    F: FnOnce(),
+{
+    let first =
+        capture_compile_input_fingerprint_once(input).map_err(classify_compile_input_error)?;
+    between_scans();
+    let second =
+        capture_compile_input_fingerprint_once(input).map_err(classify_compile_input_error)?;
+    ensure_stable_compile_input_capture(&first, &second)?;
+    Ok(second)
+}
+
+fn ensure_stable_compile_input_capture(first: &str, second: &str) -> Result<(), CompileError> {
+    if first == second {
+        return Ok(());
+    }
+    Err(CompileError::ModuleSystem(super::ModuleSystemError::new(
+        super::ModuleSystemStage::CompileInputs,
+        super::ModuleSystemErrorKind::Mismatch,
+        "compile input closure changed between its two bounded captures; retry after concurrent source updates finish",
+    )))
 }
 
 fn classify_compile_input_error(error: CompileError) -> CompileError {
@@ -267,6 +447,24 @@ fn classify_compile_input_error(error: CompileError) -> CompileError {
 fn capture_compile_inputs_once(
     input: CompileInputCapture<'_>,
 ) -> Result<CapturedCompileInputs, CompileError> {
+    let mut snapshot = CompileInputSnapshot::default();
+    let fingerprint = capture_compile_inputs_into(input, &mut snapshot)?;
+    Ok(CapturedCompileInputs {
+        fingerprint,
+        snapshot: Arc::new(snapshot),
+    })
+}
+
+fn capture_compile_input_fingerprint_once(
+    input: CompileInputCapture<'_>,
+) -> Result<String, CompileError> {
+    capture_compile_inputs_into(input, &mut FingerprintCaptureSink::default())
+}
+
+fn capture_compile_inputs_into<S: CompileInputCaptureSink>(
+    input: CompileInputCapture<'_>,
+    sink: &mut S,
+) -> Result<String, CompileError> {
     let CompileInputCapture {
         source_root,
         project_root,
@@ -292,7 +490,6 @@ fn capture_compile_inputs_once(
     let canonical_mod_cache = mod_cache
         .canonicalize()
         .unwrap_or_else(|_| mod_cache.to_path_buf());
-    let mut snapshot = CompileInputSnapshot::default();
     let mut hasher = StableHasher::new(COMPILE_CACHE_NATIVE_NAMESPACE);
     hasher.update_str("schema", COMPILE_CACHE_SCHEMA_VERSION);
     hasher.update_str("compiler_version", vo_module::TOOLCHAIN_VERSION);
@@ -325,12 +522,12 @@ fn capture_compile_inputs_once(
     let excluded_module_tree_roots = BTreeSet::from([canonical_mod_cache.clone()]);
     let mut native_module_dirs = capture_compile_input_tree_with_exclusions(
         &mut hasher,
-        &mut snapshot,
+        sink,
         "project_root",
         &canonical_project_root,
         &excluded_module_tree_roots,
     )?;
-    capture_project_graph_inputs(&mut hasher, &mut snapshot, graph)?;
+    capture_project_graph_inputs(&mut hasher, sink, graph)?;
     hash_project_plan(&mut hasher, project_plan);
 
     let workspace_file = vo_module::workspace::discover_workfile_in_with(
@@ -340,9 +537,9 @@ fn capture_compile_inputs_once(
     )
     .map_err(workspace_capture_error)?;
     if let Some(workfile_path) = workspace_file {
-        let bytes = snapshot.capture_file(&workfile_path)?;
+        let bytes = sink.capture_file(&workfile_path)?;
         hasher.update_path("workspace_file", &workfile_path);
-        hasher.update_bytes("workspace_file_bytes", bytes);
+        bytes.hash(&mut hasher, "workspace_file_digest");
     } else {
         hasher.update_str("workspace_file", "");
     }
@@ -363,7 +560,7 @@ fn capture_compile_inputs_once(
         if seen_roots.insert(workspace_source_root.clone()) {
             native_module_dirs.extend(capture_compile_input_tree_with_exclusions(
                 &mut hasher,
-                &mut snapshot,
+                sink,
                 &format!("workspace-source:{module}"),
                 &workspace_source_root,
                 &excluded_module_tree_roots,
@@ -371,12 +568,7 @@ fn capture_compile_inputs_once(
         }
     }
 
-    capture_locked_module_inputs(
-        &mut hasher,
-        &mut snapshot,
-        &canonical_mod_cache,
-        project_plan,
-    )?;
+    capture_locked_module_inputs(&mut hasher, sink, &canonical_mod_cache, project_plan)?;
 
     for (module_dir, cargo_manifest) in native_module_dirs {
         hasher.update_path("native_module_dir", &module_dir);
@@ -385,7 +577,7 @@ fn capture_compile_inputs_once(
 
     if let Some(source_generation) = single_file_source_generation {
         let source_path = source_generation.path();
-        let source = snapshot.read_file(source_path).map_err(|error| {
+        let source_bytes = sink.capture_file(source_path).map_err(|error| {
             CompileError::ModuleSystem(
                 super::ModuleSystemError::new(
                     super::ModuleSystemStage::CompileInputs,
@@ -398,7 +590,20 @@ fn capture_compile_inputs_once(
                 .with_path(source_path),
             )
         })?;
-        if !source_generation.matches_source(source_path, &source) {
+        let source = std::str::from_utf8(source_bytes.bytes.as_ref()).map_err(|error| {
+            CompileError::ModuleSystem(
+                super::ModuleSystemError::new(
+                    super::ModuleSystemStage::CompileInputs,
+                    super::ModuleSystemErrorKind::ReadFailed,
+                    format!(
+                        "captured single-file source at {} could not be validated against its classification generation: source file is not valid UTF-8: {error}",
+                        source_path.display(),
+                    ),
+                )
+                .with_path(source_path),
+            )
+        })?;
+        if !source_generation.matches_source(source_path, source) {
             return Err(CompileError::ModuleSystem(
                 super::ModuleSystemError::new(
                     super::ModuleSystemStage::CompileInputs,
@@ -417,10 +622,7 @@ fn capture_compile_inputs_once(
         hasher.update_str("single_file_classification_generation", "");
     }
 
-    Ok(CapturedCompileInputs {
-        fingerprint: hasher.finish(),
-        snapshot: Arc::new(snapshot),
-    })
+    Ok(hasher.finish())
 }
 
 fn validate_live_single_file_generation(
@@ -491,9 +693,9 @@ fn hash_project_graph_context(
     Ok(())
 }
 
-fn capture_project_graph_inputs(
+fn capture_project_graph_inputs<S: CompileInputCaptureSink>(
     hasher: &mut StableHasher,
-    snapshot: &mut CompileInputSnapshot,
+    sink: &mut S,
     graph: &ProjectGraphContext,
 ) -> Result<(), CompileError> {
     if graph.validated_input_files.len() > COMPILE_INPUT_MAX_FILES_PER_TREE {
@@ -514,9 +716,9 @@ fn capture_project_graph_inputs(
         &u64::try_from(paths.len()).unwrap_or(u64::MAX).to_le_bytes(),
     );
     for path in paths {
-        let bytes = snapshot.capture_file(&path)?;
+        let bytes = sink.capture_file(&path)?;
         hasher.update_path("project_authority_input", &path);
-        hasher.update_bytes("project_authority_input_bytes", bytes);
+        bytes.hash(hasher, "project_authority_input_digest");
     }
     Ok(())
 }
@@ -574,9 +776,9 @@ fn capture_compile_input_tree(
     capture_compile_input_tree_with_exclusions(hasher, snapshot, label, root, &BTreeSet::new())
 }
 
-fn capture_compile_input_tree_with_exclusions(
+fn capture_compile_input_tree_with_exclusions<S: CompileInputCaptureSink>(
     hasher: &mut StableHasher,
-    snapshot: &mut CompileInputSnapshot,
+    sink: &mut S,
     label: &str,
     root: &Path,
     excluded_directories: &BTreeSet<PathBuf>,
@@ -593,21 +795,52 @@ fn capture_compile_input_tree_with_exclusions(
         reserved_native_roots,
         deferred_native_files,
     } = discovery;
-    let mut files = Vec::<CapturedTreeFile>::new();
     // The collector already selects only Vo sources and module control files.
     // A declared Cargo manifest may live beside a real Vo package, so its
     // parent directory must remain visible to the language snapshot.
     let mut language_tree_exclusions = excluded_directories.clone();
     language_tree_exclusions.extend(reserved_native_roots);
+    let mut captured_manifests = BTreeMap::new();
+    hasher.update_str("tree_label", label);
+    hasher.update_path("tree_root", root);
+    let remaining_files = sink.remaining_files();
+    let remaining_bytes = sink.remaining_bytes();
+    let mut capture = |file: CapturedTreeFile| {
+        if file
+            .relative
+            .file_name()
+            .is_some_and(|name| name == "vo.mod")
+        {
+            let digest = compile_input_manifest_digest(&file.bytes);
+            if manifest_digests
+                .get(&file.relative)
+                .is_none_or(|discovered| discovered != &digest)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "compile input manifest changed while scanning {}",
+                        root.join(&file.relative).display(),
+                    ),
+                )
+                .into());
+            }
+            captured_manifests.insert(file.relative.clone(), digest);
+        }
+        let bytes = sink.insert_consistent(root.join(&file.relative), file.bytes)?;
+        hasher.update_path("file_path", &file.relative);
+        bytes.hash(hasher, "file_digest");
+        Ok(())
+    };
     collect_compile_input_files_matching_with_options(
         root,
         root,
         root_directory.clone(),
-        &mut files,
+        &mut capture,
         CompileInputLimits {
             entries: COMPILE_INPUT_MAX_ENTRIES_PER_TREE,
-            files: snapshot.remaining_files(),
-            bytes: snapshot.remaining_bytes(),
+            files: remaining_files,
+            bytes: remaining_bytes,
         },
         CompileInputFileSelection {
             include_file: is_module_compile_input_file,
@@ -616,17 +849,7 @@ fn capture_compile_input_tree_with_exclusions(
             excluded_files: &deferred_native_files,
         },
     )?;
-    let captured_manifests = files
-        .iter()
-        .filter(|file| {
-            file.relative
-                .file_name()
-                .is_some_and(|name| name == "vo.mod")
-        })
-        .map(|file| file.relative.clone())
-        .collect::<BTreeSet<_>>();
-    let discovered_manifests = manifest_digests.keys().cloned().collect::<BTreeSet<_>>();
-    if captured_manifests != discovered_manifests {
+    if captured_manifests != manifest_digests {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -635,49 +858,6 @@ fn capture_compile_input_tree_with_exclusions(
             ),
         )
         .into());
-    }
-    for rel in &captured_manifests {
-        let bytes = files
-            .iter()
-            .find(|file| &file.relative == rel)
-            .map(|file| file.bytes.as_slice())
-            .expect("captured manifest path must retain its bytes");
-        if manifest_digests
-            .get(rel)
-            .is_none_or(|discovered| discovered != &compile_input_manifest_digest(bytes))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "compile input manifest changed while scanning {}",
-                    root.join(rel).display(),
-                ),
-            )
-            .into());
-        }
-    }
-
-    files.sort_by(|left, right| left.relative.cmp(&right.relative));
-    files.dedup_by(|left, right| left.relative == right.relative && left.bytes == right.bytes);
-    if files.len() > COMPILE_INPUT_MAX_FILES_PER_TREE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "compile input tree at {} exceeds the {}-file limit",
-                root.display(),
-                COMPILE_INPUT_MAX_FILES_PER_TREE,
-            ),
-        )
-        .into());
-    }
-
-    hasher.update_str("tree_label", label);
-    hasher.update_path("tree_root", root);
-    for file in files {
-        let path = root.join(&file.relative);
-        let bytes = snapshot.insert_consistent(path, file.bytes)?;
-        hasher.update_path("file_path", &file.relative);
-        hasher.update_bytes("file_bytes", bytes);
     }
 
     Ok(native_module_roots)
@@ -958,9 +1138,9 @@ fn is_declared_cache_directory(
     Ok(super::host_input::cache_directory_tag_has_signature(&bytes))
 }
 
-fn capture_locked_module_inputs(
+fn capture_locked_module_inputs<S: CompileInputCaptureSink>(
     hasher: &mut StableHasher,
-    snapshot: &mut CompileInputSnapshot,
+    sink: &mut S,
     mod_cache: &Path,
     project_plan: &ProjectPlan,
 ) -> Result<(), CompileError> {
@@ -969,6 +1149,7 @@ fn capture_locked_module_inputs(
         (left.path.as_str(), left.version.to_string())
             .cmp(&(right.path.as_str(), right.version.to_string()))
     });
+    let mut mod_cache_directory = None;
 
     for locked in modules {
         let relative_root =
@@ -977,41 +1158,72 @@ fn capture_locked_module_inputs(
         let root_directory =
             super::host_input::read_stable_directory(&root, COMPILE_INPUT_MAX_ENTRIES_PER_TREE)?;
         let release_path = root.join("vo.release.json");
-        let artifact_paths = {
-            if snapshot.remaining_files() == 0 {
+        let mut artifact_paths = {
+            if sink.remaining_files() == 0 {
                 return Err(compile_input_capture_limit_error(&root));
             }
             let release_bytes = super::host_input::read_stable_descendant_file(
                 &root_directory.capability,
                 Path::new("vo.release.json"),
                 &release_path,
-                super::snapshot::compile_input_limit(&release_path).min(snapshot.remaining_bytes()),
+                super::snapshot::compile_input_limit(&release_path).min(sink.remaining_bytes()),
             )?;
             let artifact_paths = locked_module_artifact_input_paths(locked, &release_bytes)?;
-            snapshot.insert_consistent(release_path, release_bytes)?;
+            sink.insert_consistent(release_path, release_bytes)?;
             artifact_paths
         };
-        let mut files = Vec::new();
+        if locked.selection.as_ref().is_some_and(|selection| {
+            selection.mode == vo_module::schema::lockfile::LockedArtifactMode::SourceRecipe
+        }) {
+            if mod_cache_directory.is_none() {
+                mod_cache_directory = Some(super::host_input::read_stable_directory(
+                    mod_cache,
+                    COMPILE_INPUT_MAX_ENTRIES_PER_TREE,
+                )?);
+            }
+            let materialization = locked_source_materialization_inputs(
+                locked,
+                &mod_cache_directory
+                    .as_ref()
+                    .expect("source materialization opens the cache root")
+                    .capability,
+                mod_cache,
+                sink.remaining_bytes(),
+            )?;
+            if sink.remaining_files() == 0 {
+                return Err(compile_input_capture_limit_error(mod_cache));
+            }
+            let bytes = sink.insert_consistent(
+                mod_cache.join(&materialization.attestation_relative_path),
+                materialization.attestation_bytes,
+            )?;
+            hasher.update_path(
+                "locked_cache_file_path",
+                &materialization.attestation_relative_path,
+            );
+            bytes.hash(hasher, "locked_cache_file_digest");
+            artifact_paths.extend(materialization.module_relative_paths);
+        }
+        hasher.update_str("locked_module", locked.path.as_str());
+        hasher.update_str("locked_version", &locked.version.to_string());
+        hasher.update_path("locked_module_root", &root);
+        let remaining_files = sink.remaining_files();
+        let remaining_bytes = sink.remaining_bytes();
+        let mut capture = |file: CapturedTreeFile| {
+            let bytes = sink.insert_consistent(root.join(&file.relative), file.bytes)?;
+            hasher.update_path("locked_file_path", &file.relative);
+            bytes.hash(hasher, "locked_file_digest");
+            Ok(())
+        };
         collect_locked_module_input_files(
             &root,
             &root,
             root_directory,
             &artifact_paths,
-            &mut files,
-            snapshot.remaining_files(),
-            snapshot.remaining_bytes(),
+            &mut capture,
+            remaining_files,
+            remaining_bytes,
         )?;
-        files.sort_by(|left, right| left.relative.cmp(&right.relative));
-
-        hasher.update_str("locked_module", locked.path.as_str());
-        hasher.update_str("locked_version", &locked.version.to_string());
-        hasher.update_path("locked_module_root", &root);
-        for file in files {
-            let path = root.join(&file.relative);
-            let bytes = snapshot.insert_consistent(path, file.bytes)?;
-            hasher.update_path("locked_file_path", &file.relative);
-            hasher.update_bytes("locked_file_bytes", bytes);
-        }
     }
     Ok(())
 }
@@ -1074,6 +1286,25 @@ fn locked_module_artifact_input_paths(
             )
         })?;
 
+    if let Some(selection) = &locked.selection {
+        if selection.mode == vo_module::schema::lockfile::LockedArtifactMode::SourceRecipe {
+            vo_module::profile::resolve_locked_source_recipe(locked, &release).map_err(
+                |error| invalid_locked_module_input(locked, "locked source recipe", error),
+            )?;
+        }
+        let required = vo_module::artifact::required_artifacts_for_target(
+            locked,
+            &release.artifacts,
+            None,
+            current_target_triple(),
+        )
+        .map_err(|error| invalid_locked_module_input(locked, "locked artifact selection", error))?;
+        return Ok(required
+            .into_iter()
+            .map(|artifact| artifact.cache_relative_path)
+            .collect());
+    }
+
     release
         .artifacts
         .iter()
@@ -1090,32 +1321,121 @@ fn locked_module_artifact_input_paths(
         .collect()
 }
 
-fn collect_locked_module_input_files(
+struct LockedSourceMaterializationInputs {
+    attestation_relative_path: PathBuf,
+    attestation_bytes: Vec<u8>,
+    module_relative_paths: BTreeSet<PathBuf>,
+}
+
+fn invalid_locked_module_input(
+    locked: &LockedModule,
+    subject: &str,
+    error: impl std::fmt::Display,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "invalid {subject} for {}@{}: {error}",
+            locked.path, locked.version,
+        ),
+    )
+}
+
+fn locked_source_materialization_inputs(
+    locked: &LockedModule,
+    mod_cache_capability: &HostDirectoryCapability,
+    mod_cache: &Path,
+    byte_limit: usize,
+) -> Result<LockedSourceMaterializationInputs, CompileError> {
+    let attestation_relative_path =
+        vo_module::attestation::materialization_attestation_cache_path(locked).map_err(
+            |error| invalid_locked_module_input(locked, "materialization attestation path", error),
+        )?;
+    let attestation_path = mod_cache.join(&attestation_relative_path);
+    let attestation_bytes = super::host_input::read_stable_descendant_file(
+        mod_cache_capability,
+        &attestation_relative_path,
+        &attestation_path,
+        vo_common::vfs::MAX_TEXT_FILE_BYTES.min(byte_limit),
+    )?;
+    let attestation =
+        serde_json::from_slice::<vo_module::attestation::DevMaterializationAttestation>(
+            &attestation_bytes,
+        )
+        .map_err(|error| {
+            invalid_locked_module_input(locked, "materialization attestation", error)
+        })?;
+    attestation.validate_against_lock(locked).map_err(|error| {
+        invalid_locked_module_input(locked, "materialization attestation", error)
+    })?;
+
+    let mut module_relative_paths = BTreeSet::new();
+    for artifact in &attestation.statement.artifacts {
+        module_relative_paths.insert(
+            vo_module::attestation::materialized_source_artifact_relative_path(locked, artifact)
+                .map_err(|error| {
+                    invalid_locked_module_input(locked, "materialized artifact path", error)
+                })?,
+        );
+        module_relative_paths.insert(
+            vo_module::attestation::materialized_source_manifest_relative_path(locked, artifact)
+                .map_err(|error| {
+                    invalid_locked_module_input(
+                        locked,
+                        "materialized artifact manifest path",
+                        error,
+                    )
+                })?,
+        );
+    }
+
+    Ok(LockedSourceMaterializationInputs {
+        attestation_relative_path,
+        attestation_bytes,
+        module_relative_paths,
+    })
+}
+
+fn collect_locked_module_input_files<F>(
     root: &Path,
     dir: &Path,
     directory: HostDirectorySnapshot,
     artifact_paths: &BTreeSet<PathBuf>,
-    out: &mut Vec<CapturedTreeFile>,
+    capture: &mut F,
     file_limit: usize,
     byte_limit: usize,
-) -> Result<(), CompileError> {
+) -> Result<(), CompileError>
+where
+    F: FnMut(CapturedTreeFile) -> Result<(), CompileError>,
+{
     let mut walk = CompileInputWalkState::with_limits(
         COMPILE_INPUT_MAX_ENTRIES_PER_TREE,
         file_limit,
         byte_limit,
     );
-    collect_locked_module_input_files_inner(root, dir, directory, artifact_paths, out, &mut walk, 0)
+    collect_locked_module_input_files_inner(
+        root,
+        dir,
+        directory,
+        artifact_paths,
+        capture,
+        &mut walk,
+        0,
+    )
 }
 
-fn collect_locked_module_input_files_inner(
+fn collect_locked_module_input_files_inner<F>(
     root: &Path,
     dir: &Path,
     directory: HostDirectorySnapshot,
     artifact_paths: &BTreeSet<PathBuf>,
-    out: &mut Vec<CapturedTreeFile>,
+    capture: &mut F,
     walk: &mut CompileInputWalkState,
     depth: usize,
-) -> Result<(), CompileError> {
+) -> Result<(), CompileError>
+where
+    F: FnMut(CapturedTreeFile) -> Result<(), CompileError>,
+{
     let directory = enter_compile_input_directory(walk, dir, depth, "locked module", directory)?;
     let directory_identity = directory.identity.clone();
     let directory_capability = directory.capability.clone();
@@ -1152,7 +1472,7 @@ fn collect_locked_module_input_files_inner(
                             walk.entry_limit.saturating_sub(walk.entries),
                         )?,
                         artifact_paths,
-                        out,
+                        capture,
                         walk,
                         depth.saturating_add(1),
                     )?;
@@ -1196,10 +1516,10 @@ fn collect_locked_module_input_files_inner(
                     super::snapshot::compile_input_limit(&path).min(remaining_bytes),
                 )?;
                 consume_compile_input_file(walk, bytes.len(), root, "locked module")?;
-                out.push(CapturedTreeFile {
+                capture(CapturedTreeFile {
                     relative: rel,
                     bytes,
-                });
+                })?;
             }
         }
         Ok(())
@@ -1216,16 +1536,19 @@ fn collect_compile_input_files(
 ) -> Result<(), CompileError> {
     let directory =
         super::host_input::read_stable_directory(dir, COMPILE_INPUT_MAX_ENTRIES_PER_TREE)?;
-    let mut captured = Vec::new();
+    let mut capture = |file: CapturedTreeFile| {
+        out.push(file.relative);
+        Ok(())
+    };
     collect_compile_input_files_matching(
         root,
         dir,
         directory,
-        &mut captured,
+        &mut capture,
         is_module_compile_input_file,
         COMPILE_INPUT_MAX_ENTRIES_PER_TREE,
     )
-    .map(|_| out.extend(captured.into_iter().map(|file| file.relative)))
+    .map(|_| ())
 }
 
 pub(super) fn collect_module_compile_input_files(
@@ -1236,11 +1559,15 @@ pub(super) fn collect_module_compile_input_files(
 ) -> Result<(CapturedInputFiles, usize), CompileError> {
     let mut files = Vec::new();
     let directory = super::host_input::read_stable_directory(root, entry_limit)?;
+    let mut capture = |file: CapturedTreeFile| {
+        files.push((file.relative, file.bytes));
+        Ok(())
+    };
     let entries = collect_compile_input_files_matching_with_options(
         root,
         root,
         directory,
-        &mut files,
+        &mut capture,
         CompileInputLimits {
             entries: entry_limit,
             files: file_limit,
@@ -1253,30 +1580,26 @@ pub(super) fn collect_module_compile_input_files(
             excluded_files: &BTreeSet::new(),
         },
     )?;
-    files.sort_by(|left, right| left.relative.cmp(&right.relative));
-    Ok((
-        files
-            .into_iter()
-            .map(|file| (file.relative, file.bytes))
-            .collect(),
-        entries,
-    ))
+    Ok((files, entries))
 }
 
 #[cfg(test)]
-fn collect_compile_input_files_matching(
+fn collect_compile_input_files_matching<F>(
     root: &Path,
     dir: &Path,
     directory: HostDirectorySnapshot,
-    out: &mut Vec<CapturedTreeFile>,
+    capture: &mut F,
     include_file: fn(&Path, &Path) -> bool,
     entry_limit: usize,
-) -> Result<usize, CompileError> {
+) -> Result<usize, CompileError>
+where
+    F: FnMut(CapturedTreeFile) -> Result<(), CompileError>,
+{
     collect_compile_input_files_matching_with_options(
         root,
         dir,
         directory,
-        out,
+        capture,
         CompileInputLimits {
             entries: entry_limit,
             files: super::snapshot::MAX_COMPILE_SNAPSHOT_FILES,
@@ -1291,14 +1614,17 @@ fn collect_compile_input_files_matching(
     )
 }
 
-fn collect_compile_input_files_matching_with_options(
+fn collect_compile_input_files_matching_with_options<F>(
     root: &Path,
     dir: &Path,
     directory: HostDirectorySnapshot,
-    out: &mut Vec<CapturedTreeFile>,
+    capture: &mut F,
     limits: CompileInputLimits,
     selection: CompileInputFileSelection<'_>,
-) -> Result<usize, CompileError> {
+) -> Result<usize, CompileError>
+where
+    F: FnMut(CapturedTreeFile) -> Result<(), CompileError>,
+{
     let excluded_directories = selection.excluded_directories;
     let mut effective_excluded_directories = excluded_directories.clone();
     let excluded_files = selection.excluded_files;
@@ -1320,7 +1646,7 @@ fn collect_compile_input_files_matching_with_options(
         root,
         dir,
         directory,
-        out,
+        capture,
         &mut walk,
         0,
         CompileInputFileSelection {
@@ -1354,15 +1680,18 @@ struct CompileInputFileSelection<'a> {
 
 type CapturedInputFiles = Vec<(PathBuf, Vec<u8>)>;
 
-fn collect_compile_input_files_inner(
+fn collect_compile_input_files_inner<F>(
     root: &Path,
     dir: &Path,
     directory: HostDirectorySnapshot,
-    out: &mut Vec<CapturedTreeFile>,
+    capture: &mut F,
     walk: &mut CompileInputWalkState,
     depth: usize,
     selection: CompileInputFileSelection<'_>,
-) -> Result<(), CompileError> {
+) -> Result<(), CompileError>
+where
+    F: FnMut(CapturedTreeFile) -> Result<(), CompileError>,
+{
     let directory = enter_compile_input_directory(walk, dir, depth, "compile input", directory)?;
     let directory_identity = directory.identity.clone();
     let directory_capability = directory.capability.clone();
@@ -1415,7 +1744,7 @@ fn collect_compile_input_files_inner(
                         root,
                         &path,
                         child,
-                        out,
+                        capture,
                         walk,
                         depth.saturating_add(1),
                         selection,
@@ -1444,10 +1773,10 @@ fn collect_compile_input_files_inner(
                 super::snapshot::compile_input_limit(&path).min(remaining_bytes),
             )?;
             consume_compile_input_file(walk, bytes.len(), root, "compile input")?;
-            out.push(CapturedTreeFile {
+            capture(CapturedTreeFile {
                 relative: path.strip_prefix(root).unwrap_or(&path).to_path_buf(),
                 bytes,
-            });
+            })?;
         }
         Ok(())
     })();
@@ -1748,7 +2077,9 @@ fn load_compile_cache_entry(
     }
 
     let module = Module::deserialize(&module_bytes).map_err(|_| CacheEntryLoadError::Corrupt)?;
-    vo_common_core::verifier::verify_module(&module).map_err(|_| CacheEntryLoadError::Corrupt)?;
+    let module = vo_common_core::verifier::verify_loaded_module(module)
+        .map(Arc::new)
+        .map_err(|_| CacheEntryLoadError::Corrupt)?;
     let extensions =
         deserialize_extensions(&extensions_bytes).ok_or(CacheEntryLoadError::Corrupt)?;
     let locked_modules =
@@ -1779,9 +2110,6 @@ pub(super) fn save_compile_cache(
     fingerprint: &str,
     output: &CompileOutput,
 ) {
-    if vo_common_core::verifier::verify_module(&output.module).is_err() {
-        return;
-    }
     let Ok(module_bytes) = output.module.serialize() else {
         return;
     };
@@ -2168,19 +2496,34 @@ mod tests {
     }
 
     #[test]
-    fn locked_module_input_collection_includes_frozen_readiness_metadata_and_target_artifacts() {
+    fn locked_module_input_collection_uses_selected_profile_artifact_paths() {
         let slot = temp_cache_slot("nested-locked-artifact");
         let root = slot.dir.join("module");
+        let schema = vo_module::digest::Digest::from_sha256(b"schema");
+        let abi = vo_module::digest::Digest::from_sha256(b"abi");
+        let vo_graph = vo_module::digest::Digest::from_sha256(b"vo-graph");
+        let rust_graph = vo_module::digest::Digest::from_sha256(b"rust-graph");
+        let js_graph = vo_module::digest::Digest::from_sha256(b"js-graph");
+        let recipe_graph = vo_module::digest::Digest::from_sha256(b"recipe-graph");
         let artifact = vo_module::schema::manifest::ManifestArtifact {
             id: vo_module::identity::ArtifactId {
                 kind: "extension-native".to_string(),
                 target: current_target_triple().to_string(),
-                name: "libdemo.bin".to_string(),
+                name: "selected.bin".to_string(),
             },
             size: 4,
             digest: vo_module::digest::Digest::from_sha256(b"demo"),
         };
         let artifact_id = artifact.id.clone();
+        let role = vo_module::profile::RoleArtifactDeclaration {
+            role: vo_module::profile::ArtifactRole::Asset,
+            kind: artifact.id.kind.clone(),
+            name: artifact.id.name.clone(),
+            digest: artifact.digest.clone(),
+            sbom: vo_module::digest::Digest::from_sha256(b"sbom"),
+            capability_manifest: vo_module::digest::Digest::from_sha256(b"capabilities"),
+            provenance: vo_module::digest::Digest::from_sha256(b"provenance"),
+        };
         let mod_raw =
             b"format = 1\nmodule = \"github.com/acme/demo\"\nversion = \"1.0.0\"\nvo = \"0.1.0\"\n";
         let mod_file =
@@ -2203,10 +2546,31 @@ mod tests {
             vo: vo_module::version::ToolchainConstraint::parse("0.1.0").unwrap(),
             intent: vo_module::lock::module_intent_digest(&mod_file).unwrap(),
             dependencies: Vec::new(),
-            capabilities: Default::default(),
-            profiles: Default::default(),
+            capabilities: std::collections::BTreeMap::from([(
+                "render".to_string(),
+                vo_module::profile::CapabilityDeclaration::default(),
+            )]),
+            profiles: std::collections::BTreeMap::from([(
+                "full".to_string(),
+                vo_module::profile::ProfileDeclaration {
+                    extends: None,
+                    capabilities: vec!["render".to_string()],
+                },
+            )]),
             default_profile: None,
-            artifact_variants: Vec::new(),
+            artifact_variants: vec![vo_module::profile::ArtifactVariantDeclaration {
+                profile: Some("full".to_string()),
+                capabilities: Vec::new(),
+                target: current_target_triple().to_string(),
+                toolchain: "0.1.0".to_string(),
+                schema: schema.clone(),
+                abi: abi.clone(),
+                vo_graph: vo_graph.clone(),
+                rust_graph: rust_graph.clone(),
+                js_graph: js_graph.clone(),
+                recipe_graph: recipe_graph.clone(),
+                roles: vec![role.clone()],
+            }],
             source_recipes: Vec::new(),
             source: vo_module::schema::manifest::ManifestSource {
                 name: "source.tar.gz".to_string(),
@@ -2225,12 +2589,44 @@ mod tests {
                 release_raw.as_bytes(),
             )),
             intent: None,
-            selection: None,
+            selection: Some(vo_module::schema::lockfile::LockedCapabilitySelection {
+                requested_by: vec!["github.com/acme/app".to_string()],
+                capabilities: vec!["render".to_string()],
+                target: current_target_triple().to_string(),
+                toolchain: "0.1.0".to_string(),
+                schema,
+                abi,
+                vo_graph,
+                rust_graph,
+                js_graph,
+                recipe_graph,
+                mode: vo_module::schema::lockfile::LockedArtifactMode::Published,
+                role_artifacts: vec![vo_module::schema::lockfile::LockedRoleArtifact {
+                    role: role.role,
+                    kind: role.kind,
+                    name: role.name,
+                    digest: role.digest,
+                    sbom: role.sbom,
+                    capability_manifest: role.capability_manifest,
+                    provenance: role.provenance,
+                }],
+                source_recipe: None,
+                source_outputs: Vec::new(),
+            }),
         };
-        let relative_artifact = vo_module::artifact::artifact_relative_path(&artifact_id).unwrap();
+        let relative_artifact = vo_module::artifact::selected_artifact_relative_path(
+            &locked,
+            &locked.selection.as_ref().unwrap().role_artifacts[0],
+        )
+        .unwrap();
         let artifact_path = root.join(&relative_artifact);
         fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
         fs::write(&artifact_path, b"demo").unwrap();
+        let unselected_artifact =
+            vo_module::artifact::artifact_relative_path(&artifact_id).unwrap();
+        let unselected_path = root.join(&unselected_artifact);
+        fs::create_dir_all(unselected_path.parent().unwrap()).unwrap();
+        fs::write(unselected_path, b"unselected").unwrap();
         fs::write(
             root.join(vo_module::cache::layout::VERSION_MARKER),
             b"1.0.0\n",
@@ -2261,31 +2657,38 @@ mod tests {
             COMPILE_INPUT_MAX_ENTRIES_PER_TREE,
         )
         .expect("open locked module root");
+        let mut capture = |file: CapturedTreeFile| {
+            files.push(file);
+            Ok(())
+        };
         collect_locked_module_input_files(
             &root,
             &root,
             root_directory,
             &artifact_paths,
-            &mut files,
+            &mut capture,
             super::super::snapshot::MAX_COMPILE_SNAPSHOT_FILES,
             super::super::snapshot::MAX_COMPILE_SNAPSHOT_BYTES,
         )
         .unwrap();
 
+        let files = files
+            .into_iter()
+            .map(|file| file.relative)
+            .collect::<BTreeSet<_>>();
         assert_eq!(
-            files
-                .into_iter()
-                .map(|file| file.relative)
-                .collect::<BTreeSet<_>>(),
+            files,
             BTreeSet::from([
                 PathBuf::from(vo_module::cache::layout::SOURCE_DIGEST_MARKER),
                 PathBuf::from(vo_module::cache::layout::VERSION_MARKER),
-                relative_artifact,
+                relative_artifact.clone(),
                 PathBuf::from("vo.mod"),
                 PathBuf::from("vo.tree.json"),
                 PathBuf::from("vo.release.json"),
             ])
         );
+        assert!(files.contains(&relative_artifact));
+        assert!(!files.contains(&unselected_artifact));
         let _ = fs::remove_dir_all(&slot.dir);
     }
 
@@ -3004,6 +3407,25 @@ mod tests {
             stdlib_source_fingerprint: "sha256:stdlib",
         };
 
+        let canonical_project_root = project_root.canonicalize().unwrap();
+        let enumerations_before =
+            super::super::host_input::directory_enumeration_count(&canonical_project_root);
+        let captured = capture_compile_inputs(input).expect("materialize stable compile inputs");
+        let materialized_enumerations =
+            super::super::host_input::directory_enumeration_count(&canonical_project_root)
+                - enumerations_before;
+        assert_eq!(materialized_enumerations, 4);
+
+        let enumerations_before =
+            super::super::host_input::directory_enumeration_count(&canonical_project_root);
+        let fingerprint =
+            capture_compile_input_fingerprint(input).expect("fingerprint stable compile inputs");
+        let fingerprint_enumerations =
+            super::super::host_input::directory_enumeration_count(&canonical_project_root)
+                - enumerations_before;
+        assert_eq!(fingerprint, captured.fingerprint());
+        assert_eq!(fingerprint_enumerations, 4);
+
         let result = capture_compile_inputs_with_between_scans(input, || {
             fs::write(&entry, "package main\nfunc main() { println(1) }\n")
                 .expect("change source between captures");
@@ -3012,6 +3434,16 @@ mod tests {
             Ok(_) => panic!("mixed full-tree generations were accepted"),
             Err(error) => error,
         };
+        assert!(error
+            .to_string()
+            .contains("between its two bounded captures"));
+
+        fs::write(&entry, "package main\nfunc main() {}\n").expect("restore source");
+        let result = capture_compile_input_fingerprint_with_between_scans(input, || {
+            fs::write(&entry, "package main\nfunc main() { println(2) }\n")
+                .expect("change source between fingerprint captures");
+        });
+        let error = result.expect_err("mixed fingerprint generations were accepted");
         assert!(error
             .to_string()
             .contains("between its two bounded captures"));

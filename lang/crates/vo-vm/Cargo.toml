@@ -11,9 +11,9 @@ publish = false
 
 [features]
 default = ["std"]
-std = ["vo-runtime/std", "vo-stdlib/std", "fastrand/std", "libc"]
+std = ["vo-runtime/std", "vo-stdlib/std", "fastrand/std"]
 # Enable JIT compilation support
-jit = ["vo-jit"]
+jit = ["std", "vo-jit"]
 
 [dependencies]
 vo-runtime = { path = "../vo-runtime", default-features = false }
@@ -21,10 +21,9 @@ vo-common-core = { path = "../vo-common-core", default-features = false }
 vo-stdlib = { path = "../vo-stdlib", default-features = false }
 hashbrown = "0.15"
 fastrand = { version = "2.0", default-features = false }
-libc = { version = "0.2", optional = true }
 
 # Optional JIT compiler
 vo-jit = { path = "../vo-jit", optional = true }
 
 [dev-dependencies]
-vo-source-contract = { path = "../vo-source-contract" }
+vo-common-core = { path = "../vo-common-core", default-features = false, features = ["test-support"] }

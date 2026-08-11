@@ -21,30 +21,17 @@ crate-type = ["cdylib", "rlib"]
 vo-app-runtime = { path = "../../../lang/crates/vo-app-runtime", default-features = false }
 vo-web = { path = "../../../lang/crates/vo-web" }
 vo-web-runtime-wasm = { path = "../../../lang/crates/vo-web/runtime-wasm" }
-vo-common = { path = "../../../lang/crates/vo-common" }
+vo-common = { path = "../../../lang/crates/vo-common", default-features = false }
 vo-common-core = { path = "../../../lang/crates/vo-common-core", default-features = false }
 vo-runtime = { path = "../../../lang/crates/vo-runtime", default-features = false }
-vo-module = { path = "../../../lang/crates/vo-module" }
+vo-module = { path = "../../../lang/crates/vo-module", default-features = false }
 vo-vm = { path = "../../../lang/crates/vo-vm", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
 console_error_panic_hook = "0.1"
-toml = "0.8"
-
-[build-dependencies]
-vo-module = { path = "../../../lang/crates/vo-module" }
-toml = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.64"
-
-[patch."https://github.com/vo-lang/volang"]
-vo-common    = { path = "../../../lang/crates/vo-common" }
-vo-ffi-macro = { path = "../../../lang/crates/vo-ffi-macro" }
-vo-module    = { path = "../../../lang/crates/vo-module" }
-vo-runtime   = { path = "../../../lang/crates/vo-runtime" }
-vo-stdlib    = { path = "../../../lang/crates/vo-stdlib" }
-vo-syntax    = { path = "../../../lang/crates/vo-syntax" }
-vo-vm        = { path = "../../../lang/crates/vo-vm" }

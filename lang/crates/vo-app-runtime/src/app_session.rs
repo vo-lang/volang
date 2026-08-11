@@ -13,15 +13,14 @@ use alloc::string::ToString;
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
 use alloc::sync::Arc;
 
-use vo_runtime::island::IslandCommand;
 use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::{SchedulingOutcome, Vm};
 
 use crate::effects::SessionEffects;
 use crate::{
     advance_session, emit_outbound_frames, push_targeted_inbound_island_frame,
-    resume_waiting_event, run_inbound_island_command, run_inbound_island_frame, PendingHostEvent,
-    SessionError, SessionMailbox, StepResult,
+    resume_waiting_event, run_inbound_island_frame, PendingHostEvent, SessionError, SessionMailbox,
+    StepResult,
 };
 
 #[cfg(all(test, any(feature = "std", target_arch = "wasm32")))]
@@ -5400,17 +5399,6 @@ impl AppSession {
     ) -> Result<StepResult, SessionError> {
         self.clear_outputs();
         let outcome = run_inbound_island_frame(&mut self.vm, data)?;
-        advance_session(&mut self.mailbox, &mut self.vm, outcome, panic_message)?;
-        Ok(self.record_step(outcome))
-    }
-
-    pub fn run_inbound_island_command(
-        &mut self,
-        cmd: IslandCommand,
-        panic_message: &'static str,
-    ) -> Result<StepResult, SessionError> {
-        self.clear_outputs();
-        let outcome = run_inbound_island_command(&mut self.vm, cmd)?;
         advance_session(&mut self.mailbox, &mut self.vm, outcome, panic_message)?;
         Ok(self.record_step(outcome))
     }

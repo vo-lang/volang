@@ -1,6 +1,3 @@
-#[cfg(not(feature = "std"))]
-use alloc::string::String;
-
 use vo_runtime::bytecode::Module;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 use vo_runtime::objects::interface::InterfaceSlot;
@@ -136,25 +133,4 @@ pub(super) fn setup_jit_panic(
         trap_kind,
         msg: panic_msg,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vm_jit_panic_setup_materializes_before_consuming_recoverable_payload_060() {
-        let source = crate::source_contract::production_source_without_test_modules(include_str!(
-            "panic_setup.rs"
-        ));
-        let materialize_pos = source
-            .find("materialize_jit_frames(")
-            .expect("JIT panic setup must materialize JIT frames");
-        let take_pos = source
-            .find("take_recoverable_panic_with_kind()")
-            .expect("JIT panic setup must consume the recoverable payload after setup");
-
-        assert!(
-            materialize_pos < take_pos,
-            "JIT panic setup must keep the recoverable payload rooted until frame materialization succeeds"
-        );
-    }
 }

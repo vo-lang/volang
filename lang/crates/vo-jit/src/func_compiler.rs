@@ -1,36 +1,26 @@
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 //! Function compiler: bytecode -> Cranelift IR.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{
+    types, FuncRef, Function, InstBuilder, MemFlagsData as MemFlags, Value,
+};
+use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use crate::translate::translate_inst;
-use crate::translator::{HelperFuncs, SelectSyncCase, SlotAccess, TranslateResult};
-use crate::{JitCompileEnv, JitError};
+use crate::translator::{
+    HelperKind, HelperRefs, RuntimeContext as _, SelectSyncCase, SlotAccess, TranslateResult,
+};
+use crate::{analysis::FunctionAnalysis, JitCompileEnv, JitError};
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::JitContextField;
 
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
-    func_id: u32,
-    func_def: &'a FunctionDef,
-    vo_module: &'a VoModule,
-    env: JitCompileEnv<'a>,
-    vars: Vec<Variable>,
-    blocks: HashMap<usize, Block>,
-    entry_block: Block,
-    current_pc: usize,
-    helpers: HelperFuncs,
+    core: crate::compile_common::CompilerCore<'a>,
     copy_frame_slots: FuncRef,
-    reg_consts: HashMap<u16, i64>,
-    reg_const_facts: Vec<HashMap<u16, i64>>,
-    /// FuncRef table for other already-compiled callees.
-    /// Index by func_id. None means generated code keeps the VM call materialization path.
-    callee_func_refs: &'a [Option<FuncRef>],
     /// Saved jit_bp from function entry, used to recompute fiber.stack address after reallocation
     saved_jit_bp: Variable,
     /// Variable wrapping the args_ptr for this function (points to fiber.stack[jit_bp]).
@@ -39,14 +29,6 @@ pub struct FunctionCompiler<'a> {
     /// have triggered fiber.stack reallocation via jit_push_frame.
     args_ptr_var: Variable,
     args_ptr_is_stack_var: Variable,
-    execution_budget_regions: BTreeMap<usize, u32>,
-    /// Slots that have been verified non-nil in the current basic block.
-    /// Cleared on block transitions (jump targets).
-    checked_non_nil: HashSet<u16>,
-    /// Slots at or above this value use memory reads, either because bytecode
-    /// may alias them or because the shared JIT SSA budget moved them to the
-    /// memory-backed suffix. Lower slots use SSA reads for register allocation.
-    memory_only_start: u16,
     /// ctx.jit_bp at function entry (i32). Reused by all call sites as caller_bp.
     saved_caller_bp: Value,
     /// ctx.fiber_sp at function entry (i32). Reused by all call sites as old_fiber_sp.
@@ -62,126 +44,63 @@ impl<'a> FunctionCompiler<'a> {
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
         env: JitCompileEnv<'a>,
-        helpers: HelperFuncs,
-        callee_func_refs: &'a [Option<FuncRef>],
-    ) -> Result<Self, JitError> {
+        mut helpers: HelperRefs<'a>,
+        analysis: &'a FunctionAnalysis,
+    ) -> Self {
+        let copy_frame_slots = helpers
+            .resolve(HelperKind::copy_frame_slots, func)
+            .func_ref();
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
 
-        let local_slots = func_def.local_slots as u32;
+        let saved_jit_bp = builder.declare_var(types::I64);
+        let args_ptr_var = builder.declare_var(types::I64);
+        let args_ptr_is_stack_var = builder.declare_var(types::I8);
+        let jit_memory_flags = crate::translator::JitMemoryFlags::new(&mut builder);
 
-        let copy_frame_slots = helpers.copy_frame_slots.ok_or_else(|| {
-            JitError::Internal("vo_jit_copy_frame_slots helper was not declared".to_string())
-        })?;
-
-        Ok(Self {
+        Self {
             builder,
-            func_id,
-            func_def,
-            vo_module,
-            env,
-            vars: Vec::new(),
-            blocks: HashMap::new(),
-            entry_block,
-            current_pc: 0,
-            helpers,
+            core: crate::compile_common::CompilerCore::new(
+                func_id,
+                func_def,
+                vo_module,
+                env,
+                entry_block,
+                helpers,
+                analysis,
+                analysis.memory_only_start,
+                jit_memory_flags,
+            ),
             copy_frame_slots,
-            reg_consts: HashMap::new(),
-            reg_const_facts: Vec::new(),
-            callee_func_refs,
-            saved_jit_bp: Variable::from_u32(local_slots + 1000),
-            args_ptr_var: Variable::from_u32(local_slots + 1001),
-            args_ptr_is_stack_var: Variable::from_u32(local_slots + 1002),
-            execution_budget_regions: BTreeMap::new(),
-            checked_non_nil: HashSet::new(),
-            memory_only_start: u16::MAX,
+            saved_jit_bp,
+            args_ptr_var,
+            args_ptr_is_stack_var,
             saved_caller_bp: Value::from_u32(0),
             saved_fiber_sp: Value::from_u32(0),
             pending_select_cases: Vec::new(),
-        })
+        }
     }
 
-    pub fn compile(mut self) -> Result<(), JitError> {
-        let analysis =
-            crate::analysis::FunctionAnalysis::for_function(self.func_def, self.vo_module)?;
-        self.memory_only_start =
-            crate::compile_common::bounded_memory_only_start(analysis.memory_only_start);
-        self.reg_const_facts = analysis.reg_const_facts;
-        self.declare_variables();
-        self.scan_jump_targets()?;
+    pub fn compile(mut self, frontend_config: TargetFrontendConfig) -> Result<(), JitError> {
+        self.core.declare_variables(&mut self.builder);
+        let policy =
+            crate::compile_common::ControlPolicy::full_function(self.core.func_def.code.len());
+        self.core.execution_budget_regions = crate::compile_common::prepare_control_flow(
+            &mut self.builder,
+            &mut self.core.blocks,
+            &self.core.func_def.code,
+            policy,
+        )?;
 
-        self.builder.switch_to_block(self.entry_block);
+        self.builder.switch_to_block(self.core.entry_block);
         self.emit_prologue();
         crate::compile_common::drive_compile(&mut self)?;
 
         self.builder.seal_all_blocks();
-        self.builder.finalize();
+        self.builder.finalize(frontend_config);
 
         Ok(())
-    }
-
-    fn declare_variables(&mut self) {
-        self.vars = crate::compile_common::declare_variables(
-            &mut self.builder,
-            self.func_def,
-            self.memory_only_start,
-        );
-    }
-
-    #[inline]
-    fn is_float_slot(&self, slot: u16) -> bool {
-        crate::compile_common::is_float_slot(self.func_def, slot)
-    }
-
-    fn scan_jump_targets(&mut self) -> Result<(), JitError> {
-        let policy = crate::compile_common::ControlPolicy::full_function(self.func_def.code.len());
-        let regions = crate::compile_common::execution_budget_regions(&self.func_def.code, policy)?;
-        for start in regions.keys().copied() {
-            self.ensure_block(start);
-        }
-        self.execution_budget_regions = regions;
-        Ok(())
-    }
-
-    fn ensure_block(&mut self, pc: usize) {
-        if !self.blocks.contains_key(&pc) {
-            let block = self.builder.create_block();
-            self.blocks.insert(pc, block);
-        }
-    }
-
-    fn block_for_pc(&self, pc: usize, context: &'static str) -> Result<Block, JitError> {
-        self.blocks.get(&pc).copied().ok_or_else(|| {
-            JitError::Internal(format!(
-                "missing JIT basic block for {context} target pc {pc}"
-            ))
-        })
-    }
-
-    fn checked_branch_target(
-        &self,
-        pc: usize,
-        offset: i32,
-        opcode: Opcode,
-    ) -> Result<usize, JitError> {
-        crate::compile_common::checked_branch_target(self.func_def.code.len(), pc, offset, opcode)
-    }
-
-    fn checked_forloop_target(&self, pc: usize, inst: &Instruction) -> Result<usize, JitError> {
-        crate::compile_common::checked_forloop_target(self.func_def.code.len(), pc, inst)
-    }
-
-    fn clear_flow_facts(&mut self) {
-        crate::compile_common::clear_flow_facts(&mut self.checked_non_nil, &mut self.reg_consts);
-    }
-
-    fn apply_reg_const_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        crate::compile_common::apply_reg_const_facts(
-            &mut self.reg_consts,
-            &self.reg_const_facts,
-            pc,
-        )
     }
 
     /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
@@ -192,9 +111,9 @@ impl<'a> FunctionCompiler<'a> {
         let dst_ptr = self.fiber_stack_args_ptr();
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .spill_for_materialized_frame(
             &mut self.builder,
@@ -206,12 +125,12 @@ impl<'a> FunctionCompiler<'a> {
 
     fn emit_cooperative_yield(&mut self, resume_pc: usize) {
         self.emit_variable_spill();
-        let ctx = self.builder.block_params(self.entry_block)[0];
+        let ctx = self.builder.block_params(self.core.entry_block)[0];
         crate::compile_common::emit_cooperative_yield_return(&mut self.builder, ctx, resume_pc);
     }
 
     fn emit_execution_budget_checkpoint(&mut self, resume_pc: usize, cost: u32) {
-        let ctx = self.builder.block_params(self.entry_block)[0];
+        let ctx = self.builder.block_params(self.core.entry_block)[0];
         let poll = crate::compile_common::branch_on_execution_budget(&mut self.builder, ctx, cost);
 
         self.builder.switch_to_block(poll.exhausted);
@@ -224,7 +143,10 @@ impl<'a> FunctionCompiler<'a> {
     fn current_memory_base_ptr(&mut self) -> Value {
         let entry_args_ptr = self.builder.use_var(self.args_ptr_var);
         let uses_stack = self.builder.use_var(self.args_ptr_is_stack_var);
-        let use_stack = self.builder.ins().icmp_imm(IntCC::NotEqual, uses_stack, 0);
+        let use_stack = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, uses_stack, 0);
         let stack_args_ptr = self.fiber_stack_args_ptr();
         self.builder
             .ins()
@@ -234,16 +156,10 @@ impl<'a> FunctionCompiler<'a> {
     /// Compute fiber.stack base dynamically from ctx.stack_ptr + saved_jit_bp.
     /// Needed because fiber.stack may reallocate during nested calls.
     fn fiber_stack_args_ptr(&mut self) -> Value {
-        let ctx = self.builder.block_params(self.entry_block)[0];
-        let stack_ptr = self.builder.ins().load(
-            types::I64,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_STACK_PTR,
-        );
+        let stack_ptr = self.load_context_field(types::I64, JitContextField::StackPtr);
         let jit_bp = self.builder.use_var(self.saved_jit_bp);
         // fiber_args_ptr = stack_ptr + jit_bp * 8
-        let bp_offset = self.builder.ins().imul_imm(jit_bp, 8);
+        let bp_offset = self.builder.ins().imul_imm_u(jit_bp, 8);
         self.builder.ins().iadd(stack_ptr, bp_offset)
     }
 
@@ -295,10 +211,10 @@ impl<'a> FunctionCompiler<'a> {
             let slot_count = elem_slots + if has_ok { 1 } else { 0 };
             for slot_offset in 0..slot_count {
                 let slot = dst_reg + slot_offset as u16;
-                if slot >= self.memory_only_start {
+                if slot >= self.core.memory_only_start {
                     continue;
                 }
-                if self.is_float_slot(slot) {
+                if self.core.is_float_slot(slot) {
                     let val = crate::compile_common::load_memory_slot_f64(
                         &mut self.builder,
                         stack_args_ptr,
@@ -336,9 +252,9 @@ impl<'a> FunctionCompiler<'a> {
         }
         let args_ptr = self.current_memory_base_ptr();
         let slots = crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .load_memory_slot_range(
             &mut self.builder,
@@ -359,42 +275,27 @@ impl<'a> FunctionCompiler<'a> {
 
     fn emit_prologue(&mut self) {
         // entry_block has no predecessors (it's the function entry point)
-        self.builder.seal_block(self.entry_block);
+        self.builder.seal_block(self.core.entry_block);
 
-        let params = self.builder.block_params(self.entry_block);
-        let ctx = params[0];
+        let params = self.builder.block_params(self.core.entry_block);
         let args_ptr = params[1]; // Points to fiber.stack[jit_bp]
         let _ret = params[2];
         let current_func_id = self
             .builder
             .ins()
-            .iconst(types::I32, i64::from(self.func_id));
-        self.builder.ins().store(
-            MemFlags::trusted(),
-            current_func_id,
-            ctx,
-            JitContext::OFFSET_CURRENT_FUNC_ID,
-        );
+            .iconst(types::I32, i64::from(self.core.func_id));
+        self.store_context_field(current_func_id, JitContextField::CurrentFuncId);
 
         // Wrap args_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
         // it after any call that may have triggered fiber.stack reallocation.
-        self.builder.declare_var(self.args_ptr_var, types::I64);
         self.builder.def_var(self.args_ptr_var, args_ptr);
 
         // Save jit_bp from ctx at function entry.
         // This is needed to compute fiber.stack address for spilling.
         // Also saved as caller_bp (i32) for reuse by all call sites.
-        self.builder.declare_var(self.saved_jit_bp, types::I64);
-        let jit_bp_i32 = self.builder.ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_JIT_BP,
-        );
+        let jit_bp_i32 = self.load_context_field(types::I32, JitContextField::JitBp);
         let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
         self.builder.def_var(self.saved_jit_bp, jit_bp_i64);
-        self.builder
-            .declare_var(self.args_ptr_is_stack_var, types::I8);
         let stack_args_ptr = self.fiber_stack_args_ptr();
         let uses_stack = self
             .builder
@@ -408,37 +309,32 @@ impl<'a> FunctionCompiler<'a> {
         self.saved_caller_bp = jit_bp_i32;
 
         // Save fiber_sp from ctx at function entry. Reused by all call sites.
-        let fiber_sp_i32 = self.builder.ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            ctx,
-            JitContext::OFFSET_FIBER_SP,
-        );
+        let fiber_sp_i32 = self.load_context_field(types::I32, JitContextField::FiberSp);
         self.saved_fiber_sp = fiber_sp_i32;
 
-        let param_slots = self.func_def.param_slots as usize;
-        let ssa_slots = self.vars.len();
-        let num_slots = self.func_def.local_slots as usize;
+        let param_slots = self.core.func_def.param_slots as usize;
+        let ssa_slots = self.core.vars.len();
+        let num_slots = self.core.func_def.local_slots as usize;
 
         // Load params from args_ptr into SSA vars (params already in args_ptr from caller)
         for i in 0..param_slots.min(ssa_slots) {
             let slot = i as u16;
-            let val = if self.is_float_slot(slot) {
+            let val = if self.core.is_float_slot(slot) {
                 crate::compile_common::load_memory_slot_f64(&mut self.builder, args_ptr, slot)
             } else {
                 crate::compile_common::load_memory_slot_i64(&mut self.builder, args_ptr, slot)
             };
-            self.builder.def_var(self.vars[i], val);
+            self.builder.def_var(self.core.vars[i], val);
         }
 
         // Initialize the non-parameter SSA prefix and memory-backed suffix.
         let zero_i64 = self.builder.ins().iconst(types::I64, 0);
         let zero_f64 = self.builder.ins().f64const(0.0);
         for i in param_slots..ssa_slots {
-            if self.is_float_slot(i as u16) {
-                self.builder.def_var(self.vars[i], zero_f64);
+            if self.core.is_float_slot(i as u16) {
+                self.builder.def_var(self.core.vars[i], zero_f64);
             } else {
-                self.builder.def_var(self.vars[i], zero_i64);
+                self.builder.def_var(self.core.vars[i], zero_i64);
             }
         }
         for i in param_slots.max(ssa_slots)..num_slots {
@@ -454,7 +350,6 @@ impl<'a> FunctionCompiler<'a> {
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
         match translate_inst(self, inst)? {
             TranslateResult::Completed => return Ok(false),
-            TranslateResult::Terminated => return Ok(true),
             TranslateResult::Unhandled => {}
         }
 
@@ -485,7 +380,7 @@ impl<'a> FunctionCompiler<'a> {
                     self,
                     inst,
                     crate::call_helpers::CallExternConfig {
-                        current_pc: self.current_pc,
+                        current_pc: self.core.current_pc,
                     },
                 )?;
                 Ok(terminated)
@@ -507,8 +402,10 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn jump(&mut self, inst: &Instruction) -> Result<(), JitError> {
-        let target = self.checked_branch_target(self.current_pc, inst.imm32(), inst.opcode())?;
-        let block = self.block_for_pc(target, "jump")?;
+        let target =
+            self.core
+                .checked_branch_target(self.core.current_pc, inst.imm32(), inst.opcode())?;
+        let block = self.core.block_for_pc(target, "jump")?;
 
         self.builder.ins().jump(block, &[]);
         Ok(())
@@ -526,9 +423,9 @@ impl<'a> FunctionCompiler<'a> {
     fn load_local(&mut self, slot: u16) -> Value {
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .load_i64(&mut self.builder, args_ptr, slot)
     }
@@ -539,20 +436,22 @@ impl<'a> FunctionCompiler<'a> {
     fn store_local(&mut self, slot: u16, val: Value) {
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .store_i64(&mut self.builder, args_ptr, slot, val);
         // Writes invalidate local compile-time facts for the slot.
-        self.checked_non_nil.remove(&slot);
-        self.reg_consts.remove(&slot);
+        self.core.checked_non_nil.remove(&slot);
+        self.core.reg_consts.remove(&slot);
     }
 
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) -> Result<(), JitError> {
         let cond = self.load_local(inst.a);
-        let target = self.checked_branch_target(self.current_pc, inst.imm32(), inst.opcode())?;
-        let target_block = self.block_for_pc(target, "conditional jump")?;
+        let target =
+            self.core
+                .checked_branch_target(self.core.current_pc, inst.imm32(), inst.opcode())?;
+        let target_block = self.core.block_for_pc(target, "conditional jump")?;
         let fall_through = self.builder.create_block();
 
         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -563,7 +462,7 @@ impl<'a> FunctionCompiler<'a> {
 
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
-        self.clear_flow_facts();
+        self.core.clear_flow_facts();
         Ok(())
     }
 
@@ -582,8 +481,10 @@ impl<'a> FunctionCompiler<'a> {
         );
         self.store_local(inst.a, next_idx);
 
-        let target = self.checked_forloop_target(self.current_pc, inst)?;
-        let target_block = self.block_for_pc(target, "forloop")?;
+        let target = self
+            .core
+            .checked_forloop_target(self.core.current_pc, inst)?;
+        let target_block = self.core.block_for_pc(target, "forloop")?;
         let fall_through = self.builder.create_block();
 
         self.builder
@@ -591,18 +492,17 @@ impl<'a> FunctionCompiler<'a> {
             .brif(continue_loop, target_block, &[], fall_through, &[]);
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
-        self.clear_flow_facts();
+        self.core.clear_flow_facts();
         Ok(())
     }
 
     fn ret(&mut self, inst: &Instruction) -> Result<(), JitError> {
         use vo_common_core::bytecode::ReturnFlags;
-        let ret_ptr = self.builder.block_params(self.entry_block)[2];
-        let ctx = self.builder.block_params(self.entry_block)[0];
+        let ret_ptr = self.builder.block_params(self.core.entry_block)[2];
         let flags = ReturnFlags::from_bits(inst.flags).ok_or_else(|| {
             JitError::InvalidMetadata(crate::JitMetadataError::InvalidInstructionFlags {
-                func: self.func_def.name.clone(),
-                pc: self.current_pc,
+                func: self.core.func_def.name.clone(),
+                pc: self.core.current_pc,
                 opcode: Opcode::Return,
                 flags: inst.flags,
                 allowed: ReturnFlags::ALLOWED_BITS,
@@ -613,9 +513,9 @@ impl<'a> FunctionCompiler<'a> {
 
         // Pure function: no defer, no error return, no heap returns.
         // VM guards metadata reads with func attributes, so we can skip all metadata stores.
-        let is_pure = !self.func_def.has_defer
-            && self.func_def.error_ret_slot < 0
-            && self.func_def.heap_ret_gcref_count == 0;
+        let is_pure = !self.core.func_def.has_defer
+            && self.core.func_def.error_ret_slot < 0
+            && self.core.func_def.heap_ret_gcref_count == 0;
 
         if !is_pure {
             // Set is_error_return for VM errdefer decision.
@@ -623,12 +523,7 @@ impl<'a> FunctionCompiler<'a> {
                 .builder
                 .ins()
                 .iconst(types::I8, if is_error_return { 1 } else { 0 });
-            self.builder.ins().store(
-                MemFlags::trusted(),
-                err_flag,
-                ctx,
-                JitContext::OFFSET_IS_ERROR_RETURN,
-            );
+            self.store_context_field(err_flag, JitContextField::IsErrorReturn);
         }
 
         if heap_returns {
@@ -636,30 +531,20 @@ impl<'a> FunctionCompiler<'a> {
             // This keeps defer/recover timing correct and lets canonical array
             // returns flatten through ArrayHeader-aware runtime code.
             let gcref_start = self.builder.ins().iconst(types::I16, inst.a as i64);
-            self.builder.ins().store(
-                MemFlags::trusted(),
-                gcref_start,
-                ctx,
-                JitContext::OFFSET_RET_GCREF_START,
-            );
+            self.store_context_field(gcref_start, JitContextField::RetGcRefStart);
             let one = self.builder.ins().iconst(types::I8, 1);
-            self.builder.ins().store(
-                MemFlags::trusted(),
-                one,
-                ctx,
-                JitContext::OFFSET_RET_IS_HEAP,
-            );
+            self.store_context_field(one, JitContextField::RetIsHeap);
 
             // SSA-only slots are not guaranteed to have reached frame memory.
             let gcref_count = inst.b as usize;
             let args_ptr = self.fiber_stack_args_ptr();
             for i in 0..gcref_count {
                 let slot = (inst.a as usize + i) as u16;
-                if slot < self.memory_only_start {
+                if slot < self.core.memory_only_start {
                     let val_i64 = crate::compile_common::read_ssa_slot_i64(
                         &mut self.builder,
-                        &self.vars,
-                        &self.func_def.slot_types,
+                        &self.core.vars,
+                        &self.core.func_def.slot_types,
                         slot,
                     );
                     crate::compile_common::store_memory_slot(
@@ -673,24 +558,14 @@ impl<'a> FunctionCompiler<'a> {
         } else {
             if !is_pure {
                 let zero = self.builder.ins().iconst(types::I8, 0);
-                self.builder.ins().store(
-                    MemFlags::trusted(),
-                    zero,
-                    ctx,
-                    JitContext::OFFSET_RET_IS_HEAP,
-                );
+                self.store_context_field(zero, JitContextField::RetIsHeap);
 
                 // Store ret_start for VM to extract slot_types for GC scanning
                 let ret_start_val = self.builder.ins().iconst(types::I16, inst.a as i64);
-                self.builder.ins().store(
-                    MemFlags::trusted(),
-                    ret_start_val,
-                    ctx,
-                    JitContext::OFFSET_RET_START,
-                );
+                self.store_context_field(ret_start_val, JitContextField::RetStart);
             }
 
-            let ret_slots = self.func_def.ret_slots as usize;
+            let ret_slots = self.core.func_def.ret_slots as usize;
             let ret_reg = inst.a as usize;
 
             for i in 0..ret_slots {
@@ -717,63 +592,47 @@ impl<'a> FunctionCompiler<'a> {
         let arg_start = inst.b as usize;
 
         let target_func = self
+            .core
             .vo_module
             .functions
             .get(target_func_id as usize)
             .ok_or(JitError::FunctionNotFound(target_func_id))?;
-        let callee_func_ref = self
-            .callee_func_refs
-            .get(target_func_id as usize)
-            .copied()
-            .flatten();
-        let call_plan = crate::call_helpers::CallPlan::new(
-            target_func_id,
-            arg_start,
-            target_func,
-            callee_func_ref,
-        );
+        let call_plan = crate::call_helpers::CallPlan::new(target_func_id, arg_start, target_func);
 
-        match call_plan.route_for_full_function(self.func_id) {
-            crate::call_helpers::CallRoute::KnownDirectJit
-            | crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(
-                    self,
-                    call_plan.jit_materialization_config(),
-                )?;
+        match call_plan.route_for_full_function(self.core.func_id) {
+            crate::call_helpers::CallRoute::DynamicJitTable => {
+                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::VmCallMaterialization => {
                 crate::call_helpers::emit_call_via_vm(
                     self,
-                    call_plan.vm_config(self.current_pc + 1),
+                    call_plan.vm_config(self.core.current_pc + 1),
                 )?;
                 Ok(true)
             }
-            crate::call_helpers::CallRoute::DynamicInlineCache => Err(JitError::Internal(
-                "static full-function call selected dynamic inline-cache route".into(),
-            )),
         }
     }
 }
 
 impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
     fn control_policy(&self) -> crate::compile_common::ControlPolicy {
-        crate::compile_common::ControlPolicy::full_function(self.func_def.code.len())
+        crate::compile_common::ControlPolicy::full_function(self.core.func_def.code.len())
     }
 
     fn set_current_pc(&mut self, pc: usize) {
-        self.current_pc = pc;
+        self.core.current_pc = pc;
     }
 
     fn enter_pc_block(&mut self, pc: usize, block_terminated: &mut bool) -> Result<(), JitError> {
         if crate::compile_common::enter_compile_pc(
             &mut self.builder,
-            &self.blocks,
+            &self.core.blocks,
             pc,
             block_terminated,
         ) {
-            self.clear_flow_facts();
-            if let Some(cost) = self.execution_budget_regions.get(&pc).copied() {
+            self.core.clear_flow_facts();
+            if let Some(cost) = self.core.execution_budget_regions.get(&pc).copied() {
                 self.emit_execution_budget_checkpoint(pc, cost);
             }
         }
@@ -781,11 +640,12 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
     }
 
     fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.apply_reg_const_facts(pc)
+        self.core.apply_reg_const_facts(pc)
     }
 
     fn instruction_for_pc(&self, pc: usize) -> Result<Instruction, JitError> {
-        self.func_def
+        self.core
+            .func_def
             .code
             .get(pc)
             .copied()
@@ -805,6 +665,16 @@ impl<'a> crate::translator::IrBuilder<'a> for FunctionCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> {
         &mut self.builder
     }
+
+    fn jit_memory_flags(&self) -> crate::translator::JitMemoryFlags {
+        self.core.jit_memory_flags
+    }
+}
+
+impl<'a> crate::translator::ScratchAccess<'a> for FunctionCompiler<'a> {
+    fn native_scratch_slots(&mut self) -> &mut crate::translator::NativeScratchSlots {
+        &mut self.core.native_scratch_slots
+    }
 }
 
 impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
@@ -816,55 +686,40 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
     }
     fn var_addr(&mut self, slot: u16) -> Value {
         let args_ptr = self.current_memory_base_ptr();
-        self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
-    }
-    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
-        let args_ptr = self.current_memory_base_ptr();
-        crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
-        )
-        .sync_ssa_slots_to_memory(
-            &mut self.builder,
-            args_ptr,
-            start_slot,
-            slot_count,
-            "memory sync",
-        )
+        self.builder.ins().iadd_imm_u(args_ptr, i64::from(slot) * 8)
     }
     fn local_slot_count(&self) -> usize {
-        self.func_def.local_slots as usize
+        self.core.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .load_f64(&mut self.builder, args_ptr, slot)
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .store_f64(&mut self.builder, args_ptr, slot, val);
-        self.checked_non_nil.remove(&slot);
-        self.reg_consts.remove(&slot);
+        self.core.checked_non_nil.remove(&slot);
+        self.core.reg_consts.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
-            self.func_def,
-            &self.vars,
-            self.memory_only_start,
+            self.core.func_def,
+            &self.core.vars,
+            self.core.memory_only_start,
         )
         .reload_all_from_memory(&mut self.builder, args_ptr);
-        self.clear_flow_facts();
+        self.core.clear_flow_facts();
     }
     fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
         self.sync_written_slots_precise(start_slot, slot_count)
@@ -873,82 +728,13 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
 
 impl<'a> crate::translator::RuntimeContext<'a> for FunctionCompiler<'a> {
     fn ctx_param(&mut self) -> Value {
-        self.builder.block_params(self.entry_block)[0]
-    }
-    fn gc_ptr(&mut self) -> Value {
-        let ctx = self.ctx_param();
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), ctx, 0)
-    }
-    fn globals_ptr(&mut self) -> Value {
-        let ctx = self.ctx_param();
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), ctx, 8)
+        self.builder.block_params(self.core.entry_block)[0]
     }
 }
 
-impl crate::translator::MetadataAccess for FunctionCompiler<'_> {
-    fn vo_module(&self) -> &VoModule {
-        self.vo_module
-    }
-
-    fn resolved_extern(
-        &self,
-        extern_id: u32,
-    ) -> Result<&vo_runtime::bytecode::ResolvedExtern, JitError> {
-        let resolved = self.env.externs.get(extern_id).ok_or_else(|| {
-            JitError::Internal(format!("CallExtern missing resolved extern {extern_id}"))
-        })?;
-        if matches!(
-            resolved.jit_route,
-            vo_runtime::bytecode::ExternJitRoute::DirectHelper
-        ) && !self.env.backend_caps.extern_suspend
-            && !resolved.effective_effects.is_empty()
-        {
-            return Err(JitError::Internal(format!(
-                "CallExtern extern {extern_id} requires extern suspend support"
-            )));
-        }
-        Ok(resolved)
-    }
-    fn current_pc(&self) -> usize {
-        self.current_pc
-    }
-    fn func_id(&self) -> u32 {
-        self.func_id
-    }
-    fn current_jit_metadata(&self) -> Option<&vo_runtime::bytecode::JitInstructionMetadata> {
-        self.func_def.jit_metadata.get(self.current_pc)
-    }
-}
-
-impl crate::translator::HelperAccess for FunctionCompiler<'_> {
-    fn helpers(&self) -> &HelperFuncs {
-        &self.helpers
-    }
-}
-
-impl crate::translator::RegConstAccess for FunctionCompiler<'_> {
-    fn set_reg_const(&mut self, reg: u16, val: i64) {
-        self.reg_consts.insert(reg, val);
-    }
-    fn get_reg_const(&self, reg: u16) -> Option<i64> {
-        self.reg_consts.get(&reg).copied()
-    }
-    fn clear_reg_const(&mut self, reg: u16) {
-        self.reg_consts.remove(&reg);
-    }
-    fn clear_reg_consts(&mut self) {
-        self.reg_consts.clear();
-    }
-}
+crate::translator::impl_shared_compiler_traits!(FunctionCompiler<'_>);
 
 impl crate::translator::FrameBoundary for FunctionCompiler<'_> {
-    fn panic_return_value(&self) -> i32 {
-        1
-    }
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();
     }
@@ -981,15 +767,6 @@ impl<'a> crate::translator::SelectSync<'a> for FunctionCompiler<'a> {
     }
 }
 
-impl crate::translator::FlowFacts for FunctionCompiler<'_> {
-    fn is_checked_non_nil(&self, slot: u16) -> bool {
-        self.checked_non_nil.contains(&slot)
-    }
-    fn mark_checked_non_nil(&mut self, slot: u16) {
-        self.checked_non_nil.insert(slot);
-    }
-}
-
 impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
     fn call_caller_bp(&mut self) -> Value {
         self.saved_caller_bp
@@ -1001,16 +778,4 @@ impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
 
 impl crate::translator::StackRefresh for FunctionCompiler<'_> {
     fn refresh_stack_base_after_reallocation(&mut self) {}
-}
-
-#[cfg(test)]
-mod heap_return_contract_tests {
-    #[test]
-    fn jit_routes_all_heap_returns_through_vm_materialization() {
-        let source = vo_source_contract::production_source_without_test_modules(include_str!(
-            "func_compiler.rs"
-        ));
-        assert!(source.contains("Heap returns are materialized by the VM for every JIT function"));
-        assert!(!source.contains("dereference GcRefs and copy to ret buffer"));
-    }
 }

@@ -21,14 +21,6 @@ impl JitBridgeMode {
         }
     }
 
-    #[cfg(not(feature = "std"))]
-    pub(super) fn wait_io_error(self) -> &'static str {
-        match self {
-            Self::FullFunction => "JIT returned WaitIo but std feature is not enabled",
-            Self::LoopOsr => "Loop OSR returned WaitIo but std feature is not enabled",
-        }
-    }
-
     pub(super) fn resolve_regular_callee(self) -> bool {
         matches!(self, Self::FullFunction)
     }
@@ -40,8 +32,10 @@ pub(super) enum JitBridgeTransition {
     FrameChanged,
     TimesliceExpired,
     QueueBlock,
-    #[cfg(feature = "std")]
-    WaitIo(u64),
+    WaitIo {
+        token: u64,
+        staged_io_roots_added: bool,
+    },
     HostEvent {
         token: u64,
         delay_ms: u32,
@@ -90,10 +84,13 @@ fn decode_jit_bridge_transition(transition: JitBridgeTransition) -> DecodedJitTr
                 GcRootEffect::CurrentFiberDirty,
             ))
         }
-        #[cfg(feature = "std")]
-        JitBridgeTransition::WaitIo(token) => DecodedJitTransition::Runtime(
-            bridge_runtime_transition(RuntimeBoundary::Block(BlockReason::Io(token))),
-        ),
+        JitBridgeTransition::WaitIo {
+            token,
+            staged_io_roots_added,
+        } => DecodedJitTransition::Runtime(bridge_runtime_transition_with_gc(
+            RuntimeBoundary::Block(BlockReason::Io(token)),
+            crate::vm::wait_io_gc_root_effect(staged_io_roots_added),
+        )),
         JitBridgeTransition::HostEvent { token, delay_ms } => {
             DecodedJitTransition::Runtime(bridge_runtime_transition(RuntimeBoundary::Block(
                 BlockReason::HostEvent { token, delay_ms },
@@ -227,7 +224,7 @@ pub(super) fn osr_result_from_bridge_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fiber::ResumePoint;
+    use crate::fiber::{PendingSpawn, ResumePoint};
     use crate::vm::jit::OsrResult;
 
     fn decoded_runtime(transition: JitBridgeTransition) -> RuntimeTransition {
@@ -268,8 +265,10 @@ mod tests {
             },
             JitBridgeTransition::QueueBlock,
             JitBridgeTransition::WaitQueue,
-            #[cfg(feature = "std")]
-            JitBridgeTransition::WaitIo(9),
+            JitBridgeTransition::WaitIo {
+                token: 9,
+                staged_io_roots_added: false,
+            },
         ];
 
         for transition in transitions {
@@ -283,10 +282,19 @@ mod tests {
     }
 
     #[test]
+    fn vm_jit_wait_io_with_new_staged_roots_dirties_all_roots() {
+        let runtime = decoded_runtime(JitBridgeTransition::WaitIo {
+            token: 9,
+            staged_io_roots_added: true,
+        });
+        assert_eq!(runtime.gc_roots, GcRootEffect::AllRootsDirty);
+    }
+
+    #[test]
     fn vm_jit_fatal_infra_transport_preserves_jit_error_terminal_policy_047() {
         let mut vm = Vm::new();
         let mut pending = RuntimeTransition::continue_with_gc_roots(GcRootEffect::AllRootsDirty);
-        pending.spawns.push(Fiber::new(99));
+        pending.spawns.push(PendingSpawn::for_test(99));
         vm.push_pending_runtime_transition(pending);
 
         let result = exec_result_from_bridge_transition(

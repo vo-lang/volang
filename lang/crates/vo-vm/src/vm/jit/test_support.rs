@@ -20,7 +20,7 @@ pub(super) fn function(local_slots: u16, gc_scan_slots: u16) -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::Value; local_slots as usize],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
             SlotType::Value;

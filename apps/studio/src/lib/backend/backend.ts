@@ -1,26 +1,18 @@
 import type {
   BootstrapContext,
-  BuildResult,
-  CheckResult,
-  CompileResult,
   DiscoveredProject,
   DisplayPulseSubmission,
   DisplayTimingRequest,
   FsEntry,
-  FsStat,
   FrameworkLaneBinding,
   GitOp,
   GitResult,
-  GrepMatch,
-  GrepOpts,
   GuiRunOutput,
   HttpOpts,
   HttpResult,
   LaunchSpec,
   ProcEvent,
   PreparedSession,
-  ReadManyResult,
-  RendererBridgeVfsSnapshot,
   RunEvent,
   RunOpts,
   SessionInfo,
@@ -63,24 +55,15 @@ export interface Backend {
   readPreparedSessionFile(candidate: PreparedSession, path: string): Promise<string>;
 
   // Filesystem
-  discoverProjects(root: string): Promise<DiscoveredProject[]>;
   discoverWorkspaceProjects(): Promise<DiscoveredProject[]>;
   listDir(path: string): Promise<FsEntry[]>;
-  statPath(path: string): Promise<FsStat>;
   readFile(path: string): Promise<string>;
-  readMany(paths: string[]): Promise<ReadManyResult[]>;
   writeFile(path: string, content: string): Promise<void>;
   mkdir(path: string): Promise<void>;
   removeEntry(path: string, recursive: boolean): Promise<void>;
   renameEntry(oldPath: string, newPath: string): Promise<void>;
-  copyEntry(src: string, dst: string): Promise<void>;
-  grep(path: string, pattern: string, opts?: GrepOpts): Promise<GrepMatch[]>;
 
   // Compiler
-  checkVo(path: string): Promise<CheckResult>;
-  compileVo(path: string): Promise<CompileResult>;
-  formatVo(path: string): Promise<string>;
-  buildVo(path: string, output?: string): Promise<BuildResult>;
   dumpVo(path: string): Promise<string>;
 
   // Runtime
@@ -92,7 +75,6 @@ export interface Backend {
   setGuiGuestErrorHandler(handler: ((session: GuiSessionToken, error: Error) => void) | null): void;
   sendGuiEvent(handlerId: number, payload: string, session?: GuiSessionToken): Promise<Uint8Array>;
   sendGuiEventAsync(handlerId: number, payload: string, session?: GuiSessionToken): Promise<void>;
-  pushIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<void>;
   pushAndPollIslandTransport(data: Uint8Array, session?: GuiSessionToken): Promise<Uint8Array[]>;
   pollIslandTransport(session?: GuiSessionToken): Promise<Uint8Array>;
   pollGuiRender(session?: GuiSessionToken): Promise<Uint8Array>;
@@ -146,14 +128,8 @@ export interface Backend {
     session?: GuiSessionToken,
   ): Promise<DisplayPulseSubmission>;
   stopGui(session?: GuiSessionToken): Promise<void>;
-  getRendererBridgeVfsSnapshot(
-    path: string,
-    sessionId?: number,
-  ): Promise<RendererBridgeVfsSnapshot>;
-
   // Toolchain
   voInit(path: string, module: string, mainContent: string): Promise<string>;
-  voVersion(): Promise<string>;
 
   // Process (native only)
   spawnProcess(program: string, args: string[], cwd?: string, env?: Record<string, string>): StreamHandle<ProcEvent>;
@@ -167,8 +143,8 @@ export interface Backend {
 
   // Project creation
   createWorkspaceFiles(files: { path: string; content: string }[]): Promise<void>;
-  // Native external creation accepts exactly one .vo file in an existing directory.
-  createProjectFiles(files: { path: string; content: string }[]): Promise<void>;
+  // Creates one new .vo file in an existing directory without replacing anything.
+  createProjectFile(path: string, content: string): Promise<void>;
 
   // Git
   gitExec(op: GitOp): Promise<GitResult>;

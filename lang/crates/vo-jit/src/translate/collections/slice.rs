@@ -1,10 +1,12 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{
+    types, InstBuilder, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
+};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
-use crate::translate::{emit_runtime_trap_if, require_helper};
-use crate::translator::{emit_funcref_call, CollectionEmitter};
+use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if};
+use crate::translator::{emit_runtime_helper_call, CollectionEmitter, HelperKind};
 use crate::JitError;
 
 use super::array::{emit_typed_write_barrier_single_by_meta, emit_write_barrier_multi_by_meta};
@@ -30,7 +32,7 @@ fn emit_slice_storage_layout<'a>(
         s,
         (vo_runtime::objects::slice::FIELD_STORAGE_MODE * 8) as i32,
     );
-    let is_flat = e.builder().ins().icmp_imm(IntCC::NotEqual, mode, 0);
+    let is_flat = e.builder().ins().icmp_imm_u(IntCC::NotEqual, mode, 0);
     let flat_stride = e.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
@@ -80,8 +82,8 @@ pub(in crate::translate) fn slice_new<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().slice_new_checked, "slice_new_checked")?;
-    let elem_bytes_val = emit_elem_bytes_i32(e, inst.opcode(), inst.flags, inst.c + 2)?;
+    let func = e.helper(HelperKind::slice_new_checked);
+    let elem_bytes_val = emit_elem_bytes_i32(e, inst.opcode())?;
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -95,7 +97,7 @@ pub(in crate::translate) fn slice_new<'a>(
     let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
 
     // Call checked helper: (gc, meta, elem_bytes, len, cap, out) -> error_code
-    let call = emit_funcref_call(
+    let call = emit_runtime_helper_call(
         e,
         func,
         &[gc_ptr, meta_i32, elem_bytes_val, len, cap, out_ptr],
@@ -115,7 +117,11 @@ pub(in crate::translate) fn slice_new<'a>(
     );
 
     // Load result from output slot
-    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
+    let result = e
+        .builder()
+        .ins()
+        .stack_load(types::I64, types::I64, out_slot, 0);
+    emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -126,7 +132,7 @@ pub(in crate::translate) fn slice_get<'a>(
 ) -> Result<(), JitError> {
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode())?;
 
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     if elem_bytes == 0 {
@@ -151,12 +157,12 @@ pub(in crate::translate) fn slice_get<'a>(
             .builder()
             .ins()
             .load(types::I64, MemFlags::trusted(), addr, 0);
-        e.builder().ins().jump(merge_block, &[flat_val]);
+        e.builder().ins().jump(merge_block, &[flat_val.into()]);
 
         e.builder().switch_to_block(packed_block);
         e.builder().seal_block(packed_block);
         let packed_val = load_element(e, addr, elem_bytes, needs_sext);
-        e.builder().ins().jump(merge_block, &[packed_val]);
+        e.builder().ins().jump(merge_block, &[packed_val.into()]);
 
         e.builder().switch_to_block(merge_block);
         e.builder().seal_block(merge_block);
@@ -169,7 +175,7 @@ pub(in crate::translate) fn slice_get<'a>(
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
         for i in 0..elem_slots {
-            let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
+            let slot_off = e.builder().ins().iadd_imm_u(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(data_ptr, slot_off);
             let val = e
                 .builder()
@@ -187,7 +193,7 @@ pub(in crate::translate) fn slice_set<'a>(
 ) -> Result<(), JitError> {
     let s = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
-    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode())?;
 
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     if elem_bytes == 0 {
@@ -231,7 +237,7 @@ pub(in crate::translate) fn slice_set<'a>(
             s,
             (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
         );
-        emit_typed_write_barrier_single_by_meta(e, owner, val, elem_meta_raw)?;
+        emit_typed_write_barrier_single_by_meta(e, owner, val, elem_meta_raw);
         e.builder().ins().store(MemFlags::trusted(), val, addr, 0);
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
@@ -246,10 +252,10 @@ pub(in crate::translate) fn slice_set<'a>(
             s,
             (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
         );
-        emit_write_barrier_multi_by_meta(e, owner, elem_meta_raw, inst.c, elem_slots)?;
+        emit_write_barrier_multi_by_meta(e, owner, elem_meta_raw, inst.c, elem_slots);
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
-            let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
+            let slot_off = e.builder().ins().iadd_imm_u(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(data_ptr, slot_off);
             e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
         }
@@ -277,7 +283,7 @@ pub(in crate::translate) fn emit_nil_guarded_load<'a>(
 
     e.builder().switch_to_block(nil_block);
     e.builder().seal_block(nil_block);
-    e.builder().ins().jump(merge_block, &[zero]);
+    e.builder().ins().jump(merge_block, &[zero.into()]);
 
     e.builder().switch_to_block(not_nil_block);
     e.builder().seal_block(not_nil_block);
@@ -285,7 +291,7 @@ pub(in crate::translate) fn emit_nil_guarded_load<'a>(
         .builder()
         .ins()
         .load(types::I64, MemFlags::trusted(), ptr, offset);
-    e.builder().ins().jump(merge_block, &[val]);
+    e.builder().ins().jump(merge_block, &[val.into()]);
 
     e.builder().switch_to_block(merge_block);
     e.builder().seal_block(merge_block);
@@ -331,11 +337,8 @@ pub(in crate::translate) fn slice_slice<'a>(
         let array_len = e.read_var(inst.b + 5);
         if has_max {
             let max = e.read_var(inst.c + 2);
-            let func = require_helper(
-                e.helpers().slice_from_inline_array3,
-                "slice_from_inline_array3",
-            )?;
-            let call = emit_funcref_call(
+            let func = e.helper(HelperKind::slice_from_inline_array3);
+            let call = emit_runtime_helper_call(
                 e,
                 func,
                 &[
@@ -353,11 +356,8 @@ pub(in crate::translate) fn slice_slice<'a>(
             );
             e.builder().inst_results(call)[0]
         } else {
-            let func = require_helper(
-                e.helpers().slice_from_inline_array,
-                "slice_from_inline_array",
-            )?;
-            let call = emit_funcref_call(
+            let func = e.helper(HelperKind::slice_from_inline_array);
+            let call = emit_runtime_helper_call(
                 e,
                 func,
                 &[
@@ -377,21 +377,21 @@ pub(in crate::translate) fn slice_slice<'a>(
     } else if has_max {
         let max = e.read_var(inst.c + 2);
         if is_array {
-            let func = require_helper(e.helpers().slice_from_array3, "slice_from_array3")?;
-            let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi, max]);
+            let func = e.helper(HelperKind::slice_from_array3);
+            let call = emit_runtime_helper_call(e, func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         } else {
-            let func = require_helper(e.helpers().slice_slice3, "slice_slice3")?;
-            let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi, max]);
+            let func = e.helper(HelperKind::slice_slice3);
+            let call = emit_runtime_helper_call(e, func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         }
     } else if is_array {
-        let func = require_helper(e.helpers().slice_from_array, "slice_from_array")?;
-        let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi]);
+        let func = e.helper(HelperKind::slice_from_array);
+        let call = emit_runtime_helper_call(e, func, &[gc_ptr, src, lo, hi]);
         e.builder().inst_results(call)[0]
     } else {
-        let func = require_helper(e.helpers().slice_slice, "slice_slice")?;
-        let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi]);
+        let func = e.helper(HelperKind::slice_slice);
+        let call = emit_runtime_helper_call(e, func, &[gc_ptr, src, lo, hi]);
         e.builder().inst_results(call)[0]
     };
 
@@ -406,6 +406,17 @@ pub(in crate::translate) fn slice_slice<'a>(
         Some(hi),
     );
 
+    if is_array || inline_view {
+        emit_jit_error_if_zero(e, result);
+    } else {
+        let zero = e.builder().ins().iconst(types::I64, 0);
+        let result_is_nonzero = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
+        let source_is_nil = e.builder().ins().icmp(IntCC::Equal, src, zero);
+        let allocation_ok = e.builder().ins().bor(result_is_nonzero, source_is_nil);
+        let allocation_ok = e.builder().ins().uextend(types::I64, allocation_ok);
+        emit_jit_error_if_zero(e, allocation_ok);
+    }
+
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -414,28 +425,23 @@ pub(in crate::translate) fn slice_append<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let slice_append_func = require_helper(e.helpers().slice_append, "slice_append")?;
+    let slice_append_func = e.helper(HelperKind::slice_append);
     let ctx = e.ctx_param();
     let s = e.read_var(inst.b);
-
-    // Instruction format:
-    // - c = elem_meta slot
-    // - flags==0: c+1 = elem_bytes, c+2.. = elem value
-    // - flags!=0: c+1.. = elem value (elem_bytes derived from flags)
 
     // elem_meta from slot c (as i32)
     let elem_meta_raw = e.read_var(inst.c);
     let elem_meta = e.builder().ins().ireduce(types::I32, elem_meta_raw);
 
     // elem_bytes (as i32)
-    let elem_bytes = emit_elem_bytes_i32(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    let elem_bytes = emit_elem_bytes_i32(e, inst.opcode())?;
 
     // val_ptr: pointer to element value in stack
-    let elem_slot = inst.c + if inst.flags == 0 { 2 } else { 1 };
+    let elem_slot = inst.c + 1;
     let val_ptr = e.var_addr(elem_slot);
 
     // vo_slice_append(ctx, elem_meta: u32, elem_bytes: u32, s: u64, val_ptr: *const u64) -> u64
-    let call = emit_funcref_call(
+    let call = emit_runtime_helper_call(
         e,
         slice_append_func,
         &[ctx, elem_meta, elem_bytes, s, val_ptr],
@@ -452,7 +458,7 @@ pub(in crate::translate) fn slice_addr<'a>(
 ) -> Result<(), JitError> {
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode())?;
     let data_ptr = emit_slice_bounds_check(e, s, idx);
     let (_, stride) = emit_slice_storage_layout(e, s, elem_bytes);
     let off = e.builder().ins().imul(idx, stride);

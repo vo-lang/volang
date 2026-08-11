@@ -10,15 +10,12 @@ use vo_runtime::jit_api::{
 use vo_runtime::slot::Slot;
 
 use crate::exec::{self, SelectResult};
-use crate::runtime_boundary::{
-    IslandCommandEffect, PendingTransitionTerminalPolicy, ResumePolicy, RuntimeBoundary,
-    RuntimeTransition, WakeCommand,
-};
-use crate::vm::{helpers, GcRootEffect, RuntimeTrapKind};
+use crate::vm::{helpers, RuntimeTrapKind};
 
 use super::helpers::{
-    extract_context, queue_layout_for_current_pc, set_jit_panic, set_jit_trap,
-    validate_callback_slot_count, validate_queue_layout_slot_count, validate_vm_callback_context,
+    extract_context, extract_fiber, queue_layout_for_current_pc, set_jit_panic, set_jit_trap,
+    validate_callback_context, validate_callback_slot_count, validate_queue_layout_slot_count,
+    validate_vm_callback_context,
 };
 
 // =============================================================================
@@ -78,30 +75,6 @@ fn validate_select_reg_span(
     Ok(())
 }
 
-fn commit_select_transition(
-    _ctx: *mut JitContext,
-    vm: &mut crate::vm::Vm,
-    mut transition: RuntimeTransition,
-) -> JitResult {
-    transition.set_pending_terminal_policy(PendingTransitionTerminalPolicy::CommitOnAnyTerminal);
-    vm.push_pending_runtime_transition(transition);
-    JitResult::Ok
-}
-
-fn commit_select_wake(
-    ctx: *mut JitContext,
-    vm: &mut crate::vm::Vm,
-    wake: WakeCommand,
-) -> JitResult {
-    let mut transition = RuntimeTransition::new(
-        RuntimeBoundary::Continue,
-        ResumePolicy::PreserveFramePc,
-        GcRootEffect::CurrentFiberDirty,
-    );
-    transition.wakes.push(wake);
-    commit_select_transition(ctx, vm, transition)
-}
-
 /// Initialize a new select statement.
 ///
 /// Arguments:
@@ -112,7 +85,7 @@ pub extern "C" fn jit_select_begin(
     case_count: u32,
     has_default: u32,
 ) -> JitResult {
-    if let Err(result) = validate_vm_callback_context(
+    if let Err(result) = validate_callback_context(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         u64::from(case_count),
@@ -139,7 +112,7 @@ pub extern "C" fn jit_select_begin(
         Ok(case_count) => case_count,
         Err(result) => return result,
     };
-    let (_, fiber) = unsafe { extract_context(ctx) };
+    let fiber = unsafe { extract_fiber(ctx) };
 
     match exec::exec_select_begin(fiber, case_count, has_default) {
         Ok(()) => JitResult::Ok,
@@ -166,7 +139,7 @@ pub extern "C" fn jit_select_send(
     elem_slots: u32,
     case_idx: u32,
 ) -> JitResult {
-    if let Err(result) = validate_vm_callback_context(
+    if let Err(result) = validate_callback_context(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         queue_reg as u64,
@@ -195,7 +168,8 @@ pub extern "C" fn jit_select_send(
         Err(result) => return result,
     };
 
-    let module = unsafe { &*((*ctx).module) };
+    let module =
+        unsafe { (*ctx).module_ref() }.expect("validated JIT callback context must carry a module");
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
         Ok(layout) => layout.map(|layout| layout.to_vec()),
         Err(msg) => {
@@ -222,7 +196,7 @@ pub extern "C" fn jit_select_send(
     if let Err(result) = validate_select_reg_span(ctx, module, val_reg, usize::from(elem_slots)) {
         return result;
     }
-    let (_, fiber) = unsafe { extract_context(ctx) };
+    let fiber = unsafe { extract_fiber(ctx) };
 
     if fiber.select_state.is_none() {
         return set_jit_infra_error(
@@ -266,7 +240,7 @@ pub extern "C" fn jit_select_recv(
     has_ok: u32,
     case_idx: u32,
 ) -> JitResult {
-    if let Err(result) = validate_vm_callback_context(
+    if let Err(result) = validate_callback_context(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         queue_reg as u64,
@@ -302,7 +276,8 @@ pub extern "C" fn jit_select_recv(
         Err(result) => return result,
     };
 
-    let module = unsafe { &*((*ctx).module) };
+    let module =
+        unsafe { (*ctx).module_ref() }.expect("validated JIT callback context must carry a module");
     let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
         Ok(layout) => layout.map(|layout| layout.to_vec()),
         Err(msg) => {
@@ -336,7 +311,7 @@ pub extern "C" fn jit_select_recv(
     if let Err(result) = validate_select_reg_span(ctx, module, dst_reg, dst_slots) {
         return result;
     }
-    let (_, fiber) = unsafe { extract_context(ctx) };
+    let fiber = unsafe { extract_fiber(ctx) };
 
     if fiber.select_state.is_none() {
         return set_jit_infra_error(
@@ -372,6 +347,7 @@ pub extern "C" fn jit_select_recv(
 ///
 /// Returns:
 /// - JitResult::Ok if select completed (result_reg contains case index)
+/// - JitResult::RuntimeTransition if completion published deferred queue effects
 /// - JitResult::WaitQueue if select blocked (fiber registered on channels)
 /// - JitResult::Panic if send on closed channel
 pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
@@ -386,7 +362,12 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
         Ok(reg) => reg,
         Err(result) => return result,
     };
-    let (vm, fiber) = unsafe { extract_context(ctx) };
+    let module_metadata = unsafe { super::helpers::module_runtime_metadata(ctx) };
+    let module = module_metadata.module();
+    if let Err(result) = validate_select_reg_span(ctx, module, result_reg, 1) {
+        return result;
+    }
+    let (mut vm, fiber) = unsafe { extract_context(ctx) };
 
     if fiber.select_state.is_none() {
         return set_jit_infra_error(
@@ -397,30 +378,26 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
     }
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
-    let module = unsafe { &*((*ctx).module) };
-    if let Err(result) = validate_select_reg_span(ctx, module, result_reg, 1) {
-        return result;
-    }
 
     match exec::exec_select_exec(
         exec::SelectExecContext {
             stack,
             bp,
-            island_id: vm.state.current_island_id,
+            island_id: vm.state().current_island_id,
             fiber_key: fiber.wake_key_packed(),
-            vm_state: &mut vm.state,
-            module: Some(module),
+            vm_state: vm.state_mut(),
+            module: Some(module_metadata),
         },
         &mut fiber.select_state,
         result_reg,
     ) {
         SelectResult::Continue => {
-            vm.mark_gc_fiber_roots_dirty(crate::scheduler::FiberId::from_raw(fiber.id));
+            vm.state_mut().mark_gc_fiber_roots_dirty(fiber.id);
             JitResult::Ok
         }
         SelectResult::Block => JitResult::WaitQueue,
         SelectResult::SendOnClosed => set_jit_trap(
-            &mut vm.state.gc,
+            &mut vm.state_mut().gc,
             fiber,
             RuntimeTrapKind::SendOnClosedChannel,
             helpers::ERR_SEND_ON_CLOSED,
@@ -430,76 +407,13 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
                 (*ctx).user_panic_pc = (*ctx).runtime_trap_pc;
             }
             set_jit_panic(
-                &mut vm.state.gc,
+                &mut vm.state_mut().gc,
                 fiber,
                 helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
             )
         }
-        SelectResult::Wake { waiter, payload } => commit_select_wake(
-            ctx,
-            vm,
-            match payload {
-                Some(payload) => WakeCommand::queue_waiter_with_result(waiter, payload),
-                None => WakeCommand::queue_waiter(waiter),
-            },
-        ),
-        SelectResult::RemoteSendAck {
-            endpoint_id,
-            target_island,
-            fiber_key,
-            wait_id,
-            closed,
-            rollback,
-        } => {
-            let mut transition = RuntimeTransition::new(
-                RuntimeBoundary::Continue,
-                ResumePolicy::PreserveFramePc,
-                GcRootEffect::CurrentFiberDirty,
-            );
-            transition
-                .island_commands
-                .push(IslandCommandEffect::endpoint_response(
-                    target_island,
-                    vm.state.current_island_id,
-                    endpoint_id,
-                    vo_runtime::island::EndpointResponseKind::SendAck { closed },
-                    fiber_key,
-                    wait_id,
-                ));
-            if let Some(rollback) = rollback {
-                transition.set_rollback(rollback);
-            }
-            commit_select_transition(ctx, vm, transition)
-        }
-        SelectResult::RemoteRecvData {
-            endpoint_id,
-            target_island,
-            fiber_key,
-            wait_id,
-            data,
-            mut island_effects,
-            rollback,
-        } => {
-            let mut transition = RuntimeTransition::new(
-                RuntimeBoundary::Continue,
-                ResumePolicy::PreserveFramePc,
-                GcRootEffect::CurrentFiberDirty,
-            );
-            transition.island_commands.append(&mut island_effects);
-            transition
-                .island_commands
-                .push(IslandCommandEffect::endpoint_recv_data_response(
-                    target_island,
-                    vm.state.current_island_id,
-                    endpoint_id,
-                    data,
-                    fiber_key,
-                    wait_id,
-                ));
-            if let Some(rollback) = rollback {
-                transition.set_rollback(rollback);
-            }
-            commit_select_transition(ctx, vm, transition)
+        SelectResult::Queue(action) => {
+            super::queue::commit_queue_action(ctx, &mut vm, fiber, action, u64::from(result_reg))
         }
         SelectResult::Malformed(_) => set_jit_infra_error(
             ctx,

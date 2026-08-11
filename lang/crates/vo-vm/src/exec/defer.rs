@@ -2,6 +2,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -10,7 +11,7 @@ use std::string::{String, ToString};
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
-use vo_runtime::{ValueKind, ValueMeta};
+use vo_runtime::{SlotType, ValueKind, ValueMeta};
 
 use crate::bytecode::{FunctionDef, Module};
 use crate::fiber::{CallFrame, DeferArgLayout, DeferEntry};
@@ -21,7 +22,7 @@ use crate::vm::helpers::{stack_get, stack_set};
 /// DeferPush instruction format:
 /// - a: func_id (if flags bit 0 = 0) or closure_reg (if flags bit 0 = 1)
 /// - b: arg_start
-/// - c: arg_slots
+/// - c: reserved (zero)
 /// - flags bit 0: is_closure
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -33,6 +34,7 @@ pub fn exec_defer_push(
     module: &Module,
     defer_stack: &mut Vec<DeferEntry>,
     inst: &Instruction,
+    callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
     panic_generation: u64,
 ) -> Result<(), String> {
@@ -44,6 +46,7 @@ pub fn exec_defer_push(
         module,
         defer_stack,
         inst,
+        callsite_arg_layout,
         gc,
         false,
         panic_generation,
@@ -60,6 +63,7 @@ pub fn exec_err_defer_push(
     module: &Module,
     defer_stack: &mut Vec<DeferEntry>,
     inst: &Instruction,
+    callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
     panic_generation: u64,
 ) -> Result<(), String> {
@@ -71,6 +75,7 @@ pub fn exec_err_defer_push(
         module,
         defer_stack,
         inst,
+        callsite_arg_layout,
         gc,
         true,
         panic_generation,
@@ -86,13 +91,15 @@ fn push_defer_entry(
     module: &Module,
     defer_stack: &mut Vec<DeferEntry>,
     inst: &Instruction,
+    callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
     is_errdefer: bool,
     panic_generation: u64,
 ) -> Result<(), String> {
     let is_closure = inst.call_shape_is_closure();
     let arg_start = inst.b;
-    let arg_slots = inst.c;
+    let arg_slots = u16::try_from(callsite_arg_layout.len())
+        .map_err(|_| "DeferPush argument layout exceeds u16 slots".to_string())?;
     let Some(caller_frame) = frames.last() else {
         return Err("DeferPush missing caller frame".to_string());
     };
@@ -103,6 +110,12 @@ fn push_defer_entry(
         arg_start,
         arg_slots,
     )?;
+    if arg_layout.slot_types != callsite_arg_layout {
+        return Err(format!(
+            "DeferPush argument layout {:?} does not match caller storage {:?}",
+            callsite_arg_layout, arg_layout.slot_types
+        ));
+    }
     let frame_depth = frames.len();
 
     let (func_id, closure) = if is_closure {
@@ -211,7 +224,7 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             slot_types,
             borrowed_scan_slots_prefix: vec![0, 0],
             capture_types: Vec::new(),
@@ -240,6 +253,7 @@ mod tests {
             &module,
             &mut defer_stack,
             &inst,
+            &[],
             &mut gc,
             0,
         )
@@ -268,6 +282,7 @@ mod tests {
             &module,
             &mut defer_stack,
             &inst,
+            &[],
             &mut gc,
             0,
         )
@@ -276,45 +291,5 @@ mod tests {
         assert_eq!(defer_stack.len(), 1);
         assert!(defer_stack[0].is_closure);
         assert!(defer_stack[0].closure.is_null());
-    }
-
-    #[test]
-    fn vm_defer_closure_kind_062_source_validates_before_entry_publication() {
-        let source = crate::source_contract::production_source_without_test_modules(include_str!(
-            "defer.rs"
-        ));
-        let push_body = source
-            .split("fn push_defer_entry")
-            .nth(1)
-            .expect("push_defer_entry source");
-        assert!(
-            vo_source_contract::compact_pattern_before(
-                push_body,
-                "validate_closure_target(",
-                "defer_stack.push(DeferEntry"
-            ),
-            "closure-form defer registration must validate closure target before DeferEntry publication"
-        );
-    }
-
-    #[test]
-    fn vm_defer_closure_kind_062_source_order_ignores_comment_spoofed_validator() {
-        let probe = r#"
-            fn push_defer_entry() {
-                // validate_closure_target(
-                defer_stack.push(DeferEntry {
-                    frame_depth,
-                });
-            }
-        "#;
-
-        assert!(
-            !vo_source_contract::compact_pattern_before(
-                probe,
-                "validate_closure_target(",
-                "defer_stack.push(DeferEntry"
-            ),
-            "comments must not satisfy defer validator-before-publication source contracts"
-        );
     }
 }

@@ -11,6 +11,141 @@ fn process_identity_allocator_exhausts_without_wrapping_or_reuse() {
 }
 
 #[cfg(feature = "std")]
+fn box_with_object_limit(
+    module: &Module,
+    rttid: u32,
+    kind: ValueKind,
+    raw_slots: &[u64],
+) -> (InterfaceSlot, Option<crate::gc::MemoryError>) {
+    let mut gc = Gc::with_memory_config(crate::gc::VmMemoryConfig {
+        max_objects: Some(0),
+        ..crate::gc::VmMemoryConfig::default()
+    })
+    .expect("bounded GC configuration");
+    let mut stack = [0u64; 0];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 0,
+        ret_start: 0,
+        ret_slots: 0,
+    };
+    let mut itab_cache = ItabCache::new();
+    let program_args = Vec::new();
+    let output = crate::output::CaptureSink::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let mut host_output = None;
+    let world = ExternWorld::new(
+        &mut gc,
+        module.into(),
+        &mut itab_cache,
+        &program_args,
+        output.as_ref(),
+        &mut sentinel_errors,
+        &mut host_output,
+    );
+    let mut call = ExternCallContext::new(&mut stack, invoke, world, ExternFiberInputs::default());
+    let boxed = call.box_to_interface(rttid, kind, raw_slots);
+    drop(call);
+    (boxed, gc.last_memory_error())
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn box_to_interface_propagates_struct_allocation_failure() {
+    let mut module = Module::new("ffi-struct-box-oom".to_string());
+    module.struct_metas.push(StructMeta {
+        slot_types: vec![crate::SlotType::Value],
+        fields: Vec::new(),
+        field_index: HashMap::new(),
+    });
+    module.runtime_types.push(RuntimeType::Struct {
+        fields: Vec::new(),
+        meta_id: 0,
+    });
+
+    let (boxed, error) = box_with_object_limit(&module, 0, ValueKind::Struct, &[7]);
+
+    assert_eq!(boxed.slot1, 0);
+    assert_eq!(error, Some(crate::gc::MemoryError::MetadataExhausted));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn box_to_interface_propagates_array_allocation_failure() {
+    let mut module = Module::new("ffi-array-box-oom".to_string());
+    module
+        .runtime_types
+        .push(RuntimeType::Basic(ValueKind::Int64));
+    module.runtime_types.push(RuntimeType::Array {
+        len: 2,
+        elem: ValueRttid::new(0, ValueKind::Int64),
+    });
+
+    let (boxed, error) = box_with_object_limit(&module, 1, ValueKind::Array, &[7, 11]);
+
+    assert_eq!(boxed.slot1, 0);
+    assert_eq!(error, Some(crate::gc::MemoryError::MetadataExhausted));
+}
+
+#[cfg(feature = "std")]
+fn allocate_string_slice_with_object_limit(
+    max_objects: usize,
+    byte_strings: bool,
+) -> (GcRef, Option<crate::gc::MemoryError>) {
+    let mut gc = Gc::with_memory_config(crate::gc::VmMemoryConfig {
+        max_objects: Some(max_objects),
+        ..crate::gc::VmMemoryConfig::default()
+    })
+    .expect("bounded GC configuration");
+    let module = Module::new("ffi-string-slice-oom".to_string());
+    let mut stack = [0u64; 0];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 0,
+        ret_start: 0,
+        ret_slots: 0,
+    };
+    let mut itab_cache = ItabCache::new();
+    let program_args = Vec::new();
+    let output = crate::output::CaptureSink::new();
+    let mut sentinel_errors = SentinelErrorCache::new();
+    let mut host_output = None;
+    let world = ExternWorld::new(
+        &mut gc,
+        (&module).into(),
+        &mut itab_cache,
+        &program_args,
+        output.as_ref(),
+        &mut sentinel_errors,
+        &mut host_output,
+    );
+    let mut call = ExternCallContext::new(&mut stack, invoke, world, ExternFiberInputs::default());
+    let value = if byte_strings {
+        call.alloc_string_bytes_slice(&[b"x".to_vec()])
+    } else {
+        call.alloc_string_slice(&["x".to_string()])
+    };
+    drop(call);
+    (value, gc.last_memory_error())
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn string_slice_helpers_propagate_container_and_element_allocation_failures() {
+    for byte_strings in [false, true] {
+        for max_objects in [1, 3] {
+            let (value, error) = allocate_string_slice_with_object_limit(max_objects, byte_strings);
+            assert!(value.is_null());
+            assert_eq!(error, Some(crate::gc::MemoryError::MetadataExhausted));
+        }
+    }
+}
+
+#[cfg(feature = "std")]
 #[test]
 fn native_abi_fingerprint_covers_entry_and_table_layouts_independently() {
     const SEED: u64 = 0xcbf2_9ce4_8422_2325;
@@ -549,6 +684,44 @@ fn registry_registration_is_single_assignment_and_transactional() {
 
 #[cfg(feature = "std")]
 #[test]
+fn stdlib_catalog_registration_preserves_existing_provider_single_assignment() {
+    const NAME: &str = crate::vo_extern_name!("errors", "identity");
+    let mut registry = ExternRegistry::new();
+    registry
+        .try_register_named_with_effects(0, NAME, ignore_host_event_resume, ExternEffects::NONE)
+        .expect("pre-register embedder provider");
+    let provider_identity = registry
+        .registered_by_name(NAME)
+        .expect("pre-registered provider")
+        .provider_identity;
+    let externs = [extern_def(
+        NAME,
+        ParamShape::Exact { slots: 2 },
+        ReturnShape::with_slot_types(vec![vo_common_core::SlotType::Value]),
+        ExternEffects::NONE,
+    )];
+    let entries = [StdlibEntry {
+        name: NAME,
+        func: other_ok_extern,
+        effects: ExternEffects::NONE,
+    }];
+
+    let error = register_stdlib_providers(&mut registry, &externs, &entries)
+        .expect_err("stdlib catalog must not replace a pre-existing provider");
+
+    assert!(error.to_string().contains("single-assignment"), "{error}");
+    assert_eq!(registry.len(), 1);
+    assert_eq!(
+        registry
+            .registered_by_name(NAME)
+            .expect("original provider remains")
+            .provider_identity,
+        provider_identity
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn sparse_max_extern_id_does_not_allocate_a_dense_registry() {
     let mut registry = ExternRegistry::new();
     let name = test_extern_name("sparse_max_id");
@@ -571,11 +744,7 @@ fn sparse_max_extern_id_does_not_allocate_a_dense_registry() {
 
 #[cfg(feature = "std")]
 #[test]
-fn provider_single_assignment_does_not_depend_on_function_addresses() {
-    let production = include_str!("mod.rs");
-    assert!(!production.contains("fn_addr_eq"));
-    assert!(!production.contains("has_same_address"));
-
+fn provider_identity_is_single_assignment_across_function_changes() {
     fn provider_a(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
         ExternResult::Ok
     }
@@ -748,62 +917,36 @@ fn empty_wasm_owner_catalog_blocks_same_owner_native_catalog() {
 
 #[cfg(feature = "std")]
 #[test]
-fn native_loader_and_linkme_batches_share_transactional_commit_path() {
-    let production = include_str!("mod.rs");
-    let catalog_body = production
-        .split("pub fn register_from_extension_catalogs")
-        .nth(1)
-        .expect("unified extension catalog registrar")
-        .split("/// Register the unified linkme and dynamic catalog")
-        .next()
-        .expect("unified extension catalog registrar body");
-    assert!(catalog_body.contains("self.try_native_catalog_transaction"));
-    assert!(catalog_body.contains("deepest_owning_module"));
-    assert!(catalog_body.contains("lookup_in_module_owner"));
-    let transaction_body = production
-        .split("fn try_native_catalog_transaction")
-        .nth(1)
-        .expect("native catalog transaction helper")
-        .split("/// Build one active native-extension catalog")
-        .next()
-        .expect("native catalog transaction helper body");
-    assert!(transaction_body.contains("self.try_registration_transaction"));
-    assert!(production.contains("&EXTERN_MODULE_OWNER_TABLE"));
-    assert!(production.contains("undeclared module owner"));
-    assert!(!production.contains("extern_defs[..id]"));
+fn unique_extern_providers_retains_first_ids_and_distinct_names() {
+    let first_name = test_extern_name("unique_first");
+    let second_name = test_extern_name("unique_second");
+    let first = extern_def(
+        &first_name,
+        ParamShape::Exact { slots: 0 },
+        ReturnShape::slots(0),
+        ExternEffects::NONE,
+    );
+    let second = extern_def(
+        &second_name,
+        ParamShape::Exact { slots: 0 },
+        ReturnShape::slots(0),
+        ExternEffects::NONE,
+    );
+    let externs = [first.clone(), first, second];
+
+    let unique = unique_extern_providers(&externs)
+        .map(|(id, def)| (id, def.name.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        unique,
+        vec![(0, first_name.as_str()), (2, second_name.as_str())]
+    );
 }
 
 #[cfg(feature = "std")]
 #[test]
-fn production_native_registration_exposes_only_atomic_catalogs() {
-    let production = include_str!("mod.rs");
-    let direct_adapter = production
-        .split("/// Test-only single-entry adapter. Production native providers")
-        .nth(1)
-        .expect("test-only native adapter")
-        .split("fn try_register_native_extension_with_effects")
-        .next()
-        .expect("test-only adapter body");
-    assert!(direct_adapter.contains("cfg(all(feature = \"std\", test))"));
-    assert!(!direct_adapter.contains("#[cfg(feature = \"std\")]\n    pub fn"));
-
-    let vm_source = include_str!("../../../vo-vm/src/vm/mod.rs");
-    assert!(vm_source.contains("register_from_extension_catalogs(ext_loader.as_ref()"));
-    assert!(!vm_source.contains(".register_from_extension_loader("));
-    assert!(!production.contains("pub fn register_from_extension_loader"));
-    assert!(!production.contains("pub fn register_from_linkme"));
-}
-
-#[cfg(feature = "std")]
-#[test]
-fn bulk_registrars_use_seen_sets_for_large_repeated_inputs() {
-    let builtin_source = include_str!("../builtins/builtin.rs");
-    let dynamic_source = include_str!("../builtins/dynamic.rs");
-    for source in [builtin_source, dynamic_source] {
-        assert!(source.contains("BTreeSet"));
-        assert!(!source.contains("externs[..id]"));
-    }
-
+fn bulk_registrars_register_large_repeated_inputs_once_per_provider() {
     let repeated = (0..8_192)
         .map(|_| {
             extern_def(
@@ -906,12 +1049,9 @@ fn fiber_inputs(
     resume_host_event_data: Option<Vec<u8>>,
 ) -> ExternFiberInputs {
     ExternFiberInputs {
-        fiber_opaque: core::ptr::null_mut(),
-        resume_io_token: None,
         resume_host_event_token,
         resume_host_event_data,
-        replay_results: Vec::new(),
-        replay_panic_message: None,
+        ..ExternFiberInputs::default()
     }
 }
 
@@ -1015,15 +1155,15 @@ fn call_registered_extern_with_effects(
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     registry.call(&mut stack, invoke, world, inputs)
@@ -1085,15 +1225,15 @@ fn extern_world_preserves_authoritative_v2_caller_binding() {
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &[],
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: Some(&binding),
-        io: &mut io,
+        io: Some(&mut io),
     };
     let outcome = registry.call(&mut stack, invoke, world, fiber_inputs(None, None));
     assert!(matches!(outcome, Ok(ExternResult::Ok)));
@@ -1150,15 +1290,15 @@ fn call_registered_extension_with_services(
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     let outcome = registry.call(&mut stack, invoke, world, fiber_inputs(None, None));
@@ -1190,15 +1330,15 @@ fn call_extension_with_state(
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
     registry.call(stack, invoke, world, inputs)
 }
@@ -1465,6 +1605,51 @@ extern "C" fn callback_panic_extension(ctx: *mut ExtAbiContextV10) -> u32 {
 #[cfg(feature = "std")]
 extern "C" fn abi_error_extension(_ctx: *mut ExtAbiContextV10) -> u32 {
     ext_abi::RESULT_ABI_ERROR
+}
+
+#[cfg(feature = "std")]
+extern "C" fn extension_io_facade_is_inert(ctx: *mut ExtAbiContextV10) -> u32 {
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let no_runtime = call.try_io_mut().is_none();
+    let no_consumable_token = call.take_resume_io_token().is_none();
+    let no_visible_token = call.resume_io_token().is_none();
+    call.set_host_output(vec![
+        u8::from(no_runtime),
+        u8::from(no_consumable_token),
+        u8::from(no_visible_token),
+    ]);
+    ext_abi::RESULT_OK
+}
+
+#[cfg(feature = "std")]
+extern "C" fn generated_wait_io_rejection_extension(ctx: *mut ExtAbiContextV10) -> u32 {
+    let Ok(mut call) = (unsafe { ExternCallContext::try_from_extension_abi(ctx) }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    call.record_contract_violation(NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR);
+    ext_abi::RESULT_ABI_ERROR
+}
+
+#[cfg(feature = "std")]
+extern "C" fn legacy_raw_set_wait_io_extension(ctx: *mut ExtAbiContextV10) -> u32 {
+    let Some(frame) = (unsafe { ctx.as_mut() }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let Some(ops) = (unsafe { frame.ops.as_ref() }) else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    let Some(set_wait_io) = ops.set_wait_io else {
+        return ext_abi::RESULT_ABI_ERROR;
+    };
+    unsafe { set_wait_io(frame.host, 77) };
+    ext_abi::RESULT_OK
+}
+
+#[cfg(feature = "std")]
+extern "C" fn legacy_raw_wait_io_result_extension(_ctx: *mut ExtAbiContextV10) -> u32 {
+    ext_abi::RESULT_WAIT_IO
 }
 
 #[cfg(feature = "std")]
@@ -1990,6 +2175,53 @@ fn extension_v10_abi_error_code_is_a_contract_failure() {
 
 #[cfg(feature = "std")]
 #[test]
+fn extension_v10_host_only_io_facade_is_inert_without_panicking() {
+    let (outcome, output) = call_registered_extension_with_services(
+        extension_io_facade_is_inert,
+        ExternEffects::NONE,
+        None,
+    );
+    assert!(matches!(outcome, Ok(ExternResult::Ok)));
+    assert_eq!(output, Some(vec![1, 1, 1]));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v10_generated_wait_io_path_preserves_the_contract_error() {
+    let error = call_registered_extension_with_effects(
+        generated_wait_io_rejection_extension,
+        ExternEffects::MAY_WAIT_IO_REPLAY,
+    )
+    .expect_err("generated native-extension WaitIo must be rejected");
+    assert_eq!(error.message(), NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn extension_v10_legacy_wait_io_slots_are_reserved_and_rejected() {
+    assert_eq!(ext_abi::RESULT_WAIT_IO, 3);
+    assert!(native_abi_v10::OPS.set_wait_io.is_some());
+
+    let callback_error = call_registered_extension(legacy_raw_set_wait_io_extension)
+        .expect_err("legacy ABI-v10 set_wait_io callback must fail closed");
+    assert_eq!(
+        callback_error.message(),
+        NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR
+    );
+
+    let result_error = call_registered_extension_with_effects(
+        legacy_raw_wait_io_result_extension,
+        ExternEffects::MAY_WAIT_IO_REPLAY,
+    )
+    .expect_err("legacy ABI-v10 WaitIo result code must fail closed");
+    assert_eq!(
+        result_error.message(),
+        NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn extension_exit_result_round_trips_signed_status() {
     assert!(matches!(
         call_registered_extension_with_effects(exit_extension, ExternEffects::MAY_EXIT),
@@ -2354,22 +2586,15 @@ fn extension_v10_catches_host_callback_panics_before_c_boundary() {
 }
 
 #[cfg(feature = "std")]
-fn resolve_single_extern(
-    registry: &ExternRegistry,
-    def: crate::bytecode::ExternDef,
-) -> ResolvedExtern {
+fn freeze_single_extern(registry: &mut ExternRegistry, def: crate::bytecode::ExternDef) {
     registry
-        .resolve_module_externs(&[def])
-        .expect("resolve test extern")
-        .get(0)
-        .expect("resolved extern")
-        .clone()
+        .resolve_and_freeze(&[def])
+        .expect("resolve test extern");
 }
 
 #[cfg(feature = "std")]
 fn call_resolved_extern_with_stack(
     registry: &ExternRegistry,
-    resolved: &ResolvedExtern,
     stack: &mut [u64],
     invoke: ExternInvoke,
 ) -> ExternCallOutcome {
@@ -2383,18 +2608,18 @@ fn call_resolved_extern_with_stack(
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
-    registry.call_resolved(stack, invoke, world, fiber_inputs(None, None), resolved)
+    registry.call_resolved(stack, invoke, world, fiber_inputs(None, None))
 }
 
 #[cfg(feature = "std")]
@@ -2413,15 +2638,15 @@ fn call_unresolved_extern_with_stack(
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     registry.call(stack, invoke, world, fiber_inputs(None, None))
@@ -2456,8 +2681,8 @@ fn call_empty_interface_return_provider(
 ) -> ExternCallOutcome {
     let mut registry = ExternRegistry::new();
     registry.register_test_named(0, test_extern_name(name), func);
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             name,
             ParamShape::Exact { slots: 0 },
@@ -2475,15 +2700,15 @@ fn call_empty_interface_return_provider(
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module,
+        module: module.into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     registry.call_resolved(
@@ -2491,7 +2716,6 @@ fn call_empty_interface_return_provider(
         invoke_with_returns(2),
         world,
         fiber_inputs(None, None),
-        &resolved,
     )
 }
 
@@ -2517,15 +2741,15 @@ fn call_module_metadata_provider(func: ExternFn, module: &Module) -> ExternCallO
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module,
+        module: module.into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     registry.call(&mut stack, invoke, world, fiber_inputs(None, None))
@@ -2543,16 +2767,6 @@ static DIRECT_WASM_BRIDGE_PROVIDER_RAN_061: core::sync::atomic::AtomicBool =
 #[cfg(feature = "std")]
 fn direct_wasm_bridge_provider_061(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
     DIRECT_WASM_BRIDGE_PROVIDER_RAN_061.store(true, core::sync::atomic::Ordering::SeqCst);
-    ExternResult::Ok
-}
-
-#[cfg(feature = "std")]
-static RESOLVED_WASM_BRIDGE_PROVIDER_RAN_061: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-#[cfg(feature = "std")]
-fn resolved_wasm_bridge_provider_061(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
-    RESOLVED_WASM_BRIDGE_PROVIDER_RAN_061.store(true, core::sync::atomic::Ordering::SeqCst);
     ExternResult::Ok
 }
 
@@ -3090,52 +3304,6 @@ fn wasm_extension_bridge_call_061_requires_resolved_abi_before_provider() {
 
 #[cfg(feature = "std")]
 #[test]
-fn wasm_extension_bridge_call_061_revalidates_resolved_param_kinds_before_provider() {
-    RESOLVED_WASM_BRIDGE_PROVIDER_RAN_061.store(false, core::sync::atomic::Ordering::SeqCst);
-    let mut registry = ExternRegistry::new();
-    registry.register_wasm_extension_bridge_with_effects(
-        0,
-        TEST_MODULE_OWNER,
-        TEST_ARTIFACT_GENERATION,
-        test_extern_name("bridge_resolved"),
-        resolved_wasm_bridge_provider_061,
-        ExternEffects::NONE,
-    );
-    let mut def = extern_def(
-        "bridge_resolved",
-        ParamShape::Exact { slots: 1 },
-        ReturnShape::slots(0),
-        ExternEffects::NONE,
-    );
-    def.param_kinds = vec![crate::bytecode::ExtSlotKind::Value];
-    let mut resolved = resolve_single_extern(&registry, def);
-    resolved.param_kinds.clear();
-    let mut stack = [0u64; 4];
-    let invoke = ExternInvoke {
-        extern_id: 0,
-        bp: 0,
-        arg_start: 0,
-        arg_slots: 1,
-        ret_start: 1,
-        ret_slots: 0,
-    };
-
-    let err = call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke)
-        .expect_err("mutated bridge resolved ABI must be rejected");
-
-    assert!(
-        err.to_string().contains("wasm extension bridge")
-            && err.to_string().contains("param_kinds"),
-        "{err}"
-    );
-    assert!(
-        !RESOLVED_WASM_BRIDGE_PROVIDER_RAN_061.load(core::sync::atomic::Ordering::SeqCst),
-        "bridge provider must not run after resolved ABI metadata drift"
-    );
-}
-
-#[cfg(feature = "std")]
-#[test]
 fn wasm_extension_bridge_call_061_passes_resolved_abi_to_provider_context() {
     RESOLVED_WASM_BRIDGE_CONTEXT_ABI_OK_061.store(false, core::sync::atomic::Ordering::SeqCst);
     let mut registry = ExternRegistry::new();
@@ -3157,7 +3325,7 @@ fn wasm_extension_bridge_call_061_passes_resolved_abi_to_provider_context() {
         crate::bytecode::ExtSlotKind::Bytes,
         crate::bytecode::ExtSlotKind::Value,
     ];
-    let resolved = resolve_single_extern(&registry, def);
+    freeze_single_extern(&mut registry, def);
     let mut stack = [0u64; 4];
     let invoke = ExternInvoke {
         extern_id: 0,
@@ -3168,7 +3336,7 @@ fn wasm_extension_bridge_call_061_passes_resolved_abi_to_provider_context() {
         ret_slots: 0,
     };
 
-    let result = call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke)
+    let result = call_resolved_extern_with_stack(&registry, &mut stack, invoke)
         .expect("resolved wasm bridge ABI should be available to the provider");
 
     assert!(matches!(result, ExternResult::Ok));
@@ -3370,62 +3538,6 @@ fn registry_rejects_provider_metadata_replacement_transactionally() {
 
 #[cfg(feature = "std")]
 #[test]
-fn resolved_call_rejects_abi_fingerprint_drift_after_load() {
-    let mut registry = ExternRegistry::new();
-    registry.register_test_named(0, test_extern_name("contract_ok"), ignore_host_event_resume);
-    let externs = vec![variadic_extern_def("contract_ok", 0, ExternEffects::NONE)];
-    let mut resolved = registry
-        .resolve_module_externs(&externs)
-        .expect("resolve")
-        .get(0)
-        .expect("resolved")
-        .clone();
-    resolved.abi_fingerprint ^= 0x55aa;
-
-    let mut stack = [0u64; 4];
-    let invoke = ExternInvoke {
-        extern_id: 0,
-        bp: 0,
-        arg_start: 0,
-        arg_slots: 0,
-        ret_start: 0,
-        ret_slots: 0,
-    };
-    let mut gc = Gc::new();
-    let module = Module::new("ffi-resolved-call-test".to_string());
-    let mut itab_cache = ItabCache::new();
-    let program_args = Vec::new();
-    let output = crate::output::CaptureSink::new();
-    let mut sentinel_errors = SentinelErrorCache::new();
-    let mut host_output = None;
-    let mut io = crate::io::IoRuntime::new().expect("io runtime");
-    let world = ExternWorld {
-        gc: &mut gc,
-        module: &module,
-        itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
-        program_args: &program_args,
-        output: output.as_ref(),
-        sentinel_errors: &mut sentinel_errors,
-        host_output: &mut host_output,
-        host_services_v2: None,
-        io: &mut io,
-    };
-
-    let err = registry
-        .call_resolved(
-            &mut stack,
-            invoke,
-            world,
-            fiber_inputs(None, None),
-            &resolved,
-        )
-        .expect_err("ABI fingerprint drift must be rejected");
-    assert!(err.to_string().contains("metadata drifted"));
-}
-
-#[cfg(feature = "std")]
-#[test]
 fn resolved_call_rejects_shape_mismatch_before_provider_runs() {
     static PROVIDER_RAN: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
@@ -3444,12 +3556,9 @@ fn resolved_call_rejects_shape_mismatch_before_provider_runs() {
         ReturnShape::slots(0),
         ExternEffects::NONE,
     )];
-    let resolved = registry
-        .resolve_module_externs(&externs)
-        .expect("resolve")
-        .get(0)
-        .expect("resolved")
-        .clone();
+    registry
+        .resolve_and_freeze(&externs)
+        .expect("freeze resolved extern contract");
 
     let mut stack = [0u64; 4];
     let invoke = ExternInvoke {
@@ -3470,25 +3579,19 @@ fn resolved_call_rejects_shape_mismatch_before_provider_runs() {
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     let err = registry
-        .call_resolved(
-            &mut stack,
-            invoke,
-            world,
-            fiber_inputs(None, None),
-            &resolved,
-        )
+        .call_resolved(&mut stack, invoke, world, fiber_inputs(None, None))
         .expect_err("shape mismatch must be rejected");
     assert!(err.to_string().contains("arg slot count"));
     assert!(!PROVIDER_RAN.load(core::sync::atomic::Ordering::SeqCst));
@@ -3503,8 +3606,8 @@ fn ffi_return_window_contract_rejects_single_slot_helper_outside_declared_return
         test_extern_name("contract_ret_oob"),
         write_ret_u64_slot_one,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_ret_oob",
             ParamShape::Exact { slots: 0 },
@@ -3514,9 +3617,8 @@ fn ffi_return_window_contract_rejects_single_slot_helper_outside_declared_return
     );
     let mut stack = [0x1111, 0x2222, 0x3333, 0x4444];
 
-    let err =
-        call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke_with_returns(1))
-            .expect_err("out-of-window return write must be rejected");
+    let err = call_resolved_extern_with_stack(&registry, &mut stack, invoke_with_returns(1))
+        .expect_err("out-of-window return write must be rejected");
 
     assert!(err.to_string().contains("outside declared ret_slots 1"));
     assert_eq!(stack, [0x1111, 0x2222, 0x3333, 0x4444]);
@@ -3531,8 +3633,8 @@ fn ffi_return_window_contract_rejects_two_slot_helper_without_clobbering_next_sl
         test_extern_name("contract_ret_any_oob"),
         write_ret_any_into_one_slot,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_ret_any_oob",
             ParamShape::Exact { slots: 0 },
@@ -3542,9 +3644,8 @@ fn ffi_return_window_contract_rejects_two_slot_helper_without_clobbering_next_sl
     );
     let mut stack = [0xaaaa, 0xbbbb, 0xcccc, 0xdddd];
 
-    let err =
-        call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke_with_returns(1))
-            .expect_err("two-slot helper must not write outside one-slot return window");
+    let err = call_resolved_extern_with_stack(&registry, &mut stack, invoke_with_returns(1))
+        .expect_err("two-slot helper must not write outside one-slot return window");
 
     assert!(err.to_string().contains("outside declared ret_slots 1"));
     assert_eq!(stack, [0xaaaa, 0xbbbb, 0xcccc, 0xdddd]);
@@ -3568,8 +3669,8 @@ fn ffi_resolved_return_shape_rejects_invalid_gcref_return() {
         test_extern_name("contract_invalid_gcref"),
         return_invalid_gc_ref,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_invalid_gcref",
             ParamShape::Exact { slots: 0 },
@@ -3579,9 +3680,8 @@ fn ffi_resolved_return_shape_rejects_invalid_gcref_return() {
     );
     let mut stack = [0, 0, 0, 0];
 
-    let err =
-        call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke_with_returns(1))
-            .expect_err("invalid GC-shaped return must be rejected");
+    let err = call_resolved_extern_with_stack(&registry, &mut stack, invoke_with_returns(1))
+        .expect_err("invalid GC-shaped return must be rejected");
 
     assert!(err.to_string().contains("returned invalid GcRef"));
 }
@@ -3596,8 +3696,8 @@ fn ffi_resolved_non_ok_return_slots_rollback_before_yield_061() {
         write_invalid_gc_ref_then_yield,
         ExternEffects::MAY_YIELD,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_yield_invalid_gcref",
             ParamShape::Exact { slots: 0 },
@@ -3607,9 +3707,8 @@ fn ffi_resolved_non_ok_return_slots_rollback_before_yield_061() {
     );
     let mut stack = [0xaaaa, 0xbbbb, 0xcccc, 0xdddd];
 
-    let result =
-        call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke_with_returns(1))
-            .expect("yield is allowed by the resolved effect contract");
+    let result = call_resolved_extern_with_stack(&registry, &mut stack, invoke_with_returns(1))
+        .expect("yield is allowed by the resolved effect contract");
 
     assert!(matches!(result, ExternResult::Yield));
     assert_eq!(stack, [0xaaaa, 0xbbbb, 0xcccc, 0xdddd]);
@@ -3625,8 +3724,8 @@ fn ffi_resolved_contract_error_rolls_back_return_slots_061() {
         write_invalid_gc_ref_then_contract_error,
         ExternEffects::MAY_YIELD,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_post_call_invalid_gcref",
             ParamShape::Exact { slots: 0 },
@@ -3636,9 +3735,8 @@ fn ffi_resolved_contract_error_rolls_back_return_slots_061() {
     );
     let mut stack = [0x1111, 0x2222, 0x3333, 0x4444];
 
-    let err =
-        call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke_with_returns(1))
-            .expect_err("post-call contract violation must fail the call");
+    let err = call_resolved_extern_with_stack(&registry, &mut stack, invoke_with_returns(1))
+        .expect_err("post-call contract violation must fail the call");
 
     assert!(err
         .to_string()
@@ -3663,7 +3761,7 @@ fn ffi_str_argument_rejects_invalid_utf8_as_contract_error() {
         ExternEffects::NONE,
     );
     def.param_kinds = vec![ExtSlotKind::Bytes];
-    let resolved = resolve_single_extern(&registry, def);
+    freeze_single_extern(&mut registry, def);
 
     let mut gc = Gc::new();
     let invalid = crate::objects::string::create(&mut gc, &[0xff]);
@@ -3685,25 +3783,19 @@ fn ffi_str_argument_rejects_invalid_utf8_as_contract_error() {
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     let error = registry
-        .call_resolved(
-            &mut stack,
-            invoke,
-            world,
-            fiber_inputs(None, None),
-            &resolved,
-        )
+        .call_resolved(&mut stack, invoke, world, fiber_inputs(None, None))
         .expect_err("Rust &str extern parameters must reject invalid UTF-8");
     assert!(error.to_string().contains("contains invalid UTF-8"));
 }
@@ -3867,8 +3959,8 @@ fn ffi_resolved_return_shape_canonicalizes_interface_data_slot_061() {
         test_extern_name("contract_interior_struct_iface_data"),
         return_interior_struct_interface_data,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_interior_struct_iface_data",
             ParamShape::Exact { slots: 0 },
@@ -3909,15 +4001,15 @@ fn ffi_resolved_return_shape_canonicalizes_interface_data_slot_061() {
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     registry
@@ -3926,7 +4018,6 @@ fn ffi_resolved_return_shape_canonicalizes_interface_data_slot_061() {
             invoke_with_returns(3),
             world,
             fiber_inputs(None, None),
-            &resolved,
         )
         .expect("interior interface data ref should be accepted after canonical writeback");
 
@@ -3942,34 +4033,6 @@ fn ffi_resolved_return_shape_canonicalizes_interface_data_slot_061() {
 
 #[cfg(feature = "std")]
 #[test]
-fn ffi_resolved_return_shape_rejects_slots_only_interface_metadata_060() {
-    let mut registry = ExternRegistry::new();
-    registry.register_test_named(0, test_extern_name("contract_ok"), ignore_host_event_resume);
-    let mut resolved = resolve_single_extern(
-        &registry,
-        extern_def(
-            "contract_ok",
-            ParamShape::Exact { slots: 0 },
-            ReturnShape::slots(2),
-            ExternEffects::NONE,
-        ),
-    );
-    resolved.returns.interface_metas = vec![Some(0), None];
-    let mut stack = [0, 0, 0, 0];
-
-    let err =
-        call_resolved_extern_with_stack(&registry, &resolved, &mut stack, invoke_with_returns(2))
-            .expect_err("FFI boundary must reject malformed ReturnShape metadata");
-
-    assert!(
-        err.to_string()
-            .contains("return interface metadata requires return slot_types"),
-        "{err}"
-    );
-}
-
-#[cfg(feature = "std")]
-#[test]
 fn ffi_resolved_return_shape_rejects_wrong_kind_interface_data_061() {
     let mut registry = ExternRegistry::new();
     registry.register_test_named(
@@ -3977,8 +4040,8 @@ fn ffi_resolved_return_shape_rejects_wrong_kind_interface_data_061() {
         test_extern_name("contract_wrong_kind_iface_data"),
         return_wrong_kind_interface_data,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_wrong_kind_iface_data",
             ParamShape::Exact { slots: 0 },
@@ -4009,15 +4072,15 @@ fn ffi_resolved_return_shape_rejects_wrong_kind_interface_data_061() {
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     let err = registry
@@ -4026,7 +4089,6 @@ fn ffi_resolved_return_shape_rejects_wrong_kind_interface_data_061() {
             invoke_with_returns(2),
             world,
             fiber_inputs(None, None),
-            &resolved,
         )
         .expect_err("wrong-kind interface data must be rejected at the FFI boundary");
 
@@ -4191,8 +4253,8 @@ fn ffi_resolved_return_shape_rejects_wrong_signature_itab_060() {
         test_extern_name("contract_wrong_signature_iface"),
         return_wrong_signature_interface,
     );
-    let resolved = resolve_single_extern(
-        &registry,
+    freeze_single_extern(
+        &mut registry,
         extern_def(
             "contract_wrong_signature_iface",
             ParamShape::Exact { slots: 0 },
@@ -4252,15 +4314,15 @@ fn ffi_resolved_return_shape_rejects_wrong_signature_itab_060() {
     let mut io = crate::io::IoRuntime::new().expect("io runtime");
     let world = ExternWorld {
         gc: &mut gc,
-        module: &module,
+        module: (&module).into(),
         itab_cache: &mut itab_cache,
-        vm_opaque: core::ptr::null_mut(),
+        runtime_mem_requests: None,
         program_args: &program_args,
         output: output.as_ref(),
         sentinel_errors: &mut sentinel_errors,
         host_output: &mut host_output,
         host_services_v2: None,
-        io: &mut io,
+        io: Some(&mut io),
     };
 
     let err = registry
@@ -4269,7 +4331,6 @@ fn ffi_resolved_return_shape_rejects_wrong_signature_itab_060() {
             invoke_with_returns(2),
             world,
             fiber_inputs(None, None),
-            &resolved,
         )
         .expect_err("wrong-signature itab must be rejected at the FFI boundary");
 
@@ -4306,58 +4367,6 @@ fn registry_rejects_provider_function_replacement_transactionally() {
         .registered_by_name(&name)
         .expect("original provider remains registered");
     assert_eq!(registered.provider_identity, provider_identity);
-}
-
-#[cfg(feature = "std")]
-#[test]
-fn resolved_call_rejects_provider_identity_drift_after_registry_replacement() {
-    static REPLACEMENT_PROVIDER_RAN: core::sync::atomic::AtomicBool =
-        core::sync::atomic::AtomicBool::new(false);
-
-    fn replacement_provider(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
-        REPLACEMENT_PROVIDER_RAN.store(true, core::sync::atomic::Ordering::SeqCst);
-        ExternResult::Ok
-    }
-
-    REPLACEMENT_PROVIDER_RAN.store(false, core::sync::atomic::Ordering::SeqCst);
-
-    let mut original = ExternRegistry::new();
-    original.register_test_named_with_effects(
-        0,
-        test_extern_name("contract_ok"),
-        ignore_host_event_resume,
-        ExternEffects::NONE,
-    );
-    let externs = vec![variadic_extern_def("contract_ok", 0, ExternEffects::NONE)];
-    let resolved = original
-        .resolve_module_externs(&externs)
-        .expect("resolve")
-        .get(0)
-        .expect("resolved")
-        .clone();
-
-    let mut replacement = ExternRegistry::new();
-    replacement.register_test_named_with_effects(
-        0,
-        test_extern_name("contract_ok"),
-        replacement_provider,
-        ExternEffects::NONE,
-    );
-
-    let mut stack = [0u64; 4];
-    let invoke = ExternInvoke {
-        extern_id: 0,
-        bp: 0,
-        arg_start: 0,
-        arg_slots: 0,
-        ret_start: 0,
-        ret_slots: 0,
-    };
-    let err = call_resolved_extern_with_stack(&replacement, &resolved, &mut stack, invoke)
-        .expect_err("registry replacement must not inherit provider authority");
-
-    assert!(err.to_string().contains("identity or metadata drifted"));
-    assert!(!REPLACEMENT_PROVIDER_RAN.load(core::sync::atomic::Ordering::SeqCst));
 }
 
 #[cfg(feature = "std")]
@@ -4433,7 +4442,7 @@ fn registry_owner_catalog_blocks_parent_fallback_before_freeze() {
 #[test]
 fn frozen_registry_rejects_late_mutation() {
     let mut registry = ExternRegistry::new();
-    registry.freeze();
+    registry.resolve_and_freeze(&[]).expect("freeze registry");
 
     let error = registry
         .try_register_test_with_effects(0, ignore_host_event_resume, ExternEffects::NONE)
@@ -4442,6 +4451,15 @@ fn frozen_registry_rejects_late_mutation() {
     assert!(registry.registration_error().is_none());
     assert!(registry.is_frozen());
     assert!(registry.is_empty());
+
+    let refreeze_error = registry
+        .resolve_and_freeze(&[])
+        .expect_err("resolved extern snapshot must be immutable after freeze");
+    assert!(
+        refreeze_error.to_string().contains("frozen"),
+        "{refreeze_error}"
+    );
+    assert!(registry.resolved_externs().is_empty());
 
     let owner_error = registry
         .try_declare_extension_module_owner(TEST_MODULE_OWNER, ExtensionOwnerCatalog::NativeDynamic)
@@ -4800,145 +4818,8 @@ fn ffi_runtime_assignment_checks_non_empty_interface_method_sets() {
 }
 
 #[test]
-fn ffi_runtime_metadata_does_not_fallback_to_meta_zero() {
-    let ffi_src =
-        vo_source_contract::production_source_without_test_modules(include_str!("mod.rs"));
-    let dynamic_src = vo_source_contract::production_source_without_test_modules(include_str!(
-        "../builtins/dynamic.rs"
-    ));
-    let sources = [
-        ("ffi/mod.rs", ffi_src.as_str()),
-        ("builtins/dynamic.rs", dynamic_src.as_str()),
-    ];
-
-    for (name, src) in sources {
-        let normalized = src.split_whitespace().collect::<Vec<_>>().join(" ");
-        for forbidden in [
-                "get_struct_meta_id_from_rttid(rttid) .unwrap_or(0)",
-                "get_interface_meta_id_from_rttid(rttid) .unwrap_or(0)",
-                "get_struct_meta_id_from_rttid(actual_rttid) .unwrap_or(0)",
-                "InterfaceSlot::new(raw_slots[0], raw_slots.get(1).copied().unwrap_or(0))",
-                "InterfaceSlot::new(slot0, raw_slots.first().copied().unwrap_or(0))",
-                "if let Some(meta) = self.struct_meta(*meta_id as usize) { return meta.slot_count(); } 2",
-                "if let Some(named_meta) = self.module.named_type_metas.get(*named_id as usize)",
-                "require_struct_meta_id_from_rttid(actual_rttid, \"dynamic call result boxing\")",
-            ] {
-                assert!(
-                    !normalized.contains(forbidden),
-                    "{name} must fail fast on RTTID-to-runtime-metadata drift instead of falling back to metadata id 0"
-                );
-            }
-    }
-}
-
-#[test]
-fn box_to_interface_raw_slots_are_exact_layout_authority() {
-    let ffi_src =
-        vo_source_contract::production_source_without_test_modules(include_str!("mod.rs"));
-    let normalized = ffi_src.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    assert!(
-        normalized.contains("assert_eq!( raw_slots.len(), expected_slots,"),
-        "box_to_interface must reject raw slot-count drift before reading slots"
-    );
-    assert!(
-            normalized
-                .contains("array::set_n(new_ref, i, &raw_slots[src_start..src_end], elem_bytes)"),
-            "array boxing must copy by exact element layout instead of treating packed arrays as u64 buffers"
-        );
-    assert!(
-        normalized.contains(".checked_mul(len)"),
-        "array runtime slot counts must be overflow-checked"
-    );
-}
-
-#[test]
 fn array_runtime_slot_count_rejects_target_width_overflow() {
     assert_eq!(checked_array_slot_count(3, 4), Some(12));
     assert_eq!(checked_array_slot_count(0, usize::MAX), Some(0));
     assert_eq!(checked_array_slot_count(2, usize::MAX), None);
-}
-
-#[test]
-fn runtime_map_surfaces_use_checked_map_api_and_pre_set_barriers_048() {
-    let sources = [
-        ("ffi/mod.rs", include_str!("mod.rs")),
-        ("ffi/containers.rs", include_str!("containers.rs")),
-        (
-            "builtins/dynamic.rs",
-            include_str!("../builtins/dynamic.rs"),
-        ),
-        ("pack.rs", include_str!("../pack.rs")),
-        ("gc.rs", include_str!("../gc.rs")),
-    ];
-
-    for (name, raw_source) in sources {
-        let source = vo_source_contract::production_source_without_test_modules(raw_source);
-        for forbidden in [
-            "map::get(",
-            "map::set(",
-            "map::delete(",
-            "map::contains(",
-            "crate::objects::map::get(",
-            "crate::objects::map::set(",
-            "crate::objects::map::delete(",
-            "crate::objects::map::contains(",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{name} must use checked map APIs instead of lossy wrapper {forbidden}"
-            );
-        }
-    }
-
-    let map_source = vo_source_contract::production_source_without_test_modules(include_str!(
-        "../objects/map.rs"
-    ));
-    for forbidden in [
-        "pub fn get(",
-        "pub fn set(",
-        "pub fn delete(",
-        "pub fn contains(",
-    ] {
-        assert!(
-                !map_source.contains(forbidden),
-                "objects::map must not expose lossy wrapper {forbidden}; checked APIs are the runtime fact source"
-            );
-    }
-
-    let ffi_source =
-        vo_source_contract::production_source_without_test_modules(include_str!("mod.rs"));
-    let map_set_string_key = ffi_source
-        .split("pub unsafe fn map_set_string_key(")
-        .nth(1)
-        .and_then(|rest| rest.split("/// Find the rttid").next())
-        .expect("ExternCallContext::map_set_string_key section");
-    let set_pos = map_set_string_key
-        .find("map::set_checked(")
-        .expect("ExternCallContext::map_set_string_key must use set_checked");
-    let width_check_pos = map_set_string_key
-        .find("validate_entry_slot_counts(")
-        .expect("ExternCallContext::map_set_string_key must validate entry width");
-    let key_barrier_pos = map_set_string_key
-        .find("typed_write_barrier_by_meta(m, &key_data")
-        .expect("ExternCallContext::map_set_string_key must barrier key roots");
-    let val_barrier_pos = map_set_string_key
-        .find("typed_write_barrier_by_meta(m, val")
-        .expect("ExternCallContext::map_set_string_key must barrier value roots");
-    assert!(
-        width_check_pos < key_barrier_pos && width_check_pos < val_barrier_pos,
-        "ExternCallContext::map_set_string_key must validate key/value widths before barriers"
-    );
-    assert!(
-        key_barrier_pos < set_pos && val_barrier_pos < set_pos,
-        "ExternCallContext::map_set_string_key must barrier key/value roots before insertion"
-    );
-
-    let containers_source =
-        vo_source_contract::production_source_without_test_modules(include_str!("containers.rs"));
-    assert!(
-        !containers_source.contains("pub struct VoMap")
-            && !containers_source.contains("pub fn set_raw("),
-        "allocator-specific VoMap accessors must stay outside the native extension surface"
-    );
 }

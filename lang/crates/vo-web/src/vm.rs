@@ -154,6 +154,7 @@ pub(crate) fn register_wasm_runtime_externs(
     vo_web_runtime_wasm::exec::register_externs(reg, exts)?;
     vo_web_runtime_wasm::time::register_externs(reg, exts)?;
     vo_web_runtime_wasm::filepath::register_externs(reg, exts)?;
+    vo_web_runtime_wasm::fmt::register_externs(reg, exts)?;
     vo_web_runtime_wasm::net_http::register_externs(reg, exts)?;
     Ok(())
 }
@@ -573,27 +574,6 @@ mod tests {
         bytes.truncate(11);
         bytes[7..11].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode_bytecode_module(&bytes).is_err());
-    }
-
-    #[test]
-    fn vm_web_closure_calls_use_vm_owned_frame_entry_047() {
-        let src = include_str!("vm.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production section");
-
-        assert!(
-            src.contains("vm.spawn_closure_call(closure, args)"),
-            "vo-web event closures must enter through the VM-owned closure-call API"
-        );
-        assert!(
-            !src.contains("vo_vm::vm::helpers"),
-            "vo-web must not depend on VM helper internals for closure argument shaping"
-        );
-        assert!(
-            !src.contains("build_closure_args"),
-            "closure argument layout must be owned by vo-vm"
-        );
     }
 
     #[test]

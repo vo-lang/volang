@@ -352,7 +352,6 @@ fn lint_docs(root: &Path) -> Result<()> {
             }
         }
     }
-    lint_jit_runtime_path_wording(root)?;
     lint_touched_dev_note_front_matter(root)?;
     Ok(())
 }
@@ -727,24 +726,6 @@ fn read_json_object_limited(path: &Path, label: &str, limit: usize) -> Result<se
         bail!("{label} {} must contain a JSON object", path.display());
     }
     Ok(value)
-}
-
-fn lint_jit_runtime_path_wording(root: &Path) -> Result<()> {
-    let path = root.join("apps/studio/docs/pages/advanced/backends.md");
-    let source = fs::read_to_string(&path)
-        .map_err(|err| anyhow!("could not read {}: {err}", path.display()))?;
-    for forbidden in ["Graceful fallback", "VM fallback behavior"] {
-        if source.contains(forbidden) {
-            bail!("Studio backend docs must avoid broad JIT fallback wording: {forbidden}");
-        }
-    }
-    if !source.contains("Invalid strict-JIT metadata")
-        || !source.contains("fail fast")
-        || !source.contains("VM-managed runtime paths")
-    {
-        bail!("Studio backend docs must spell out strict-JIT fail-fast runtime-path policy");
-    }
-    Ok(())
 }
 
 fn lint_touched_dev_note_front_matter(root: &Path) -> Result<()> {

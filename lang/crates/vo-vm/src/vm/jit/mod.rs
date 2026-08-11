@@ -38,7 +38,6 @@ mod transition;
 
 #[cfg(test)]
 pub(crate) use context::build_jit_context;
-#[cfg(feature = "std")]
 pub use extern_call::jit_call_extern;
 pub use invoke::dispatch_jit_frame;
 pub(crate) use osr::{try_loop_osr, OsrResult};

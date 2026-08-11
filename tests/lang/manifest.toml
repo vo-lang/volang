@@ -141,10 +141,11 @@ expect = "pass"
 id = "2026-02-06-jit-loop-osr-defer"
 kind = "file"
 path = "cases/jit/2026_02_06_jit_loop_osr_defer.vo"
-matrix = "default"
-tags = ["jit", "osr", "regression", "defer", "smoke"]
+matrix = "osr-contract"
+tags = ["jit", "osr", "regression", "defer", "contract", "smoke"]
 owner = "jit"
-expect = "pass"
+reason = "forced VM/JIT/OSR and GC-stress differential for defer, errdefer, panic, recover, allocation, and nested-loop OSR"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
 id = "2026-02-06-jit-select-comprehensive"
@@ -159,10 +160,11 @@ expect = "pass"
 id = "2026-02-06-loop-osr-only"
 kind = "file"
 path = "cases/jit/2026_02_06_loop_osr_only.vo"
-matrix = "default"
-tags = ["osr", "regression"]
+matrix = "osr-contract"
+tags = ["jit", "osr", "regression", "defer", "contract"]
 owner = "jit"
-expect = "pass"
+reason = "single-call loop must prove an OSR entry in both normal and GC-stress execution"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
 id = "2026-02-06-port-wake-pc"
@@ -1299,26 +1301,14 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
-id = "bugs.2026-01-31-jit-http-server-client"
-kind = "file"
-path = "cases/bugs/2026_01_31_jit_http_server_client.vo"
-matrix = "default"
-tags = ["jit", "regression", "contract"]
-owner = "jit"
-skip = ["osr", "nostd", "wasm"]
-timeout = { jit = 120 }
-reason = "the dedicated osr-only case proves loop entry; nostd lacks the required time and network externs, and wasm lacks native listener externs"
-expect = "pass"
-
-[[case]]
 id = "bugs.2026-01-31-jit-http-server-client-osr"
 kind = "file"
 path = "cases/bugs/2026_01_31_jit_http_server_client.vo"
-matrix = "osr-only"
+matrix = "osr-contract"
 tags = ["jit", "osr", "contract", "stdlib", "regression"]
 owner = "jit"
-reason = "OSR readiness proof for the HTTP server/client hot loop"
-timeout = { osr = 120 }
+reason = "native and GC-stress VM/JIT differential baselines plus OSR loop-entry proof for the HTTP server/client hot loop; nostd and wasm lack the required native networking surface"
+timeout = { jit = 120, osr = 120, gc-vm = 120, gc-osr = 180 }
 expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
@@ -1387,10 +1377,11 @@ expect = "pass"
 id = "bugs.2026-05-27-jit-copy-n-canonical-osr"
 kind = "file"
 path = "cases/bugs/2026_05_27_jit_copy_n_canonical_osr.vo"
-matrix = "default"
-tags = ["jit", "osr", "regression"]
+matrix = "osr-contract"
+tags = ["jit", "osr", "regression", "contract"]
 owner = "jit"
-expect = "pass"
+reason = "aggregate CopyN canonicalization must execute in a proven OSR entry with a VM baseline"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
 id = "bugs.2026-05-27-jit-direct-stack-capacity-waitio"
@@ -1540,7 +1531,7 @@ expect = "pass"
 id = "bugs.2026-06-15-osr-prepared-call-stack"
 kind = "file"
 path = "cases/bugs/2026_06_15_osr_prepared_call_stack.vo"
-matrix = "osr-only"
+matrix = "osr-contract"
 tags = ["jit", "osr", "regression", "closure", "contract", "smoke"]
 owner = "jit"
 reason = "native OSR regression for prepared closure-call OK path stack-base refresh after fiber stack growth"
@@ -3176,7 +3167,7 @@ expect = "pass"
 id = "dyn.osr-dynamic-set-from-get-contract"
 kind = "file"
 path = "cases/dyn/osr_dynamic_set_from_get_contract.vo"
-matrix = "osr-only"
+matrix = "osr-contract"
 tags = ["dyn", "jit", "osr", "contract"]
 owner = "runtime"
 reason = "VM readiness OSR contract: dynamic get-to-set value pairs and aggregate unboxing must execute inside loop JIT"
@@ -3186,7 +3177,7 @@ expect = { kind = "pass", jit_loop_entries_min = 1 }
 id = "dyn.osr-dynamic-integer-key-contract"
 kind = "file"
 path = "cases/dyn/osr_dynamic_integer_key_contract.vo"
-matrix = "osr-only"
+matrix = "osr-contract"
 tags = ["dyn", "map", "numeric", "jit", "osr", "contract"]
 owner = "runtime"
 reason = "VM readiness OSR contract: dynamic integer map keys and slice indexes must execute inside loop JIT"
@@ -3196,7 +3187,7 @@ expect = { kind = "pass", jit_loop_entries_min = 1 }
 id = "dyn.osr-dynamic-protocol-index-contract"
 kind = "file"
 path = "cases/dyn/osr_dynamic_protocol_index_contract.vo"
-matrix = "osr-only"
+matrix = "osr-contract"
 tags = ["dyn", "method", "jit", "osr", "contract", "smoke"]
 owner = "runtime"
 reason = "VM readiness OSR contract: dynamic DynIndex/DynSetIndex replay must preserve interface pairs inside loop JIT"
@@ -11011,10 +11002,11 @@ expect = "pass"
 id = "test-osr"
 kind = "file"
 path = "cases/jit/test_osr.vo"
-matrix = "default"
-tags = ["osr"]
+matrix = "osr-contract"
+tags = ["jit", "osr", "contract"]
 owner = "jit"
-expect = "pass"
+reason = "basic slice loop is the minimal forced OSR and GC-OSR contract"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
 id = "three-index-slice"

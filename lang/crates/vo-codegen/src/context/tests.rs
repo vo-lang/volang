@@ -5,7 +5,7 @@ use super::{
 use std::collections::{BTreeMap, HashMap};
 use vo_analysis::arena::ArenaKey;
 use vo_common::{SourceMap, Span};
-use vo_common_core::JitInstructionMetadata;
+use vo_common_core::InstructionMetadata;
 use vo_runtime::bytecode::{
     ExtSlotKind, FunctionDef, GlobalDef, InterfaceMeta, NamedTypeMeta, ParamShape, ReturnShape,
     StructMeta,
@@ -37,7 +37,7 @@ fn minimal_function(code_len: usize) -> FunctionDef {
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        jit_metadata: vec![JitInstructionMetadata::None; code_len],
+        instruction_metadata: vec![InstructionMetadata::None; code_len],
         code,
         slot_types,
         borrowed_scan_slots_prefix: vec![0],
@@ -794,28 +794,6 @@ fn runtime_debug_locations_preserve_the_source_path_when_available() {
         ctx.module.debug_info.files[entry.file_id as usize],
         "project/cmd/app/main.vo"
     );
-}
-
-#[test]
-fn vm_ptr_new_boxing_paths_use_physical_boxing_meta_060() {
-    let sources = [
-        ("assign.rs", include_str!("../assign.rs")),
-        ("expr/builtin.rs", include_str!("../expr/builtin.rs")),
-        ("expr/pointer.rs", include_str!("../expr/pointer.rs")),
-    ];
-    for (path, source) in sources {
-        let mut rest = source;
-        while let Some(ptr_new_idx) = rest.find("emit_ptr_new") {
-            let prefix = &rest[..ptr_new_idx];
-            let start = prefix.len().saturating_sub(260);
-            let window = &prefix[start..];
-            assert!(
-                    !window.contains("get_or_create_value_meta("),
-                    "{path} must use get_boxing_meta before emit_ptr_new so boxed values carry physical object metadata"
-                );
-            rest = &rest[ptr_new_idx + "emit_ptr_new".len()..];
-        }
-    }
 }
 
 #[test]

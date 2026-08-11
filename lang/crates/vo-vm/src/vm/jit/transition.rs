@@ -89,10 +89,11 @@ pub(super) fn handle_jit_non_ok_transition(
             JitBridgeTransition::JitError(jit_context_error_message(ctx, module))
         }
         JitResult::Call => call::handle_call_transition(mode, vm, fiber, module, ctx),
-        JitResult::WaitIo => wait::handle_wait_io_transition(mode, vm, fiber, module, ctx),
+        JitResult::WaitIo => wait::handle_wait_io_transition(vm, fiber, module, ctx),
         JitResult::WaitQueue => wait::handle_wait_queue_transition(vm, fiber, module, ctx),
         JitResult::Replay => wait::handle_replay_transition(vm, fiber, module, ctx),
         JitResult::ExternSuspend => wait::handle_extern_suspend_transition(mode, vm, fiber, module),
+        JitResult::RuntimeTransition => wait::handle_runtime_transition(vm, fiber, module, ctx),
     }
 }
 
@@ -100,14 +101,54 @@ pub(super) fn handle_jit_non_ok_transition(
 mod tests {
     use super::super::context::build_jit_context;
     use super::*;
-    use crate::vm::{JitConfig, Vm};
+    use crate::vm::jit::test_support::function;
+    use crate::vm::{JitConfig, JitSideExitReason, Vm};
+
+    #[test]
+    fn vm_jit_runtime_transition_materializes_next_pc_and_yields() {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-runtime-transition".to_string());
+        module.functions.push(function(1, 0));
+        vm.finish_load(module.clone());
+        let mut fiber = Fiber::new(11);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
+        ctx.ctx.call_resume_pc = 3;
+        let before = vm
+            .jit
+            .manager()
+            .expect("jit manager")
+            .execution_stats()
+            .side_exit_count(JitSideExitReason::Yield);
+
+        let transition = handle_jit_non_ok_transition(
+            JitBridgeMode::FullFunction,
+            &mut vm,
+            &mut fiber,
+            &module,
+            JitResult::RuntimeTransition,
+            &ctx,
+        );
+
+        assert!(matches!(transition, JitBridgeTransition::TimesliceExpired));
+        assert_eq!(fiber.frames.last().expect("entry frame").pc, 3);
+        assert_eq!(
+            vm.jit
+                .manager()
+                .expect("jit manager")
+                .execution_stats()
+                .side_exit_count(JitSideExitReason::Yield),
+            before + 1
+        );
+    }
 
     #[test]
     fn vm_jit_context_error_message_includes_infra_contract_detail() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-infra-message".to_string());
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        vm.finish_load(module.clone());
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let _ = vo_runtime::jit_api::set_jit_infra_error_with_message(
             ctx.as_ptr(),
@@ -126,7 +167,8 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-extern-message".to_string());
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        vm.finish_load(module.clone());
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let _ = vo_runtime::jit_api::set_jit_infra_error_with_message(
             ctx.as_ptr(),
@@ -146,7 +188,8 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-call-request-infra".to_string());
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        vm.finish_load(module.clone());
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         vo_runtime::jit_api::vo_set_call_request(
             ctx.as_ptr(),
@@ -180,7 +223,8 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
         let module = Module::new("jit-runtime-panic-sentinel-arg".to_string());
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        vm.finish_load(module.clone());
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.runtime_trap_kind = vo_runtime::jit_api::JitRuntimeTrapKind::IndexOutOfBounds as u8;
         ctx.ctx.runtime_trap_pc = 0;
         ctx.ctx.runtime_trap_arg0 = vo_runtime::jit_api::JIT_INFRA_ERROR_SENTINEL;
@@ -207,8 +251,8 @@ mod tests {
     fn vm_jit_prepared_call_request_abi_018_preserves_full_caller_resume_pc() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut fiber = Fiber::new(11);
-        let module = Module::new("jit-prepared-call-request".to_string());
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        vm.finish_load(Module::new("jit-prepared-call-request".to_string()));
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         let high_resume_pc = u32::from(u16::MAX) + 1;
 
         vo_runtime::jit_api::vo_set_call_request(

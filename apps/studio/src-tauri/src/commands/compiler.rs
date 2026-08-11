@@ -3,48 +3,11 @@ use crate::state::AppState;
 use std::path::PathBuf;
 use vo_app_runtime::take_captured_stdout;
 use vo_engine::{
-    check_with_auto_install_with_options, compile_with_auto_install_with_options, format_text,
-    run_with_output, run_with_output_interruptible, CaptureSink, CompileError, CompileOutput,
-    RunError, RunMode, RuntimeErrorKind,
+    compile_with_auto_install_prepared_with_options, format_text, run_with_output_interruptible,
+    CaptureSink, CompileError, CompileOutput, PreparedCompileOutput, RunError, RunMode,
+    RuntimeErrorKind,
 };
 use vo_module::project::ProjectContextOptions;
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticError {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub message: String,
-    pub category: String,
-    pub module_stage: Option<String>,
-    pub module_kind: Option<String>,
-    pub module_path: Option<String>,
-    pub module_version: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CheckResult {
-    pub ok: bool,
-    pub errors: Vec<DiagnosticError>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompileResult {
-    pub ok: bool,
-    pub errors: Vec<DiagnosticError>,
-    pub output_path: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuildResult {
-    pub ok: bool,
-    pub errors: Vec<DiagnosticError>,
-    pub output_path: Option<String>,
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -71,42 +34,15 @@ pub(crate) fn prepare_and_compile(
     target: &str,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
-    compile_with_auto_install_with_options(target, options)
+    prepare_and_compile_prepared(target, options)
+        .and_then(PreparedCompileOutput::into_validated_output)
 }
 
-fn diagnostic_from_compile_error(default_file: &str, error: &CompileError) -> DiagnosticError {
-    let module_error = error.module_system();
-    DiagnosticError {
-        file: module_error
-            .and_then(|module_error| module_error.path().map(str::to_string))
-            .unwrap_or_else(|| default_file.to_string()),
-        line: 0,
-        column: 0,
-        message: module_error
-            .map(|module_error| module_error.detail().to_string())
-            .unwrap_or_else(|| error.to_string()),
-        category: error.category().to_string(),
-        module_stage: module_error.map(|module_error| module_error.stage().as_str().to_string()),
-        module_kind: module_error.map(|module_error| module_error.kind().as_str().to_string()),
-        module_path: module_error
-            .and_then(|module_error| module_error.module_path().map(str::to_string)),
-        module_version: module_error
-            .and_then(|module_error| module_error.version().map(str::to_string)),
-    }
-}
-
-fn diagnostic_from_message(file: &str, category: &str, message: String) -> DiagnosticError {
-    DiagnosticError {
-        file: file.to_string(),
-        line: 0,
-        column: 0,
-        message,
-        category: category.to_string(),
-        module_stage: None,
-        module_kind: None,
-        module_path: None,
-        module_version: None,
-    }
+pub(crate) fn prepare_and_compile_prepared(
+    target: &str,
+    options: &ProjectContextOptions,
+) -> Result<PreparedCompileOutput, CompileError> {
+    compile_with_auto_install_prepared_with_options(target, options)
 }
 
 fn resolve_command_target(
@@ -123,177 +59,12 @@ fn resolve_command_target(
     Ok((target, session.project_context_options()))
 }
 
-fn default_output_path(target: &ResolvedTarget) -> PathBuf {
-    target.output_base_path.with_extension("vob")
-}
-
-#[tauri::command]
-pub fn cmd_check_vo(
-    path: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<CheckResult, String> {
-    let (target, options) = resolve_command_target(&state, &path)?;
-    let compile_str = target.compile_path.to_string_lossy().to_string();
-    match check_with_auto_install_with_options(&compile_str, &options) {
-        Ok(_) => Ok(CheckResult {
-            ok: true,
-            errors: vec![],
-        }),
-        Err(error) => Ok(CheckResult {
-            ok: false,
-            errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
-        }),
-    }
-}
-
-#[tauri::command]
-pub fn cmd_compile_vo(
-    path: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<CompileResult, String> {
-    let (target, options) = resolve_command_target(&state, &path)?;
-    let compile_str = target.compile_path.to_string_lossy().to_string();
-    match prepare_and_compile(&compile_str, &options) {
-        Ok(output) => {
-            let output_path = default_output_path(&target);
-            let module_bytes = match output.module.serialize() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return Ok(CompileResult {
-                        ok: false,
-                        errors: vec![diagnostic_from_message(
-                            &output_path.to_string_lossy(),
-                            "serialize",
-                            format!("failed to serialize output: {error}"),
-                        )],
-                        output_path: None,
-                    });
-                }
-            };
-            if let Err(error) = std::fs::write(&output_path, module_bytes) {
-                return Ok(CompileResult {
-                    ok: false,
-                    errors: vec![diagnostic_from_message(
-                        &output_path.to_string_lossy(),
-                        "io",
-                        format!("failed to write output: {}", error),
-                    )],
-                    output_path: None,
-                });
-            }
-            Ok(CompileResult {
-                ok: true,
-                errors: vec![],
-                output_path: Some(output_path.to_string_lossy().to_string()),
-            })
-        }
-        Err(error) => Ok(CompileResult {
-            ok: false,
-            errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
-            output_path: None,
-        }),
-    }
-}
-
-#[tauri::command]
-pub fn cmd_format_vo(_path: String, _state: tauri::State<'_, AppState>) -> Result<String, String> {
-    Err("vo format is not yet implemented".to_string())
-}
-
-#[tauri::command]
-pub fn cmd_build_vo(
-    path: String,
-    output: Option<String>,
-    state: tauri::State<'_, AppState>,
-) -> Result<BuildResult, String> {
-    let (target, options) = resolve_command_target(&state, &path)?;
-    let compile_str = target.compile_path.to_string_lossy().to_string();
-    match prepare_and_compile(&compile_str, &options) {
-        Ok(compiled) => {
-            let output_path = output
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| default_output_path(&target));
-            let module_bytes = match compiled.module.serialize() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return Ok(BuildResult {
-                        ok: false,
-                        errors: vec![diagnostic_from_message(
-                            &output_path.to_string_lossy(),
-                            "serialize",
-                            format!("failed to serialize output: {error}"),
-                        )],
-                        output_path: None,
-                    });
-                }
-            };
-            if let Err(error) = std::fs::write(&output_path, module_bytes) {
-                return Ok(BuildResult {
-                    ok: false,
-                    errors: vec![diagnostic_from_message(
-                        &output_path.to_string_lossy(),
-                        "io",
-                        format!("failed to write output: {}", error),
-                    )],
-                    output_path: None,
-                });
-            }
-            Ok(BuildResult {
-                ok: true,
-                errors: vec![],
-                output_path: Some(output_path.to_string_lossy().to_string()),
-            })
-        }
-        Err(error) => Ok(BuildResult {
-            ok: false,
-            errors: vec![diagnostic_from_compile_error(&compile_str, &error)],
-            output_path: None,
-        }),
-    }
-}
-
 #[tauri::command]
 pub fn cmd_dump_vo(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
     let (target, options) = resolve_command_target(&state, &path)?;
     let output = prepare_and_compile(&target.compile_path.to_string_lossy(), &options)
         .map_err(|error| error.to_string())?;
     Ok(format_text(&output.module))
-}
-
-#[tauri::command]
-pub fn cmd_run_vo(
-    path: String,
-    run_mode: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let session = state.session_snapshot();
-    let run_target = resolve_run_target(
-        session.root(),
-        state.workspace_root(),
-        &path,
-        session.single_file_run(),
-    )?;
-    let options = session.project_context_options();
-    let compiled = prepare_and_compile(&run_target.compile_path.to_string_lossy(), &options)
-        .map_err(|error| error.to_string())?;
-    let sink = CaptureSink::new();
-    let result = run_with_output(
-        compiled,
-        parse_run_mode(&run_mode)?,
-        Vec::new(),
-        sink.clone(),
-    );
-    let captured = take_captured_stdout(sink.as_ref()).unwrap_or_default();
-    match result {
-        Ok(()) => Ok(captured),
-        Err(err) => {
-            if captured.trim().is_empty() {
-                Err(err.to_string())
-            } else {
-                Err(format!("{}\nRuntime error: {}", captured.trim_end(), err))
-            }
-        }
-    }
 }
 
 #[tauri::command]
@@ -395,12 +166,4 @@ pub async fn cmd_run_vo_stream(
 pub fn cmd_stop_vo_run(state: tauri::State<'_, AppState>) -> Result<(), String> {
     state.stop_console_run();
     Ok(())
-}
-
-fn parse_run_mode(run_mode: &str) -> Result<RunMode, String> {
-    match run_mode {
-        "vm" => Ok(RunMode::Vm),
-        "jit" => Ok(RunMode::Jit),
-        other => Err(format!("Unsupported run mode: {}", other)),
-    }
 }

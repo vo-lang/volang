@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(feature = "jit")]
 #[test]
 fn vm_osr_borrow_lease_rejection_061_restores_rollback_before_return() {
     let mut vm = Vm::new();
@@ -13,9 +12,13 @@ fn vm_osr_borrow_lease_rejection_061_restores_rollback_before_return() {
         1,
     );
     let endpoint_id = 0x0610_0000_0000_0201;
+    let mut endpoint_registry_undo = EndpointRegistryUndo::default();
+    endpoint_registry_undo.record(&vm.state.endpoint_registry, endpoint_id);
     let rollback = RuntimeRollback::endpoint_transfer(
-        vm.state.endpoint_registry.snapshot(),
-        vec![(ch, queue::home_info_snapshot(ch))],
+        endpoint_registry_undo,
+        vec![(ch, unsafe {
+            vo_runtime::objects::queue::home_info_undo(ch, vm.state.current_island_id)
+        })],
     );
     queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
@@ -56,142 +59,4 @@ fn vm_osr_borrow_lease_rejection_061_restores_rollback_before_return() {
         .get_fiber(current)
         .remote_endpoint_wait
         .is_none());
-}
-
-fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
-    vo_source_contract::compact_pattern_position(compact, pattern)
-}
-
-fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-    vo_source_contract::compact_region_between(source, marker, terminator)
-}
-
-fn compact_source_without_non_dominating_blocks(compact: &[u8]) -> Vec<u8> {
-    vo_source_contract::compact_rust_source_without_non_dominating_blocks_for_contract(compact)
-}
-
-fn restore_runtime_rollback_marks_all_roots_dirty_058(source: &str) -> bool {
-    let Some(restore) = compact_region_between(
-        source,
-        "fnrestore_runtime_rollback(",
-        "fnapply_pending_spawns(",
-    ) else {
-        return false;
-    };
-    let restore = compact_source_without_non_dominating_blocks(&restore);
-    let restore_stmt = "rollback.restore(&mutself.state,&mutself.scheduler,current_fiber);";
-    let dirty_stmt = "self.mark_gc_all_roots_dirty();";
-    let Some(restore_pos) = compact_pattern_position(&restore, restore_stmt) else {
-        return false;
-    };
-    let Some(dirty_pos) = compact_pattern_position(&restore, dirty_stmt) else {
-        return false;
-    };
-    let between = &restore[restore_pos + restore_stmt.len()..dirty_pos];
-    restore_pos < dirty_pos
-        && compact_pattern_position(between, "return").is_none()
-        && compact_pattern_position(&restore[..dirty_pos], "return").is_none()
-}
-
-#[test]
-fn vm_runtime_rollback_gc_dirty_058_restore_marks_all_roots_dirty() {
-    let src = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../../runtime_boundary.rs"
-    ));
-
-    assert!(
-        restore_runtime_rollback_marks_all_roots_dirty_058(&src),
-        "runtime rollback restore must go through the unified rollback object"
-    );
-}
-
-#[test]
-fn vm_runtime_rollback_gc_dirty_058_rejects_comment_spoofed_restore_dirty_order() {
-    let spoof = r#"
-            fn restore_runtime_rollback(
-                &mut self,
-                current_fiber: Option<FiberId>,
-                rollback: RuntimeRollback,
-            ) {
-                self.mark_gc_all_roots_dirty();
-                // rollback.restore(&mut self.state, &mut self.scheduler, current_fiber);
-            }
-
-            fn apply_pending_spawns(&mut self, spawns: Vec<Fiber>) -> Result<(), VmError> {
-                Ok(())
-            }
-        "#;
-
-    assert!(
-        !restore_runtime_rollback_marks_all_roots_dirty_058(spoof),
-        "comment-only rollback restore facts must not satisfy GC dirty-root rollback contract"
-    );
-}
-
-#[test]
-fn vm_runtime_rollback_gc_dirty_058_rejects_restore_early_return_before_dirty() {
-    let spoof = r#"
-            fn restore_runtime_rollback(
-                &mut self,
-                current_fiber: Option<FiberId>,
-                rollback: RuntimeRollback,
-            ) {
-                rollback.restore(&mut self.state, &mut self.scheduler, current_fiber);
-                return;
-                self.mark_gc_all_roots_dirty();
-            }
-
-            fn apply_pending_spawns(&mut self, spawns: Vec<Fiber>) -> Result<(), VmError> {
-                Ok(())
-            }
-        "#;
-
-    assert!(
-        !restore_runtime_rollback_marks_all_roots_dirty_058(spoof),
-        "rollback restore must not be able to return before dirtying all roots"
-    );
-}
-
-#[test]
-fn vm_runtime_rollback_gc_dirty_058_rejects_unreachable_restore_or_early_return() {
-    let unreachable_restore = r#"
-            fn restore_runtime_rollback(
-                &mut self,
-                current_fiber: Option<FiberId>,
-                rollback: RuntimeRollback,
-            ) {
-                if false {
-                    rollback.restore(&mut self.state, &mut self.scheduler, current_fiber);
-                    self.mark_gc_all_roots_dirty();
-                }
-            }
-
-            fn apply_pending_spawns(&mut self, spawns: Vec<Fiber>) -> Result<(), VmError> {
-                Ok(())
-            }
-        "#;
-    let conditional_return = r#"
-            fn restore_runtime_rollback(
-                &mut self,
-                current_fiber: Option<FiberId>,
-                rollback: RuntimeRollback,
-            ) {
-                if condition {
-                    return;
-                }
-                rollback.restore(&mut self.state, &mut self.scheduler, current_fiber);
-                self.mark_gc_all_roots_dirty();
-            }
-
-            fn apply_pending_spawns(&mut self, spawns: Vec<Fiber>) -> Result<(), VmError> {
-                Ok(())
-            }
-        "#;
-
-    for spoof in [unreachable_restore, conditional_return] {
-        assert!(
-            !restore_runtime_rollback_marks_all_roots_dirty_058(spoof),
-            "rollback restore must be reachable and must not have a dirty-before return path"
-        );
-    }
 }

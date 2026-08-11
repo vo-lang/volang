@@ -1,8 +1,6 @@
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use vo_runtime::instruction::{Instruction, Opcode};
 
-#[cfg(test)]
-use crate::semantics::LoweringOwner;
 use crate::translator::{IrEmitter, TranslateResult};
 use crate::JitError;
 
@@ -231,11 +229,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         PtrGetN => {
-            ptr_get_n(e, inst);
+            ptr_get_n(e, inst)?;
             Ok(Completed)
         }
         PtrSetN => {
-            ptr_set_n(e, inst);
+            ptr_set_n(e, inst)?;
             Ok(Completed)
         }
         PtrAdd => {
@@ -335,43 +333,43 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         StrIndex => {
-            str_index(e, inst)?;
+            str_index(e, inst);
             Ok(Completed)
         }
         StrConcat => {
-            str_concat(e, inst)?;
+            str_concat(e, inst);
             Ok(Completed)
         }
         StrSlice => {
-            str_slice(e, inst)?;
+            str_slice(e, inst);
             Ok(Completed)
         }
         StrEq => {
-            str_eq(e, inst)?;
+            str_eq(e, inst);
             Ok(Completed)
         }
         StrNe => {
-            str_ne(e, inst)?;
+            str_ne(e, inst);
             Ok(Completed)
         }
         StrLt => {
-            str_cmp(e, inst, IntCC::SignedLessThan)?;
+            str_cmp(e, inst, IntCC::SignedLessThan);
             Ok(Completed)
         }
         StrLe => {
-            str_cmp(e, inst, IntCC::SignedLessThanOrEqual)?;
+            str_cmp(e, inst, IntCC::SignedLessThanOrEqual);
             Ok(Completed)
         }
         StrGt => {
-            str_cmp(e, inst, IntCC::SignedGreaterThan)?;
+            str_cmp(e, inst, IntCC::SignedGreaterThan);
             Ok(Completed)
         }
         StrGe => {
-            str_cmp(e, inst, IntCC::SignedGreaterThanOrEqual)?;
+            str_cmp(e, inst, IntCC::SignedGreaterThanOrEqual);
             Ok(Completed)
         }
         StrDecodeRune => {
-            str_decode_rune(e, inst)?;
+            str_decode_rune(e, inst);
             Ok(Completed)
         }
         MapNew => {
@@ -379,7 +377,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         MapLen => {
-            map_len(e, inst)?;
+            map_len(e, inst);
             Ok(Completed)
         }
         MapGet => {
@@ -395,7 +393,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         MapIterInit => {
-            map_iter_init(e, inst)?;
+            map_iter_init(e, inst);
             Ok(Completed)
         }
         MapIterNext => {
@@ -403,7 +401,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         ClosureNew => {
-            closure_new(e, inst)?;
+            closure_new(e, inst);
             Ok(Completed)
         }
         ClosureGet => {
@@ -419,11 +417,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         QueueLen => {
-            queue_len(e, inst)?;
+            queue_len(e, inst);
             Ok(Completed)
         }
         QueueCap => {
-            queue_cap(e, inst)?;
+            queue_cap(e, inst);
             Ok(Completed)
         }
         IslandNew => {
@@ -431,7 +429,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         QueueClose => {
-            queue_close(e, inst)?;
+            queue_close(e, inst);
             Ok(Completed)
         }
         QueueSend => {
@@ -463,7 +461,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         SelectBegin => {
-            select_begin(e, inst)?;
+            select_begin(e, inst);
             Ok(Completed)
         }
         SelectSend => {
@@ -491,7 +489,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         IfaceEq => {
-            iface_eq(e, inst)?;
+            iface_eq(e, inst);
             Ok(Completed)
         }
         opcode if is_compiler_specific_opcode(opcode) => Ok(Unhandled),
@@ -514,39 +512,4 @@ pub(crate) fn is_compiler_specific_opcode(opcode: Opcode) -> bool {
             | Opcode::CallClosure
             | Opcode::CallIface
     )
-}
-
-#[cfg(test)]
-pub(crate) fn translate_dispatch_lowering_owner(opcode: Opcode) -> LoweringOwner {
-    use LoweringOwner::*;
-    use Opcode::*;
-
-    match opcode {
-        Hint | LoadInt | LoadConst | Copy | CopyN | AddI | SubI | MulI | DivI | DivU | ModI
-        | ModU | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LeI | GtI | GeI
-        | LtU | LeU | GtU | GeU | EqF | NeF | LtF | LeF | GtF | GeF | Not | BoolNot | And | Or
-        | Xor | AndNot | Shl | ShrS | ShrU => TranslateScalar,
-
-        GlobalGet | GlobalSet | GlobalGetN | GlobalSetN | PtrGet | PtrSet | PtrGetN | PtrSetN
-        | PtrAdd | SlotGet | SlotSet | SlotGetN | SlotSetN => TranslateMemory,
-
-        ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | IndexCheck => TranslateConversions,
-
-        SliceNew | SliceGet | SliceSet | SliceLen | SliceCap | SliceSlice | SliceAppend
-        | SliceAddr | ArrayNew | ArrayGet | ArraySet | ArrayAddr | StrLen | StrIndex
-        | StrConcat | StrSlice | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune
-        | MapNew | MapLen | MapGet | MapSet | MapDelete | MapIterInit | MapIterNext => {
-            TranslateCollections
-        }
-
-        ClosureNew | ClosureGet | PtrNew | QueueNew | QueueLen | QueueCap | IslandNew
-        | QueueClose | QueueSend | QueueRecv | GoStart | GoIsland | DeferPush | ErrDeferPush
-        | Recover | SelectBegin | SelectSend | SelectRecv | SelectExec | IfaceAssert | StrNew
-        | IfaceAssign | IfaceEq => TranslateRuntimeOps,
-
-        Jump | JumpIf | JumpIfNot | Return | Panic => FunctionCompiler,
-        Call | CallExtern | CallClosure | CallIface => CallHelpers,
-        ForLoop => LoopCompiler,
-        Opcode::Invalid => LoweringOwner::Invalid,
-    }
 }

@@ -1,6 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::cache::layout;
 use crate::ext_manifest::{DeclaredArtifactId, ExtensionManifest};
 use crate::identity::ArtifactId;
 use crate::schema::lockfile::LockedModule;
@@ -120,17 +119,6 @@ pub fn selected_artifact_relative_path(
         .join(&role.name))
 }
 
-pub fn find_locked_module_for_cache_dir<'a>(
-    cache_root: &Path,
-    module_dir: &Path,
-    locked_modules: &'a [LockedModule],
-) -> Option<&'a LockedModule> {
-    let (module_path, version) = layout::module_identity_from_cache_dir(cache_root, module_dir)?;
-    locked_modules
-        .iter()
-        .find(|locked| locked.path == module_path && locked.version == version)
-}
-
 fn declared_artifacts_for_target(
     ext_manifest: &ExtensionManifest,
     target: &str,
@@ -217,6 +205,7 @@ mod tests {
     use crate::schema::lockfile::LockOrigin;
     use crate::schema::manifest::ManifestArtifact;
     use crate::version::ExactVersion;
+    use std::path::Path;
 
     fn published_artifact(kind: &str, target: &str, name: &str, bytes: &[u8]) -> ManifestArtifact {
         ManifestArtifact {
@@ -498,23 +487,5 @@ js = "{js}"
                 .unwrap();
 
         assert!(required.is_empty());
-    }
-
-    #[test]
-    fn find_locked_module_for_cache_dir_matches_locked_module() {
-        let locked = locked_module();
-        let cache_root = Path::new("cache");
-        let module_dir =
-            cache_root.join(layout::relative_module_dir(&locked.path, &locked.version));
-
-        let found = find_locked_module_for_cache_dir(
-            cache_root,
-            &module_dir,
-            std::slice::from_ref(&locked),
-        )
-        .unwrap();
-
-        assert_eq!(found.path, locked.path);
-        assert_eq!(found.version, locked.version);
     }
 }

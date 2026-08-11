@@ -17,10 +17,11 @@ use std::{
     vec::Vec,
 };
 
-use vo_common_core::bytecode::{Module, StructMeta};
+use vo_common_core::bytecode::{Module, ModuleRuntimeMetadata, StructMeta};
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_common_core::RuntimeType;
-use vo_runtime::gc::{Gc, GcRef, MemoryError};
+use vo_runtime::gc::{Gc, GcRef};
+use vo_runtime::island::EndpointWaitKey;
 use vo_runtime::objects::queue::{self, BlockingRecvResult};
 use vo_runtime::objects::queue_state::{
     self, QueueKind, QueueMessage, QueueWaiter, SelectWaitKind,
@@ -65,7 +66,7 @@ pub fn validate_queue_payload_slots(
 
 pub fn select_woken_recv_slot_types(
     ch: GcRef,
-    module: Option<&vo_runtime::bytecode::Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) -> Result<Vec<SlotType>, String> {
     // Safety: callers validate the queue handle before layout inspection.
     let elem_meta = unsafe { queue_state::elem_meta(ch) };
@@ -75,7 +76,7 @@ pub fn select_woken_recv_slot_types(
         ValueKind::Struct => {
             let meta_id = elem_meta.meta_id() as usize;
             module
-                .and_then(|module| module.struct_metas.get(meta_id))
+                .and_then(|metadata| metadata.module().struct_metas.get(meta_id))
                 .map(|meta| meta.slot_types.clone())
                 .ok_or_else(|| {
                     format!(
@@ -84,7 +85,7 @@ pub fn select_woken_recv_slot_types(
                 })?
         }
         ValueKind::Array => {
-            let module = module.ok_or_else(|| {
+            let metadata = module.ok_or_else(|| {
                 "select wake recv missing module runtime metadata for array payload root scan"
                     .to_string()
             })?;
@@ -93,7 +94,7 @@ pub fn select_woken_recv_slot_types(
             } else {
                 unsafe { queue_state::elem_rttid(ch) }
             };
-            select_woken_slot_types_for_rttid(rttid, module)?
+            select_woken_slot_types_for_rttid(rttid, metadata.module())?
         }
         ValueKind::Interface => vec![SlotType::Interface0, SlotType::Interface1],
         ValueKind::Float32 | ValueKind::Float64 => vec![SlotType::Float; elem_slots],
@@ -106,15 +107,42 @@ pub fn validate_queue_payload_layout(
     ch: GcRef,
     payload_layout: &[SlotType],
     context: &str,
-    module: Option<&vo_runtime::bytecode::Module>,
+    module: Option<ModuleRuntimeMetadata<'_>>,
 ) -> Result<(), String> {
-    let expected = select_woken_recv_slot_types(ch, module)?;
-    if payload_layout != expected.as_slice() {
+    validate_queue_payload_slots(ch, payload_layout.len(), context)?;
+    let elem_meta = unsafe { queue_state::elem_meta(ch) };
+    let matches = match elem_meta.value_kind() {
+        ValueKind::Struct => {
+            let meta_id = elem_meta.meta_id() as usize;
+            let expected = module
+                .and_then(|metadata| metadata.module().struct_metas.get(meta_id))
+                .ok_or_else(|| {
+                    format!(
+                        "select wake recv missing StructMeta id {meta_id} for payload root scan"
+                    )
+                })?;
+            payload_layout == expected.slot_types.as_slice()
+        }
+        ValueKind::Array => {
+            let expected = select_woken_recv_slot_types(ch, module)?;
+            payload_layout == expected.as_slice()
+        }
+        ValueKind::Interface => payload_layout == [SlotType::Interface0, SlotType::Interface1],
+        ValueKind::Float32 | ValueKind::Float64 => {
+            payload_layout.iter().all(|slot| *slot == SlotType::Float)
+        }
+        kind if kind.may_contain_gc_refs() => {
+            payload_layout.iter().all(|slot| *slot == SlotType::GcRef)
+        }
+        _ => payload_layout.iter().all(|slot| *slot == SlotType::Value),
+    };
+    if !matches {
+        let expected = select_woken_recv_slot_types(ch, module)?;
         return Err(format!(
             "{context} payload layout {payload_layout:?} does not match queue element layout {expected:?}"
         ));
     }
-    validate_queue_payload_slots(ch, payload_layout.len(), context)
+    Ok(())
 }
 
 pub fn preflight_island_route(
@@ -138,13 +166,10 @@ pub fn preflight_island_route(
     }
 }
 
-pub fn preflight_queue_close_routes(state: &crate::vm::VmState, ch: GcRef) -> Result<(), String> {
-    if ch.is_null() {
-        return Ok(());
-    }
-    let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueClose") else {
-        return Ok(());
-    };
+fn preflight_queue_close_routes_validated(
+    state: &crate::vm::VmState,
+    ch: GcRef,
+) -> Result<(), String> {
     if unsafe { queue::is_remote(ch) } {
         let proxy = unsafe { queue::remote_proxy(ch) };
         if !proxy.closed {
@@ -160,13 +185,10 @@ pub fn preflight_queue_close_routes(state: &crate::vm::VmState, ch: GcRef) -> Re
     Ok(())
 }
 
-pub fn preflight_queue_send_routes(state: &crate::vm::VmState, ch: GcRef) -> Result<(), String> {
-    if ch.is_null() {
-        return Ok(());
-    }
-    let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueSend") else {
-        return Ok(());
-    };
+fn preflight_queue_send_routes_validated(
+    state: &crate::vm::VmState,
+    ch: GcRef,
+) -> Result<(), String> {
     if unsafe { queue::is_remote(ch) } {
         let proxy = unsafe { queue::remote_proxy(ch) };
         if !proxy.closed {
@@ -180,25 +202,22 @@ pub fn preflight_queue_send_routes(state: &crate::vm::VmState, ch: GcRef) -> Res
         if unsafe { queue::home_info(ch) }.is_none() {
             return Err(format!(
                 "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
-                receiver.island_id, receiver.fiber_key
+                receiver.island_id(), receiver.fiber_key()
             ));
         }
         preflight_island_route(
             state,
-            receiver.island_id,
+            receiver.island_id(),
             "QueueSend remote receiver response route",
         )?;
     }
     Ok(())
 }
 
-pub fn preflight_queue_recv_routes(state: &crate::vm::VmState, ch: GcRef) -> Result<(), String> {
-    if ch.is_null() {
-        return Ok(());
-    }
-    let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueRecv") else {
-        return Ok(());
-    };
+pub(crate) fn preflight_queue_recv_routes_validated(
+    state: &crate::vm::VmState,
+    ch: GcRef,
+) -> Result<(), String> {
     if unsafe { queue::is_remote(ch) } {
         let proxy = unsafe { queue::remote_proxy(ch) };
         if !proxy.closed {
@@ -206,11 +225,17 @@ pub fn preflight_queue_recv_routes(state: &crate::vm::VmState, ch: GcRef) -> Res
         }
         return Ok(());
     }
-    queue_recv_endpoint_ack_preflight(ch)?;
     if let Some(sender) = unsafe { queue::next_recv_endpoint_sender(ch) } {
+        if unsafe { queue::home_info(ch) }.is_none() {
+            return Err(format!(
+                "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
+                sender.island_id(),
+                sender.fiber_key()
+            ));
+        }
         preflight_island_route(
             state,
-            sender.island_id,
+            sender.island_id(),
             "QueueRecv remote sender response route",
         )?;
     }
@@ -305,15 +330,6 @@ pub fn select_woken_recv_payload_with_slot_types(
     })
 }
 
-pub fn select_woken_recv_payload(
-    ch: GcRef,
-    payload: QueueMessage,
-    module: Option<&vo_runtime::bytecode::Module>,
-) -> Result<SelectWokenResult, String> {
-    let slot_types = select_woken_recv_slot_types(ch, module)?;
-    select_woken_recv_payload_with_slot_types(payload, slot_types)
-}
-
 #[derive(Debug)]
 pub enum QueueAction {
     Continue,
@@ -330,6 +346,7 @@ pub enum QueueAction {
     Trap(RuntimeTrapKind),
     Malformed(String),
     Close {
+        ch: GcRef,
         receivers: Vec<QueueWaiter>,
         senders: Vec<QueueWaiter>,
         endpoint_id: Option<u64>,
@@ -349,19 +366,17 @@ pub enum QueueAction {
     RemoteSendAck {
         endpoint_id: u64,
         target_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
+        wait_key: EndpointWaitKey,
         closed: bool,
-        rollback: Option<crate::runtime_boundary::RuntimeRollback>,
+        rollback: crate::runtime_boundary::RuntimeRollback,
     },
     RemoteRecvData {
         endpoint_id: u64,
         target_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
+        wait_key: EndpointWaitKey,
         data: Vec<u8>,
         island_effects: Vec<IslandCommandEffect>,
-        rollback: Option<crate::runtime_boundary::RuntimeRollback>,
+        rollback: crate::runtime_boundary::RuntimeRollback,
     },
     RemoteClose {
         endpoint_id: u64,
@@ -369,8 +384,6 @@ pub enum QueueAction {
         rollback: crate::runtime_boundary::RuntimeRollback,
     },
 }
-
-pub type QueueExecResult = QueueAction;
 
 #[derive(Debug)]
 pub enum QueueRecvCoreResult {
@@ -429,14 +442,14 @@ pub fn decode_remote_queue_recv_response(
     runtime_types: &[RuntimeType],
     endpoint_registry: &mut crate::vm::EndpointRegistry,
 ) -> Result<Option<QueueMessage>, super::transport::QueueHandleValidationError> {
-    if response.rejected {
-        Err(super::transport::QueueHandleValidationError::EndpointRecvRejected)
-    } else if response.closed {
-        Ok(None)
-    } else {
-        super::transport::unpack_transport_message(
+    match response {
+        crate::fiber::RemoteRecvResponse::Rejected => {
+            Err(super::transport::QueueHandleValidationError::EndpointRecvRejected)
+        }
+        crate::fiber::RemoteRecvResponse::Closed => Ok(None),
+        crate::fiber::RemoteRecvResponse::Data(data) => super::transport::unpack_transport_message(
             gc,
-            &response.data,
+            &data,
             elem_meta,
             elem_rttid,
             elem_slots,
@@ -445,7 +458,7 @@ pub fn decode_remote_queue_recv_response(
             runtime_types,
             endpoint_registry,
         )
-        .map(Some)
+        .map(Some),
     }
 }
 
@@ -535,74 +548,26 @@ pub fn queue_new_trap_kind(flags: u8) -> RuntimeTrapKind {
     }
 }
 
-pub type QueueNewResult = Result<(), String>;
-
-enum QueueSendPayload<'a> {
-    Borrowed(&'a [u64]),
-    Owned(QueueMessage),
-}
-
-impl QueueSendPayload<'_> {
-    #[inline]
-    fn as_slice(&self) -> &[u64] {
-        match self {
-            Self::Borrowed(value) => value,
-            Self::Owned(value) => value,
-        }
-    }
-
-    #[inline]
-    fn into_managed(self, gc: &mut Gc) -> Result<QueueMessage, MemoryError> {
-        match self {
-            Self::Borrowed(value) => QueueMessage::managed(gc, value),
-            Self::Owned(value) => value.promote(gc),
-        }
-    }
-}
-
-struct LocalQueueMutation {
+fn restore_direct_receiver(
+    state: &mut crate::vm::VmState,
     ch: GcRef,
-    state: vo_runtime::objects::queue_state::LocalQueueState,
-    endpoint_registry: crate::vm::EndpointRegistrySnapshot,
-    transfer_commit: super::QueueTransferCommit,
+    receiver: QueueWaiter,
+    transfer: super::QueueTransferCommit,
+) {
+    transfer.restore_committed_local_endpoint_state(state);
+    unsafe { queue::restore_direct_receiver(ch, receiver) };
+    state.mark_gc_all_roots_dirty();
 }
 
-impl LocalQueueMutation {
-    fn snapshot(state: &crate::vm::VmState, ch: GcRef) -> Self {
-        Self {
-            ch,
-            state: unsafe { queue::local_state(ch) }.clone(),
-            endpoint_registry: state.endpoint_registry.snapshot(),
-            transfer_commit: super::QueueTransferCommit::default(),
-        }
-    }
-
-    fn absorb_transfer(&mut self, commit: super::QueueTransferCommit) {
-        self.transfer_commit.absorb(commit);
-    }
-
-    fn rollback(self, state: &mut crate::vm::VmState) {
-        self.transfer_commit
-            .restore_committed_local_endpoint_state(state);
-        unsafe {
-            queue::with_local_state(self.ch, |local_state| {
-                *local_state = self.state;
-            })
-        };
-        state.endpoint_registry.restore(self.endpoint_registry);
-        state.mark_gc_all_roots_dirty();
-    }
-
-    fn into_runtime_rollback(self) -> crate::runtime_boundary::RuntimeRollback {
-        let local = crate::runtime_boundary::RuntimeRollback::local_queue_from_snapshot(
-            self.ch,
-            self.state,
-            self.endpoint_registry,
-        );
-        match self.transfer_commit.into_runtime_rollback() {
-            Some(transfer) => crate::runtime_boundary::RuntimeRollback::combine(local, transfer),
-            None => local,
-        }
+fn direct_receiver_rollback(
+    ch: GcRef,
+    receiver: QueueWaiter,
+    transfer: super::QueueTransferCommit,
+) -> crate::runtime_boundary::RuntimeRollback {
+    let receiver = crate::runtime_boundary::RuntimeRollback::direct_queue_receiver(ch, receiver);
+    match transfer.into_runtime_rollback() {
+        Some(transfer) => crate::runtime_boundary::RuntimeRollback::combine(receiver, transfer),
+        None => receiver,
     }
 }
 
@@ -614,7 +579,7 @@ pub fn exec_queue_new(
     gc: &mut Gc,
     module: &Module,
     elem_layout: &[SlotType],
-) -> QueueNewResult {
+) -> Result<(), String> {
     let kind = queue_new_kind_from_flags(inst.flags);
     let packed_type = stack_get(stack, bp + inst.b as usize);
     let elem_meta = ValueMeta::from_raw(packed_type as u32);
@@ -636,6 +601,34 @@ pub fn exec_queue_new(
     }
 }
 
+/// Copy a payload into Island-owned storage and publish every queue edge that
+/// can keep it live beyond the current instruction.
+pub(crate) fn prepare_local_queue_payload(
+    state: &mut crate::vm::VmState,
+    ch: GcRef,
+    src: &[u64],
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    context: &str,
+) -> Result<(QueueMessage, ValueMeta), String> {
+    let value = QueueMessage::managed(&mut state.gc, src)
+        .map_err(|error| format!("{context} Island allocation failed: {error}"))?;
+    if let Some(backing) = value.backing_ref() {
+        state.gc.write_barrier(ch, backing);
+    }
+    let elem_meta = unsafe { queue_state::elem_meta(ch) };
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+            &mut state.gc,
+            ch,
+            &value,
+            elem_meta,
+            module,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok((value, elem_meta))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn queue_send_core(
     ch: GcRef,
@@ -645,8 +638,8 @@ pub fn queue_send_core(
     state: &mut crate::vm::VmState,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-    module: Option<&vo_runtime::bytecode::Module>,
-) -> QueueExecResult {
+    module: Option<ModuleRuntimeMetadata<'_>>,
+) -> QueueAction {
     queue_send_core_with_layout(
         ch,
         src,
@@ -670,96 +663,49 @@ pub fn queue_send_core_with_layout(
     state: &mut crate::vm::VmState,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
-    module: Option<&vo_runtime::bytecode::Module>,
-) -> QueueExecResult {
-    queue_send_payload_core(
-        ch,
-        QueueSendPayload::Borrowed(src),
-        src_layout,
-        island_id,
-        fiber_key,
-        state,
-        struct_metas,
-        runtime_types,
-        module,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn queue_send_owned_core_with_layout(
-    ch: GcRef,
-    value: QueueMessage,
-    src_layout: Option<&[SlotType]>,
-    island_id: u32,
-    fiber_key: u64,
-    state: &mut crate::vm::VmState,
-    struct_metas: &[StructMeta],
-    runtime_types: &[RuntimeType],
-    module: Option<&vo_runtime::bytecode::Module>,
-) -> QueueExecResult {
-    queue_send_payload_core(
-        ch,
-        QueueSendPayload::Owned(value),
-        src_layout,
-        island_id,
-        fiber_key,
-        state,
-        struct_metas,
-        runtime_types,
-        module,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn queue_send_payload_core(
-    ch: GcRef,
-    payload: QueueSendPayload<'_>,
-    src_layout: Option<&[SlotType]>,
-    island_id: u32,
-    fiber_key: u64,
-    state: &mut crate::vm::VmState,
-    struct_metas: &[StructMeta],
-    runtime_types: &[RuntimeType],
-    module: Option<&vo_runtime::bytecode::Module>,
-) -> QueueExecResult {
-    let src = payload.as_slice();
+    module: Option<ModuleRuntimeMetadata<'_>>,
+) -> QueueAction {
     if ch.is_null() {
-        return QueueExecResult::Block { waiter: None };
+        return QueueAction::Block { waiter: None };
     }
     let ch = match validate_queue_handle(&state.gc, ch, "QueueSend") {
         Ok(ch) => ch,
-        Err(msg) => return QueueExecResult::Malformed(msg),
+        Err(msg) => return QueueAction::Malformed(msg),
     };
     if let Err(msg) = validate_queue_payload_slots(ch, src.len(), "QueueSend") {
-        return QueueExecResult::Malformed(msg);
+        return QueueAction::Malformed(msg);
     }
     if let Some(src_layout) = src_layout {
         if let Err(msg) = validate_queue_payload_layout(ch, src_layout, "QueueSend", module) {
-            return QueueExecResult::Malformed(msg);
+            return QueueAction::Malformed(msg);
         }
     }
-    if let Err(msg) = preflight_queue_send_routes(state, ch) {
-        return QueueExecResult::Malformed(msg);
+    if unsafe { queue::is_closed(ch) } {
+        return QueueAction::Trap(RuntimeTrapKind::SendOnClosedChannel);
     }
+    if let Err(msg) = preflight_queue_send_routes_validated(state, ch) {
+        return QueueAction::Malformed(msg);
+    }
+
+    let raw_module = module.map(ModuleRuntimeMetadata::module);
 
     // REMOTE channel — send via message passing
     if unsafe { queue::is_remote(ch) } {
         let proxy = unsafe { queue::remote_proxy(ch) };
-        if proxy.closed {
-            return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel);
-        }
         let mut island_effects = Vec::new();
         let transfer_commit = match super::prepare_remote_send_value_if_needed(
             ch,
             src,
             struct_metas,
-            module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+            raw_module
+                .map(|module| module.named_type_metas.as_slice())
+                .unwrap_or(&[]),
             runtime_types,
             state,
             &mut island_effects,
         ) {
             Ok(commit) => commit,
-            Err(msg) => return QueueExecResult::Malformed(msg),
+            Err(msg) => return QueueAction::Malformed(msg),
         };
         let elem_meta = unsafe { queue_state::elem_meta(ch) };
         let data = match unsafe {
@@ -768,19 +714,21 @@ fn queue_send_payload_core(
                 src,
                 elem_meta,
                 struct_metas,
-                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                raw_module
+                    .map(|module| module.named_type_metas.as_slice())
+                    .unwrap_or(&[]),
                 runtime_types,
             )
         } {
             Ok(data) => data,
             Err(error) => {
                 transfer_commit.restore_committed_local_endpoint_state(state);
-                return QueueExecResult::Malformed(format!(
+                return QueueAction::Malformed(format!(
                     "failed to pack remote send payload: {error}"
                 ));
             }
         };
-        let result = QueueExecResult::RemoteSend {
+        let result = QueueAction::RemoteSend {
             endpoint_id: proxy.endpoint_id,
             home_island: proxy.home_island,
             data,
@@ -791,52 +739,24 @@ fn queue_send_payload_core(
         return result;
     }
 
-    let value = match payload.into_managed(&mut state.gc) {
-        Ok(value) => value,
-        Err(error) => {
-            return QueueExecResult::Malformed(format!(
-                "QueueSend Island allocation failed: {error}"
-            ))
-        }
+    let (value, em) = match prepare_local_queue_payload(state, ch, src, module, "QueueSend") {
+        Ok(prepared) => prepared,
+        Err(message) => return QueueAction::Malformed(message),
     };
-    if let Some(backing) = value.backing_ref() {
-        state.gc.write_barrier(ch, backing);
-    }
-
-    // Write barrier: type-aware to avoid UB on mixed-slot types.
-    // Must be done before send_or_block because the value is moved into the buffer.
-    let em = unsafe { queue_state::elem_meta(ch) };
     let remote_direct_receiver = unsafe { queue::next_remote_direct_receiver(ch, island_id) };
-    if let Some(receiver) = remote_direct_receiver.as_ref() {
-        if unsafe { queue::home_info(ch) }.is_none() {
-            return QueueExecResult::Malformed(format!(
-                "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
-                receiver.island_id, receiver.fiber_key
-            ));
-        }
-    }
-    if em.value_kind().may_contain_gc_refs() {
-        if let Err(err) = vo_runtime::gc_types::try_typed_write_barrier_by_meta(
-            &mut state.gc,
-            ch,
-            &value,
+    if em.value_kind().may_contain_gc_refs() && remote_direct_receiver.is_some() {
+        if let Err(msg) = super::validate_value_queue_handles_for_transfer(
+            value.as_ref(),
             em,
-            module,
+            island_id,
+            struct_metas,
+            raw_module
+                .map(|module| module.named_type_metas.as_slice())
+                .unwrap_or(&[]),
+            runtime_types,
+            state,
         ) {
-            return QueueExecResult::Malformed(err.to_string());
-        }
-        if remote_direct_receiver.is_some() {
-            if let Err(msg) = super::validate_value_queue_handles_for_transfer(
-                value.as_ref(),
-                em,
-                island_id,
-                struct_metas,
-                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
-                runtime_types,
-                state,
-            ) {
-                return QueueExecResult::Malformed(msg);
-            }
+            return QueueAction::Malformed(msg);
         }
     }
     let select_recv_slot_types =
@@ -846,44 +766,46 @@ fn queue_send_payload_core(
                 Ok(slot_types)
             }) {
                 Ok(slot_types) => Some(slot_types),
-                Err(msg) => return QueueExecResult::Malformed(msg),
+                Err(msg) => return QueueAction::Malformed(msg),
             }
         } else {
             None
         };
 
-    let waiter = match QueueWaiter::try_simple_queue(
-        island_id,
-        fiber_key,
-        ch as u64,
-        SelectWaitKind::Send,
-    ) {
-        Ok(waiter) => waiter,
-        Err(err) => return QueueExecResult::Malformed(err.to_string()),
-    };
     let mut select_recv_slot_types = select_recv_slot_types;
-    let mut mutation = LocalQueueMutation::snapshot(state, ch);
-    match unsafe { queue::send_or_block_resolved(ch, value, waiter.clone(), island_id) } {
+    let result = unsafe {
+        queue::try_send_or_block_resolved_with(
+            ch,
+            value,
+            || QueueWaiter::try_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Send),
+            island_id,
+        )
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => return QueueAction::Malformed(err.to_string()),
+    };
+    match result {
         queue::ResolvedSendResult::Wake { receiver, payload } => {
             let payload = match payload {
                 Some(payload) => {
                     let Some(slot_types) = select_recv_slot_types.take() else {
-                        mutation.rollback(state);
-                        return QueueExecResult::Malformed(
+                        unsafe { queue::restore_direct_receiver(ch, receiver) };
+                        return QueueAction::Malformed(
                             "select wake recv payload returned without preflight".to_string(),
                         );
                     };
                     match select_woken_recv_payload_with_slot_types(payload, slot_types) {
                         Ok(payload) => Some(payload),
                         Err(msg) => {
-                            mutation.rollback(state);
-                            return QueueExecResult::Malformed(msg);
+                            unsafe { queue::restore_direct_receiver(ch, receiver) };
+                            return QueueAction::Malformed(msg);
                         }
                     }
                 }
                 None => None,
             };
-            QueueExecResult::Wake {
+            QueueAction::Wake {
                 waiter: receiver,
                 payload,
             }
@@ -892,32 +814,41 @@ fn queue_send_payload_core(
             receiver,
             payload: value,
         } => {
+            let target_island = receiver.island_id();
+            let receiver_key = receiver.fiber_key();
             let mut island_effects = Vec::new();
             let transfer_commit = match super::prepare_value_queue_handles_for_transfer_with_commit(
                 value.as_ref(),
                 em,
-                receiver.island_id,
+                target_island,
                 struct_metas,
-                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                raw_module
+                    .map(|module| module.named_type_metas.as_slice())
+                    .unwrap_or(&[]),
                 runtime_types,
                 state,
                 &mut island_effects,
             ) {
                 Ok(commit) => commit,
                 Err(msg) => {
-                    mutation.rollback(state);
-                    return QueueExecResult::Malformed(msg);
+                    unsafe { queue::restore_direct_receiver(ch, receiver) };
+                    return QueueAction::Malformed(msg);
                 }
             };
-            mutation.absorb_transfer(transfer_commit);
             let Some(home_info) = (unsafe { queue::home_info(ch) }) else {
-                mutation.rollback(state);
-                return QueueExecResult::Malformed(format!(
+                restore_direct_receiver(state, ch, receiver, transfer_commit);
+                return QueueAction::Malformed(format!(
                     "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
-                    receiver.island_id, receiver.fiber_key
+                    target_island, receiver_key
                 ));
             };
             let endpoint_id = home_info.endpoint_id;
+            let Some(wait_key) = receiver.endpoint_wait_key() else {
+                restore_direct_receiver(state, ch, receiver, transfer_commit);
+                return QueueAction::Malformed(
+                    "RemoteDirect receiver missing endpoint wait identity".to_string(),
+                );
+            };
             // Safety: the validated queue metadata matches `value`, which remains
             // rooted until the transport payload is materialized.
             let data = match unsafe {
@@ -926,48 +857,53 @@ fn queue_send_payload_core(
                     value.as_ref(),
                     em,
                     struct_metas,
-                    module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                    raw_module
+                        .map(|module| module.named_type_metas.as_slice())
+                        .unwrap_or(&[]),
                     runtime_types,
                 )
             } {
                 Ok(data) => data,
                 Err(error) => {
-                    mutation.rollback(state);
-                    return QueueExecResult::Malformed(format!(
+                    restore_direct_receiver(state, ch, receiver, transfer_commit);
+                    return QueueAction::Malformed(format!(
                         "failed to pack remote receive payload: {error}"
                     ));
                 }
             };
-            let rollback = mutation.into_runtime_rollback();
-            QueueExecResult::RemoteRecvData {
+            let rollback = direct_receiver_rollback(ch, receiver, transfer_commit);
+            QueueAction::RemoteRecvData {
                 endpoint_id,
-                target_island: receiver.island_id,
-                fiber_key: receiver.fiber_key,
-                wait_id: receiver.endpoint_wait_id(),
+                target_island,
+                wait_key,
                 data,
                 island_effects,
-                rollback: Some(rollback),
+                rollback,
             }
         }
-        queue::ResolvedSendResult::Buffered => QueueExecResult::Continue,
-        queue::ResolvedSendResult::Blocked => QueueExecResult::Block {
+        queue::ResolvedSendResult::Buffered => QueueAction::Continue,
+        queue::ResolvedSendResult::Blocked(waiter) => QueueAction::Block {
             waiter: Some(waiter),
         },
         queue::ResolvedSendResult::Closed => {
-            QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel)
+            QueueAction::Trap(RuntimeTrapKind::SendOnClosedChannel)
         }
     }
 }
 
-pub fn queue_recv_core(gc: &Gc, ch: GcRef, island_id: u32, fiber_key: u64) -> QueueRecvCoreResult {
+/// Execute receive after the caller validated every non-null queue handle.
+pub(crate) unsafe fn queue_recv_validated_core(
+    state: &crate::vm::VmState,
+    ch: GcRef,
+    island_id: u32,
+    fiber_key: u64,
+) -> QueueRecvCoreResult {
     if ch.is_null() {
         return QueueRecvCoreResult::WouldBlock { waiter: None };
     }
-    let ch = match validate_queue_handle(gc, ch, "QueueRecv") {
-        Ok(ch) => ch,
-        Err(msg) => return QueueRecvCoreResult::Malformed(msg),
-    };
-
+    if let Err(msg) = preflight_queue_recv_routes_validated(state, ch) {
+        return QueueRecvCoreResult::Malformed(msg);
+    }
     // REMOTE channel — recv via message passing
     if unsafe { queue::is_remote(ch) } {
         let proxy = unsafe { queue::remote_proxy(ch) };
@@ -979,45 +915,25 @@ pub fn queue_recv_core(gc: &Gc, ch: GcRef, island_id: u32, fiber_key: u64) -> Qu
             home_island: proxy.home_island,
         };
     }
-    if let Err(msg) = queue_recv_endpoint_ack_preflight(ch) {
-        return QueueRecvCoreResult::Malformed(msg);
-    }
-
-    let waiter = match QueueWaiter::try_simple_queue(
-        island_id,
-        fiber_key,
-        ch as u64,
-        SelectWaitKind::Recv,
-    ) {
-        Ok(waiter) => waiter,
-        Err(err) => return QueueRecvCoreResult::Malformed(err.to_string()),
+    let result = unsafe {
+        queue::try_recv_or_block_with(ch, || {
+            QueueWaiter::try_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Recv)
+        })
     };
-    match unsafe { queue::recv_or_block(ch, waiter.clone()) } {
-        BlockingRecvResult::Success {
+    match result {
+        Err(err) => QueueRecvCoreResult::Malformed(err.to_string()),
+        Ok(BlockingRecvResult::Success {
             woke_sender,
             payload,
-        } => QueueRecvCoreResult::Success {
+        }) => QueueRecvCoreResult::Success {
             data: payload,
             wake_sender: woke_sender,
         },
-        BlockingRecvResult::Blocked => QueueRecvCoreResult::WouldBlock {
+        Ok(BlockingRecvResult::Blocked(waiter)) => QueueRecvCoreResult::WouldBlock {
             waiter: Some(waiter),
         },
-        BlockingRecvResult::Closed => QueueRecvCoreResult::Closed,
+        Ok(BlockingRecvResult::Closed) => QueueRecvCoreResult::Closed,
     }
-}
-
-pub fn queue_recv_endpoint_ack_preflight(ch: GcRef) -> Result<(), String> {
-    if let Some(sender) = unsafe { queue::next_recv_endpoint_sender(ch) } {
-        if unsafe { queue::home_info(ch) }.is_none() {
-            return Err(format!(
-                "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
-                sender.island_id,
-                sender.fiber_key()
-            ));
-        }
-    }
-    Ok(())
 }
 
 pub fn queue_sender_ack_or_wake(
@@ -1025,25 +941,27 @@ pub fn queue_sender_ack_or_wake(
     sender: QueueWaiter,
     closed: bool,
     rollback: Option<crate::runtime_boundary::RuntimeRollback>,
-) -> QueueExecResult {
-    if sender.endpoint_wait_id() == 0 {
-        return QueueExecResult::Wake {
+) -> QueueAction {
+    let Some(wait_key) = sender.endpoint_wait_key() else {
+        return QueueAction::Wake {
             waiter: sender,
             payload: None,
         };
-    }
+    };
     let Some(home_info) = (unsafe { queue::home_info(ch) }) else {
-        return QueueExecResult::Malformed(format!(
+        return QueueAction::Malformed(format!(
             "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
-            sender.island_id,
+            sender.island_id(),
             sender.fiber_key()
         ));
     };
-    QueueExecResult::RemoteSendAck {
+    let Some(rollback) = rollback else {
+        return QueueAction::Malformed("remote endpoint sender missing queue rollback".to_string());
+    };
+    QueueAction::RemoteSendAck {
         endpoint_id: home_info.endpoint_id,
-        target_island: sender.island_id,
-        fiber_key: sender.fiber_key(),
-        wait_id: sender.endpoint_wait_id(),
+        target_island: sender.island_id(),
+        wait_key,
         closed,
         rollback,
     }
@@ -1056,34 +974,25 @@ pub fn exec_queue_recv(
     fiber_key: u64,
     inst: &Instruction,
     state: &crate::vm::VmState,
-    module: Option<&vo_runtime::bytecode::Module>,
-    elem_layout: Option<&[SlotType]>,
-) -> QueueExecResult {
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    elem_layout: &[SlotType],
+) -> QueueAction {
     let ch = stack_get(stack, bp + inst.b as usize) as GcRef;
-    // Verified bytecode always supplies QueueLayout. The legacy flag width is
-    // retained only for direct low-level callers exercising old instructions.
-    let elem_slots = elem_layout
-        .map(<[SlotType]>::len)
-        .unwrap_or_else(|| inst.recv_legacy_elem_slots() as usize);
+    let elem_slots = elem_layout.len();
     let has_ok = inst.recv_has_ok();
     let dst_start = bp + inst.a as usize;
 
     if !ch.is_null() {
         let ch = match validate_queue_handle(&state.gc, ch, "QueueRecv") {
             Ok(ch) => ch,
-            Err(msg) => return QueueExecResult::Malformed(msg),
+            Err(msg) => return QueueAction::Malformed(msg),
         };
         if let Err(msg) = validate_queue_payload_slots(ch, elem_slots, "QueueRecv") {
-            return QueueExecResult::Malformed(msg);
+            return QueueAction::Malformed(msg);
         }
-        if let Some(elem_layout) = elem_layout {
-            if let Err(msg) = validate_queue_payload_layout(ch, elem_layout, "QueueRecv", module) {
-                return QueueExecResult::Malformed(msg);
-            }
+        if let Err(msg) = validate_queue_payload_layout(ch, elem_layout, "QueueRecv", module) {
+            return QueueAction::Malformed(msg);
         }
-    }
-    if let Err(msg) = preflight_queue_recv_routes(state, ch) {
-        return QueueExecResult::Malformed(msg);
     }
     let remote_sender_rollback = if !ch.is_null()
         && !unsafe { queue::is_remote(ch) }
@@ -1101,27 +1010,25 @@ pub fn exec_queue_recv(
     };
 
     match complete_queue_recv(
-        queue_recv_core(&state.gc, ch, island_id, fiber_key),
+        unsafe { queue_recv_validated_core(state, ch, island_id, fiber_key) },
         elem_slots,
         has_ok,
         |i, value| stack_set(stack, dst_start + i, value),
     ) {
         Ok(Some(sender)) => queue_sender_ack_or_wake(ch, sender, false, remote_sender_rollback),
-        Ok(None) => QueueExecResult::Continue,
-        Err(QueueRecvCoreResult::WouldBlock { waiter }) => {
-            QueueExecResult::ReplayThenBlock { waiter }
-        }
+        Ok(None) => QueueAction::Continue,
+        Err(QueueRecvCoreResult::WouldBlock { waiter }) => QueueAction::ReplayThenBlock { waiter },
         Err(QueueRecvCoreResult::Remote {
             endpoint_id,
             home_island,
-        }) => QueueExecResult::RemoteRecv {
+        }) => QueueAction::RemoteRecv {
             endpoint_id,
             home_island,
         },
-        Err(QueueRecvCoreResult::Trap(kind)) => QueueExecResult::Trap(kind),
-        Err(QueueRecvCoreResult::Malformed(msg)) => QueueExecResult::Malformed(msg),
+        Err(QueueRecvCoreResult::Trap(kind)) => QueueAction::Trap(kind),
+        Err(QueueRecvCoreResult::Malformed(msg)) => QueueAction::Malformed(msg),
         Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
-            QueueExecResult::Malformed(
+            QueueAction::Malformed(
                 "complete_queue_recv returned terminal recv result as Err".to_string(),
             )
         }
@@ -1144,7 +1051,7 @@ pub fn exec_queue_get<F>(
     inst: &Instruction,
     gc: &Gc,
     get: F,
-) -> QueueExecResult
+) -> QueueAction
 where
     F: FnOnce(GcRef) -> usize,
 {
@@ -1154,34 +1061,37 @@ where
     } else {
         let obj = match validate_queue_handle(gc, obj, "QueueGet") {
             Ok(obj) => obj,
-            Err(msg) => return QueueExecResult::Malformed(msg),
+            Err(msg) => return QueueAction::Malformed(msg),
         };
         get(obj)
     };
     stack_set(stack, bp + inst.a as usize, val as u64);
-    QueueExecResult::Continue
+    QueueAction::Continue
 }
 
-pub fn queue_close_core(state: &crate::vm::VmState, ch: GcRef) -> QueueExecResult {
+pub fn queue_close_core(state: &crate::vm::VmState, ch: GcRef) -> QueueAction {
     if ch.is_null() {
-        return QueueExecResult::Trap(RuntimeTrapKind::CloseNilChannel);
+        return QueueAction::Trap(RuntimeTrapKind::CloseNilChannel);
     }
     let ch = match validate_queue_handle(&state.gc, ch, "QueueClose") {
         Ok(ch) => ch,
-        Err(msg) => return QueueExecResult::Malformed(msg),
+        Err(msg) => return QueueAction::Malformed(msg),
     };
+    if let Err(msg) = preflight_queue_close_routes_validated(state, ch) {
+        return QueueAction::Malformed(msg);
+    }
 
     // REMOTE channel close — send message to home island
     if unsafe { queue::is_remote(ch) } {
         let proxy = unsafe { queue::remote_proxy(ch) };
         if proxy.closed {
-            return QueueExecResult::Continue;
+            return QueueAction::Continue;
         }
         let endpoint_id = proxy.endpoint_id;
         let home_island = proxy.home_island;
         let rollback = crate::runtime_boundary::RuntimeRollback::remote_queue_proxy(state, ch);
         unsafe { queue::mark_remote_closed(ch) };
-        return QueueExecResult::RemoteClose {
+        return QueueAction::RemoteClose {
             endpoint_id,
             home_island,
             rollback,
@@ -1189,25 +1099,28 @@ pub fn queue_close_core(state: &crate::vm::VmState, ch: GcRef) -> QueueExecResul
     }
 
     if unsafe { queue::is_closed(ch) } {
-        return QueueExecResult::Trap(RuntimeTrapKind::CloseClosedChannel);
+        return QueueAction::Trap(RuntimeTrapKind::CloseClosedChannel);
     }
     if unsafe { queue::has_endpoint_waiters(ch) } && unsafe { queue::home_info(ch) }.is_none() {
-        return QueueExecResult::Malformed(
+        return QueueAction::Malformed(
             "QueueClose missing HomeInfo for remote endpoint waiters".to_string(),
         );
     }
-    let rollback = crate::runtime_boundary::RuntimeRollback::local_queue(state, ch);
+    let rollback = crate::runtime_boundary::RuntimeRollback::local_queue_close(ch);
     unsafe { queue::close(ch) };
-    let receivers = unsafe { queue::take_waiting_receivers(ch) };
-    let senders = unsafe { queue::take_waiting_senders(ch) }
-        .into_iter()
-        .map(|(w, _)| w)
-        .collect::<Vec<_>>();
+    let local = unsafe { queue::local_state(ch) };
+    let receivers: Vec<QueueWaiter> = local.waiting_receivers.iter().cloned().collect();
+    let senders: Vec<QueueWaiter> = local
+        .waiting_senders
+        .iter()
+        .map(|(waiter, _)| waiter.clone())
+        .collect();
     let endpoint_id = unsafe { queue::home_info(ch) }.map(|info| info.endpoint_id);
     if receivers.is_empty() && senders.is_empty() && endpoint_id.is_none() {
-        QueueExecResult::Continue
+        QueueAction::Continue
     } else {
-        QueueExecResult::Close {
+        QueueAction::Close {
+            ch,
             receivers,
             senders,
             endpoint_id,
@@ -1222,7 +1135,7 @@ pub fn exec_queue_close(
     bp: usize,
     inst: &Instruction,
     state: &crate::vm::VmState,
-) -> QueueExecResult {
+) -> QueueAction {
     let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
     queue_close_core(state, ch)
 }

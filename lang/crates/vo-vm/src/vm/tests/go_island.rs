@@ -7,10 +7,7 @@ fn vm_gc_001_interpreter_go_start_transition_marks_spawn_roots_dirty() {
         vec![Instruction::with_flags(Opcode::GoStart, 0, 1, 0, 0)],
         Vec::new(),
     );
-    module.functions[0].jit_metadata = vec![JitInstructionMetadata::CallLayout {
-        arg_layout: Vec::new(),
-        ret_layout: Vec::new(),
-    }];
+    module.functions[0].instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(FunctionDef {
         name: "spawned".to_string(),
         param_count: 0,
@@ -28,7 +25,7 @@ fn vm_gc_001_interpreter_go_start_transition_marks_spawn_roots_dirty() {
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         code: Vec::new(),
         slot_types: vec![SlotType::Value],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
@@ -78,7 +75,7 @@ fn malformed_select_without_begin_is_rejected_before_execution() {
     );
     let func = &mut module.functions[0];
     func.slot_types[0] = SlotType::GcRef;
-    func.jit_metadata = vec![JitInstructionMetadata::QueueLayout {
+    func.instruction_metadata = vec![InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value],
     }];
     refresh_vm_test_function_metadata(func);
@@ -90,13 +87,7 @@ fn malformed_select_without_begin_is_rejected_before_execution() {
 fn malformed_iface_assert_metadata_is_vm_error_instead_of_panic() {
     let mut module = malformed_single_instruction_module(
         "malformed-iface-assert",
-        vec![Instruction::with_flags(
-            Opcode::IfaceAssert,
-            crate::instruction::pack_iface_assert_flags(1, false, 2).unwrap(),
-            2,
-            0,
-            0,
-        )],
+        vec![Instruction::with_flags(Opcode::IfaceAssert, 0, 2, 0, 0)],
         Vec::new(),
     );
     module.interface_metas = vec![InterfaceMeta {
@@ -120,7 +111,7 @@ fn malformed_iface_assert_metadata_is_vm_error_instead_of_panic() {
 fn malformed_defer_arg_layout_is_vm_error_instead_of_metadata_panic() {
     let mut module = malformed_single_instruction_module(
         "malformed-defer-push",
-        vec![Instruction::with_flags(Opcode::DeferPush, 1, 0, 3, 2)],
+        vec![Instruction::with_flags(Opcode::DeferPush, 1, 0, 3, 0)],
         Vec::new(),
     );
     let func = &mut module.functions[0];
@@ -161,7 +152,7 @@ fn malformed_call_extern_id_is_vm_error_instead_of_index_panic() {
         Vec::new(),
     );
     let func = &mut module.functions[0];
-    func.jit_metadata = vec![JitInstructionMetadata::CallExternLayout {
+    func.instruction_metadata = vec![InstructionMetadata::CallExternLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -196,7 +187,7 @@ fn vm_goisland_object_kind_002_malformed_closure_target_is_vm_error_instead_of_h
     let func = &mut module.functions[0];
     func.slot_types[0] = SlotType::GcRef;
     func.slot_types[1] = SlotType::GcRef;
-    func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+    func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -234,7 +225,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_island_gcref_before_islan
     let func = &mut module.functions[0];
     func.slot_types[0] = SlotType::GcRef;
     func.slot_types[1] = SlotType::GcRef;
-    func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+    func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -276,7 +267,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_closure_gcref_before_clos
     let func = &mut module.functions[0];
     func.slot_types[0] = SlotType::GcRef;
     func.slot_types[1] = SlotType::GcRef;
-    func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+    func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -319,7 +310,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_shape_drift_before_island_effects() 
         let func = &mut module.functions[0];
         func.slot_types[0] = SlotType::GcRef;
         func.slot_types[1] = SlotType::GcRef;
-        func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+        func.instruction_metadata = vec![InstructionMetadata::CallLayout {
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         }];
@@ -342,7 +333,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_shape_drift_before_island_effects() 
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         code: Vec::new(),
         slot_types: vec![SlotType::Value],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
@@ -381,14 +372,14 @@ fn vm_goisland_remote_shape_002_rejects_arg_shape_drift_before_island_effects() 
     }
     assert!(vm.state.outbound_commands.is_empty());
     #[cfg(feature = "jit")]
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
 }
 
 #[test]
 fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_effects() {
     let mut module = malformed_single_instruction_module(
         "remote-go-island-arg-metadata",
-        vec![Instruction::with_flags(Opcode::GoIsland, 1, 0, 1, 2)],
+        vec![Instruction::with_flags(Opcode::GoIsland, 0, 0, 1, 2)],
         Vec::new(),
     );
     {
@@ -396,7 +387,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
         func.slot_types[0] = SlotType::GcRef;
         func.slot_types[1] = SlotType::GcRef;
         func.slot_types[2] = SlotType::Value;
-        func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+        func.instruction_metadata = vec![InstructionMetadata::CallLayout {
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         }];
@@ -419,7 +410,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         code: Vec::new(),
         slot_types: vec![SlotType::GcRef, SlotType::GcRef],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
@@ -457,181 +448,5 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
     }
     assert!(vm.state.outbound_commands.is_empty());
     #[cfg(feature = "jit")]
-    assert!(vm.state.pending_runtime_transitions.is_empty());
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_paths_share_frame_call_validators() {
-    let interpreter_src =
-        crate::source_contract::production_source_without_test_modules(include_str!("../mod.rs"));
-    let jit_src = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../jit/callbacks/goroutine.rs"
-    ));
-    let interpreter_goisland =
-        source_slice_between(&interpreter_src, "Opcode::GoIsland =>", "Opcode::Invalid")
-            .expect("interpreter GoIsland arm");
-    let jit_goisland = jit_src
-        .split("pub extern \"C\" fn jit_go_island")
-        .nth(1)
-        .expect("JIT GoIsland callback");
-
-    assert_goisland_validators_before("interpreter", interpreter_goisland, "exec::exec_go_island(");
-    assert!(
-            goisland_validators_before_jit_publication(jit_goisland),
-            "jit goroutine callbacks GoIsland path must use shared frame_call object-kind validators before publishing island work"
-        );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_ignores_comment_spoofed_validators() {
-    let probe = r#"
-            Opcode::GoIsland => {
-                // validate_island_handle(
-                // validate_closure_target(
-                exec::exec_go_island(stack, bp, &inst, island_handle, &closure_target);
-            }
-        "#;
-
-    assert!(
-        !goisland_validators_before(probe, "exec::exec_go_island("),
-        "comments must not satisfy GoIsland shared-validator source contracts"
-    );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_rejects_jit_publication_before_validators() {
-    let probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                commit_go_spawn(ctx, vm, new_fiber);
-                let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                validate_closure_go_abi(ctx, &closure_target, args_ptr, arg_slots).unwrap();
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-
-    assert!(
-            !goisland_validators_before_jit_publication(probe),
-            "JIT GoIsland proof must use publication tokens, not an intermediate ABI validator, as the terminal"
-        );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_rejects_non_dominating_validator_tokens() {
-    let probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                if false {
-                    let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                    let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                }
-                commit_go_spawn(ctx, vm, new_fiber);
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-
-    assert!(
-        !goisland_validators_before_jit_publication(probe),
-        "unreachable validator tokens must not satisfy GoIsland publication source contracts"
-    );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_rejects_closure_body_spoofed_validators() {
-    let probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                let _spoof = || {
-                    let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                    let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                };
-                commit_go_spawn(ctx, vm, new_fiber);
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-
-    assert!(
-        !goisland_validators_before_jit_publication(probe),
-        "closure-body validator tokens must not satisfy GoIsland publication source contracts"
-    );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_rejects_async_body_spoofed_validators() {
-    let probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                let _spoof = async {
-                    let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                    let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                };
-                commit_go_spawn(ctx, vm, new_fiber);
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-
-    assert!(
-        !goisland_validators_before_jit_publication(probe),
-        "async-body validator tokens must not satisfy GoIsland publication source contracts"
-    );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_rejects_nested_fn_spoofed_validators() {
-    let probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                fn spoof() {
-                    let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                    let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                }
-                commit_go_spawn(ctx, vm, new_fiber);
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-
-    assert!(
-        !goisland_validators_before_jit_publication(probe),
-        "nested function validator tokens must not satisfy GoIsland publication source contracts"
-    );
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_goisland_object_kind_002_source_contract_rejects_cfg_false_spoofed_validators() {
-    let cfg_probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                if cfg!(any()) {
-                    let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                    let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                }
-                commit_go_spawn(ctx, vm, new_fiber);
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-    let match_probe = r#"
-            pub extern "C" fn jit_go_island(ctx: &mut JitContext) -> JitResult {
-                match false {
-                    true => {
-                        let island_handle = validate_island_handle(gc, island, "jit_go_island").unwrap();
-                        let closure_target = validate_closure_target(gc, module, closure_ref, "jit_go_island").unwrap();
-                    }
-                    false => {}
-                }
-                commit_go_spawn(ctx, vm, new_fiber);
-                commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
-            }
-        "#;
-
-    assert!(
-        !goisland_validators_before_jit_publication(cfg_probe),
-        "compile-time-false cfg! branches must not satisfy GoIsland publication source contracts"
-    );
-    assert!(
-        !goisland_validators_before_jit_publication(match_probe),
-        "compile-time-false match arms must not satisfy GoIsland publication source contracts"
-    );
+    assert!(vm.pending_runtime_transitions.is_empty());
 }

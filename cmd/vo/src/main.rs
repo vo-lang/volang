@@ -25,8 +25,9 @@ use std::process;
 
 use vo_engine::{
     compile_path_with_auto_install, compile_path_with_generated_sources_and_auto_install,
-    format_text, run, run_with_byte_args_and_memory, CompileOutput, GcMode, Module, OomPolicy,
-    RunError, RunMode, VmMemoryConfig,
+    format_text, render_run_observation_json, run, run_with_byte_args_and_memory,
+    run_with_byte_args_and_memory_observed, CompileOutput, GcMode, Module, OomPolicy, RunError,
+    RunMode, VmMemoryConfig,
 };
 use vo_release::{ArtifactInput, StageReleaseOptions};
 use vo_syntax::format_source;
@@ -166,6 +167,13 @@ fn utf8_arg<'a>(arg: &'a OsStr, role: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("{role} must be valid UTF-8"))
 }
 
+fn strip_os_prefix<'a>(arg: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    let suffix = arg.as_encoded_bytes().strip_prefix(prefix.as_bytes())?;
+    // SAFETY: the split follows a non-empty ASCII substring, as required by
+    // OsStr's platform-independent encoded-byte boundary contract.
+    Some(unsafe { OsStr::from_encoded_bytes_unchecked(suffix) })
+}
+
 fn report_unknown_option(command: &str, arg: &OsStr) {
     match utf8_arg(arg, &format!("{command} option name")) {
         Ok(arg) => eprintln!("unknown {command} option: {arg}"),
@@ -187,7 +195,7 @@ fn print_run_usage() {
     println!(
         "usage: vo run <file|dir> [--mode=vm|jit] [--memory-reserve=BYTES] \
          [--memory-limit=BYTES] [--gc-mode=generational|incremental] \
-         [--no-memory-growth] [--codegen] [-- args...]"
+         [--no-memory-growth] [--jit-stats-json=PATH] [--codegen] [-- args...]"
     );
 }
 
@@ -278,6 +286,7 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     };
     let mut mode = RunMode::Vm;
     let mut print_codegen = false;
+    let mut jit_stats_json = None;
     let mut memory_config = VmMemoryConfig::default();
     let mut program_args: Vec<Vec<u8>> = Vec::new();
     let mut saw_dashdash = false;
@@ -314,6 +323,18 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
             return 1;
         } else if arg == OsStr::new("--codegen") {
             print_codegen = true;
+        } else if let Some(path) = strip_os_prefix(arg, "--jit-stats-json=") {
+            if path.is_empty() {
+                eprintln!("--jit-stats-json requires a non-empty path");
+                return 1;
+            }
+            if jit_stats_json.replace(PathBuf::from(path)).is_some() {
+                eprintln!("--jit-stats-json may be specified once");
+                return 1;
+            }
+        } else if arg == OsStr::new("--jit-stats-json") {
+            eprintln!("--jit-stats-json requires a value in --jit-stats-json=PATH form");
+            return 1;
         } else if arg.as_encoded_bytes().starts_with(b"--memory-reserve=") {
             let option = match utf8_arg(arg, "memory reserve") {
                 Ok(option) => option,
@@ -382,6 +403,15 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
         }
     }
 
+    if jit_stats_json.is_some() && mode != RunMode::Jit {
+        eprintln!("--jit-stats-json requires --mode=jit");
+        return 1;
+    }
+    if jit_stats_json.is_some() && print_codegen {
+        eprintln!("--jit-stats-json cannot be combined with --codegen");
+        return 1;
+    }
+
     let output = match compile_cli_path(&file) {
         Ok(o) => o,
         Err(e) => {
@@ -395,8 +425,33 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
         return 0;
     }
 
-    match run_with_byte_args_and_memory(output, mode, program_args, memory_config) {
-        Ok(()) => 0,
+    let run_result = if jit_stats_json.is_some() {
+        run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config).map(Some)
+    } else {
+        run_with_byte_args_and_memory(output, mode, program_args, memory_config).map(|()| None)
+    };
+    match run_result {
+        Ok(Some(observation)) => {
+            let bytes = match render_run_observation_json(observation) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    eprintln!("failed to encode JIT statistics: {error}");
+                    return 1;
+                }
+            };
+            let path = jit_stats_json
+                .as_ref()
+                .expect("observed run requires a statistics path");
+            if let Err(error) = fs::write(path, bytes) {
+                eprintln!(
+                    "failed to write JIT statistics to {}: {error}",
+                    path.display()
+                );
+                return 1;
+            }
+            0
+        }
+        Ok(None) => 0,
         Err(RunError::Exited(code)) => code,
         Err(error) => {
             eprintln!("{error}");
@@ -2117,6 +2172,26 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_compile_skips_parent_generator_config() {
+        let temporary = unique_temp_dir("bytecode-skip-generation");
+        fs::create_dir_all(&temporary).unwrap();
+        let root = temporary.canonicalize().unwrap();
+        let expected =
+            vo_engine::compile_source_at("package main\nfunc main() {}\n", &root).unwrap();
+        let artifact = root.join("program.vob");
+        fs::write(&artifact, expected.module.serialize().unwrap()).unwrap();
+        fs::write(root.join("vo.generate.toml"), "invalid generator config").unwrap();
+
+        let loaded = compile_cli_path(&artifact).unwrap();
+        assert_eq!(
+            loaded.module.serialize().unwrap(),
+            expected.module.serialize().unwrap()
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn formatter_argument_parser_rejects_unknown_options_before_writes() {
         let root = unique_temp_dir("fmt-option");
         fs::create_dir_all(&root).unwrap();
@@ -2554,6 +2629,31 @@ mod tests {
         assert_eq!(cmd_run_os(&os_strings(&["missing.vo", "--mode=banana"])), 1);
         assert_eq!(cmd_test(&os_strings(&["--mode=banana"])), 1);
         assert_eq!(cmd_run_os(&os_strings(&["missing.vo", "--mode"])), 1);
+        assert_eq!(
+            cmd_run_os(&os_strings(&["missing.vo", "--jit-stats-json"])),
+            1
+        );
+        assert_eq!(
+            cmd_run_os(&os_strings(&["missing.vo", "--jit-stats-json=stats.json"])),
+            1
+        );
+        assert_eq!(
+            cmd_run_os(&os_strings(&[
+                "missing.vo",
+                "--mode=jit",
+                "--jit-stats-json="
+            ])),
+            1
+        );
+        assert_eq!(
+            cmd_run_os(&os_strings(&[
+                "missing.vo",
+                "--mode=jit",
+                "--jit-stats-json=one.json",
+                "--jit-stats-json=two.json"
+            ])),
+            1
+        );
     }
 
     #[test]
@@ -2624,10 +2724,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_arguments_preserve_arbitrary_unix_bytes() {
-        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
         let value = OsString::from_vec(b"a\xffz".to_vec());
         assert_eq!(os_arg_into_bytes(value).unwrap(), b"a\xffz");
+        let option = OsStr::from_bytes(b"--jit-stats-json=a\xffz");
+        assert_eq!(
+            strip_os_prefix(option, "--jit-stats-json=").unwrap(),
+            OsStr::from_bytes(b"a\xffz")
+        );
     }
 
     #[test]
@@ -2642,6 +2747,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(cmd_run_os(&[source.into_os_string()]), 37);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(feature = "jit"))]
+    #[test]
+    fn run_command_rejects_jit_mode_when_cli_jit_feature_is_disabled() {
+        let root = unique_temp_dir("jit-feature-disabled");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.vo");
+        fs::write(&source, "package main\n\nfunc main() {}\n").unwrap();
+
+        assert_eq!(
+            cmd_run_os(&[source.into_os_string(), OsString::from("--mode=jit")]),
+            1
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn run_command_writes_opt_in_jit_statistics_without_using_guest_output() {
+        let root = unique_temp_dir("jit-stats-json");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.vo");
+        let stats = root.join("jit-stats.json");
+        fs::write(&source, "package main\n\nfunc main() {}\n").unwrap();
+        assert!(!stats.exists());
+
+        assert_eq!(
+            cmd_run_os(&[
+                source.into_os_string(),
+                OsString::from("--mode=jit"),
+                OsString::from(format!("--jit-stats-json={}", stats.display())),
+            ]),
+            0
+        );
+        let json = fs::read_to_string(&stats).expect("JIT statistics file");
+        assert!(json.contains("\"schema\": \"volang.jit.execution-stats.v1\""));
+        assert!(json.contains("\"scope\": \"root_vm\""));
+        assert!(json.contains("\"function_entries\""));
+        assert!(json.contains("\"loop_entries\""));
+        assert!(json.contains("\"side_exits\""));
+        assert!(json.contains("\"low_progress_function_disables\""));
+        assert!(json.contains("\"low_progress_loop_disables\""));
+
         fs::remove_dir_all(root).unwrap();
     }
 

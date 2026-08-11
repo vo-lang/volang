@@ -39,7 +39,7 @@ Related context:
   that semantic change is designed explicitly.
 - Do not add a new ad hoc test runner. Use crate tests, `eng/*.toml`,
   `cmd/vo-dev`, and `./d.py`.
-- Do not rename `JitInstructionMetadata` as part of unrelated verifier work.
+- Do not rename `InstructionMetadata` as part of unrelated verifier work.
   Clarify the contract first; a rename can be a follow-up migration.
 
 ## Current Architecture
@@ -56,7 +56,7 @@ Related context:
 1. Verify the module through `vo_common_core::verifier::verify_module`.
 2. Register stdlib, linkme, native extension, or WASM externs.
 3. Validate extern registration.
-4. If strict JIT is enabled, run `vo_jit::verify_module_after_common`.
+4. If strict JIT is enabled, bind the common certificate through `JitManager::init_verified`; the binder runs the strict-only JIT verifier once.
 5. Finish loading globals, itab cache, sentinel errors, GC state, and JIT tables.
 
 `vo-jit` is now layered on top of the shared verifier:
@@ -75,7 +75,7 @@ embed runner, or JIT must trust before executing a module:
 
 - module entry and island-init function indices
 - itab and named-method function references
-- `FunctionDef.code.len() == FunctionDef.jit_metadata.len()`
+- `FunctionDef.code.len() == FunctionDef.instruction_metadata.len()`
 - no `Opcode::Invalid`
 - local/global slot ranges and slot layouts
 - branch and loop target ranges
@@ -122,7 +122,7 @@ Tests:
 
 ### A2. Instruction Metadata Shape
 
-`JitInstructionMetadata` is now consumed by the shared verifier for VM-visible
+`InstructionMetadata` is now consumed by the shared verifier for VM-visible
 layout facts. Clarify and tighten that boundary:
 
 - Document that the type currently stores instruction metadata, not purely JIT

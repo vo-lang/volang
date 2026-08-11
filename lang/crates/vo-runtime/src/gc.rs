@@ -6,8 +6,6 @@ mod heap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use core::cell::Cell;
-
 use heap::{HeapError, HeapStats, SpanHeap};
 
 use crate::slot::{Slot, SLOT_BYTES};
@@ -79,6 +77,7 @@ pub(crate) const BLACK_BIT: u8 = 1 << 5; // bit 5
 pub(crate) const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
 pub(crate) const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
 pub(crate) const RUNTIME_BACKING_OBJECT_BIT: u8 = 1 << 1;
+const REMEMBERED_FORGET_PENDING_BIT: u8 = 1 << 2;
 
 // Age values (for generational GC)
 pub const G_YOUNG: u8 = 0;
@@ -157,6 +156,12 @@ struct GcLeaseEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AllocationExtent {
+    data_size: usize,
+    remembered_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryError {
     AllocationForbidden,
     GrowthDisabled,
@@ -227,6 +232,8 @@ pub struct MemoryStats {
     pub work_units_total: u64,
     pub last_step_work_units: usize,
     pub max_step_work_units: usize,
+    /// Number of remembered old parents. The legacy field name is preserved
+    /// in the public runtime/mem stats ABI.
     pub dirty_cards: usize,
     pub dirty_root_domains: usize,
     pub remark_rounds: u64,
@@ -404,8 +411,8 @@ pub struct GcStepStats {
     pub debt_after: i64,
     pub gray_len_before: usize,
     pub gray_len_after: usize,
-    pub grayagain_len_before: usize,
-    pub grayagain_len_after: usize,
+    pub remembered_len_before: usize,
+    pub remembered_len_after: usize,
     pub cycle_started: bool,
     pub cycle_finished: bool,
 }
@@ -432,8 +439,8 @@ impl Default for GcStepStats {
             debt_after: 0,
             gray_len_before: 0,
             gray_len_after: 0,
-            grayagain_len_before: 0,
-            grayagain_len_after: 0,
+            remembered_len_before: 0,
+            remembered_len_after: 0,
             cycle_started: false,
             cycle_finished: false,
         }
@@ -541,6 +548,20 @@ impl GcHeader {
     fn set_runtime_backing_object(&mut self) {
         self._reserved |= RUNTIME_BACKING_OBJECT_BIT;
     }
+
+    #[inline]
+    fn remembered_forget_pending(&self) -> bool {
+        (self._reserved & REMEMBERED_FORGET_PENDING_BIT) != 0
+    }
+
+    #[inline]
+    fn set_remembered_forget_pending(&mut self, pending: bool) {
+        if pending {
+            self._reserved |= REMEMBERED_FORGET_PENDING_BIT;
+        } else {
+            self._reserved &= !REMEMBERED_FORGET_PENDING_BIT;
+        }
+    }
 }
 
 /// GC reference - pointer to GcObject data (after header).
@@ -574,16 +595,18 @@ pub struct Gc {
     // ========== Object Storage ==========
     all_objects: Vec<GcRef>,
     all_object_data_sizes: Vec<usize>,
-    allocation_extents: hashbrown::HashMap<usize, usize>,
+    allocation_extents: hashbrown::HashMap<usize, AllocationExtent>,
     leases: Vec<GcLeaseEntry>,
-    object_index: core::cell::RefCell<Vec<GcRef>>,
-    object_index_dirty: Cell<bool>,
+    free_lease_indices: Vec<u32>,
 
     // ========== Mark Queues ==========
-    gray: Vec<GcRef>,      // To be scanned
-    grayagain: Vec<GcRef>, // Re-scan (barrier triggered)
+    gray: Vec<GcRef>,
+    remembered: Vec<GcRef>,
+    remembered_forget: Vec<GcRef>,
     pending_object_scan: Option<GcRef>,
     pending_trace_cursor: GcTraceCursor,
+    pending_remembered_parent: Option<GcRef>,
+    pending_remembered_has_young: bool,
     remembered_scan_pos: usize,
     remembered_scan_end: usize,
 
@@ -595,8 +618,14 @@ pub struct Gc {
 
     // ========== Memory Stats ==========
     total_bytes: usize, // Total allocated bytes
-    estimate: usize,    // Estimated live bytes after last GC
-    debt: i64,          // Work debt (triggers GC when > 0)
+    live_object_count: usize,
+    young_live_bytes: usize,
+    old_live_bytes: usize,
+    large_live_bytes: usize,
+    runtime_backing_bytes: usize,
+    active_lease_count: usize,
+    estimate: usize, // Estimated live bytes after last GC
+    debt: i64,       // Work debt (triggers GC when > 0)
 
     // ========== Parameters ==========
     pause: u16,      // Pause multiplier (default 200 = 2x)
@@ -637,6 +666,8 @@ impl Gc {
     const DEFAULT_PAUSE: u16 = 200; // Trigger at 2x estimated live size
     const DEFAULT_STEPMUL: u16 = 100; // Work multiplier
     const DEFAULT_STEPSIZE: usize = 8192; // 8KB per step
+    const NO_GROWTH_LEASES_PER_BLOCK: usize = 64;
+    const MAX_LEASE_SLOTS: usize = u32::MAX as usize;
 
     pub fn new() -> Self {
         Self::with_memory_config(VmMemoryConfig::default())
@@ -644,6 +675,12 @@ impl Gc {
     }
 
     pub fn with_memory_config(config: VmMemoryConfig) -> Result<Self, MemoryError> {
+        if config
+            .max_leases
+            .is_some_and(|max_leases| max_leases > Self::MAX_LEASE_SLOTS)
+        {
+            return Err(MemoryError::MetadataExhausted);
+        }
         let mut heap = SpanHeap::new(config.hard_limit_bytes);
         if config.initial_reserve_bytes > 0 {
             heap.reserve(config.initial_reserve_bytes)?;
@@ -652,18 +689,21 @@ impl Gc {
         heap.set_allocation_allowed(config.allocation_allowed);
         let max_objects = config
             .max_objects
-            .or_else(|| (!config.growth_allowed).then_some(config.initial_reserve_bytes / 64));
+            .or_else(|| (!config.growth_allowed).then(|| heap.max_min_cell_allocations()));
         let max_leases = config.max_leases.or_else(|| {
-            (!config.growth_allowed)
-                .then(|| (config.initial_reserve_bytes / (64 * 1024)).saturating_mul(64))
+            (!config.growth_allowed).then(|| {
+                heap.committed_block_count()
+                    .saturating_mul(Self::NO_GROWTH_LEASES_PER_BLOCK)
+            })
         });
         let mut all_objects = Vec::new();
         let mut all_object_data_sizes = Vec::new();
         let mut allocation_extents = hashbrown::HashMap::new();
         let mut leases = Vec::new();
-        let mut object_index = Vec::new();
+        let mut free_lease_indices = Vec::new();
         let mut gray = Vec::new();
-        let mut grayagain = Vec::new();
+        let mut remembered = Vec::new();
+        let mut remembered_forget = Vec::new();
         if let Some(max_objects) = max_objects {
             all_objects
                 .try_reserve_exact(max_objects)
@@ -674,17 +714,20 @@ impl Gc {
             allocation_extents
                 .try_reserve(max_objects)
                 .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            object_index
-                .try_reserve_exact(max_objects)
-                .map_err(|_| MemoryError::SystemAllocationFailed)?;
             gray.try_reserve_exact(max_objects)
                 .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            grayagain
+            remembered
+                .try_reserve_exact(max_objects)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            remembered_forget
                 .try_reserve_exact(max_objects)
                 .map_err(|_| MemoryError::SystemAllocationFailed)?;
         }
         if let Some(max_leases) = max_leases {
             leases
+                .try_reserve_exact(max_leases)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            free_lease_indices
                 .try_reserve_exact(max_leases)
                 .map_err(|_| MemoryError::SystemAllocationFailed)?;
         }
@@ -710,12 +753,14 @@ impl Gc {
             all_object_data_sizes,
             allocation_extents,
             leases,
-            object_index: core::cell::RefCell::new(object_index),
-            object_index_dirty: Cell::new(false),
+            free_lease_indices,
             gray,
-            grayagain,
+            remembered,
+            remembered_forget,
             pending_object_scan: None,
             pending_trace_cursor: GcTraceCursor::default(),
+            pending_remembered_parent: None,
+            pending_remembered_has_young: false,
             remembered_scan_pos: 0,
             remembered_scan_end: 0,
             state: GcState::Pause,
@@ -723,6 +768,12 @@ impl Gc {
             sweep_pos: 0,
             sweep_write_pos: 0,
             total_bytes: 0,
+            live_object_count: 0,
+            young_live_bytes: 0,
+            old_live_bytes: 0,
+            large_live_bytes: 0,
+            runtime_backing_bytes: 0,
+            active_lease_count: 0,
             estimate: 0,
             debt: 0,
             pause: Self::DEFAULT_PAUSE,
@@ -778,16 +829,14 @@ impl Gc {
         self.reject_owner_proxy_api("memory_reserve");
         self.heap.reserve(bytes)?;
         if let Some(max_objects) = self.max_objects {
-            let object_remaining = max_objects.saturating_sub(self.all_objects.capacity());
-            if object_remaining > 0 {
+            if self.all_objects.capacity() < max_objects {
                 self.all_objects
-                    .try_reserve_exact(object_remaining)
+                    .try_reserve_exact(max_objects.saturating_sub(self.all_objects.len()))
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
-            let size_remaining = max_objects.saturating_sub(self.all_object_data_sizes.capacity());
-            if size_remaining > 0 {
+            if self.all_object_data_sizes.capacity() < max_objects {
                 self.all_object_data_sizes
-                    .try_reserve_exact(size_remaining)
+                    .try_reserve_exact(max_objects.saturating_sub(self.all_object_data_sizes.len()))
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
             let extent_remaining = max_objects.saturating_sub(self.allocation_extents.len());
@@ -796,16 +845,40 @@ impl Gc {
                     .try_reserve(extent_remaining)
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
+            self.reserve_object_work_queues(max_objects)?;
         }
         if let Some(max_leases) = self.max_leases {
-            let remaining = max_leases.saturating_sub(self.leases.capacity());
-            if remaining > 0 {
+            if self.leases.capacity() < max_leases {
                 self.leases
-                    .try_reserve_exact(remaining)
+                    .try_reserve_exact(max_leases.saturating_sub(self.leases.len()))
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            if self.free_lease_indices.capacity() < max_leases {
+                self.free_lease_indices
+                    .try_reserve_exact(max_leases.saturating_sub(self.free_lease_indices.len()))
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
         }
         Ok(self.memory_stats())
+    }
+
+    /// Keep every object-indexed collector queue large enough for the complete
+    /// live-object set. Queue insertion can then remain infallible after an
+    /// object color or remembered-set bit has changed, and a bounded GC slice
+    /// never hides a whole-Vec reallocation in one work unit.
+    fn reserve_object_work_queues(&mut self, object_capacity: usize) -> Result<(), MemoryError> {
+        for queue in [
+            &mut self.gray,
+            &mut self.remembered,
+            &mut self.remembered_forget,
+        ] {
+            if queue.capacity() < object_capacity {
+                queue
+                    .try_reserve_exact(object_capacity.saturating_sub(queue.len()))
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -814,17 +887,15 @@ impl Gc {
         if !allowed && self.heap.growth_allowed() {
             let max_objects = self
                 .max_objects
-                .unwrap_or_else(|| self.heap.stats().committed_bytes / 64);
-            let object_additional = max_objects.saturating_sub(self.all_objects.capacity());
-            if object_additional > 0 {
+                .unwrap_or_else(|| self.heap.max_min_cell_allocations());
+            if self.all_objects.capacity() < max_objects {
                 self.all_objects
-                    .try_reserve_exact(object_additional)
+                    .try_reserve_exact(max_objects.saturating_sub(self.all_objects.len()))
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
-            let size_additional = max_objects.saturating_sub(self.all_object_data_sizes.capacity());
-            if size_additional > 0 {
+            if self.all_object_data_sizes.capacity() < max_objects {
                 self.all_object_data_sizes
-                    .try_reserve_exact(size_additional)
+                    .try_reserve_exact(max_objects.saturating_sub(self.all_object_data_sizes.len()))
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
             let extent_additional = max_objects.saturating_sub(self.allocation_extents.len());
@@ -833,32 +904,22 @@ impl Gc {
                     .try_reserve(extent_additional)
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
-            {
-                let mut index = self.object_index.borrow_mut();
-                let additional = max_objects.saturating_sub(index.capacity());
-                if additional > 0 {
-                    index
-                        .try_reserve_exact(additional)
-                        .map_err(|_| MemoryError::SystemAllocationFailed)?;
-                }
-            }
-            for queue in [&mut self.gray, &mut self.grayagain] {
-                let additional = max_objects.saturating_sub(queue.capacity());
-                if additional > 0 {
-                    queue
-                        .try_reserve_exact(additional)
-                        .map_err(|_| MemoryError::SystemAllocationFailed)?;
-                }
-            }
+            self.reserve_object_work_queues(max_objects)?;
             self.max_objects = Some(max_objects);
 
             let max_leases = self.max_leases.unwrap_or_else(|| {
-                (self.heap.stats().committed_bytes / heap::HEAP_BLOCK_SIZE).saturating_mul(64)
+                self.heap
+                    .committed_block_count()
+                    .saturating_mul(Self::NO_GROWTH_LEASES_PER_BLOCK)
             });
-            let additional = max_leases.saturating_sub(self.leases.capacity());
-            if additional > 0 {
+            if self.leases.capacity() < max_leases {
                 self.leases
-                    .try_reserve_exact(additional)
+                    .try_reserve_exact(max_leases.saturating_sub(self.leases.len()))
+                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
+            }
+            if self.free_lease_indices.capacity() < max_leases {
+                self.free_lease_indices
+                    .try_reserve_exact(max_leases.saturating_sub(self.free_lease_indices.len()))
                     .map_err(|_| MemoryError::SystemAllocationFailed)?;
             }
             self.max_leases = Some(max_leases);
@@ -1012,24 +1073,20 @@ impl Gc {
             .canonicalize_ref(obj)
             .filter(|obj| !obj.is_null())
             .ok_or(MemoryError::InvalidPointer)?;
-        if let Some((index, entry)) = self
-            .leases
-            .iter_mut()
-            .enumerate()
-            .find(|(_, entry)| entry.root.is_null() && !entry.retired)
-        {
+        if let Some(index) = self.free_lease_indices.pop() {
+            let entry = &mut self.leases[index as usize];
+            debug_assert!(entry.root.is_null() && !entry.retired);
             entry.root = obj;
             let generation = entry.generation;
+            self.active_lease_count += 1;
             self.mark_gray(obj);
             self.roots_changed();
-            return Ok(GcLease {
-                index: index as u32,
-                generation,
-            });
+            return Ok(GcLease { index, generation });
         }
         if self
             .max_leases
             .is_some_and(|max_leases| self.leases.len() >= max_leases)
+            || self.leases.len() >= Self::MAX_LEASE_SLOTS
         {
             return Err(MemoryError::MetadataExhausted);
         }
@@ -1047,6 +1104,7 @@ impl Gc {
             generation: 1,
             retired: false,
         });
+        self.active_lease_count += 1;
         self.mark_gray(obj);
         self.roots_changed();
         Ok(GcLease {
@@ -1076,9 +1134,21 @@ impl Gc {
                 !entry.retired && !entry.root.is_null() && entry.generation == lease.generation
             })
             .ok_or(MemoryError::InvalidPointer)?;
+        if entry.generation != u32::MAX
+            && self.free_lease_indices.len() == self.free_lease_indices.capacity()
+        {
+            if !self.heap.growth_allowed() {
+                return Err(MemoryError::MetadataExhausted);
+            }
+            self.free_lease_indices
+                .try_reserve(1)
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
+        }
         entry.root = core::ptr::null_mut();
+        self.active_lease_count -= 1;
         if let Some(next) = entry.generation.checked_add(1) {
             entry.generation = next;
+            self.free_lease_indices.push(lease.index);
         } else {
             entry.retired = true;
         }
@@ -1094,29 +1164,7 @@ impl Gc {
             segment_count,
             block_count,
             free_blocks,
-            dirty_cards,
         } = self.heap.stats();
-        let mut young_live_bytes = 0usize;
-        let mut old_live_bytes = 0usize;
-        let mut large_live_bytes = 0usize;
-        let mut runtime_backing_bytes = 0usize;
-        for (index, &obj) in self.all_objects.iter().enumerate() {
-            if obj.is_null() {
-                continue;
-            }
-            let size = GcHeader::SIZE + self.all_object_data_sizes[index];
-            if unsafe { Self::header(obj) }.age() >= G_OLD {
-                old_live_bytes = old_live_bytes.saturating_add(size);
-            } else {
-                young_live_bytes = young_live_bytes.saturating_add(size);
-            }
-            if size > (1usize << 15) {
-                large_live_bytes = large_live_bytes.saturating_add(size);
-            }
-            if unsafe { Self::header(obj) }.is_runtime_backing_object() {
-                runtime_backing_bytes = runtime_backing_bytes.saturating_add(size);
-            }
-        }
         let fragmentation_bytes = allocated_span_bytes.saturating_sub(self.total_bytes);
         MemoryStats {
             managed_reserved_bytes: committed_bytes,
@@ -1127,11 +1175,11 @@ impl Gc {
             segment_count,
             block_count,
             free_blocks,
-            object_count: self.object_count(),
-            young_live_bytes,
-            old_live_bytes,
-            large_live_bytes,
-            runtime_backing_bytes,
+            object_count: self.live_object_count,
+            young_live_bytes: self.young_live_bytes,
+            old_live_bytes: self.old_live_bytes,
+            large_live_bytes: self.large_live_bytes,
+            runtime_backing_bytes: self.runtime_backing_bytes,
             external_reported_bytes: self.external_reported_bytes,
             unknown_external_provider_count: self.unknown_external_provider_count,
             partial_span_bytes: fragmentation_bytes,
@@ -1146,18 +1194,14 @@ impl Gc {
             work_units_total: self.work_units_total,
             last_step_work_units: self.last_step_stats.total_work_bytes / SLOT_BYTES,
             max_step_work_units: self.max_step_work_units,
-            dirty_cards,
+            dirty_cards: self.remembered.len(),
             dirty_root_domains: usize::from(
                 self.pending_root_scan.is_some()
                     || !self.atomic_root_scan_complete
                     || !self.sweep_root_scan_complete,
             ),
             remark_rounds: self.remark_rounds,
-            active_leases: self
-                .leases
-                .iter()
-                .filter(|entry| !entry.root.is_null())
-                .count(),
+            active_leases: self.active_lease_count,
             reclaim_backlog_bytes: pending_reclaim_bytes,
             growth_allowed: self.heap.growth_allowed(),
             allocation_allowed: self.heap.allocation_allowed(),
@@ -1248,6 +1292,11 @@ impl Gc {
         let backing = self.alloc_array(ValueMeta::new(0, ValueKind::Uint64), total_slots);
         if !backing.is_null() {
             unsafe { Self::header_mut(backing) }.set_runtime_backing_object();
+            if self.owner_dispatch.is_none() {
+                self.runtime_backing_bytes = self.runtime_backing_bytes.saturating_add(
+                    GcHeader::SIZE.saturating_add(total_slots.saturating_mul(SLOT_BYTES)),
+                );
+            }
         }
         backing
     }
@@ -1329,6 +1378,10 @@ impl Gc {
                 return core::ptr::null_mut();
             }
         }
+        if let Err(error) = self.reserve_object_work_queues(self.all_objects.capacity()) {
+            self.record_allocation_failure(error);
+            return core::ptr::null_mut();
+        }
 
         let allocation = match self.heap.allocate(total_size) {
             Ok(allocation) => allocation,
@@ -1351,19 +1404,30 @@ impl Gc {
 
         self.all_objects.push(data_ptr);
         self.all_object_data_sizes.push(data_size);
-        let replaced_extent = self.allocation_extents.insert(data_ptr as usize, data_size);
+        let replaced_extent = self.allocation_extents.insert(
+            data_ptr as usize,
+            AllocationExtent {
+                data_size,
+                remembered_index: None,
+            },
+        );
         assert!(
             replaced_extent.is_none(),
             "new allocation must not replace a live allocation extent"
         );
-        self.object_index_dirty.set(true);
         self.total_bytes += total_size;
+        self.live_object_count += 1;
+        self.young_live_bytes += total_size;
+        if total_size > (1usize << 15) {
+            self.large_live_bytes += total_size;
+        }
         self.allocation_bytes_total = self
             .allocation_bytes_total
             .saturating_add(total_size as u64);
         self.debt += total_size as i64;
         if matches!(self.state, GcState::Propagate | GcState::Atomic) {
             unsafe { Self::header_mut(data_ptr) }.set_gray();
+            debug_assert!(self.gray.len() < self.gray.capacity());
             self.gray.push(data_ptr);
         }
 
@@ -1377,6 +1441,13 @@ impl Gc {
     fn record_allocation_failure(&mut self, error: MemoryError) {
         self.allocation_failures = self.allocation_failures.saturating_add(1);
         self.last_memory_error = Some(error);
+    }
+
+    /// Record fallible host-side runtime metadata allocation owned by this
+    /// Island. Container/transport helpers use this to preserve the same sticky
+    /// OOM path as managed allocations.
+    pub(crate) fn record_system_allocation_failure(&mut self) {
+        self.record_allocation_failure(MemoryError::SystemAllocationFailed);
     }
 
     /// Read a slot from a GC object.
@@ -1435,7 +1506,9 @@ impl Gc {
     }
 
     fn allocated_data_size_bytes_for_base(&self, obj: GcRef) -> Option<usize> {
-        self.allocation_extents.get(&(obj as usize)).copied()
+        self.allocation_extents
+            .get(&(obj as usize))
+            .map(|extent| extent.data_size)
     }
 
     pub fn allocated_data_size_bytes(&self, obj: GcRef) -> Option<usize> {
@@ -1462,24 +1535,6 @@ impl Gc {
             return None;
         }
         Some((base, offset, data_size))
-    }
-
-    fn refresh_object_index(&self) {
-        if !self.object_index_dirty.get() {
-            return;
-        }
-
-        let mut index = self.object_index.borrow_mut();
-        index.clear();
-        index.extend(
-            self.all_objects
-                .iter()
-                .copied()
-                .filter(|object| !object.is_null()),
-        );
-        index.sort_unstable_by_key(|&object| object as usize);
-        index.dedup();
-        self.object_index_dirty.set(false);
     }
 
     // The owner-dispatch callback receives an opaque handle. It validates the
@@ -1513,17 +1568,6 @@ impl Gc {
         (addr == base as usize || addr < data_end).then_some(base)
     }
 
-    pub fn debug_ref_membership(&self, obj: GcRef) -> (bool, bool, usize) {
-        self.reject_owner_proxy_api("debug_ref_membership");
-        let in_all_objects = self.canonicalize_ref(obj) == Some(obj);
-        self.refresh_object_index();
-        let index = self.object_index.borrow();
-        let in_object_index = index
-            .binary_search_by_key(&(obj as usize), |&candidate| candidate as usize)
-            .is_ok();
-        (in_all_objects, in_object_index, index.len())
-    }
-
     /// Mark an object as gray (pending scan).
     #[inline]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -1538,6 +1582,9 @@ impl Gc {
         let Some(obj) = self.canonicalize_ref(obj) else {
             self.mark_gray_fail(obj);
         };
+        if self.pending_remembered_parent.is_some() && unsafe { Self::header(obj) }.age() < G_OLD {
+            self.pending_remembered_has_young = true;
+        }
         if self.state == GcState::Sweep {
             self.mark_dead_white_gray(obj);
             return;
@@ -1545,6 +1592,7 @@ impl Gc {
         let header = unsafe { Self::header_mut(obj) };
         if header.is_white() {
             header.set_gray();
+            debug_assert!(self.gray.len() < self.gray.capacity());
             self.gray.push(obj);
         }
     }
@@ -1555,6 +1603,7 @@ impl Gc {
         let header = unsafe { Self::header_mut(obj) };
         if header.marked & WHITE_BITS == dead_white {
             header.set_gray();
+            debug_assert!(self.gray.len() < self.gray.capacity());
             self.gray.push(obj);
         }
     }
@@ -1582,6 +1631,7 @@ impl Gc {
         let header = unsafe { Self::header_mut(obj) };
         if header.marked & WHITE_BITS == self.current_white {
             header.set_gray();
+            debug_assert!(self.gray.len() < self.gray.capacity());
             self.gray.push(obj);
         }
     }
@@ -1598,6 +1648,47 @@ impl Gc {
             loc.file(),
             loc.line(),
         );
+    }
+
+    fn remember_parent(&mut self, parent: GcRef) {
+        let key = parent as usize;
+        let already_remembered = self
+            .allocation_extents
+            .get(&key)
+            .and_then(|extent| extent.remembered_index)
+            .is_some();
+        if already_remembered {
+            unsafe { Self::header_mut(parent) }.set_remembered_forget_pending(false);
+            return;
+        }
+        let index = self.remembered.len();
+        debug_assert!(self.remembered.len() < self.remembered.capacity());
+        self.remembered.push(parent);
+        self.allocation_extents
+            .get_mut(&key)
+            .expect("live parent must have allocation metadata")
+            .remembered_index = Some(index);
+    }
+
+    fn forget_remembered_parent(&mut self, parent: GcRef) {
+        unsafe { Self::header_mut(parent) }.set_remembered_forget_pending(false);
+        let key = parent as usize;
+        let Some(index) = self
+            .allocation_extents
+            .get_mut(&key)
+            .and_then(|extent| extent.remembered_index.take())
+        else {
+            return;
+        };
+        let moved = self.remembered.swap_remove(index);
+        debug_assert_eq!(moved, parent);
+        if index < self.remembered.len() {
+            let replacement = self.remembered[index];
+            self.allocation_extents
+                .get_mut(&(replacement as usize))
+                .expect("remembered parent must have allocation metadata")
+                .remembered_index = Some(index);
+        }
     }
 
     /// Typed new-value barrier shared by the interpreter, JIT, stdlib, and FFI.
@@ -1629,8 +1720,12 @@ impl Gc {
         let parent_age = unsafe { Self::header(parent) }.age();
         let child_age = unsafe { Self::header(child) }.age();
         if self.gc_mode == GcMode::Generational && parent_age >= G_OLD && child_age < G_OLD {
-            self.heap
-                .dirty_card_for_store(parent as usize, parent as usize);
+            self.remember_parent(parent);
+            if self.cycle_kind == GcCycleKind::Minor
+                && matches!(self.state, GcState::Propagate | GcState::Atomic)
+            {
+                self.mark_gray(child);
+            }
         }
 
         match self.state {
@@ -1900,7 +1995,7 @@ impl Gc {
             heap_bytes_before: self.total_bytes,
             debt_before: self.debt,
             gray_len_before: self.gray.len(),
-            grayagain_len_before: self.grayagain.len(),
+            remembered_len_before: self.remembered.len(),
             ..GcStepStats::default()
         };
 
@@ -1997,12 +2092,12 @@ impl Gc {
                     self.force_major_cycle = false;
                     self.cycle_id = self.cycle_id.saturating_add(1);
                     self.current_white ^= WHITE_BITS;
+                    debug_assert!(self.remembered_forget.is_empty());
                     self.remembered_scan_pos = 0;
-                    // A minor cycle only needs remembered parents that already
-                    // existed at cycle start. Objects allocated while marking
-                    // are young, so extending this frontier would make the
-                    // remembered pass chase a growing object table forever.
-                    self.remembered_scan_end = self.all_objects.len();
+                    // Snapshot the stable remembered-parent prefix. New
+                    // old-to-young stores shade their child immediately and
+                    // join the next minor cycle's prefix.
+                    self.remembered_scan_end = self.remembered.len();
                     self.atomic_root_scan_complete = false;
                     self.sweep_root_scan_complete = false;
                     self.pending_root_scan = Some(GcRootScanKind::StartCycle);
@@ -2023,7 +2118,7 @@ impl Gc {
                     };
                     stats.propagate_work_bytes += remembered_work;
                     work += remembered_work;
-                    if work >= phase_limit {
+                    if work >= phase_limit || self.remembered_scan_pos < self.remembered_scan_end {
                         break;
                     }
                     let propagate_work = {
@@ -2042,9 +2137,14 @@ impl Gc {
                     stats.propagate_work_bytes += propagate_work;
                     work += propagate_work;
 
+                    let forget_work = self.remembered_forget_step(phase_limit.saturating_sub(work));
+                    stats.propagate_work_bytes += forget_work;
+                    work += forget_work;
+
                     if self.gray.is_empty()
                         && self.pending_object_scan.is_none()
                         && self.remembered_scan_pos >= self.remembered_scan_end
+                        && self.remembered_forget.is_empty()
                     {
                         self.state = GcState::Atomic;
                         break;
@@ -2174,7 +2274,7 @@ impl Gc {
         stats.heap_bytes_after = self.total_bytes;
         stats.debt_after = self.debt;
         stats.gray_len_after = self.gray.len();
-        stats.grayagain_len_after = self.grayagain.len();
+        stats.remembered_len_after = self.remembered.len();
         let step_units = work.div_ceil(SLOT_BYTES);
         self.work_units_total = self.work_units_total.saturating_add(step_units as u64);
         self.max_step_work_units = self.max_step_work_units.max(step_units);
@@ -2182,12 +2282,7 @@ impl Gc {
         work
     }
 
-    /// Discover old objects whose remembered card may contain a young edge.
-    ///
-    /// Card clearing is deliberately conservative: a dirty card remains dirty
-    /// until its block is reclaimed. This avoids an extra post-scan pass to
-    /// prove that every old-to-young edge disappeared, while keeping discovery
-    /// bounded to one object-table entry per work unit.
+    /// Queue the stable prefix of old parents known to contain young edges.
     fn remembered_step(&mut self, limit: usize) -> usize {
         let entry_budget = limit / SLOT_BYTES;
         if entry_budget == 0 {
@@ -2199,21 +2294,34 @@ impl Gc {
             .saturating_add(entry_budget)
             .min(self.remembered_scan_end);
         while self.remembered_scan_pos < end {
-            let obj = self.all_objects[self.remembered_scan_pos];
+            let obj = self.remembered[self.remembered_scan_pos];
             self.remembered_scan_pos += 1;
-            if obj.is_null() {
-                continue;
-            }
             let header = unsafe { Self::header(obj) };
-            if header.age() >= G_OLD
-                && self.heap.allocation_has_dirty_cards(obj as usize)
-                && header.is_white()
-            {
+            debug_assert!(header.age() >= G_OLD);
+            if header.is_white() {
                 unsafe { Self::header_mut(obj) }.set_gray();
+                debug_assert!(self.gray.len() < self.gray.capacity());
                 self.gray.push(obj);
             }
         }
         (end - start) * SLOT_BYTES
+    }
+
+    /// Retire remembered parents after the stable prefix has been queued.
+    /// Delaying swap-removal keeps the snapshot cursor valid across small
+    /// incremental budgets.
+    fn remembered_forget_step(&mut self, limit: usize) -> usize {
+        let count = (limit / SLOT_BYTES).min(self.remembered_forget.len());
+        for _ in 0..count {
+            let parent = self
+                .remembered_forget
+                .pop()
+                .expect("bounded remembered retirement count must be available");
+            if unsafe { Self::header(parent) }.remembered_forget_pending() {
+                self.forget_remembered_parent(parent);
+            }
+        }
+        count * SLOT_BYTES
     }
 
     /// Propagate marking incrementally. Returns work done.
@@ -2242,9 +2350,25 @@ impl Gc {
                 obj
             );
             if unsafe { Self::header(obj) }.is_black() {
+                if self.pending_remembered_parent == Some(obj) {
+                    self.pending_remembered_parent = None;
+                    self.pending_remembered_has_young = false;
+                }
                 self.pending_object_scan = None;
                 self.pending_trace_cursor = GcTraceCursor::default();
                 continue;
+            }
+
+            if self.pending_remembered_parent.is_none()
+                && self.cycle_kind == GcCycleKind::Minor
+                && self
+                    .allocation_extents
+                    .get(&(obj as usize))
+                    .and_then(|extent| extent.remembered_index)
+                    .is_some()
+            {
+                self.pending_remembered_parent = Some(obj);
+                self.pending_remembered_has_young = false;
             }
 
             let remaining = limit.saturating_sub(work);
@@ -2265,6 +2389,16 @@ impl Gc {
             work = work.saturating_add(chunk.work_bytes);
             if chunk.done {
                 unsafe { Self::header_mut(obj) }.set_black();
+                if self.pending_remembered_parent == Some(obj) {
+                    self.pending_remembered_parent = None;
+                    if !core::mem::take(&mut self.pending_remembered_has_young) {
+                        unsafe { Self::header_mut(obj) }.set_remembered_forget_pending(true);
+                        debug_assert!(
+                            self.remembered_forget.len() < self.remembered_forget.capacity()
+                        );
+                        self.remembered_forget.push(obj);
+                    }
+                }
                 self.pending_object_scan = None;
                 self.pending_trace_cursor = GcTraceCursor::default();
             } else {
@@ -2277,9 +2411,6 @@ impl Gc {
 
     #[cfg(test)]
     fn atomic_phase<S: FnMut(&mut Gc, GcRef)>(&mut self, scan_object: &mut S) {
-        while let Some(obj) = self.grayagain.pop() {
-            self.mark_gray(obj);
-        }
         let mut atomic_scanner =
             |gc: &mut Gc, obj: GcRef, _cursor: &mut GcTraceCursor, limit: usize| {
                 scan_object(gc, obj);
@@ -2313,6 +2444,7 @@ impl Gc {
             let header = unsafe { Self::header(obj) };
             let obj_white = header.marked & WHITE_BITS;
             let age = header.age();
+            let runtime_backing = header.is_runtime_backing_object();
             let data_size = self.all_object_data_sizes[self.sweep_pos];
 
             // Gray objects should never exist during sweep — atomic phase processes all of them.
@@ -2338,7 +2470,9 @@ impl Gc {
                 }
                 header.set_white(self.current_white);
                 if promoted_to_old {
-                    self.heap.dirty_card_for_store(obj as usize, obj as usize);
+                    self.young_live_bytes -= size_bytes;
+                    self.old_live_bytes += size_bytes;
+                    self.remember_parent(obj);
                 }
                 self.all_objects[self.sweep_write_pos] = obj;
                 self.all_object_data_sizes[self.sweep_write_pos] = data_size;
@@ -2355,14 +2489,29 @@ impl Gc {
                 stats.sweep_freed_bytes += size_bytes;
                 self.all_objects[self.sweep_pos] = core::ptr::null_mut();
                 self.all_object_data_sizes[self.sweep_pos] = 0;
-                self.object_index_dirty.set(true);
                 self.total_bytes -= size_bytes;
+                self.live_object_count -= 1;
+                if age >= G_OLD {
+                    self.old_live_bytes -= size_bytes;
+                } else {
+                    self.young_live_bytes -= size_bytes;
+                }
+                if size_bytes > (1usize << 15) {
+                    self.large_live_bytes -= size_bytes;
+                }
+                if runtime_backing {
+                    self.runtime_backing_bytes -= size_bytes;
+                }
                 work += SLOT_BYTES;
 
+                self.forget_remembered_parent(obj);
                 let removed_extent = self.allocation_extents.remove(&(obj as usize));
                 assert_eq!(
                     removed_extent,
-                    Some(data_size),
+                    Some(AllocationExtent {
+                        data_size,
+                        remembered_index: None,
+                    }),
                     "sweep must remove the exact allocation extent for every live object record"
                 );
                 let raw_ptr = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
@@ -2378,7 +2527,6 @@ impl Gc {
         if self.sweep_pos >= self.all_objects.len() {
             self.all_objects.truncate(self.sweep_write_pos);
             self.all_object_data_sizes.truncate(self.sweep_write_pos);
-            self.object_index_dirty.set(true);
         }
 
         work
@@ -2418,7 +2566,7 @@ impl Gc {
 
     pub fn object_count(&self) -> usize {
         self.reject_owner_proxy_api("object_count");
-        self.all_objects.iter().filter(|obj| !obj.is_null()).count()
+        self.live_object_count
     }
 
     pub fn objects(&self) -> impl Iterator<Item = GcRef> + '_ {

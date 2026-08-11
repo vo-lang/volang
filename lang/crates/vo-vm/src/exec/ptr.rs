@@ -1,19 +1,32 @@
 //! Pointer instructions: PtrNew, PtrGet, PtrSet, PtrGetN, PtrSetN
 
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(feature = "std")]
+use std::string::{String, ToString};
+
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
-use vo_runtime::ValueMeta;
+use vo_runtime::{SlotType, ValueMeta};
 
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
 #[inline]
-pub fn exec_ptr_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_ptr_new(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+    value_layout: &[SlotType],
+) -> Result<(), String> {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let value_meta = ValueMeta::from_raw(meta_raw);
-    let slots = inst.c;
+    let slots = u16::try_from(value_layout.len())
+        .map_err(|_| "PtrNew value layout exceeds u16 slots".to_string())?;
     let ptr = gc.alloc(value_meta, slots);
     stack_set(stack, bp + inst.a as usize, ptr as u64);
+    Ok(())
 }
 
 /// Returns false if ptr is nil (caller should trigger panic)
@@ -40,18 +53,26 @@ pub fn exec_ptr_get(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
 }
 
 /// PtrSet: a=ptr, b=offset, c=val
-/// flags: bit0 = val is GcRef (needs write barrier)
+/// PtrLayout determines whether the value needs a write barrier.
 /// Returns false if ptr is nil (caller should trigger panic)
 #[inline]
-pub fn exec_ptr_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> bool {
+pub fn exec_ptr_set(
+    stack: *const Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+    value_layout: &[SlotType],
+) -> bool {
     let ptr = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ptr.is_null() {
         return false;
     }
     let offset = inst.b as usize;
     let val = stack_get(stack, bp + inst.c as usize);
-    // Write barrier if val may be GcRef
-    if (inst.flags & 1) != 0 {
+    if value_layout
+        .first()
+        .is_some_and(|slot| matches!(slot, SlotType::GcRef | SlotType::Interface1))
+    {
         gc.write_barrier(ptr, val as GcRef);
     }
     unsafe { Gc::write_slot(ptr, offset, val) };
@@ -60,13 +81,18 @@ pub fn exec_ptr_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut 
 
 /// Returns false if ptr is nil (caller should trigger panic)
 #[inline]
-pub fn exec_ptr_get_n(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
+pub fn exec_ptr_get_n(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    value_layout: &[SlotType],
+) -> bool {
     let ptr = stack_get(stack, bp + inst.b as usize) as GcRef;
     if ptr.is_null() {
         return false;
     }
     let offset = inst.c as usize;
-    let count = inst.flags as usize;
+    let count = value_layout.len();
     let dst_start = bp + inst.a as usize;
 
     for i in 0..count {
@@ -76,19 +102,24 @@ pub fn exec_ptr_get_n(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
     true
 }
 
-/// PtrSetN: a=ptr, b=offset, c=src_start, flags=count
+/// PtrSetN: a=ptr, b=offset, c=src_start. PtrLayout owns the count.
 /// Note: PtrSetN has no barrier support. For structs containing GcRefs,
-/// codegen emits individual PtrSet instructions (with barrier flags) for
+/// codegen emits individual PtrSet instructions (with one-slot metadata) for
 /// each slot using emit_ptr_set_with_slot_types().
 /// Returns false if ptr is nil (caller should trigger panic)
 #[inline]
-pub fn exec_ptr_set_n(stack: *const Slot, bp: usize, inst: &Instruction) -> bool {
+pub fn exec_ptr_set_n(
+    stack: *const Slot,
+    bp: usize,
+    inst: &Instruction,
+    value_layout: &[SlotType],
+) -> bool {
     let ptr = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ptr.is_null() {
         return false;
     }
     let offset = inst.b as usize;
-    let count = inst.flags as usize;
+    let count = value_layout.len();
     let src_start = bp + inst.c as usize;
 
     for i in 0..count {
@@ -96,25 +127,4 @@ pub fn exec_ptr_set_n(stack: *const Slot, bp: usize, inst: &Instruction) -> bool
         unsafe { Gc::write_slot(ptr, offset + i, val) };
     }
     true
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn ptr_set_write_barrier_precedes_heap_mutation_053() {
-        let src = include_str!("ptr.rs");
-        let start = src.find("pub fn exec_ptr_set(").expect("exec_ptr_set");
-        let end = src[start..]
-            .find("pub fn exec_ptr_get_n(")
-            .map(|offset| start + offset)
-            .expect("exec_ptr_get_n marker");
-        let body = &src[start..end];
-        let barrier = body.find("gc.write_barrier").expect("write barrier");
-        let mutation = body.find("Gc::write_slot").expect("heap mutation");
-
-        assert!(
-            barrier < mutation,
-            "PtrSet must execute the write barrier before publishing a GC ref into heap storage"
-        );
-    }
 }

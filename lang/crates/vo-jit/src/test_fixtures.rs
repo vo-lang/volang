@@ -1,10 +1,9 @@
-use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata, Module as VoModule};
+use vo_runtime::bytecode::{FunctionDef, InstructionMetadata};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
 #[derive(Debug, Clone)]
 pub(crate) struct JitFunctionBuilder {
-    name: String,
     code: Vec<Instruction>,
     slot_types: Vec<SlotType>,
     param_count: u16,
@@ -12,14 +11,11 @@ pub(crate) struct JitFunctionBuilder {
     ret_slots: u16,
     ret_slot_types: Option<Vec<SlotType>>,
     recv_slots: u16,
-    error_ret_slot: i32,
-    jit_metadata: Option<Vec<JitInstructionMetadata>>,
 }
 
 impl JitFunctionBuilder {
     pub(crate) fn new(code: Vec<Instruction>) -> Self {
         Self {
-            name: "test".to_string(),
             code,
             slot_types: Vec::new(),
             param_count: 0,
@@ -27,14 +23,7 @@ impl JitFunctionBuilder {
             ret_slots: 0,
             ret_slot_types: None,
             recv_slots: 0,
-            error_ret_slot: -1,
-            jit_metadata: None,
         }
-    }
-
-    pub(crate) fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
     }
 
     pub(crate) fn local_slots(mut self, local_slots: u16) -> Self {
@@ -54,16 +43,6 @@ impl JitFunctionBuilder {
         self
     }
 
-    pub(crate) fn error_ret_slot(mut self, error_ret_slot: i32) -> Self {
-        self.error_ret_slot = error_ret_slot;
-        self
-    }
-
-    pub(crate) fn jit_metadata(mut self, jit_metadata: Vec<JitInstructionMetadata>) -> Self {
-        self.jit_metadata = Some(jit_metadata);
-        self
-    }
-
     pub(crate) fn build(self) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
         let has_defer = self
@@ -73,12 +52,10 @@ impl JitFunctionBuilder {
         let ret_slot_types = self
             .ret_slot_types
             .unwrap_or_else(|| vec![SlotType::Value; self.ret_slots as usize]);
-        let jit_metadata = self
-            .jit_metadata
-            .unwrap_or_else(|| vec![JitInstructionMetadata::None; self.code.len()]);
+        let instruction_metadata = vec![InstructionMetadata::None; self.code.len()];
 
         FunctionDef {
-            name: self.name,
+            name: "test".to_string(),
             param_count: self.param_count,
             param_slots: self.param_slots,
             local_slots: self.slot_types.len() as u16,
@@ -90,12 +67,12 @@ impl JitFunctionBuilder {
             heap_ret_gcref_start: 0,
             heap_ret_slots: Vec::new(),
             is_closure: false,
-            error_ret_slot: self.error_ret_slot,
+            error_ret_slot: -1,
             has_defer,
             has_calls,
             has_call_extern,
             code: self.code,
-            jit_metadata,
+            instruction_metadata,
             slot_types: self.slot_types.clone(),
             borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
                 &self.slot_types,
@@ -146,43 +123,6 @@ pub(crate) fn function_with_slot_types_and_sig(
         .build()
 }
 
-pub(crate) fn function_with_shape(
-    code: Vec<Instruction>,
-    jit_metadata: Vec<JitInstructionMetadata>,
-    slot_types: Vec<SlotType>,
-    param_slots: u16,
-    ret_slots: u16,
-    error_ret_slot: i32,
-) -> FunctionDef {
-    JitFunctionBuilder::new(code)
-        .name("verify")
-        .slot_types(slot_types)
-        .signature(0, param_slots, ret_slots)
-        .error_ret_slot(error_ret_slot)
-        .jit_metadata(jit_metadata)
-        .build()
-}
-
-pub(crate) fn module_with_functions(name: &str, functions: Vec<FunctionDef>) -> VoModule {
-    let mut module = VoModule::new(name.to_string());
-    module.functions = functions;
-    module
-}
-
-pub(crate) fn refresh_derived_function_fields(func: &mut FunctionDef) {
-    func.local_slots = func.slot_types.len() as u16;
-    func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
-    func.has_defer = func
-        .code
-        .iter()
-        .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
-    let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
-    func.has_calls = has_calls;
-    func.has_call_extern = has_call_extern;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,7 +146,7 @@ mod tests {
         assert_eq!(func.local_slots, 4);
         assert_eq!(func.gc_scan_slots, 4);
         assert_eq!(func.borrowed_scan_slots_prefix, vec![0, 0, 2, 4, 4]);
-        assert_eq!(func.jit_metadata.len(), func.code.len());
+        assert_eq!(func.instruction_metadata.len(), func.code.len());
         assert_eq!(func.ret_slot_types, vec![SlotType::Value]);
         assert!(func.has_calls);
         assert!(func.has_call_extern);

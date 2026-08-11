@@ -2,7 +2,11 @@ import { Channel } from '../tauri';
 import type { StreamHandle } from '../types';
 
 export function makeStreamHandleFromProducer<T>(
-  start: (emit: (msg: T) => void, onDone: () => void, onError: (err: Error) => void) => void,
+  start: (
+    emit: (msg: T) => void,
+    onDone: () => void,
+    onError: (err: Error) => void,
+  ) => void | (() => void),
 ): StreamHandle<T> {
   const queue: T[] = [];
   const waiters: Array<{ resolve: (result: IteratorResult<T>) => void; reject: (err: Error) => void }> = [];
@@ -32,7 +36,13 @@ export function makeStreamHandleFromProducer<T>(
     }
   }
 
-  start(enqueue, () => finish(), (e) => finish(e));
+  const cancelProducer = start(enqueue, () => finish(), (e) => finish(e));
+
+  function cancel(): void {
+    if (done) return;
+    cancelProducer?.();
+    finish();
+  }
 
   return {
     [Symbol.asyncIterator]() {
@@ -50,14 +60,12 @@ export function makeStreamHandleFromProducer<T>(
           });
         },
         return(): Promise<IteratorResult<T>> {
-          finish();
+          cancel();
           return Promise.resolve({ value: undefined as unknown as T, done: true });
         },
       };
     },
-    cancel() {
-      finish();
-    },
+    cancel,
   };
 }
 

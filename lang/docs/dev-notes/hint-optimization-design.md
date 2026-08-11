@@ -1,4 +1,17 @@
+---
+date: 2026-08-10
+status: archived
+area: jit
+owner: volang
+supersedes: []
+superseded_by: []
+---
+
 # Hint Instruction Optimization Design
+
+> Historical design note. The low four `HINT_LOOP` flag bits described below
+> have been retired and must now be zero. Current code retains the encoded
+> structural depth, end offset, `LoopEnd` metadata, and OSR exit boundary.
 
 ## Problem Statement
 

@@ -1,4 +1,4 @@
-use cranelift_codegen::ir::{InstBuilder, StackSlot, Value};
+use cranelift_codegen::ir::{types, InstBuilder, StackSlot, Value};
 
 use crate::translator::IrEmitter;
 
@@ -10,5 +10,5 @@ pub(super) fn emit_iface_hit_slot0<'a, E: IrEmitter<'a>>(
     emitter
         .builder()
         .ins()
-        .stack_store(receiver, ic_args_slot, 0);
+        .stack_store(types::I64, receiver, ic_args_slot, 0);
 }

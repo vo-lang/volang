@@ -9,7 +9,7 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget {
     pub compile_path: PathBuf,
-    pub output_base_path: PathBuf,
+    pub compile_path_is_file: bool,
     pub source_root: PathBuf,
 }
 
@@ -96,7 +96,7 @@ pub fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-pub fn find_project_root(path: &Path) -> Result<Option<PathBuf>, String> {
+fn target_file_type(path: &Path) -> Result<fs::FileType, String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect target path {}: {error}", path.display()))?;
     let file_type = metadata.file_type();
@@ -106,57 +106,35 @@ pub fn find_project_root(path: &Path) -> Result<Option<PathBuf>, String> {
             path.display()
         ));
     }
-    let current = if file_type.is_dir() {
-        path.to_path_buf()
-    } else if file_type.is_file() {
-        path.parent()
-            .ok_or_else(|| format!("target file has no parent directory: {}", path.display()))?
-            .to_path_buf()
-    } else {
+    if !file_type.is_file() && !file_type.is_dir() {
         return Err(format!(
             "target path must be a regular file or directory: {}",
             path.display()
         ));
+    }
+    Ok(file_type)
+}
+
+pub fn find_project_root(path: &Path) -> Result<Option<PathBuf>, String> {
+    let file_type = target_file_type(path)?;
+    let current = if file_type.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .ok_or_else(|| format!("target file has no parent directory: {}", path.display()))?
+            .to_path_buf()
     };
     project::find_project_root(&current).map_err(|error| error.to_string())
 }
 
 pub fn is_module_root(path: &Path) -> Result<bool, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect target path {}: {error}", path.display()))?;
-    let file_type = metadata.file_type();
-    if is_link_or_reparse_point(&metadata) {
-        return Err(format!(
-            "target path must not be a symbolic link or reparse point: {}",
-            path.display()
-        ));
-    }
+    let file_type = target_file_type(path)?;
     if file_type.is_file() {
         return Ok(false);
-    }
-    if !file_type.is_dir() {
-        return Err(format!(
-            "target path must be a regular file or directory: {}",
-            path.display()
-        ));
     }
     project::find_project_root(path)
         .map(|root| root.is_some_and(|root| root == path))
         .map_err(|error| error.to_string())
-}
-
-pub fn resolve_compile_path(entry: &Path) -> Result<PathBuf, String> {
-    Ok(find_project_root(entry)?.unwrap_or_else(|| entry.to_path_buf()))
-}
-
-pub fn source_root_for_target(target_path: &Path) -> Result<PathBuf, String> {
-    if let Some(project_root) = find_project_root(target_path)? {
-        return Ok(project_root);
-    }
-    if target_path.is_file() {
-        return Ok(target_path.parent().unwrap_or(target_path).to_path_buf());
-    }
-    Ok(target_path.to_path_buf())
 }
 
 pub fn resolve_target(
@@ -169,24 +147,31 @@ pub fn resolve_target(
 
     // single_file_run: compile only this file, regardless of vo.mod presence.
     // This is the runner-mode path for `run=file://path/to/file.vo`.
-    if single_file_run && abs.is_file() {
+    if single_file_run && target_file_type(&abs)?.is_file() {
         let source_root = abs.parent().unwrap_or(&abs).to_path_buf();
         return Ok(ResolvedTarget {
-            output_base_path: abs.clone(),
             compile_path: abs,
+            compile_path_is_file: true,
             source_root,
         });
     }
 
-    let output_base_path = resolve_compile_path(&abs)?;
-    if is_standalone_single_file_target(&abs)? {
-        return resolve_standalone_single_file_target(&abs, output_base_path);
+    let project_root = find_project_root(&abs)?;
+    let compile_path_is_file = project_root.is_none() && target_file_type(&abs)?.is_file();
+    let standalone_file =
+        compile_path_is_file && abs.extension().and_then(|ext| ext.to_str()) == Some("vo");
+    if standalone_file {
+        return resolve_standalone_single_file_target(&abs);
     }
-    let compile_path = resolve_compile_path(&abs)?;
-    let source_root = source_root_for_target(&compile_path)?;
+    let compile_path = project_root.unwrap_or_else(|| abs.clone());
+    let source_root = if compile_path_is_file {
+        compile_path.parent().unwrap_or(&compile_path).to_path_buf()
+    } else {
+        compile_path.clone()
+    };
     Ok(ResolvedTarget {
         compile_path,
-        output_base_path,
+        compile_path_is_file,
         source_root,
     })
 }
@@ -200,24 +185,17 @@ pub fn resolve_run_target(
     resolve_target(session_root, workspace_root, entry_path, single_file_run)
 }
 
-fn is_standalone_single_file_target(path: &Path) -> Result<bool, String> {
-    if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("vo") {
-        return Ok(false);
-    }
-    Ok(find_project_root(path)?.is_none())
-}
-
-fn resolve_standalone_single_file_target(
-    target_path: &Path,
-    output_base_path: PathBuf,
-) -> Result<ResolvedTarget, String> {
+fn resolve_standalone_single_file_target(target_path: &Path) -> Result<ResolvedTarget, String> {
     let canonical_target = target_path
         .canonicalize()
         .map_err(|err| format!("{}: {}", target_path.display(), err))?;
-    let source_root = source_root_for_target(&canonical_target)?;
+    let source_root = canonical_target
+        .parent()
+        .unwrap_or(&canonical_target)
+        .to_path_buf();
     Ok(ResolvedTarget {
         compile_path: canonical_target,
-        output_base_path,
+        compile_path_is_file: true,
         source_root,
     })
 }
@@ -264,6 +242,8 @@ mod tests {
         assert_ne!(alpha_target.compile_path, beta_target.compile_path);
         assert_eq!(alpha_target.compile_path, alpha_output_base);
         assert_eq!(beta_target.compile_path, beta_output_base);
+        assert!(alpha_target.compile_path_is_file);
+        assert!(beta_target.compile_path_is_file);
         assert_eq!(
             alpha_target.source_root,
             session_root.canonicalize().unwrap()
@@ -272,16 +252,14 @@ mod tests {
             beta_target.source_root,
             session_root.canonicalize().unwrap()
         );
-        assert_eq!(alpha_target.output_base_path, alpha_output_base);
-        assert_eq!(beta_target.output_base_path, beta_output_base);
         assert!(alpha_target.source_root.join("shared.vo").is_file());
         assert!(beta_target.source_root.join("shared.vo").is_file());
         remove_temp_dir(&root);
     }
 
     #[test]
-    fn resolve_target_keeps_original_output_base_for_standalone_single_files() {
-        let root = make_temp_dir("single-file-output-base");
+    fn resolve_target_freezes_standalone_file_identity() {
+        let root = make_temp_dir("single-file-identity");
         let workspace_root = root.join("workspace");
         let session_root = root.join("session");
         fs::create_dir_all(&workspace_root).unwrap();
@@ -302,8 +280,10 @@ mod tests {
 
         assert!(resolved.compile_path.is_file());
         assert_eq!(resolved.compile_path, output_base);
-        assert_eq!(resolved.output_base_path, output_base);
         assert!(resolved.source_root.join("shared.vo").is_file());
+        fs::remove_file(&resolved.compile_path).unwrap();
+        fs::create_dir(&resolved.compile_path).unwrap();
+        assert!(resolved.compile_path_is_file);
         remove_temp_dir(&root);
     }
 
@@ -332,15 +312,15 @@ mod tests {
         let canonical_project_root = project_root.canonicalize().unwrap();
 
         assert_eq!(resolved.compile_path, canonical_project_root);
-        assert_eq!(resolved.output_base_path, canonical_project_root);
+        assert!(!resolved.compile_path_is_file);
         assert_eq!(resolved.source_root, canonical_project_root);
 
         remove_temp_dir(&root);
     }
 
     #[test]
-    fn isolated_single_file_keeps_its_output_inside_the_isolated_entry() {
-        let root = make_temp_dir("isolated-output-base");
+    fn isolated_single_file_keeps_its_compile_path_inside_the_isolated_entry() {
+        let root = make_temp_dir("isolated-compile-path");
         let workspace_root = root.join("workspace");
         let project_root = root.join("project");
         let isolated_root = project_root.join("examples/demo");
@@ -364,12 +344,8 @@ mod tests {
         let canonical_entry = entry.canonicalize().unwrap();
 
         assert_eq!(resolved.compile_path, canonical_entry);
-        assert_eq!(resolved.output_base_path, canonical_entry);
+        assert!(resolved.compile_path_is_file);
         assert_eq!(resolved.source_root, isolated_root.canonicalize().unwrap());
-        assert_eq!(
-            resolved.output_base_path.with_extension("vob"),
-            canonical_entry.with_extension("vob")
-        );
 
         remove_temp_dir(&root);
     }

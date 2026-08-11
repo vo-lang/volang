@@ -20,6 +20,21 @@ use std::collections::HashMap;
 use crate::{RuntimeType, ValueKind, ValueRttid};
 use vo_common_core::bytecode::{InterfaceMeta, Itab, Module, NamedTypeMeta};
 
+#[inline]
+fn named_type_implements_interface(
+    named_type: &NamedTypeMeta,
+    iface_meta: &InterfaceMeta,
+    src_is_pointer: bool,
+) -> bool {
+    iface_meta.methods.iter().all(|iface_method| {
+        let Some(method_info) = named_type.methods.get(&iface_method.name) else {
+            return false;
+        };
+        (src_is_pointer || !method_info.is_pointer_receiver)
+            && method_info.signature_rttid == iface_method.signature_rttid
+    })
+}
+
 pub fn expected_interface_itab_methods(
     named_type_id: u32,
     iface_meta_id: u32,
@@ -29,20 +44,77 @@ pub fn expected_interface_itab_methods(
 ) -> Option<Vec<u32>> {
     let named_type = named_type_metas.get(named_type_id as usize)?;
     let iface_meta = interface_metas.get(iface_meta_id as usize)?;
+    iface_meta
+        .methods
+        .iter()
+        .map(|iface_method| {
+            let method_info = named_type.methods.get(&iface_method.name)?;
+            (src_is_pointer || !method_info.is_pointer_receiver)
+                .then_some(())
+                .filter(|_| method_info.signature_rttid == iface_method.signature_rttid)
+                .map(|_| method_info.func_id)
+        })
+        .collect()
+}
 
-    let mut methods = Vec::with_capacity(iface_meta.methods.len());
-    for iface_method in &iface_meta.methods {
-        let method_info = named_type.methods.get(&iface_method.name)?;
-        // Value types cannot use pointer receiver methods
-        if !src_is_pointer && method_info.is_pointer_receiver {
-            return None;
-        }
-        if method_info.signature_rttid != iface_method.signature_rttid {
-            return None;
-        }
-        methods.push(method_info.func_id);
+/// Validate the itab carried by an already-validated interface payload.
+///
+/// `value_rttid` is `None` for nil interfaces. Empty interfaces intentionally
+/// accept any carried itab identity because no method dispatch observes it.
+#[inline]
+pub fn validate_interface_itab(
+    module: &Module,
+    itab_cache: &ItabCache,
+    expected_iface_meta_id: u32,
+    itab_id: u32,
+    value_rttid: Option<ValueRttid>,
+) -> Result<(), &'static str> {
+    let expected_iface = module
+        .interface_metas
+        .get(expected_iface_meta_id as usize)
+        .ok_or("references missing interface")?;
+    let Some(value_rttid) = value_rttid else {
+        return Ok(());
+    };
+    if expected_iface.methods.is_empty() {
+        return Ok(());
     }
-    Some(methods)
+    if itab_id == 0 {
+        return Err("missing itab");
+    }
+    let named_type_id = module
+        .named_type_id_for_rttid(value_rttid.rttid())
+        .ok_or("is not a named value")?;
+    let named_type = module
+        .named_type_metas
+        .get(named_type_id as usize)
+        .ok_or("is not a named value")?;
+    if !named_type_implements_interface(
+        named_type,
+        expected_iface,
+        value_rttid.value_kind() == ValueKind::Pointer,
+    ) {
+        return Err("does not implement expected interface");
+    }
+    let actual_itab = itab_cache
+        .get_itab(itab_id)
+        .ok_or("references missing itab entry")?;
+    if actual_itab.iface_meta_id != expected_iface_meta_id {
+        return Err("itab does not match expected interface");
+    }
+    let methods_match = actual_itab.methods.len() == expected_iface.methods.len()
+        && expected_iface.methods.iter().zip(&actual_itab.methods).all(
+            |(iface_method, actual_func_id)| {
+                named_type
+                    .methods
+                    .get(&iface_method.name)
+                    .is_some_and(|method_info| method_info.func_id == *actual_func_id)
+            },
+        );
+    if !methods_match {
+        return Err("itab methods do not match expected interface");
+    }
+    Ok(())
 }
 
 /// Unified itab table with runtime cache for interface-to-interface assignments.
@@ -206,14 +278,10 @@ pub fn check_interface_satisfaction(
     let Some(named_type_id) = module.named_type_id_for_rttid(src_rttid) else {
         return false;
     };
-    expected_interface_itab_methods(
-        named_type_id,
-        target_iface_id,
-        src_vk == ValueKind::Pointer,
-        &module.named_type_metas,
-        &module.interface_metas,
-    )
-    .is_some()
+    let Some(named_type) = module.named_type_metas.get(named_type_id as usize) else {
+        return false;
+    };
+    named_type_implements_interface(named_type, iface_meta, src_vk == ValueKind::Pointer)
 }
 
 fn interface_method_set_includes(source: &InterfaceMeta, target: &InterfaceMeta) -> bool {
@@ -306,32 +374,43 @@ mod tests {
     use vo_common_core::runtime_type::InterfaceMethod;
     use vo_common_core::types::{ValueMeta, ValueRttid};
 
-    #[test]
-    fn itab_cache_reserves_zero_for_no_itab_060() {
-        let mut methods = std::collections::BTreeMap::new();
-        methods.insert(
+    fn single_method_metadata(
+        pointer_receiver: bool,
+        named_signature: u32,
+        interface_signature: u32,
+    ) -> (Vec<NamedTypeMeta>, Vec<InterfaceMeta>) {
+        let methods = [(
             "M".to_string(),
             MethodInfo {
                 func_id: 7,
-                is_pointer_receiver: false,
+                is_pointer_receiver: pointer_receiver,
                 receiver_is_iface_boxed: false,
-                signature_rttid: 3,
+                signature_rttid: named_signature,
             },
-        );
-        let named = vec![NamedTypeMeta {
-            name: "T".to_string(),
-            underlying_meta: ValueMeta::new(0, ValueKind::Int64),
-            underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
-            methods,
-        }];
-        let interfaces = vec![InterfaceMeta {
-            name: "I".to_string(),
-            method_names: vec!["M".to_string()],
-            methods: vec![InterfaceMethodMeta {
-                name: "M".to_string(),
-                signature_rttid: 3,
+        )]
+        .into_iter()
+        .collect();
+        (
+            vec![NamedTypeMeta {
+                name: "T".to_string(),
+                underlying_meta: ValueMeta::new(0, ValueKind::Int64),
+                underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
+                methods,
             }],
-        }];
+            vec![InterfaceMeta {
+                name: "I".to_string(),
+                method_names: vec!["M".to_string()],
+                methods: vec![InterfaceMethodMeta {
+                    name: "M".to_string(),
+                    signature_rttid: interface_signature,
+                }],
+            }],
+        )
+    }
+
+    #[test]
+    fn itab_cache_reserves_zero_for_no_itab_060() {
+        let (named, interfaces) = single_method_metadata(false, 3, 3);
 
         let mut cache = ItabCache::new();
         assert_eq!(cache.get_itab(0).map(|itab| itab.methods.len()), Some(0));
@@ -350,36 +429,80 @@ mod tests {
 
     #[test]
     fn itab_cache_rejects_signature_mismatch_060() {
-        let mut methods = std::collections::BTreeMap::new();
-        methods.insert(
-            "M".to_string(),
-            MethodInfo {
-                func_id: 7,
-                is_pointer_receiver: false,
-                receiver_is_iface_boxed: false,
-                signature_rttid: 3,
-            },
-        );
-        let named = vec![NamedTypeMeta {
-            name: "T".to_string(),
-            underlying_meta: ValueMeta::new(0, ValueKind::Int64),
-            underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
-            methods,
-        }];
-        let interfaces = vec![InterfaceMeta {
-            name: "I".to_string(),
-            method_names: vec!["M".to_string()],
-            methods: vec![InterfaceMethodMeta {
-                name: "M".to_string(),
-                signature_rttid: 4,
-            }],
-        }];
+        let (named, interfaces) = single_method_metadata(false, 3, 4);
 
         let mut cache = ItabCache::new();
 
         assert_eq!(
             cache.try_get_or_create(0, 0, false, &named, &interfaces),
             None
+        );
+    }
+
+    #[test]
+    fn shared_itab_validation_is_cycle_bounded_and_pointer_aware() {
+        let mut module = Module::new("shared-itab-validation".to_string());
+        module.runtime_types.extend([
+            RuntimeType::Basic(ValueKind::Int64),
+            RuntimeType::Named {
+                id: 0,
+                struct_meta_id: None,
+            },
+            RuntimeType::Pointer(ValueRttid::new(1, ValueKind::Int64)),
+            RuntimeType::Pointer(ValueRttid::new(2, ValueKind::Pointer)),
+        ]);
+        let (named, mut interfaces) = single_method_metadata(true, 4, 4);
+        module.named_type_metas = named;
+        interfaces.push(InterfaceMeta {
+            name: "Any".to_string(),
+            method_names: Vec::new(),
+            methods: Vec::new(),
+        });
+        module.interface_metas = interfaces;
+        let cache = ItabCache::from_module_itabs(vec![
+            Itab::default(),
+            Itab {
+                iface_meta_id: 0,
+                methods: vec![7],
+            },
+            Itab {
+                iface_meta_id: 0,
+                methods: vec![8],
+            },
+        ]);
+
+        let pointer_chain = ValueRttid::new(3, ValueKind::Pointer);
+        assert_eq!(
+            validate_interface_itab(&module, &cache, 0, 1, Some(pointer_chain)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_interface_itab(
+                &module,
+                &cache,
+                0,
+                1,
+                Some(ValueRttid::new(1, ValueKind::Int64)),
+            ),
+            Err("does not implement expected interface")
+        );
+        assert_eq!(
+            validate_interface_itab(&module, &cache, 0, 2, Some(pointer_chain)),
+            Err("itab methods do not match expected interface")
+        );
+        assert_eq!(
+            validate_interface_itab(
+                &module,
+                &cache,
+                1,
+                u32::MAX,
+                Some(ValueRttid::new(0, ValueKind::Int64)),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_interface_itab(&module, &cache, 99, 0, None),
+            Err("references missing interface")
         );
     }
 

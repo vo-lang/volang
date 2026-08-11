@@ -1,5 +1,21 @@
 use super::*;
 
+fn endpoint_wait_key(fiber_key: u64, wait_id: u64) -> EndpointWaitKey {
+    EndpointWaitKey::try_new(fiber_key, wait_id).expect("test endpoint wait id must be non-zero")
+}
+
+fn send_ack(closed: bool, wait_key: EndpointWaitKey) -> EndpointResponseKind {
+    EndpointResponseKind::SendAck { closed, wait_key }
+}
+
+fn recv_data(data: Vec<u8>, closed: bool, wait_key: EndpointWaitKey) -> EndpointResponseKind {
+    EndpointResponseKind::RecvData {
+        data,
+        closed,
+        wait_key,
+    }
+}
+
 #[test]
 fn endpoint_response_ignores_stale_fiber_generation_key() {
     let mut vm = Vm::new();
@@ -10,14 +26,13 @@ fn endpoint_response_ignores_stale_fiber_generation_key() {
 
     let reused = vm.scheduler.reuse_or_spawn();
     assert_eq!(fid.to_raw(), reused.to_raw());
-    let current_key = vm.scheduler.get_fiber(reused).endpoint_response_key();
     {
         let fiber = vm.scheduler.get_fiber_mut(reused);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
     }
     vm.scheduler.schedule_next().expect("reused fiber");
-    let current_wait_id = vm
+    let current_wait_key = vm
         .scheduler
         .current_fiber_mut()
         .expect("current fiber")
@@ -32,9 +47,10 @@ fn endpoint_response_ignores_stale_fiber_generation_key() {
         &mut vm,
         42,
         from_island,
-        stale_key,
-        current_wait_id,
-        EndpointResponseKind::SendAck { closed: true },
+        send_ack(
+            true,
+            endpoint_wait_key(stale_key, current_wait_key.wait_id().get()),
+        ),
     );
     assert_eq!(vm.state.pending_island_responses, 2);
     assert_eq!(
@@ -43,14 +59,7 @@ fn endpoint_response_ignores_stale_fiber_generation_key() {
     );
     assert!(!vm.scheduler.get_fiber(reused).remote_send_closed);
 
-    resume_endpoint_response(
-        &mut vm,
-        42,
-        from_island,
-        current_key,
-        current_wait_id,
-        EndpointResponseKind::SendAck { closed: true },
-    );
+    resume_endpoint_response(&mut vm, 42, from_island, send_ack(true, current_wait_key));
     assert_eq!(vm.state.pending_island_responses, 1);
     assert!(vm.scheduler.get_fiber(reused).state.is_runnable());
     assert!(vm.scheduler.get_fiber(reused).remote_send_closed);
@@ -71,9 +80,7 @@ fn endpoint_response_rejects_wrong_wait_source() {
         &mut vm,
         42,
         from_island,
-        key,
-        1,
-        EndpointResponseKind::SendAck { closed: true },
+        send_ack(true, endpoint_wait_key(key, 1)),
     );
 
     assert_eq!(vm.state.pending_island_responses, 1);
@@ -96,8 +103,8 @@ fn endpoint_response_rejects_wrong_endpoint_id() {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        let wait_id = fiber.begin_remote_endpoint_send_wait(42);
-        assert_eq!(wait_id, 1);
+        let wait_key = fiber.begin_remote_endpoint_send_wait(42);
+        assert_eq!(wait_key.wait_id().get(), 1);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
@@ -109,9 +116,7 @@ fn endpoint_response_rejects_wrong_endpoint_id() {
         &mut vm,
         43,
         from_island,
-        key,
-        1,
-        EndpointResponseKind::SendAck { closed: true },
+        send_ack(true, endpoint_wait_key(key, 1)),
     );
 
     assert_eq!(vm.state.pending_island_responses, 1);
@@ -127,28 +132,20 @@ fn vm_endpoint_response_source_024_missing_registry_rejects_targeted_response() 
     vm.state.current_island_id = 7;
     let endpoint_id = 42;
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 1;
     let from_island = vm.state.current_island_id;
 
-    handle_endpoint_response_command(
-        &mut vm,
-        endpoint_id,
-        EndpointResponseKind::SendAck { closed: true },
-        from_island,
-        key,
-        wait_id,
-    )
-    .expect("missing registry response is ignored before VM command");
+    handle_endpoint_response_command(&mut vm, endpoint_id, send_ack(true, wait_key), from_island)
+        .expect("missing registry response is ignored before VM command");
 
     assert_eq!(vm.state.pending_island_responses, 1);
     let fiber = vm.scheduler.get_fiber(fid);
@@ -163,13 +160,12 @@ fn vm_endpoint_response_commit_001_rejected_closed_send_ack_keeps_remote_proxy_o
     let endpoint_id = 42;
     let ch = register_remote_proxy(&mut vm, endpoint_id);
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
@@ -178,10 +174,11 @@ fn vm_endpoint_response_commit_001_rejected_closed_send_ack_keeps_remote_proxy_o
     handle_endpoint_response_command(
         &mut vm,
         endpoint_id,
-        EndpointResponseKind::SendAck { closed: true },
+        send_ack(
+            true,
+            endpoint_wait_key(wait_key.fiber_key(), wait_key.wait_id().get() + 1),
+        ),
         queue::remote_proxy(ch).home_island,
-        key,
-        wait_id + 1,
     )
     .expect_err("stale SendAck must be rejected");
 
@@ -201,13 +198,12 @@ fn vm_endpoint_response_commit_001_zero_pending_closed_recv_data_keeps_remote_pr
     let endpoint_id = 43;
     let ch = register_remote_proxy(&mut vm, endpoint_id);
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
@@ -216,13 +212,8 @@ fn vm_endpoint_response_commit_001_zero_pending_closed_recv_data_keeps_remote_pr
     handle_endpoint_response_command(
         &mut vm,
         endpoint_id,
-        EndpointResponseKind::RecvData {
-            data: Vec::new(),
-            closed: true,
-        },
+        recv_data(Vec::new(), true, wait_key),
         queue::remote_proxy(ch).home_island,
-        key,
-        wait_id,
     )
     .expect_err("closed RecvData with no pending response must be rejected");
 
@@ -243,7 +234,7 @@ fn vm_endpoint_closed_response_owner_019_rejects_non_home_source() {
     let ch = register_remote_proxy(&mut vm, endpoint_id);
     assert_eq!(queue::remote_proxy(ch).home_island, 9);
 
-    handle_endpoint_response_command(&mut vm, endpoint_id, EndpointResponseKind::Closed, 0, 0, 0)
+    handle_endpoint_response_command(&mut vm, endpoint_id, EndpointResponseKind::Closed, 0)
         .expect("non-home Closed response is ignored before VM command");
 
     assert!(
@@ -260,13 +251,12 @@ fn vm_endpoint_closed_response_owner_019_rejects_non_home_source() {
 fn endpoint_response_rejects_stale_wait_id_for_same_fiber_and_endpoint() {
     let mut vm = Vm::new();
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_send_wait(42);
+        wait_key = fiber.begin_remote_endpoint_send_wait(42);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
@@ -278,9 +268,10 @@ fn endpoint_response_rejects_stale_wait_id_for_same_fiber_and_endpoint() {
         &mut vm,
         42,
         from_island,
-        key,
-        wait_id + 1,
-        EndpointResponseKind::SendAck { closed: true },
+        send_ack(
+            true,
+            endpoint_wait_key(wait_key.fiber_key(), wait_key.wait_id().get() + 1),
+        ),
     );
 
     assert_eq!(vm.state.pending_island_responses, 2);
@@ -289,14 +280,7 @@ fn endpoint_response_rejects_stale_wait_id_for_same_fiber_and_endpoint() {
     assert!(!fiber.remote_send_closed);
     assert_eq!(fiber.current_frame().unwrap().pc, 1);
 
-    resume_endpoint_response(
-        &mut vm,
-        42,
-        from_island,
-        key,
-        wait_id,
-        EndpointResponseKind::SendAck { closed: true },
-    );
+    resume_endpoint_response(&mut vm, 42, from_island, send_ack(true, wait_key));
 
     assert_eq!(vm.state.pending_island_responses, 1);
     let fiber = vm.scheduler.get_fiber(fid);
@@ -309,8 +293,7 @@ fn endpoint_response_rejects_stale_wait_id_for_same_fiber_and_endpoint() {
 fn endpoint_response_rejects_wrong_response_kind() {
     let mut vm = Vm::new();
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(fid)
         .begin_remote_endpoint_send_wait(42);
@@ -324,12 +307,7 @@ fn endpoint_response_rejects_wrong_response_kind() {
         &mut vm,
         42,
         from_island,
-        key,
-        wait_id,
-        EndpointResponseKind::RecvData {
-            data: vec![1, 2, 3],
-            closed: false,
-        },
+        recv_data(vec![1, 2, 3], false, wait_key),
     );
 
     assert_eq!(vm.state.pending_island_responses, 1);
@@ -343,28 +321,21 @@ fn endpoint_response_rejects_wrong_response_kind() {
 fn endpoint_response_without_pending_count_does_not_mutate_waiter() {
     let mut vm = Vm::new();
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    {
+    let wait_key = {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        let wait_id = fiber.begin_remote_endpoint_send_wait(42);
-        assert_eq!(wait_id, 1);
-    }
+        let wait_key = fiber.begin_remote_endpoint_send_wait(42);
+        assert_eq!(wait_key.wait_id().get(), 1);
+        wait_key
+    };
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 0;
     vm.state.endpoint_registry.mark_tombstone(42);
     let from_island = vm.state.current_island_id;
 
-    resume_endpoint_response(
-        &mut vm,
-        42,
-        from_island,
-        key,
-        1,
-        EndpointResponseKind::SendAck { closed: true },
-    );
+    resume_endpoint_response(&mut vm, 42, from_island, send_ack(true, wait_key));
 
     assert_eq!(vm.state.pending_island_responses, 0);
     let fiber = vm.scheduler.get_fiber(fid);
@@ -380,7 +351,7 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
     vm.state.current_island_id = 0;
     let mut module = Module::new("same-island-endpoint-response".to_string());
     module.runtime_types = vec![RuntimeType::Basic(ValueKind::Int64)];
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let endpoint_id = 44;
     let ch = queue::create(
         &mut vm.state.gc,
@@ -398,13 +369,12 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
     }
 
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
@@ -414,10 +384,8 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
     handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Recv,
+        EndpointRequestKind::Recv { wait_key },
         current_island_id,
-        key,
-        wait_id,
     )
     .expect("same-island endpoint request should apply");
 
@@ -440,8 +408,10 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
     }
     .expect("response payload should pack")
     .into_data();
-    assert_eq!(response.data, expected);
-    assert!(!response.closed);
+    match response {
+        RemoteRecvResponse::Data(data) => assert_eq!(data, &expected),
+        other => panic!("expected recv data response, got {other:?}"),
+    }
 }
 
 #[test]
@@ -453,7 +423,7 @@ fn vm_endpoint_recv_gc_payload_marks_roots_dirty_061() {
         RuntimeType::Basic(ValueKind::Port),
         RuntimeType::Basic(ValueKind::Int64),
     ];
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let endpoint_id = 45;
     let ch = queue::create(
         &mut vm.state.gc,
@@ -481,29 +451,26 @@ fn vm_endpoint_recv_gc_payload_marks_roots_dirty_061() {
     });
 
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 1;
     vm.state.gc_roots_dirty_all = false;
-    vm.state.gc_dirty_fibers.clear();
+    vm.state.clear_gc_dirty_fibers();
     vm.state.gc_dirty_epoch = 41;
 
     let current_island_id = vm.state.current_island_id;
     handle_endpoint_request_command(
         &mut vm,
         endpoint_id,
-        EndpointRequestKind::Recv,
+        EndpointRequestKind::Recv { wait_key },
         current_island_id,
-        key,
-        wait_id,
     )
     .expect("same-island endpoint recv should apply");
 
@@ -517,7 +484,7 @@ fn vm_endpoint_recv_gc_payload_marks_roots_dirty_061() {
         .remote_recv_response
         .as_ref()
         .expect("same-island response must materialize recv payload");
-    assert!(!response.closed);
+    assert!(matches!(response, RemoteRecvResponse::Data(_)));
 }
 
 #[test]
@@ -527,32 +494,24 @@ fn vm_endpoint_response_source_020_closed_tombstone_preserves_home_send_ack_auth
     let endpoint_id = 61;
     let ch = register_remote_proxy_for_home(&mut vm, endpoint_id, 9);
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 1;
 
-    handle_endpoint_response_command(&mut vm, endpoint_id, EndpointResponseKind::Closed, 9, 0, 0)
+    handle_endpoint_response_command(&mut vm, endpoint_id, EndpointResponseKind::Closed, 9)
         .expect("home Closed response should tombstone the endpoint");
     assert!(queue::remote_proxy(ch).closed);
     assert!(vm.state.endpoint_registry.is_tombstone(endpoint_id));
 
-    handle_endpoint_response_command(
-        &mut vm,
-        endpoint_id,
-        EndpointResponseKind::SendAck { closed: true },
-        9,
-        key,
-        wait_id,
-    )
-    .expect("closed tombstone should preserve SendAck authority");
+    handle_endpoint_response_command(&mut vm, endpoint_id, send_ack(true, wait_key), 9)
+        .expect("closed tombstone should preserve SendAck authority");
 
     assert_eq!(vm.state.pending_island_responses, 0);
     let fiber = vm.scheduler.get_fiber(fid);
@@ -568,8 +527,7 @@ fn vm_endpoint_response_source_020_closed_tombstone_preserves_home_recv_data_aut
     let endpoint_id = 62;
     let ch = register_remote_proxy_for_home(&mut vm, endpoint_id, 9);
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id = vm
+    let wait_key = vm
         .scheduler
         .get_fiber_mut(fid)
         .begin_remote_endpoint_recv_wait(endpoint_id);
@@ -577,7 +535,7 @@ fn vm_endpoint_response_source_020_closed_tombstone_preserves_home_recv_data_aut
     vm.scheduler.block_for_queue();
     vm.state.pending_island_responses = 1;
 
-    handle_endpoint_response_command(&mut vm, endpoint_id, EndpointResponseKind::Closed, 9, 0, 0)
+    handle_endpoint_response_command(&mut vm, endpoint_id, EndpointResponseKind::Closed, 9)
         .expect("home Closed response should tombstone the endpoint");
     assert!(queue::remote_proxy(ch).closed);
     assert!(vm.state.endpoint_registry.is_tombstone(endpoint_id));
@@ -585,13 +543,8 @@ fn vm_endpoint_response_source_020_closed_tombstone_preserves_home_recv_data_aut
     handle_endpoint_response_command(
         &mut vm,
         endpoint_id,
-        EndpointResponseKind::RecvData {
-            data: Vec::new(),
-            closed: true,
-        },
+        recv_data(Vec::new(), true, wait_key),
         9,
-        key,
-        wait_id,
     )
     .expect("closed tombstone should preserve RecvData authority");
 
@@ -602,8 +555,7 @@ fn vm_endpoint_response_source_020_closed_tombstone_preserves_home_recv_data_aut
         .remote_recv_response
         .as_ref()
         .expect("closed recv response should settle the pending wait");
-    assert!(response.closed);
-    assert!(response.data.is_empty());
+    assert!(matches!(response, RemoteRecvResponse::Closed));
 }
 
 #[test]
@@ -614,13 +566,12 @@ fn vm_endpoint_tombstone_authority_021_remote_close_transition_preserves_home_se
     let home_island = 9;
     register_remote_proxy_for_home(&mut vm, endpoint_id, home_island);
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_send_wait(endpoint_id);
+        wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
     vm.scheduler.schedule_next().expect("fiber");
     vm.scheduler.block_for_queue();
@@ -642,15 +593,8 @@ fn vm_endpoint_tombstone_authority_021_remote_close_transition_preserves_home_se
 
     assert!(vm.state.endpoint_registry.is_tombstone(endpoint_id));
 
-    handle_endpoint_response_command(
-        &mut vm,
-        endpoint_id,
-        EndpointResponseKind::SendAck { closed: true },
-        home_island,
-        key,
-        wait_id,
-    )
-    .expect("transition-created closed tombstone should preserve SendAck authority");
+    handle_endpoint_response_command(&mut vm, endpoint_id, send_ack(true, wait_key), home_island)
+        .expect("transition-created closed tombstone should preserve SendAck authority");
 
     assert_eq!(vm.state.pending_island_responses, 0);
     let fiber = vm.scheduler.get_fiber(fid);

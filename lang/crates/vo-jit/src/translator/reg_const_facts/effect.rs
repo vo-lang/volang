@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use vo_runtime::bytecode::{Constant, ExternDef, FunctionDef, JitInstructionMetadata};
+use vo_runtime::bytecode::{Constant, ExternDef, FunctionDef, InstructionMetadata};
 use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::effects::{self, MemorySyncEffect};
@@ -47,7 +47,7 @@ impl RegConstEffect {
                         let Some(slot) = start.checked_add(i as u16) else {
                             break;
                         };
-                        facts.insert(slot, value);
+                        set_slot_const(facts, slot, Some(value));
                     }
                 }
             }
@@ -57,18 +57,26 @@ impl RegConstEffect {
 
 pub(super) fn transfer_reg_const_facts(
     inst: &Instruction,
-    jit_metadata: Option<&JitInstructionMetadata>,
+    instruction_metadata: Option<&InstructionMetadata>,
     constants: &[Constant],
     functions: &[FunctionDef],
     externs: &[ExternDef],
     facts: &mut HashMap<u16, i64>,
 ) {
-    reg_const_effect(inst, jit_metadata, constants, functions, externs, facts).apply(facts);
+    reg_const_effect(
+        inst,
+        instruction_metadata,
+        constants,
+        functions,
+        externs,
+        facts,
+    )
+    .apply(facts);
 }
 
 fn reg_const_effect(
     inst: &Instruction,
-    jit_metadata: Option<&JitInstructionMetadata>,
+    instruction_metadata: Option<&InstructionMetadata>,
     constants: &[Constant],
     functions: &[FunctionDef],
     externs: &[ExternDef],
@@ -81,7 +89,7 @@ fn reg_const_effect(
         };
     }
 
-    let metadata_facts = crate::metadata::MetadataFacts::from_instruction(jit_metadata);
+    let metadata_facts = crate::metadata::MetadataFacts::from_instruction(instruction_metadata);
 
     match inst.opcode() {
         Opcode::CopyN => {
@@ -111,7 +119,7 @@ fn reg_const_effect(
             functions,
         )
         .map(reg_const_effect_from_instruction_effects)
-        .unwrap_or_else(|_| reg_const_effect_for_unknown_effects(inst)),
+        .unwrap_or(RegConstEffect::Clear),
     }
 }
 
@@ -122,14 +130,5 @@ fn reg_const_effect_from_instruction_effects(
         RegConstEffect::Preserve
     } else {
         RegConstEffect::KillSlotList(effects.writes)
-    }
-}
-
-fn reg_const_effect_for_unknown_effects(inst: &Instruction) -> RegConstEffect {
-    let shape = crate::semantics::opcode_register_effects(inst.opcode());
-    if !shape.has_write_effects() {
-        RegConstEffect::Preserve
-    } else {
-        RegConstEffect::Clear
     }
 }

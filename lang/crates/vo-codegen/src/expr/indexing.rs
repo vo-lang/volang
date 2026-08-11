@@ -51,23 +51,15 @@ pub fn compile_index(
         let key_slots = info
             .checked_slot_count(key_slot_types.len())
             .map_err(CodegenError::Internal)?;
-        let val_slots = info
-            .checked_slot_count(val_slot_types.len())
-            .map_err(CodegenError::Internal)?;
         let key_reg = compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let result_type = info.expr_type(expr.id);
         let is_comma_ok = info.is_tuple(result_type);
-        let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, is_comma_ok);
-        let mut map_get_slot_types = vec![SlotType::Value]; // meta
-        map_get_slot_types.extend(key_slot_types.iter().copied()); // key
-        let meta_reg = func.alloc_slots(&map_get_slot_types);
-        let meta_idx = ctx.const_int(meta as i64);
-        func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_copy(meta_reg + 1, key_reg, key_slots);
+        let key_start = func.alloc_slots(&key_slot_types);
+        func.emit_copy(key_start, key_reg, key_slots);
         func.emit_map_get(
             dst,
             map_reg,
-            meta_reg,
+            key_start,
             &key_slot_types,
             &val_slot_types,
             is_comma_ok,

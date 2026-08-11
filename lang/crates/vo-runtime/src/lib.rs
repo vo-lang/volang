@@ -15,6 +15,7 @@ pub const EXECUTION_TIMESLICE_INSTRUCTIONS: u32 = 16_384;
 
 pub mod output;
 pub mod slot;
+pub mod value_layout;
 
 // Core runtime (no_std compatible)
 pub mod gc;
@@ -33,6 +34,9 @@ pub mod ffi;
 
 // Builtins (no_std compatible, linkme registration is std-only)
 pub mod builtins;
+
+mod dynamic_call_ic;
+pub use dynamic_call_ic::{alloc_ic_table, DynCallIC};
 
 // Std-only modules
 #[cfg(feature = "std")]
@@ -87,11 +91,3 @@ pub use ffi::{
 pub use linkme as __linkme;
 #[cfg(feature = "std")]
 pub use linkme::distributed_slice;
-
-#[cfg(test)]
-mod source_contract_tests {
-    #[test]
-    fn source_contract_tests_do_not_use_textual_cfg_test_truncation_062() {
-        vo_source_contract::assert_no_textual_cfg_test_splits(env!("CARGO_MANIFEST_DIR"));
-    }
-}

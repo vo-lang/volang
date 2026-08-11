@@ -2,11 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use vo_common::stable_hash::StableHasher;
-#[cfg(test)]
-use vo_common::vfs::RealFs;
 use vo_common::vfs::{
     normalize_ancestor_discovery_start, normalize_fs_path, sort_fs_paths, FileSystem,
-    FileSystemEntryKind, MAX_DIRECTORY_ENTRIES,
+    FileSystemEntryKind, RealFs, MAX_DIRECTORY_ENTRIES,
 };
 
 use crate::identity::{classify_import, ImportClass, ModIdentity, ModulePath};
@@ -758,6 +756,17 @@ pub(crate) fn read_stable_regular_file_bytes<F: FileSystem>(
     label: &str,
 ) -> Result<Vec<u8>, Error> {
     read_stable_regular_file_bytes_generation(fs, path, max_bytes, label).map(|(bytes, _)| bytes)
+}
+
+/// Read a bounded host file through one descriptor-anchored, no-follow
+/// generation. This is the native adapter for consumers that do not already
+/// own a virtual filesystem authority.
+pub fn read_stable_host_regular_file(
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, Error> {
+    read_stable_regular_file_bytes(&RealFs::new("."), path, max_bytes, label)
 }
 
 fn read_stable_regular_text_file_generation<F: FileSystem>(

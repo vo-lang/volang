@@ -6,7 +6,7 @@ use vo_runtime::jit_api::{
 
 use crate::fiber::Fiber;
 use crate::frame_call::{validate_call_frame_shape, validate_call_return_window};
-use crate::vm::jit::callbacks::helpers::validate_vm_callback_context;
+use crate::vm::jit::callbacks::helpers::validate_callback_context;
 
 /// Reserve a callee stack window for a prepared JIT-to-JIT call.
 ///
@@ -32,7 +32,7 @@ pub extern "C" fn jit_push_frame(
     ret_slots: u32,
     _caller_resume_pc: u32,
 ) -> *mut u64 {
-    if validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+    if validate_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
         .is_err()
     {
         return core::ptr::null_mut();
@@ -107,7 +107,7 @@ fn validate_push_frame_publication(
     ret_reg: u16,
     ret_slots: u16,
 ) -> Result<(), u64> {
-    let module = unsafe { ctx.module.as_ref() }.ok_or(func_id as u64)?;
+    let module = unsafe { ctx.module_ref() }.ok_or(func_id as u64)?;
     let callee = module
         .functions
         .get(func_id as usize)
@@ -134,7 +134,7 @@ fn validate_push_frame_publication(
 /// # Safety
 /// All pointers must be valid. Called from JIT-generated code.
 pub extern "C" fn jit_pop_frame(ctx: *mut JitContext, caller_bp: u32) {
-    if validate_vm_callback_context(
+    if validate_callback_context(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         caller_bp as u64,
@@ -192,7 +192,7 @@ pub extern "C" fn jit_push_resume_point(
     ret_slots: u32,
 ) -> JitResult {
     if let Err(result) =
-        validate_vm_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
+        validate_callback_context(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64)
     {
         return result;
     }
@@ -247,7 +247,7 @@ fn validate_resume_point_publication(
     ret_reg: u16,
     ret_slots: u16,
 ) -> Result<(), u64> {
-    let module = unsafe { ctx.module.as_ref() }.ok_or(func_id as u64)?;
+    let module = unsafe { ctx.module_ref() }.ok_or(func_id as u64)?;
     let callee = module
         .functions
         .get(func_id as usize)
@@ -281,11 +281,9 @@ mod tests {
         module.functions.push(function(1, 0));
         vm.load(module).unwrap();
 
-        let module_ptr = vm.module.as_deref().unwrap() as *const Module;
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx =
-            unsafe { build_jit_context(&mut vm, &mut fiber, &*module_ptr) }.expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.fiber_sp = MAX_STACK_CAPACITY as u32;
 
         let args = jit_push_frame(ctx.as_ptr(), 0, 1, 0, 0, 12);
@@ -303,9 +301,9 @@ mod tests {
     #[test]
     fn vm_jit_resume_point_abi_006_rejects_ret_register_width_drift_before_push() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = Module::new("jit-resume-point-contract-test".to_string());
+        vm.finish_load(Module::new("jit-resume-point-contract-test".to_string()));
         let mut fiber = Fiber::new(7);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_push_resume_point(ctx.as_ptr(), 0, 12, 0, 0, u32::from(u16::MAX) + 1, 1);
 
@@ -323,9 +321,10 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-resume-point-capacity-test".to_string());
         module.functions.push(function(1, 0));
+        vm.finish_load(module);
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = 0;
         while fiber
             .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
@@ -362,9 +361,10 @@ mod tests {
         ret_slots: u32,
     ) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        vm.finish_load(module);
         let mut fiber = Fiber::new(7);
         fiber.push_frame(current_func_id, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = current_func_id;
 
         let result = jit_push_resume_point(ctx.as_ptr(), func_id, 12, 0, 0, ret_reg, ret_slots);
@@ -387,9 +387,10 @@ mod tests {
         ret_slots: u32,
     ) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        vm.finish_load(module);
         let mut fiber = Fiber::new(7);
         fiber.push_frame(current_func_id, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = current_func_id;
         let old_sp = fiber.sp;
         let old_jit_bp = ctx.ctx.jit_bp;

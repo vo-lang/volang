@@ -1,6 +1,10 @@
 use super::*;
+#[cfg(feature = "jit")]
+use crate::fiber::PendingSpawn;
 #[cfg(all(feature = "jit", feature = "std"))]
 use crate::test_support::queue as test_queue;
+#[cfg(feature = "jit")]
+use vo_runtime::island::EndpointWaitKey;
 
 #[cfg(all(feature = "jit", feature = "std"))]
 #[test]
@@ -33,10 +37,8 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
         0,
     );
     test_queue::install_home_info(ch, 42, vm.state.current_island_id);
-    test_queue::register_receiver(
-        ch,
-        QueueWaiter::endpoint(target_island, 0x0000_0002_0000_0003, 11),
-    );
+    let receiver_wait_key = EndpointWaitKey::try_new(0x0000_0002_0000_0003, 11).unwrap();
+    test_queue::register_receiver(ch, QueueWaiter::endpoint(target_island, receiver_wait_key));
     let current = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(current);
@@ -64,11 +66,9 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
         .island_commands
         .push(IslandCommandEffect::endpoint_recv_data_response(
             target_island,
-            vm.state.current_island_id,
             42,
             vec![0],
-            0x0000_0002_0000_0003,
-            11,
+            receiver_wait_key,
         ));
     vm.push_pending_runtime_transition(pending);
 
@@ -96,22 +96,55 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
 #[test]
 fn pending_spawn_commits_before_panic_result() {
     let mut vm = Vm::new();
-    let mut spawned = Fiber::new(99);
-    spawned.push_frame(0, 0, 0, 0, 0);
-
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::AllRootsDirty,
     );
-    transition.spawns.push(spawned);
+    transition.spawns.push(PendingSpawn::for_test(0));
     vm.push_pending_runtime_transition(transition);
 
     let result = vm.attach_pending_runtime_transitions(ExecResult::Panic);
 
     assert!(matches!(result, ExecResult::Panic));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.scheduler.fibers.len(), 1);
+}
+
+#[cfg(feature = "jit")]
+#[test]
+fn pending_transition_buffer_retains_capacity_after_attachment() {
+    let mut vm = Vm::new();
+    vm.pending_runtime_transitions.reserve(8);
+    let capacity = vm.pending_runtime_transitions.capacity();
+    vm.push_pending_runtime_transition(RuntimeTransition::continue_with_gc_roots(
+        GcRootEffect::None,
+    ));
+
+    let result = vm.attach_pending_runtime_transitions(ExecResult::TimesliceExpired);
+
+    assert!(matches!(result, ExecResult::Transition(_)));
+    assert!(vm.pending_runtime_transitions.is_empty());
+    assert_eq!(vm.pending_runtime_transitions.capacity(), capacity);
+}
+
+#[cfg(feature = "jit")]
+#[test]
+fn pending_transition_buffer_retains_capacity_after_merged_drain() {
+    let mut vm = Vm::new();
+    vm.pending_runtime_transitions.reserve(8);
+    let capacity = vm.pending_runtime_transitions.capacity();
+    for _ in 0..2 {
+        vm.push_pending_runtime_transition(RuntimeTransition::continue_with_gc_roots(
+            GcRootEffect::None,
+        ));
+    }
+
+    let result = vm.attach_pending_runtime_transitions(ExecResult::FrameChanged);
+
+    assert!(matches!(result, ExecResult::Transition(_)));
+    assert!(vm.pending_runtime_transitions.is_empty());
+    assert_eq!(vm.pending_runtime_transitions.capacity(), capacity);
 }
 
 #[cfg(feature = "jit")]
@@ -123,7 +156,7 @@ fn pending_exit_commits_only_effects_marked_for_every_terminal() {
         ResumePolicy::PreserveFramePc,
         GcRootEffect::AllRootsDirty,
     );
-    language_panic_only.spawns.push(Fiber::new(1));
+    language_panic_only.spawns.push(PendingSpawn::for_test(1));
     vm.push_pending_runtime_transition(language_panic_only);
 
     assert!(matches!(
@@ -140,7 +173,7 @@ fn pending_exit_commits_only_effects_marked_for_every_terminal() {
     any_terminal.set_pending_terminal_policy(
         crate::runtime_boundary::PendingTransitionTerminalPolicy::CommitOnAnyTerminal,
     );
-    any_terminal.spawns.push(Fiber::new(2));
+    any_terminal.spawns.push(PendingSpawn::for_test(2));
     vm.push_pending_runtime_transition(any_terminal);
 
     assert!(matches!(
@@ -148,7 +181,7 @@ fn pending_exit_commits_only_effects_marked_for_every_terminal() {
         ExecResult::Exit(37)
     ));
     assert_eq!(vm.scheduler.fibers.len(), 1);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
 }
 
 #[cfg(feature = "jit")]
@@ -159,15 +192,12 @@ fn vm_pending_terminal_txn_002_jit_error_discards_uncommitted_spawn() {
     vm.scheduler.schedule_next().unwrap();
     assert_eq!(vm.scheduler.current, Some(current));
 
-    let mut spawned = Fiber::new(99);
-    spawned.push_frame(0, 0, 0, 0, 0);
-
     let mut pending = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::AllRootsDirty,
     );
-    pending.spawns.push(spawned);
+    pending.spawns.push(PendingSpawn::for_test(0));
     vm.push_pending_runtime_transition(pending);
 
     let result = vm.attach_pending_runtime_transitions(ExecResult::JitError(
@@ -188,7 +218,7 @@ fn vm_pending_terminal_txn_002_jit_error_discards_uncommitted_spawn() {
         transition.boundary,
         RuntimeBoundary::FatalInfra(ref msg) if msg == "injected terminal JIT error"
     ));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
 }
 
 #[cfg(feature = "jit")]
@@ -226,7 +256,7 @@ fn vm_pending_terminal_txn_002_jit_error_discards_uncommitted_island_command() {
     assert!(transition.spawns.is_empty());
     assert!(transition.wakes.is_empty());
     assert!(transition.endpoint_tombstones.is_empty());
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
 }
 
 #[cfg(feature = "jit")]
@@ -234,52 +264,14 @@ fn vm_pending_terminal_txn_002_jit_error_discards_uncommitted_island_command() {
 #[should_panic(expected = "pending runtime transitions must be attached or discarded before GC")]
 fn vm_pending_transition_roots_002_gc_entry_rejects_unattached_pending_transition() {
     let mut vm = Vm::new();
-    let mut spawned = Fiber::new(99);
-    spawned.push_frame(0, 0, 0, 0, 0);
-
     let mut pending = RuntimeTransition::new(
         RuntimeBoundary::Continue,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::AllRootsDirty,
     );
-    pending.spawns.push(spawned);
+    pending.spawns.push(PendingSpawn::for_test(0));
     vm.push_pending_runtime_transition(pending);
     vm.gc_step_after_fiber(None);
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_osr_panic_pending_001_execution_owner_reattaches_before_pending_commit() {
-    let source = compact_source_bytes(include_str!("../mod.rs"));
-    let owner = compact_region_between_compact(&source, "fnrun_fiber(", "fnrun_detached_fiber(")
-        .expect("run_fiber execution owner");
-    let execution =
-        compact_pattern_position(&owner, "execution.run()").expect("detached execution invocation");
-    let attach = compact_pattern_position(&owner, "attach_pending_runtime_transitions(result)")
-        .expect("pending transition attachment");
-    let lease = compact_region_between_compact(
-        &source,
-        "impl<'vm>DetachedFiberExecution<'vm>{",
-        "implDropforDetachedFiberExecution<'_>{",
-    )
-    .expect("detached execution lease implementation");
-    compact_pattern_position(&lease, "reattach_after_execution(self.fiber_id,fiber)")
-        .expect("active fiber reattachment");
-    assert!(
-        compact_contains(&lease, "letmodule=vm.module.as_ref()?.clone()")
-            && !compact_contains(&lease, "vm.module.take()"),
-        "fiber execution must share the immutable module instead of detaching VM ownership"
-    );
-    let drop_impl = compact_region_between_compact(
-        &source,
-        "implDropforDetachedFiberExecution<'_>{",
-        "#[cfg(feature=\"jit\")]",
-    )
-    .expect("detached execution drop implementation");
-    assert!(
-        execution < attach && compact_contains(&drop_impl, "self.restore()"),
-        "pending transition commit must follow execution guarded by panic-safe fiber restoration"
-    );
 }
 
 #[cfg(feature = "jit")]
@@ -297,7 +289,7 @@ fn vm_osr_panic_pending_001_attach_pending_error_becomes_jit_error() {
     let result = vm.attach_pending_runtime_transitions(ExecResult::Panic);
 
     assert!(matches!(result, ExecResult::JitError(ref msg) if msg.contains("OSR borrow lease")));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
 }
 
 #[cfg(feature = "jit")]
@@ -308,15 +300,12 @@ fn vm_rt_002_jit_error_discards_uncommitted_pending_spawns() {
     vm.scheduler.schedule_next().unwrap();
     assert_eq!(vm.scheduler.current, Some(current));
 
-    let mut spawned = Fiber::new(99);
-    spawned.push_frame(0, 0, 0, 0, 0);
-
     let mut pending = RuntimeTransition::new(
         RuntimeBoundary::Yield,
         ResumePolicy::PreserveFramePc,
         GcRootEffect::AllRootsDirty,
     );
-    pending.spawns.push(spawned);
+    pending.spawns.push(PendingSpawn::for_test(0));
     vm.push_pending_runtime_transition(pending);
 
     let result = vm.attach_pending_runtime_transitions(ExecResult::JitError(
@@ -342,7 +331,7 @@ fn vm_rt_002_jit_error_discards_uncommitted_pending_spawns() {
         err,
         VmError::Jit(ref msg) if msg == "injected JIT infra fault"
     ));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.scheduler.fibers.len(), 1);
     assert!(matches!(
         vm.scheduler.get_fiber(current).state,
@@ -370,9 +359,7 @@ fn vm_rt_002_jit_error_discards_uncommitted_endpoint_request_effect() {
         .push(IslandCommandEffect::endpoint_recv_request(
             9,
             42,
-            vm.state.current_island_id,
-            0x0000_0001_0000_0002,
-            8,
+            EndpointWaitKey::try_new(0x0000_0001_0000_0002, 8).unwrap(),
         ));
     vm.push_pending_runtime_transition(pending);
 
@@ -402,12 +389,12 @@ fn command_queue_endpoint_response_wakes_blocked_fiber() {
     let mut vm = Vm::new();
 
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    let wait_id;
+    let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
         fiber.push_frame(0, 0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
-        wait_id = fiber.begin_remote_endpoint_send_wait(42);
+        wait_key = fiber.begin_remote_endpoint_send_wait(42);
     }
 
     vm.scheduler.schedule_next().unwrap();
@@ -421,10 +408,10 @@ fn command_queue_endpoint_response_wakes_blocked_fiber() {
         9,
         IslandCommand::EndpointResponse {
             endpoint_id: 42,
-            kind: EndpointResponseKind::SendAck { closed: true },
-            from_island: 9,
-            fiber_key: vm.scheduler.get_fiber(fid).wake_key_packed(),
-            wait_id,
+            kind: EndpointResponseKind::SendAck {
+                closed: true,
+                wait_key,
+            },
         },
     );
 

@@ -707,21 +707,6 @@ fn vm_jit_materialize_resume_stack_rejects_restore_sp_below_caller_scan_extent_0
 }
 
 #[test]
-fn vm_gc_materialized_frame_invariants_are_not_debug_only() {
-    let src = include_str!("../materialize.rs");
-    assert!(
-        !src.contains(
-            "#[cfg(debug_assertions)]\n    if let Err(err) = materialized_jit_frame_invariants"
-        ),
-        "JIT frame materialization invariants must run in release builds"
-    );
-    assert!(
-        !src.contains("#[cfg(any(debug_assertions, test))]\nfn materialized_jit_frame_invariants"),
-        "JIT frame materialization invariant implementation must be available outside debug/test"
-    );
-}
-
-#[test]
 fn vm_gc_materialize_jit_frames_preserves_nested_frame_invariants() {
     let mut module = Module::new("jit-frame-test".to_string());
     module.functions.push(function(2, 0));

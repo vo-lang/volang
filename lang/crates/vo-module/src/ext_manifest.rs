@@ -1039,10 +1039,6 @@ fn parse_generator_providers_from_value(
     Ok(parsed)
 }
 
-pub fn extension_name_from_content(content: &str) -> Result<String, Error> {
-    Ok(parse_ext_manifest_content(content, Path::new("vo.mod"))?.name)
-}
-
 fn parse_web_project_from_value(
     root: &toml::value::Table,
 ) -> Result<Option<WebProjectManifest>, Error> {

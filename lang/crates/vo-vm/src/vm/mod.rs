@@ -28,6 +28,10 @@ use std::vec::Vec;
 use vo_runtime::gc::{Gc, GcRef, MemoryError, OomPolicy};
 use vo_runtime::objects::{array, interface, string};
 use vo_runtime::output::OutputSink;
+use vo_runtime::value_layout::{
+    canonicalize_concrete_heap_value, validate_interface_value, validate_transfer_layout,
+    ValidatedInterfaceValue,
+};
 
 mod extern_call;
 pub(crate) mod helpers;
@@ -36,6 +40,7 @@ mod island_shared;
 pub mod island_thread;
 #[cfg(feature = "jit")]
 mod jit;
+mod jit_stats;
 mod types;
 
 pub(crate) use extern_call::prepare_extern_closure_replay_call;
@@ -43,15 +48,16 @@ pub(crate) use extern_call::prepare_extern_closure_replay_call;
 pub(crate) use extern_call::prepare_typed_extern_closure_replay_setup;
 pub(crate) use helpers::{stack_get, stack_set};
 pub(crate) use island_shared::endpoint_response_from_authorized_source;
+pub use jit_stats::{JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
 pub use types::EndpointRegistry;
-pub(crate) use types::EndpointRegistrySnapshot;
+pub(crate) use types::EndpointRegistryUndo;
 #[cfg(feature = "std")]
 pub use types::{EntryIslandEvent, IslandThread};
 pub use types::{
     ErrorLocation, ExecResult, GcRootEffect, HostServicesUpdateError, RuntimeTrapKind,
     SchedulingOutcome, VmConstructionError, VmError, VmFiberRootScanStage, VmGcCycleReport,
-    VmGcStepReport, VmGcStepStats, VmIdentityExhausted, VmRootScanMode, VmRootScanSnapshot,
-    VmRootScanStage, VmState, TIME_SLICE,
+    VmGcStepReport, VmGcStepStats, VmIdentityExhausted, VmResourceError, VmRootScanMode,
+    VmRootScanSnapshot, VmRootScanStage, VmState, TIME_SLICE,
 };
 
 use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
@@ -64,19 +70,276 @@ use helpers::{
 use crate::bytecode::ExternJitRoute;
 use crate::bytecode::{FunctionDef, Module, TransferType};
 use crate::exec;
-use crate::fiber::{Fiber, FiberCapacityError};
+use crate::fiber::{Fiber, FiberCapacityError, PendingSpawn};
 use crate::runtime_boundary::{
     replay_current_instruction_policy, IslandCommandEffect, ResumePolicy, RuntimeBoundary,
     RuntimeCommand, RuntimeTransition, WakeCommand,
 };
-use vo_common_core::bytecode::{JitInstructionMetadata, ReturnFlags};
+use vo_common_core::bytecode::{InstructionMetadata, LoadedModule, ReturnFlags};
 
 #[inline]
 fn queue_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::SlotType]> {
-    match func.jit_metadata.get(pc) {
-        Some(JitInstructionMetadata::QueueLayout { elem_layout }) => Some(elem_layout.as_slice()),
-        _ => None,
+    func.instruction_metadata.get(pc)?.queue_elem_layout()
+}
+
+fn ptr_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::SlotType]> {
+    func.instruction_metadata.get(pc)?.ptr_value_layout()
+}
+
+fn elem_layout_for_pc(
+    func: &FunctionDef,
+    pc: usize,
+) -> Option<(usize, bool, &[vo_runtime::SlotType])> {
+    let metadata = func.instruction_metadata.get(pc)?;
+    let layout = metadata.elem_layout()?;
+    Some((
+        layout.bytes,
+        layout.needs_sign_extend,
+        metadata.elem_slot_layout()?,
+    ))
+}
+
+pub(crate) enum PreparedQueueAction {
+    Continue,
+    Block(QueueWaitMode),
+    Trap(RuntimeTrapKind),
+    Transition {
+        transition: RuntimeTransition,
+        wait: Option<QueueWaitMode>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueWaitMode {
+    Resume,
+    Replay,
+}
+
+#[inline]
+pub(crate) fn prepare_queue_action(
+    state: &mut VmState,
+    fiber: &mut Fiber,
+    action: exec::QueueAction,
+) -> Result<PreparedQueueAction, String> {
+    match action {
+        exec::QueueAction::Continue => Ok(PreparedQueueAction::Continue),
+        action => prepare_nontrivial_queue_action(state, fiber, action),
     }
+}
+
+fn prepare_nontrivial_queue_action(
+    state: &mut VmState,
+    fiber: &mut Fiber,
+    action: exec::QueueAction,
+) -> Result<PreparedQueueAction, String> {
+    use exec::QueueAction;
+
+    let completed = |transition: RuntimeTransition| {
+        #[cfg(feature = "jit")]
+        let transition = {
+            let mut transition = transition;
+            transition.set_pending_terminal_policy(
+                crate::runtime_boundary::PendingTransitionTerminalPolicy::CommitOnAnyTerminal,
+            );
+            transition
+        };
+        PreparedQueueAction::Transition {
+            transition,
+            wait: None,
+        }
+    };
+    let waiting = |transition: RuntimeTransition, wait, commit_on_terminal| {
+        #[cfg(feature = "jit")]
+        let transition = {
+            let mut transition = transition;
+            transition.set_pending_terminal_policy(if commit_on_terminal {
+                crate::runtime_boundary::PendingTransitionTerminalPolicy::CommitOnAnyTerminal
+            } else {
+                crate::runtime_boundary::PendingTransitionTerminalPolicy::DiscardOnTerminal
+            });
+            transition
+        };
+        #[cfg(not(feature = "jit"))]
+        let _ = commit_on_terminal;
+        PreparedQueueAction::Transition {
+            transition,
+            wait: Some(wait),
+        }
+    };
+
+    Ok(match action {
+        QueueAction::Continue => unreachable!("Continue is handled by the inline queue fast path"),
+        QueueAction::Block { waiter } => {
+            if let Some(waiter) = waiter.as_ref() {
+                fiber.begin_queue_wait(waiter);
+            } else {
+                fiber.clear_queue_wait();
+            }
+            PreparedQueueAction::Block(QueueWaitMode::Resume)
+        }
+        QueueAction::ReplayThenBlock { waiter } => {
+            if let Some(waiter) = waiter.as_ref() {
+                fiber.begin_queue_wait(waiter);
+            } else {
+                fiber.clear_queue_wait();
+            }
+            PreparedQueueAction::Block(QueueWaitMode::Replay)
+        }
+        QueueAction::Trap(kind) => PreparedQueueAction::Trap(kind),
+        QueueAction::Malformed(message) => return Err(message),
+        QueueAction::Wake { waiter, payload } => {
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::CurrentFiberDirty);
+            transition.wakes.push(match payload {
+                Some(payload) => WakeCommand::queue_waiter_with_result(waiter, payload),
+                None => WakeCommand::queue_waiter(waiter),
+            });
+            completed(transition)
+        }
+        QueueAction::Close {
+            ch,
+            receivers,
+            senders,
+            endpoint_id,
+            rollback,
+        } => {
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::CurrentFiberDirty);
+            transition.prepare_queue_close(ch);
+            transition.set_rollback(rollback);
+            for waiter in receivers {
+                transition
+                    .push_queue_close_wake(WakeCommand::queue_closed_receiver(waiter, endpoint_id));
+            }
+            for waiter in senders {
+                transition
+                    .push_queue_close_wake(WakeCommand::queue_closed_sender(waiter, endpoint_id));
+            }
+            if let Some(endpoint_id) = endpoint_id {
+                island_shared::append_closed_home_endpoint_effects(
+                    state,
+                    endpoint_id,
+                    None,
+                    &mut transition,
+                );
+            }
+            completed(transition)
+        }
+        QueueAction::RemoteSend {
+            endpoint_id,
+            home_island,
+            data,
+            mut island_effects,
+            transfer_commit,
+        } => {
+            fiber.clear_queue_wait();
+            let wait_key = match fiber.try_begin_remote_endpoint_send_wait(endpoint_id) {
+                Ok(wait_key) => wait_key,
+                Err(error) => {
+                    transfer_commit.restore_committed_local_endpoint_state(state);
+                    return Err(error.to_string());
+                }
+            };
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::CurrentFiberDirty);
+            transition.island_commands.append(&mut island_effects);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_send_request(
+                    home_island,
+                    endpoint_id,
+                    data,
+                    wait_key,
+                ));
+            let commit_on_terminal = transfer_commit.requires_terminal_commit();
+            if let Some(rollback) = transfer_commit.into_runtime_rollback() {
+                transition.set_rollback(rollback);
+            }
+            waiting(transition, QueueWaitMode::Resume, commit_on_terminal)
+        }
+        QueueAction::RemoteRecv {
+            endpoint_id,
+            home_island,
+        } => {
+            fiber.clear_queue_wait();
+            let wait_key = fiber
+                .try_begin_remote_endpoint_recv_wait(endpoint_id)
+                .map_err(|error| error.to_string())?;
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::CurrentFiberDirty);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_recv_request(
+                    home_island,
+                    endpoint_id,
+                    wait_key,
+                ));
+            waiting(transition, QueueWaitMode::Replay, false)
+        }
+        QueueAction::RemoteSendAck {
+            endpoint_id,
+            target_island,
+            wait_key,
+            closed,
+            rollback,
+        } => {
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::CurrentFiberDirty);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_response(
+                    target_island,
+                    endpoint_id,
+                    vo_runtime::island::EndpointResponseKind::SendAck { closed, wait_key },
+                ));
+            transition.set_rollback(rollback);
+            completed(transition)
+        }
+        QueueAction::RemoteRecvData {
+            endpoint_id,
+            target_island,
+            wait_key,
+            data,
+            mut island_effects,
+            rollback,
+        } => {
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::CurrentFiberDirty);
+            transition.island_commands.append(&mut island_effects);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_recv_data_response(
+                    target_island,
+                    endpoint_id,
+                    data,
+                    wait_key,
+                ));
+            transition.set_rollback(rollback);
+            completed(transition)
+        }
+        QueueAction::RemoteClose {
+            endpoint_id,
+            home_island,
+            rollback,
+        } => {
+            let mut transition =
+                RuntimeTransition::continue_with_gc_roots(GcRootEffect::AllRootsDirty);
+            transition.set_rollback(rollback);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_close_request(
+                    home_island,
+                    endpoint_id,
+                ));
+            transition.endpoint_tombstones.push(
+                crate::runtime_boundary::EndpointTombstone::with_response_source(
+                    endpoint_id,
+                    home_island,
+                ),
+            );
+            completed(transition)
+        }
+    })
 }
 
 #[inline]
@@ -117,63 +380,31 @@ fn map_key_value_layout_for_pc(
     func: &FunctionDef,
     pc: usize,
 ) -> Option<(&[vo_runtime::SlotType], &[vo_runtime::SlotType])> {
-    match func.jit_metadata.get(pc) {
-        Some(JitInstructionMetadata::MapGet {
-            key_layout,
-            val_layout,
-            ..
-        })
-        | Some(JitInstructionMetadata::MapSet {
-            key_layout,
-            val_layout,
-        })
-        | Some(JitInstructionMetadata::MapIterNext {
-            key_layout,
-            val_layout,
-        }) => Some((key_layout.as_slice(), val_layout.as_slice())),
-        _ => None,
-    }
+    func.instruction_metadata
+        .get(pc)?
+        .map_key_value_layout_slices()
 }
 
 fn map_new_layout_for_pc(
     func: &FunctionDef,
     pc: usize,
 ) -> Option<(&[vo_runtime::SlotType], &[vo_runtime::SlotType])> {
-    match func.jit_metadata.get(pc) {
-        Some(JitInstructionMetadata::MapNew {
-            key_layout,
-            val_layout,
-        }) => Some((key_layout.as_slice(), val_layout.as_slice())),
-        _ => None,
-    }
+    func.instruction_metadata.get(pc)?.map_new_layout_slices()
 }
 
 fn map_get_layout_for_pc(
     func: &FunctionDef,
     pc: usize,
 ) -> Option<(&[vo_runtime::SlotType], &[vo_runtime::SlotType], bool)> {
-    match func.jit_metadata.get(pc) {
-        Some(JitInstructionMetadata::MapGet {
-            key_layout,
-            val_layout,
-            has_ok,
-        }) => Some((key_layout.as_slice(), val_layout.as_slice(), *has_ok)),
-        _ => None,
-    }
+    func.instruction_metadata.get(pc)?.map_get_layout_slices()
 }
 
 fn slot_elem_slots_for_pc(func: &FunctionDef, pc: usize) -> Option<usize> {
-    match func.jit_metadata.get(pc) {
-        Some(JitInstructionMetadata::SlotLayout { elem_layout }) => Some(elem_layout.len()),
-        _ => None,
-    }
+    Some(func.instruction_metadata.get(pc)?.slot_elem_layout()?.len())
 }
 
 fn map_key_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::SlotType]> {
-    match func.jit_metadata.get(pc) {
-        Some(JitInstructionMetadata::MapDelete { key_layout }) => Some(key_layout.as_slice()),
-        _ => None,
-    }
+    func.instruction_metadata.get(pc)?.map_delete_key_layout()
 }
 
 /// Result of wait_for_work() — what the scheduling loop should do next.
@@ -244,11 +475,60 @@ fn exec_result_marks_gc_fiber_roots_dirty(result: &ExecResult) -> bool {
     !matches!(result, ExecResult::Interrupted)
 }
 
+#[inline]
+#[cfg(any(feature = "std", test))]
+pub(crate) fn wait_io_gc_root_effect(staged_io_roots_added: bool) -> GcRootEffect {
+    if staged_io_roots_added {
+        GcRootEffect::AllRootsDirty
+    } else {
+        GcRootEffect::CurrentFiberDirty
+    }
+}
+
 fn fiber_capacity_error_to_vm_error(err: FiberCapacityError) -> VmError {
+    match err {
+        FiberCapacityError::HostStorage {
+            resource,
+            requested_bytes,
+            limit_bytes,
+        } => {
+            return VmError::Resource(VmResourceError::Limit {
+                resource,
+                required: requested_bytes,
+                limit: limit_bytes,
+            })
+        }
+        FiberCapacityError::HostAllocation { resource } => {
+            return VmError::Resource(VmResourceError::Allocation { resource })
+        }
+        FiberCapacityError::StackSlots { .. } | FiberCapacityError::CallFrames { .. } => {}
+    }
     VmError::RuntimeTrap {
         kind: RuntimeTrapKind::StackOverflow,
         msg: err.message(),
         loc: None,
+    }
+}
+
+pub(crate) fn scheduler_error_to_vm_error(
+    err: crate::scheduler::SchedulerIdentityExhausted,
+) -> VmError {
+    use crate::scheduler::SchedulerIdentityExhausted;
+    match err {
+        SchedulerIdentityExhausted::FiberLimit { required, limit } => {
+            VmError::Resource(VmResourceError::Limit {
+                resource: "scheduled fibers",
+                required,
+                limit,
+            })
+        }
+        SchedulerIdentityExhausted::HostAllocation(resource) => {
+            VmError::Resource(VmResourceError::Allocation { resource })
+        }
+        SchedulerIdentityExhausted::FiberCapacity(error) => fiber_capacity_error_to_vm_error(error),
+        SchedulerIdentityExhausted::FiberSlots | SchedulerIdentityExhausted::WaitRegistrations => {
+            VmError::Jit(err.to_string())
+        }
     }
 }
 
@@ -278,15 +558,15 @@ fn can_enter_materialized_frame_at_pc(
 
 use crate::instruction::{Instruction, Opcode};
 use crate::scheduler::Scheduler;
-use vo_runtime::itab::ItabCache;
+use vo_runtime::itab::{validate_interface_itab, ItabCache};
 
 #[cfg(feature = "jit")]
 mod jit_mgr;
 
 #[cfg(feature = "jit")]
-use jit_mgr::JitManager;
+pub use jit_mgr::JitConfig;
 #[cfg(feature = "jit")]
-pub use jit_mgr::{JitConfig, JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
+use jit_mgr::{JitManager, SharedJitCode};
 
 #[cfg(feature = "jit")]
 #[derive(Default)]
@@ -295,6 +575,20 @@ enum VmJitState {
     Disabled,
     BestEffort(JitManager),
     Strict(JitManager),
+}
+
+#[cfg(feature = "jit")]
+#[derive(Clone)]
+enum ChildJitMode {
+    Disabled,
+    BestEffort {
+        config: JitConfig,
+        shared_code: Arc<SharedJitCode>,
+    },
+    Strict {
+        config: JitConfig,
+        shared_code: Arc<SharedJitCode>,
+    },
 }
 
 #[cfg(feature = "jit")]
@@ -317,23 +611,51 @@ impl VmJitState {
         !matches!(self, Self::Disabled)
     }
 
-    fn is_strict(&self) -> bool {
-        matches!(self, Self::Strict(_))
+    fn is_best_effort(&self) -> bool {
+        matches!(self, Self::BestEffort(_))
+    }
+
+    fn child_mode(&self) -> ChildJitMode {
+        match self {
+            Self::Disabled => ChildJitMode::Disabled,
+            Self::BestEffort(manager) => ChildJitMode::BestEffort {
+                config: manager.config().clone(),
+                shared_code: manager.shared_code(),
+            },
+            Self::Strict(manager) => ChildJitMode::Strict {
+                config: manager.config().clone(),
+                shared_code: manager.shared_code(),
+            },
+        }
     }
 
     #[allow(clippy::result_large_err)]
-    fn ensure_strict(&mut self) -> Result<&mut JitManager, vo_jit::JitError> {
-        let manager = match core::mem::replace(self, Self::Disabled) {
-            Self::Disabled => JitManager::new()?,
-            Self::BestEffort(manager) | Self::Strict(manager) => manager,
-        };
-        *self = Self::Strict(manager);
-        match self {
-            Self::Strict(manager) => Ok(manager),
-            Self::Disabled | Self::BestEffort(_) => Err(vo_jit::JitError::Internal(
-                "failed to enter strict JIT state".to_string(),
-            )),
+    fn enable_strict_for_module(
+        &mut self,
+        module: Option<&Arc<LoadedModule>>,
+    ) -> Result<(), vo_jit::JitError> {
+        if matches!(self, Self::Disabled) {
+            let mut manager = JitManager::new()?;
+            if let Some(module) = module {
+                manager.init_verified(module)?;
+            }
+            *self = Self::Strict(manager);
+            return Ok(());
         }
+
+        let promote = matches!(self, Self::BestEffort(_));
+        if let Some(module) = module {
+            self.manager_mut()
+                .expect("enabled JIT state has a manager")
+                .init_verified(module)?;
+        }
+        if promote {
+            let Self::BestEffort(manager) = core::mem::replace(self, Self::Disabled) else {
+                unreachable!("best-effort JIT state changed during promotion")
+            };
+            *self = Self::Strict(manager);
+        }
+        Ok(())
     }
 
     fn set_best_effort(&mut self, manager: JitManager) {
@@ -343,14 +665,21 @@ impl VmJitState {
     fn set_strict(&mut self, manager: JitManager) {
         *self = Self::Strict(manager);
     }
+
+    #[allow(clippy::result_large_err)]
+    fn init_for_module(&mut self, module: &Arc<LoadedModule>) -> Result<(), vo_jit::JitError> {
+        match self {
+            Self::Disabled => Ok(()),
+            Self::Strict(manager) => manager.init_verified(module),
+            Self::BestEffort(manager) => manager.init_best_effort(module),
+        }
+    }
 }
 
 pub struct Vm {
     #[cfg(feature = "std")]
-    extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
-    #[cfg(feature = "std")]
-    extension_specs: Option<Vec<vo_runtime::ext_loader::NativeExtensionSpec>>,
-    pub(crate) module: Option<Arc<Module>>,
+    extension_loader: Option<Arc<vo_runtime::ext_loader::ExtensionLoader>>,
+    pub(crate) module: Option<Arc<LoadedModule>>,
     pub(crate) scheduler: Scheduler,
     pub(crate) state: VmState,
     exit_code: Option<i32>,
@@ -359,11 +688,23 @@ pub struct Vm {
     /// Remains true after the first fiber begins execution, including after
     /// every scheduler slot has reached a terminal state.
     execution_started: bool,
-    /// JIT state is declared last so Rust's declaration-order field drop keeps
-    /// executable memory alive until module, scheduler, and VM state are gone.
-    /// Strict JIT entry points validate all function metadata before admission.
+    #[cfg(feature = "jit")]
+    pub(crate) pending_runtime_transitions: Vec<RuntimeTransition>,
+    /// Declared last so executable memory outlives scheduler and VM state.
+    /// Its shared code owner independently retains the exact module image until
+    /// after the compiler and every published entry point are dropped.
     #[cfg(feature = "jit")]
     jit: VmJitState,
+}
+
+/// Immutable execution authorities inherited together by process-local child
+/// Islands. Keeping these values in one private type prevents a module,
+/// provider table, and dynamic-library owner from being mixed across loads.
+#[cfg(feature = "std")]
+struct InheritedProgramImage {
+    module: Arc<LoadedModule>,
+    extern_registry: Arc<vo_runtime::ExternRegistry>,
+    extension_loader: Option<Arc<vo_runtime::ext_loader::ExtensionLoader>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,7 +718,7 @@ enum StdlibRegistrationMode {
 struct DetachedFiberExecution<'vm> {
     vm: &'vm mut Vm,
     fiber_id: crate::scheduler::FiberId,
-    module: Arc<Module>,
+    module: Arc<LoadedModule>,
     fiber: Option<Box<Fiber>>,
 }
 
@@ -419,15 +760,6 @@ impl Drop for DetachedFiberExecution<'_> {
 }
 
 #[cfg(feature = "jit")]
-#[allow(clippy::result_large_err)]
-fn validate_strict_jit_module(
-    verified: vo_common_core::verifier::VerifiedModule<'_>,
-) -> Result<(), vo_jit::JitError> {
-    vo_jit::verify_module_after_common(verified)?;
-    Ok(())
-}
-
-#[cfg(feature = "jit")]
 fn strict_jit_load_error(err: vo_jit::JitError) -> VmError {
     VmError::Jit(err.to_string())
 }
@@ -436,11 +768,16 @@ fn invalid_module_metadata(msg: impl Into<String>) -> VmError {
     VmError::Jit(format!("invalid module metadata: {}", msg.into()))
 }
 
-fn validate_vm_module(
-    module: &Module,
-) -> Result<vo_common_core::verifier::VerifiedModule<'_>, VmError> {
-    vo_common_core::verifier::verify_module(module)
+fn validate_vm_module(module: Module) -> Result<LoadedModule, VmError> {
+    vo_common_core::verifier::verify_loaded_module(module)
         .map_err(|err| invalid_module_metadata(err.to_string()))
+}
+
+#[cfg(test)]
+pub(crate) fn test_loaded_module(module: Module) -> Arc<LoadedModule> {
+    // SAFETY: this helper is compiled only for VM hardening tests. Callers use
+    // the module to probe defensive runtime paths, never to certify bytecode.
+    Arc::new(unsafe { LoadedModule::from_unverified_for_test(module) })
 }
 
 #[cfg(debug_assertions)]
@@ -492,9 +829,8 @@ fn debug_validate_extern_returns(
                     ));
                 };
                 if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
-                    let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
                     return Err(format!(
-                        "CallExtern returned invalid GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
+                        "CallExtern returned invalid GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x}",
                         fiber_id.to_raw(),
                         func_id,
                         func.name,
@@ -502,9 +838,6 @@ fn debug_validate_extern_returns(
                         extern_def.name,
                         slot_idx,
                         raw,
-                        in_all,
-                        in_index,
-                        index_len,
                     ));
                 }
                 slot_idx += 1;
@@ -546,13 +879,26 @@ fn debug_validate_extern_returns(
                         extern_id
                     ));
                 };
-                if vo_runtime::objects::interface::data_is_gc_ref(slot0)
+                let value_kind =
+                    vo_runtime::objects::interface::try_unpack_value_kind(slot0).ok_or_else(
+                        || {
+                            format!(
+                                "CallExtern returned interface with invalid value-kind tag {} fiber={} caller_func={} caller_name={} extern={} ret_slot={}",
+                                slot0 as u8,
+                                fiber_id.to_raw(),
+                                func_id,
+                                func.name,
+                                extern_id,
+                                slot_idx
+                            )
+                        },
+                    )?;
+                if value_kind.may_contain_gc_refs()
                     && slot1 != 0
                     && gc.canonicalize_ref(slot1 as GcRef).is_none()
                 {
-                    let (in_all, in_index, index_len) = gc.debug_ref_membership(slot1 as GcRef);
                     return Err(format!(
-                        "CallExtern returned invalid interface GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
+                        "CallExtern returned invalid interface GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x}",
                         fiber_id.to_raw(),
                         func_id,
                         func.name,
@@ -560,9 +906,6 @@ fn debug_validate_extern_returns(
                         extern_def.name,
                         slot_idx + 1,
                         slot1,
-                        in_all,
-                        in_index,
-                        index_len,
                     ));
                 }
                 slot_idx += 2;
@@ -670,23 +1013,62 @@ impl Vm {
     }
 
     fn from_state(state: VmState) -> Self {
+        Self::from_state_with_resource_limits(state, crate::fiber::VmResourceLimits::default())
+    }
+
+    fn from_state_with_resource_limits(
+        state: VmState,
+        resource_limits: crate::fiber::VmResourceLimits,
+    ) -> Self {
         let mut vm = Self {
             #[cfg(feature = "jit")]
             jit: VmJitState::Disabled,
             #[cfg(feature = "std")]
             extension_loader: None,
-            #[cfg(feature = "std")]
-            extension_specs: None,
             module: None,
-            scheduler: Scheduler::new(),
+            scheduler: Scheduler::with_resource_limits(resource_limits),
             state,
             exit_code: None,
             pending_exit_code: None,
             terminal_memory_error: None,
             execution_started: false,
+            #[cfg(feature = "jit")]
+            pending_runtime_transitions: Vec::new(),
         };
         vm.apply_gc_environment();
         vm
+    }
+
+    pub fn try_with_resource_limits(
+        resource_limits: crate::fiber::VmResourceLimits,
+    ) -> Result<Self, VmConstructionError> {
+        #[cfg(feature = "std")]
+        let state = VmState::try_new().map_err(VmConstructionError::Io)?;
+        #[cfg(not(feature = "std"))]
+        let state = VmState::try_new().map_err(VmConstructionError::Infallible)?;
+        Ok(Self::from_state_with_resource_limits(
+            state,
+            resource_limits,
+        ))
+    }
+
+    pub fn try_with_memory_and_resource_limits(
+        memory_config: vo_runtime::gc::VmMemoryConfig,
+        resource_limits: crate::fiber::VmResourceLimits,
+    ) -> Result<Self, VmConstructionError> {
+        let state = VmState::try_new_with_memory_config(memory_config)?;
+        Ok(Self::from_state_with_resource_limits(
+            state,
+            resource_limits,
+        ))
+    }
+
+    pub fn resource_limits(&self) -> crate::fiber::VmResourceLimits {
+        self.scheduler.resource_limits()
+    }
+
+    pub fn fiber_storage_bytes(&self) -> usize {
+        self.scheduler.fiber_storage_bytes()
     }
 
     fn apply_gc_environment(&mut self) {
@@ -730,28 +1112,6 @@ impl Vm {
         Ok(())
     }
 
-    /// Create a VM with custom JIT thresholds.
-    ///
-    /// This is a best-effort convenience constructor: if JIT initialization
-    /// fails, the VM is still created without a JIT manager. Use
-    /// [`Vm::try_with_jit_config`] for strict `RunMode::Jit` paths.
-    #[cfg(feature = "jit")]
-    #[deprecated(
-        note = "non-strict best-effort API; use try_with_jit_config for strict JIT or with_best_effort_jit_config for explicit fallback"
-    )]
-    pub fn with_jit_thresholds(call_threshold: u32, loop_threshold: u32) -> Self {
-        Self::with_best_effort_jit_config(JitConfig {
-            call_threshold,
-            loop_threshold,
-            ..Default::default()
-        })
-    }
-
-    #[cfg(not(feature = "jit"))]
-    pub fn with_jit_thresholds(_call_threshold: u32, _loop_threshold: u32) -> Self {
-        Self::new()
-    }
-
     /// Create a VM with custom JIT configuration, best effort.
     ///
     /// JIT initialization errors are swallowed and the VM runs interpreter-only.
@@ -763,18 +1123,6 @@ impl Vm {
             vm.jit.set_best_effort(mgr);
         }
         vm
-    }
-
-    /// Deprecated alias for [`Vm::with_best_effort_jit_config`].
-    ///
-    /// This method is non-strict and may return a VM without JIT enabled.
-    /// New strict callers should use [`Vm::try_with_jit_config`].
-    #[cfg(feature = "jit")]
-    #[deprecated(
-        note = "non-strict best-effort API; use try_with_jit_config for strict JIT or with_best_effort_jit_config for explicit fallback"
-    )]
-    pub fn with_jit_config(config: JitConfig) -> Self {
-        Self::with_best_effort_jit_config(config)
     }
 
     #[cfg(feature = "jit")]
@@ -792,31 +1140,64 @@ impl Vm {
         jit_config: JitConfig,
         memory_config: vo_runtime::gc::VmMemoryConfig,
     ) -> Result<Self, VmConstructionError> {
-        let mut vm = Self::try_with_memory_config(memory_config)?;
+        Self::try_with_jit_memory_and_resource_limits(
+            jit_config,
+            memory_config,
+            crate::fiber::VmResourceLimits::default(),
+        )
+    }
+
+    /// Construct a strict-JIT VM with managed-heap and native-Fiber policies
+    /// fixed before any runtime owner is allocated.
+    #[cfg(feature = "jit")]
+    #[allow(clippy::result_large_err)]
+    pub fn try_with_jit_memory_and_resource_limits(
+        jit_config: JitConfig,
+        memory_config: vo_runtime::gc::VmMemoryConfig,
+        resource_limits: crate::fiber::VmResourceLimits,
+    ) -> Result<Self, VmConstructionError> {
+        let mut vm = Self::try_with_memory_and_resource_limits(memory_config, resource_limits)?;
         vm.jit
             .set_strict(JitManager::with_config(jit_config).map_err(VmConstructionError::Jit)?);
         Ok(vm)
     }
 
+    #[cfg(feature = "jit")]
+    #[allow(clippy::result_large_err)]
+    fn try_with_child_jit_mode(
+        mode: ChildJitMode,
+        memory_config: vo_runtime::gc::VmMemoryConfig,
+        resource_limits: crate::fiber::VmResourceLimits,
+    ) -> Result<Self, VmConstructionError> {
+        let mut vm = Self::try_with_memory_and_resource_limits(memory_config, resource_limits)?;
+        match mode {
+            ChildJitMode::Disabled => {}
+            ChildJitMode::BestEffort {
+                config,
+                shared_code,
+            } => {
+                vm.jit
+                    .set_best_effort(JitManager::with_shared_code(config, shared_code));
+            }
+            ChildJitMode::Strict {
+                config,
+                shared_code,
+            } => vm
+                .jit
+                .set_strict(JitManager::with_shared_code(config, shared_code)),
+        }
+        Ok(vm)
+    }
+
     /// Strictly initialize the JIT compiler.
     ///
-    /// If a module is already loaded, validates strict JIT metadata before the
+    /// If a module is already loaded, binds its verifier certificate before the
     /// VM can enter JIT mode and sizes dispatch tables for the loaded module.
     #[cfg(feature = "jit")]
     #[allow(clippy::result_large_err)]
     pub fn try_init_jit(&mut self) -> Result<(), vo_jit::JitError> {
-        if let Some(module) = self.module.as_ref() {
-            let verified = vo_common_core::verifier::verify_module(module)
-                .map_err(|err| vo_jit::JitError::Internal(err.to_string()))?;
-            validate_strict_jit_module(verified)?;
-        }
-        let jit_mgr = self.jit.ensure_strict()?;
-        if let Some(module) = self.module.as_ref() {
-            if jit_mgr.func_table_len() != module.functions.len() {
-                jit_mgr.init(module.functions.len());
-            }
-        }
-        Ok(())
+        let module = self.module.clone();
+        self.jit.enable_strict_for_module(module.as_ref())
     }
 
     /// Best-effort JIT initialization.
@@ -832,7 +1213,11 @@ impl Vm {
         match JitManager::new() {
             Ok(mut mgr) => {
                 if let Some(module) = self.module.as_ref() {
-                    mgr.init(module.functions.len());
+                    if let Err(error) = mgr.init_best_effort(module) {
+                        #[cfg(feature = "std")]
+                        eprintln!("Warning: best-effort JIT initialization failed: {error}");
+                        return;
+                    }
                 }
                 self.jit.set_best_effort(mgr);
             }
@@ -841,18 +1226,6 @@ impl Vm {
                 eprintln!("Warning: best-effort JIT initialization failed: {}", e);
             }
         }
-    }
-
-    /// Deprecated alias for [`Vm::init_jit_best_effort`].
-    ///
-    /// This method is non-strict and may leave the VM without JIT enabled.
-    /// New strict callers should use [`Vm::try_init_jit`].
-    #[cfg(feature = "jit")]
-    #[deprecated(
-        note = "non-strict best-effort API; use try_init_jit for strict JIT or init_jit_best_effort for explicit fallback"
-    )]
-    pub fn init_jit(&mut self) {
-        self.init_jit_best_effort();
     }
 
     /// Check if JIT is available and enabled.
@@ -869,6 +1242,11 @@ impl Vm {
             .unwrap_or_default()
     }
 
+    #[cfg(not(feature = "jit"))]
+    pub fn jit_execution_stats(&self) -> JitExecutionStats {
+        JitExecutionStats::default()
+    }
+
     #[cfg(feature = "jit")]
     pub fn jit_code_memory_stats(&self) -> vo_jit::JitCodeMemoryStats {
         self.jit
@@ -878,11 +1256,42 @@ impl Vm {
     }
 
     #[cfg(feature = "jit")]
+    pub fn jit_analysis_memory_stats(&self) -> vo_jit::JitAnalysisMemoryStats {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.analysis_memory_stats())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "jit")]
     pub fn jit_unsupported_function_count(&self) -> usize {
         self.jit
             .manager()
             .map(|mgr| mgr.unsupported_function_count())
             .unwrap_or(0)
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_resource_rejected_function_count(&self) -> usize {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.resource_rejected_function_count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_compiler_fault_function_count(&self) -> usize {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.compiler_fault_function_count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_function_failure_kind(&self, func_id: u32) -> Option<vo_jit::JitFailureKind> {
+        self.jit
+            .manager()
+            .and_then(|mgr| mgr.function_failure_kind(func_id))
     }
 
     #[cfg(feature = "jit")]
@@ -932,7 +1341,13 @@ impl Vm {
     }
 
     pub fn module(&self) -> Option<&Module> {
-        self.module.as_deref()
+        self.module.as_deref().map(LoadedModule::module)
+    }
+
+    pub(crate) fn module_runtime_metadata(
+        &self,
+    ) -> Option<vo_common_core::bytecode::ModuleRuntimeMetadata<'_>> {
+        self.module.as_deref().map(LoadedModule::runtime_metadata)
     }
 
     /// Exit status requested by `os.Exit`, retained for every later host poll.
@@ -976,18 +1391,18 @@ impl Vm {
         #[cfg(feature = "std")]
         self.state.shutdown_island_threads();
 
-        self.scheduler = Scheduler::new();
+        self.scheduler = Scheduler::with_resource_limits(self.scheduler.resource_limits());
         self.state.command_queue.clear();
         self.state.outbound_commands.clear();
         self.state.endpoint_registry = EndpointRegistry::new();
         self.state.pending_island_responses = 0;
         #[cfg(feature = "jit")]
         {
-            self.state.pending_runtime_transitions.clear();
+            self.pending_runtime_transitions.clear();
             self.state.jit_osr_borrow_lease_depth = 0;
         }
         self.state.gc_root_scan = None;
-        self.state.gc_dirty_fibers.clear();
+        self.state.clear_gc_dirty_fibers();
         self.state.gc_roots_dirty_all = true;
 
         #[cfg(feature = "std")]
@@ -1000,7 +1415,7 @@ impl Vm {
         }
 
         #[cfg(feature = "jit")]
-        let collector_boundary_is_clean = self.state.pending_runtime_transitions.is_empty();
+        let collector_boundary_is_clean = self.pending_runtime_transitions.is_empty();
         #[cfg(not(feature = "jit"))]
         let collector_boundary_is_clean = true;
         if self.state.gc.oom_policy() == OomPolicy::CollectThenTerminateIsland
@@ -1032,7 +1447,7 @@ impl Vm {
                     .to_string(),
             ));
         }
-        Ok(&mut self.state.extern_registry)
+        Ok(Arc::make_mut(&mut self.state.extern_registry))
     }
 
     pub fn set_output_sink(&mut self, sink: Arc<dyn OutputSink>) {
@@ -1111,6 +1526,27 @@ impl Vm {
         self.state.program_args = args;
     }
 
+    /// Load an immutable module image already accepted by the common
+    /// verifier.
+    ///
+    /// This preserves the image's derived runtime facts and skips a redundant
+    /// common-verifier pass. Bytecode received from a serialized or otherwise
+    /// mutable boundary must first be converted with
+    /// `vo_common_core::verifier::verify_loaded_module`.
+    pub fn load_verified(&mut self, module: Arc<LoadedModule>) -> Result<(), VmError> {
+        #[cfg(feature = "std")]
+        {
+            self.load_verified_with_extensions(module, None)
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.load_verified_with_stdlib_registration(
+                module,
+                StdlibRegistrationMode::TargetDefaults,
+            )
+        }
+    }
+
     #[cfg(feature = "std")]
     pub fn load(&mut self, module: Module) -> Result<(), VmError> {
         self.load_with_extensions(module, None)
@@ -1118,7 +1554,7 @@ impl Vm {
 
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) -> Result<(), VmError> {
-        self.load_with_stdlib_registration(module, StdlibRegistrationMode::TargetDefaults)
+        self.load_owned_with_stdlib_registration(module, StdlibRegistrationMode::TargetDefaults)
     }
 
     /// Load a module after the embedder has configured every non-VM extern
@@ -1131,47 +1567,81 @@ impl Vm {
     /// providers before calling this method.
     #[cfg(not(feature = "std"))]
     pub fn load_with_embedder_externs(&mut self, module: Module) -> Result<(), VmError> {
-        self.load_with_stdlib_registration(module, StdlibRegistrationMode::EmbedderConfigured)
+        self.load_owned_with_stdlib_registration(module, StdlibRegistrationMode::EmbedderConfigured)
     }
 
     #[cfg(not(feature = "std"))]
-    fn load_with_stdlib_registration(
+    fn load_owned_with_stdlib_registration(
         &mut self,
         module: Module,
         stdlib_registration: StdlibRegistrationMode,
     ) -> Result<(), VmError> {
         self.ensure_can_load_module()?;
+        let module = Arc::new(validate_vm_module(module)?);
+        self.load_verified_with_stdlib_registration_after_preflight(module, stdlib_registration)
+    }
+
+    /// Load a common-verified image after the embedder has configured every
+    /// non-VM extern provider through [`Vm::extern_registry_mut`].
+    pub fn load_verified_with_embedder_externs(
+        &mut self,
+        module: Arc<LoadedModule>,
+    ) -> Result<(), VmError> {
+        #[cfg(feature = "std")]
         {
-            let verified = validate_vm_module(&module)?;
-            let mut staged_extern_registry = self.state.extern_registry.clone();
-            if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
-                vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs).map_err(
-                    |err| VmError::Jit(format!("extern provider registration failed: {err}")),
-                )?;
-            }
-            // VM-owned runtime providers are authoritative for VM state such
-            // as the active fiber's materialized call stack. Register them
-            // before extension tables so a conflicting provider is rejected.
-            crate::runtime_externs::register_externs(&mut staged_extern_registry, &module.externs)
+            self.load_verified_with_extensions_and_stdlib_registration(
+                module,
+                None,
+                StdlibRegistrationMode::EmbedderConfigured,
+            )
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.load_verified_with_stdlib_registration(
+                module,
+                StdlibRegistrationMode::EmbedderConfigured,
+            )
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn load_verified_with_stdlib_registration(
+        &mut self,
+        module: Arc<LoadedModule>,
+        stdlib_registration: StdlibRegistrationMode,
+    ) -> Result<(), VmError> {
+        self.ensure_can_load_module()?;
+        self.load_verified_with_stdlib_registration_after_preflight(module, stdlib_registration)
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn load_verified_with_stdlib_registration_after_preflight(
+        &mut self,
+        module: Arc<LoadedModule>,
+        stdlib_registration: StdlibRegistrationMode,
+    ) -> Result<(), VmError> {
+        let mut staged_extern_registry = self.state.extern_registry.as_ref().clone();
+        if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
+            vo_stdlib::register_portable_externs(&mut staged_extern_registry, &module.externs)
                 .map_err(|err| {
                     VmError::Jit(format!("extern provider registration failed: {err}"))
                 })?;
-            let resolved_externs = staged_extern_registry
-                .resolve_module_externs(&module.externs)
-                .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
-            #[cfg(not(feature = "jit"))]
-            let _ = verified;
-
-            #[cfg(feature = "jit")]
-            if self.jit.is_strict() {
-                validate_strict_jit_module(verified).map_err(strict_jit_load_error)?;
-            }
-            staged_extern_registry.freeze();
-            self.state.extern_registry = staged_extern_registry;
-            self.state.resolved_externs = resolved_externs;
         }
+        // VM-owned runtime providers are authoritative for VM state such as
+        // the active fiber's materialized call stack.
+        crate::runtime_externs::register_externs(&mut staged_extern_registry, &module.externs)
+            .map_err(|err| VmError::Jit(format!("extern provider registration failed: {err}")))?;
+        staged_extern_registry
+            .resolve_and_freeze(&module.externs)
+            .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
 
-        self.finish_load(module);
+        #[cfg(feature = "jit")]
+        self.jit
+            .init_for_module(&module)
+            .map_err(strict_jit_load_error)?;
+        self.state.extern_registry = Arc::new(staged_extern_registry);
+
+        self.finish_load_shared(module);
         Ok(())
     }
 
@@ -1182,7 +1652,26 @@ impl Vm {
         module: Module,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     ) -> Result<(), VmError> {
-        self.load_shared_with_extensions(Arc::new(module), ext_loader)
+        self.load_owned_with_extensions_and_stdlib_registration(
+            module,
+            ext_loader,
+            StdlibRegistrationMode::TargetDefaults,
+        )
+    }
+
+    /// Load a common-verified module image with an optional native extension
+    /// owner. Extern resolution and registry freezing remain transactional.
+    #[cfg(feature = "std")]
+    pub fn load_verified_with_extensions(
+        &mut self,
+        module: Arc<LoadedModule>,
+        ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+    ) -> Result<(), VmError> {
+        self.load_verified_with_extensions_and_stdlib_registration(
+            module,
+            ext_loader,
+            StdlibRegistrationMode::TargetDefaults,
+        )
     }
 
     /// Load a module after the embedder has configured every non-VM extern
@@ -1195,92 +1684,129 @@ impl Vm {
     /// and its platform providers before calling this method.
     #[cfg(feature = "std")]
     pub fn load_with_embedder_externs(&mut self, module: Module) -> Result<(), VmError> {
-        self.load_shared_with_extensions_and_stdlib_registration(
-            Arc::new(module),
+        self.load_owned_with_extensions_and_stdlib_registration(
+            module,
             None,
             StdlibRegistrationMode::EmbedderConfigured,
         )
     }
 
-    /// Load an immutable module already owned by a VM family. Island VMs use
-    /// this path so bytecode and metadata are shared instead of deep-cloned.
     #[cfg(feature = "std")]
-    pub(crate) fn load_shared_with_extensions(
+    fn load_owned_with_extensions_and_stdlib_registration(
         &mut self,
-        module: Arc<Module>,
+        module: Module,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+        stdlib_registration: StdlibRegistrationMode,
+    ) -> Result<(), VmError> {
+        self.ensure_can_load_module()?;
+        let module = Arc::new(validate_vm_module(module)?);
+        self.load_verified_with_extensions_and_stdlib_registration_after_preflight(
+            module,
+            ext_loader,
+            stdlib_registration,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    fn load_verified_with_extensions_and_stdlib_registration(
+        &mut self,
+        module: Arc<LoadedModule>,
+        ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+        stdlib_registration: StdlibRegistrationMode,
+    ) -> Result<(), VmError> {
+        self.ensure_can_load_module()?;
+        self.load_verified_with_extensions_and_stdlib_registration_after_preflight(
+            module,
+            ext_loader,
+            stdlib_registration,
+        )
+    }
+
+    #[cfg(feature = "std")]
+    fn load_verified_with_extensions_and_stdlib_registration_after_preflight(
+        &mut self,
+        module: Arc<LoadedModule>,
+        ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+        stdlib_registration: StdlibRegistrationMode,
     ) -> Result<(), VmError> {
         self.load_shared_with_extensions_and_stdlib_registration(
             module,
             ext_loader,
-            StdlibRegistrationMode::TargetDefaults,
+            stdlib_registration,
         )
     }
 
     #[cfg(feature = "std")]
     fn load_shared_with_extensions_and_stdlib_registration(
         &mut self,
-        module: Arc<Module>,
+        module: Arc<LoadedModule>,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
         stdlib_registration: StdlibRegistrationMode,
     ) -> Result<(), VmError> {
-        self.ensure_can_load_module()?;
-        {
-            let verified = validate_vm_module(&module)?;
-            let mut staged_extern_registry = self.state.extern_registry.clone();
-            #[cfg(not(target_arch = "wasm32"))]
-            if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
-                vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs).map_err(
-                    |err| VmError::Jit(format!("extern provider registration failed: {err}")),
-                )?;
-            }
-
-            crate::runtime_externs::register_externs(&mut staged_extern_registry, &module.externs)
-                .map_err(|err| {
-                    VmError::Jit(format!("extern provider registration failed: {err}"))
-                })?;
-
-            // Build one owner-aware native catalog from linkme and dynamic
-            // providers before resolving any extern. Longest module ownership
-            // is selected before exact function lookup, independent of load
-            // order and provider transport.
-            if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
-                staged_extern_registry
-                    .register_from_extension_catalogs(ext_loader.as_ref(), &module.externs)
-                    .map_err(|err| {
-                        VmError::Jit(format!("extern contract resolution failed: {err}"))
-                    })?;
-            }
-
-            let resolved_externs = staged_extern_registry
-                .resolve_module_externs(&module.externs)
-                .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
-            #[cfg(not(feature = "jit"))]
-            let _ = verified;
-
-            #[cfg(feature = "jit")]
-            if self.jit.is_strict() {
-                validate_strict_jit_module(verified).map_err(strict_jit_load_error)?;
-            }
-            staged_extern_registry.freeze();
-            self.state.extern_registry = staged_extern_registry;
-            self.state.resolved_externs = resolved_externs;
+        let mut staged_extern_registry = self.state.extern_registry.as_ref().clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
+            vo_stdlib::register_externs(&mut staged_extern_registry, &module.externs).map_err(
+                |err| VmError::Jit(format!("extern provider registration failed: {err}")),
+            )?;
         }
 
-        self.extension_specs = ext_loader.as_ref().map(|loader| loader.specs().to_vec());
-        self.extension_loader = ext_loader;
+        crate::runtime_externs::register_externs(&mut staged_extern_registry, &module.externs)
+            .map_err(|err| VmError::Jit(format!("extern provider registration failed: {err}")))?;
+
+        // Build one owner-aware native catalog from linkme and dynamic
+        // providers before resolving any extern. Longest module ownership is
+        // selected before exact function lookup, independent of load order.
+        if stdlib_registration == StdlibRegistrationMode::TargetDefaults {
+            staged_extern_registry
+                .register_from_extension_catalogs(ext_loader.as_ref(), &module.externs)
+                .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
+        }
+
+        staged_extern_registry
+            .resolve_and_freeze(&module.externs)
+            .map_err(|err| VmError::Jit(format!("extern contract resolution failed: {err}")))?;
+
+        #[cfg(feature = "jit")]
+        self.jit
+            .init_for_module(&module)
+            .map_err(strict_jit_load_error)?;
+        self.state.extern_registry = Arc::new(staged_extern_registry);
+
+        self.extension_loader = ext_loader.map(Arc::new);
 
         self.finish_load_shared(module);
         Ok(())
     }
 
-    /// Finish loading a module (shared by load and load_with_extensions).
-    #[cfg(any(test, not(feature = "std")))]
-    fn finish_load(&mut self, module: Module) {
-        self.finish_load_shared(Arc::new(module));
+    /// Install the immutable module and frozen provider snapshot inherited by
+    /// a child Island. Providers execute against the child call context, while
+    /// dynamic-library ownership is shared explicitly through the loader Arc.
+    #[cfg(feature = "std")]
+    fn load_inherited_module(&mut self, image: InheritedProgramImage) -> Result<(), VmError> {
+        self.ensure_can_load_module()?;
+        if !image.extern_registry.is_frozen() {
+            return Err(VmError::Jit(
+                "child Island requires a frozen parent extern registry".to_string(),
+            ));
+        }
+        #[cfg(feature = "jit")]
+        self.jit
+            .init_for_module(&image.module)
+            .map_err(strict_jit_load_error)?;
+        self.state.extern_registry = image.extern_registry;
+        self.extension_loader = image.extension_loader;
+        self.finish_load_shared(image.module);
+        Ok(())
     }
 
-    fn finish_load_shared(&mut self, module: Arc<Module>) {
+    /// Finish loading a module (shared by load and load_with_extensions).
+    #[cfg(test)]
+    fn finish_load(&mut self, module: Module) {
+        self.finish_load_shared(test_loaded_module(module));
+    }
+
+    fn finish_load_shared(&mut self, module: Arc<LoadedModule>) {
         let total_global_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();
         self.state.globals = vec![0u64; total_global_slots];
         self.state.mark_gc_all_roots_dirty();
@@ -1288,14 +1814,10 @@ impl Vm {
         self.state.last_gc_step_stats = VmGcStepStats::default();
         // Initialize itab_cache from module's compile-time itabs
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
+        self.state.dynamic_call_ic =
+            vo_runtime::alloc_ic_table(module.dynamic_callsite_map().len());
         // Reset sentinel error cache for new module (prevents cross-module corruption)
         self.state.sentinel_errors = vo_runtime::SentinelErrorCache::new();
-
-        // Initialize JIT manager state for this module
-        #[cfg(feature = "jit")]
-        if let Some(jit_mgr) = self.jit.manager_mut() {
-            jit_mgr.init(module.functions.len());
-        }
 
         self.module = Some(module);
     }
@@ -1304,19 +1826,36 @@ impl Vm {
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
     pub fn create_island(&mut self) -> Result<GcRef, VmError> {
-        let module = if self.state.external_island_transport {
+        let image = if self.state.external_island_transport {
             None
         } else {
-            Some(
-                self.module
-                    .as_ref()
-                    .ok_or_else(|| {
-                        VmError::Jit("create_island requires loaded module".to_string())
-                    })?
-                    .clone(),
-            )
+            if self.module.is_none() {
+                return Err(VmError::Jit(
+                    "create_island requires loaded module".to_string(),
+                ));
+            }
+            Some(self.inherited_program_image()?)
         };
-        self.create_island_with_shared_module(module)
+        self.create_island_with_program_image(image)
+    }
+
+    #[cfg(feature = "std")]
+    fn inherited_program_image(&self) -> Result<InheritedProgramImage, VmError> {
+        let module = self
+            .module
+            .as_ref()
+            .ok_or_else(|| VmError::Jit("child Island requires loaded module".to_string()))?
+            .clone();
+        if !self.state.extern_registry.is_frozen() {
+            return Err(VmError::Jit(
+                "child Island requires a frozen extern registry".to_string(),
+            ));
+        }
+        Ok(InheritedProgramImage {
+            module,
+            extern_registry: self.state.extern_registry.clone(),
+            extension_loader: self.extension_loader.clone(),
+        })
     }
 
     /// Create a process-local target island and start a certified generated
@@ -1351,12 +1890,9 @@ impl Vm {
                 "entry island launch token must be non-zero".to_string(),
             ));
         }
-        let module = self
+        let image = self.inherited_program_image()?;
+        let function = image
             .module
-            .as_ref()
-            .ok_or_else(|| VmError::Jit("entry island launch requires loaded module".to_string()))?
-            .clone();
-        let function = module
             .functions
             .get(function_id as usize)
             .ok_or(VmError::InvalidFunctionId(function_id))?;
@@ -1378,8 +1914,8 @@ impl Vm {
             ));
         }
 
-        let island_handle = self
-            .create_island_with_shared_module_and_host_services(Some(module), host_services_v2)?;
+        let island_handle =
+            self.create_island_with_program_image_and_host_services(Some(image), host_services_v2)?;
         // Safety: `create_island` returned a canonical live island allocation.
         let island_id = unsafe { vo_runtime::island::id(island_handle) };
         self.state
@@ -1445,50 +1981,41 @@ impl Vm {
             .map_err(|error| VmError::Jit(format!("entry island host wake failed: {error}")))
     }
 
-    /// Create an island while an execution lease owns the active module.
     #[cfg(feature = "std")]
-    pub(crate) fn create_island_for_execution(
+    fn create_island_with_program_image(
         &mut self,
-        _module: &Module,
-    ) -> Result<GcRef, VmError> {
-        self.create_island()
-    }
-
-    #[cfg(feature = "std")]
-    fn create_island_with_shared_module(
-        &mut self,
-        module: Option<Arc<Module>>,
+        image: Option<InheritedProgramImage>,
     ) -> Result<GcRef, VmError> {
         const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        self.create_island_with_shared_module_and_timeout(
-            module,
+        self.create_island_with_program_image_and_timeout(
+            image,
             self.state.host_services_v2.clone(),
             ISLAND_STARTUP_TIMEOUT,
         )
     }
 
     #[cfg(feature = "std")]
-    fn create_island_with_shared_module_and_host_services(
+    fn create_island_with_program_image_and_host_services(
         &mut self,
-        module: Option<Arc<Module>>,
+        image: Option<InheritedProgramImage>,
         host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
     ) -> Result<GcRef, VmError> {
         const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        self.create_island_with_shared_module_and_timeout(
-            module,
+        self.create_island_with_program_image_and_timeout(
+            image,
             host_services_v2,
             ISLAND_STARTUP_TIMEOUT,
         )
     }
 
     #[cfg(feature = "std")]
-    fn create_island_with_shared_module_and_timeout(
+    fn create_island_with_program_image_and_timeout(
         &mut self,
-        module: Option<Arc<Module>>,
+        image: Option<InheritedProgramImage>,
         host_services_v2: Option<vo_runtime::host_services_v2::HostServicesV2Binding>,
         startup_timeout: std::time::Duration,
     ) -> Result<GcRef, VmError> {
-        if !self.state.external_island_transport && module.is_none() {
+        if !self.state.external_island_transport && image.is_none() {
             return Err(VmError::Jit(
                 "create_island requires loaded module".to_string(),
             ));
@@ -1503,7 +2030,7 @@ impl Vm {
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
 
-        let module = module.expect("loaded module checked before island identity allocation");
+        let image = image.expect("program image checked before island identity allocation");
 
         // Create transport pair for the new island
         let (island_sender, island_transport) = InThreadTransport::new();
@@ -1543,10 +2070,10 @@ impl Vm {
 
         // Spawn island thread with JIT config from main VM
         let registry_clone = registry.clone();
-        let extension_specs = self.extension_specs.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
-        let jit_config = self.jit.manager().map(|mgr| mgr.config().clone());
+        let jit_mode = self.jit.child_mode();
         let child_memory_config = self.state.gc.memory_config_snapshot();
+        let child_resource_limits = self.resource_limits();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let startup_interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let child_interrupt = startup_interrupt.clone();
@@ -1556,13 +2083,13 @@ impl Vm {
             #[cfg(feature = "jit")]
             let result = island_thread::run_island_thread(
                 next_id,
-                module,
+                image,
                 island_transport,
                 registry_clone,
-                extension_specs,
                 host_services_v2,
-                jit_config,
+                jit_mode,
                 child_memory_config,
+                child_resource_limits,
                 child_interrupt,
                 event_waker,
                 &event_tx,
@@ -1570,12 +2097,12 @@ impl Vm {
             #[cfg(not(feature = "jit"))]
             let result = island_thread::run_island_thread(
                 next_id,
-                module,
+                image,
                 island_transport,
                 registry_clone,
-                extension_specs,
                 host_services_v2,
                 child_memory_config,
+                child_resource_limits,
                 child_interrupt,
                 event_waker,
                 &event_tx,
@@ -1676,11 +2203,17 @@ impl Vm {
             .functions
             .get(entry_func as usize)
             .ok_or(VmError::InvalidFunctionId(entry_func))?;
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(entry_func, func.local_slots, func.gc_scan_slots, 0, 0);
+        let spawn = PendingSpawn::try_new(
+            entry_func,
+            func.local_slots,
+            func.gc_scan_slots,
+            0,
+            Vec::new(),
+        )
+        .map_err(fiber_capacity_error_to_vm_error)?;
         self.scheduler
-            .try_spawn(fiber)
-            .map_err(|err| VmError::Jit(err.to_string()))?;
+            .try_spawn_pending(spawn)
+            .map_err(scheduler_error_to_vm_error)?;
         Ok(())
     }
 
@@ -1717,11 +2250,17 @@ impl Vm {
             .functions
             .get(init_func as usize)
             .ok_or(VmError::InvalidFunctionId(init_func))?;
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(init_func, func.local_slots, func.gc_scan_slots, 0, 0);
+        let spawn = PendingSpawn::try_new(
+            init_func,
+            func.local_slots,
+            func.gc_scan_slots,
+            0,
+            Vec::new(),
+        )
+        .map_err(fiber_capacity_error_to_vm_error)?;
         self.scheduler
-            .try_spawn(fiber)
-            .map_err(|err| VmError::Jit(err.to_string()))?;
+            .try_spawn_pending(spawn)
+            .map_err(scheduler_error_to_vm_error)?;
         self.run_scheduling_loop(None)
     }
 
@@ -1771,20 +2310,17 @@ impl Vm {
         }
         // Safety: `init_slice` is a fresh byte slice with exact `init.len()`.
         unsafe { vo_runtime::objects::slice::write_bytes(init_slice, init) };
-        let mut fiber = Fiber::new(0);
-        let bp = fiber
-            .try_push_frame(
-                function_id,
-                function.local_slots,
-                function.gc_scan_slots,
-                0,
-                0,
-            )
-            .map_err(|error| VmError::Jit(error.message()))?;
-        fiber.write_reg_abs(bp, init_slice as u64);
+        let spawn = PendingSpawn::try_new(
+            function_id,
+            function.local_slots,
+            function.gc_scan_slots,
+            0,
+            vec![init_slice as u64],
+        )
+        .map_err(fiber_capacity_error_to_vm_error)?;
         self.scheduler
-            .try_spawn(fiber)
-            .map_err(|error| VmError::Jit(error.to_string()))?;
+            .try_spawn_pending(spawn)
+            .map_err(scheduler_error_to_vm_error)?;
         self.mark_gc_all_roots_dirty();
         Ok(())
     }
@@ -1800,14 +2336,10 @@ impl Vm {
         self.run_scheduling_loop(None)
     }
 
-    pub fn push_targeted_island_command(
-        &mut self,
-        target_island_id: u32,
-        cmd: vo_runtime::island::IslandCommand,
-    ) -> Result<(), IslandTargetError> {
-        self.push_targeted_island_command_from(self.state.current_island_id, target_island_id, cmd)
-    }
-
+    /// Queues a command accepted by the owning trusted island transport.
+    ///
+    /// The caller must authenticate `source_island_id`; the command payload
+    /// itself carries no independent source identity.
     pub fn push_targeted_island_command_from(
         &mut self,
         source_island_id: u32,
@@ -1827,11 +2359,7 @@ impl Vm {
         Ok(())
     }
 
-    pub fn push_island_command(&mut self, cmd: vo_runtime::island::IslandCommand) {
-        self.push_island_command_from(self.state.current_island_id, cmd);
-    }
-
-    pub fn push_island_command_from(
+    pub(crate) fn push_island_command_from(
         &mut self,
         source_island_id: u32,
         cmd: vo_runtime::island::IslandCommand,
@@ -1851,7 +2379,8 @@ impl Vm {
         core::mem::take(&mut self.state.outbound_commands)
     }
 
-    /// Encode and drain all outbound island commands atomically.
+    /// Encode and drain all outbound island envelopes atomically, preserving
+    /// both target and source identity in each frame.
     ///
     /// The queue remains unchanged if any frame cannot be represented or its
     /// destination buffer cannot be reserved.
@@ -2073,7 +2602,7 @@ impl Vm {
             self.mark_gc_all_roots_dirty();
         }
         for envelope in cmds {
-            self.dispatch_queued_island_command_from(envelope.source_island_id, envelope.command)?;
+            self.dispatch_island_command_from(envelope.source_island_id, envelope.command)?;
         }
         self.state.clear_endpoint_tombstones_if_quiescent();
         Ok(())
@@ -2204,17 +2733,8 @@ impl Vm {
         endpoint_id: u64,
         kind: &vo_runtime::island::EndpointRequestKind,
         from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
     ) -> Result<(), VmError> {
-        island_shared::preflight_endpoint_request_command(
-            self,
-            endpoint_id,
-            kind,
-            from_island,
-            fiber_key,
-            wait_id,
-        )
+        island_shared::preflight_endpoint_request_command(self, endpoint_id, kind, from_island)
     }
 
     pub(crate) fn dispatch_island_command(
@@ -2256,77 +2776,25 @@ impl Vm {
                     ));
                 }
             }
-            IslandCommand::WakeFiber { waiter } => {
-                if source_island_id != self.state.current_island_id {
-                    return Err(VmError::Jit(
-                        "WakeFiber transport source was rejected".to_string(),
-                    ));
-                }
-                let outcome = self.apply_runtime_command(RuntimeCommand::island_wake(waiter));
-                if !outcome.applied || !outcome.payload_accepted {
-                    return Err(VmError::Jit(
-                        "island wake command was rejected by the VM".to_string(),
-                    ));
-                }
-            }
-            IslandCommand::EndpointRequest {
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            } => {
-                if source_island_id != from_island {
-                    return Err(VmError::Jit(
-                        "endpoint request transport source was rejected".to_string(),
-                    ));
-                }
+            IslandCommand::EndpointRequest { endpoint_id, kind } => {
                 island_shared::handle_endpoint_request_command(
                     self,
                     endpoint_id,
                     kind,
-                    from_island,
-                    fiber_key,
-                    wait_id,
+                    source_island_id,
                 )?;
             }
-            IslandCommand::EndpointResponse {
-                endpoint_id,
-                kind,
-                from_island,
-                fiber_key,
-                wait_id,
-            } => {
-                if source_island_id != from_island {
-                    return Err(VmError::Jit(
-                        "endpoint response transport source was rejected".to_string(),
-                    ));
-                }
+            IslandCommand::EndpointResponse { endpoint_id, kind } => {
                 island_shared::handle_endpoint_response_command(
                     self,
                     endpoint_id,
                     kind,
-                    from_island,
-                    fiber_key,
-                    wait_id,
+                    source_island_id,
                 )?;
             }
             IslandCommand::Shutdown => {}
         }
         Ok(())
-    }
-
-    fn dispatch_queued_island_command_from(
-        &mut self,
-        source_island_id: u32,
-        cmd: vo_runtime::island::IslandCommand,
-    ) -> Result<(), VmError> {
-        match cmd {
-            vo_runtime::island::IslandCommand::WakeFiber { .. } => Err(VmError::Jit(
-                "WakeFiber transport ingress was rejected".to_string(),
-            )),
-            command => self.dispatch_island_command_from(source_island_id, command),
-        }
     }
 
     #[cfg(feature = "std")]
@@ -2364,6 +2832,8 @@ impl Vm {
             return Ok(WaitResult::Retry);
         }
 
+        self.scheduler.release_oversized_dead_fiber_storage();
+
         if !self.state.outbound_commands.is_empty() || self.state.pending_island_responses > 0 {
             return Ok(WaitResult::Suspended);
         }
@@ -2396,7 +2866,7 @@ impl Vm {
                 match transport.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(envelope) => {
                         self.mark_gc_all_roots_dirty();
-                        self.dispatch_queued_island_command_from(
+                        self.dispatch_island_command_from(
                             envelope.source_island_id,
                             envelope.command,
                         )?;
@@ -2460,18 +2930,6 @@ impl Vm {
     pub fn wake_host_event(&mut self, key: crate::scheduler::HostWaitKey) -> bool {
         self.apply_runtime_command(RuntimeCommand::host_event_wake(key))
             .applied
-    }
-
-    /// Compatibility adapter for timer-only callers still carrying source-local tokens.
-    pub fn wake_host_event_legacy_timer_token(&mut self, token: u64) -> bool {
-        let _ = token;
-        false
-    }
-
-    /// Compatibility adapter for replay-only callers still carrying source-local tokens.
-    pub fn wake_host_event_legacy_replay_token(&mut self, token: u64) -> bool {
-        let _ = token;
-        false
     }
 
     /// Wake a fiber blocked on a host-side event, attaching opaque data.
@@ -2678,8 +3136,10 @@ impl Vm {
         &mut self,
         fiber_id: crate::scheduler::FiberId,
         fiber: &mut Fiber,
-        module: &Module,
+        loaded_module: &LoadedModule,
     ) -> ExecResult {
+        let module = loaded_module.module();
+        let runtime_metadata = loaded_module.runtime_metadata();
         fiber.execution_budget = TIME_SLICE;
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
         // Get raw pointer to stack for fast access - fiber.ensure_capacity may invalidate this
@@ -2739,7 +3199,7 @@ impl Vm {
                 let r = $result;
                 if matches!(r, ExecResult::FrameChanged) {
                     #[cfg(feature = "jit")]
-                    if !self.state.pending_runtime_transitions.is_empty() {
+                    if !self.pending_runtime_transitions.is_empty() {
                         return ExecResult::FrameChanged;
                     }
                     stack = fiber.stack_ptr();
@@ -2756,14 +3216,14 @@ impl Vm {
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
                 if let Some(osr_result) =
-                    jit::try_loop_osr(self, fiber, module, func_id, $target_pc, bp)
+                    jit::try_loop_osr(self, fiber, loaded_module, func_id, $target_pc, bp)
                 {
                     match osr_result {
                         jit::OsrResult::Exit(code) => {
                             return ExecResult::Exit(code);
                         }
                         jit::OsrResult::FrameChanged => {
-                            if !self.state.pending_runtime_transitions.is_empty() {
+                            if !self.pending_runtime_transitions.is_empty() {
                                 return ExecResult::FrameChanged;
                             }
                             stack = fiber.stack_ptr();
@@ -2780,7 +3240,7 @@ impl Vm {
                                 );
                             };
                             frame.pc = exit_pc;
-                            if !self.state.pending_runtime_transitions.is_empty() {
+                            if !self.pending_runtime_transitions.is_empty() {
                                 return ExecResult::FrameChanged;
                             }
                             stack = fiber.stack_ptr();
@@ -2806,37 +3266,29 @@ impl Vm {
 
         macro_rules! handle_queue_action {
             ($action:expr) => {
-                match $action {
-                    exec::QueueAction::Continue => {
-                        refetch!();
-                    }
-                    exec::QueueAction::Block { waiter } => {
-                        if let Some(waiter) = waiter.as_ref() {
-                            fiber.begin_queue_wait(waiter);
-                        } else {
-                            fiber.clear_queue_wait();
+                match {
+                    let action = $action;
+                    prepare_queue_action(&mut self.state, fiber, action)
+                } {
+                    Ok(PreparedQueueAction::Continue) => refetch!(),
+                    Ok(PreparedQueueAction::Block(wait)) => {
+                        if wait == QueueWaitMode::Replay {
+                            let resume = match replay_current_instruction_policy(
+                                fiber,
+                                "queue block replay",
+                            ) {
+                                Ok(resume) => resume,
+                                Err(message) => return ExecResult::JitError(message),
+                            };
+                            return ExecResult::Transition(RuntimeTransition::new(
+                                RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
+                                resume,
+                                GcRootEffect::CurrentFiberDirty,
+                            ));
                         }
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
-                    exec::QueueAction::ReplayThenBlock { waiter } => {
-                        let resume =
-                            match replay_current_instruction_policy(fiber, "Queue ReplayThenBlock")
-                            {
-                                Ok(resume) => resume,
-                                Err(msg) => return ExecResult::JitError(msg),
-                            };
-                        if let Some(waiter) = waiter.as_ref() {
-                            fiber.begin_queue_wait(waiter);
-                        } else {
-                            fiber.clear_queue_wait();
-                        }
-                        return ExecResult::Transition(RuntimeTransition::new(
-                            RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
-                            resume,
-                            GcRootEffect::CurrentFiberDirty,
-                        ));
-                    }
-                    exec::QueueAction::Trap(kind) => {
+                    Ok(PreparedQueueAction::Trap(kind)) => {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -2845,204 +3297,33 @@ impl Vm {
                             kind
                         ));
                     }
-                    exec::QueueAction::Malformed(msg) => {
-                        return ExecResult::JitError(msg);
-                    }
-                    exec::QueueAction::Wake { waiter, payload } => {
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::CurrentFiberDirty,
-                        );
-                        transition.wakes.push(match payload {
-                            Some(payload) => WakeCommand::queue_waiter_with_result(waiter, payload),
-                            None => WakeCommand::queue_waiter(waiter),
-                        });
-                        return ExecResult::Transition(transition);
-                    }
-                    exec::QueueAction::Close {
-                        receivers,
-                        senders,
-                        endpoint_id,
-                        rollback,
-                    } => {
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::CurrentFiberDirty,
-                        );
-                        transition.set_rollback(rollback);
-                        for waiter in receivers {
-                            transition.push_queue_close_wake(WakeCommand::queue_closed_receiver(
-                                waiter,
-                                endpoint_id,
-                            ));
-                        }
-                        for waiter in senders {
-                            transition.push_queue_close_wake(WakeCommand::queue_closed_sender(
-                                waiter,
-                                endpoint_id,
-                            ));
-                        }
-                        if let Some(endpoint_id) = endpoint_id {
-                            island_shared::append_closed_home_endpoint_effects(
-                                self,
-                                endpoint_id,
-                                None,
-                                &mut transition,
-                            );
+                    Ok(PreparedQueueAction::Transition {
+                        mut transition,
+                        wait,
+                    }) => {
+                        match wait {
+                            None => {
+                                transition.boundary = RuntimeBoundary::Yield;
+                            }
+                            Some(QueueWaitMode::Resume) => {
+                                transition.boundary =
+                                    RuntimeBoundary::Block(crate::fiber::BlockReason::Queue);
+                            }
+                            Some(QueueWaitMode::Replay) => {
+                                transition.boundary =
+                                    RuntimeBoundary::Block(crate::fiber::BlockReason::Queue);
+                                transition.resume = match replay_current_instruction_policy(
+                                    fiber,
+                                    "remote queue receive",
+                                ) {
+                                    Ok(resume) => resume,
+                                    Err(message) => return ExecResult::JitError(message),
+                                };
+                            }
                         }
                         return ExecResult::Transition(transition);
                     }
-                    exec::QueueAction::RemoteSend {
-                        endpoint_id,
-                        home_island,
-                        data,
-                        mut island_effects,
-                        transfer_commit,
-                    } => {
-                        fiber.clear_queue_wait();
-                        let fiber_key = fiber.endpoint_response_key();
-                        let wait_id = match fiber.try_begin_remote_endpoint_send_wait(endpoint_id) {
-                            Ok(wait_id) => wait_id,
-                            Err(err) => return ExecResult::JitError(err.to_string()),
-                        };
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::CurrentFiberDirty,
-                        );
-                        transition.island_commands.append(&mut island_effects);
-                        transition.island_commands.push(
-                            IslandCommandEffect::endpoint_send_request(
-                                home_island,
-                                endpoint_id,
-                                data,
-                                self.state.current_island_id,
-                                fiber_key,
-                                wait_id,
-                            ),
-                        );
-                        if let Some(rollback) = transfer_commit.into_runtime_rollback() {
-                            transition.set_rollback(rollback);
-                        }
-                        return ExecResult::Transition(transition);
-                    }
-                    exec::QueueAction::RemoteRecv {
-                        endpoint_id,
-                        home_island,
-                    } => {
-                        let resume =
-                            match replay_current_instruction_policy(fiber, "Queue RemoteRecv") {
-                                Ok(resume) => resume,
-                                Err(msg) => return ExecResult::JitError(msg),
-                            };
-                        fiber.clear_queue_wait();
-                        let fiber_key = fiber.endpoint_response_key();
-                        let wait_id = match fiber.try_begin_remote_endpoint_recv_wait(endpoint_id) {
-                            Ok(wait_id) => wait_id,
-                            Err(err) => return ExecResult::JitError(err.to_string()),
-                        };
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Block(crate::fiber::BlockReason::Queue),
-                            resume,
-                            GcRootEffect::CurrentFiberDirty,
-                        );
-                        transition.island_commands.push(
-                            IslandCommandEffect::endpoint_recv_request(
-                                home_island,
-                                endpoint_id,
-                                self.state.current_island_id,
-                                fiber_key,
-                                wait_id,
-                            ),
-                        );
-                        return ExecResult::Transition(transition);
-                    }
-                    exec::QueueAction::RemoteSendAck {
-                        endpoint_id,
-                        target_island,
-                        fiber_key,
-                        wait_id,
-                        closed,
-                        rollback,
-                    } => {
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::CurrentFiberDirty,
-                        );
-                        transition
-                            .island_commands
-                            .push(IslandCommandEffect::endpoint_response(
-                                target_island,
-                                self.state.current_island_id,
-                                endpoint_id,
-                                vo_runtime::island::EndpointResponseKind::SendAck { closed },
-                                fiber_key,
-                                wait_id,
-                            ));
-                        if let Some(rollback) = rollback {
-                            transition.set_rollback(rollback);
-                        }
-                        return ExecResult::Transition(transition);
-                    }
-                    exec::QueueAction::RemoteRecvData {
-                        endpoint_id,
-                        target_island,
-                        fiber_key,
-                        wait_id,
-                        data,
-                        mut island_effects,
-                        rollback,
-                    } => {
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::CurrentFiberDirty,
-                        );
-                        transition.island_commands.append(&mut island_effects);
-                        transition.island_commands.push(
-                            IslandCommandEffect::endpoint_recv_data_response(
-                                target_island,
-                                self.state.current_island_id,
-                                endpoint_id,
-                                data,
-                                fiber_key,
-                                wait_id,
-                            ),
-                        );
-                        if let Some(rollback) = rollback {
-                            transition.set_rollback(rollback);
-                        }
-                        return ExecResult::Transition(transition);
-                    }
-                    exec::QueueAction::RemoteClose {
-                        endpoint_id,
-                        home_island,
-                        rollback,
-                    } => {
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::AllRootsDirty,
-                        );
-                        transition.set_rollback(rollback);
-                        transition.island_commands.push(
-                            IslandCommandEffect::endpoint_close_request(
-                                home_island,
-                                endpoint_id,
-                                self.state.current_island_id,
-                            ),
-                        );
-                        transition.endpoint_tombstones.push(
-                            crate::runtime_boundary::EndpointTombstone::with_response_source(
-                                endpoint_id,
-                                home_island,
-                            ),
-                        );
-                        return ExecResult::Transition(transition);
-                    }
+                    Err(message) => return ExecResult::JitError(message),
                 }
             };
         }
@@ -3068,16 +3349,18 @@ impl Vm {
                     && can_enter_materialized_frame_at_pc(
                         func,
                         frame.pc,
-                        &self.state.resolved_externs,
+                        self.state.extern_registry.resolved_externs(),
                     )
                 {
+                    let best_effort = self.jit.is_best_effort();
                     let jit_func = if let Some(jit_mgr) = self.jit.manager_mut() {
                         let env = vo_jit::JitCompileEnv {
-                            externs: &self.state.resolved_externs,
+                            externs: self.state.extern_registry.resolved_externs(),
                             backend_caps: Default::default(),
                         };
-                        match jit_mgr.resolve_call(func_id, func, module, env) {
+                        match jit_mgr.resolve_call(func_id, loaded_module.verified_module(), env) {
                             Ok(entry) => entry,
+                            Err(_) if best_effort => None,
                             Err(err) => {
                                 return ExecResult::JitError(format!(
                                     "JIT frame-entry compilation failed for {}: {err}",
@@ -3098,7 +3381,7 @@ impl Vm {
                         }
                         match result {
                             ExecResult::FrameChanged => {
-                                if !self.state.pending_runtime_transitions.is_empty() {
+                                if !self.pending_runtime_transitions.is_empty() {
                                     return ExecResult::FrameChanged;
                                 }
                                 refetch_after_frame_change!();
@@ -3197,7 +3480,16 @@ impl Vm {
                 }
 
                 Opcode::PtrNew => {
-                    exec::exec_ptr_new(stack, bp, &inst, &mut self.state.gc);
+                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "PtrNew at pc {pc} is missing PtrLayout metadata"
+                        ));
+                    };
+                    if let Err(msg) =
+                        exec::exec_ptr_new(stack, bp, &inst, &mut self.state.gc, layout)
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::PtrGet => {
                     if !exec::exec_ptr_get(stack, bp, &inst) {
@@ -3211,7 +3503,12 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSet => {
-                    if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc) {
+                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "PtrSet at pc {pc} is missing PtrLayout metadata"
+                        ));
+                    };
+                    if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc, layout) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -3222,7 +3519,12 @@ impl Vm {
                     }
                 }
                 Opcode::PtrGetN => {
-                    if !exec::exec_ptr_get_n(stack, bp, &inst) {
+                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "PtrGetN at pc {pc} is missing PtrLayout metadata"
+                        ));
+                    };
+                    if !exec::exec_ptr_get_n(stack, bp, &inst, layout) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -3233,7 +3535,12 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSetN => {
-                    if !exec::exec_ptr_set_n(stack, bp, &inst) {
+                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "PtrSetN at pc {pc} is missing PtrLayout metadata"
+                        ));
+                    };
+                    if !exec::exec_ptr_set_n(stack, bp, &inst, layout) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -3615,7 +3922,6 @@ impl Vm {
                         Ok(pc) => pc as u32,
                         Err(result) => return result,
                     };
-                    let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
 
                     let Some(_extern_def) = module.externs.get(extern_id as usize) else {
@@ -3623,17 +3929,17 @@ impl Vm {
                             "CallExtern missing extern id {extern_id}"
                         ));
                     };
-                    let Some(resolved_extern) = self.state.resolved_externs.get(extern_id).cloned()
+                    let Some(resolved_extern) = self.state.extern_registry.resolved(extern_id)
                     else {
                         return ExecResult::JitError(format!(
                             "CallExtern id {extern_id} missing resolved extern entry"
                         ));
                     };
                     let (arg_slots, callsite_ret_slots) = match func
-                        .jit_metadata
+                        .instruction_metadata
                         .get(fetched_pc as usize)
                     {
-                        Some(JitInstructionMetadata::CallExternLayout {
+                        Some(InstructionMetadata::CallExternLayout {
                             arg_layout,
                             ret_layout,
                         }) => {
@@ -3693,43 +3999,59 @@ impl Vm {
                         ret_start: inst.a,
                         ret_slots,
                     };
-                    let world = ExternWorld {
-                        gc: &mut self.state.gc,
-                        module,
-                        itab_cache: &mut self.state.itab_cache,
-                        vm_opaque: vm_ptr,
-                        program_args: &self.state.program_args,
-                        output: &*self.state.output,
-                        sentinel_errors: &mut self.state.sentinel_errors,
-                        host_output: &mut self.state.host_output,
-                        host_services_v2: self.state.host_services_v2.as_ref(),
-                        #[cfg(feature = "std")]
-                        io: &mut self.state.io,
-                    };
+                    #[cfg(feature = "std")]
+                    let staged_io_root_additions_before = self.state.io.staged_gc_root_additions();
+                    let world = ExternWorld::new(
+                        &mut self.state.gc,
+                        runtime_metadata,
+                        &mut self.state.itab_cache,
+                        &self.state.program_args,
+                        &*self.state.output,
+                        &mut self.state.sentinel_errors,
+                        &mut self.state.host_output,
+                    )
+                    .with_runtime_mem_requests(&mut self.state.runtime_mem_requests)
+                    .with_host_services_v2(self.state.host_services_v2.as_ref());
+                    #[cfg(feature = "std")]
+                    let world = world.with_io(&mut self.state.io);
                     let (closure_replay_results, closure_replay_panic_message) =
                         fiber.closure_replay.snapshot_for_extern(fiber.frames.len());
-                    #[cfg(feature = "std")]
-                    let resume_io_token = fiber.resume_io_token.take();
+                    let resume_io_token = {
+                        #[cfg(feature = "std")]
+                        {
+                            fiber.resume_io_token.take()
+                        }
+                        #[cfg(not(feature = "std"))]
+                        {
+                            None
+                        }
+                    };
                     let resume_host_event_token = fiber.resume_host_event_token.take();
                     let resume_host_event_data = fiber.resume_host_event_data.take();
                     let fiber_inputs = ExternFiberInputs {
                         fiber_opaque: fiber_ptr,
-                        #[cfg(feature = "std")]
                         resume_io_token,
                         resume_host_event_token,
                         resume_host_event_data,
                         replay_results: closure_replay_results,
                         replay_panic_message: closure_replay_panic_message,
                     };
-                    let extern_result = match self.state.extern_registry.call_resolved(
+                    let extern_result = self.state.extern_registry.call_resolved(
                         &mut fiber.stack,
                         invoke,
                         world,
                         fiber_inputs,
-                        &resolved_extern,
-                    ) {
+                    );
+                    #[cfg(feature = "std")]
+                    let staged_io_roots_added =
+                        self.state.io.staged_gc_root_additions() != staged_io_root_additions_before;
+                    let extern_result = match extern_result {
                         Ok(result) => result,
                         Err(err) => {
+                            #[cfg(feature = "std")]
+                            if staged_io_roots_added {
+                                self.mark_gc_all_roots_dirty();
+                            }
                             fiber.closure_replay.finish_extern_terminal();
                             return ExecResult::JitError(err.to_string());
                         }
@@ -3752,7 +4074,7 @@ impl Vm {
                         }
                     }
                     let transition =
-                        extern_result_to_transition(&resolved_extern, extern_result, fetched_pc);
+                        extern_result_to_transition(resolved_extern, extern_result, fetched_pc);
                     apply_extern_replay_scope_effect(fiber, transition.replay_scope);
                     match transition.boundary {
                         ExternBoundary::Continue => {
@@ -3794,13 +4116,23 @@ impl Vm {
                                 GcRootEffect::CurrentFiberDirty,
                             ));
                         }
-                        #[cfg(feature = "std")]
                         ExternBoundary::WaitIo(token) => {
-                            return ExecResult::Transition(RuntimeTransition::new(
-                                RuntimeBoundary::Block(crate::fiber::BlockReason::Io(token)),
-                                transition.resume,
-                                GcRootEffect::CurrentFiberDirty,
-                            ));
+                            #[cfg(feature = "std")]
+                            {
+                                return ExecResult::Transition(RuntimeTransition::new(
+                                    RuntimeBoundary::Block(crate::fiber::BlockReason::Io(token)),
+                                    transition.resume,
+                                    wait_io_gc_root_effect(staged_io_roots_added),
+                                ));
+                            }
+                            #[cfg(not(feature = "std"))]
+                            {
+                                let _ = token;
+                                return ExecResult::JitError(
+                                    "extern requested I/O wait from a VM without I/O support"
+                                        .to_string(),
+                                );
+                            }
                         }
                         ExternBoundary::CallClosure { closure_ref, args } => {
                             let result = prepare_extern_closure_replay_call(
@@ -3843,12 +4175,27 @@ impl Vm {
                     ));
                 }
                 Opcode::CallIface => {
-                    handle_panic_result!(exec::exec_call_iface(
+                    let Some(callsite_index) =
+                        loaded_module.dynamic_callsite_map().index(func_id, pc)
+                    else {
+                        return ExecResult::JitError(format!(
+                            "CallIface at func_id={func_id} pc={pc} has no verified callsite index"
+                        ));
+                    };
+                    let Some(ic_entry) =
+                        self.state.dynamic_call_ic.get_mut(callsite_index as usize)
+                    else {
+                        return ExecResult::JitError(format!(
+                            "CallIface cache index {callsite_index} is out of bounds"
+                        ));
+                    };
+                    handle_panic_result!(exec::exec_call_iface_cached(
                         &mut self.state.gc,
                         fiber,
                         &inst,
                         module,
-                        &self.state.itab_cache
+                        &self.state.itab_cache,
+                        ic_entry,
                     ));
                 }
                 Opcode::Return => {
@@ -3982,7 +4329,14 @@ impl Vm {
 
                 // Array operations
                 Opcode::ArrayNew => {
-                    if let Err(msg) = exec::exec_array_new(stack, bp, &inst, &mut self.state.gc) {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "ArrayNew at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    if let Err(msg) =
+                        exec::exec_array_new(stack, bp, &inst, &mut self.state.gc, elem_bytes)
+                    {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -4015,27 +4369,23 @@ impl Vm {
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
-                    let val = match inst.flags {
-                        1 => unsafe { *base.offset(off) as u64 },
-                        2 => unsafe { *(base.offset(off * 2) as *const u16) as u64 },
-                        4 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
-                        8 => unsafe { *(base.offset(off * 8) as *const u64) },
-                        129 => unsafe { *base.offset(off) as i8 as i64 as u64 },
-                        130 => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
-                        132 => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
-                        0x44 => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
-                        0 => {
-                            let elem_bytes = stack_get(stack, bp + inst.c as usize + 1) as usize;
-                            for i in 0..elem_bytes.div_ceil(8) {
-                                let ptr =
-                                    unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
-                                stack_set(stack, dst + i, unsafe { *ptr });
-                            }
-                            continue;
-                        }
+                    let Some((elem_bytes, needs_sign_extend, elem_layout)) =
+                        elem_layout_for_pc(func, pc)
+                    else {
+                        return ExecResult::JitError(format!(
+                            "ArrayGet at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    let val = match (elem_bytes, needs_sign_extend) {
+                        (1, false) => unsafe { *base.offset(off) as u64 },
+                        (2, false) => unsafe { *(base.offset(off * 2) as *const u16) as u64 },
+                        (4, false) => unsafe { *(base.offset(off * 4) as *const u32) as u64 },
+                        (8, false) => unsafe { *(base.offset(off * 8) as *const u64) },
+                        (1, true) => unsafe { *base.offset(off) as i8 as i64 as u64 },
+                        (2, true) => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
+                        (4, true) => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
                         _ => {
-                            let elem_bytes = inst.flags as usize;
-                            for i in 0..elem_bytes.div_ceil(8) {
+                            for i in 0..elem_layout.len() {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
@@ -4068,11 +4418,15 @@ impl Vm {
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let val = stack_get(stack, src);
-                    match inst.flags {
-                        1 | 129 => unsafe { *base.offset(off) = val as u8 },
-                        2 | 130 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
-                        4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
-                        0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
+                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "ArraySet at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    match elem_bytes {
+                        1 => unsafe { *base.offset(off) = val as u8 },
+                        2 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
+                        4 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => {
                             let em = unsafe { array::elem_meta(arr) };
                             if em.value_kind().may_contain_gc_refs() {
@@ -4082,7 +4436,7 @@ impl Vm {
                                         arr,
                                         &[val],
                                         em,
-                                        Some(module),
+                                        Some(runtime_metadata),
                                     )
                                 {
                                     return ExecResult::JitError(err.to_string());
@@ -4090,9 +4444,8 @@ impl Vm {
                             }
                             unsafe { *(base.offset(off * 8) as *mut u64) = val };
                         }
-                        0 => {
-                            let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
-                            let elem_slots = elem_bytes.div_ceil(8);
+                        _ => {
+                            let elem_slots = elem_layout.len();
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let em = unsafe { array::elem_meta(arr) };
                             if em.value_kind().may_contain_gc_refs() {
@@ -4107,42 +4460,7 @@ impl Vm {
                                         arr,
                                         vals,
                                         em,
-                                        Some(module),
-                                    )
-                                {
-                                    return ExecResult::JitError(err.to_string());
-                                }
-                                for (i, val) in vals.iter().enumerate() {
-                                    let ptr =
-                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                    unsafe { *ptr = *val };
-                                }
-                            } else {
-                                for i in 0..elem_slots {
-                                    let ptr =
-                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                    unsafe { *ptr = stack_get(stack, src + i) };
-                                }
-                            }
-                        }
-                        _ => {
-                            let elem_bytes = inst.flags as usize;
-                            let elem_slots = elem_bytes.div_ceil(8);
-                            // Write barrier for multi-slot elements that may contain GcRefs
-                            let em = unsafe { array::elem_meta(arr) };
-                            if elem_bytes >= 8 && em.value_kind().may_contain_gc_refs() {
-                                // Safety: verified ArraySet metadata keeps this source range
-                                // inside the active frame for the duration of the barrier/copy.
-                                let vals = unsafe {
-                                    core::slice::from_raw_parts(stack.add(src), elem_slots)
-                                };
-                                if let Err(err) =
-                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
-                                        &mut self.state.gc,
-                                        arr,
-                                        vals,
-                                        em,
-                                        Some(module),
+                                        Some(runtime_metadata),
                                     )
                                 {
                                     return ExecResult::JitError(err.to_string());
@@ -4181,12 +4499,10 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let elem_bytes = match inst.flags {
-                        0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
-                        0x81 => 1,
-                        0x82 => 2,
-                        0x84 | 0x44 => 4,
-                        f => f as usize,
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "ArrayAddr at pc {pc} is missing ElemLayout metadata"
+                        ));
                     };
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
@@ -4195,7 +4511,14 @@ impl Vm {
 
                 // Slice operations
                 Opcode::SliceNew => {
-                    if let Err(msg) = exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc) {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SliceNew at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    if let Err(msg) =
+                        exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc, elem_bytes)
+                    {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -4236,27 +4559,23 @@ impl Vm {
                         }
                         continue;
                     }
-                    let val = match inst.flags {
-                        1 => unsafe { *base.add(idx) as u64 },
-                        2 => unsafe { *(base.add(idx * 2) as *const u16) as u64 },
-                        4 => unsafe { *(base.add(idx * 4) as *const u32) as u64 },
-                        8 => unsafe { *(base.add(idx * 8) as *const u64) },
-                        129 => unsafe { *base.add(idx) as i8 as i64 as u64 },
-                        130 => unsafe { *(base.add(idx * 2) as *const i16) as i64 as u64 },
-                        132 => unsafe { *(base.add(idx * 4) as *const i32) as i64 as u64 },
-                        0x44 => unsafe { *(base.add(idx * 4) as *const u32) as u64 },
-                        0 => {
-                            let elem_bytes = stack_get(stack, bp + inst.c as usize + 1) as usize;
-                            for i in 0..elem_bytes.div_ceil(8) {
-                                let ptr =
-                                    unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
-                                stack_set(stack, dst + i, unsafe { *ptr });
-                            }
-                            continue;
-                        }
+                    let Some((elem_bytes, needs_sign_extend, elem_layout)) =
+                        elem_layout_for_pc(func, pc)
+                    else {
+                        return ExecResult::JitError(format!(
+                            "SliceGet at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    let val = match (elem_bytes, needs_sign_extend) {
+                        (1, false) => unsafe { *base.add(idx) as u64 },
+                        (2, false) => unsafe { *(base.add(idx * 2) as *const u16) as u64 },
+                        (4, false) => unsafe { *(base.add(idx * 4) as *const u32) as u64 },
+                        (8, false) => unsafe { *(base.add(idx * 8) as *const u64) },
+                        (1, true) => unsafe { *base.add(idx) as i8 as i64 as u64 },
+                        (2, true) => unsafe { *(base.add(idx * 2) as *const i16) as i64 as u64 },
+                        (4, true) => unsafe { *(base.add(idx * 4) as *const i32) as i64 as u64 },
                         _ => {
-                            let elem_bytes = inst.flags as usize;
-                            for i in 0..elem_bytes.div_ceil(8) {
+                            for i in 0..elem_layout.len() {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
                                 stack_set(stack, dst + i, unsafe { *ptr });
@@ -4300,7 +4619,7 @@ impl Vm {
                                 owner,
                                 vals,
                                 elem_meta,
-                                Some(module),
+                                Some(runtime_metadata),
                             ) {
                                 return ExecResult::JitError(err.to_string());
                             }
@@ -4310,11 +4629,15 @@ impl Vm {
                         }
                         continue;
                     }
-                    match inst.flags {
-                        1 | 129 => unsafe { *base.add(idx) = val as u8 },
-                        2 | 130 => unsafe { *(base.add(idx * 2) as *mut u16) = val as u16 },
-                        4 | 132 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
-                        0x44 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
+                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SliceSet at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    match elem_bytes {
+                        1 => unsafe { *base.add(idx) = val as u8 },
+                        2 => unsafe { *(base.add(idx * 2) as *mut u16) = val as u16 },
+                        4 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         8 => {
                             let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
                             if !owner.is_null() {
@@ -4326,7 +4649,7 @@ impl Vm {
                                             owner,
                                             &[val],
                                             em,
-                                            Some(module),
+                                            Some(runtime_metadata),
                                         )
                                     {
                                         return ExecResult::JitError(err.to_string());
@@ -4335,56 +4658,11 @@ impl Vm {
                             }
                             unsafe { *(base.add(idx * 8) as *mut u64) = val };
                         }
-                        0 => {
-                            let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
-                            let elem_slots = elem_bytes.div_ceil(8);
-                            // Write barrier for multi-slot elements that may contain GcRefs
-                            let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
-                            let needs_barrier = if owner.is_null() {
-                                false
-                            } else {
-                                unsafe { vo_runtime::objects::slice::elem_meta(s) }
-                                    .value_kind()
-                                    .may_contain_gc_refs()
-                            };
-                            if needs_barrier {
-                                // Safety: verified SliceSet metadata keeps this source range
-                                // inside the active frame for the duration of the barrier/copy.
-                                let vals = unsafe {
-                                    core::slice::from_raw_parts(stack.add(src), elem_slots)
-                                };
-                                let em = unsafe { vo_runtime::objects::slice::elem_meta(s) };
-                                if let Err(err) =
-                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
-                                        &mut self.state.gc,
-                                        owner,
-                                        vals,
-                                        em,
-                                        Some(module),
-                                    )
-                                {
-                                    return ExecResult::JitError(err.to_string());
-                                }
-                                for (i, val) in vals.iter().enumerate() {
-                                    let ptr =
-                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                    unsafe { *ptr = *val };
-                                }
-                            } else {
-                                for i in 0..elem_slots {
-                                    let ptr =
-                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                    unsafe { *ptr = stack_get(stack, src + i) };
-                                }
-                            }
-                        }
                         _ => {
-                            let elem_bytes = inst.flags as usize;
-                            let elem_slots = elem_bytes.div_ceil(8);
+                            let elem_slots = elem_layout.len();
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
-                            let needs_barrier = elem_bytes >= 8
-                                && !owner.is_null()
+                            let needs_barrier = !owner.is_null()
                                 && unsafe { vo_runtime::objects::slice::elem_meta(s) }
                                     .value_kind()
                                     .may_contain_gc_refs();
@@ -4401,7 +4679,7 @@ impl Vm {
                                         owner,
                                         vals,
                                         em,
-                                        Some(module),
+                                        Some(runtime_metadata),
                                     )
                                 {
                                     return ExecResult::JitError(err.to_string());
@@ -4446,9 +4724,19 @@ impl Vm {
                     }
                 }
                 Opcode::SliceAppend => {
-                    if let Err(msg) =
-                        exec::exec_slice_append(stack, bp, &inst, &mut self.state.gc, Some(module))
-                    {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SliceAppend at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
+                    if let Err(msg) = exec::exec_slice_append(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc,
+                        Some(runtime_metadata),
+                        elem_bytes,
+                    ) {
                         return ExecResult::JitError(msg);
                     }
                 }
@@ -4470,17 +4758,16 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
+                    let Some((metadata_elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "SliceAddr at pc {pc} is missing ElemLayout metadata"
+                        ));
+                    };
                     let elem_bytes =
                         if unsafe { vo_runtime::objects::slice::uses_flat_slot_storage(s) } {
                             unsafe { vo_runtime::objects::slice::storage_stride(s) }
                         } else {
-                            match inst.flags {
-                                0 => stack_get(stack, bp + inst.c as usize + 1) as usize,
-                                0x81 => 1,
-                                0x82 => 2,
-                                0x84 | 0x44 => 4,
-                                f => f as usize,
-                            }
+                            metadata_elem_bytes
                         };
                     let base = slice_data_ptr(s);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
@@ -4505,27 +4792,34 @@ impl Vm {
                         return ExecResult::JitError(msg);
                     }
                 }
-                Opcode::MapGet => match exec::exec_map_get_with_layout_using_scratch(
-                    stack,
-                    bp,
-                    &inst,
-                    &self.state.gc,
-                    Some(module),
-                    map_get_layout_for_pc(func, pc),
-                    &mut fiber.map_scratch,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        handle_panic_result!(runtime_trap(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::UnhashableType
+                Opcode::MapGet => {
+                    let Some(layout) = map_get_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "MapGet at pc {pc} is missing MapGet metadata"
                         ));
+                    };
+                    match exec::exec_map_get_with_layout_using_scratch(
+                        stack,
+                        bp,
+                        &inst,
+                        &self.state.gc,
+                        Some(runtime_metadata),
+                        layout,
+                        &mut fiber.map_scratch,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::UnhashableType
+                            ));
+                        }
+                        Err(msg) => return ExecResult::JitError(msg),
                     }
-                    Err(msg) => return ExecResult::JitError(msg),
-                },
+                }
                 Opcode::MapSet => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if m.is_null() {
@@ -4537,13 +4831,18 @@ impl Vm {
                             RuntimeTrapKind::NilMapWrite
                         ));
                     }
+                    let Some(layout) = map_key_value_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "MapSet at pc {pc} is missing MapSet metadata"
+                        ));
+                    };
                     match exec::exec_map_set_with_layout_using_scratch(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
-                        Some(module),
-                        map_key_value_layout_for_pc(func, pc),
+                        Some(runtime_metadata),
+                        layout,
                         &mut fiber.map_scratch,
                     ) {
                         Ok(true) => {}
@@ -4562,13 +4861,18 @@ impl Vm {
                 Opcode::MapDelete => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if !m.is_null() {
+                        let Some(key_layout) = map_key_layout_for_pc(func, pc) else {
+                            return ExecResult::JitError(format!(
+                                "MapDelete at pc {pc} is missing MapDelete metadata"
+                            ));
+                        };
                         match exec::exec_map_delete_with_layout_using_scratch(
                             stack,
                             bp,
                             &inst,
                             &self.state.gc,
-                            Some(module),
-                            map_key_layout_for_pc(func, pc),
+                            Some(runtime_metadata),
+                            key_layout,
                             &mut fiber.map_scratch,
                         ) {
                             Ok(true) => {}
@@ -4596,13 +4900,18 @@ impl Vm {
                     }
                 }
                 Opcode::MapIterNext => {
+                    let Some(layout) = map_key_value_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "MapIterNext at pc {pc} is missing MapIterNext metadata"
+                        ));
+                    };
                     if let Err(msg) = exec::exec_map_iter_next_with_layout(
                         stack,
                         bp,
                         &inst,
                         Some(&self.state.gc),
-                        Some(module),
-                        map_key_value_layout_for_pc(func, pc),
+                        Some(runtime_metadata),
+                        layout,
                     ) {
                         return ExecResult::JitError(msg);
                     }
@@ -4664,10 +4973,15 @@ impl Vm {
                         &mut self.state,
                         &module.struct_metas,
                         &module.runtime_types,
-                        Some(module),
+                        Some(runtime_metadata),
                     ));
                 }
                 Opcode::QueueRecv => {
+                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                        return ExecResult::JitError(format!(
+                            "QueueRecv missing QueueLayout metadata at pc {pc}"
+                        ));
+                    };
                     if fiber.remote_recv_response.is_some() {
                         let raw_ch = helpers::stack_get(stack, bp + inst.b as usize) as GcRef;
                         let ch = match exec::validate_queue_handle(
@@ -4681,11 +4995,6 @@ impl Vm {
                         let elem_meta = unsafe { vo_runtime::objects::queue_state::elem_meta(ch) };
                         let elem_rttid =
                             unsafe { vo_runtime::objects::queue_state::elem_rttid(ch) };
-                        let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
-                            return ExecResult::JitError(format!(
-                                "QueueRecv missing QueueLayout metadata at pc {pc}"
-                            ));
-                        };
                         let elem_slots = elem_layout.len();
                         let queue_elem_slots =
                             unsafe { vo_runtime::objects::queue_state::elem_slots(ch) } as usize;
@@ -4698,7 +5007,7 @@ impl Vm {
                             ch,
                             elem_layout,
                             "QueueRecv replay",
-                            Some(module),
+                            Some(runtime_metadata),
                         ) {
                             return ExecResult::JitError(msg);
                         }
@@ -4736,15 +5045,11 @@ impl Vm {
                         fiber.wake_key_packed(),
                         &inst,
                         &self.state,
-                        Some(module),
-                        queue_layout_for_pc(func, pc),
+                        Some(runtime_metadata),
+                        elem_layout,
                     ));
                 }
                 Opcode::QueueClose => {
-                    let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
-                    if let Err(msg) = exec::preflight_queue_close_routes(&self.state, ch) {
-                        return ExecResult::JitError(msg);
-                    }
                     handle_queue_action!(exec::exec_queue_close(stack, bp, &inst, &self.state));
                 }
                 Opcode::QueueLen => {
@@ -4832,7 +5137,7 @@ impl Vm {
                             island_id: self.state.current_island_id,
                             fiber_key: fiber.wake_key_packed(),
                             vm_state: &mut self.state,
-                            module: Some(module),
+                            module: Some(runtime_metadata),
                         },
                         &mut fiber.select_state,
                         inst.a,
@@ -4873,77 +5178,8 @@ impl Vm {
                                 crate::vm::helpers::ERR_SELECT_REMOTE_UNSUPPORTED.to_string(),
                             ));
                         }
-                        exec::SelectResult::Wake { waiter, payload } => {
-                            let mut transition = RuntimeTransition::new(
-                                RuntimeBoundary::Yield,
-                                ResumePolicy::PreserveFramePc,
-                                GcRootEffect::AllRootsDirty,
-                            );
-                            transition.wakes.push(match payload {
-                                Some(payload) => {
-                                    WakeCommand::queue_waiter_with_result(waiter, payload)
-                                }
-                                None => WakeCommand::queue_waiter(waiter),
-                            });
-                            return ExecResult::Transition(transition);
-                        }
-                        exec::SelectResult::RemoteSendAck {
-                            endpoint_id,
-                            target_island,
-                            fiber_key,
-                            wait_id,
-                            closed,
-                            rollback,
-                        } => {
-                            let mut transition = RuntimeTransition::new(
-                                RuntimeBoundary::Yield,
-                                ResumePolicy::PreserveFramePc,
-                                GcRootEffect::CurrentFiberDirty,
-                            );
-                            transition.island_commands.push(
-                                IslandCommandEffect::endpoint_response(
-                                    target_island,
-                                    self.state.current_island_id,
-                                    endpoint_id,
-                                    vo_runtime::island::EndpointResponseKind::SendAck { closed },
-                                    fiber_key,
-                                    wait_id,
-                                ),
-                            );
-                            if let Some(rollback) = rollback {
-                                transition.set_rollback(rollback);
-                            }
-                            return ExecResult::Transition(transition);
-                        }
-                        exec::SelectResult::RemoteRecvData {
-                            endpoint_id,
-                            target_island,
-                            fiber_key,
-                            wait_id,
-                            data,
-                            mut island_effects,
-                            rollback,
-                        } => {
-                            let mut transition = RuntimeTransition::new(
-                                RuntimeBoundary::Yield,
-                                ResumePolicy::PreserveFramePc,
-                                GcRootEffect::CurrentFiberDirty,
-                            );
-                            transition.island_commands.append(&mut island_effects);
-                            transition.island_commands.push(
-                                IslandCommandEffect::endpoint_recv_data_response(
-                                    target_island,
-                                    self.state.current_island_id,
-                                    endpoint_id,
-                                    data,
-                                    fiber_key,
-                                    wait_id,
-                                ),
-                            );
-                            if let Some(rollback) = rollback {
-                                transition.set_rollback(rollback);
-                            }
-                            return ExecResult::Transition(transition);
+                        exec::SelectResult::Queue(action) => {
+                            handle_queue_action!(action)
                         }
                         exec::SelectResult::Malformed(msg) => {
                             return ExecResult::JitError(msg);
@@ -4976,32 +5212,29 @@ impl Vm {
                             ));
                         }
                     }
-                    let (callsite_arg_layout, callsite_ret_layout) =
-                        match crate::frame_call::call_layout_for_callsite(func, pc, "GoStart") {
+                    let callsite_arg_layout =
+                        match crate::frame_call::shared_call_arg_layout_for_callsite(
+                            func, module, pc, &inst, "GoStart",
+                        ) {
                             Ok(layout) => layout,
                             Err(err) => return ExecResult::JitError(err),
                         };
-                    let next_id = match self.scheduler.next_spawn_identity_hint() {
-                        Ok(next_id) => next_id,
-                        Err(error) => return ExecResult::JitError(error.to_string()),
-                    };
                     match exec::exec_go_start(
                         &self.state.gc,
                         stack,
                         bp,
                         &inst,
                         module,
-                        next_id,
                         callsite_arg_layout,
-                        callsite_ret_layout,
+                        &[],
                     ) {
-                        Ok(go_result) => {
+                        Ok(spawn) => {
                             let mut transition = RuntimeTransition::new(
                                 RuntimeBoundary::Yield,
                                 ResumePolicy::PreserveFramePc,
                                 GcRootEffect::AllRootsDirty,
                             );
-                            transition.spawns.push(go_result.new_fiber);
+                            transition.spawns.push(spawn);
                             return ExecResult::Transition(transition);
                         }
                         Err(exec::GoStartError::Trap(kind)) => {
@@ -5022,6 +5255,16 @@ impl Vm {
                 // Defer and error handling
                 Opcode::DeferPush => {
                     let generation = fiber.effective_defer_generation();
+                    let arg_layout = match crate::frame_call::shared_call_arg_layout_for_callsite(
+                        func,
+                        module,
+                        pc,
+                        &inst,
+                        "DeferPush",
+                    ) {
+                        Ok(layout) => layout,
+                        Err(err) => return ExecResult::JitError(err),
+                    };
                     if let Err(msg) = exec::exec_defer_push(
                         stack,
                         bp,
@@ -5030,6 +5273,7 @@ impl Vm {
                         module,
                         &mut fiber.defer_stack,
                         &inst,
+                        arg_layout,
                         &mut self.state.gc,
                         generation,
                     ) {
@@ -5038,6 +5282,16 @@ impl Vm {
                 }
                 Opcode::ErrDeferPush => {
                     let generation = fiber.effective_defer_generation();
+                    let arg_layout = match crate::frame_call::shared_call_arg_layout_for_callsite(
+                        func,
+                        module,
+                        pc,
+                        &inst,
+                        "ErrDeferPush",
+                    ) {
+                        Ok(layout) => layout,
+                        Err(err) => return ExecResult::JitError(err),
+                    };
                     if let Err(msg) = exec::exec_err_defer_push(
                         stack,
                         bp,
@@ -5046,6 +5300,7 @@ impl Vm {
                         module,
                         &mut fiber.defer_stack,
                         &inst,
+                        arg_layout,
                         &mut self.state.gc,
                         generation,
                     ) {
@@ -5078,11 +5333,11 @@ impl Vm {
                     }
                 }
                 Opcode::IfaceAssert => {
-                    let Some(JitInstructionMetadata::IfaceAssertLayout {
+                    let Some(InstructionMetadata::IfaceAssertLayout {
                         assert_kind,
                         target_id,
                         result_layout,
-                    }) = func.jit_metadata.get(pc)
+                    }) = func.instruction_metadata.get(pc)
                     else {
                         return ExecResult::JitError(
                             "missing IfaceAssertLayout metadata".to_string(),
@@ -5182,7 +5437,7 @@ impl Vm {
                 // === ISLAND/CHANNEL: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
-                    let handle = match self.create_island_for_execution(module) {
+                    let handle = match self.create_island() {
                         Ok(handle) => handle,
                         Err(VmError::Jit(msg)) => return ExecResult::JitError(msg),
                         Err(err) => {
@@ -5275,20 +5530,14 @@ impl Vm {
                     let island_id = unsafe { vo_runtime::island::id(island_handle) };
 
                     if island_id == self.state.current_island_id {
-                        let new_fiber = match unsafe {
-                            helpers::try_build_validated_closure_fiber_from_args_ptr(
-                                match self.scheduler.next_spawn_identity_hint() {
-                                    Ok(next_id) => next_id,
-                                    Err(error) => {
-                                        return ExecResult::JitError(error.to_string());
-                                    }
-                                },
+                        let spawn = match unsafe {
+                            helpers::try_build_validated_closure_pending_spawn_from_args_ptr(
                                 &closure_target,
                                 stack.add(bp + inst.c as usize),
                                 u32::try_from(callsite_arg_layout.len()).unwrap_or(u32::MAX),
                             )
                         } {
-                            Ok(new_fiber) => new_fiber,
+                            Ok(spawn) => spawn,
                             Err(helpers::ClosureFiberBuildError::Trap(
                                 RuntimeTrapKind::StackOverflow,
                             )) => {
@@ -5318,7 +5567,7 @@ impl Vm {
                             ResumePolicy::PreserveFramePc,
                             GcRootEffect::AllRootsDirty,
                         );
-                        transition.spawns.push(new_fiber);
+                        transition.spawns.push(spawn);
                         return ExecResult::Transition(transition);
                     } else {
                         let func_def = closure_target.func;
@@ -5414,7 +5663,7 @@ impl Vm {
 
     /// Spawn a new fiber that calls a function with the given arguments.
     /// The fiber is added to the ready queue and will be executed by run_scheduled().
-    /// Reuses a dead fiber's stack allocation when available to avoid repeated 64KB allocs.
+    /// Reuses a dead fiber's retained stack allocation when available.
     pub fn spawn_call(&mut self, func_id: u32, args: &[u64]) -> Result<(), VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
         let func_def = module
@@ -5423,8 +5672,6 @@ impl Vm {
             .ok_or(VmError::InvalidFunctionId(func_id))?;
         crate::frame_call::validate_function_arg_shape("spawn_call", func_id, func_def, args.len())
             .map_err(VmError::Jit)?;
-        let local_slots = func_def.local_slots as usize;
-        let gc_scan_slots = func_def.gc_scan_slots as usize;
         let mut args = args.to_vec();
         validate_spawn_call_args(
             &self.state.gc,
@@ -5434,27 +5681,18 @@ impl Vm {
             func_def,
             &mut args,
         )?;
-        let ret_slots = func_def.ret_slots;
-        let gc_scan_slots_u16 = func_def.gc_scan_slots;
-
-        let fiber_id = self
-            .scheduler
-            .try_reuse_or_spawn()
-            .map_err(|err| VmError::Jit(err.to_string()))?;
+        let spawn = PendingSpawn::try_new(
+            func_id,
+            func_def.local_slots,
+            func_def.gc_scan_slots,
+            func_def.ret_slots,
+            args,
+        )
+        .map_err(fiber_capacity_error_to_vm_error)?;
+        self.scheduler
+            .try_spawn_pending(spawn)
+            .map_err(scheduler_error_to_vm_error)?;
         self.mark_gc_all_roots_dirty();
-        let fiber = self.scheduler.get_fiber_mut(fiber_id);
-
-        let bp = fiber.sp;
-        fiber
-            .try_reserve_slots_at(bp, local_slots)
-            .map_err(fiber_capacity_error_to_vm_error)?;
-
-        fiber.zero_slots_tail_at(bp, gc_scan_slots, args.len());
-        fiber.copy_slots_from_slice(bp, &args);
-
-        fiber
-            .try_push_call_frame(func_id, bp, 0, ret_slots, gc_scan_slots_u16)
-            .map_err(fiber_capacity_error_to_vm_error)?;
         Ok(())
     }
 
@@ -5697,12 +5935,23 @@ fn validate_spawn_call_transfer_args(
                 args.len()
             )));
         }
-        let transfer_meta = validate_spawn_call_transfer_layout(
-            module, slot_types, slot_idx, transfer, func_id, func_def,
-        )?;
+        let transfer_meta = validate_transfer_layout(module, slot_types, slot_idx, transfer)
+            .map_err(|err| {
+                VmError::Jit(format!(
+                    "spawn_call param {err} for function {} ({}) slot={}",
+                    func_id, func_def.name, slot_idx
+                ))
+            })?;
         if transfer_meta.value_kind() == vo_runtime::ValueKind::Interface {
             validate_spawn_call_interface_arg(
-                gc, module, itab_cache, args, slot_idx, transfer, func_id, func_def,
+                gc,
+                module,
+                itab_cache,
+                args,
+                slot_idx,
+                transfer_meta,
+                func_id,
+                func_def,
             )?;
         } else {
             validate_spawn_call_concrete_arg(gc, args, slot_idx, transfer_meta, func_id, func_def)?;
@@ -5718,68 +5967,6 @@ fn validate_spawn_call_transfer_args(
     Ok(())
 }
 
-fn validate_spawn_call_transfer_layout(
-    module: &Module,
-    slot_types: &[vo_runtime::SlotType],
-    slot_idx: usize,
-    transfer: &TransferType,
-    func_id: u32,
-    func_def: &FunctionDef,
-) -> Result<vo_runtime::ValueMeta, VmError> {
-    let expected_meta = vo_runtime::ValueMeta::from_raw(transfer.meta_raw);
-    let expected_rttid = vo_runtime::ValueRttid::from_raw(transfer.rttid_raw);
-    if expected_meta.value_kind() != expected_rttid.value_kind() {
-        return Err(VmError::Jit(format!(
-            "spawn_call param metadata kind {:?} does not match RTTID kind {:?} for function {} ({}) slot={}",
-            expected_meta.value_kind(),
-            expected_rttid.value_kind(),
-            func_id,
-            func_def.name,
-            slot_idx
-        )));
-    }
-    let Some(canonical_meta) = module.canonical_value_meta_for_value_rttid(expected_rttid) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call param RTTID cannot be resolved for function {} ({}) slot={}",
-            func_id, func_def.name, slot_idx
-        )));
-    };
-    if expected_meta != canonical_meta {
-        return Err(VmError::Jit(format!(
-            "spawn_call param metadata raw 0x{:x} does not match RTTID canonical raw 0x{:x} for function {} ({}) slot={}",
-            expected_meta.to_raw(),
-            canonical_meta.to_raw(),
-            func_id,
-            func_def.name,
-            slot_idx
-        )));
-    }
-    let Some(expected_layout) = module.slot_layout_for_value_rttid(expected_rttid) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call param RTTID cannot resolve slot layout for function {} ({}) slot={}",
-            func_id, func_def.name, slot_idx
-        )));
-    };
-    if transfer.slots as usize != expected_layout.len() {
-        return Err(VmError::Jit(format!(
-            "spawn_call param transfer has {} slots but RTTID layout has {} for function {} ({}) slot={}",
-            transfer.slots,
-            expected_layout.len(),
-            func_id,
-            func_def.name,
-            slot_idx
-        )));
-    }
-    let end = slot_idx + expected_layout.len();
-    if slot_types.get(slot_idx..end) != Some(expected_layout.as_slice()) {
-        return Err(VmError::Jit(format!(
-            "spawn_call param slot layout mismatch for function {} ({}) slot={}",
-            func_id, func_def.name, slot_idx
-        )));
-    }
-    Ok(expected_meta)
-}
-
 fn validate_spawn_call_concrete_arg(
     gc: &Gc,
     args: &mut [u64],
@@ -5788,67 +5975,17 @@ fn validate_spawn_call_concrete_arg(
     func_id: u32,
     func_def: &FunctionDef,
 ) -> Result<(), VmError> {
-    let value_kind = expected_meta.value_kind();
-    let Some(expected_header_kind) = spawn_call_heap_header_kind_for_value_kind(value_kind) else {
-        return Ok(());
-    };
     let raw = args[slot_idx];
-    if raw == 0 {
-        return Ok(());
-    }
-    let Some(canonical) = gc.canonicalize_ref(raw as GcRef) else {
-        let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
-        return Err(VmError::Jit(format!(
-            "spawn_call invalid GcRef arg func={} name={} slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
-            func_id,
-            func_def.name,
-            slot_idx,
-            raw,
-            in_all,
-            in_index,
-            index_len
-        )));
-    };
-    args[slot_idx] = canonical as u64;
-    let header = unsafe { Gc::header(canonical) };
-    if header.kind() != expected_header_kind {
-        return Err(VmError::Jit(format!(
-            "spawn_call param object kind {:?} does not match expected {:?} for value kind {:?} func={} name={} slot={}",
-            header.kind(),
-            expected_header_kind,
-            value_kind,
-            func_id,
-            func_def.name,
-            slot_idx
-        )));
-    }
-    if value_kind == vo_runtime::ValueKind::Pointer && header.meta_id() != expected_meta.meta_id() {
-        return Err(VmError::Jit(format!(
-            "spawn_call pointer param meta_id {} does not match expected {} for func={} name={} slot={}",
-            header.meta_id(),
-            expected_meta.meta_id(),
-            func_id,
-            func_def.name,
-            slot_idx
-        )));
+    let canonical = canonicalize_concrete_heap_value(gc, raw, expected_meta).map_err(|err| {
+        VmError::Jit(format!(
+            "spawn_call param {err} for function {} ({}) slot={}",
+            func_id, func_def.name, slot_idx
+        ))
+    })?;
+    if let Some(canonical) = canonical {
+        args[slot_idx] = canonical as u64;
     }
     Ok(())
-}
-
-fn spawn_call_heap_header_kind_for_value_kind(
-    value_kind: vo_runtime::ValueKind,
-) -> Option<vo_runtime::ValueKind> {
-    match value_kind {
-        vo_runtime::ValueKind::String
-        | vo_runtime::ValueKind::Slice
-        | vo_runtime::ValueKind::Map
-        | vo_runtime::ValueKind::Channel
-        | vo_runtime::ValueKind::Port
-        | vo_runtime::ValueKind::Closure
-        | vo_runtime::ValueKind::Island => Some(value_kind),
-        vo_runtime::ValueKind::Pointer => Some(vo_runtime::ValueKind::Struct),
-        _ => None,
-    }
 }
 
 fn validate_spawn_call_interface_arg(
@@ -5857,482 +5994,43 @@ fn validate_spawn_call_interface_arg(
     itab_cache: &ItabCache,
     args: &mut [u64],
     slot_idx: usize,
-    transfer: &TransferType,
+    expected_meta: vo_runtime::ValueMeta,
     func_id: u32,
     func_def: &FunctionDef,
 ) -> Result<(), VmError> {
-    if transfer.slots != 2 {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface param has {} slots for function {} ({}) slot={}",
-            transfer.slots, func_id, func_def.name, slot_idx
-        )));
-    }
-    let expected_meta = vo_runtime::ValueMeta::from_raw(transfer.meta_raw);
     let expected_iface_meta_id = expected_meta.meta_id();
-    let Some(expected_iface) = module.interface_metas.get(expected_iface_meta_id as usize) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface param references missing interface {} for function {} ({}) slot={}",
-            expected_iface_meta_id, func_id, func_def.name, slot_idx
-        )));
-    };
     let slot0 = args[slot_idx];
     let slot1 = args[slot_idx + 1];
-    let value_kind = interface::unpack_value_kind(slot0);
-    if value_kind == vo_runtime::ValueKind::Void {
-        if slot1 != 0 {
-            return Err(VmError::Jit(format!(
-                "spawn_call nil interface arg has nonzero data for function {} ({}) slot={}",
-                func_id, func_def.name, slot_idx
-            )));
-        }
-        return Ok(());
-    }
-    if value_kind == vo_runtime::ValueKind::Interface {
-        return Err(VmError::Jit(format!(
-            "spawn_call raw interface-kind arg for function {} ({}) slot={}",
+    let validated = validate_interface_value(gc, module, slot0, slot1).map_err(|err| {
+        VmError::Jit(format!(
+            "spawn_call interface arg {err} for function {} ({}) slot={}",
             func_id, func_def.name, slot_idx
-        )));
+        ))
+    })?;
+    let (value_rttid, canonical_data) = match validated {
+        ValidatedInterfaceValue::Nil => (None, None),
+        ValidatedInterfaceValue::Concrete {
+            value_rttid,
+            canonical_data,
+        } => (Some(value_rttid), canonical_data),
+    };
+    if let Some(canonical) = canonical_data {
+        args[slot_idx + 1] = canonical as u64;
     }
-    let rttid = interface::unpack_rttid(slot0);
-    if module
-        .canonical_value_meta_for_value_rttid(vo_runtime::ValueRttid::new(rttid, value_kind))
-        .is_none()
-    {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg has non-canonical RTTID/kind for function {} ({}) slot={} rttid={} kind={:?}",
-            func_id, func_def.name, slot_idx, rttid, value_kind
-        )));
-    }
-    validate_spawn_call_interface_data_object(
-        gc, module, args, slot_idx, slot0, slot1, rttid, value_kind, func_id, func_def,
-    )?;
     let itab_id = interface::unpack_itab_id(slot0);
-    if expected_iface.methods.is_empty() {
-        return Ok(());
-    }
-    if itab_id == 0 {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg missing itab for function {} ({}) slot={} iface_meta_id={}",
-            func_id, func_def.name, slot_idx, expected_iface_meta_id
-        )));
-    }
-    let Some(named_type_id) =
-        named_type_id_from_spawn_call_interface_value(module, rttid, value_kind)
-    else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg is not a named value for function {} ({}) slot={} rttid={} kind={:?}",
-            func_id, func_def.name, slot_idx, rttid, value_kind
-        )));
-    };
-    let Some(expected_methods) = vo_runtime::itab::expected_interface_itab_methods(
-        named_type_id,
+    validate_interface_itab(
+        module,
+        itab_cache,
         expected_iface_meta_id,
-        value_kind == vo_runtime::ValueKind::Pointer,
-        &module.named_type_metas,
-        &module.interface_metas,
-    ) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg does not implement expected interface for function {} ({}) slot={} named_type_id={} iface_meta_id={}",
-            func_id, func_def.name, slot_idx, named_type_id, expected_iface_meta_id
-        )));
-    };
-    let Some(actual_itab) = itab_cache.get_itab(itab_id) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg references missing itab {} for function {} ({}) slot={}",
-            itab_id, func_id, func_def.name, slot_idx
-        )));
-    };
-    if actual_itab.iface_meta_id != expected_iface_meta_id
-        || actual_itab.methods != expected_methods
-    {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg itab {} does not match expected interface for function {} ({}) slot={} iface_meta_id={}",
-            itab_id, func_id, func_def.name, slot_idx, expected_iface_meta_id
-        )));
-    }
-    Ok(())
-}
-
-fn validate_spawn_call_interface_data_object(
-    gc: &Gc,
-    module: &Module,
-    args: &mut [u64],
-    slot_idx: usize,
-    slot0: u64,
-    slot1: u64,
-    rttid: u32,
-    value_kind: vo_runtime::ValueKind,
-    func_id: u32,
-    func_def: &FunctionDef,
-) -> Result<(), VmError> {
-    if !interface::data_is_gc_ref(slot0) {
-        return Ok(());
-    }
-    if slot1 == 0 {
-        if matches!(
-            value_kind,
-            vo_runtime::ValueKind::Struct | vo_runtime::ValueKind::Array
-        ) {
-            return Err(VmError::Jit(format!(
-                "spawn_call interface arg data missing object for aggregate value kind {:?} func={} name={} slot={}",
-                value_kind,
-                func_id,
-                func_def.name,
-                slot_idx + 1
-            )));
-        }
-        return Ok(());
-    }
-    let Some(canonical) = gc.canonicalize_ref(slot1 as GcRef) else {
-        let (in_all, in_index, index_len) = gc.debug_ref_membership(slot1 as GcRef);
-        return Err(VmError::Jit(format!(
-            "spawn_call invalid interface GcRef arg func={} name={} slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            slot1,
-            in_all,
-            in_index,
-            index_len
-        )));
-    };
-    args[slot_idx + 1] = canonical as u64;
-    let header = unsafe { Gc::header(canonical) };
-    let Some(expected_meta) =
-        module.canonical_value_meta_for_value_rttid(vo_runtime::ValueRttid::new(rttid, value_kind))
-    else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg data RTTID cannot be resolved for function {} ({}) slot={} rttid={} kind={:?}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            rttid,
-            value_kind
-        )));
-    };
-    match value_kind {
-        vo_runtime::ValueKind::Struct | vo_runtime::ValueKind::Pointer => {
-            validate_spawn_call_interface_data_kind(
-                header.kind(),
-                vo_runtime::ValueKind::Struct,
-                value_kind,
-                func_id,
-                func_def,
-                slot_idx,
-            )?;
-            if header.meta_id() != expected_meta.meta_id() {
-                return Err(VmError::Jit(format!(
-                    "spawn_call interface arg data meta_id {} does not match expected {} for function {} ({}) slot={}",
-                    header.meta_id(),
-                    expected_meta.meta_id(),
-                    func_id,
-                    func_def.name,
-                    slot_idx + 1
-                )));
-            }
-            validate_spawn_call_struct_data_slots(
-                module,
-                header.meta_id(),
-                header.slots as usize,
-                func_id,
-                func_def,
-                slot_idx,
-            )?;
-        }
-        vo_runtime::ValueKind::Array => {
-            validate_spawn_call_interface_array_data(
-                module, canonical, header, rttid, func_id, func_def, slot_idx,
-            )?;
-        }
-        _ => {
-            if let Some(expected_kind) = spawn_call_interface_data_heap_kind(value_kind) {
-                validate_spawn_call_interface_data_kind(
-                    header.kind(),
-                    expected_kind,
-                    value_kind,
-                    func_id,
-                    func_def,
-                    slot_idx,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn spawn_call_interface_data_heap_kind(
-    value_kind: vo_runtime::ValueKind,
-) -> Option<vo_runtime::ValueKind> {
-    match value_kind {
-        vo_runtime::ValueKind::String
-        | vo_runtime::ValueKind::Slice
-        | vo_runtime::ValueKind::Map
-        | vo_runtime::ValueKind::Channel
-        | vo_runtime::ValueKind::Port
-        | vo_runtime::ValueKind::Closure
-        | vo_runtime::ValueKind::Island => Some(value_kind),
-        _ => None,
-    }
-}
-
-fn validate_spawn_call_interface_data_kind(
-    actual: vo_runtime::ValueKind,
-    expected: vo_runtime::ValueKind,
-    value_kind: vo_runtime::ValueKind,
-    func_id: u32,
-    func_def: &FunctionDef,
-    slot_idx: usize,
-) -> Result<(), VmError> {
-    if actual != expected {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg data object kind {:?} does not match expected {:?} for value kind {:?} func={} name={} slot={}",
-            actual,
-            expected,
-            value_kind,
-            func_id,
-            func_def.name,
-            slot_idx + 1
-        )));
-    }
-    Ok(())
-}
-
-fn validate_spawn_call_struct_data_slots(
-    module: &Module,
-    struct_meta_id: u32,
-    actual_slots: usize,
-    func_id: u32,
-    func_def: &FunctionDef,
-    slot_idx: usize,
-) -> Result<(), VmError> {
-    let Some(struct_meta) = module.struct_metas.get(struct_meta_id as usize) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg data references missing StructMeta id {} for function {} ({}) slot={}",
-            struct_meta_id,
-            func_id,
-            func_def.name,
-            slot_idx + 1
-        )));
-    };
-    validate_spawn_call_data_slot_width(
-        actual_slots,
-        struct_meta.slot_types.len(),
-        func_id,
-        func_def,
-        slot_idx,
+        itab_id,
+        value_rttid,
     )
-}
-
-fn validate_spawn_call_data_slot_width(
-    actual_slots: usize,
-    expected_slots: usize,
-    func_id: u32,
-    func_def: &FunctionDef,
-    slot_idx: usize,
-) -> Result<(), VmError> {
-    if actual_slots != expected_slots {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg data allocation slots {} do not match expected {} for function {} ({}) slot={}",
-            actual_slots,
-            expected_slots,
-            func_id,
-            func_def.name,
-            slot_idx + 1
-        )));
-    }
-    Ok(())
-}
-
-fn validate_spawn_call_interface_array_data(
-    module: &Module,
-    array_ref: GcRef,
-    header: &vo_runtime::gc::GcHeader,
-    rttid: u32,
-    func_id: u32,
-    func_def: &FunctionDef,
-    slot_idx: usize,
-) -> Result<(), VmError> {
-    let value_rttid = vo_runtime::ValueRttid::new(rttid, vo_runtime::ValueKind::Array);
-    let Some((expected_len, expected_elem_rttid)) =
-        interface_array_runtime_type(module, value_rttid)
-    else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data layout missing for function {} ({}) slot={} rttid={}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            rttid
-        )));
-    };
-    let Some(expected_elem_meta) = module.canonical_value_meta_for_value_rttid(expected_elem_rttid)
-    else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data element RTTID cannot be resolved for function {} ({}) slot={} rttid={}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            expected_elem_rttid.rttid()
-        )));
-    };
-    let Some(expected_elem_bytes) = sequence_element_physical_bytes(module, expected_elem_rttid)
-    else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data element layout missing for function {} ({}) slot={} rttid={}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            expected_elem_rttid.rttid()
-        )));
-    };
-    match header.kind() {
-        vo_runtime::ValueKind::Array => {}
-        vo_runtime::ValueKind::Struct => {
-            return validate_spawn_call_interface_array_value_slot_box(
-                module, header, rttid, func_id, func_def, slot_idx,
-            );
-        }
-        actual => {
-            return Err(VmError::Jit(format!(
-                "spawn_call interface arg data object kind {:?} does not match expected Array or Struct for value kind Array func={} name={} slot={}",
-                actual,
-                func_id,
-                func_def.name,
-                slot_idx + 1
-            )));
-        }
-    }
-    // Safety: the spawn validator canonicalized the object and checked its array kind.
-    let actual_len = unsafe { array::len(array_ref) };
-    let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
-    let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
-    if actual_len != expected_len
-        || actual_elem_meta != expected_elem_meta
-        || actual_elem_bytes != expected_elem_bytes
-    {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data layout mismatch for function {} ({}) slot={}: len {} expected {}, elem_meta 0x{:x} expected 0x{:x}, elem_bytes {} expected {}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            actual_len,
-            expected_len,
-            actual_elem_meta.to_raw(),
-            expected_elem_meta.to_raw(),
-            actual_elem_bytes,
-            expected_elem_bytes
-        )));
-    }
-    Ok(())
-}
-
-fn validate_spawn_call_interface_array_value_slot_box(
-    module: &Module,
-    header: &vo_runtime::gc::GcHeader,
-    rttid: u32,
-    func_id: u32,
-    func_def: &FunctionDef,
-    slot_idx: usize,
-) -> Result<(), VmError> {
-    let Some(expected_layout) = module.slot_layout_for_value_rttid(vo_runtime::ValueRttid::new(
-        rttid,
-        vo_runtime::ValueKind::Array,
-    )) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data layout missing for function {} ({}) slot={} rttid={}",
-            func_id,
-            func_def.name,
-            slot_idx + 1,
-            rttid
-        )));
-    };
-    let Some(struct_meta) = module.struct_metas.get(header.meta_id() as usize) else {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data value-slot box references missing StructMeta id {} for function {} ({}) slot={}",
-            header.meta_id(),
-            func_id,
-            func_def.name,
-            slot_idx + 1
-        )));
-    };
-    if struct_meta.slot_types != expected_layout {
-        return Err(VmError::Jit(format!(
-            "spawn_call interface arg array data value-slot box layout {:?} does not match Array slot layout {:?} for function {} ({}) slot={}",
-            struct_meta.slot_types,
-            expected_layout,
-            func_id,
-            func_def.name,
-            slot_idx + 1
-        )));
-    }
-    validate_spawn_call_data_slot_width(
-        header.slots as usize,
-        expected_layout.len(),
-        func_id,
-        func_def,
-        slot_idx,
-    )
-}
-
-fn interface_array_runtime_type(
-    module: &Module,
-    value_rttid: vo_runtime::ValueRttid,
-) -> Option<(usize, vo_runtime::ValueRttid)> {
-    let mut current = value_rttid;
-    let limit = module.runtime_types.len() + module.named_type_metas.len() + 1;
-    for _ in 0..limit {
-        match module.runtime_types.get(current.rttid() as usize)? {
-            vo_runtime::RuntimeType::Array { len, elem }
-                if current.value_kind() == vo_runtime::ValueKind::Array =>
-            {
-                return Some((*len as usize, *elem));
-            }
-            vo_runtime::RuntimeType::Named { id, .. } => {
-                let named = module.named_type_metas.get(*id as usize)?;
-                if named.underlying_rttid.value_kind() != vo_runtime::ValueKind::Array {
-                    return None;
-                }
-                current = named.underlying_rttid;
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn sequence_element_physical_bytes(
-    module: &Module,
-    value_rttid: vo_runtime::ValueRttid,
-) -> Option<usize> {
-    match value_rttid.value_kind() {
-        vo_runtime::ValueKind::Void => Some(0),
-        vo_runtime::ValueKind::Bool
-        | vo_runtime::ValueKind::Int8
-        | vo_runtime::ValueKind::Uint8 => Some(1),
-        vo_runtime::ValueKind::Int16 | vo_runtime::ValueKind::Uint16 => Some(2),
-        vo_runtime::ValueKind::Int32
-        | vo_runtime::ValueKind::Uint32
-        | vo_runtime::ValueKind::Float32 => Some(4),
-        _ => module
-            .slot_layout_for_value_rttid(value_rttid)
-            .and_then(|layout| layout.len().checked_mul(vo_runtime::slot::SLOT_BYTES)),
-    }
-}
-
-fn named_type_id_from_spawn_call_interface_value(
-    module: &Module,
-    rttid: u32,
-    value_kind: vo_runtime::ValueKind,
-) -> Option<u32> {
-    match module.runtime_types.get(rttid as usize)? {
-        vo_runtime::RuntimeType::Named { id, .. } => Some(*id),
-        vo_runtime::RuntimeType::Pointer(elem) if value_kind == vo_runtime::ValueKind::Pointer => {
-            match module.runtime_types.get(elem.rttid() as usize)? {
-                vo_runtime::RuntimeType::Named { id, .. } => Some(*id),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    .map_err(|err| {
+        VmError::Jit(format!(
+            "spawn_call interface arg {err} for function {} ({}) slot={} itab_id={} iface_meta_id={}",
+            func_id, func_def.name, slot_idx, itab_id, expected_iface_meta_id
+        ))
+    })
 }
 
 impl Default for Vm {

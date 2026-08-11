@@ -541,11 +541,19 @@ impl GuestSession {
         }
     }
 
+    pub fn poll_pending_host_event(&mut self) -> Option<PendingHostEvent> {
+        self.pop_pending_host_event()
+    }
+
     pub fn pop_outbound_frame(&mut self) -> Option<Vec<u8>> {
         match self {
             Self::GuiApp(session) => session.pop_outbound_frame(),
             Self::RenderIsland(session) => session.pop_outbound_frame(),
         }
+    }
+
+    pub fn poll_outbound_frame(&mut self) -> Option<Vec<u8>> {
+        self.pop_outbound_frame()
     }
 
     pub fn wake_host_event(&mut self, key: HostWaitKey) -> Result<(), SessionError> {
@@ -618,6 +626,10 @@ impl GuestSession {
             Self::GuiApp(session) => session.dispatch_inbound_island_frame(data),
             Self::RenderIsland(session) => session.dispatch_inbound_island_frame(data),
         }
+    }
+
+    pub fn push_island_frame(&mut self, data: &[u8]) -> Result<StepResult, SessionError> {
+        self.dispatch_inbound_island_frame(data)
     }
 
     pub fn shutdown(&mut self) {

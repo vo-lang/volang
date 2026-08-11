@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn dynamic_call_metadata_accepts_shapes_wider_than_compact_mirror() {
+fn dynamic_call_metadata_accepts_full_width_shapes() {
     let mut module = Module::new("wide-dynamic-call-metadata".to_string());
     let mut slots = vec![SlotType::GcRef];
     slots.extend(vec![SlotType::Value; 300 + 257]);
@@ -10,12 +10,12 @@ fn dynamic_call_metadata_accepts_shapes_wider_than_compact_mirror() {
         Instruction::new(Opcode::CallClosure, 0, 1, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallLayout {
             arg_layout: vec![SlotType::Value; 300],
             ret_layout: vec![SlotType::Value; 257],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -23,7 +23,7 @@ fn dynamic_call_metadata_accepts_shapes_wider_than_compact_mirror() {
 }
 
 #[test]
-fn call_iface_metadata_accepts_method_index_wider_than_flag_mirror() {
+fn call_iface_metadata_accepts_full_width_method_index() {
     let mut module = Module::new("wide-call-iface-method-index".to_string());
     module.runtime_types.push(RuntimeType::Func {
         params: Vec::new(),
@@ -51,14 +51,14 @@ fn call_iface_metadata_accepts_method_index_wider_than_flag_mirror() {
         Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallIfaceLayout {
             iface_meta_id,
             method_idx: 256,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -71,21 +71,15 @@ fn vm_ver_zero_slot_range_001_rejects_static_call_zero_arg_ret_out_of_frame_star
     let mut caller = function_with_slot_types(Vec::new());
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(
-            Opcode::Call,
-            0,
-            1,
-            1,
-            crate::instruction::pack_call_shape(0, 0).unwrap(),
-        ),
+        Instruction::with_flags(Opcode::Call, 0, 1, 1, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
 
     let mut callee = function_with_slot_types(Vec::new());
     callee.name = "callee".to_string();
     callee.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    callee.jit_metadata = vec![JitInstructionMetadata::None];
+    callee.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(callee));
@@ -99,21 +93,15 @@ fn vm_ver_zero_slot_range_001_rejects_call_closure_zero_arg_ret_out_of_frame_sta
     let mut caller = function_with_slot_types(vec![SlotType::GcRef]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(
-            Opcode::CallClosure,
-            0,
-            0,
-            2,
-            crate::instruction::pack_call_shape(0, 0).unwrap(),
-        ),
+        Instruction::with_flags(Opcode::CallClosure, 0, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallLayout {
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -133,23 +121,17 @@ fn vm_ver_zero_slot_range_001_rejects_call_iface_zero_arg_ret_out_of_frame_start
     let mut caller = function_with_slot_types(vec![SlotType::Interface0, SlotType::Interface1]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(
-            Opcode::CallIface,
-            0,
-            0,
-            3,
-            crate::instruction::pack_call_shape(0, 0).unwrap(),
-        ),
+        Instruction::with_flags(Opcode::CallIface, 0, 0, 3, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallIfaceLayout {
             iface_meta_id,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -174,23 +156,17 @@ fn call_iface_rejects_itab_target_with_non_interface_receiver_abi() {
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(
-            Opcode::CallIface,
-            0,
-            2,
-            3,
-            crate::instruction::pack_call_shape(0, 0).unwrap(),
-        ),
+        Instruction::with_flags(Opcode::CallIface, 0, 2, 3, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallIfaceLayout {
             iface_meta_id,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&caller.code);
     caller.has_calls = has_calls;
@@ -202,7 +178,7 @@ fn call_iface_rejects_itab_target_with_non_interface_receiver_abi() {
     target.param_slots = 2;
     target.recv_slots = 2;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(caller);
     module.functions.push(target);
@@ -263,23 +239,17 @@ fn call_iface_rejects_itab_target_signature_mismatch() {
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(
-            Opcode::CallIface,
-            0,
-            0,
-            2,
-            crate::instruction::pack_call_shape(0, 0).unwrap(),
-        ),
+        Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallIfaceLayout {
             iface_meta_id,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
 
     let mut target = function_with_slot_types(vec![SlotType::Value]);
@@ -288,7 +258,7 @@ fn call_iface_rejects_itab_target_signature_mismatch() {
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(target));
@@ -349,7 +319,7 @@ fn vm_call_iface_receiver_layout_058_iface_assign_rejects_itab_receiver_layout_d
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Int64 as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
 
     let mut target = function_with_slot_types(vec![SlotType::GcRef]);
     target.name = "bad_int_receiver".to_string();
@@ -357,7 +327,7 @@ fn vm_call_iface_receiver_layout_058_iface_assign_rejects_itab_receiver_layout_d
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(target));
@@ -432,7 +402,7 @@ fn vm_iface_assign_rejects_itab_target_not_owned_by_receiver_rttid_060() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Int64 as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
 
     let mut target = function_with_slot_types(vec![SlotType::Value]);
     target.name = "B.M".to_string();
@@ -440,7 +410,7 @@ fn vm_iface_assign_rejects_itab_target_not_owned_by_receiver_rttid_060() {
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(target));
@@ -511,7 +481,7 @@ fn vm_iface_assign_rejects_itab_method_name_mismatch_060() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Int64 as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
 
     let mut method_m = function_with_slot_types(vec![SlotType::Value]);
     method_m.name = "T.M".to_string();
@@ -519,7 +489,7 @@ fn vm_iface_assign_rejects_itab_method_name_mismatch_060() {
     method_m.param_slots = 1;
     method_m.recv_slots = 1;
     method_m.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    method_m.jit_metadata = vec![JitInstructionMetadata::None];
+    method_m.instruction_metadata = vec![InstructionMetadata::None];
 
     let mut method_n = function_with_slot_types(vec![SlotType::Value]);
     method_n.name = "T.N".to_string();
@@ -527,7 +497,7 @@ fn vm_iface_assign_rejects_itab_method_name_mismatch_060() {
     method_n.param_slots = 1;
     method_n.recv_slots = 1;
     method_n.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    method_n.jit_metadata = vec![JitInstructionMetadata::None];
+    method_n.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(method_m));
@@ -593,7 +563,7 @@ fn vm_iface_assign_rejects_pointer_receiver_target_for_non_pointer_reference_rec
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::String as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
 
     let mut target = function_with_slot_types(vec![SlotType::GcRef]);
     target.name = "(*R).M".to_string();
@@ -601,7 +571,7 @@ fn vm_iface_assign_rejects_pointer_receiver_target_for_non_pointer_reference_rec
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(target));
@@ -647,7 +617,7 @@ fn vm_iface_assign_rejects_noncanonical_pointer_kind_rttid_without_itab_060() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Pointer as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
     let err = verify_module(&module).expect_err(
@@ -722,7 +692,7 @@ fn iface_assign_resolves_deep_pointer_chains_without_host_recursion() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Pointer as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
 
     let mut target = function_with_slot_types(vec![SlotType::GcRef]);
     target.name = "T.M".to_string();
@@ -730,7 +700,7 @@ fn iface_assign_resolves_deep_pointer_chains_without_host_recursion() {
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
 
     module.functions.push(finish_test_function(caller));
     module.functions.push(finish_test_function(target));
@@ -789,7 +759,7 @@ fn iface_assign_rejects_pointer_runtime_type_cycles_without_host_recursion() {
         Instruction::with_flags(Opcode::IfaceAssign, ValueKind::Pointer as u8, 0, 2, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![JitInstructionMetadata::None, JitInstructionMetadata::None];
+    caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
     let mut target = function_with_slot_types(vec![SlotType::Value]);
@@ -798,7 +768,7 @@ fn iface_assign_rejects_pointer_runtime_type_cycles_without_host_recursion() {
     target.param_slots = 1;
     target.recv_slots = 1;
     target.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    target.jit_metadata = vec![JitInstructionMetadata::None];
+    target.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(finish_test_function(target));
     module.itabs.push(Itab::default());
     module.itabs.push(Itab {

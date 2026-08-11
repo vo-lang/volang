@@ -244,7 +244,6 @@ fn compile_literal_to_owned_ref(
             index_reg,
             value,
             ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
-            ctx,
         );
     }
     Ok(array_ref)
@@ -279,14 +278,11 @@ pub(crate) fn emit_new_ref_at(
     let elem_slot_types = info
         .try_type_slot_types(elem_type)
         .map_err(CodegenError::Internal)?;
-    let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
-
     let meta_reg = func.alloc_slots(&[SlotType::Value]);
     let elem_meta_idx = ctx.get_or_create_array_elem_meta(array_type, info);
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
-    let len_reg_count = if flags == 0 { 2 } else { 1 };
-    let len_reg = func.alloc_slots(&vec![SlotType::Value; len_reg_count]);
+    let len_reg = func.alloc_slots(&[SlotType::Value]);
     if let Ok(len32) = i32::try_from(array_len) {
         let (b, c) = encode_i32(len32);
         func.emit_op(Opcode::LoadInt, len_reg, b, c);
@@ -295,15 +291,10 @@ pub(crate) fn emit_new_ref_at(
         let len_idx = ctx.const_int(array_len as i64);
         func.emit_op(Opcode::LoadConst, len_reg, len_idx, 0);
     }
-    if flags == 0 {
-        let elem_bytes_idx = ctx.const_int(elem_bytes as i64);
-        func.emit_op(Opcode::LoadConst, len_reg + 1, elem_bytes_idx, 0);
-    }
     func.emit_array_new(
         dst,
         meta_reg,
         len_reg,
-        flags,
         ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
     );
     Ok(())
@@ -349,7 +340,7 @@ pub(crate) fn emit_ref_to_flat(
     for index in 0..layout.len {
         let elem_dst = checked_element_slot(dst, index, layout.elem_slots, "destination")?;
         load_array_index(index_reg, index, ctx, func);
-        func.emit_array_get(elem_dst, src_ref, index_reg, layout.elem_spec(), ctx);
+        func.emit_array_get(elem_dst, src_ref, index_reg, layout.elem_spec());
     }
     Ok(())
 }
@@ -370,7 +361,7 @@ pub(crate) fn emit_flat_to_ref(
     for index in 0..layout.len {
         let elem_src = checked_element_slot(src, index, layout.elem_slots, "source")?;
         load_array_index(index_reg, index, ctx, func);
-        func.emit_array_set(dst_ref, index_reg, elem_src, layout.elem_spec(), ctx);
+        func.emit_array_set(dst_ref, index_reg, elem_src, layout.elem_spec());
     }
     Ok(())
 }
@@ -399,23 +390,15 @@ pub(crate) fn emit_ref_to_ref(
     func.emit_op(Opcode::LoadInt, index_reg, 0, 0);
     load_array_index(limit_reg, layout.len, ctx, func);
 
-    func.enter_loop(0, None);
+    func.enter_loop(None);
     let body_start = func.current_pc();
-    func.set_loop_start(body_start);
-    func.emit_array_get(value, src_ref, index_reg, layout.elem_spec(), ctx);
-    func.emit_array_set(dst_ref, index_reg, value, layout.elem_spec(), ctx);
+    func.emit_array_get(value, src_ref, index_reg, layout.elem_spec());
+    func.emit_array_set(dst_ref, index_reg, value, layout.elem_spec());
 
     let exit_info = func.exit_loop();
     let end_pc = func.emit_forloop(index_reg, limit_reg, body_start, 0x01);
     let exit_pc = func.current_pc();
-    func.finalize_loop_hint(
-        exit_info.hint_pc,
-        end_pc,
-        exit_pc,
-        exit_info.has_defer,
-        exit_info.has_labeled_break,
-        exit_info.has_labeled_continue,
-    );
+    func.finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
     Ok(())
 }
 

@@ -14,9 +14,10 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use core::num::NonZeroU64;
+
 use crate::gc::{Gc, GcRef};
 use crate::objects::impl_gc_object;
-use crate::objects::queue_state::QueueWaiter;
 use crate::pack::PackedValue;
 use crate::slot::SLOT_BYTES;
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -51,33 +52,25 @@ pub enum IslandCommand {
     },
     /// Resume a target-island fiber waiting on a HostServices completion.
     WakeHostEvent { token: u64, data: Vec<u8> },
-    /// Wake a blocked queue waiter (no PC modification - blocker sets resume PC).
-    WakeFiber { waiter: QueueWaiter },
     /// Request island shutdown
     Shutdown,
     /// Request from a remote island to the home island (where ChannelState lives).
     EndpointRequest {
         endpoint_id: u64,
         kind: EndpointRequestKind,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
     },
     /// Response from the home island back to the requesting remote island.
     EndpointResponse {
         endpoint_id: u64,
         kind: EndpointResponseKind,
-        from_island: u32,
-        fiber_key: u64,
-        wait_id: u64,
     },
 }
 
 /// Authenticated transport envelope for a command delivered to an island.
 ///
-/// `IslandCommand` payloads still carry semantic source fields for endpoint
-/// protocol compatibility. The envelope source is the transport-owned fact that
-/// receivers use to reject forged endpoint sources before mutating state.
+/// The envelope source is the sole transport-owned source identity. Endpoint
+/// command payloads deliberately omit a second source field, so receivers cannot
+/// observe conflicting transport and semantic identities.
 #[derive(Debug)]
 pub struct IslandCommandEnvelope {
     pub source_island_id: u32,
@@ -93,30 +86,99 @@ impl IslandCommandEnvelope {
     }
 }
 
+/// Identity of a fiber waiting for an endpoint operation to complete.
+///
+/// Keeping the wait ID non-zero makes fire-and-forget endpoint messages
+/// structurally distinct from operations that must receive a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EndpointWaitKey {
+    fiber_key: u64,
+    wait_id: NonZeroU64,
+}
+
+impl EndpointWaitKey {
+    #[inline]
+    pub const fn new(fiber_key: u64, wait_id: NonZeroU64) -> Self {
+        Self { fiber_key, wait_id }
+    }
+
+    #[inline]
+    pub const fn try_new(fiber_key: u64, wait_id: u64) -> Option<Self> {
+        match NonZeroU64::new(wait_id) {
+            Some(wait_id) => Some(Self::new(fiber_key, wait_id)),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub const fn fiber_key(self) -> u64 {
+        self.fiber_key
+    }
+
+    #[inline]
+    pub const fn wait_id(self) -> NonZeroU64 {
+        self.wait_id
+    }
+}
+
 /// Kind of channel request (remote → home).
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointRequestKind {
     /// Send data to the channel.
-    Send { data: Vec<u8> },
+    Send {
+        data: Vec<u8>,
+        wait_key: EndpointWaitKey,
+    },
     /// Receive data from the channel.
-    Recv,
+    Recv { wait_key: EndpointWaitKey },
     /// Close the channel.
     Close,
     /// Notify home that a new peer island has received a proxy.
     Transfer { new_peer: u32 },
 }
 
+impl EndpointRequestKind {
+    /// Returns the wait identity exactly when the request expects a response.
+    #[inline]
+    pub const fn wait_key(&self) -> Option<EndpointWaitKey> {
+        match self {
+            Self::Send { wait_key, .. } | Self::Recv { wait_key } => Some(*wait_key),
+            Self::Close | Self::Transfer { .. } => None,
+        }
+    }
+}
+
 /// Kind of channel response (home → remote).
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointResponseKind {
     /// Acknowledgment of a send operation.
-    SendAck { closed: bool },
+    SendAck {
+        closed: bool,
+        wait_key: EndpointWaitKey,
+    },
     /// Data delivered to a receiver (or closed indication).
-    RecvData { data: Vec<u8>, closed: bool },
+    RecvData {
+        data: Vec<u8>,
+        closed: bool,
+        wait_key: EndpointWaitKey,
+    },
     /// Receive failed before the home queue state was consumed.
-    RecvError,
+    RecvError { wait_key: EndpointWaitKey },
     /// Broadcast: channel was closed by someone else.
     Closed,
+}
+
+impl EndpointResponseKind {
+    /// Returns the targeted wait identity, excluding untargeted close broadcasts.
+    #[inline]
+    pub const fn wait_key(&self) -> Option<EndpointWaitKey> {
+        match self {
+            Self::SendAck { wait_key, .. }
+            | Self::RecvData { wait_key, .. }
+            | Self::RecvError { wait_key } => Some(*wait_key),
+            Self::Closed => None,
+        }
+    }
 }
 
 /// Create a new island handle.

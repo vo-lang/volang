@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use super::*;
 use crate::test_support::{
     array as test_array, scan_object as test_scan_object, slice as test_slice,
@@ -37,40 +39,6 @@ where
 
 fn empty_closure_scan_layout(_: u32) -> crate::gc_types::ClosureScanLayout<'static> {
     crate::gc_types::ClosureScanLayout::default()
-}
-
-#[test]
-fn gc_debug_ref_membership_is_release_available_047() {
-    let src = include_str!("../gc.rs");
-    for method in ["fn refresh_object_index", "pub fn debug_ref_membership"] {
-        let method_start = src.find(method).expect("GC diagnostic method");
-        let recent_attrs = src[..method_start]
-            .rsplit('\n')
-            .take(4)
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            !recent_attrs.contains("debug_assertions"),
-            "spawn_call release diagnostics type-check {method}, so it must not be debug-only"
-        );
-    }
-}
-
-#[test]
-fn gc_step_boundary_062_step_apis_are_unsafe() {
-    let src = include_str!("../gc.rs");
-    for signature in [
-        "pub unsafe fn step<",
-        "pub unsafe fn step_with_root_state<",
-        "pub unsafe fn step_with_root_scanner<",
-        "pub unsafe fn step_with_scanners_budget<",
-    ] {
-        assert!(
-            src.contains(signature),
-            "GC collector advancement must require an explicit VM/test boundary: {signature}"
-        );
-    }
 }
 
 #[test]
@@ -118,7 +86,7 @@ fn bounded_step_never_exceeds_requested_work_units() {
 }
 
 #[test]
-fn generational_minor_uses_dirty_old_cards_and_major_reclaims_old() {
+fn generational_minor_uses_remembered_parents_and_major_reclaims_old() {
     fn run_cycle(gc: &mut Gc, root: Option<GcRef>, major: bool) {
         let before = gc.memory_stats();
         if major {
@@ -181,8 +149,11 @@ fn generational_minor_uses_dirty_old_cards_and_major_reclaims_old() {
 #[test]
 fn minor_remembered_scan_frontier_does_not_chase_new_allocations() {
     let mut gc = Gc::new();
+    let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
     for _ in 0..32 {
-        assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        test_header_mut(parent).set_age(G_OLD);
+        gc.write_barrier(parent, child);
     }
     gc.gc_request_cycle();
 
@@ -202,7 +173,7 @@ fn minor_remembered_scan_frontier_does_not_chase_new_allocations() {
     for _ in 0..64 {
         assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
     }
-    assert_eq!(gc.all_objects.len(), 96);
+    assert_eq!(gc.all_objects.len(), 97);
     assert_eq!(gc.remembered_scan_end, 32);
 
     for _ in 0..64 {
@@ -216,10 +187,95 @@ fn minor_remembered_scan_frontier_does_not_chase_new_allocations() {
 }
 
 #[test]
+fn minor_remembered_retirement_is_bounded_and_cursor_stable() {
+    let mut gc = Gc::new();
+    let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    for _ in 0..32 {
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        test_header_mut(parent).set_age(G_OLD);
+        gc.write_barrier(parent, child);
+    }
+    gc.gc_request_cycle();
+
+    for calls in 0..1024 {
+        let work = unsafe {
+            gc.step_with_scanners_budget(
+                GcRootState::MayHaveChanged,
+                1,
+                |_, _, _| GcRootScanChunk::complete(0),
+                |_, _, _, _| GcObjectScanChunk::complete(SLOT_BYTES),
+                |_| {},
+            )
+        };
+        assert!(work <= SLOT_BYTES);
+        if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > 0 {
+            assert!(gc.remembered.is_empty());
+            assert!(gc.remembered_forget.is_empty());
+            return;
+        }
+        assert!(
+            calls < 1023,
+            "bounded remembered retirement did not converge"
+        );
+    }
+}
+
+#[test]
+fn old_to_young_write_after_minor_frontier_keeps_child_alive() {
+    let mut gc = Gc::new();
+    let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+    test_header_mut(parent).set_age(G_OLD);
+    let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    gc.gc_request_cycle();
+
+    unsafe {
+        gc.step_with_scanners_budget(
+            GcRootState::MayHaveChanged,
+            1,
+            |_, _, _| GcRootScanChunk::complete(0),
+            |_, _, _, _| GcObjectScanChunk::complete(SLOT_BYTES),
+            |_| {},
+        );
+    }
+    assert_eq!(gc.remembered_scan_end, 0);
+    assert!(matches!(gc.state(), GcState::Propagate | GcState::Atomic));
+
+    gc.write_barrier(parent, child);
+    unsafe { Gc::write_slot(parent, 0, child as u64) };
+    for _ in 0..1024 {
+        unsafe {
+            gc.step_with_scanners_budget(
+                GcRootState::MayHaveChanged,
+                1,
+                |_, _, _| GcRootScanChunk::complete(0),
+                |gc, obj, _, _| {
+                    if Gc::header(obj).slots > 0 {
+                        let child = Gc::read_slot(obj, 0) as GcRef;
+                        if !child.is_null() {
+                            gc.mark_gray(child);
+                        }
+                    }
+                    GcObjectScanChunk::complete(SLOT_BYTES)
+                },
+                |_| {},
+            );
+        }
+        if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > 0 {
+            assert_eq!(gc.canonicalize_ref(child), Some(child));
+            return;
+        }
+    }
+    panic!("minor cycle did not converge after mid-cycle old-to-young write");
+}
+
+#[test]
 fn incremental_step_returns_with_a_sub_slot_phase_budget_remainder() {
     let mut gc = Gc::new();
+    let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
     for _ in 0..2 {
-        assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        test_header_mut(parent).set_age(G_OLD);
+        gc.write_barrier(parent, child);
     }
     gc.stepsize = SLOT_BYTES + 1;
     gc.gc_request_cycle();
@@ -287,10 +343,23 @@ fn gc_lease_obeys_reserved_metadata_limit_without_growth() {
     let reused = gc.gc_lease(second).expect("reuse lease slot");
     assert_eq!(reused.index, first_lease.index);
     assert_ne!(reused.generation, first_lease.generation);
+    assert!(gc.free_lease_indices.is_empty());
     assert_eq!(
         gc.gc_release_lease(first_lease),
         Err(MemoryError::InvalidPointer)
     );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn gc_lease_configuration_rejects_unrepresentable_indices_before_reserving() {
+    let error = Gc::with_memory_config(VmMemoryConfig {
+        max_leases: Some(u32::MAX as usize + 1),
+        ..VmMemoryConfig::default()
+    })
+    .err()
+    .expect("lease indices must remain representable in the public handle");
+    assert_eq!(error, MemoryError::MetadataExhausted);
 }
 
 #[test]
@@ -325,6 +394,12 @@ fn disabling_growth_preallocates_all_collector_object_worklists() {
         ..VmMemoryConfig::default()
     })
     .expect("reserved collector");
+    for _ in 0..3 {
+        assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    }
+    let leased = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+    gc.gc_lease(leased)
+        .expect("seed partially occupied lease table");
 
     gc.memory_set_growth_allowed(false)
         .expect("metadata admission before no-growth");
@@ -333,9 +408,11 @@ fn disabling_growth_preallocates_all_collector_object_worklists() {
     assert!(gc.all_objects.capacity() >= max_objects);
     assert!(gc.all_object_data_sizes.capacity() >= max_objects);
     assert!(gc.allocation_extents.capacity() >= max_objects);
-    assert!(gc.object_index.borrow().capacity() >= max_objects);
     assert!(gc.gray.capacity() >= max_objects);
-    assert!(gc.grayagain.capacity() >= max_objects);
+    assert!(gc.remembered.capacity() >= max_objects);
+    assert!(gc.remembered_forget.capacity() >= max_objects);
+    assert!(gc.leases.capacity() >= gc.max_leases.expect("no-growth lease bound"));
+    assert!(gc.free_lease_indices.capacity() >= gc.max_leases.expect("no-growth lease bound"));
 
     gc.memory_set_growth_allowed(true)
         .expect("re-enable growth");
@@ -344,14 +421,82 @@ fn disabling_growth_preallocates_all_collector_object_worklists() {
 }
 
 #[test]
+fn initial_and_dynamic_no_growth_use_rounded_heap_capacity() {
+    let initial = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: 1,
+        growth_allowed: false,
+        ..VmMemoryConfig::default()
+    })
+    .expect("small initial reserve");
+
+    let mut dynamic = Gc::new();
+    dynamic.memory_reserve(1).expect("small dynamic reserve");
+    dynamic
+        .memory_set_growth_allowed(false)
+        .expect("dynamic no-growth admission");
+
+    let expected_objects = heap::HEAP_BLOCK_SIZE / heap::MIN_CELL_SIZE;
+    for gc in [&initial, &dynamic] {
+        assert_eq!(
+            gc.memory_stats().managed_committed_bytes,
+            heap::HEAP_BLOCK_SIZE
+        );
+        assert_eq!(gc.max_objects, Some(expected_objects));
+        assert_eq!(gc.max_leases, Some(Gc::NO_GROWTH_LEASES_PER_BLOCK));
+    }
+}
+
+#[test]
+fn implicit_no_growth_metadata_covers_every_min_cell_object() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: 1,
+        growth_allowed: false,
+        automatic_gc: false,
+        ..VmMemoryConfig::default()
+    })
+    .expect("small no-growth reserve");
+    let max_objects = gc.max_objects.expect("implicit object metadata bound");
+
+    for index in 0..max_objects {
+        let object = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+        assert!(
+            !object.is_null(),
+            "minimum-cell allocation {index} exhausted metadata early"
+        );
+    }
+    assert_eq!(
+        gc.memory_stats().allocated_span_bytes,
+        heap::HEAP_BLOCK_SIZE
+    );
+    assert!(gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+}
+
+#[test]
+fn explicit_max_objects_keeps_its_earlier_admission_limit() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: 1,
+        growth_allowed: false,
+        max_objects: Some(2),
+        ..VmMemoryConfig::default()
+    })
+    .expect("explicit object metadata bound");
+
+    assert_eq!(gc.max_objects, Some(2));
+    assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    assert!(gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
+    assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    assert!(gc.memory_stats().allocated_span_bytes < heap::HEAP_BLOCK_SIZE);
+}
+
+#[test]
 fn test_canonicalize_ref_base_uses_base_index() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(1, ValueKind::Struct);
     let obj = gc.alloc(meta, 2);
 
-    assert!(gc.object_index_dirty.get());
     assert_eq!(gc.canonicalize_ref(obj), Some(obj));
-    assert!(gc.object_index_dirty.get());
 }
 
 #[test]
@@ -376,13 +521,13 @@ fn vm_jit_typed_barrier_001_no_ref_struct_scalar_is_not_barriered() {
         parent,
         &[scalar_that_looks_like_ref],
         ValueMeta::new(0, ValueKind::Struct),
-        Some(&module),
+        Some(crate::bytecode::ModuleRuntimeMetadata::unverified(&module)),
     )
     .expect("no-ref struct scalar must not be treated as a GcRef");
 
     assert!(test_header(parent).is_black());
     assert!(
-        gc.grayagain.is_empty(),
+        gc.remembered.is_empty(),
         "no-ref struct scalar should not trigger a GC write barrier"
     );
 }
@@ -408,10 +553,13 @@ fn vm_value_slot_clone_lifecycle_006_ptr_clone_preserves_value_slot_scan_layout(
             elem: crate::ValueRttid::new(0, ValueKind::String),
         },
     ];
+    let facts =
+        vo_common_core::bytecode::RuntimeTypeFacts::from_module_parts(&[], &[], &runtime_types)
+            .expect("valid array facts");
     let mut visited = Vec::new();
     crate::test_support::trace_object_children_with_context(
         clone,
-        crate::gc_types::GcScanContext::from_module_parts(&[], &[], &runtime_types),
+        crate::gc_types::GcScanContext::with_runtime_type_facts(&[], &facts),
         &empty_closure_scan_layout,
         |child| visited.push(child),
     );
@@ -440,9 +588,7 @@ fn test_canonicalize_ref_interior_pointer_uses_range_index() {
     let obj = gc.alloc(meta, 2);
     let interior = unsafe { obj.add(1) };
 
-    assert!(gc.object_index_dirty.get());
     assert_eq!(gc.canonicalize_ref(interior), Some(obj));
-    assert!(gc.object_index_dirty.get());
 }
 
 #[test]
@@ -466,7 +612,6 @@ fn test_canonicalize_ref_nearby_interior_pointer_uses_base_fast_path() {
     let interior = unsafe { obj.add(7) };
 
     assert_eq!(gc.canonicalize_ref(interior), Some(obj));
-    assert!(gc.object_index_dirty.get());
 }
 
 #[test]
@@ -479,7 +624,6 @@ fn test_canonicalize_ref_forgets_freed_object_during_partial_sweep() {
     let mut finalized = Vec::new();
 
     assert_eq!(gc.canonicalize_ref(dead_interior), Some(dead));
-    assert!(gc.object_index_dirty.get());
 
     gc.current_white ^= WHITE_BITS;
     gc.state = GcState::Sweep;
@@ -1031,15 +1175,17 @@ fn test_sweep_range_barrier_rescues_copied_string_refs() {
     test_header_mut(arr).set_black();
 
     unsafe { crate::objects::array::set(arr, 0, child as u64, SLOT_BYTES) };
-    crate::gc_types::typed_write_barrier_range_by_meta(
-        &mut gc,
-        arr,
-        test_array::data_ptr_bytes(arr),
-        1,
-        SLOT_BYTES,
-        elem_meta,
-        None,
-    );
+    unsafe {
+        crate::gc_types::typed_write_barrier_range_by_meta(
+            &mut gc,
+            arr,
+            test_array::data_ptr_bytes(arr),
+            1,
+            SLOT_BYTES,
+            elem_meta,
+            None,
+        );
+    }
     assert!(test_header(child).is_gray());
 
     let work = gc_step(

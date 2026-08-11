@@ -114,7 +114,7 @@ fn read_bounded_compile_input(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn validate_compile_input_size(path: &Path, len: usize) -> io::Result<()> {
+pub(super) fn validate_compile_input_size(path: &Path, len: usize) -> io::Result<()> {
     let max_bytes = compile_input_limit(path);
     if len > max_bytes {
         return Err(compile_input_size_error(path, len, max_bytes));

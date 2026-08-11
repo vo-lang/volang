@@ -3,9 +3,13 @@ use crate::fiber::{
     Fiber, FiberState, SelectCase, SelectCaseKind, SelectRegisteredQueue, SelectState,
     SelectWokenResult,
 };
-use crate::test_support::queue;
+use crate::test_support::{endpoint_waiter, queue};
 use vo_runtime::objects::queue_state::{QueueKind, SelectWaitKind};
 use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
+
+fn endpoint_wait_key(fiber_key: u64, wait_id: u64) -> EndpointWaitKey {
+    EndpointWaitKey::try_new(fiber_key, wait_id).expect("test endpoint wait id must be non-zero")
+}
 
 #[cfg(feature = "std")]
 struct FailingIslandSender;
@@ -174,30 +178,10 @@ fn select_send_state_for_queue_061(ch: GcRef) -> SelectState {
     }
 }
 
-fn live_same_island_endpoint_061(name: &str) -> (Vm, GcRef, u64) {
-    let mut vm = Vm::new();
-    vm.state.external_island_transport = true;
-    vm.module = Some(std::sync::Arc::new(vo_common_core::bytecode::Module::new(
-        name.to_string(),
-    )));
-    let endpoint_id = 0x0610_0000_0000_0600;
-    let ch = queue::create(
-        &mut vm.state.gc,
-        QueueKind::Port,
-        ValueMeta::new(0, ValueKind::Int64),
-        ValueRttid::new(0, ValueKind::Int64),
-        1,
-        0,
-    );
-    queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
-    vm.state.endpoint_registry.register_live(endpoint_id, ch);
-    (vm, ch, endpoint_id)
-}
-
 mod endpoint_activation;
-mod pending_terminal_policy;
 mod queue_wake_contracts;
 mod remote_publish_rollback;
+#[cfg(feature = "jit")]
 mod rollback_gc_dirty;
 mod select_sibling_rollback;
 mod transition_transactions;

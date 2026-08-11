@@ -4,18 +4,12 @@
 //! a recoverable language panic. Keep all generated trap exits flowing through
 //! these helpers instead of returning a bare `JitResult::Panic`.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, InstBuilder, Value};
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::Opcode;
-use vo_runtime::jit_api::{
-    JitContext, JitResult, JitRuntimeTrapKind, JIT_INFRA_ERROR_MISSING_CALLBACK,
-    JIT_INFRA_ERROR_SENTINEL,
-};
+use vo_runtime::jit_api::{JitContextField, JitResult, JitRuntimeTrapKind};
 
-use crate::translator::{emit_funcref_call, SlotAccess, TrapEmitter};
-
-const MISSING_RUNTIME_TRAP_HELPER_ID: u32 = 1;
-const MISSING_PANIC_HELPER_ID: u32 = 2;
+use crate::translator::{emit_runtime_helper_call, HelperKind, SlotAccess, TrapEmitter};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EffectContract {
@@ -82,6 +76,19 @@ impl EffectContract {
             || self.touches_interface
             || self.materializes_closure)
     }
+
+    /// A prepared call has precise shadow-stack slots, but no registered VM
+    /// call frame until a non-OK result is materialized.
+    pub fn permits_prepared_shadow_frame(self) -> bool {
+        !(self.may_gc
+            || self.may_alloc
+            || self.may_unwind
+            || self.may_call
+            || self.may_schedule
+            || self.may_observe_frame
+            || self.needs_frame
+            || self.materializes_closure)
+    }
 }
 
 pub fn opcode_contract(opcode: Opcode) -> EffectContract {
@@ -131,11 +138,8 @@ pub fn emit_runtime_trap_return<'a>(
     let kind_val = e.builder().ins().iconst(types::I32, kind as i64);
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
-    let Some(trap_func) = e.helpers().runtime_trap else {
-        emit_missing_helper_jit_error_return(e, MISSING_RUNTIME_TRAP_HELPER_ID);
-        return;
-    };
-    let call = emit_funcref_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val]);
+    let trap_func = e.helper(HelperKind::runtime_trap);
+    let call = emit_runtime_helper_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val]);
     let panic_ret = e.builder().inst_results(call)[0];
     e.builder().ins().return_(&[panic_ret]);
 }
@@ -144,64 +148,20 @@ pub fn emit_user_panic_return<'a, E>(e: &mut E, msg_slot: u16)
 where
     E: TrapEmitter<'a> + SlotAccess<'a>,
 {
-    let Some(panic_func) = e.helpers().panic else {
-        emit_missing_helper_jit_error_return(e, MISSING_PANIC_HELPER_ID);
-        return;
-    };
+    let panic_func = e.helper(HelperKind::panic);
     let ctx = e.ctx_param();
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
-    e.builder().ins().store(
-        MemFlags::trusted(),
-        pc_val,
-        ctx,
-        JitContext::OFFSET_USER_PANIC_PC,
-    );
+    e.store_context_field(pc_val, JitContextField::UserPanicPc);
 
     let msg_slot0 = e.read_var(msg_slot);
     let msg_slot1 = e.read_var(msg_slot + 1);
-    emit_funcref_call(e, panic_func, &[ctx, msg_slot0, msg_slot1]);
+    emit_runtime_helper_call(e, panic_func, &[ctx, msg_slot0, msg_slot1]);
     let panic_val = e
         .builder()
         .ins()
         .iconst(types::I32, JitResult::Panic as i64);
     e.builder().ins().return_(&[panic_val]);
-}
-
-fn emit_missing_helper_jit_error_return<'a>(e: &mut impl TrapEmitter<'a>, helper_id: u32) {
-    let ctx = e.ctx_param();
-    let sentinel = e
-        .builder()
-        .ins()
-        .iconst(types::I64, JIT_INFRA_ERROR_SENTINEL as i64);
-    let missing = e
-        .builder()
-        .ins()
-        .iconst(types::I64, JIT_INFRA_ERROR_MISSING_CALLBACK as i64);
-    let helper_id = e.builder().ins().iconst(types::I32, helper_id as i64);
-    e.builder().ins().store(
-        MemFlags::trusted(),
-        sentinel,
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_ARG0,
-    );
-    e.builder().ins().store(
-        MemFlags::trusted(),
-        missing,
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_ARG1,
-    );
-    e.builder().ins().store(
-        MemFlags::trusted(),
-        helper_id,
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_PC,
-    );
-    let jit_error = e
-        .builder()
-        .ins()
-        .iconst(types::I32, JitResult::JitError as i64);
-    e.builder().ins().return_(&[jit_error]);
 }
 
 pub fn emit_runtime_trap_if<'a>(
@@ -211,7 +171,7 @@ pub fn emit_runtime_trap_if<'a>(
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) {
-    let panic_block = e.builder().create_block();
+    let panic_block = crate::compile_common::cold_block(e.builder());
     let ok_block = e.builder().create_block();
     e.builder()
         .ins()
@@ -236,13 +196,7 @@ pub fn emit_nil_func_trap_if<'a>(e: &mut impl TrapEmitter<'a>, closure_ref: Valu
 }
 
 pub fn mark_runtime_trap_pc<'a>(e: &mut impl TrapEmitter<'a>) {
-    let ctx = e.ctx_param();
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
-    e.builder().ins().store(
-        MemFlags::trusted(),
-        pc_val,
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_PC,
-    );
+    e.store_context_field(pc_val, JitContextField::RuntimeTrapPc);
 }

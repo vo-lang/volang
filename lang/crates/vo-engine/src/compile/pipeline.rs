@@ -7,7 +7,8 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use vo_analysis::project::{PackageIdentity, Project as AnalysisProject};
 use vo_analysis::vfs::{
-    analyze_file_set_with_package_identity, project_package_resolver_with_workspace_sources,
+    analyze_file_set_with_package_identity, package_identity_for_module_path,
+    project_package_resolver_with_workspace_sources,
 };
 use vo_codegen::compile_project;
 use vo_common::vfs::{
@@ -19,7 +20,6 @@ use vo_module::project::{
 use vo_module::readiness::ReadyModule;
 use vo_module::workspace::WorkspaceDiscovery;
 use vo_stdlib::EmbeddedStdlib;
-use vo_vm::bytecode::Module;
 
 use super::native::{
     check_materialized_dependency_readiness_with_fs,
@@ -79,29 +79,45 @@ pub(super) struct ProjectCompileContext {
     pub(super) workspace: super::WorkspaceCompileContext,
 }
 
-fn package_subpath(package_dir: &Path) -> Result<String, CompileError> {
-    let mut segments = Vec::new();
-    for component in package_dir.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(segment) => {
-                let segment = segment.to_str().ok_or_else(|| {
-                    CompileError::Analysis(format!(
-                        "package path is not valid UTF-8: {}",
-                        package_dir.display()
-                    ))
-                })?;
-                segments.push(segment);
-            }
-            _ => {
-                return Err(CompileError::Analysis(format!(
-                    "package path must stay within the project root: {}",
-                    package_dir.display()
-                )))
-            }
+pub(super) struct ProjectSnapshotInputs<'a> {
+    pub(super) project_root: &'a Path,
+    pub(super) mod_cache: &'a Path,
+    pub(super) graph: &'a super::ProjectGraphContext,
+    pub(super) project_plan: &'a ProjectPlan,
+    pub(super) current_module_override: Option<&'a str>,
+    pub(super) workspace_sources: &'a HashMap<String, PathBuf>,
+    pub(super) workspace: &'a super::WorkspaceCompileContext,
+}
+
+impl<'a> From<&'a ProjectCompileContext> for ProjectSnapshotInputs<'a> {
+    fn from(context: &'a ProjectCompileContext) -> Self {
+        Self {
+            project_root: &context.project_root,
+            mod_cache: &context.mod_cache,
+            graph: &context.graph,
+            project_plan: &context.project_plan,
+            current_module_override: context.current_module_override.as_deref(),
+            workspace_sources: &context.workspace_sources,
+            workspace: &context.workspace,
         }
     }
-    Ok(segments.join("/"))
+}
+
+pub(super) struct PreparedProjectSnapshot {
+    snapshot: Arc<CompileInputSnapshot>,
+    project_plan: ProjectPlan,
+    workspace_sources: HashMap<String, PathBuf>,
+    ready_modules: Vec<ReadyModule>,
+}
+
+impl PreparedProjectSnapshot {
+    pub(super) fn context_fs(&self) -> ResolverFs {
+        ResolverFs::snapshot_global(Arc::clone(&self.snapshot))
+    }
+
+    pub(super) fn ready_modules(&self) -> &[ReadyModule] {
+        &self.ready_modules
+    }
 }
 
 fn compilation_identities(
@@ -127,15 +143,10 @@ fn compilation_identities(
         return Ok((None, None));
     };
 
-    let subpath = package_subpath(package_dir)?;
-    let package_path = if subpath.is_empty() {
-        module.to_string()
-    } else {
-        format!("{module}/{subpath}")
-    };
-    let package_identity = PackageIdentity::new(package_path).map_err(|error| {
-        CompileError::Analysis(format!("invalid current package identity: {error}"))
-    })?;
+    let package_identity = package_identity_for_module_path(module, Path::new("."), package_dir)
+        .map_err(|error| {
+            CompileError::Analysis(format!("invalid current package identity: {error}"))
+        })?;
     Ok((current_module, Some(package_identity)))
 }
 
@@ -156,6 +167,7 @@ impl<F: FileSystem> PreparedProject<F> {
             None,
             module_fs,
             workspace_source_fs,
+            Vec::new(),
         )
     }
 
@@ -166,6 +178,7 @@ impl<F: FileSystem> PreparedProject<F> {
         stdlib: Option<EmbeddedStdlib>,
         module_fs: ResolverFs,
         workspace_source_fs: ResolverFs,
+        ready_modules: Vec<ReadyModule>,
     ) -> Result<Self, CompileError> {
         let (current_module, current_package) = compilation_identities(
             &context.project_plan,
@@ -179,23 +192,6 @@ impl<F: FileSystem> PreparedProject<F> {
             context.project_root.clone(),
             empty_message,
         )?;
-        vo_module::readiness::validate_materialized_graph(
-            &module_fs,
-            &context.project_plan,
-            &context.graph.workspace_modules,
-        )
-        .map_err(|error| {
-            CompileError::ModuleSystem(super::ModuleSystemError::new(
-                super::ModuleSystemStage::CachedModule,
-                super::ModuleSystemErrorKind::ValidationFailed,
-                error.to_string(),
-            ))
-        })?;
-        let ready_modules = check_materialized_dependency_readiness_with_fs(
-            &module_fs,
-            context.project_plan.locked_modules(),
-        )
-        .map_err(CompileError::ModuleSystem)?;
         let native_input_fs = workspace_source_fs.clone();
         Ok(Self {
             fs,
@@ -310,7 +306,9 @@ impl AnalyzedCompilation {
 
         let module =
             compile_project(&self.project).map_err(|e| CompileError::Codegen(format!("{}", e)))?;
-        verify_generated_module(&module)?;
+        let module = vo_common_core::verifier::verify_loaded_module(module)
+            .map(Arc::new)
+            .map_err(|err| CompileError::Codegen(format!("generated invalid bytecode: {err}")))?;
 
         Ok(CompileOutput {
             module,
@@ -319,12 +317,6 @@ impl AnalyzedCompilation {
             locked_modules: self.locked_modules,
         })
     }
-}
-
-fn verify_generated_module(module: &Module) -> Result<(), CompileError> {
-    vo_common_core::verifier::verify_module(module)
-        .map(|_| ())
-        .map_err(|err| CompileError::Codegen(format!("generated invalid bytecode: {err}")))
 }
 
 fn invalid_bytecode_error(err: impl std::fmt::Display) -> CompileError {
@@ -380,8 +372,8 @@ pub(super) fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> 
             format!("{:?}", e),
         ))
     })?;
-    vo_common_core::verifier::verify_module(&module)
-        .map(|_| ())
+    let module = vo_common_core::verifier::verify_loaded_module(module)
+        .map(Arc::new)
         .map_err(invalid_bytecode_error)?;
     Ok(CompileOutput {
         module,
@@ -589,6 +581,14 @@ pub(super) fn compile_with_project_snapshot(
     compile_with_project_snapshot_and_generated_inputs(context, stdlib, snapshot, &BTreeSet::new())
 }
 
+pub(super) fn compile_with_prepared_project_snapshot(
+    context: ProjectCompileContext,
+    stdlib: EmbeddedStdlib,
+    prepared: PreparedProjectSnapshot,
+) -> Result<CompileOutput, CompileError> {
+    load_prepared_project_snapshot(context, stdlib, prepared)?.compile()
+}
+
 pub(super) fn compile_with_project_snapshot_and_generated_inputs(
     context: ProjectCompileContext,
     stdlib: EmbeddedStdlib,
@@ -612,17 +612,27 @@ fn load_project_from_snapshot(
     snapshot: Arc<CompileInputSnapshot>,
     generated_inputs: &BTreeSet<PathBuf>,
 ) -> Result<PreparedProject<ResolverFs>, CompileError> {
-    let context_fs = ResolverFs::snapshot_global(Arc::clone(&snapshot));
-    validate_captured_project_context_with_generated_inputs(
-        &context_fs,
-        &context.project_root,
-        &context.graph,
-        &context.project_plan,
-        &context.workspace_sources,
-        context.current_module_override.as_deref(),
-        &context.workspace,
+    let prepared = prepare_project_snapshot_with_generated_inputs(
+        ProjectSnapshotInputs::from(&context),
+        snapshot,
         generated_inputs,
     )?;
+    load_prepared_project_snapshot(context, stdlib, prepared)
+}
+
+fn load_prepared_project_snapshot(
+    mut context: ProjectCompileContext,
+    stdlib: EmbeddedStdlib,
+    prepared: PreparedProjectSnapshot,
+) -> Result<PreparedProject<ResolverFs>, CompileError> {
+    let PreparedProjectSnapshot {
+        snapshot,
+        project_plan,
+        workspace_sources,
+        ready_modules,
+    } = prepared;
+    context.project_plan = project_plan;
+    context.workspace_sources = workspace_sources;
     let project_fs = ResolverFs::snapshot(Arc::clone(&snapshot), &context.project_root);
     let module_fs = ResolverFs::snapshot(Arc::clone(&snapshot), &context.mod_cache);
     let workspace_source_fs = ResolverFs::snapshot_global(snapshot);
@@ -633,28 +643,63 @@ fn load_project_from_snapshot(
         Some(stdlib),
         module_fs,
         workspace_source_fs,
+        ready_modules,
     )
 }
 
-pub(super) fn validate_captured_project_context<F: FileSystem>(
-    snapshot_fs: &F,
-    project_root: &Path,
-    expected_graph: &super::ProjectGraphContext,
-    expected: &ProjectPlan,
-    workspace_sources: &HashMap<String, PathBuf>,
-    current_module_override: Option<&str>,
-    workspace: &super::WorkspaceCompileContext,
-) -> Result<(), CompileError> {
-    validate_captured_project_context_with_generated_inputs(
-        snapshot_fs,
-        project_root,
-        expected_graph,
-        expected,
+pub(super) fn prepare_project_snapshot(
+    inputs: ProjectSnapshotInputs<'_>,
+    snapshot: Arc<CompileInputSnapshot>,
+) -> Result<PreparedProjectSnapshot, CompileError> {
+    prepare_project_snapshot_with_generated_inputs(inputs, snapshot, &BTreeSet::new())
+}
+
+fn prepare_project_snapshot_with_generated_inputs(
+    inputs: ProjectSnapshotInputs<'_>,
+    snapshot: Arc<CompileInputSnapshot>,
+    generated_inputs: &BTreeSet<PathBuf>,
+) -> Result<PreparedProjectSnapshot, CompileError> {
+    let context_fs = ResolverFs::snapshot_global(Arc::clone(&snapshot));
+    let captured_context = validate_captured_project_context_with_generated_inputs(
+        &context_fs,
+        inputs.project_root,
+        inputs.graph,
+        inputs.project_plan,
+        inputs.workspace_sources,
+        inputs.current_module_override,
+        inputs.workspace,
+        generated_inputs,
+    )?;
+    let module_fs = ResolverFs::snapshot(Arc::clone(&snapshot), inputs.mod_cache);
+    let ready_modules = prepare_materialized_modules(
+        &module_fs,
+        captured_context.project_plan(),
+        captured_context.workspace_modules(),
+    )?;
+    let (_, project_plan, workspace_sources) = captured_context.into_parts();
+    Ok(PreparedProjectSnapshot {
+        snapshot,
+        project_plan,
         workspace_sources,
-        current_module_override,
-        workspace,
-        &BTreeSet::new(),
-    )
+        ready_modules,
+    })
+}
+
+pub(super) fn prepare_materialized_modules<F: FileSystem>(
+    module_fs: &F,
+    project_plan: &ProjectPlan,
+    workspace_modules: &[WorkspaceModule],
+) -> Result<Vec<ReadyModule>, CompileError> {
+    vo_module::readiness::validate_materialized_graph(module_fs, project_plan, workspace_modules)
+        .map_err(|error| {
+        CompileError::ModuleSystem(ModuleSystemError::new(
+            ModuleSystemStage::CachedModule,
+            ModuleSystemErrorKind::ValidationFailed,
+            error.to_string(),
+        ))
+    })?;
+    check_materialized_dependency_readiness_with_fs(module_fs, project_plan.locked_modules())
+        .map_err(CompileError::ModuleSystem)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -667,7 +712,7 @@ fn validate_captured_project_context_with_generated_inputs<F: FileSystem>(
     current_module_override: Option<&str>,
     workspace: &super::WorkspaceCompileContext,
     generated_inputs: &BTreeSet<PathBuf>,
-) -> Result<(), CompileError> {
+) -> Result<ProjectContext, CompileError> {
     let captured_context = vo_module::project::load_project_context_with_options(
         snapshot_fs,
         project_root,
@@ -710,7 +755,7 @@ fn validate_captured_project_context_with_generated_inputs<F: FileSystem>(
                 "vo.mod",
             ));
         }
-        return Ok(());
+        return Ok(captured_context);
     }
 
     let expected_mod = render_project_mod(expected)?;
@@ -730,7 +775,7 @@ fn validate_captured_project_context_with_generated_inputs<F: FileSystem>(
             "vo.lock",
         ));
     }
-    Ok(())
+    Ok(captured_context)
 }
 
 fn validate_captured_project_graph(

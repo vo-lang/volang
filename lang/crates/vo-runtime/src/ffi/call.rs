@@ -10,10 +10,10 @@ use alloc::vec::Vec;
 
 use crate::gc::Gc;
 #[cfg(feature = "std")]
-use crate::io::{IoRuntime, IoToken};
+use crate::io::IoRuntime;
 use crate::itab::ItabCache;
 use crate::output::OutputSink;
-use vo_common_core::bytecode::Module;
+use vo_common_core::bytecode::ModuleRuntimeMetadata;
 use vo_common_core::types::SlotType;
 
 use super::SentinelErrorCache;
@@ -47,17 +47,46 @@ pub struct ExternInvoke {
 // ExternWorld: borrowed runtime state (no fiber-owned fields)
 // =============================================================================
 
+/// Scheduler-bound requests issued by the public `runtime/mem` providers.
+///
+/// Providers only enqueue work here. The VM consumes it after the active
+/// extern call returns to a safe boundary where complete roots are available.
+#[derive(Default)]
+pub struct RuntimeMemRequests {
+    work_units: usize,
+    collect: bool,
+}
+
+impl RuntimeMemRequests {
+    #[inline]
+    pub(super) fn request_step(&mut self, work_units: usize) {
+        self.work_units = self.work_units.max(work_units);
+    }
+
+    #[inline]
+    pub(super) fn request_collect(&mut self) {
+        self.collect = true;
+    }
+
+    #[inline]
+    pub fn take(&mut self) -> (bool, usize) {
+        let pending = (self.collect, self.work_units);
+        *self = Self::default();
+        pending
+    }
+}
+
 /// Groups all borrowed "world state" needed by extern functions.
 ///
 /// These are naturally owned by the VM runtime state. Fiber-owned inputs
 /// (replay state, resume tokens) belong in `ExternFiberInputs`, not here.
+#[non_exhaustive]
 pub struct ExternWorld<'env> {
     pub gc: &'env mut Gc,
-    pub module: &'env Module,
+    pub module: ModuleRuntimeMetadata<'env>,
     pub itab_cache: &'env mut ItabCache,
 
-    /// Opaque handle to the VM instance. Extensions must not dereference this.
-    pub vm_opaque: *mut core::ffi::c_void,
+    pub runtime_mem_requests: Option<&'env mut RuntimeMemRequests>,
 
     pub program_args: &'env [Vec<u8>],
 
@@ -74,7 +103,56 @@ pub struct ExternWorld<'env> {
     pub host_services_v2: Option<&'env crate::host_services_v2::HostServicesV2Binding>,
 
     #[cfg(feature = "std")]
-    pub io: &'env mut IoRuntime,
+    pub io: Option<&'env mut IoRuntime>,
+}
+
+impl<'env> ExternWorld<'env> {
+    #[inline]
+    pub fn new(
+        gc: &'env mut Gc,
+        module: ModuleRuntimeMetadata<'env>,
+        itab_cache: &'env mut ItabCache,
+        program_args: &'env [Vec<u8>],
+        output: &'env dyn OutputSink,
+        sentinel_errors: &'env mut SentinelErrorCache,
+        host_output: &'env mut Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            gc,
+            module,
+            itab_cache,
+            runtime_mem_requests: None,
+            program_args,
+            output,
+            sentinel_errors,
+            host_output,
+            host_services_v2: None,
+            #[cfg(feature = "std")]
+            io: None,
+        }
+    }
+
+    #[inline]
+    pub fn with_runtime_mem_requests(mut self, requests: &'env mut RuntimeMemRequests) -> Self {
+        self.runtime_mem_requests = Some(requests);
+        self
+    }
+
+    #[inline]
+    pub fn with_host_services_v2(
+        mut self,
+        binding: Option<&'env crate::host_services_v2::HostServicesV2Binding>,
+    ) -> Self {
+        self.host_services_v2 = binding;
+        self
+    }
+
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn with_io(mut self, io: &'env mut IoRuntime) -> Self {
+        self.io = Some(io);
+        self
+    }
 }
 
 // =============================================================================
@@ -102,6 +180,7 @@ impl ExternReplayResult {
 /// One-shot inputs derived from the active fiber immediately before calling
 /// an extern function. Replay results are snapshots; the VM keeps the
 /// authoritative typed replay log on the fiber until the extern terminates.
+#[derive(Default)]
 pub struct ExternFiberInputs {
     /// Opaque pointer to the current fiber.
     pub fiber_opaque: *mut core::ffi::c_void,
@@ -109,8 +188,7 @@ pub struct ExternFiberInputs {
     /// I/O completion token that woke this fiber. Present only on the
     /// PC re-execution path (second execution of the same `CallExtern`
     /// after the runtime resumes the fiber).
-    #[cfg(feature = "std")]
-    pub resume_io_token: Option<IoToken>,
+    pub resume_io_token: Option<u64>,
 
     /// Host event token that woke this fiber. Present only on the PC re-execution
     /// path (second execution of the same `CallExtern`) after `HostEventWaitAndReplay`.
@@ -127,4 +205,20 @@ pub struct ExternFiberInputs {
     /// Original panic message captured when the replayed closure unwound.
     /// `is_some()` also serves as the "panicked" flag.
     pub replay_panic_message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeMemRequests;
+
+    #[test]
+    fn runtime_mem_requests_coalesce_and_clear() {
+        let mut requests = RuntimeMemRequests::default();
+        requests.request_step(8);
+        requests.request_step(3);
+        requests.request_collect();
+
+        assert_eq!(requests.take(), (true, 8));
+        assert_eq!(requests.take(), (false, 0));
+    }
 }

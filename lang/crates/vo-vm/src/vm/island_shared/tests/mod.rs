@@ -1,11 +1,11 @@
 use super::*;
-use crate::fiber::{BlockReason, Fiber, FiberState};
-use crate::test_support::{queue, queue_state as test_queue_state};
+use crate::fiber::{BlockReason, Fiber, FiberState, RemoteRecvResponse};
+use crate::test_support::{endpoint_waiter, queue, queue_state as test_queue_state};
 use std::collections::BTreeMap;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 use vo_common_core::bytecode::{
-    FieldMeta, FunctionDef, JitInstructionMetadata, MethodInfo, Module, NamedTypeMeta, StructMeta,
+    FieldMeta, FunctionDef, InstructionMetadata, MethodInfo, Module, NamedTypeMeta, StructMeta,
 };
 use vo_common_core::{ChanDir, RuntimeType, StructField, TransferType};
 #[cfg(feature = "std")]
@@ -33,7 +33,7 @@ fn empty_spawn_func() -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::<JitInstructionMetadata>::new(),
+        instruction_metadata: Vec::<InstructionMetadata>::new(),
         slot_types: Vec::new(),
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[]),
         capture_types: Vec::new(),
@@ -61,7 +61,7 @@ fn direct_method_spawn_func(slot_types: Vec<SlotType>) -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::<JitInstructionMetadata>::new(),
+        instruction_metadata: Vec::<InstructionMetadata>::new(),
         slot_types: slot_types.clone(),
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         capture_types: Vec::new(),
@@ -187,6 +187,10 @@ impl FailSecondReserveSender {
 
 #[cfg(feature = "std")]
 impl IslandSender for FailSecondReserveSender {
+    fn preflight_send_command(&self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     fn reserve_send_command(&self) -> Result<Box<dyn IslandSendReservation>, TransportError> {
         let mut reserves = self.reserves.lock().expect("reserve count");
         *reserves += 1;
@@ -216,6 +220,10 @@ impl SucceedThenFailReserveSender {
 
 #[cfg(feature = "std")]
 impl IslandSender for SucceedThenFailReserveSender {
+    fn preflight_send_command(&self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     fn reserve_send_command(&self) -> Result<Box<dyn IslandSendReservation>, TransportError> {
         let mut reserves = self.reserves.lock().expect("reserve count");
         *reserves += 1;

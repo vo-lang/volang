@@ -1,32 +1,62 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder};
-use vo_runtime::bytecode::JitInstructionMetadata;
+use vo_runtime::bytecode::InstructionMetadata;
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::call_helpers::emit_checked_jit_result_helper_call;
-use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
-use crate::translator::RuntimeOpsEmitter;
+use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc};
+use crate::translator::{HelperKind, RuntimeOpsEmitter};
 use crate::JitError;
 
 pub(in crate::translate) fn island_new<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let island_new_func = require_helper(e.helpers().island_new, "island_new")?;
+    let island_new_func = e.helper(HelperKind::island_new);
     let ctx = e.ctx_param();
     let out_ptr = e.var_addr(inst.a);
 
-    emit_checked_jit_result_helper_call(e, island_new_func, &[ctx, out_ptr], true);
+    emit_checked_jit_result_helper_call(e, island_new_func, &[ctx, out_ptr]);
     e.sync_written_slots(inst.a, 1)?;
     Ok(())
+}
+
+fn shared_call_arg_slots<'a>(
+    e: &impl RuntimeOpsEmitter<'a>,
+    inst: &Instruction,
+) -> Result<u32, JitError> {
+    let slots = if inst.call_shape_is_closure() {
+        match e.current_instruction_metadata() {
+            Some(InstructionMetadata::CallLayout { arg_layout, .. }) => arg_layout.len(),
+            _ => {
+                return Err(JitError::MissingJitLayout {
+                    pc: e.current_pc(),
+                    opcode: inst.opcode(),
+                    layout: "CallLayout",
+                });
+            }
+        }
+    } else {
+        let func_id = inst.call_shape_static_func_id();
+        usize::from(
+            e.vo_module()
+                .functions
+                .get(func_id as usize)
+                .ok_or_else(|| JitError::Internal(format!("missing function {func_id}")))?
+                .param_slots,
+        )
+    };
+    u32::try_from(slots)
+        .map_err(|_| JitError::Internal("shared call argument layout exceeds u32".to_string()))
 }
 
 pub(in crate::translate) fn go_start<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let go_start_func = require_helper(e.helpers().go_start, "go_start")?;
+    let arg_slots = shared_call_arg_slots(e, inst)?;
+    let go_start_func = e.helper(HelperKind::go_start);
     let ctx = e.ctx_param();
     let is_closure_call = inst.call_shape_is_closure();
     let func_id = if is_closure_call {
@@ -47,7 +77,7 @@ pub(in crate::translate) fn go_start<'a>(
         e.builder().ins().iconst(types::I64, 0)
     };
     let args_ptr = e.var_addr(inst.b);
-    let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
+    let arg_slots = e.builder().ins().iconst(types::I32, i64::from(arg_slots));
     mark_runtime_trap_pc(e);
     emit_checked_jit_result_helper_call(
         e,
@@ -60,7 +90,6 @@ pub(in crate::translate) fn go_start<'a>(
             args_ptr,
             arg_slots,
         ],
-        true,
     );
     Ok(())
 }
@@ -69,8 +98,8 @@ pub(in crate::translate) fn go_island<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let arg_slots = match e.current_jit_metadata() {
-        Some(JitInstructionMetadata::CallLayout {
+    let arg_slots = match e.current_instruction_metadata() {
+        Some(InstructionMetadata::CallLayout {
             arg_layout,
             ret_layout,
         }) if ret_layout.is_empty() => arg_layout.len(),
@@ -83,7 +112,7 @@ pub(in crate::translate) fn go_island<'a>(
     };
     let arg_slots = u32::try_from(arg_slots)
         .map_err(|_| JitError::Internal("GoIsland argument layout exceeds u32".to_string()))?;
-    let go_island_func = require_helper(e.helpers().go_island, "go_island")?;
+    let go_island_func = e.helper(HelperKind::go_island);
     let ctx = e.ctx_param();
     let island = e.read_var(inst.a);
     let zero = e.builder().ins().iconst(types::I64, 0);
@@ -104,7 +133,6 @@ pub(in crate::translate) fn go_island<'a>(
         e,
         go_island_func,
         &[ctx, island, closure_ref, args_ptr, arg_slots],
-        true,
     );
     Ok(())
 }
@@ -114,7 +142,8 @@ pub(in crate::translate) fn defer_push<'a>(
     inst: &Instruction,
     is_errdefer: bool,
 ) -> Result<(), JitError> {
-    let defer_push_func = require_helper(e.helpers().defer_push, "defer_push")?;
+    let arg_count = shared_call_arg_slots(e, inst)?;
+    let defer_push_func = e.helper(HelperKind::defer_push);
     let ctx = e.ctx_param();
     let is_closure_call = inst.call_shape_is_closure();
     let func_id = if is_closure_call {
@@ -134,7 +163,7 @@ pub(in crate::translate) fn defer_push<'a>(
     };
     let arg_start_val = e.builder().ins().iconst(types::I32, inst.b as i64);
     let args_ptr = e.var_addr(inst.b);
-    let arg_count = e.builder().ins().iconst(types::I32, inst.c as i64);
+    let arg_count = e.builder().ins().iconst(types::I32, i64::from(arg_count));
     let is_errdefer_val = e
         .builder()
         .ins()
@@ -152,7 +181,6 @@ pub(in crate::translate) fn defer_push<'a>(
             arg_count,
             is_errdefer_val,
         ],
-        true,
     );
     Ok(())
 }
@@ -161,10 +189,10 @@ pub(in crate::translate) fn recover<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let recover_func = require_helper(e.helpers().recover, "recover")?;
+    let recover_func = e.helper(HelperKind::recover);
     let ctx = e.ctx_param();
     let result_ptr = e.var_addr(inst.a);
-    emit_checked_jit_result_helper_call(e, recover_func, &[ctx, result_ptr], true);
+    emit_checked_jit_result_helper_call(e, recover_func, &[ctx, result_ptr]);
     e.sync_written_slots(inst.a, 2)?;
     Ok(())
 }

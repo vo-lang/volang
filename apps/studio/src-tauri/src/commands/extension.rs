@@ -80,11 +80,6 @@ fn finish_module_creation(dir: PathBuf, result: Result<(), String>) -> Result<Pa
     }
 }
 
-#[tauri::command]
-pub fn cmd_vo_version() -> String {
-    vo_module::TOOLCHAIN_VERSION.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,11 +139,6 @@ mod tests {
 
         assert!(error.contains("exists"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn studio_version_uses_the_module_protocol_authority() {
-        assert_eq!(cmd_vo_version(), vo_module::TOOLCHAIN_VERSION);
     }
 
     #[test]

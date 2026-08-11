@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_BENCH_WARMUP: u64 = 1;
 const DEFAULT_BENCH_RUNS: u64 = 3;
+const NATIVE_BENCH_PROFILE: &str = "release-native";
 
 pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
     let mut target = "all".to_string();
@@ -159,7 +160,7 @@ impl BenchRunner<'_> {
 
     fn build_vo(&self) -> Result<()> {
         let mut cmd = Command::new("cargo");
-        cmd.args(["build", "--release", "-p", "vo"]);
+        cmd.args(["build", "--profile", NATIVE_BENCH_PROFILE, "-p", "vo"]);
         if self.arch == "32" {
             cmd.args(["--target", TARGET_32, "--no-default-features"]);
         }
@@ -168,7 +169,7 @@ impl BenchRunner<'_> {
             .status()
             .context("could not build vo")?;
         if !status.success() {
-            bail!("cargo build --release -p vo failed");
+            bail!("cargo build --profile {NATIVE_BENCH_PROFILE} -p vo failed");
         }
         Ok(())
     }
@@ -219,17 +220,11 @@ impl BenchRunner<'_> {
             commands.push(format!("{vo_bin} run {vo_file} --mode=vm"));
             names.push("Vo-VM".to_string());
             if self.arch != "32" {
-                let jit = format!(
-                    "{} {vo_bin} run {vo_file} --mode=jit",
-                    self.jit_env_prefix()
-                )
-                .trim()
-                .to_string();
-                names.push(if self.jit_env_prefix().is_empty() {
-                    "Vo-JIT".to_string()
-                } else {
-                    "Vo-JIT-Hot".to_string()
-                });
+                let jit_env = self.jit_env_prefix();
+                let jit = format!("{} {vo_bin} run {vo_file} --mode=jit", jit_env)
+                    .trim()
+                    .to_string();
+                names.push(self.jit_series_name());
                 commands.push(jit);
             }
         }
@@ -420,20 +415,15 @@ impl BenchRunner<'_> {
                 let Some(name) = result.get("command").and_then(Value::as_str) else {
                     continue;
                 };
-                if !matches!(
-                    name,
-                    "Vo-VM"
-                        | "Vo-JIT"
-                        | "Vo-JIT-Hot"
-                        | "Go"
-                        | "Lua"
-                        | "LuaJIT"
-                        | "Node"
-                        | "Python"
-                        | "Ruby"
-                        | "Java"
-                        | "C"
-                ) {
+                if !(name == "Vo-VM"
+                    || name == "Vo-JIT"
+                    || name == "Vo-JIT-Hot"
+                    || name.starts_with("Vo-JIT(")
+                    || matches!(
+                        name,
+                        "Go" | "Lua" | "LuaJIT" | "Node" | "Python" | "Ruby" | "Java" | "C"
+                    ))
+                {
                     continue;
                 }
                 if let Some(mean) = result.get("mean").and_then(Value::as_f64) {
@@ -520,6 +510,7 @@ impl BenchRunner<'_> {
                 all_langs: self.all_langs,
                 vo_only: self.vo_only,
                 arch: self.arch.clone(),
+                vo_profile: NATIVE_BENCH_PROFILE.to_string(),
                 jit_hot: self.jit_hot,
                 jit_call_threshold: self.jit_call_threshold,
                 jit_loop_threshold: self.jit_loop_threshold,
@@ -564,16 +555,34 @@ impl BenchRunner<'_> {
         if let Some(value) = self.jit_loop_threshold {
             parts.push(format!("VO_JIT_LOOP_THRESHOLD={value}"));
         } else if self.jit_hot {
-            parts.push("VO_JIT_LOOP_THRESHOLD=999999".to_string());
+            parts.push("VO_JIT_LOOP_THRESHOLD=1".to_string());
         }
         parts.join(" ")
     }
 
+    fn jit_series_name(&self) -> String {
+        let call = self
+            .jit_call_threshold
+            .unwrap_or(if self.jit_hot { 1 } else { 100 });
+        let loop_threshold = self
+            .jit_loop_threshold
+            .unwrap_or(if self.jit_hot { 1 } else { 50 });
+        format!("Vo-JIT(call={call},loop={loop_threshold})")
+    }
+
     fn vo_bench_bin(&self) -> PathBuf {
         if self.arch == "32" {
-            return self.root.join("target").join(TARGET_32).join("release/vo");
+            return self
+                .root
+                .join("target")
+                .join(TARGET_32)
+                .join(NATIVE_BENCH_PROFILE)
+                .join("vo");
         }
-        self.root.join("target/release/vo")
+        self.root
+            .join("target")
+            .join(NATIVE_BENCH_PROFILE)
+            .join("vo")
     }
 
     fn bench_results_dir(&self) -> PathBuf {
@@ -617,6 +626,7 @@ struct BenchmarkSummaryConfig {
     all_langs: bool,
     vo_only: bool,
     arch: String,
+    vo_profile: String,
     jit_hot: bool,
     jit_call_threshold: Option<u64>,
     jit_loop_threshold: Option<u64>,

@@ -11,6 +11,7 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     format,
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -18,25 +19,27 @@ use alloc::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
 
-use core::fmt;
+use core::{fmt, mem::size_of};
 
 use crate::bytecode::{
     ext_slot_kind_matches_slot_type, ext_slot_kinds_for_slot_types,
     known_builtin_extern_fixed_return_slot_types, known_builtin_extern_param_slot_types,
     known_builtin_extern_requires_precise_return_layout, known_builtin_extern_return_slot_count,
     slot_type_for_value_kind, validate_ext_param_kinds_with_label, Constant, ExtSlotKind,
-    ExternDef, FunctionDef, JitInstructionMetadata, Module, ParamShape, ReturnFlags, TransferType,
-    IFACE_ASSIGN_NO_ITAB, MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES, MAX_CLOSURE_CAPTURE_SLOTS,
+    ExternDef, FunctionDef, InstructionMetadata, LoadedModule, Module, ParamShape, ReturnFlags,
+    RuntimeTypeFacts, TransferType, IFACE_ASSIGN_NO_ITAB, MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES,
+    MAX_CLOSURE_CAPTURE_SLOTS,
 };
 use crate::instruction::{
     Instruction, Opcode, CONV_F2I_ALLOWED_FLAGS, CONV_I2F_ALLOWED_FLAGS, HINT_LOOP, HINT_NOP,
-    IFACE_ASSERT_MAX_TARGET_SLOTS, LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK,
-    LOOP_FLAG_HAS_LABELED_CONTINUE, SHIFT_ALLOWED_FLAGS, SLICE_SLICE_ALLOWED_FLAGS,
-    SLICE_SLICE_FLAG_ARRAY, SLICE_SLICE_FLAG_HAS_MAX, SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW,
+    IFACE_ASSERT_HAS_OK_FLAG, QUEUE_KIND_PORT_FLAG, QUEUE_RECV_HAS_OK_FLAG, SHIFT_ALLOWED_FLAGS,
+    SLICE_SLICE_ALLOWED_FLAGS, SLICE_SLICE_FLAG_ARRAY, SLICE_SLICE_FLAG_HAS_MAX,
+    SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW,
 };
 use crate::runtime_type::RuntimeType;
 use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid, INVALID_META_ID};
@@ -55,6 +58,107 @@ const ANY_SINGLE_SLOT: &[SlotType] = &[
     SlotType::Float,
 ];
 const FLOAT_STORAGE_SLOTS: &[SlotType] = &[SlotType::Float, SlotType::Value];
+
+// Verification runs on untrusted modules before the VM or JIT may execute
+// them.  Keep derived data and fixed-point work bounded independently from the
+// encoded module size: a tiny instruction can otherwise fan out into one fact
+// per tracked slot at every program counter.
+const MAX_VERIFIER_DERIVED_BYTES: usize = 256 * 1024 * 1024;
+const MAX_VERIFIER_WORK_UNITS: usize = 256 * 1024 * 1024;
+
+struct VerifierResources {
+    derived_bytes_left: usize,
+    work_left: usize,
+}
+
+impl VerifierResources {
+    fn new() -> Self {
+        Self {
+            derived_bytes_left: MAX_VERIFIER_DERIVED_BYTES,
+            work_left: MAX_VERIFIER_WORK_UNITS,
+        }
+    }
+
+    fn charge_bytes<T>(
+        &mut self,
+        func: &FunctionDef,
+        count: usize,
+        resource: &'static str,
+    ) -> Result<(), ModuleVerificationError> {
+        let requested = count.checked_mul(size_of::<T>()).ok_or_else(|| {
+            verifier_resource_limit(func, resource, usize::MAX, MAX_VERIFIER_DERIVED_BYTES)
+        })?;
+        if requested > self.derived_bytes_left {
+            return Err(verifier_resource_limit(
+                func,
+                resource,
+                requested,
+                self.derived_bytes_left,
+            ));
+        }
+        self.derived_bytes_left -= requested;
+        Ok(())
+    }
+
+    fn charge_work(
+        &mut self,
+        func: &FunctionDef,
+        units: usize,
+        resource: &'static str,
+    ) -> Result<(), ModuleVerificationError> {
+        if units > self.work_left {
+            return Err(verifier_resource_limit(
+                func,
+                resource,
+                units,
+                self.work_left,
+            ));
+        }
+        self.work_left -= units;
+        Ok(())
+    }
+}
+
+fn verifier_resource_limit(
+    func: &FunctionDef,
+    resource: &'static str,
+    requested: usize,
+    remaining: usize,
+) -> ModuleVerificationError {
+    ModuleVerificationError::ResourceLimit {
+        func: func.name.clone(),
+        resource,
+        requested,
+        remaining,
+    }
+}
+
+fn try_none_vec<T>(
+    func: &FunctionDef,
+    len: usize,
+    resource: &'static str,
+) -> Result<Vec<Option<T>>, ModuleVerificationError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| verifier_resource_limit(func, resource, len, MAX_VERIFIER_DERIVED_BYTES))?;
+    values.resize_with(len, || None);
+    Ok(values)
+}
+
+fn try_filled_vec<T: Clone>(
+    func: &FunctionDef,
+    len: usize,
+    value: T,
+    resource: &'static str,
+) -> Result<Vec<T>, ModuleVerificationError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| verifier_resource_limit(func, resource, len, MAX_VERIFIER_DERIVED_BYTES))?;
+    values.resize(len, value);
+    Ok(values)
+}
 
 #[derive(Clone, Copy)]
 struct InstructionVerifierContext<'a> {
@@ -244,6 +348,25 @@ pub enum ModuleVerificationError {
         opcode: Opcode,
         layout: &'static str,
     },
+    WrongMetadataKind {
+        func: String,
+        pc: usize,
+        opcode: Opcode,
+        metadata: &'static str,
+    },
+    InvalidLoopEnd {
+        func: String,
+        pc: usize,
+        begin_pc: usize,
+        end_pc: usize,
+        code_len: usize,
+    },
+    InvalidLoopEndBackEdge {
+        func: String,
+        pc: usize,
+        begin_pc: usize,
+        end_pc: usize,
+    },
     MissingFunction {
         func: String,
         pc: usize,
@@ -331,6 +454,12 @@ pub enum ModuleVerificationError {
         flags: u8,
         allowed: u8,
     },
+    ResourceLimit {
+        func: String,
+        resource: &'static str,
+        requested: usize,
+        remaining: usize,
+    },
     GcLayout {
         detail: String,
     },
@@ -362,6 +491,34 @@ impl fmt::Display for ModuleVerificationError {
             } => write!(
                 f,
                 "missing {layout} layout for {opcode:?} in {func} at pc {pc}"
+            ),
+            Self::WrongMetadataKind {
+                func,
+                pc,
+                opcode,
+                metadata,
+            } => write!(
+                f,
+                "wrong instruction metadata kind {metadata} for {opcode:?} in {func} at pc {pc}"
+            ),
+            Self::InvalidLoopEnd {
+                func,
+                pc,
+                begin_pc,
+                end_pc,
+                code_len,
+            } => write!(
+                f,
+                "invalid LoopEnd in {func} at pc {pc}: begin_pc={begin_pc}, end_pc={end_pc}, code_len={code_len}"
+            ),
+            Self::InvalidLoopEndBackEdge {
+                func,
+                pc,
+                begin_pc,
+                end_pc,
+            } => write!(
+                f,
+                "LoopEnd in {func} at pc {pc} points at end_pc={end_pc}, which is not a back-edge to begin_pc={begin_pc}"
             ),
             Self::MissingFunction {
                 func,
@@ -485,6 +642,15 @@ impl fmt::Display for ModuleVerificationError {
                 f,
                 "invalid flags 0x{flags:02x} for {opcode:?} in {func} at pc {pc}; allowed mask is 0x{allowed:02x}"
             ),
+            Self::ResourceLimit {
+                func,
+                resource,
+                requested,
+                remaining,
+            } => write!(
+                f,
+                "verifier resource limit exceeded in {func} while building {resource}: requested {requested}, remaining {remaining}"
+            ),
             Self::GcLayout { detail } => write!(f, "{detail}"),
         }
     }
@@ -508,6 +674,16 @@ impl<'m> VerifiedModule<'m> {
     }
 }
 
+impl LoadedModule {
+    /// Reborrow the common-verifier certificate owned by this loaded image.
+    #[inline]
+    pub fn verified_module(&self) -> VerifiedModule<'_> {
+        VerifiedModule {
+            module: self.module(),
+        }
+    }
+}
+
 pub struct ModuleVerifier<'m> {
     module: &'m Module,
 }
@@ -518,14 +694,25 @@ impl<'m> ModuleVerifier<'m> {
     }
 
     pub fn verify(self) -> Result<VerifiedModule<'m>, ModuleVerificationError> {
-        verify_module_invariants(self.module)?;
+        let (verified, _) = self.verify_with_runtime_type_facts()?;
+        Ok(verified)
+    }
+
+    pub fn verify_with_runtime_type_facts(
+        self,
+    ) -> Result<(VerifiedModule<'m>, RuntimeTypeFacts), ModuleVerificationError> {
+        let runtime_type_facts = verify_module_invariants(self.module)?;
         validate_module_gc_layout(self.module)?;
+        let mut resources = VerifierResources::new();
         for (idx, func) in self.module.functions.iter().enumerate() {
-            verify_function_at(self.module, idx, func)?;
+            verify_function_at(self.module, idx, func, &mut resources)?;
         }
-        Ok(VerifiedModule {
-            module: self.module,
-        })
+        Ok((
+            VerifiedModule {
+                module: self.module,
+            },
+            runtime_type_facts,
+        ))
     }
 }
 
@@ -533,11 +720,21 @@ pub fn verify_module(module: &Module) -> Result<VerifiedModule<'_>, ModuleVerifi
     ModuleVerifier::new(module).verify()
 }
 
-pub fn verify_function(func: &FunctionDef, module: &Module) -> Result<(), ModuleVerificationError> {
-    verify_function_common(func, module)
+/// Verify an owned immutable module and bind all derived facts to that exact
+/// image for VM-family sharing.
+pub fn verify_loaded_module(module: Module) -> Result<LoadedModule, ModuleVerificationError> {
+    let runtime_type_facts = {
+        let (_, facts) = ModuleVerifier::new(&module).verify_with_runtime_type_facts()?;
+        facts
+    };
+    Ok(LoadedModule::new(module, runtime_type_facts))
 }
 
-fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationError> {
+pub fn verify_function(func: &FunctionDef, module: &Module) -> Result<(), ModuleVerificationError> {
+    verify_function_common(func, module, &mut VerifierResources::new())
+}
+
+fn verify_module_invariants(module: &Module) -> Result<RuntimeTypeFacts, ModuleVerificationError> {
     let invariant = |detail: String| ModuleVerificationError::ModuleInvariant { detail };
 
     validate_metadata_table_lengths(
@@ -730,11 +927,11 @@ fn verify_module_invariants(module: &Module) -> Result<(), ModuleVerificationErr
     }
     validate_struct_metadata_refs(module)?;
     validate_interface_metadata_refs(module)?;
-    validate_runtime_type_refs(module)?;
+    let runtime_type_facts = validate_runtime_type_refs(module)?;
     validate_global_metadata_refs(module)?;
     validate_well_known_types(module)?;
     validate_debug_info_refs(module)?;
-    Ok(())
+    Ok(runtime_type_facts)
 }
 
 fn validate_metadata_table_lengths(
@@ -1546,7 +1743,9 @@ fn validate_interface_metadata_refs(module: &Module) -> Result<(), ModuleVerific
     Ok(())
 }
 
-fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationError> {
+fn validate_runtime_type_refs(
+    module: &Module,
+) -> Result<RuntimeTypeFacts, ModuleVerificationError> {
     for (idx, runtime_type) in module.runtime_types.iter().enumerate() {
         let label = format!("runtime_types[{idx}]");
         match runtime_type {
@@ -1723,8 +1922,7 @@ fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationE
             }
         }
     }
-    validate_runtime_value_containment_graph(module)?;
-    Ok(())
+    validate_runtime_value_containment_graph(module)
 }
 
 /// Validate the graph of types that are stored inline in another value.
@@ -1736,154 +1934,13 @@ fn validate_runtime_type_refs(module: &Module) -> Result<(), ModuleVerificationE
 /// terminating even when a forged `StructMeta` supplied a finite slot vector.
 fn validate_runtime_value_containment_graph(
     module: &Module,
-) -> Result<(), ModuleVerificationError> {
-    // Runtime type identity may describe a value that is represented only by
-    // canonical heap storage. Keep enough width information to reject real
-    // flattened ABI uses without making metadata-only wide arrays allocate an
-    // enormous layout or fail module verification globally.
-    const OVERWIDE_SLOT_COUNT: usize = u16::MAX as usize + 1;
-
-    fn bounded_add(left: usize, right: usize) -> usize {
-        left.saturating_add(right).min(OVERWIDE_SLOT_COUNT)
-    }
-
-    fn bounded_array_width(len: u64, elem_width: usize) -> usize {
-        if len == 0 || elem_width == 0 {
-            return 0;
-        }
-        let elem_width = elem_width.min(OVERWIDE_SLOT_COUNT);
-        let exact_limit = OVERWIDE_SLOT_COUNT as u64;
-        let elem_width_u64 = elem_width as u64;
-        if elem_width == OVERWIDE_SLOT_COUNT || len > exact_limit / elem_width_u64 {
-            OVERWIDE_SLOT_COUNT
-        } else {
-            usize::try_from(len * elem_width_u64)
-                .unwrap_or(OVERWIDE_SLOT_COUNT)
-                .min(OVERWIDE_SLOT_COUNT)
-        }
-    }
-
-    enum Task {
-        Enter { id: usize, parent: Option<usize> },
-        Exit(usize),
-    }
-
-    let mut states = vec![0u8; module.runtime_types.len()];
-    let mut widths = vec![None; module.runtime_types.len()];
-    let mut tasks = Vec::new();
-
-    for root in 0..module.runtime_types.len() {
-        if states[root] != 0 {
-            continue;
-        }
-        tasks.push(Task::Enter {
-            id: root,
-            parent: None,
-        });
-        while let Some(task) = tasks.pop() {
-            match task {
-                Task::Enter { id, parent } => match states.get(id).copied() {
-                    Some(2) => continue,
-                    Some(1) => {
-                        let source = parent
-                            .map(|source| format!("runtime_types[{source}]"))
-                            .unwrap_or_else(|| "the runtime type graph".to_string());
-                        return Err(module_invariant(format!(
-                            "{source} contains active runtime_types[{id}] by value, forming an inline type cycle"
-                        )));
-                    }
-                    Some(0) => {
-                        states[id] = 1;
-                        tasks.push(Task::Exit(id));
-                        match &module.runtime_types[id] {
-                            RuntimeType::Named { id: named_id, .. } => {
-                                let child = module.named_type_metas[*named_id as usize]
-                                    .underlying_rttid
-                                    .rttid() as usize;
-                                tasks.push(Task::Enter {
-                                    id: child,
-                                    parent: Some(id),
-                                });
-                            }
-                            RuntimeType::Array { elem, .. } => tasks.push(Task::Enter {
-                                id: elem.rttid() as usize,
-                                parent: Some(id),
-                            }),
-                            RuntimeType::Struct { fields, .. } => {
-                                tasks.extend(fields.iter().rev().map(|field| Task::Enter {
-                                    id: field.typ.rttid() as usize,
-                                    parent: Some(id),
-                                }));
-                            }
-                            RuntimeType::Tuple(elems) => {
-                                tasks.extend(elems.iter().rev().map(|elem| Task::Enter {
-                                    id: elem.rttid() as usize,
-                                    parent: Some(id),
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
-                    None => {
-                        return Err(module_invariant(format!(
-                            "runtime value containment references missing runtime_types[{id}]"
-                        )));
-                    }
-                    _ => unreachable!("runtime type traversal state is 0, 1, or 2"),
-                },
-                Task::Exit(id) => {
-                    let width = match &module.runtime_types[id] {
-                        RuntimeType::Basic(_)
-                        | RuntimeType::Pointer(_)
-                        | RuntimeType::Slice(_)
-                        | RuntimeType::Map { .. }
-                        | RuntimeType::Chan { .. }
-                        | RuntimeType::Port { .. }
-                        | RuntimeType::Func { .. }
-                        | RuntimeType::Island => 1,
-                        RuntimeType::Interface { .. } => 2,
-                        RuntimeType::Struct { meta_id, .. } => {
-                            module.struct_metas[*meta_id as usize]
-                                .slot_types
-                                .len()
-                                .min(OVERWIDE_SLOT_COUNT)
-                        }
-                        RuntimeType::Named { id: named_id, .. } => {
-                            let child = module.named_type_metas[*named_id as usize]
-                                .underlying_rttid
-                                .rttid() as usize;
-                            widths[child].ok_or_else(|| {
-                                module_invariant(format!(
-                                    "runtime_types[{id}] named underlying width was not resolved"
-                                ))
-                            })?
-                        }
-                        RuntimeType::Array { len, elem } => {
-                            let elem_width = widths[elem.rttid() as usize].ok_or_else(|| {
-                                module_invariant(format!(
-                                    "runtime_types[{id}] array element width was not resolved"
-                                ))
-                            })?;
-                            bounded_array_width(*len, elem_width)
-                        }
-                        RuntimeType::Tuple(elems) => {
-                            elems.iter().try_fold(0usize, |total, elem| {
-                                let elem_width =
-                                    widths[elem.rttid() as usize].ok_or_else(|| {
-                                        module_invariant(format!(
-                                            "runtime_types[{id}] tuple element width was not resolved"
-                                        ))
-                                    })?;
-                                Ok::<_, ModuleVerificationError>(bounded_add(total, elem_width))
-                            })?
-                        }
-                    };
-                    widths[id] = Some(width);
-                    states[id] = 2;
-                }
-            }
-        }
-    }
+) -> Result<RuntimeTypeFacts, ModuleVerificationError> {
+    let facts = RuntimeTypeFacts::from_module_parts(
+        &module.struct_metas,
+        &module.named_type_metas,
+        &module.runtime_types,
+    )
+    .map_err(|error| module_invariant(error.to_string()))?;
 
     for (id, runtime_type) in module.runtime_types.iter().enumerate() {
         let RuntimeType::Func {
@@ -1896,12 +1953,17 @@ fn validate_runtime_value_containment_graph(
         };
         for (role, values) in [("parameter", params), ("result", results)] {
             let total = values.iter().try_fold(0usize, |total, value| {
-                let value_width = widths[value.rttid() as usize].ok_or_else(|| {
-                    module_invariant(format!(
-                        "runtime_types[{id}] function {role} width was not resolved"
-                    ))
-                })?;
-                Ok::<_, ModuleVerificationError>(bounded_add(total, value_width))
+                let value_width = facts
+                    .get(*value)
+                    .ok_or_else(|| {
+                        module_invariant(format!(
+                            "runtime_types[{id}] function {role} width was not resolved"
+                        ))
+                    })?
+                    .bounded_slot_count();
+                Ok::<_, ModuleVerificationError>(
+                    total.saturating_add(value_width).min(u16::MAX as usize + 1),
+                )
             })?;
             if total > u16::MAX as usize {
                 return Err(module_invariant(format!(
@@ -1925,7 +1987,7 @@ fn validate_runtime_value_containment_graph(
         }
     }
 
-    Ok(())
+    Ok(facts)
 }
 
 fn validate_global_metadata_refs(module: &Module) -> Result<(), ModuleVerificationError> {
@@ -2240,31 +2302,44 @@ fn verify_function_at(
     module: &Module,
     idx: usize,
     func: &FunctionDef,
+    resources: &mut VerifierResources,
 ) -> Result<(), ModuleVerificationError> {
     let _ = idx;
-    verify_function_common(func, module)
+    verify_function_common(func, module, resources)
 }
 
 fn verify_function_common(
     func: &FunctionDef,
     module: &Module,
+    resources: &mut VerifierResources,
 ) -> Result<(), ModuleVerificationError> {
     verify_function_invariants(func, module)?;
 
-    if func.code.len() != func.jit_metadata.len() {
+    if func.code.len() != func.instruction_metadata.len() {
         return Err(ModuleVerificationError::LengthMismatch {
             func: func.name.clone(),
             code_len: func.code.len(),
-            metadata_len: func.jit_metadata.len(),
+            metadata_len: func.instruction_metadata.len(),
         });
     }
-    for (pc, metadata) in func.jit_metadata.iter().enumerate() {
+    for (pc, metadata) in func.instruction_metadata.iter().enumerate() {
         validate_instruction_metadata_shape(func, pc, metadata)?;
     }
     verify_select_case_structure(func)?;
-    let constant_facts = ConstantFactAnalysis::analyze(func, module);
-    let index_check_facts = IndexCheckAnalysis::analyze(func, module, &constant_facts);
-    let container_layout_facts = ContainerLayoutAnalysis::analyze(func, module);
+    let cfg = FunctionCfg::build(func, resources)?;
+    let dependencies = FactDependencyGraph::build(func, resources)?;
+    let constant_facts =
+        ConstantFactAnalysis::analyze(func, module, &cfg, &dependencies, resources)?;
+    let index_check_facts = IndexCheckAnalysis::analyze(
+        func,
+        module,
+        &cfg,
+        &dependencies,
+        &constant_facts,
+        resources,
+    )?;
+    let container_layout_facts =
+        ContainerLayoutAnalysis::analyze(func, module, &cfg, &dependencies, resources)?;
     let analyses = VerifierAnalyses {
         module,
         constant_facts: &constant_facts,
@@ -2281,7 +2356,15 @@ fn verify_function_common(
                 raw: inst.op,
             });
         }
+        validate_instruction_metadata_contract(
+            func,
+            pc,
+            opcode,
+            inst.flags,
+            &func.instruction_metadata[pc],
+        )?;
         verify_instruction_contract(func, analyses, pc, inst, opcode)?;
+        validate_loop_end_contract(func, pc, &func.instruction_metadata[pc])?;
     }
 
     Ok(())
@@ -2394,11 +2477,11 @@ fn verify_select_case_structure(func: &FunctionDef) -> Result<(), ModuleVerifica
 fn validate_instruction_metadata_shape(
     func: &FunctionDef,
     pc: usize,
-    metadata: &JitInstructionMetadata,
+    metadata: &InstructionMetadata,
 ) -> Result<(), ModuleVerificationError> {
     match metadata {
-        JitInstructionMetadata::None | JitInstructionMetadata::LoopEnd { .. } => Ok(()),
-        JitInstructionMetadata::ElemLayout {
+        InstructionMetadata::None | InstructionMetadata::LoopEnd { .. } => Ok(()),
+        InstructionMetadata::ElemLayout {
             elem_bytes,
             needs_sign_extend,
             slot_layout,
@@ -2438,18 +2521,18 @@ fn validate_instruction_metadata_shape(
             }
             Ok(())
         }
-        JitInstructionMetadata::MapNew { .. }
-        | JitInstructionMetadata::MapGet { .. }
-        | JitInstructionMetadata::MapSet { .. }
-        | JitInstructionMetadata::MapDelete { .. }
-        | JitInstructionMetadata::PtrLayout { .. }
-        | JitInstructionMetadata::SlotLayout { .. }
-        | JitInstructionMetadata::CallLayout { .. }
-        | JitInstructionMetadata::CallIfaceLayout { .. }
-        | JitInstructionMetadata::CallExternLayout { .. }
-        | JitInstructionMetadata::QueueLayout { .. }
-        | JitInstructionMetadata::MapIterNext { .. }
-        | JitInstructionMetadata::IfaceAssertLayout { .. } => {
+        InstructionMetadata::MapNew { .. }
+        | InstructionMetadata::MapGet { .. }
+        | InstructionMetadata::MapSet { .. }
+        | InstructionMetadata::MapDelete { .. }
+        | InstructionMetadata::PtrLayout { .. }
+        | InstructionMetadata::SlotLayout { .. }
+        | InstructionMetadata::CallLayout { .. }
+        | InstructionMetadata::CallIfaceLayout { .. }
+        | InstructionMetadata::CallExternLayout { .. }
+        | InstructionMetadata::QueueLayout { .. }
+        | InstructionMetadata::MapIterNext { .. }
+        | InstructionMetadata::IfaceAssertLayout { .. } => {
             // Metadata kind and interface-pair semantics are enforced by
             // opcode-specific VM/JIT contracts. The common shape check only
             // rejects self-inconsistent byte/slot metadata that every backend
@@ -2457,6 +2540,168 @@ fn validate_instruction_metadata_shape(
             Ok(())
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstructionMetadataKind {
+    None,
+    ElemLayout,
+    MapNew,
+    MapGet,
+    MapSet,
+    MapDelete,
+    PtrLayout,
+    SlotLayout,
+    CallLayout,
+    CallIfaceLayout,
+    CallExternLayout,
+    QueueLayout,
+    MapIterNext,
+    IfaceAssertLayout,
+    LoopEnd,
+}
+
+impl InstructionMetadataKind {
+    fn of(metadata: &InstructionMetadata) -> Self {
+        match metadata {
+            InstructionMetadata::None => Self::None,
+            InstructionMetadata::ElemLayout { .. } => Self::ElemLayout,
+            InstructionMetadata::MapNew { .. } => Self::MapNew,
+            InstructionMetadata::MapGet { .. } => Self::MapGet,
+            InstructionMetadata::MapSet { .. } => Self::MapSet,
+            InstructionMetadata::MapDelete { .. } => Self::MapDelete,
+            InstructionMetadata::PtrLayout { .. } => Self::PtrLayout,
+            InstructionMetadata::SlotLayout { .. } => Self::SlotLayout,
+            InstructionMetadata::CallLayout { .. } => Self::CallLayout,
+            InstructionMetadata::CallIfaceLayout { .. } => Self::CallIfaceLayout,
+            InstructionMetadata::CallExternLayout { .. } => Self::CallExternLayout,
+            InstructionMetadata::QueueLayout { .. } => Self::QueueLayout,
+            InstructionMetadata::MapIterNext { .. } => Self::MapIterNext,
+            InstructionMetadata::IfaceAssertLayout { .. } => Self::IfaceAssertLayout,
+            InstructionMetadata::LoopEnd { .. } => Self::LoopEnd,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::ElemLayout => "ElemLayout",
+            Self::MapNew => "MapNew",
+            Self::MapGet => "MapGet",
+            Self::MapSet => "MapSet",
+            Self::MapDelete => "MapDelete",
+            Self::PtrLayout => "PtrLayout",
+            Self::SlotLayout => "SlotLayout",
+            Self::CallLayout => "CallLayout",
+            Self::CallIfaceLayout => "CallIfaceLayout",
+            Self::CallExternLayout => "CallExternLayout",
+            Self::QueueLayout => "QueueLayout",
+            Self::MapIterNext => "MapIterNext",
+            Self::IfaceAssertLayout => "IfaceAssertLayout",
+            Self::LoopEnd => "LoopEnd",
+        }
+    }
+}
+
+fn required_instruction_metadata_kind(opcode: Opcode, flags: u8) -> InstructionMetadataKind {
+    match opcode {
+        Opcode::Hint if flags == HINT_LOOP => InstructionMetadataKind::LoopEnd,
+        Opcode::SlotGet | Opcode::SlotSet | Opcode::SlotGetN | Opcode::SlotSetN => {
+            InstructionMetadataKind::SlotLayout
+        }
+        Opcode::PtrNew | Opcode::PtrGet | Opcode::PtrSet | Opcode::PtrGetN | Opcode::PtrSetN => {
+            InstructionMetadataKind::PtrLayout
+        }
+        Opcode::CallExtern => InstructionMetadataKind::CallExternLayout,
+        Opcode::CallClosure | Opcode::GoIsland => InstructionMetadataKind::CallLayout,
+        Opcode::CallIface => InstructionMetadataKind::CallIfaceLayout,
+        Opcode::ArrayNew
+        | Opcode::ArrayGet
+        | Opcode::ArraySet
+        | Opcode::ArrayAddr
+        | Opcode::SliceNew
+        | Opcode::SliceGet
+        | Opcode::SliceSet
+        | Opcode::SliceAppend
+        | Opcode::SliceAddr => InstructionMetadataKind::ElemLayout,
+        Opcode::MapNew => InstructionMetadataKind::MapNew,
+        Opcode::MapGet => InstructionMetadataKind::MapGet,
+        Opcode::MapSet => InstructionMetadataKind::MapSet,
+        Opcode::MapDelete => InstructionMetadataKind::MapDelete,
+        Opcode::MapIterNext => InstructionMetadataKind::MapIterNext,
+        Opcode::QueueNew
+        | Opcode::QueueSend
+        | Opcode::QueueRecv
+        | Opcode::SelectSend
+        | Opcode::SelectRecv => InstructionMetadataKind::QueueLayout,
+        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush if flags & 1 != 0 => {
+            InstructionMetadataKind::CallLayout
+        }
+        Opcode::IfaceAssert => InstructionMetadataKind::IfaceAssertLayout,
+        _ => InstructionMetadataKind::None,
+    }
+}
+
+fn validate_instruction_metadata_contract(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    flags: u8,
+    metadata: &InstructionMetadata,
+) -> Result<(), ModuleVerificationError> {
+    let required = required_instruction_metadata_kind(opcode, flags);
+    let actual = InstructionMetadataKind::of(metadata);
+    if actual == InstructionMetadataKind::None && required != InstructionMetadataKind::None {
+        return Err(missing_layout(func, pc, opcode, required.name()));
+    }
+    if actual != required {
+        return Err(ModuleVerificationError::WrongMetadataKind {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            metadata: actual.name(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_loop_end_contract(
+    func: &FunctionDef,
+    pc: usize,
+    metadata: &InstructionMetadata,
+) -> Result<(), ModuleVerificationError> {
+    let InstructionMetadata::LoopEnd { end_pc } = metadata else {
+        return Ok(());
+    };
+    let begin_pc = pc + 1;
+    let end_pc = *end_pc as usize;
+    if begin_pc >= func.code.len() || end_pc >= func.code.len() || begin_pc > end_pc {
+        return Err(ModuleVerificationError::InvalidLoopEnd {
+            func: func.name.clone(),
+            pc,
+            begin_pc,
+            end_pc,
+            code_len: func.code.len(),
+        });
+    }
+    let end = func.code[end_pc];
+    let targets_begin = match end.opcode() {
+        Opcode::Jump => {
+            let target = end_pc as i64 + i64::from(end.imm32());
+            target == begin_pc as i64
+        }
+        Opcode::ForLoop => end_pc as i64 + 1 + i64::from(end.c as i16) == begin_pc as i64,
+        _ => false,
+    };
+    if !targets_begin {
+        return Err(ModuleVerificationError::InvalidLoopEndBackEdge {
+            func: func.name.clone(),
+            pc,
+            begin_pc,
+            end_pc,
+        });
+    }
+    Ok(())
 }
 
 fn instruction_metadata_invariant(
@@ -3095,28 +3340,12 @@ fn verify_instruction_contract(
         Opcode::LoadConst => verify_load_const_contract(func, module, pc, inst),
         Opcode::Copy => verify_copy_contract(func, pc, opcode, inst),
         Opcode::CopyN => verify_copy_n_contract(func, pc, opcode, inst),
-        Opcode::SlotGet => {
-            verify_slot_get_contract(ctx, index_check_facts, inst.a, inst.b, inst.c, 1)
+        Opcode::SlotGet | Opcode::SlotGetN => {
+            verify_slot_get_contract(ctx, index_check_facts, inst.a, inst.b, inst.c)
         }
-        Opcode::SlotGetN => verify_slot_get_contract(
-            ctx,
-            index_check_facts,
-            inst.a,
-            inst.b,
-            inst.c,
-            inst.flags as u16,
-        ),
-        Opcode::SlotSet => {
-            verify_slot_set_contract(ctx, index_check_facts, inst.a, inst.b, inst.c, 1)
+        Opcode::SlotSet | Opcode::SlotSetN => {
+            verify_slot_set_contract(ctx, index_check_facts, inst.a, inst.b, inst.c)
         }
-        Opcode::SlotSetN => verify_slot_set_contract(
-            ctx,
-            index_check_facts,
-            inst.a,
-            inst.b,
-            inst.c,
-            inst.flags as u16,
-        ),
         Opcode::GlobalGet => {
             verify_global_get_contract(func, module, pc, opcode, inst.b, inst.a, 1)
         }
@@ -3130,9 +3359,8 @@ fn verify_instruction_contract(
             verify_global_set_contract(func, module, pc, opcode, inst.a, inst.b, inst.flags as u16)
         }
         Opcode::PtrNew => verify_ptr_new_contract(func, module, constant_facts, pc, opcode, inst),
-        Opcode::PtrGet => verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, 1),
-        Opcode::PtrGetN => {
-            verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, inst.flags as u16)
+        Opcode::PtrGet | Opcode::PtrGetN => {
+            verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, inst.flags)
         }
         Opcode::PtrSet => verify_ptr_set_contract(func, pc, opcode, inst.a, inst.c, inst.flags),
         Opcode::PtrSetN => verify_ptr_set_n_contract(func, pc, opcode, inst),
@@ -3471,30 +3699,11 @@ fn verify_instruction_contract(
             verify_slice_append_contract(func, module, constant_facts, pc, opcode, inst)
         }
         Opcode::MapNew => verify_map_new_contract(func, module, constant_facts, pc, opcode, inst),
-        Opcode::MapGet => verify_map_get_contract(
-            func,
-            container_layout_facts,
-            constant_facts,
-            pc,
-            opcode,
-            inst,
-        ),
-        Opcode::MapSet => verify_map_set_contract(
-            func,
-            container_layout_facts,
-            constant_facts,
-            pc,
-            opcode,
-            inst,
-        ),
-        Opcode::MapDelete => verify_map_delete_contract(
-            func,
-            container_layout_facts,
-            constant_facts,
-            pc,
-            opcode,
-            inst,
-        ),
+        Opcode::MapGet => verify_map_get_contract(func, container_layout_facts, pc, opcode, inst),
+        Opcode::MapSet => verify_map_set_contract(func, container_layout_facts, pc, opcode, inst),
+        Opcode::MapDelete => {
+            verify_map_delete_contract(func, container_layout_facts, pc, opcode, inst)
+        }
         Opcode::MapLen => {
             verify_layout(
                 func,
@@ -3731,25 +3940,13 @@ fn verify_hint(
     match inst.flags {
         HINT_NOP => Ok(()),
         HINT_LOOP => {
-            let loop_flags = (inst.a & 0x0F) as u8;
-            const ALLOWED_LOOP_FLAGS: u8 =
-                LOOP_FLAG_HAS_DEFER | LOOP_FLAG_HAS_LABELED_BREAK | LOOP_FLAG_HAS_LABELED_CONTINUE;
-            if loop_flags & !ALLOWED_LOOP_FLAGS != 0 {
+            if inst.a != 0 {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
                     Opcode::Hint,
-                    format!("unsupported HINT_LOOP flags 0x{loop_flags:02x}"),
+                    format!("Hint loop reserved operand a must be zero, got {}", inst.a),
                 ));
-            }
-            let encoded_end_offset = ((inst.a >> 8) & 0xFF) as usize;
-            if encoded_end_offset > 0 {
-                verify_jump_target_contract(
-                    func,
-                    pc,
-                    Opcode::Hint,
-                    (pc + encoded_end_offset) as i64,
-                )?;
             }
             let exit_pc = inst.imm32_unsigned() as usize;
             if exit_pc != 0 && exit_pc >= func.code.len() {
@@ -3812,39 +4009,53 @@ struct ConstantFactAnalysis {
 }
 
 impl ConstantFactAnalysis {
-    fn analyze(func: &FunctionDef, module: &Module) -> Self {
-        let slots = tracked_constant_slots(func, module);
+    fn analyze(
+        func: &FunctionDef,
+        module: &Module,
+        cfg: &FunctionCfg,
+        dependencies: &FactDependencyGraph,
+        resources: &mut VerifierResources,
+    ) -> Result<Self, ModuleVerificationError> {
+        let slots = tracked_constant_slots(func, dependencies, resources)?;
         if slots.is_empty() || func.code.is_empty() {
-            return Self {
+            return Ok(Self {
                 slots,
-                before: vec![None; func.code.len()],
-            };
+                before: try_none_vec(func, func.code.len(), "constant fact states")?,
+            });
         }
 
-        let mut before = vec![None; func.code.len()];
-        before[0] = Some(vec![ConstantFact::Unknown; slots.len()]);
-        let mut worklist = vec![0usize];
+        resources.charge_bytes::<ConstantFact>(
+            func,
+            func.code.len().saturating_mul(slots.len()),
+            "constant fact matrix",
+        )?;
+        let mut before = try_none_vec(func, func.code.len(), "constant fact states")?;
+        before[0] = Some(try_filled_vec(
+            func,
+            slots.len(),
+            ConstantFact::Unknown,
+            "constant entry facts",
+        )?);
+        let mut worklist = try_filled_vec(func, 1, 0usize, "constant fact worklist")?;
 
         while let Some(pc) = worklist.pop() {
+            resources.charge_work(func, slots.len(), "constant fact propagation")?;
             let Some(mut out) = before[pc].clone() else {
                 continue;
             };
             apply_constant_fact_transfer(func, module, pc, &slots, &mut out);
-            for succ in instruction_successors(func, pc) {
-                if succ >= func.code.len() {
-                    continue;
-                }
-                if merge_constant_state(&mut before[succ], &out) {
+            for succ in cfg.successors(pc) {
+                if merge_constant_state(func, &mut before[succ], &out)? {
                     worklist.push(succ);
                 }
             }
         }
 
-        Self { slots, before }
+        Ok(Self { slots, before })
     }
 
     fn fact_for_slot(&self, pc: usize, slot: u16) -> Option<ConstantFact> {
-        let idx = self.slots.iter().position(|candidate| *candidate == slot)?;
+        let idx = self.slots.binary_search(&slot).ok()?;
         self.before
             .get(pc)
             .and_then(|state| state.as_ref())
@@ -3869,39 +4080,54 @@ struct IndexCheckAnalysis {
 }
 
 impl IndexCheckAnalysis {
-    fn analyze(func: &FunctionDef, module: &Module, constant_facts: &ConstantFactAnalysis) -> Self {
-        let slots = tracked_index_check_slots(func, module);
+    fn analyze(
+        func: &FunctionDef,
+        module: &Module,
+        cfg: &FunctionCfg,
+        dependencies: &FactDependencyGraph,
+        constant_facts: &ConstantFactAnalysis,
+        resources: &mut VerifierResources,
+    ) -> Result<Self, ModuleVerificationError> {
+        let slots = tracked_index_check_slots(func, dependencies, resources)?;
         if slots.is_empty() || func.code.is_empty() {
-            return Self {
+            return Ok(Self {
                 slots,
-                before: vec![None; func.code.len()],
-            };
+                before: try_none_vec(func, func.code.len(), "index fact states")?,
+            });
         }
 
-        let mut before = vec![None; func.code.len()];
-        before[0] = Some(vec![IndexCheckFact::Unknown; slots.len()]);
-        let mut worklist = vec![0usize];
+        resources.charge_bytes::<IndexCheckFact>(
+            func,
+            func.code.len().saturating_mul(slots.len()),
+            "index fact matrix",
+        )?;
+        let mut before = try_none_vec(func, func.code.len(), "index fact states")?;
+        before[0] = Some(try_filled_vec(
+            func,
+            slots.len(),
+            IndexCheckFact::Unknown,
+            "index entry facts",
+        )?);
+        let mut worklist = try_filled_vec(func, 1, 0usize, "index fact worklist")?;
 
         while let Some(pc) = worklist.pop() {
+            resources.charge_work(func, slots.len(), "index fact propagation")?;
             let Some(mut out) = before[pc].clone() else {
                 continue;
             };
             apply_index_check_transfer(func, module, constant_facts, pc, &slots, &mut out);
-            for succ in instruction_successors(func, pc) {
-                if succ >= func.code.len() {
-                    continue;
-                }
-                if merge_index_check_state(&mut before[succ], &out) {
+            for succ in cfg.successors(pc) {
+                if merge_index_check_state(func, &mut before[succ], &out)? {
                     worklist.push(succ);
                 }
             }
         }
 
-        Self { slots, before }
+        Ok(Self { slots, before })
     }
 
     fn fact_for_slot(&self, pc: usize, slot: u16) -> Option<IndexCheckFact> {
-        let idx = self.slots.iter().position(|candidate| *candidate == slot)?;
+        let idx = self.slots.binary_search(&slot).ok()?;
         self.before
             .get(pc)
             .and_then(|state| state.as_ref())
@@ -3914,15 +4140,15 @@ enum ContainerLayoutFact {
     Unknown,
     Conflict,
     Map {
-        key_layout: Vec<SlotType>,
-        val_layout: Vec<SlotType>,
+        key_layout: Arc<[SlotType]>,
+        val_layout: Arc<[SlotType]>,
     },
     MapIter {
-        key_layout: Vec<SlotType>,
-        val_layout: Vec<SlotType>,
+        key_layout: Arc<[SlotType]>,
+        val_layout: Arc<[SlotType]>,
     },
     Queue {
-        elem_layout: Vec<SlotType>,
+        elem_layout: Arc<[SlotType]>,
     },
 }
 
@@ -3932,39 +4158,49 @@ struct ContainerLayoutAnalysis {
 }
 
 impl ContainerLayoutAnalysis {
-    fn analyze(func: &FunctionDef, module: &Module) -> Self {
-        let slots = tracked_container_slots(func, module);
+    fn analyze(
+        func: &FunctionDef,
+        module: &Module,
+        cfg: &FunctionCfg,
+        dependencies: &FactDependencyGraph,
+        resources: &mut VerifierResources,
+    ) -> Result<Self, ModuleVerificationError> {
+        let slots = tracked_container_slots(func, dependencies, resources)?;
         if slots.is_empty() || func.code.is_empty() {
-            return Self {
+            return Ok(Self {
                 slots,
-                before: vec![None; func.code.len()],
-            };
+                before: try_none_vec(func, func.code.len(), "container fact states")?,
+            });
         }
 
-        let mut before = vec![None; func.code.len()];
-        before[0] = Some(initial_container_state(func, module, &slots));
-        let mut worklist = vec![0usize];
+        resources.charge_bytes::<ContainerLayoutFact>(
+            func,
+            func.code.len().saturating_mul(slots.len()),
+            "container fact matrix",
+        )?;
+        let mut before = try_none_vec(func, func.code.len(), "container fact states")?;
+        before[0] = Some(initial_container_state(func, module, &slots, resources)?);
+        let instruction_facts = container_instruction_facts(func, resources)?;
+        let mut worklist = try_filled_vec(func, 1, 0usize, "container fact worklist")?;
 
         while let Some(pc) = worklist.pop() {
+            resources.charge_work(func, slots.len(), "container fact propagation")?;
             let Some(mut out) = before[pc].clone() else {
                 continue;
             };
-            apply_container_layout_transfer(func, module, pc, &slots, &mut out);
-            for succ in instruction_successors(func, pc) {
-                if succ >= func.code.len() {
-                    continue;
-                }
-                if merge_container_state(&mut before[succ], &out) {
+            apply_container_layout_transfer(func, module, pc, &slots, &instruction_facts, &mut out);
+            for succ in cfg.successors(pc) {
+                if merge_container_state(func, &mut before[succ], &out)? {
                     worklist.push(succ);
                 }
             }
         }
 
-        Self { slots, before }
+        Ok(Self { slots, before })
     }
 
     fn fact_for_slot(&self, pc: usize, slot: u16) -> Option<&ContainerLayoutFact> {
-        let idx = self.slots.iter().position(|candidate| *candidate == slot)?;
+        let idx = self.slots.binary_search(&slot).ok()?;
         self.before
             .get(pc)
             .and_then(|state| state.as_ref())
@@ -3972,82 +4208,182 @@ impl ContainerLayoutAnalysis {
     }
 }
 
-fn tracked_container_slots(func: &FunctionDef, module: &Module) -> Vec<u16> {
-    let mut slots = Vec::new();
-    for inst in func.code.iter().copied() {
-        match inst.opcode() {
-            Opcode::MapNew => push_unique_slot(&mut slots, inst.a),
-            Opcode::MapGet => push_unique_slot(&mut slots, inst.b),
-            Opcode::MapSet | Opcode::MapDelete => push_unique_slot(&mut slots, inst.a),
-            Opcode::MapIterInit => {
-                push_unique_slot(&mut slots, inst.a);
-                push_unique_slot(&mut slots, inst.b);
-            }
-            Opcode::MapIterNext => push_unique_slot(&mut slots, inst.b),
-            Opcode::MapLen => push_unique_slot(&mut slots, inst.b),
-            Opcode::QueueNew => push_unique_slot(&mut slots, inst.a),
-            Opcode::QueueSend | Opcode::QueueClose | Opcode::SelectSend => {
-                push_unique_slot(&mut slots, inst.a);
-            }
-            Opcode::QueueRecv | Opcode::SelectRecv => push_unique_slot(&mut slots, inst.b),
-            Opcode::QueueLen | Opcode::QueueCap => push_unique_slot(&mut slots, inst.b),
-            _ => {}
-        }
-    }
-    loop {
-        let snapshot = slots.clone();
-        let mut changed = false;
-        for (pc, inst) in func.code.iter().copied().enumerate() {
-            for dependency in
-                container_fact_dependencies_for_tracked_write(func, module, pc, inst, &snapshot)
-            {
-                let len = slots.len();
-                push_unique_slot(&mut slots, dependency);
-                changed |= slots.len() != len;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    slots
+const CONSTANT_DEPENDENCY: u8 = 1 << 0;
+const INDEX_DEPENDENCY: u8 = 1 << 1;
+const CONTAINER_DEPENDENCY: u8 = 1 << 2;
+const COPY_DEPENDENCIES: u8 = CONSTANT_DEPENDENCY | INDEX_DEPENDENCY | CONTAINER_DEPENDENCY;
+
+#[derive(Clone, Copy)]
+struct FactDependency {
+    source: u16,
+    kinds: u8,
 }
 
-fn container_fact_dependencies_for_tracked_write(
-    func: &FunctionDef,
-    module: &Module,
-    pc: usize,
-    inst: Instruction,
-    tracked_slots: &[u16],
-) -> Vec<u16> {
-    let mut dependencies = Vec::new();
-    for slot in tracked_slots.iter().copied() {
-        if !instruction_writes_slot(Some(module), func, pc, inst, slot) {
-            continue;
-        }
-        match inst.opcode() {
-            Opcode::Copy if inst.a == slot => push_unique_slot(&mut dependencies, inst.b),
-            Opcode::CopyN if slot_in_range(slot, inst.a, inst.c as usize) => {
-                let offset = slot.wrapping_sub(inst.a);
-                if let Some(source) = inst.b.checked_add(offset) {
-                    push_unique_slot(&mut dependencies, source);
+struct FactDependencyGraph {
+    by_destination: BTreeMap<u16, Vec<FactDependency>>,
+}
+
+impl FactDependencyGraph {
+    fn build(
+        func: &FunctionDef,
+        resources: &mut VerifierResources,
+    ) -> Result<Self, ModuleVerificationError> {
+        let mut graph = Self {
+            by_destination: BTreeMap::new(),
+        };
+        for inst in func.code.iter().copied() {
+            match inst.opcode() {
+                Opcode::Copy => {
+                    graph.push(func, inst.a, inst.b, COPY_DEPENDENCIES, resources)?;
                 }
+                Opcode::CopyN => {
+                    resources.charge_work(
+                        func,
+                        inst.copy_n_count() as usize,
+                        "fact dependency graph",
+                    )?;
+                    for offset in 0..inst.copy_n_count() {
+                        let (Some(destination), Some(source)) =
+                            (inst.a.checked_add(offset), inst.b.checked_add(offset))
+                        else {
+                            break;
+                        };
+                        graph.push(func, destination, source, COPY_DEPENDENCIES, resources)?;
+                    }
+                }
+                Opcode::Shl | Opcode::Or => {
+                    graph.push(func, inst.a, inst.b, CONSTANT_DEPENDENCY, resources)?;
+                    graph.push(func, inst.a, inst.c, CONSTANT_DEPENDENCY, resources)?;
+                }
+                Opcode::MapIterInit => {
+                    graph.push(func, inst.a, inst.b, CONTAINER_DEPENDENCY, resources)?;
+                }
+                _ => {}
             }
-            Opcode::MapIterInit if inst.a == slot => push_unique_slot(&mut dependencies, inst.b),
+        }
+        Ok(graph)
+    }
+
+    fn push(
+        &mut self,
+        func: &FunctionDef,
+        destination: u16,
+        source: u16,
+        kinds: u8,
+        resources: &mut VerifierResources,
+    ) -> Result<(), ModuleVerificationError> {
+        if destination >= func.local_slots || source >= func.local_slots {
+            return Ok(());
+        }
+        resources.charge_bytes::<FactDependency>(func, 1, "fact dependency graph")?;
+        let edges = self.by_destination.entry(destination).or_default();
+        edges.try_reserve(1).map_err(|_| {
+            verifier_resource_limit(
+                func,
+                "fact dependency graph",
+                size_of::<FactDependency>(),
+                MAX_VERIFIER_DERIVED_BYTES,
+            )
+        })?;
+        edges.push(FactDependency { source, kinds });
+        Ok(())
+    }
+
+    fn expand(
+        &self,
+        func: &FunctionDef,
+        seeds: impl IntoIterator<Item = u16>,
+        kind: u8,
+        resources: &mut VerifierResources,
+    ) -> Result<Vec<u16>, ModuleVerificationError> {
+        let local_slots = func.local_slots as usize;
+        resources.charge_bytes::<bool>(func, local_slots, "tracked fact slots")?;
+        resources.charge_bytes::<u16>(func, local_slots, "tracked fact worklist")?;
+        let mut marked = try_filled_vec(func, local_slots, false, "tracked fact slots")?;
+        let mut worklist = Vec::new();
+        worklist
+            .try_reserve(local_slots.min(256))
+            .map_err(|_| verifier_resource_limit(func, "tracked fact worklist", local_slots, 0))?;
+        for slot in seeds {
+            let Some(mark) = marked.get_mut(slot as usize) else {
+                continue;
+            };
+            if !*mark {
+                *mark = true;
+                worklist.push(slot);
+            }
+        }
+        while let Some(destination) = worklist.pop() {
+            let Some(edges) = self.by_destination.get(&destination) else {
+                continue;
+            };
+            resources.charge_work(func, edges.len(), "tracked fact closure")?;
+            for edge in edges {
+                if edge.kinds & kind == 0 || marked[edge.source as usize] {
+                    continue;
+                }
+                marked[edge.source as usize] = true;
+                worklist.push(edge.source);
+            }
+        }
+        let tracked_count = marked.iter().filter(|marked| **marked).count();
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(tracked_count)
+            .map_err(|_| verifier_resource_limit(func, "tracked fact result", tracked_count, 0))?;
+        slots.extend(
+            marked
+                .into_iter()
+                .enumerate()
+                .filter_map(|(slot, marked)| marked.then_some(slot as u16)),
+        );
+        Ok(slots)
+    }
+}
+
+fn tracked_container_slots(
+    func: &FunctionDef,
+    dependencies: &FactDependencyGraph,
+    resources: &mut VerifierResources,
+) -> Result<Vec<u16>, ModuleVerificationError> {
+    let mut seeds = Vec::new();
+    for inst in func.code.iter().copied() {
+        match inst.opcode() {
+            Opcode::MapNew => seeds.push(inst.a),
+            Opcode::MapGet => seeds.push(inst.b),
+            Opcode::MapSet | Opcode::MapDelete => seeds.push(inst.a),
+            Opcode::MapIterInit => {
+                seeds.push(inst.a);
+                seeds.push(inst.b);
+            }
+            Opcode::MapIterNext => seeds.push(inst.b),
+            Opcode::MapLen => seeds.push(inst.b),
+            Opcode::QueueNew => seeds.push(inst.a),
+            Opcode::QueueSend | Opcode::QueueClose | Opcode::SelectSend => {
+                seeds.push(inst.a);
+            }
+            Opcode::QueueRecv | Opcode::SelectRecv => seeds.push(inst.b),
+            Opcode::QueueLen | Opcode::QueueCap => seeds.push(inst.b),
             _ => {}
         }
     }
-    dependencies
+    dependencies.expand(func, seeds, CONTAINER_DEPENDENCY, resources)
 }
 
 fn initial_container_state(
     func: &FunctionDef,
     module: &Module,
     slots: &[u16],
-) -> Vec<ContainerLayoutFact> {
-    let mut state = vec![ContainerLayoutFact::Unknown; slots.len()];
-    seed_param_container_layout_facts(func, module, slots, &mut state);
-    state
+    resources: &mut VerifierResources,
+) -> Result<Vec<ContainerLayoutFact>, ModuleVerificationError> {
+    let mut state = try_filled_vec(
+        func,
+        slots.len(),
+        ContainerLayoutFact::Unknown,
+        "container entry facts",
+    )?;
+    seed_param_container_layout_facts(func, module, slots, &mut state, resources)?;
+    Ok(state)
 }
 
 fn seed_param_container_layout_facts(
@@ -4055,20 +4391,21 @@ fn seed_param_container_layout_facts(
     module: &Module,
     slots: &[u16],
     state: &mut [ContainerLayoutFact],
-) {
+    resources: &mut VerifierResources,
+) -> Result<(), ModuleVerificationError> {
     if func.param_types.is_empty() {
-        return;
+        return Ok(());
     }
     let transfer_slots = func
         .param_types
         .iter()
         .try_fold(0u16, |acc, transfer| acc.checked_add(transfer.slots));
     let Some(transfer_slots) = transfer_slots else {
-        return;
+        return Ok(());
     };
     let implicit_param_slots = match func.recv_slots.checked_add(u16::from(func.is_closure)) {
         Some(slots) => slots,
-        None => return,
+        None => return Ok(()),
     };
     let start = if func
         .param_slots
@@ -4084,49 +4421,163 @@ fn seed_param_container_layout_facts(
     {
         u16::from(func.is_closure)
     } else {
-        return;
+        return Ok(());
     };
 
     let mut cursor = start;
     for transfer in &func.param_types {
-        if let Some(fact) = container_fact_for_transfer_type(module, transfer) {
-            if let Some(idx) = slots.iter().position(|slot| *slot == cursor) {
+        if let Some(fact) = container_fact_for_transfer_type(func, module, transfer, resources)? {
+            if let Ok(idx) = slots.binary_search(&cursor) {
                 state[idx] = fact;
             }
         }
         let Some(next) = cursor.checked_add(transfer.slots) else {
-            return;
+            return Ok(());
         };
         cursor = next;
     }
+    Ok(())
 }
 
 fn container_fact_for_transfer_type(
+    func: &FunctionDef,
     module: &Module,
     transfer: &TransferType,
-) -> Option<ContainerLayoutFact> {
+    resources: &mut VerifierResources,
+) -> Result<Option<ContainerLayoutFact>, ModuleVerificationError> {
     let value_rttid = ValueRttid::from_raw(transfer.rttid_raw);
-    match module.runtime_types.get(value_rttid.rttid() as usize)? {
-        RuntimeType::Map { key, val } => Some(ContainerLayoutFact::Map {
-            key_layout: module.slot_layout_for_value_rttid(*key)?,
-            val_layout: module.slot_layout_for_value_rttid(*val)?,
-        }),
-        RuntimeType::Chan { elem, .. } | RuntimeType::Port { elem, .. } => {
-            Some(ContainerLayoutFact::Queue {
-                elem_layout: module.slot_layout_for_value_rttid(*elem)?,
-            })
+    let Some(runtime_type) = module.runtime_types.get(value_rttid.rttid() as usize) else {
+        return Ok(None);
+    };
+    match runtime_type {
+        RuntimeType::Map { key, val } => {
+            let Some(key_layout) = module.slot_layout_for_value_rttid(*key) else {
+                return Ok(None);
+            };
+            let Some(val_layout) = module.slot_layout_for_value_rttid(*val) else {
+                return Ok(None);
+            };
+            Ok(Some(ContainerLayoutFact::Map {
+                key_layout: shared_container_layout(
+                    func,
+                    &key_layout,
+                    "parameter map key layout",
+                    resources,
+                )?,
+                val_layout: shared_container_layout(
+                    func,
+                    &val_layout,
+                    "parameter map value layout",
+                    resources,
+                )?,
+            }))
         }
-        _ => None,
+        RuntimeType::Chan { elem, .. } | RuntimeType::Port { elem, .. } => {
+            let Some(elem_layout) = module.slot_layout_for_value_rttid(*elem) else {
+                return Ok(None);
+            };
+            Ok(Some(ContainerLayoutFact::Queue {
+                elem_layout: shared_container_layout(
+                    func,
+                    &elem_layout,
+                    "parameter queue element layout",
+                    resources,
+                )?,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
+fn shared_container_layout(
+    func: &FunctionDef,
+    layout: &[SlotType],
+    resource: &'static str,
+    resources: &mut VerifierResources,
+) -> Result<Arc<[SlotType]>, ModuleVerificationError> {
+    resources.charge_bytes::<SlotType>(func, layout.len(), resource)?;
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(layout.len()).map_err(|_| {
+        verifier_resource_limit(
+            func,
+            resource,
+            layout.len().saturating_mul(size_of::<SlotType>()),
+            0,
+        )
+    })?;
+    owned.extend_from_slice(layout);
+    Ok(Arc::from(owned))
+}
+
+fn container_instruction_facts(
+    func: &FunctionDef,
+    resources: &mut VerifierResources,
+) -> Result<Vec<Option<ContainerLayoutFact>>, ModuleVerificationError> {
+    let mut facts = try_none_vec(func, func.code.len(), "container instruction facts")?;
+    for (pc, (inst, metadata)) in func
+        .code
+        .iter()
+        .zip(func.instruction_metadata.iter())
+        .enumerate()
+    {
+        facts[pc] = match (inst.opcode(), metadata) {
+            (
+                Opcode::MapNew,
+                InstructionMetadata::MapNew {
+                    key_layout,
+                    val_layout,
+                },
+            ) => Some({
+                Ok(ContainerLayoutFact::Map {
+                    key_layout: shared_container_layout(
+                        func,
+                        key_layout,
+                        "MapNew key layout fact",
+                        resources,
+                    )?,
+                    val_layout: shared_container_layout(
+                        func,
+                        val_layout,
+                        "MapNew value layout fact",
+                        resources,
+                    )?,
+                })
+            }),
+            (Opcode::QueueNew, InstructionMetadata::QueueLayout { elem_layout }) => Some({
+                Ok(ContainerLayoutFact::Queue {
+                    elem_layout: shared_container_layout(
+                        func,
+                        elem_layout,
+                        "QueueNew element layout fact",
+                        resources,
+                    )?,
+                })
+            }),
+            _ => None,
+        }
+        .transpose()?;
+    }
+    Ok(facts)
+}
+
 fn merge_container_state(
+    func: &FunctionDef,
     dst: &mut Option<Vec<ContainerLayoutFact>>,
     incoming: &[ContainerLayoutFact],
-) -> bool {
+) -> Result<bool, ModuleVerificationError> {
     let Some(current) = dst else {
-        *dst = Some(incoming.to_vec());
-        return true;
+        let mut state = Vec::new();
+        state.try_reserve_exact(incoming.len()).map_err(|_| {
+            verifier_resource_limit(
+                func,
+                "container fact state",
+                incoming.len(),
+                MAX_VERIFIER_DERIVED_BYTES,
+            )
+        })?;
+        state.extend_from_slice(incoming);
+        *dst = Some(state);
+        return Ok(true);
     };
 
     let mut changed = false;
@@ -4137,7 +4588,7 @@ fn merge_container_state(
             changed = true;
         }
     }
-    changed
+    Ok(changed)
 }
 
 fn merge_container_fact(
@@ -4161,6 +4612,7 @@ fn apply_container_layout_transfer(
     module: &Module,
     pc: usize,
     slots: &[u16],
+    instruction_facts: &[Option<ContainerLayoutFact>],
     state: &mut [ContainerLayoutFact],
 ) {
     let inst = func.code[pc];
@@ -4169,27 +4621,26 @@ fn apply_container_layout_transfer(
         if !instruction_writes_slot(Some(module), func, pc, inst, slot) {
             continue;
         }
-        state[idx] = container_fact_written_to_slot(func, pc, inst, slot, slots, &input);
+        state[idx] = container_fact_written_to_slot(
+            inst,
+            slot,
+            slots,
+            &input,
+            instruction_facts.get(pc).and_then(Option::as_ref),
+        );
     }
 }
 
 fn container_fact_written_to_slot(
-    func: &FunctionDef,
-    pc: usize,
     inst: Instruction,
     slot: u16,
     tracked_slots: &[u16],
     input: &[ContainerLayoutFact],
+    instruction_fact: Option<&ContainerLayoutFact>,
 ) -> ContainerLayoutFact {
     match inst.opcode() {
-        Opcode::MapNew if inst.a == slot => map_new_layout(func, pc, Opcode::MapNew)
-            .map(|(key_layout, val_layout)| ContainerLayoutFact::Map {
-                key_layout,
-                val_layout,
-            })
-            .unwrap_or(ContainerLayoutFact::Unknown),
-        Opcode::QueueNew if inst.a == slot => queue_elem_layout(func, pc, Opcode::QueueNew)
-            .map(|elem_layout| ContainerLayoutFact::Queue { elem_layout })
+        Opcode::MapNew | Opcode::QueueNew if inst.a == slot => instruction_fact
+            .cloned()
             .unwrap_or(ContainerLayoutFact::Unknown),
         Opcode::MapIterInit if inst.a == slot => {
             match fact_for_tracked_container_source(inst.b, tracked_slots, input) {
@@ -4245,205 +4696,164 @@ fn fact_for_tracked_container_source(
     input: &[ContainerLayoutFact],
 ) -> ContainerLayoutFact {
     tracked_slots
-        .iter()
-        .position(|slot| *slot == source)
+        .binary_search(&source)
+        .ok()
         .map(|idx| input[idx].clone())
         .unwrap_or(ContainerLayoutFact::Unknown)
 }
 
-fn tracked_constant_slots(func: &FunctionDef, module: &Module) -> Vec<u16> {
-    let mut slots = Vec::new();
-    for (pc, inst) in func.code.iter().copied().enumerate() {
-        if let Some(slot) = dynamic_elem_bytes_fact_slot(func, pc, inst) {
-            push_unique_slot(&mut slots, slot);
-        }
-        match inst.opcode() {
-            Opcode::MapNew => {
-                push_unique_slot(&mut slots, inst.b);
-                if let Some(key_rttid_slot) = inst.b.checked_add(1) {
-                    push_unique_slot(&mut slots, key_rttid_slot);
-                }
-            }
-            Opcode::ArrayNew | Opcode::SliceNew => push_unique_slot(&mut slots, inst.b),
-            Opcode::SliceAppend => push_unique_slot(&mut slots, inst.c),
-            Opcode::PtrNew => push_unique_slot(&mut slots, inst.b),
-            Opcode::QueueNew => push_unique_slot(&mut slots, inst.b),
-            Opcode::MapGet => push_unique_slot(&mut slots, inst.c),
-            Opcode::MapSet | Opcode::MapDelete => push_unique_slot(&mut slots, inst.b),
-            Opcode::IndexCheck => push_unique_slot(&mut slots, inst.b),
-            _ => {}
-        }
-    }
-    loop {
-        let snapshot = slots.clone();
-        let mut changed = false;
-        for (pc, inst) in func.code.iter().copied().enumerate() {
-            for dependency in
-                constant_fact_dependencies_for_tracked_write(func, module, pc, inst, &snapshot)
-            {
-                let len = slots.len();
-                push_unique_slot(&mut slots, dependency);
-                changed |= slots.len() != len;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    slots
-}
-
-fn constant_fact_dependencies_for_tracked_write(
+fn tracked_constant_slots(
     func: &FunctionDef,
-    module: &Module,
-    pc: usize,
-    inst: Instruction,
-    tracked_slots: &[u16],
-) -> Vec<u16> {
-    let mut dependencies = Vec::new();
-    for slot in tracked_slots.iter().copied() {
-        if !instruction_writes_slot(Some(module), func, pc, inst, slot) {
-            continue;
-        }
-        match inst.opcode() {
-            Opcode::Copy if inst.a == slot => push_unique_slot(&mut dependencies, inst.b),
-            Opcode::CopyN if slot_in_range(slot, inst.a, inst.c as usize) => {
-                let offset = slot.wrapping_sub(inst.a);
-                if let Some(source) = inst.b.checked_add(offset) {
-                    push_unique_slot(&mut dependencies, source);
-                }
-            }
-            Opcode::Shl | Opcode::Or if inst.a == slot => {
-                push_unique_slot(&mut dependencies, inst.b);
-                push_unique_slot(&mut dependencies, inst.c);
-            }
-            _ => {}
-        }
-    }
-    dependencies
-}
-
-fn push_unique_slot(slots: &mut Vec<u16>, slot: u16) {
-    if !slots.contains(&slot) {
-        slots.push(slot);
-    }
-}
-
-fn tracked_index_check_slots(func: &FunctionDef, module: &Module) -> Vec<u16> {
-    let mut slots = Vec::new();
+    dependencies: &FactDependencyGraph,
+    resources: &mut VerifierResources,
+) -> Result<Vec<u16>, ModuleVerificationError> {
+    let mut seeds = Vec::new();
     for inst in func.code.iter().copied() {
         match inst.opcode() {
-            Opcode::SlotGet | Opcode::SlotGetN => push_unique_slot(&mut slots, inst.c),
-            Opcode::SlotSet | Opcode::SlotSetN => push_unique_slot(&mut slots, inst.b),
-            _ => {}
-        }
-    }
-    loop {
-        let snapshot = slots.clone();
-        let mut changed = false;
-        for (pc, inst) in func.code.iter().copied().enumerate() {
-            for dependency in
-                index_check_dependencies_for_tracked_write(func, module, pc, inst, &snapshot)
-            {
-                let len = slots.len();
-                push_unique_slot(&mut slots, dependency);
-                changed |= slots.len() != len;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    slots
-}
-
-fn index_check_dependencies_for_tracked_write(
-    func: &FunctionDef,
-    module: &Module,
-    pc: usize,
-    inst: Instruction,
-    tracked_slots: &[u16],
-) -> Vec<u16> {
-    let mut dependencies = Vec::new();
-    for slot in tracked_slots.iter().copied() {
-        if !instruction_writes_slot(Some(module), func, pc, inst, slot) {
-            continue;
-        }
-        match inst.opcode() {
-            Opcode::Copy if inst.a == slot => push_unique_slot(&mut dependencies, inst.b),
-            Opcode::CopyN if slot_in_range(slot, inst.a, inst.c as usize) => {
-                let offset = slot.wrapping_sub(inst.a);
-                if let Some(source) = inst.b.checked_add(offset) {
-                    push_unique_slot(&mut dependencies, source);
+            Opcode::MapNew => {
+                seeds.push(inst.b);
+                if let Some(key_rttid_slot) = inst.b.checked_add(1) {
+                    seeds.push(key_rttid_slot);
                 }
             }
+            Opcode::ArrayNew | Opcode::SliceNew => seeds.push(inst.b),
+            Opcode::SliceAppend => seeds.push(inst.c),
+            Opcode::PtrNew => seeds.push(inst.b),
+            Opcode::QueueNew => seeds.push(inst.b),
+            Opcode::IndexCheck => seeds.push(inst.b),
             _ => {}
         }
     }
-    dependencies
+    dependencies.expand(func, seeds, CONSTANT_DEPENDENCY, resources)
 }
 
-fn dynamic_elem_bytes_fact_slot(func: &FunctionDef, pc: usize, inst: Instruction) -> Option<u16> {
-    if inst.flags != 0 {
-        return None;
+fn tracked_index_check_slots(
+    func: &FunctionDef,
+    dependencies: &FactDependencyGraph,
+    resources: &mut VerifierResources,
+) -> Result<Vec<u16>, ModuleVerificationError> {
+    let mut seeds = Vec::new();
+    for inst in func.code.iter().copied() {
+        match inst.opcode() {
+            Opcode::SlotGet | Opcode::SlotGetN => seeds.push(inst.c),
+            Opcode::SlotSet | Opcode::SlotSetN => seeds.push(inst.b),
+            _ => {}
+        }
     }
-    match inst.opcode() {
-        Opcode::ArrayNew => checked_slot_offset(func, pc, inst.c, 1, "ArrayNew elem bytes").ok(),
-        Opcode::SliceNew => checked_slot_offset(func, pc, inst.c, 2, "SliceNew elem bytes").ok(),
-        Opcode::ArrayGet | Opcode::SliceGet | Opcode::ArrayAddr | Opcode::SliceAddr => {
-            checked_slot_offset(func, pc, inst.c, 1, "indexed elem bytes").ok()
+    dependencies.expand(func, seeds, INDEX_DEPENDENCY, resources)
+}
+
+#[derive(Clone, Copy)]
+struct InstructionSuccessors {
+    pcs: [usize; 2],
+    len: u8,
+}
+
+impl InstructionSuccessors {
+    const fn new() -> Self {
+        Self {
+            pcs: [0; 2],
+            len: 0,
         }
-        Opcode::ArraySet | Opcode::SliceSet => {
-            checked_slot_offset(func, pc, inst.b, 1, "indexed elem bytes").ok()
+    }
+
+    fn push(&mut self, pc: usize) {
+        if !self.pcs[..self.len as usize].contains(&pc) {
+            self.pcs[self.len as usize] = pc;
+            self.len += 1;
         }
-        Opcode::SliceAppend => {
-            checked_slot_offset(func, pc, inst.c, 1, "SliceAppend elem bytes").ok()
-        }
-        _ => None,
+    }
+
+    fn as_slice(&self) -> &[usize] {
+        &self.pcs[..self.len as usize]
     }
 }
 
-fn instruction_successors(func: &FunctionDef, pc: usize) -> Vec<usize> {
-    let inst = func.code[pc];
-    let mut successors = Vec::with_capacity(2);
-    match inst.opcode() {
-        Opcode::Jump => {
-            push_valid_successor(func, &mut successors, jump_target_i64(pc, inst.imm32()));
-        }
-        Opcode::JumpIf | Opcode::JumpIfNot => {
-            push_fallthrough_successor(func, pc, &mut successors);
-            push_valid_successor(func, &mut successors, jump_target_i64(pc, inst.imm32()));
-        }
-        Opcode::ForLoop => {
-            push_fallthrough_successor(func, pc, &mut successors);
-            push_valid_successor(func, &mut successors, forloop_target_i64(pc, inst.c as i16));
-        }
-        Opcode::Return | Opcode::Panic => {}
-        _ => push_fallthrough_successor(func, pc, &mut successors),
-    }
-    successors
+struct FunctionCfg {
+    successors: Vec<InstructionSuccessors>,
 }
 
-fn push_fallthrough_successor(func: &FunctionDef, pc: usize, successors: &mut Vec<usize>) {
+impl FunctionCfg {
+    fn build(
+        func: &FunctionDef,
+        resources: &mut VerifierResources,
+    ) -> Result<Self, ModuleVerificationError> {
+        resources.charge_bytes::<InstructionSuccessors>(
+            func,
+            func.code.len(),
+            "control-flow graph",
+        )?;
+        resources.charge_work(func, func.code.len(), "control-flow graph")?;
+        let mut successors = try_filled_vec(
+            func,
+            func.code.len(),
+            InstructionSuccessors::new(),
+            "control-flow graph",
+        )?;
+        for (pc, inst) in func.code.iter().copied().enumerate() {
+            let entry = &mut successors[pc];
+            match inst.opcode() {
+                Opcode::Jump => {
+                    push_valid_successor(func, entry, jump_target_i64(pc, inst.imm32()));
+                }
+                Opcode::JumpIf | Opcode::JumpIfNot => {
+                    push_fallthrough_successor(func, pc, entry);
+                    push_valid_successor(func, entry, jump_target_i64(pc, inst.imm32()));
+                }
+                Opcode::ForLoop => {
+                    push_fallthrough_successor(func, pc, entry);
+                    push_valid_successor(func, entry, forloop_target_i64(pc, inst.c as i16));
+                }
+                Opcode::Return | Opcode::Panic => {}
+                _ => push_fallthrough_successor(func, pc, entry),
+            }
+        }
+        Ok(Self { successors })
+    }
+
+    fn successors(&self, pc: usize) -> impl Iterator<Item = usize> + '_ {
+        self.successors[pc].as_slice().iter().copied()
+    }
+}
+
+fn push_fallthrough_successor(
+    func: &FunctionDef,
+    pc: usize,
+    successors: &mut InstructionSuccessors,
+) {
     let next = pc + 1;
     if next < func.code.len() {
         successors.push(next);
     }
 }
 
-fn push_valid_successor(func: &FunctionDef, successors: &mut Vec<usize>, target: i64) {
+fn push_valid_successor(func: &FunctionDef, successors: &mut InstructionSuccessors, target: i64) {
     if target >= 0 {
         let target = target as usize;
-        if target < func.code.len() && !successors.contains(&target) {
+        if target < func.code.len() {
             successors.push(target);
         }
     }
 }
 
-fn merge_constant_state(dst: &mut Option<Vec<ConstantFact>>, incoming: &[ConstantFact]) -> bool {
+fn merge_constant_state(
+    func: &FunctionDef,
+    dst: &mut Option<Vec<ConstantFact>>,
+    incoming: &[ConstantFact],
+) -> Result<bool, ModuleVerificationError> {
     let Some(current) = dst else {
-        *dst = Some(incoming.to_vec());
-        return true;
+        let mut state = Vec::new();
+        state.try_reserve_exact(incoming.len()).map_err(|_| {
+            verifier_resource_limit(
+                func,
+                "constant fact state",
+                incoming.len(),
+                MAX_VERIFIER_DERIVED_BYTES,
+            )
+        })?;
+        state.extend_from_slice(incoming);
+        *dst = Some(state);
+        return Ok(true);
     };
 
     let mut changed = false;
@@ -4454,7 +4864,7 @@ fn merge_constant_state(dst: &mut Option<Vec<ConstantFact>>, incoming: &[Constan
             changed = true;
         }
     }
-    changed
+    Ok(changed)
 }
 
 fn merge_constant_fact(a: ConstantFact, b: ConstantFact) -> ConstantFact {
@@ -4557,19 +4967,30 @@ fn fact_for_tracked_source(
     input: &[ConstantFact],
 ) -> ConstantFact {
     tracked_slots
-        .iter()
-        .position(|slot| *slot == source)
+        .binary_search(&source)
+        .ok()
         .map(|idx| input[idx])
         .unwrap_or(ConstantFact::Unknown)
 }
 
 fn merge_index_check_state(
+    func: &FunctionDef,
     dst: &mut Option<Vec<IndexCheckFact>>,
     incoming: &[IndexCheckFact],
-) -> bool {
+) -> Result<bool, ModuleVerificationError> {
     let Some(current) = dst else {
-        *dst = Some(incoming.to_vec());
-        return true;
+        let mut state = Vec::new();
+        state.try_reserve_exact(incoming.len()).map_err(|_| {
+            verifier_resource_limit(
+                func,
+                "index fact state",
+                incoming.len(),
+                MAX_VERIFIER_DERIVED_BYTES,
+            )
+        })?;
+        state.extend_from_slice(incoming);
+        *dst = Some(state);
+        return Ok(true);
     };
 
     let mut changed = false;
@@ -4580,7 +5001,7 @@ fn merge_index_check_state(
             changed = true;
         }
     }
-    changed
+    Ok(changed)
 }
 
 fn merge_index_check_fact(a: IndexCheckFact, b: IndexCheckFact) -> IndexCheckFact {
@@ -4662,8 +5083,8 @@ fn index_check_slot_set_writes_slot(
 ) -> Option<bool> {
     let elem_slots = match inst.opcode() {
         Opcode::SlotSet => 1usize,
-        Opcode::SlotSetN => match func.jit_metadata.get(pc) {
-            Some(JitInstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
+        Opcode::SlotSetN => match func.instruction_metadata.get(pc) {
+            Some(InstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
             _ => inst.flags as usize,
         },
         _ => return None,
@@ -4704,8 +5125,8 @@ fn index_check_fact_for_tracked_source(
     input: &[IndexCheckFact],
 ) -> IndexCheckFact {
     tracked_slots
-        .iter()
-        .position(|slot| *slot == source)
+        .binary_search(&source)
+        .ok()
         .map(|idx| input[idx])
         .unwrap_or(IndexCheckFact::Unknown)
 }
@@ -4717,158 +5138,32 @@ fn instruction_writes_slot(
     inst: Instruction,
     slot: u16,
 ) -> bool {
-    let opcode = inst.opcode();
-    match opcode {
-        Opcode::Hint
-        | Opcode::GlobalSet
-        | Opcode::GlobalSetN
-        | Opcode::PtrSet
-        | Opcode::PtrSetN
-        | Opcode::Jump
-        | Opcode::JumpIf
-        | Opcode::JumpIfNot
-        | Opcode::Return
-        | Opcode::ArraySet
-        | Opcode::SliceSet
-        | Opcode::MapSet
-        | Opcode::MapDelete
-        | Opcode::QueueSend
-        | Opcode::QueueClose
-        | Opcode::SelectBegin
-        | Opcode::SelectSend
-        | Opcode::GoStart
-        | Opcode::DeferPush
-        | Opcode::ErrDeferPush
-        | Opcode::Panic
-        | Opcode::IndexCheck
-        | Opcode::GoIsland
-        | Opcode::Invalid => false,
-        Opcode::SlotSet => slot >= inst.a,
+    match inst.opcode() {
+        Opcode::SlotSet => return slot >= inst.a,
         Opcode::SlotSetN => {
-            let elem_slots = match func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
-                _ => inst.flags as usize,
-            };
-            elem_slots != 0 && slot >= inst.a
+            let has_elements = matches!(
+                func.instruction_metadata.get(pc),
+                Some(InstructionMetadata::SlotLayout { elem_layout }) if !elem_layout.is_empty()
+            );
+            return has_elements && slot >= inst.a;
         }
-        Opcode::CopyN => slot_in_range(slot, inst.a, inst.c as usize),
-        Opcode::SlotGetN => {
-            let elem_slots = match func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
-                _ => inst.flags as usize,
-            };
-            slot_in_range(slot, inst.a, elem_slots)
-        }
-        Opcode::GlobalGetN | Opcode::PtrGetN => slot_in_range(slot, inst.a, inst.flags as usize),
-        Opcode::Call => {
-            let Some(callee) =
-                module.and_then(|module| module.functions.get(inst.static_call_func_id() as usize))
-            else {
-                let Some(ret_start) = packed_call_ret_start_option(inst) else {
-                    return false;
-                };
-                return slot_in_range(slot, ret_start, inst.packed_ret_slots() as usize);
-            };
-            let Some(ret_start) = inst.b.checked_add(callee.param_slots) else {
-                return false;
-            };
-            slot_in_range(slot, ret_start, callee.ret_slots as usize)
-        }
-        Opcode::CallClosure | Opcode::CallIface => {
-            let Some((arg_slots, ret_slots)) =
-                func.jit_metadata
-                    .get(pc)
-                    .and_then(|metadata| match metadata {
-                        JitInstructionMetadata::CallLayout {
-                            arg_layout,
-                            ret_layout,
-                        }
-                        | JitInstructionMetadata::CallIfaceLayout {
-                            arg_layout,
-                            ret_layout,
-                            ..
-                        } => Some((arg_layout.len(), ret_layout.len())),
-                        _ => None,
-                    })
-            else {
-                return false;
-            };
-            let Ok(arg_slots) = u16::try_from(arg_slots) else {
-                return false;
-            };
-            let Some(ret_start) = inst.b.checked_add(arg_slots) else {
-                return false;
-            };
-            slot_in_range(slot, ret_start, ret_slots)
-        }
-        Opcode::CallExtern => {
-            let count = match &func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::CallExternLayout { ret_layout, .. }) => {
-                    ret_layout.len()
-                }
-                _ => 1,
-            };
-            slot_in_range(slot, inst.a, count)
-        }
-        Opcode::ArrayGet | Opcode::SliceGet => {
-            let count = elem_metadata_for_instruction(func, pc, opcode)
-                .map(|(_, _, layout)| layout.len())
-                .unwrap_or(1);
-            slot_in_range(slot, inst.a, count)
-        }
-        Opcode::MapGet => {
-            let count = match &func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::MapGet {
-                    val_layout, has_ok, ..
-                }) => val_layout.len() + usize::from(*has_ok),
-                _ => 1,
-            };
-            slot_in_range(slot, inst.a, count)
-        }
-        Opcode::MapIterInit => slot_in_range(slot, inst.a, MAP_ITER_SLOTS),
-        Opcode::MapIterNext => {
-            let key_value_slots = match func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::MapIterNext {
-                    key_layout,
-                    val_layout,
-                }) => key_layout.len() + val_layout.len(),
-                _ => usize::from(inst.map_iter_key_slots() + inst.map_iter_val_slots()),
-            };
-            slot_in_range(slot, inst.b, MAP_ITER_SLOTS)
-                || slot_in_range(slot, inst.a, key_value_slots)
-                || slot == inst.c
-        }
-        Opcode::QueueRecv => {
-            let elem_slots = match func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::QueueLayout { elem_layout }) => elem_layout.len(),
-                _ => usize::from(inst.recv_legacy_elem_slots()),
-            };
-            slot_in_range(slot, inst.a, elem_slots + usize::from(inst.recv_has_ok()))
-        }
-        Opcode::SelectRecv => {
-            let elem_slots = match func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::QueueLayout { elem_layout }) => elem_layout.len(),
-                _ => usize::from(inst.recv_legacy_elem_slots()),
-            };
-            slot_in_range(slot, inst.a, elem_slots + usize::from(inst.recv_has_ok()))
-        }
-        Opcode::IfaceAssign | Opcode::Recover => slot_in_range(slot, inst.a, 2),
-        Opcode::IfaceAssert => {
-            let has_ok = ((inst.flags >> 2) & 0x01) != 0;
-            // Keep this effect calculation on the same logical-slot ABI as
-            // contract verification. Zero-sized concrete assertions write no
-            // value slots; a comma-ok assertion writes its bool at `a`.
-            let dst_slots = match func.jit_metadata.get(pc) {
-                Some(JitInstructionMetadata::IfaceAssertLayout { result_layout, .. }) => {
-                    result_layout.len()
-                }
-                _ => 0,
-            };
-            slot_in_range(slot, inst.a, dst_slots + usize::from(has_ok))
-        }
-        Opcode::StrDecodeRune => slot_in_range(slot, inst.a, 2),
-        _ => slot == inst.a,
+        _ => {}
     }
+
+    let (externs, functions) = module
+        .map(|module| (module.externs.as_slice(), module.functions.as_slice()))
+        .unwrap_or((&[], &[]));
+    let mut writes = false;
+    let result = crate::instruction_effects::visit_instruction_register_writes(
+        &inst,
+        func.instruction_metadata.get(pc),
+        externs,
+        functions,
+        |start, count| {
+            writes |= crate::instruction_effects::register_range_contains(slot, start, count);
+        },
+    );
+    writes || result.is_err()
 }
 
 fn slot_in_range(slot: u16, start: u16, count: usize) -> bool {
@@ -4877,60 +5172,6 @@ fn slot_in_range(slot: u16, start: u16, count: usize) -> bool {
     }
     let offset = usize::from(slot - start);
     offset < count
-}
-
-fn packed_call_ret_start_option(inst: Instruction) -> Option<u16> {
-    inst.b.checked_add(inst.packed_arg_slots())
-}
-
-fn verify_u8_count_mirror(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    encoded: u8,
-    actual: usize,
-    label: &'static str,
-) -> Result<(), ModuleVerificationError> {
-    let expected = u8::try_from(actual).unwrap_or_default();
-    if encoded == expected {
-        Ok(())
-    } else {
-        Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "{label} mirror {encoded} does not match metadata count {actual} (expected mirror {expected})"
-            ),
-        ))
-    }
-}
-
-fn verify_dynamic_call_shape_mirror(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    inst: Instruction,
-    arg_slots: usize,
-    ret_slots: usize,
-) -> Result<(), ModuleVerificationError> {
-    let expected = match (u8::try_from(arg_slots), u8::try_from(ret_slots)) {
-        (Ok(args), Ok(rets)) => (u16::from(args) << 8) | u16::from(rets),
-        _ => 0,
-    };
-    if inst.c == expected {
-        Ok(())
-    } else {
-        Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "dynamic call packed shape 0x{:04x} does not match metadata args={} returns={} (expected mirror 0x{expected:04x})",
-                inst.c, arg_slots, ret_slots
-            ),
-        ))
-    }
 }
 
 fn checked_metadata_call_ret_start(
@@ -5436,6 +5677,45 @@ fn call_shape_mismatch(
     }
 }
 
+fn verify_reserved_zero(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    value: u64,
+    field: &'static str,
+) -> Result<(), ModuleVerificationError> {
+    if value == 0 {
+        Ok(())
+    } else {
+        Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!("reserved {field} must be zero, got {value}"),
+        ))
+    }
+}
+
+fn verify_allowed_flags(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    flags: u8,
+    allowed: u8,
+) -> Result<(), ModuleVerificationError> {
+    let unsupported = flags & !allowed;
+    if unsupported == 0 {
+        Ok(())
+    } else {
+        Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!("unsupported flags 0x{unsupported:02x}"),
+        ))
+    }
+}
+
 fn missing_layout(
     func: &FunctionDef,
     pc: usize,
@@ -5455,35 +5735,17 @@ fn decode_metadata_layout<T>(
     pc: usize,
     opcode: Opcode,
     layout: &'static str,
-    decode: impl FnOnce(&JitInstructionMetadata) -> Option<T>,
+    decode: impl FnOnce(&InstructionMetadata) -> Option<T>,
 ) -> Result<T, ModuleVerificationError> {
-    func.jit_metadata
+    func.instruction_metadata
         .get(pc)
         .and_then(decode)
         .ok_or_else(|| missing_layout(func, pc, opcode, layout))
 }
 
-fn elem_layout_from_flags(flags: u8) -> (usize, Vec<SlotType>, bool) {
-    let (bytes, sign) = match flags {
-        0 => (64usize, false),
-        0x81 => (1, true),
-        0x82 => (2, true),
-        0x84 => (4, true),
-        0x44 => (4, false),
-        f => (f as usize, false),
-    };
-    let slot = if (flags & crate::ELEM_FLAG_FLOAT_BIT) != 0 {
-        SlotType::Float
-    } else {
-        SlotType::Value
-    };
-    let slots = bytes.div_ceil(8);
-    (bytes, vec![slot; slots], sign)
-}
-
-fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<Vec<SlotType>> {
+fn elem_layout_from_instruction(metadata: &InstructionMetadata) -> Option<Vec<SlotType>> {
     match metadata {
-        JitInstructionMetadata::ElemLayout {
+        InstructionMetadata::ElemLayout {
             elem_bytes,
             slot_layout,
             ..
@@ -5498,140 +5760,33 @@ fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<Vec
     }
 }
 
-fn elem_runtime_layout_from_instruction(
-    metadata: &JitInstructionMetadata,
-) -> Option<Vec<SlotType>> {
+fn elem_runtime_layout_from_instruction(metadata: &InstructionMetadata) -> Option<Vec<SlotType>> {
     match metadata {
-        JitInstructionMetadata::ElemLayout { slot_layout, .. } => Some(slot_layout.clone()),
+        InstructionMetadata::ElemLayout { slot_layout, .. } => Some(slot_layout.clone()),
         _ => None,
     }
-}
-
-fn elem_metadata_for_instruction(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-) -> Result<(u32, bool, Vec<SlotType>), ModuleVerificationError> {
-    decode_metadata_layout(func, pc, opcode, "ElemLayout", |metadata| match metadata {
-        JitInstructionMetadata::ElemLayout {
-            elem_bytes,
-            needs_sign_extend,
-            slot_layout,
-        } => Some((*elem_bytes, *needs_sign_extend, slot_layout.clone())),
-        _ => None,
-    })
-}
-
-fn elem_metadata_matches_flags(metadata: &JitInstructionMetadata, flags: u8) -> bool {
-    if flags == 0 {
-        return true;
-    }
-    let JitInstructionMetadata::ElemLayout {
-        elem_bytes,
-        needs_sign_extend,
-        ..
-    } = metadata
-    else {
-        return true;
-    };
-    let (flag_bytes, _, flag_needs_sign_extend) = elem_layout_from_flags(flags);
-    *elem_bytes as usize == flag_bytes && *needs_sign_extend == flag_needs_sign_extend
 }
 
 fn elem_layout_for_indexed(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
-    flags: u8,
 ) -> Result<Vec<SlotType>, ModuleVerificationError> {
-    if let Some(metadata) = func.jit_metadata.get(pc) {
-        if let Some(layout) = elem_layout_from_instruction(metadata) {
-            if !elem_metadata_matches_flags(metadata, flags) {
-                return Err(instruction_metadata_invariant(
-                    func,
-                    pc,
-                    format!("ElemLayout is inconsistent with {opcode:?} flags {flags:#04x}"),
-                ));
-            }
-            return Ok(layout);
-        }
-    }
-    if flags == 0 {
-        return decode_metadata_layout(
-            func,
-            pc,
-            opcode,
-            "ElemLayout",
-            elem_layout_from_instruction,
-        );
-    }
-    Ok(elem_layout_from_flags(flags).1)
+    decode_metadata_layout(func, pc, opcode, "ElemLayout", elem_layout_from_instruction)
 }
 
 fn elem_runtime_layout_for_indexed(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
-    flags: u8,
 ) -> Result<Vec<SlotType>, ModuleVerificationError> {
-    if let Some(metadata) = func.jit_metadata.get(pc) {
-        if let Some(layout) = elem_runtime_layout_from_instruction(metadata) {
-            if !elem_metadata_matches_flags(metadata, flags) {
-                return Err(instruction_metadata_invariant(
-                    func,
-                    pc,
-                    format!("ElemLayout is inconsistent with {opcode:?} flags {flags:#04x}"),
-                ));
-            }
-            return Ok(layout);
-        }
-    }
-    if flags == 0 {
-        return decode_metadata_layout(
-            func,
-            pc,
-            opcode,
-            "ElemLayout",
-            elem_runtime_layout_from_instruction,
-        );
-    }
-    Ok(elem_layout_from_flags(flags).1)
-}
-
-fn verify_dynamic_elem_bytes_contract(
-    constant_facts: &ConstantFactAnalysis,
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    flags: u8,
-    elem_bytes_slot: u16,
-) -> Result<(), ModuleVerificationError> {
-    if flags != 0 {
-        return Ok(());
-    }
-    if !constant_facts.is_reachable(pc) {
-        return Ok(());
-    }
-    let (metadata_bytes, _, _) = elem_metadata_for_instruction(func, pc, opcode)?;
-    let constant = constant_u64_for_slot_before(
-        constant_facts,
+    decode_metadata_layout(
         func,
         pc,
         opcode,
-        elem_bytes_slot,
-        "dynamic elem_bytes",
-    )?;
-    if constant == metadata_bytes as u64 {
-        return Ok(());
-    }
-    Err(call_shape_mismatch(
-        func,
-        pc,
-        opcode,
-        format!(
-            "{opcode:?} dynamic elem_bytes constant {constant} does not match metadata {metadata_bytes}"
-        ),
-    ))
+        "ElemLayout",
+        elem_runtime_layout_from_instruction,
+    )
 }
 
 fn ptr_value_layout(
@@ -5640,7 +5795,7 @@ fn ptr_value_layout(
     opcode: Opcode,
 ) -> Result<Vec<SlotType>, ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "PtrLayout", |metadata| match metadata {
-        JitInstructionMetadata::PtrLayout { value_layout } => Some(value_layout.clone()),
+        InstructionMetadata::PtrLayout { value_layout } => Some(value_layout.clone()),
         _ => None,
     })
 }
@@ -5654,18 +5809,8 @@ fn verify_ptr_new_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let value_layout = ptr_value_layout(func, pc, opcode)?;
-    if value_layout.len() != inst.c as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "PtrNew metadata layout slots {} do not match allocation slots {}",
-                value_layout.len(),
-                inst.c
-            ),
-        ));
-    }
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     verify_ptr_new_runtime_metadata(
         func,
         module,
@@ -5723,7 +5868,7 @@ fn verify_ptr_new_runtime_metadata(
             pc,
             opcode,
             format!(
-                "PtrNew value metadata layout {runtime_layout:?} does not match JIT metadata {value_layout:?}"
+                "PtrNew value metadata layout {runtime_layout:?} does not match instruction metadata {value_layout:?}"
             ),
         ));
     }
@@ -5736,7 +5881,7 @@ fn slot_elem_layout(
     opcode: Opcode,
 ) -> Result<Vec<SlotType>, ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "SlotLayout", |metadata| match metadata {
-        JitInstructionMetadata::SlotLayout { elem_layout } => Some(elem_layout.clone()),
+        InstructionMetadata::SlotLayout { elem_layout } => Some(elem_layout.clone()),
         _ => None,
     })
 }
@@ -5764,7 +5909,7 @@ fn call_layout(
     opcode: Opcode,
 ) -> Result<(Vec<SlotType>, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "CallLayout", |metadata| match metadata {
-        JitInstructionMetadata::CallLayout {
+        InstructionMetadata::CallLayout {
             arg_layout,
             ret_layout,
         } => Some((arg_layout.clone(), ret_layout.clone())),
@@ -5783,7 +5928,7 @@ fn call_iface_layout(
         opcode,
         "CallIfaceLayout",
         |metadata| match metadata {
-            JitInstructionMetadata::CallIfaceLayout {
+            InstructionMetadata::CallIfaceLayout {
                 iface_meta_id,
                 method_idx,
                 arg_layout,
@@ -5810,7 +5955,7 @@ fn call_extern_layout(
         opcode,
         "CallExternLayout",
         |metadata| match metadata {
-            JitInstructionMetadata::CallExternLayout {
+            InstructionMetadata::CallExternLayout {
                 arg_layout,
                 ret_layout,
             } => Some((arg_layout.clone(), ret_layout.clone())),
@@ -5825,7 +5970,7 @@ fn queue_elem_layout(
     opcode: Opcode,
 ) -> Result<Vec<SlotType>, ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "QueueLayout", |metadata| match metadata {
-        JitInstructionMetadata::QueueLayout { elem_layout } => Some(elem_layout.clone()),
+        InstructionMetadata::QueueLayout { elem_layout } => Some(elem_layout.clone()),
         _ => None,
     })
 }
@@ -5849,35 +5994,13 @@ fn checked_queue_elem_slots(
     })
 }
 
-fn verify_legacy_queue_width(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    encoded_slots: u16,
-    metadata_slots: u16,
-) -> Result<(), ModuleVerificationError> {
-    // Zero is the metadata-width sentinel and also represents a genuinely
-    // zero-slot element. Nonzero values are accepted for existing bytecode.
-    if encoded_slots != 0 && encoded_slots != metadata_slots {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "{opcode:?} QueueLayout slots {metadata_slots} do not match legacy encoded element slots {encoded_slots}"
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn map_new_layout(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
 ) -> Result<(Vec<SlotType>, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "MapNew", |metadata| match metadata {
-        JitInstructionMetadata::MapNew {
+        InstructionMetadata::MapNew {
             key_layout,
             val_layout,
         } => Some((key_layout.clone(), val_layout.clone())),
@@ -5891,7 +6014,7 @@ fn map_get_layout(
     opcode: Opcode,
 ) -> Result<(Vec<SlotType>, Vec<SlotType>, bool), ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "MapGet", |metadata| match metadata {
-        JitInstructionMetadata::MapGet {
+        InstructionMetadata::MapGet {
             key_layout,
             val_layout,
             has_ok,
@@ -5906,7 +6029,7 @@ fn map_set_layout(
     opcode: Opcode,
 ) -> Result<(Vec<SlotType>, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "MapSet", |metadata| match metadata {
-        JitInstructionMetadata::MapSet {
+        InstructionMetadata::MapSet {
             key_layout,
             val_layout,
         } => Some((key_layout.clone(), val_layout.clone())),
@@ -5920,7 +6043,7 @@ fn map_delete_key_layout(
     opcode: Opcode,
 ) -> Result<Vec<SlotType>, ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "MapDelete", |metadata| match metadata {
-        JitInstructionMetadata::MapDelete { key_layout } => Some(key_layout.clone()),
+        InstructionMetadata::MapDelete { key_layout } => Some(key_layout.clone()),
         _ => None,
     })
 }
@@ -5931,7 +6054,7 @@ fn map_iter_next_layout(
     opcode: Opcode,
 ) -> Result<(Vec<SlotType>, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "MapIterNext", |metadata| match metadata {
-        JitInstructionMetadata::MapIterNext {
+        InstructionMetadata::MapIterNext {
             key_layout,
             val_layout,
         } => Some((key_layout.clone(), val_layout.clone())),
@@ -5950,7 +6073,7 @@ fn iface_assert_metadata(
         opcode,
         "IfaceAssertLayout",
         |metadata| match metadata {
-            JitInstructionMetadata::IfaceAssertLayout {
+            InstructionMetadata::IfaceAssertLayout {
                 assert_kind,
                 target_id,
                 result_layout,
@@ -6117,17 +6240,7 @@ fn verify_copy_n_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
-    if inst.c == 0 && inst.flags != 0 {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "CopyN count must be encoded in c, got c=0 flags={}",
-                inst.flags
-            ),
-        ));
-    }
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let count = inst.c;
     let source = local_layout(func, pc, inst.b, count, "CopyN source")?;
     verify_structural_layout(func, pc, opcode, inst.b, source, "CopyN source")?;
@@ -6163,22 +6276,25 @@ fn verify_slot_get_contract(
     dst_start: u16,
     base_start: u16,
     index_slot: u16,
-    legacy_count: u16,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let elem_layout = slot_elem_layout(func, pc, opcode)?;
-    let elem_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &elem_layout, "SlotGet element layout")?;
-    let metadata_sentinel = opcode == Opcode::SlotGetN && legacy_count == 0;
-    if !metadata_sentinel && elem_slots != legacy_count {
+    verify_reserved_zero(func, pc, opcode, ctx.inst.flags.into(), "flags")?;
+    if (opcode == Opcode::SlotGet) != (elem_layout.len() == 1) {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "SlotGet metadata layout slots {elem_slots} do not match legacy encoded count {legacy_count}"
+                "{opcode:?} requires {} element slots, metadata has {}",
+                if opcode == Opcode::SlotGet {
+                    "one"
+                } else {
+                    "zero or multiple"
+                },
+                elem_layout.len()
             ),
         ));
     }
@@ -6214,22 +6330,25 @@ fn verify_slot_set_contract(
     base_start: u16,
     index_slot: u16,
     src_start: u16,
-    legacy_count: u16,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let elem_layout = slot_elem_layout(func, pc, opcode)?;
-    let elem_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &elem_layout, "SlotSet element layout")?;
-    let metadata_sentinel = opcode == Opcode::SlotSetN && legacy_count == 0;
-    if !metadata_sentinel && elem_slots != legacy_count {
+    verify_reserved_zero(func, pc, opcode, ctx.inst.flags.into(), "flags")?;
+    if (opcode == Opcode::SlotSet) != (elem_layout.len() == 1) {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "SlotSet metadata layout slots {elem_slots} do not match legacy encoded count {legacy_count}"
+                "{opcode:?} requires {} element slots, metadata has {}",
+                if opcode == Opcode::SlotSet {
+                    "one"
+                } else {
+                    "zero or multiple"
+                },
+                elem_layout.len()
             ),
         ));
     }
@@ -6384,18 +6503,23 @@ fn verify_ptr_get_contract(
     opcode: Opcode,
     dst_start: u16,
     ptr_slot: u16,
-    count: u16,
+    flags: u8,
 ) -> Result<(), ModuleVerificationError> {
     let value_layout = ptr_value_layout(func, pc, opcode)?;
-    if value_layout.len() != count as usize {
+    verify_reserved_zero(func, pc, opcode, flags.into(), "flags")?;
+    if (opcode == Opcode::PtrGet) != (value_layout.len() == 1) {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "PtrGet metadata layout slots {} do not match encoded count {}",
-                value_layout.len(),
-                count
+                "{opcode:?} requires {} value slots, metadata has {}",
+                if opcode == Opcode::PtrGet {
+                    "one"
+                } else {
+                    "zero or multiple"
+                },
+                value_layout.len()
             ),
         ));
     }
@@ -6426,6 +6550,7 @@ fn verify_ptr_set_contract(
     flags: u8,
 ) -> Result<(), ModuleVerificationError> {
     let value_layout = ptr_value_layout(func, pc, opcode)?;
+    verify_reserved_zero(func, pc, opcode, flags.into(), "flags")?;
     if value_layout.len() != 1 {
         return Err(call_shape_mismatch(
             func,
@@ -6445,21 +6570,7 @@ fn verify_ptr_set_contract(
         &[SlotType::GcRef],
         "PtrSet pointer",
     )?;
-    let source = local_layout(func, pc, src_slot, 1, "PtrSet source")?;
     verify_raw_or_exact_layout_matches(func, pc, opcode, src_slot, &value_layout, "PtrSet source")?;
-    let requires_barrier = matches!(source[0], SlotType::GcRef | SlotType::Interface1);
-    let has_barrier = (flags & 1) != 0;
-    if requires_barrier && !has_barrier {
-        return Err(ModuleVerificationError::SlotTypeMismatch {
-            func: func.name.clone(),
-            pc,
-            opcode,
-            access: "PtrSet missing write barrier",
-            slot: src_slot,
-            expected: vec![SlotType::GcRef],
-            actual: source.to_vec(),
-        });
-    }
     Ok(())
 }
 
@@ -6470,18 +6581,7 @@ fn verify_ptr_set_n_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let value_layout = ptr_value_layout(func, pc, opcode)?;
-    if value_layout.len() != inst.flags as usize {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "PtrSetN metadata layout slots {} do not match encoded count {}",
-                value_layout.len(),
-                inst.flags
-            ),
-        ));
-    }
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     verify_layout(
         func,
         pc,
@@ -6490,7 +6590,9 @@ fn verify_ptr_set_n_contract(
         &[SlotType::GcRef],
         "PtrSetN pointer",
     )?;
-    let source = local_layout(func, pc, inst.c, inst.flags as u16, "PtrSetN source")?;
+    let count =
+        checked_metadata_layout_slots(func, pc, opcode, &value_layout, "PtrSetN source layout")?;
+    let source = local_layout(func, pc, inst.c, count, "PtrSetN source")?;
     verify_local_layout_matches(func, pc, opcode, inst.c, &value_layout, "PtrSetN source")?;
     if source
         .iter()
@@ -6702,44 +6804,7 @@ fn verify_static_call_contract(
         }
     })?;
 
-    if callee.param_slots <= u8::MAX as u16 && callee.ret_slots <= u8::MAX as u16 {
-        if inst.packed_arg_slots() != callee.param_slots {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "encoded arg slots {} do not match callee {} param_slots {}",
-                    inst.packed_arg_slots(),
-                    callee.name,
-                    callee.param_slots
-                ),
-            ));
-        }
-        if inst.packed_ret_slots() != callee.ret_slots {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "encoded ret slots {} do not match callee {} ret_slots {}",
-                    inst.packed_ret_slots(),
-                    callee.name,
-                    callee.ret_slots
-                ),
-            ));
-        }
-    } else if inst.c != 0 {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "large static call to {} must use zero packed shape mirror, got 0x{:04x}",
-                callee.name, inst.c
-            ),
-        ));
-    }
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
 
     let expected_args = callee
         .slot_types
@@ -6792,6 +6857,8 @@ fn verify_dynamic_call_contract(
     inst: Instruction,
     is_closure: bool,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     let (arg_layout, ret_layout) = if is_closure {
         verify_layout(
             func,
@@ -6872,17 +6939,8 @@ fn verify_dynamic_call_contract(
                 ),
             ));
         }
-        verify_u8_count_mirror(
-            func,
-            pc,
-            opcode,
-            inst.flags,
-            method_idx as usize,
-            "CallIface method index",
-        )?;
         (arg_layout, ret_layout)
     };
-    verify_dynamic_call_shape_mirror(func, pc, opcode, inst, arg_layout.len(), ret_layout.len())?;
     let ret_start = checked_metadata_call_ret_start(
         func,
         pc,
@@ -6909,17 +6967,10 @@ fn verify_call_extern_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let opcode = Opcode::CallExtern;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     verify_extern_index(func, module, pc, inst.b)?;
     let extern_def = &module.externs[inst.b as usize];
     let (arg_layout, ret_layout) = call_extern_layout(func, pc, opcode)?;
-    verify_u8_count_mirror(
-        func,
-        pc,
-        opcode,
-        inst.flags,
-        arg_layout.len(),
-        "CallExtern argument count",
-    )?;
     if !extern_def.param_kinds.is_empty() && extern_def.param_kinds.len() != arg_layout.len() {
         return Err(call_shape_mismatch(
             func,
@@ -7090,7 +7141,8 @@ fn verify_array_new_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
-    let elem_layout = elem_runtime_layout_for_indexed(func, pc, opcode, inst.flags)?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    let elem_layout = elem_runtime_layout_for_indexed(func, pc, opcode)?;
     verify_indexed_new_runtime_metadata(
         InstructionVerifierContext {
             func,
@@ -7128,23 +7180,7 @@ fn verify_array_new_contract(
         &[SlotType::Value],
         "ArrayNew length",
     )?;
-    verify_value_range(
-        func,
-        pc,
-        opcode,
-        inst.c,
-        if inst.flags == 0 { 2 } else { 1 },
-        "ArrayNew length/elem_bytes",
-    )?;
-    let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, "ArrayNew elem bytes")?;
-    verify_dynamic_elem_bytes_contract(
-        constant_facts,
-        func,
-        pc,
-        opcode,
-        inst.flags,
-        elem_bytes_slot,
-    )
+    Ok(())
 }
 
 fn verify_slice_new_contract(
@@ -7155,7 +7191,8 @@ fn verify_slice_new_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
-    let elem_layout = elem_runtime_layout_for_indexed(func, pc, opcode, inst.flags)?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    let elem_layout = elem_runtime_layout_for_indexed(func, pc, opcode)?;
     verify_indexed_new_runtime_metadata(
         InstructionVerifierContext {
             func,
@@ -7185,24 +7222,7 @@ fn verify_slice_new_contract(
         &[SlotType::Value],
         "SliceNew metadata",
     )?;
-    verify_value_range(func, pc, opcode, inst.c, 2, "SliceNew len/cap")?;
-    verify_value_range(
-        func,
-        pc,
-        opcode,
-        inst.c,
-        if inst.flags == 0 { 3 } else { 2 },
-        "SliceNew len/cap/elem_bytes",
-    )?;
-    let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 2, "SliceNew elem bytes")?;
-    verify_dynamic_elem_bytes_contract(
-        constant_facts,
-        func,
-        pc,
-        opcode,
-        inst.flags,
-        elem_bytes_slot,
-    )
+    verify_value_range(func, pc, opcode, inst.c, 2, "SliceNew len/cap")
 }
 
 fn verify_indexed_new_runtime_metadata(
@@ -7237,29 +7257,21 @@ fn verify_indexed_new_runtime_metadata(
         func,
         pc,
         opcode,
-        format!("{label} layout {elem_meta_layout:?} does not match JIT metadata {elem_layout:?}"),
+        format!("{label} layout {elem_meta_layout:?} does not match instruction metadata {elem_layout:?}"),
     ))
 }
 
 fn verify_indexed_get_contract(
     ctx: InstructionVerifierContext<'_>,
-    constant_facts: &ConstantFactAnalysis,
+    _constant_facts: &ConstantFactAnalysis,
     access: IndexedAccessLabels,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let inst = ctx.inst;
-    let elem_layout = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-    let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, access.value)?;
-    verify_dynamic_elem_bytes_contract(
-        constant_facts,
-        func,
-        pc,
-        opcode,
-        inst.flags,
-        elem_bytes_slot,
-    )?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    let elem_layout = elem_layout_for_indexed(func, pc, opcode)?;
     verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], access.base)?;
     verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], access.index)?;
     if elem_layout.is_empty() {
@@ -7271,23 +7283,15 @@ fn verify_indexed_get_contract(
 
 fn verify_indexed_set_contract(
     ctx: InstructionVerifierContext<'_>,
-    constant_facts: &ConstantFactAnalysis,
+    _constant_facts: &ConstantFactAnalysis,
     access: IndexedAccessLabels,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let inst = ctx.inst;
-    let elem_layout = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-    let elem_bytes_slot = checked_slot_offset(func, pc, inst.b, 1, access.value)?;
-    verify_dynamic_elem_bytes_contract(
-        constant_facts,
-        func,
-        pc,
-        opcode,
-        inst.flags,
-        elem_bytes_slot,
-    )?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    let elem_layout = elem_layout_for_indexed(func, pc, opcode)?;
     verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], access.base)?;
     verify_layout(func, pc, opcode, inst.b, &[SlotType::Value], access.index)?;
     if elem_layout.is_empty() {
@@ -7299,25 +7303,15 @@ fn verify_indexed_set_contract(
 
 fn verify_indexed_addr_contract(
     ctx: InstructionVerifierContext<'_>,
-    constant_facts: &ConstantFactAnalysis,
+    _constant_facts: &ConstantFactAnalysis,
     access: IndexedAccessLabels,
 ) -> Result<(), ModuleVerificationError> {
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
     let inst = ctx.inst;
-    if inst.flags == 0 {
-        let _ = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-        let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, access.value)?;
-        verify_dynamic_elem_bytes_contract(
-            constant_facts,
-            func,
-            pc,
-            opcode,
-            inst.flags,
-            elem_bytes_slot,
-        )?;
-    }
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    let _ = elem_layout_for_indexed(func, pc, opcode)?;
     verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], access.value)?;
     verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], access.base)?;
     verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], access.index)
@@ -7396,8 +7390,9 @@ fn verify_slice_append_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
-    let elem_layout = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-    let elem_runtime_layout = elem_runtime_layout_for_indexed(func, pc, opcode, inst.flags)?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    let elem_layout = elem_layout_for_indexed(func, pc, opcode)?;
+    let elem_runtime_layout = elem_runtime_layout_for_indexed(func, pc, opcode)?;
     verify_layout(
         func,
         pc,
@@ -7435,26 +7430,6 @@ fn verify_slice_append_contract(
         "SliceAppend element metadata",
         &elem_runtime_layout,
     )?;
-    let elem_offset = if inst.flags == 0 { 2 } else { 1 };
-    if inst.flags == 0 {
-        verify_layout(
-            func,
-            pc,
-            opcode,
-            checked_slot_offset(func, pc, inst.c, 1, "SliceAppend elem bytes")?,
-            &[SlotType::Value],
-            "SliceAppend elem bytes",
-        )?;
-        let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, "SliceAppend elem bytes")?;
-        verify_dynamic_elem_bytes_contract(
-            constant_facts,
-            func,
-            pc,
-            opcode,
-            inst.flags,
-            elem_bytes_slot,
-        )?;
-    }
     if elem_layout.is_empty() {
         Ok(())
     } else {
@@ -7462,7 +7437,7 @@ fn verify_slice_append_contract(
             func,
             pc,
             opcode,
-            checked_slot_offset(func, pc, inst.c, elem_offset, "SliceAppend element")?,
+            checked_slot_offset(func, pc, inst.c, 1, "SliceAppend element")?,
             &elem_layout,
             "SliceAppend element",
         )
@@ -7478,23 +7453,8 @@ fn verify_map_new_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let (key_layout, val_layout) = map_new_layout(func, pc, opcode)?;
-    let key_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapNew key layout")?;
-    let val_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapNew value layout")?;
-    let legacy_key_slots = inst.map_new_legacy_key_slots();
-    let legacy_val_slots = inst.map_new_legacy_val_slots();
-    let uses_metadata_sentinel = legacy_key_slots == 0 && legacy_val_slots == 0;
-    if !uses_metadata_sentinel && (key_slots != legacy_key_slots || val_slots != legacy_val_slots) {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "MapNew metadata layout key={key_slots} val={val_slots} does not match legacy encoded key={legacy_key_slots} val={legacy_val_slots}"
-            ),
-        ));
-    }
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     verify_map_new_runtime_metadata(
         InstructionVerifierContext {
             func,
@@ -7638,7 +7598,7 @@ fn verify_map_new_meta_layout_matches(
         pc,
         opcode,
         format!(
-            "MapNew {access} metadata layout {runtime_layout:?} does not match JIT metadata {metadata_layout:?}"
+            "MapNew {access} metadata layout {runtime_layout:?} does not match instruction metadata {metadata_layout:?}"
         ),
     ))
 }
@@ -7704,7 +7664,7 @@ fn verify_queue_new_runtime_metadata(
             pc,
             opcode,
             format!(
-                "QueueNew element metadata layout {elem_meta_layout:?} does not match JIT metadata {elem_layout:?}"
+                "QueueNew element metadata layout {elem_meta_layout:?} does not match instruction metadata {elem_layout:?}"
             ),
         ));
     }
@@ -7776,7 +7736,7 @@ fn verify_known_map_layout(
             key_layout: known_key,
             val_layout: known_val,
         }) => {
-            if expected.key_layout != known_key {
+            if expected.key_layout != known_key.as_ref() {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
@@ -7787,7 +7747,7 @@ fn verify_known_map_layout(
                     ),
                 ));
             }
-            if expected.val_layout != known_val {
+            if expected.val_layout != known_val.as_ref() {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
@@ -7836,7 +7796,7 @@ fn verify_known_map_key_layout(
             key_layout: known_key,
             ..
         }) => {
-            if key_layout != known_key {
+            if key_layout != known_key.as_ref() {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
@@ -7875,7 +7835,7 @@ fn verify_known_map_iter_layout(
             key_layout: known_key,
             val_layout: known_val,
         }) => {
-            if expected.key_layout != known_key {
+            if expected.key_layout != known_key.as_ref() {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
@@ -7886,7 +7846,7 @@ fn verify_known_map_iter_layout(
                     ),
                 ));
             }
-            if expected.val_layout != known_val {
+            if expected.val_layout != known_val.as_ref() {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
@@ -7942,7 +7902,7 @@ fn verify_known_queue_layout(
         Some(ContainerLayoutFact::Queue {
             elem_layout: known_elem,
         }) => {
-            if elem_layout != known_elem {
+            if elem_layout != known_elem.as_ref() {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
@@ -8044,11 +8004,11 @@ fn verify_known_queue_object(
 fn verify_map_get_contract(
     func: &FunctionDef,
     container_layout_facts: &ContainerLayoutAnalysis,
-    constant_facts: &ConstantFactAnalysis,
     pc: usize,
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let (key_layout, val_layout, has_ok) = map_get_layout(func, pc, opcode)?;
     verify_known_map_layout(
         InstructionVerifierContext {
@@ -8065,8 +8025,6 @@ fn verify_map_get_contract(
             val_layout: &val_layout,
         },
     )?;
-    let key_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapGet key layout")?;
     let val_slots =
         checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapGet value layout")?;
     if has_ok && val_slots.checked_add(1).is_none() {
@@ -8079,51 +8037,7 @@ fn verify_map_get_contract(
         });
     }
     verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "MapGet map")?;
-    verify_layout(
-        func,
-        pc,
-        opcode,
-        inst.c,
-        &[SlotType::Value],
-        "MapGet metadata",
-    )?;
-    if constant_facts.is_reachable(pc) {
-        let packed = constant_u64_for_slot_before(
-            constant_facts,
-            func,
-            pc,
-            opcode,
-            inst.c,
-            "MapGet metadata",
-        )?;
-        if packed >> 32 != 0 {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!("MapGet packed metadata 0x{packed:x} contains unsupported high bits"),
-            ));
-        }
-        let packed_key_slots = ((packed >> 16) & 0xFFFF) as u16;
-        let packed_val_slots = ((packed >> 1) & 0x7FFF) as u16;
-        let packed_has_ok = (packed & 1) != 0;
-        let uses_metadata_sentinel = packed & !1 == 0;
-        if has_ok != packed_has_ok
-            || (!uses_metadata_sentinel
-                && (key_slots != packed_key_slots || val_slots != packed_val_slots))
-        {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "MapGet metadata layout key={key_slots} val={val_slots} ok={has_ok} does not match legacy packed key={packed_key_slots} val={packed_val_slots} ok={packed_has_ok}"
-                ),
-            ));
-        }
-    }
-    let key_start = checked_slot_offset(func, pc, inst.c, 1, "MapGet key")?;
-    verify_storage_layout_compatible(func, pc, opcode, key_start, &key_layout, "MapGet key")?;
+    verify_storage_layout_compatible(func, pc, opcode, inst.c, &key_layout, "MapGet key")?;
     verify_storage_layout_compatible(func, pc, opcode, inst.a, &val_layout, "MapGet value")?;
     if has_ok {
         verify_layout(
@@ -8141,11 +8055,11 @@ fn verify_map_get_contract(
 fn verify_map_set_contract(
     func: &FunctionDef,
     container_layout_facts: &ContainerLayoutAnalysis,
-    constant_facts: &ConstantFactAnalysis,
     pc: usize,
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let (key_layout, val_layout) = map_set_layout(func, pc, opcode)?;
     verify_known_map_layout(
         InstructionVerifierContext {
@@ -8162,62 +8076,20 @@ fn verify_map_set_contract(
             val_layout: &val_layout,
         },
     )?;
-    let key_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapSet key layout")?;
-    let val_slots =
-        checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapSet value layout")?;
     verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], "MapSet map")?;
-    verify_layout(
-        func,
-        pc,
-        opcode,
-        inst.b,
-        &[SlotType::Value],
-        "MapSet metadata",
-    )?;
-    if constant_facts.is_reachable(pc) {
-        let packed = constant_u64_for_slot_before(
-            constant_facts,
-            func,
-            pc,
-            opcode,
-            inst.b,
-            "MapSet metadata",
-        )?;
-        if packed >> 16 != 0 {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!("MapSet packed metadata 0x{packed:x} contains unsupported high bits"),
-            ));
-        }
-        let packed_key_slots = ((packed >> 8) & 0xFF) as u16;
-        let packed_val_slots = (packed & 0xFF) as u16;
-        if packed != 0 && (key_slots != packed_key_slots || val_slots != packed_val_slots) {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "MapSet metadata layout key={key_slots} val={val_slots} does not match legacy packed key={packed_key_slots} val={packed_val_slots}"
-                ),
-            ));
-        }
-    }
-    let key_start = checked_slot_offset(func, pc, inst.b, 1, "MapSet key")?;
-    verify_storage_layout_compatible(func, pc, opcode, key_start, &key_layout, "MapSet key")?;
+    verify_storage_layout_compatible(func, pc, opcode, inst.b, &key_layout, "MapSet key")?;
     verify_storage_layout_compatible(func, pc, opcode, inst.c, &val_layout, "MapSet value")
 }
 
 fn verify_map_delete_contract(
     func: &FunctionDef,
     container_layout_facts: &ContainerLayoutAnalysis,
-    constant_facts: &ConstantFactAnalysis,
     pc: usize,
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     let key_layout = map_delete_key_layout(func, pc, opcode)?;
     verify_known_map_key_layout(
         func,
@@ -8236,47 +8108,7 @@ fn verify_map_delete_contract(
         &[SlotType::GcRef],
         "MapDelete map",
     )?;
-    verify_layout(
-        func,
-        pc,
-        opcode,
-        inst.b,
-        &[SlotType::Value],
-        "MapDelete metadata",
-    )?;
-    if constant_facts.is_reachable(pc) {
-        let packed = constant_u64_for_slot_before(
-            constant_facts,
-            func,
-            pc,
-            opcode,
-            inst.b,
-            "MapDelete metadata",
-        )?;
-        if packed > u16::MAX as u64 {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!("MapDelete packed metadata 0x{packed:x} exceeds u16::MAX"),
-            ));
-        }
-        let packed_key_slots = packed as usize;
-        if key_layout.len() != packed_key_slots {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "MapDelete metadata layout key={} does not match legacy packed key={}",
-                    key_layout.len(),
-                    packed_key_slots
-                ),
-            ));
-        }
-    }
-    let key_start = checked_slot_offset(func, pc, inst.b, 1, "MapDelete key")?;
-    verify_storage_layout_compatible(func, pc, opcode, key_start, &key_layout, "MapDelete key")
+    verify_storage_layout_compatible(func, pc, opcode, inst.b, &key_layout, "MapDelete key")
 }
 
 fn verify_map_iter_next_contract(
@@ -8286,6 +8118,7 @@ fn verify_map_iter_next_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let (key_layout, val_layout) = map_iter_next_layout(func, pc, opcode)?;
     verify_known_map_iter_layout(
         InstructionVerifierContext {
@@ -8302,27 +8135,9 @@ fn verify_map_iter_next_contract(
             val_layout: &val_layout,
         },
     )?;
-    let encoded_key_slots = inst.map_iter_key_slots() as usize;
-    let encoded_val_slots = inst.map_iter_val_slots() as usize;
     let key_slots =
         checked_metadata_layout_slots(func, pc, opcode, &key_layout, "MapIterNext key layout")?;
     checked_metadata_layout_slots(func, pc, opcode, &val_layout, "MapIterNext value layout")?;
-    if (encoded_key_slots != 0 || encoded_val_slots != 0)
-        && (key_layout.len() != encoded_key_slots || val_layout.len() != encoded_val_slots)
-    {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "MapIterNext metadata layout key={} val={} does not match legacy encoded key={} val={}",
-                key_layout.len(),
-                val_layout.len(),
-                encoded_key_slots,
-                encoded_val_slots
-            ),
-        ));
-    }
     let key_start = inst.a;
     let value_start = checked_slot_offset(func, pc, key_start, key_slots, "MapIterNext value")?;
     verify_layout(func, pc, opcode, key_start, &key_layout, "MapIterNext key")?;
@@ -8451,14 +8266,7 @@ fn verify_queue_new_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
-    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
-    verify_legacy_queue_width(
-        func,
-        pc,
-        opcode,
-        inst.queue_new_legacy_elem_slots(),
-        elem_slots,
-    )?;
+    verify_allowed_flags(func, pc, opcode, inst.flags, QUEUE_KIND_PORT_FLAG)?;
     verify_queue_new_runtime_metadata(
         func,
         module,
@@ -8502,7 +8310,7 @@ fn verify_queue_send_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
-    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -8511,13 +8319,6 @@ fn verify_queue_send_contract(
         inst.a,
         "QueueSend",
         &elem_layout,
-    )?;
-    verify_legacy_queue_width(
-        func,
-        pc,
-        opcode,
-        inst.queue_send_legacy_elem_slots(),
-        elem_slots,
     )?;
     verify_layout(
         func,
@@ -8539,6 +8340,7 @@ fn verify_queue_recv_contract(
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
     let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
+    verify_allowed_flags(func, pc, opcode, inst.flags, QUEUE_RECV_HAS_OK_FLAG)?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -8548,7 +8350,6 @@ fn verify_queue_recv_contract(
         "QueueRecv",
         &elem_layout,
     )?;
-    verify_legacy_queue_width(func, pc, opcode, inst.recv_legacy_elem_slots(), elem_slots)?;
     verify_layout(
         func,
         pc,
@@ -8579,7 +8380,7 @@ fn verify_select_send_contract(
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
-    let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -8588,13 +8389,6 @@ fn verify_select_send_contract(
         inst.a,
         "SelectSend",
         &elem_layout,
-    )?;
-    verify_legacy_queue_width(
-        func,
-        pc,
-        opcode,
-        inst.queue_send_legacy_elem_slots(),
-        elem_slots,
     )?;
     verify_layout(
         func,
@@ -8616,6 +8410,7 @@ fn verify_select_recv_contract(
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = queue_elem_layout(func, pc, opcode)?;
     let elem_slots = checked_queue_elem_slots(func, pc, opcode, &elem_layout)?;
+    verify_allowed_flags(func, pc, opcode, inst.flags, QUEUE_RECV_HAS_OK_FLAG)?;
     verify_known_queue_layout(
         func,
         container_layout_facts,
@@ -8625,7 +8420,6 @@ fn verify_select_recv_contract(
         "SelectRecv",
         &elem_layout,
     )?;
-    verify_legacy_queue_width(func, pc, opcode, inst.recv_legacy_elem_slots(), elem_slots)?;
     verify_layout(
         func,
         pc,
@@ -8749,6 +8543,7 @@ fn verify_shared_call_shape_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     if inst.call_shape_is_closure() {
         verify_layout(
             func,
@@ -8759,16 +8554,15 @@ fn verify_shared_call_shape_contract(
             "closure callee",
         )?;
         let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
-        if !ret_layout.is_empty() || arg_layout.len() != inst.c as usize {
+        if !ret_layout.is_empty() {
             return Err(call_shape_mismatch(
                 func,
                 pc,
                 opcode,
                 format!(
-                    "{opcode:?} closure metadata layout slots args={} returns={} do not match encoded args={}",
+                    "{opcode:?} closure metadata requires an empty return layout; args={} returns={}",
                     arg_layout.len(),
-                    ret_layout.len(),
-                    inst.c
+                    ret_layout.len()
                 ),
             ));
         }
@@ -8782,17 +8576,6 @@ fn verify_shared_call_shape_contract(
                 callee_id,
             }
         })?;
-        if inst.c != callee.param_slots {
-            return Err(call_shape_mismatch(
-                func,
-                pc,
-                opcode,
-                format!(
-                    "encoded arg slots {} do not match callee {} param_slots {}",
-                    inst.c, callee.name, callee.param_slots
-                ),
-            ));
-        }
         let expected_args = callee
             .slot_types
             .get(..callee.param_slots as usize)
@@ -8809,23 +8592,6 @@ fn verify_shared_call_shape_contract(
                     ),
                 )
             })?;
-        if opcode == Opcode::GoStart {
-            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
-            if !ret_layout.is_empty() || arg_layout.as_slice() != expected_args {
-                return Err(call_shape_mismatch(
-                    func,
-                    pc,
-                    opcode,
-                    format!(
-                        "GoStart metadata layout slots args={:?} returns={:?} do not match callee {} args={:?}",
-                        arg_layout,
-                        ret_layout,
-                        callee.name,
-                        expected_args
-                    ),
-                ));
-            }
-        }
         verify_layout(func, pc, opcode, inst.b, expected_args, "static call args")
     }
 }
@@ -8871,6 +8637,8 @@ fn verify_iface_assert_contract(
     let opcode = Opcode::IfaceAssert;
     verify_interface_pair(func, pc, opcode, inst.b, "IfaceAssert source")?;
     let (assert_kind, target_id, result_layout) = iface_assert_metadata(func, pc, opcode)?;
+    verify_allowed_flags(func, pc, opcode, inst.flags, IFACE_ASSERT_HAS_OK_FLAG)?;
+    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     if assert_kind > 1 {
         return Err(call_shape_mismatch(
             func,
@@ -8879,18 +8647,7 @@ fn verify_iface_assert_contract(
             format!("unsupported IfaceAssert kind {assert_kind}"),
         ));
     }
-    let kind_mirror = inst.flags & 0x03;
-    if kind_mirror != assert_kind {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "IfaceAssert encoded kind {kind_mirror} does not match metadata kind {assert_kind}"
-            ),
-        ));
-    }
-    let has_ok = ((inst.flags >> 2) & 0x01) != 0;
+    let has_ok = (inst.flags & IFACE_ASSERT_HAS_OK_FLAG) != 0;
     let dst_slots = u16::try_from(result_layout.len()).map_err(|_| {
         call_shape_mismatch(
             func,
@@ -8902,34 +8659,6 @@ fn verify_iface_assert_contract(
             ),
         )
     })?;
-    let slot_mirror = u16::from(inst.flags >> 3);
-    let expected_slot_mirror = if dst_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
-        dst_slots
-    } else {
-        0
-    };
-    if slot_mirror != expected_slot_mirror {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "IfaceAssert encoded destination slot mirror {slot_mirror} does not match expected mirror {expected_slot_mirror} for metadata layout slots {dst_slots}"
-            ),
-        ));
-    }
-    let target_mirror = u16::try_from(target_id).unwrap_or(u16::MAX);
-    if inst.c != target_mirror {
-        return Err(call_shape_mismatch(
-            func,
-            pc,
-            opcode,
-            format!(
-                "IfaceAssert encoded target mirror {} does not match expected mirror {target_mirror} for metadata target id {target_id}",
-                inst.c,
-            ),
-        ));
-    }
     let expected_layout = if assert_kind == 1 {
         let target_index = usize::try_from(target_id).map_err(|_| {
             call_shape_mismatch(
@@ -9311,6 +9040,7 @@ fn verify_go_island_contract(
     opcode: Opcode,
     inst: Instruction,
 ) -> Result<(), ModuleVerificationError> {
+    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     verify_layout(
         func,
         pc,
@@ -9340,14 +9070,6 @@ fn verify_go_island_contract(
             ),
         ));
     }
-    verify_u8_count_mirror(
-        func,
-        pc,
-        opcode,
-        inst.flags,
-        arg_layout.len(),
-        "GoIsland argument count",
-    )?;
     verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "GoIsland args")
 }
 

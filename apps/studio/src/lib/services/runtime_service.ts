@@ -10,9 +10,6 @@ import type {
   DisplayTimingRequest,
   FrameworkLaneBinding,
   GuiRunOutput,
-  RunEvent,
-  RunOpts,
-  StreamHandle,
 } from '../types';
 import { GuiSessionAuthority, type GuiSessionToken } from '../gui_session';
 import { formatError } from '../format_error';
@@ -71,48 +68,6 @@ export class RuntimeService {
     return { subscribe: runtime.subscribe };
   }
 
-  run(target: string, opts?: RunOpts): StreamHandle<RunEvent> {
-    const runMode = opts?.mode ?? 'vm';
-    const runId = this.beginConsoleRun(target, runMode);
-    const stream = this.backend.runVo(target, opts);
-    this.consumeRunStream(stream, target, runMode, runId);
-    return stream;
-  }
-
-  private consumeRunStream(stream: StreamHandle<RunEvent>, target: string, runMode: 'vm' | 'jit', runId: number): void {
-    (async () => {
-      try {
-        for await (const event of stream) {
-          if (!this.isConsoleRunActive(runId)) {
-            continue;
-          }
-          if (event.kind === 'stdout') {
-            consolePush('stdout', event.text);
-            runtime.update((s) => ({ ...s, consoleLines: [...s.consoleLines, event.text] }));
-          } else if (event.kind === 'stderr') {
-            consolePush('stderr', event.text);
-            runtime.update((s) => ({ ...s, consoleLines: [...s.consoleLines, `[err] ${event.text}`] }));
-          } else if (event.kind === 'stopped') {
-            this.finishConsoleRun(runId, { status: 'ready', isRunning: false });
-          } else if (event.kind === 'done') {
-            this.finishConsoleRun(runId, { status: 'ready', isRunning: false });
-          } else if (event.kind === 'error') {
-            consolePush('stderr', event.message);
-            this.finishConsoleRun(runId, { status: 'ready', isRunning: false, lastError: event.message });
-          }
-        }
-      } catch (error) {
-        if (!this.isConsoleRunActive(runId)) {
-          return;
-        }
-        const message = formatError(error);
-        consolePush('stderr', message);
-        this.activeConsoleRunId = 0;
-        runtime.set({ ...IDLE_RUNTIME, status: 'ready', kind: 'console', target, runMode, lastError: message });
-      }
-    })();
-  }
-
   async runConsole(target: string, runMode: 'vm' | 'jit'): Promise<string> {
     const runId = this.beginConsoleRun(target, runMode);
     const lines: string[] = [];
@@ -155,13 +110,10 @@ export class RuntimeService {
     }
   }
 
-  async runGui(target: string): Promise<GuiRunOutput> {
-    return (await this.runGuiPreview(target)).output;
-  }
-
   async runGuiPreview(target: string): Promise<GuiPreview> {
     const session = this.beginGuiSession(target);
     return this.serializeGuiOperation(async () => {
+      this.assertGuiSessionCurrent(session);
       try {
         const output = await this.backend.runGui(target, session);
         this.assertGuiSessionCurrent(session);
@@ -179,6 +131,7 @@ export class RuntimeService {
             gameRenderBytes: null,
             framework: output.framework,
             providerFrameworks: output.providerFrameworks,
+            vfsSnapshot: output.vfsSnapshot,
             sessionId: session.id,
           },
         });
@@ -207,29 +160,6 @@ export class RuntimeService {
     });
   }
 
-  async sendGuiEventFor(
-    session: GuiSessionToken,
-    handlerId: number,
-    payload: string,
-  ): Promise<Uint8Array> {
-    this.assertGuiSessionCurrent(session);
-    return this.serializeGuiOperation(async () => {
-      const bytes = await this.backend.sendGuiEvent(handlerId, payload, session);
-      this.assertGuiSessionCurrent(session);
-      return bytes;
-    });
-  }
-
-  async pollGuiRenderFor(session: GuiSessionToken): Promise<Uint8Array> {
-    this.assertGuiSessionCurrent(session);
-    return this.backend.pollGuiRender(session);
-  }
-
-  async pollGameRenderFor(session: GuiSessionToken): Promise<Uint8Array> {
-    this.assertGuiSessionCurrent(session);
-    return this.backend.pollGameRender(session);
-  }
-
   async stopGuiPreview(session: GuiSessionToken): Promise<void> {
     const wasSelected = this.guiSessions.active === session;
     if (!this.guiSessions.invalidate(session)) {
@@ -237,7 +167,7 @@ export class RuntimeService {
     }
     this.guiPreviews.delete(session.id);
     this.clearDisplayTimingFor(session);
-    await this.serializeGuiOperation(() => this.backend.stopGui(session));
+    await this.backend.stopGui(session);
     if (this.guiSessions.size === 0) {
       runtime.set({ ...IDLE_RUNTIME });
       return;
@@ -286,6 +216,7 @@ export class RuntimeService {
         gameRenderBytes: null,
         framework: preview.output.framework,
         providerFrameworks: preview.output.providerFrameworks,
+        vfsSnapshot: preview.output.vfsSnapshot,
         sessionId: preview.session.id,
       },
     });
@@ -317,27 +248,6 @@ export class RuntimeService {
       }
       try {
         await this.backend.sendGuiEventAsync(handlerId, payload, session);
-        if (!this.isGuiSessionActiveFor(session)) {
-          return;
-        }
-      } catch (error) {
-        const sessionError = this.coerceGuiSessionError(error, session);
-        if (isGuiSessionSupersededError(sessionError)) {
-          return;
-        }
-        throw sessionError;
-      }
-    });
-  }
-
-  async pushIslandTransport(data: Uint8Array, sessionId?: number): Promise<void> {
-    const session = this.requireLiveGuiSession(sessionId);
-    await this.serializeGuiOperation(async () => {
-      if (!this.isGuiSessionActiveFor(session)) {
-        return;
-      }
-      try {
-        await this.backend.pushIslandTransport(data, session);
         if (!this.isGuiSessionActiveFor(session)) {
           return;
         }
@@ -540,14 +450,6 @@ export class RuntimeService {
     });
   }
 
-  async pollDisplayTimingRequest(): Promise<DisplayTimingRequest | null> {
-    const session = this.guiSessions.active;
-    if (!session) {
-      return null;
-    }
-    return this.pollDisplayTimingRequestFor(session);
-  }
-
   async pollDisplayTimingRequestFor(
     session: GuiSessionToken,
   ): Promise<DisplayTimingRequest | null> {
@@ -565,15 +467,6 @@ export class RuntimeService {
         throw this.coerceGuiSessionError(error, session);
       }
     });
-  }
-
-  async submitDisplayPulse(
-    request: DisplayTimingRequest,
-    observedMicros: string,
-    intervalMicros: string,
-  ): Promise<DisplayPulseSubmission> {
-    const session = this.requireActiveGuiSession();
-    return this.submitDisplayPulseFor(session, request, observedMicros, intervalMicros);
   }
 
   async submitDisplayPulseFor(
@@ -783,11 +676,9 @@ export class RuntimeService {
       this.guiPreviews.delete(session.id);
       this.clearDisplayTimingFor(session);
     }
-    await this.serializeGuiOperation(async () => {
-      for (const session of sessions) {
-        await this.backend.stopGui(session);
-      }
-    });
+    const stopped = await Promise.allSettled(sessions.map((session) => this.backend.stopGui(session)));
+    const failure = stopped.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) throw failure.reason;
     runtime.set({ ...IDLE_RUNTIME });
   }
 
@@ -859,14 +750,6 @@ export class RuntimeService {
     });
   }
 
-  async stopConsole(): Promise<void> {
-    const state = get(runtime);
-    if (!state.isRunning || state.kind !== 'console') {
-      return;
-    }
-    await this.backend.stopVoRun();
-  }
-
   async stop(): Promise<void> {
     const state = get(runtime);
     if (!state.isRunning && this.guiSessions.size === 0) {
@@ -878,14 +761,6 @@ export class RuntimeService {
     if (state.kind === 'console' && state.isRunning) {
       await this.backend.stopVoRun();
     }
-  }
-
-  planConsoleRun(target: string): void {
-    runtime.set({ ...IDLE_RUNTIME, status: 'ready', kind: 'console', target, runMode: 'vm' });
-  }
-
-  planGuiRun(target: string): void {
-    runtime.set({ ...IDLE_RUNTIME, status: 'ready', kind: 'gui', target });
   }
 
   clearConsole(): void {

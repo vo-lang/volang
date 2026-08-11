@@ -301,7 +301,8 @@ pub fn emit_registration_with_effects(
 /// 1. Builds an extension-local context facade around the opaque ABI frame
 /// 2. Calls the inner function inside `catch_unwind`
 /// 3. Maps `ExternResult` variants to `ext_abi::RESULT_*` u32 codes
-/// 4. Stores complex payloads (panic msg, io token, closure) on the context
+/// 4. Stores supported complex payloads on the context and rejects the
+///    reserved native-extension WaitIo path
 fn generate_ext_trampoline(
     trampoline_name: &syn::Ident,
     inner_fn_name: &syn::Ident,
@@ -345,9 +346,11 @@ fn generate_ext_trampoline(
                     ctx_ref.set_ext_call_closure(closure_ref, args);
                     vo_runtime::ffi::ext_abi::RESULT_CALL_CLOSURE
                 }
-                Ok(vo_runtime::ffi::ExternResult::WaitIo { token }) => {
-                    ctx_ref.set_ext_wait_io(token);
-                    vo_runtime::ffi::ext_abi::RESULT_WAIT_IO
+                Ok(vo_runtime::ffi::ExternResult::WaitIo { .. }) => {
+                    ctx_ref.record_contract_violation(
+                        vo_runtime::ffi::NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR,
+                    );
+                    vo_runtime::ffi::ext_abi::RESULT_ABI_ERROR
                 }
                 Ok(vo_runtime::ffi::ExternResult::HostEventWait { token, delay_ms }) => {
                     ctx_ref.set_ext_host_event_wait(token, delay_ms);
@@ -411,6 +414,9 @@ mod tests {
         assert!(generated.contains("try_from_extension_abi"));
         assert!(generated.contains("RESULT_ABI_ERROR"));
         assert!(generated.contains("set_ext_panic_message"));
+        assert!(generated.contains("record_contract_violation"));
+        assert!(generated.contains("NATIVE_EXTENSION_WAIT_IO_CONTRACT_ERROR"));
+        assert!(!generated.contains("set_ext_wait_io"));
         assert!(
             generated.matches("catch_unwind").count() >= 2,
             "one guard catches provider panics and the outer guard protects the complete C boundary"

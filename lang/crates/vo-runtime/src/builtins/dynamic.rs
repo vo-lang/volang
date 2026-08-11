@@ -11,8 +11,6 @@
 //! - Layer 7: User API (dyn.GetAttr etc)
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeSet;
-#[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
@@ -23,8 +21,6 @@ use alloc::vec::Vec;
 
 use core::borrow::Borrow;
 use hashbrown::HashMap;
-#[cfg(feature = "std")]
-use std::collections::BTreeSet;
 
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;
@@ -884,7 +880,7 @@ unsafe fn get_map_string_key(
     let val_vk = val_meta.value_kind();
     let val_rttid = call.get_elem_value_rttid_from_base(rttid);
 
-    let found = map::get_checked(base_ref, &key_data, Some(call.module()))
+    let found = map::get_checked(base_ref, &key_data, Some(call.module_runtime_metadata()))
         .map_err(|_| (DynErr::BadField, "map key is not hashable"))?;
 
     // Dynamic access: missing key returns error (unlike Go's zero value)
@@ -958,10 +954,10 @@ unsafe fn set_map_string_key(
     if val_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
-    let module = call.module() as *const Module;
+    let module = call.module_runtime_metadata();
     unsafe {
         // SAFETY: dynamic map writes applied key/value barriers above using map metadata.
-        map::set_checked(call.gc(), base_ref, &key_data, &val_data, Some(&*module))
+        map::set_checked(call.gc(), base_ref, &key_data, &val_data, Some(module))
     }
     .map_err(|err| match err {
         map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadField, "map key is not hashable"),
@@ -1005,7 +1001,7 @@ unsafe fn get_map_index(
     let val_vk = val_meta.value_kind();
     let val_rttid = call.get_elem_value_rttid_from_base(rttid);
 
-    let found = map::get_checked(base_ref, &key_data, Some(call.module()))
+    let found = map::get_checked(base_ref, &key_data, Some(call.module_runtime_metadata()))
         .map_err(|_| (DynErr::BadIndex, "map key is not hashable"))?;
 
     // Dynamic access: missing key returns error (unlike Go's zero value)
@@ -1079,10 +1075,10 @@ unsafe fn set_map_index(
     if val_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
-    let module = call.module() as *const Module;
+    let module = call.module_runtime_metadata();
     unsafe {
         // SAFETY: dynamic map index writes applied key/value barriers above using map metadata.
-        map::set_checked(call.gc(), base_ref, &key_data, &val_data, Some(&*module))
+        map::set_checked(call.gc(), base_ref, &key_data, &val_data, Some(module))
     }
     .map_err(|err| match err {
         map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadIndex, "map key is not hashable"),
@@ -3503,11 +3499,7 @@ pub fn register_externs(
     registry: &mut crate::ffi::ExternRegistry,
     externs: &[crate::bytecode::ExternDef],
 ) -> Result<(), crate::ffi::ExternContractError> {
-    let mut seen = BTreeSet::new();
-    for (id, def) in externs.iter().enumerate() {
-        if !seen.insert(def.name.as_str()) {
-            continue;
-        }
+    for (id, def) in crate::ffi::unique_extern_providers(externs) {
         for entry in REGISTERED_EXTERNS {
             if def.name == entry.name {
                 registry.try_register_builtin_with_effects(

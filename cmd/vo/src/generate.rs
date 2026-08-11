@@ -146,6 +146,9 @@ fn generate_project(options: &Options) -> Result<Vec<MaterializedOutput>, String
 pub(crate) fn generate_for_build(
     project: &Path,
 ) -> Result<Option<Vec<vo_engine::GeneratedSource>>, String> {
+    if vo_engine::is_bytecode_artifact(project) {
+        return Ok(None);
+    }
     let project_root = if project.is_file() {
         project.parent().unwrap_or(project)
     } else {

@@ -1,11 +1,12 @@
 use super::*;
 use std::ptr;
 use std::sync::Arc;
-use vo_runtime::bytecode::{Constant, FunctionDef, JitInstructionMetadata, Module as VoModule};
+use vo_runtime::bytecode::{Constant, FunctionDef, InstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::jit_api::{alloc_ic_table, DynCallIC};
+use vo_runtime::jit_api::JitContextCallbacks;
 use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::output::{CaptureSink, OutputSink};
+use vo_runtime::{alloc_ic_table, DynCallIC};
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 
 fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
@@ -86,7 +87,6 @@ fn jump_if_not(cond: u16, offset: i32) -> Instruction {
 }
 
 struct JitContextParts {
-    safepoint_flag: bool,
     panic_flag: bool,
     is_user_panic: bool,
     panic_msg: InterfaceSlot,
@@ -96,12 +96,13 @@ struct JitContextParts {
     sentinel_errors: vo_runtime::ffi::SentinelErrorCache,
     empty_func_table: [*const u8; 1],
     ic_table: Vec<DynCallIC>,
+    callbacks: JitContextCallbacks,
+    loaded_module: Option<Box<vo_runtime::bytecode::LoadedModule>>,
 }
 
 impl JitContextParts {
     fn new() -> Self {
         Self {
-            safepoint_flag: false,
             panic_flag: false,
             is_user_panic: false,
             panic_msg: InterfaceSlot::default(),
@@ -110,15 +111,28 @@ impl JitContextParts {
             program_args: Vec::new(),
             sentinel_errors: vo_runtime::ffi::SentinelErrorCache::new(),
             empty_func_table: [ptr::null::<u8>()],
-            ic_table: alloc_ic_table(),
+            ic_table: Vec::new(),
+            callbacks: JitContextCallbacks::EMPTY,
+            loaded_module: None,
         }
     }
 
     fn context(&mut self, module: &VoModule, args: &mut [u64]) -> JitContext {
+        self.loaded_module = Some(Box::new(
+            vo_common_core::verifier::verify_loaded_module(module.clone())
+                .expect("JIT test context requires a verified module"),
+        ));
+        let loaded_module = self
+            .loaded_module
+            .as_deref()
+            .map_or(core::ptr::null(), core::ptr::from_ref);
+        let callsite_count = vo_runtime::bytecode::DynamicCallsiteMap::for_module(module).len();
+        if self.ic_table.len() != callsite_count {
+            self.ic_table = alloc_ic_table(callsite_count);
+        }
         JitContext {
             gc: ptr::null_mut(),
             globals: ptr::null_mut(),
-            safepoint_flag: &self.safepoint_flag,
             panic_flag: &mut self.panic_flag,
             is_user_panic: &mut self.is_user_panic,
             panic_msg: &mut self.panic_msg,
@@ -129,16 +143,13 @@ impl JitContextParts {
             runtime_trap_pc: u32::MAX,
             current_func_id: u32::MAX,
             infra_error_message: ptr::null_mut(),
-            vm: ptr::null_mut(),
+            callback_state: ptr::null_mut(),
             fiber: ptr::null_mut(),
             itab_cache: ptr::null_mut(),
             extern_registry: ptr::null(),
-            call_extern_fn: None,
-            module,
+            callbacks: &self.callbacks,
             jit_func_table: self.empty_func_table.as_ptr(),
             jit_func_count: 0,
-            direct_call_table: self.empty_func_table.as_ptr(),
-            direct_call_count: 0,
             program_args: &self.program_args,
             sentinel_errors: &mut self.sentinel_errors,
             output: &*self.output as *const dyn OutputSink,
@@ -163,20 +174,6 @@ impl JitContextParts {
             pop_frame_fn: None,
             stack_overflow_fn: None,
             push_resume_point_fn: None,
-            create_island_fn: None,
-            queue_len_fn: None,
-            queue_cap_fn: None,
-            queue_close_fn: None,
-            queue_send_fn: None,
-            queue_recv_fn: None,
-            go_start_fn: None,
-            go_island_fn: None,
-            defer_push_fn: None,
-            recover_fn: None,
-            select_begin_fn: None,
-            select_send_fn: None,
-            select_recv_fn: None,
-            select_exec_fn: None,
             is_error_return: 0,
             ret_gcref_start: 0,
             ret_is_heap: 0,
@@ -185,10 +182,11 @@ impl JitContextParts {
             prepare_iface_call_fn: None,
             ic_table: self.ic_table.as_mut_ptr(),
             execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
+            host_services_v2: core::ptr::null(),
+            loaded_module,
         }
     }
 }
 
 mod compile_contracts;
 mod misc;
-mod runtime_abi_offsets;

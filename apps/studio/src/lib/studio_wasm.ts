@@ -6,7 +6,7 @@
 // are injected dynamically via setActiveHostBridge() before WASM instantiation.
 // No static import of any framework package.
 import type { HostBridgeModule } from './gui/renderer_bridge';
-import type { DiagnosticError, FrameworkContract, FrameworkLaneBinding, WorkspaceDiscoveryMode } from './types';
+import type { FrameworkContract, FrameworkLaneBinding, RendererBridgeVfsSnapshot, WorkspaceDiscoveryMode } from './types';
 import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } from './window_vfs_bindings';
 import { observeGuestExitVm } from './guest_exit';
 import { portableCaseKey } from './portable_path_key';
@@ -29,12 +29,6 @@ export interface VoVmInstance {
   takePendingHostEvents(): Array<{ key: string; source: string; token: string; delayMs: number; replay: boolean }>;
   wakeHostEvent(key: string): void;
   takeOutput(): string;
-}
-
-export interface WasmCompileResult {
-  ok: boolean;
-  errors: DiagnosticError[];
-  bytecode: Uint8Array | null;
 }
 
 export interface WasmRunResult {
@@ -89,7 +83,12 @@ type StudioPlatformInputExport = (
 
 export interface StudioWasm {
   // Direct GUI VM API.
-  prepareGuiFromBytecode(bytecode: Uint8Array, entryPath: string, launchToken: string): StudioPreviewHandle;
+  prepareGuiFromBytecode(
+    bytecode: Uint8Array,
+    entryPath: string,
+    launchToken: string,
+    operationId: string,
+  ): Promise<StudioPreviewHandle>;
   startPreparedGui(previewIndex: number, previewGeneration: number, entryPath: string): Uint8Array;
   sendGuiEvent(previewIndex: number, previewGeneration: number, handlerId: number, payload: string): Uint8Array;
   sendGuiEventAsync(previewIndex: number, previewGeneration: number, handlerId: number, payload: string): void;
@@ -282,10 +281,6 @@ export interface StudioWasm {
     observedMicros: string,
     intervalMicros: string,
   ): { emittedDomains: number };
-  getRenderIslandVfsSnapshot(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): {
-    rootPath: string;
-    files: Array<{ path: string; bytes: Uint8Array }>;
-  };
   pollIslandData(previewIndex: number, previewGeneration: number): Uint8Array;
   pollPendingHostEvent(previewIndex: number, previewGeneration: number): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;
   pollDiagnostic(previewIndex: number, previewGeneration: number): StudioDiagnosticRecord | null;
@@ -301,34 +296,35 @@ export interface StudioWasm {
   ): void;
   wakeHostEvent(previewIndex: number, previewGeneration: number, key: string): void;
   stopGui(previewIndex: number, previewGeneration: number): void;
-  checkEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
-  compileEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
-  dumpEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
-  dumpGuiEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
+  dumpEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): Promise<string>;
+  dumpGuiEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): Promise<string>;
   dumpBytecode(bytecode: Uint8Array): string;
   // Console run (compile + execute, returns stdout and process status)
-  compileRunEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmRunResult;
+  compileRunEntry(
+    entryPath: string,
+    workspaceDiscovery: WorkspaceDiscoveryMode,
+    operationId: string,
+  ): Promise<WasmRunResult>;
   // Instance-based VM (VoWebModule interface)
   VoVm: { withExterns(bytecode: Uint8Array): VoVmInstance };
-  preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
+  preloadExtModule(path: string, bytes: Uint8Array, jsGlueSource?: string): Promise<void>;
   forgetWasmExtModuleOwner(owner: string): void;
   clearWasmExtModuleOwners(): void;
   activateWasmExtScope(scope: bigint): void;
   forgetWasmExtScope(scope: bigint): void;
-  prepareEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): Promise<void>;
-  compileGui(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): {
+  compileGui(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode, operationId: string): Promise<{
     bytecode: Uint8Array;
     entryPath: string;
     launchToken: string;
     framework: FrameworkContract | null;
     providerFrameworks: FrameworkContract[];
-    wasmExtensions: Array<{ name: string; moduleKey: string; wasmBytes: Uint8Array; jsGlueBytes: Uint8Array | null }>;
-  };
+    vfsSnapshot: RendererBridgeVfsSnapshot;
+  }>;
+  cancelStudioOperation(operationId: string): boolean;
   registerBrowserRuntimeHostArtifact(bytes: Uint8Array): void;
   discardPreparedGuiLaunch(launchToken: string): void;
   getBuildId(): string;
   renderInitialModuleManifest(module: string): string;
-  voVersion(): string;
   initVFS(): Promise<void>;
   registerBrowserReleaseCapabilities(
     modules: string[],
@@ -348,7 +344,7 @@ type RawStudioWasmModule = Partial<StudioWasm> & {
 export interface VoWebModule {
   initVFS(): Promise<void>;
   VoVm: { withExterns(bytecode: Uint8Array): VoVmInstance };
-  preloadExtModule(path: string, bytes: Uint8Array, jsGlueUrl?: string): Promise<void>;
+  preloadExtModule(path: string, bytes: Uint8Array, jsGlueSource?: string): Promise<void>;
 }
 
 const bundledStudioBuildId = __STUDIO_BUILD_ID__;
@@ -519,34 +515,6 @@ export function voExternExportKey(encoded: string): string {
   return wasmExtensionExportKeyFromCanonical(encoded);
 }
 
-// Locked against vo-common-core by the Rust source-contract test.
-export const WASM_EXTENSION_EXPORT_KEY_CONTRACT_VECTORS = [
-  [
-    'vo1:24:github.com/acme/graphics:4:Draw',
-    '__vo_ext_766f313a32343a6769746875622e636f6d2f61636d652f67726170686963733a343a44726177',
-  ],
-  [
-    'vo1:22:github.com/acme/图形:6:绘制',
-    '__vo_ext_766f313a32323a6769746875622e636f6d2f61636d652fe59bbee5bda23a363ae7bb98e588b6',
-  ],
-  [
-    'vo1:31:github.com/acme/graphics/render:4:Draw',
-    '__vo_ext_766f313a33313a6769746875622e636f6d2f61636d652f67726170686963732f72656e6465723a343a44726177',
-  ],
-] as const;
-
-// TextDecoder must preserve a field-leading UTF-8 BOM exactly like Rust str.
-export const VO_EXTERN_BOM_CONTRACT_VECTORS = [
-  ['vo1:27:\uFEFFgithub.com/acme/graphics:4:Draw', '\uFEFFgithub.com/acme/graphics', 'Draw'],
-  ['vo1:24:github.com/acme/graphics:7:\uFEFFDraw', 'github.com/acme/graphics', '\uFEFFDraw'],
-] as const;
-
-// Descendant package components are accepted only in their canonical NFC spelling.
-export const VO_PACKAGE_OWNER_NFC_CONTRACT_VECTORS = [
-  ['github.com/acme/graphics/é', true],
-  ['github.com/acme/graphics/e\u0301', false],
-] as const;
-
 function isReservedPortableModuleStem(stem: string): boolean {
   if (['con', 'prn', 'aux', 'nul', 'conin$', 'conout$'].includes(stem)) {
     return true;
@@ -656,14 +624,6 @@ function shouldTraceStandaloneExtern(externName: DecodedVoExternName): boolean {
   return externName.functionName === 'HasHostCapability' || externName.functionName === 'waitForEvent';
 }
 
-async function readJsGlueSource(jsGlueUrl: string): Promise<string> {
-  const response = await fetch(jsGlueUrl, { cache: 'no-store' });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch JS glue: HTTP ${response.status}`);
-  }
-  return response.text();
-}
-
 function createJsGlueImportUrl(jsGlueSource: string): { importUrl: string; revoke(): void } {
   // Always import a fresh Blob URL. ES module imports are cached by URL, so
   // reusing a caller-owned blob/data URL after explicit disposal would revive
@@ -754,6 +714,7 @@ function ensureStudioWindowVfsBindings(): void {
         sessionId,
         revision: sessionFactory.revision,
       };
+      studioWindowVfsInstalledRevision = -1;
       emitStudioHostLog({
         source: 'studio-wasm',
         code: 'host_vfs_provider_ready',
@@ -764,9 +725,13 @@ function ensureStudioWindowVfsBindings(): void {
     return;
   }
   if (studioWindowVfsFactory) {
-    if (studioWindowVfsInstalledRevision !== studioWindowVfsRevision) {
+    if (
+      installedStudioWindowVfsSession !== null
+      || studioWindowVfsInstalledRevision !== studioWindowVfsRevision
+    ) {
       installWindowVfsBackend(studioWindowVfsFactory());
       studioWindowVfsInstalledRevision = studioWindowVfsRevision;
+      installedStudioWindowVfsSession = null;
       emitStudioHostLog({
         source: 'studio-wasm',
         code: 'host_vfs_provider_ready',
@@ -844,21 +809,29 @@ type PreparedExtensionArtifact =
     }>;
 type PendingExtensionLoad = {
   bytes: Uint8Array;
-  hasJsGlue: boolean;
-  jsGlueSourcePromise: Promise<string | null>;
+  jsGlueSource: string | null;
   artifactToken: string;
   expectedResetGeneration: number;
   expectedOwnerGeneration: number;
   promise: Promise<void>;
   prepared: PreparedExtensionArtifact | null;
+  control: ExtensionLoadControl;
 };
 type ExtensionLoadHandle = Readonly<{
   artifactToken: string;
   leaseToken: string;
   ready: Promise<void>;
 }>;
-type ExtensionLoadLease = Readonly<{ owner: string; artifactToken: string }>;
-type ExtensionLoadHandleLease = Readonly<ExtensionLoadLease & { leaseToken: string }>;
+type ExtensionLoadLease = {
+  readonly owner: string;
+  readonly artifactToken: string;
+  cancel: ((reason: Error) => void) | null;
+};
+type ExtensionLoadHandleLease = Readonly<{
+  owner: string;
+  artifactToken: string;
+  leaseToken: string;
+}>;
 let extLoadOperations = new Map<string, PendingExtensionLoad>();
 let extLoadLeases = new Map<string, ExtensionLoadLease>();
 let extLoadHandleLeases = new WeakMap<ExtensionLoadHandle, ExtensionLoadHandleLease>();
@@ -866,6 +839,7 @@ let extOwnerLoadGenerations = new Map<string, number>();
 let extExhaustedOwnerLoads = new Set<string>();
 let extResetGeneration = 0;
 let nextExtLoadLease = 0;
+const WASM_EXTENSION_LOAD_TIMEOUT_MS = 60_000;
 let extOwnerStateBridge: Pick<
   StudioWasm,
   | 'forgetWasmExtModuleOwner'
@@ -889,7 +863,7 @@ function allocateExtensionLoadLease(owner: string, artifactToken: string): strin
   const nextLease = nextExtensionGeneration(nextExtLoadLease, 'WASM extension load lease');
   const leaseToken = String(nextLease);
   try {
-    extLoadLeases.set(leaseToken, { owner, artifactToken });
+    extLoadLeases.set(leaseToken, { owner, artifactToken, cancel: null });
   } catch (error) {
     extLoadLeases.delete(leaseToken);
     throw error;
@@ -904,12 +878,51 @@ function extensionLoadHandle(
   leaseToken: string,
   ready: Promise<void>,
 ): ExtensionLoadHandle {
+  let settled = false;
+  let rejectReady!: (error: unknown) => void;
+  const boundedReady = new Promise<void>((resolve, reject) => {
+    rejectReady = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      const error = new Error(
+        `WASM extension '${owner}' load timed out after ${WASM_EXTENSION_LOAD_TIMEOUT_MS / 1_000} seconds`,
+      );
+      try {
+        abortExtensionLoadLease(owner, artifactToken, leaseToken, error);
+      } catch (cleanupError) {
+        console.error('[voSetupExtModule] timed-out load cleanup failed:', cleanupError);
+      }
+      rejectReady(error);
+    }, WASM_EXTENSION_LOAD_TIMEOUT_MS);
+    void ready.then(
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      },
+      (error: unknown) => {
+        if (settled) return;
+        rejectReady(error);
+      },
+    );
+  });
   try {
     const handle = Object.freeze({
       artifactToken,
       leaseToken,
-      ready,
+      ready: boundedReady,
     });
+    const lease = extLoadLeases.get(leaseToken);
+    if (lease?.owner !== owner || lease.artifactToken !== artifactToken) {
+      throw new Error(`WASM extension '${owner}' setup lease was invalidated before publication`);
+    }
+    lease.cancel = rejectReady;
     extLoadHandleLeases.set(handle, { owner, artifactToken, leaseToken });
     return handle;
   } catch (error) {
@@ -1089,21 +1102,69 @@ function disposePreparedExtensionArtifact(prepared: PreparedExtensionArtifact): 
   }
 }
 
-function removeExtensionLoadLeases(owner: string, artifactToken?: string): void {
+type ExtensionLoadControl = Readonly<{
+  cancel(reason: Error): void;
+  cancelled: Promise<never>;
+}>;
+
+function createExtensionLoadControl(): ExtensionLoadControl {
+  let cancel!: (reason: Error) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    cancel = reject;
+  });
+  return { cancel, cancelled };
+}
+
+function waitForExtensionTask<T>(
+  control: ExtensionLoadControl,
+  stage: string,
+  task: Promise<T>,
+  disposeLateValue?: (value: T) => void,
+): Promise<T> {
+  let active = true;
+  const result = task.finally(() => {
+    active = false;
+  });
+  const cancellation = control.cancelled.catch((error: unknown) => {
+    if (active && disposeLateValue) {
+      void task.then((value) => {
+        try {
+          disposeLateValue(value);
+        } catch (cleanupError) {
+          console.error(`[voSetupExtModule] late ${stage} cleanup failed:`, cleanupError);
+        }
+      }, () => {});
+    }
+    throw error;
+  });
+  return Promise.race([result, cancellation]);
+}
+
+function removeExtensionLoadLeases(
+  owner: string,
+  artifactToken?: string,
+  reason = new Error(`WASM extension '${owner}' load was cancelled`),
+): void {
   for (const [leaseToken, lease] of extLoadLeases) {
     if (lease.owner === owner && (artifactToken === undefined || lease.artifactToken === artifactToken)) {
+      lease.cancel?.(reason);
       extLoadLeases.delete(leaseToken);
     }
   }
 }
 
-function cancelPendingExtensionLoad(owner: string, artifactToken?: string): boolean {
+function cancelPendingExtensionLoad(
+  owner: string,
+  artifactToken?: string,
+  reason = new Error(`WASM extension '${owner}' load was cancelled`),
+): boolean {
   const operation = extLoadOperations.get(owner);
   if (!operation || (artifactToken !== undefined && operation.artifactToken !== artifactToken)) {
     return false;
   }
+  operation.control.cancel(reason);
   extLoadOperations.delete(owner);
-  removeExtensionLoadLeases(owner, operation.artifactToken);
+  removeExtensionLoadLeases(owner, operation.artifactToken, reason);
   const prepared = operation.prepared;
   operation.prepared = null;
   if (prepared) disposePreparedExtensionArtifact(prepared);
@@ -1114,11 +1175,13 @@ function abortExtensionLoadLease(
   key: string,
   artifactToken: string,
   leaseToken: string,
+  reason?: Error,
 ): void {
   validateCanonicalModuleOwner(key);
   if (typeof artifactToken !== 'string' || typeof leaseToken !== 'string') return;
   const lease = extLoadLeases.get(leaseToken);
   if (lease?.owner !== key || lease.artifactToken !== artifactToken) return;
+  lease.cancel?.(reason ?? new Error(`WASM extension '${key}' load was cancelled`));
   extLoadLeases.delete(leaseToken);
   if (extArtifacts.get(key)?.artifactToken === artifactToken) return;
   const operation = extLoadOperations.get(key);
@@ -1138,11 +1201,11 @@ function abortExtensionLoadLease(
     // cancel it explicitly so generation exhaustion cannot revive the same
     // token or leave a prepared instance unreachable.
     extExhaustedOwnerLoads.add(key);
-    cancelPendingExtensionLoad(key, artifactToken);
+    cancelPendingExtensionLoad(key, artifactToken, reason);
     throw error;
   }
   extOwnerLoadGenerations.set(key, nextOwnerGeneration);
-  cancelPendingExtensionLoad(key, artifactToken);
+  cancelPendingExtensionLoad(key, artifactToken, reason);
 }
 
 function unloadExtModule(key: string): void {
@@ -1166,18 +1229,13 @@ function unloadExtModule(key: string): void {
   const standaloneRef = extStandaloneRefs.get(key);
   ownerStateBridge?.forgetWasmExtModuleOwner(key);
   extOwnerLoadGenerations.set(key, nextOwnerGeneration);
-  const pendingOperation = extLoadOperations.get(key);
-  const prepared = pendingOperation?.prepared ?? null;
-  if (pendingOperation) {
-    pendingOperation.prepared = null;
-    extLoadOperations.delete(key);
-  }
-  removeExtensionLoadLeases(key);
+  const cancellation = new Error(`WASM extension '${key}' load was cancelled by disposal`);
+  cancelPendingExtensionLoad(key, undefined, cancellation);
+  removeExtensionLoadLeases(key, undefined, cancellation);
   extBindgenModules.delete(key);
   extInstances.delete(key);
   extStandaloneRefs.delete(key);
   extArtifacts.delete(key);
-  if (prepared) disposePreparedExtensionArtifact(prepared);
   if (standaloneRef) disposeStandaloneRef(standaloneRef, 'voDisposeExtModule');
   if (bindgenModule) disposeBindgenModule(bindgenModule);
 }
@@ -1395,6 +1453,11 @@ export function withHostBridgeSessionSync<T>(sessionId: number, run: () => T): T
   const ticket = provider ? hostBridgeCallGates.enter(provider.callGate) : null;
   const previous = activeHostBridgeProvider;
   const previousSessionId = activeHostBridgeSessionId;
+  const previousExtensionSessionId = activeExtensionCatalogSessionId;
+  const previousVfsSessionId = installedStudioWindowVfsSession?.sessionId;
+  const previousVfsWasDefault = installedStudioWindowVfsSession === null
+    && studioWindowVfsFactory !== null
+    && studioWindowVfsInstalledRevision === studioWindowVfsRevision;
   activeHostBridgeProvider = ticket ? provider : null;
   activeHostBridgeSessionId = sessionId;
   try {
@@ -1402,11 +1465,20 @@ export function withHostBridgeSessionSync<T>(sessionId: number, run: () => T): T
     ensureStudioWindowVfsBindings();
     return run();
   } finally {
-    // See the async path above: extension continuations may outlive this
-    // synchronous VM turn, so the next serialized session owns the switch.
-    activeHostBridgeProvider = previous;
-    activeHostBridgeSessionId = previousSessionId;
-    ticket?.release();
+    try {
+      // A synchronous renderer turn may interrupt another session while its
+      // serialized async operation is awaiting. Restore that exact extension
+      // scope and VFS before its continuation can resume.
+      activateExtensionCatalog(previousExtensionSessionId);
+      if (previousVfsSessionId !== undefined || previousVfsWasDefault) {
+        activeHostBridgeSessionId = previousVfsSessionId;
+        ensureStudioWindowVfsBindings();
+      }
+    } finally {
+      activeHostBridgeProvider = previous;
+      activeHostBridgeSessionId = previousSessionId;
+      ticket?.release();
+    }
   }
 }
 
@@ -1682,6 +1754,9 @@ function unloadAllExtModules(): void {
   const standaloneRefs = Array.from(new Set(extStandaloneRefs.values()));
   ownerStateBridge?.clearWasmExtModuleOwners();
   extResetGeneration = nextResetGeneration;
+  const cancellation = new Error('WASM extension load was cancelled by runtime reset');
+  for (const operation of extLoadOperations.values()) operation.control.cancel(cancellation);
+  for (const lease of extLoadLeases.values()) lease.cancel?.(cancellation);
   extOwnerLoadGenerations.clear();
   extLoadOperations.clear();
   extLoadLeases.clear();
@@ -1706,8 +1781,11 @@ export function dropLoadedWasmExtensionsForSession(sessionId: number): void {
   }
   const previousSessionId = activeExtensionCatalogSessionId;
   activateExtensionCatalog(sessionId);
-  unloadAllExtModules();
-  activateExtensionCatalog(previousSessionId === sessionId ? 0 : previousSessionId);
+  try {
+    unloadAllExtModules();
+  } finally {
+    activateExtensionCatalog(previousSessionId === sessionId ? 0 : previousSessionId);
+  }
   extensionCatalogs.delete(sessionId);
   extOwnerStateBridge?.forgetWasmExtScope(BigInt(sessionId));
 }
@@ -1803,7 +1881,7 @@ function installExtBridgeGlobals(
   (window as unknown as Record<string, unknown>).voSetupExtModule = (
     key: string,
     bytes: Uint8Array,
-    jsGlueUrl?: string,
+    jsGlueSource?: string,
   ): ExtensionLoadHandle => {
     validateCanonicalModuleOwner(key);
     if (extExhaustedOwnerLoads.has(key)) {
@@ -1814,30 +1892,29 @@ function installExtBridgeGlobals(
     if (!(bytes instanceof Uint8Array)) {
       throw new Error(`WASM extension '${key}' bytes must be a Uint8Array`);
     }
-    if (jsGlueUrl !== undefined && typeof jsGlueUrl !== 'string') {
-      throw new Error(`WASM extension '${key}' JS glue URL must be a string`);
+    if (jsGlueSource !== undefined && typeof jsGlueSource !== 'string') {
+      throw new Error(`WASM extension '${key}' JS glue source must be a string`);
     }
     const moduleBytes = bytes.slice();
+    const glueSource = jsGlueSource ? jsGlueSource : null;
     const expectedResetGeneration = extResetGeneration;
     const expectedOwnerGeneration = extOwnerLoadGenerations.get(key) ?? 0;
     const generationToken = extArtifacts.get(key)?.artifactToken
       ?? extLoadOperations.get(key)?.artifactToken
       ?? extensionLoadGenerationToken(expectedResetGeneration, expectedOwnerGeneration);
     const leaseToken = allocateExtensionLoadLease(key, generationToken);
-    const hasJsGlue = Boolean(jsGlueUrl);
     const activeArtifact = extArtifacts.get(key);
     if (activeArtifact) {
       const ready = (async (): Promise<void> => {
-        const jsGlueSource = jsGlueUrl ? await readJsGlueSource(jsGlueUrl) : null;
         assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
         const currentArtifact = extArtifacts.get(key);
-        const expectedLoaded = jsGlueSource !== null
+        const expectedLoaded = glueSource !== null
           ? extBindgenModules.has(key) && !extInstances.has(key)
           : extInstances.has(key) && extStandaloneRefs.has(key) && !extBindgenModules.has(key);
         if (
           currentArtifact?.artifactToken !== generationToken
           || !expectedLoaded
-          || currentArtifact.jsGlueSource !== jsGlueSource
+          || currentArtifact.jsGlueSource !== glueSource
           || !bytesEqual(currentArtifact.bytes, moduleBytes)
         ) {
           throw new Error(
@@ -1852,35 +1929,24 @@ function installExtBridgeGlobals(
       if (pendingLoad) {
         if (
           pendingLoad.artifactToken !== generationToken
-          || pendingLoad.hasJsGlue !== hasJsGlue
+          || pendingLoad.jsGlueSource !== glueSource
           || !bytesEqual(pendingLoad.bytes, moduleBytes)
         ) {
           throw new Error(
             `WASM extension owner '${key}' is already loading a different artifact`,
           );
         }
-        const candidateSourcePromise = jsGlueUrl ? readJsGlueSource(jsGlueUrl) : Promise.resolve(null);
-        const [pendingSource, candidateSource] = await Promise.all([
-          pendingLoad.jsGlueSourcePromise,
-          candidateSourcePromise,
-        ]);
         assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
-        if (pendingSource !== candidateSource) {
-          throw new Error(
-            `WASM extension owner '${key}' is already loading a different artifact`,
-          );
-        }
         await pendingLoad.promise;
         return;
       }
-      const jsGlueSourcePromise = jsGlueUrl ? readJsGlueSource(jsGlueUrl) : Promise.resolve(null);
+      const loadControl = createExtensionLoadControl();
       let operation: PendingExtensionLoad | undefined;
       const loadPromise = (async (): Promise<void> => {
-        const jsGlueSource = await jsGlueSourcePromise;
         assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
         const existingArtifact = extArtifacts.get(key);
         if (existingArtifact) {
-          const expectedLoaded = jsGlueSource !== null
+          const expectedLoaded = glueSource !== null
             ? extBindgenModules.has(key) && !extInstances.has(key)
             : extInstances.has(key) && extStandaloneRefs.has(key) && !extBindgenModules.has(key);
           if (!expectedLoaded) {
@@ -1888,7 +1954,7 @@ function installExtBridgeGlobals(
           }
           if (
             existingArtifact.artifactToken === generationToken
-            && existingArtifact.jsGlueSource === jsGlueSource
+            && existingArtifact.jsGlueSource === glueSource
             && bytesEqual(existingArtifact.bytes, moduleBytes)
           ) {
             emitStudioHostLog({
@@ -1906,16 +1972,26 @@ function installExtBridgeGlobals(
         if (extBindgenModules.has(key) || extInstances.has(key) || extStandaloneRefs.has(key)) {
           throw new Error(`WASM extension '${key}' has untracked loaded state`);
         }
-        const artifact = { bytes: moduleBytes, jsGlueSource, artifactToken: generationToken };
+        const artifact = {
+          bytes: moduleBytes,
+          jsGlueSource: glueSource,
+          artifactToken: generationToken,
+        };
         emitStudioHostLog({
           source: 'studio-extbridge',
           code: 'ext_module_setup_begin',
           level: 'system',
-          text: `key=${key} bindgen=${jsGlueSource !== null ? 'yes' : 'no'} bytes=${moduleBytes.byteLength}`,
+          text: `key=${key} bindgen=${glueSource !== null ? 'yes' : 'no'} bytes=${moduleBytes.byteLength}`,
         });
-        if (jsGlueSource !== null) {
-          const { importUrl, revoke } = createJsGlueImportUrl(jsGlueSource);
+        if (glueSource !== null) {
+          const { importUrl, revoke } = createJsGlueImportUrl(glueSource);
           let glue: BindgenModule | null = null;
+          let glueDisposed = false;
+          const disposeGlue = (): void => {
+            if (!glue || glueDisposed) return;
+            glueDisposed = true;
+            disposeBindgenModule(glue);
+          };
           try {
             assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
             emitStudioHostLog({
@@ -1924,7 +2000,12 @@ function installExtBridgeGlobals(
               level: 'system',
               text: `key=${key}`,
             });
-            glue = await import(/* @vite-ignore */ importUrl) as BindgenModule;
+            glue = await waitForExtensionTask(
+              loadControl,
+              'JavaScript glue import',
+              import(/* @vite-ignore */ importUrl) as Promise<BindgenModule>,
+              disposeBindgenModule,
+            );
             assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
             emitStudioHostLog({
               source: 'studio-extbridge',
@@ -1941,9 +2022,12 @@ function installExtBridgeGlobals(
             if (typeof glue.default !== 'function') {
               throw new Error(`WASM extension '${key}' bindgen glue is missing its default initializer`);
             }
-            const initialized = await glue.default({
-              module_or_path: moduleBytes,
-            });
+            const initialized = await waitForExtensionTask(
+              loadControl,
+              'wasm-bindgen initialization',
+              glue.default({ module_or_path: moduleBytes }),
+              disposeGlue,
+            );
             assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
             requireExtensionProtocolV3(bindgenProtocolExports(initialized, key), key, 'bindgen');
             emitStudioHostLog({
@@ -1959,7 +2043,12 @@ function installExtBridgeGlobals(
                 level: 'system',
                 text: `key=${key}`,
               });
-              await (glue.__voInit as () => Promise<void>)();
+              await waitForExtensionTask(
+                loadControl,
+                '__voInit',
+                (glue.__voInit as () => Promise<void>)(),
+                disposeGlue,
+              );
               assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
               emitStudioHostLog({
                 source: 'studio-extbridge',
@@ -1986,17 +2075,26 @@ function installExtBridgeGlobals(
             };
             glue = null;
           } catch (error) {
-            if (glue) {
-              disposeBindgenModule(glue);
-            }
+            disposeGlue();
             throw error;
           } finally {
             revoke();
           }
         } else {
           const { imports, ref } = buildStandaloneImports();
+          let refDisposed = false;
+          const disposeRef = (): void => {
+            if (refDisposed) return;
+            refDisposed = true;
+            ref.dispose();
+          };
           try {
-            const { instance } = await WebAssembly.instantiate(moduleBytes, imports);
+            const { instance } = await waitForExtensionTask(
+              loadControl,
+              'standalone WebAssembly instantiation',
+              WebAssembly.instantiate(moduleBytes, imports),
+              disposeRef,
+            );
             assertExtensionLoadActive(key, expectedResetGeneration, expectedOwnerGeneration);
             // Bind the late reference so host imports can access this instance's memory.
             ref.instance = instance;
@@ -2019,20 +2117,20 @@ function installExtBridgeGlobals(
               standaloneRef: ref,
             };
           } catch (error) {
-            ref.dispose();
+            disposeRef();
             throw error;
           }
         }
       })();
       operation = {
         bytes: moduleBytes,
-        hasJsGlue,
-        jsGlueSourcePromise,
+        jsGlueSource: glueSource,
         artifactToken: generationToken,
         expectedResetGeneration,
         expectedOwnerGeneration,
         promise: loadPromise,
         prepared: null,
+        control: loadControl,
       };
       extLoadOperations.set(key, operation);
       void loadPromise.catch(() => {});
@@ -2321,12 +2419,12 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     return everyStepEnabled;
   };
   return {
-    prepareGuiFromBytecode: (bytecode, entryPath, launchToken) => {
+    prepareGuiFromBytecode: (bytecode, entryPath, launchToken, operationId) => {
       applyGcStressFlag();
       return requireStudioExport(
         mod.prepareGuiFromBytecode as StudioWasm['prepareGuiFromBytecode'],
         'prepareGuiFromBytecode',
-      )(bytecode, entryPath, launchToken);
+      )(bytecode, entryPath, launchToken, operationId);
     },
     startPreparedGui: (previewIndex, previewGeneration, entryPath) => {
       applyGcStressFlag();
@@ -2474,7 +2572,6 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
       'pollDisplayTimingRequest',
     ),
     submitDisplayPulse: requireStudioExport(mod.submitDisplayPulse, 'submitDisplayPulse'),
-    getRenderIslandVfsSnapshot: requireStudioExport(mod.getRenderIslandVfsSnapshot, 'getRenderIslandVfsSnapshot'),
     pollIslandData: requireStudioExport(mod.pollIslandData, 'pollIslandData'),
     pollPendingHostEvent: requireStudioExport(mod.pollPendingHostEvent, 'pollPendingHostEvent'),
     pollDiagnostic: requireStudioExport(mod.pollDiagnostic, 'pollDiagnostic'),
@@ -2499,14 +2596,15 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
       mod.forgetWasmExtScope,
       'forgetWasmExtScope',
     ),
-    checkEntry: requireStudioExport(mod.checkEntry as StudioWasm['checkEntry'], 'checkEntry'),
-    compileEntry: requireStudioExport(mod.compileEntry as StudioWasm['compileEntry'], 'compileEntry'),
     dumpEntry: requireStudioExport(mod.dumpEntry as StudioWasm['dumpEntry'], 'dumpEntry'),
     dumpGuiEntry: requireStudioExport(mod.dumpGuiEntry as StudioWasm['dumpGuiEntry'], 'dumpGuiEntry'),
     dumpBytecode: requireStudioExport(mod.dumpBytecode as StudioWasm['dumpBytecode'], 'dumpBytecode'),
     compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
-    prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),
+    cancelStudioOperation: requireStudioExport(
+      mod.cancelStudioOperation as StudioWasm['cancelStudioOperation'],
+      'cancelStudioOperation',
+    ),
     registerBrowserRuntimeHostArtifact: requireStudioExport(
       mod.registerBrowserRuntimeHostArtifact as StudioWasm['registerBrowserRuntimeHostArtifact'],
       'registerBrowserRuntimeHostArtifact',
@@ -2520,7 +2618,6 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
       mod.renderInitialModuleManifest as StudioWasm['renderInitialModuleManifest'],
       'renderInitialModuleManifest',
     ),
-    voVersion: requireStudioExport(mod.voVersion as StudioWasm['voVersion'], 'voVersion'),
     initVFS: requireStudioExport(mod.initVFS, 'initVFS'),
     registerBrowserReleaseCapabilities: requireStudioExport(
       mod.registerBrowserReleaseCapabilities as StudioWasm['registerBrowserReleaseCapabilities'],
@@ -2692,12 +2789,12 @@ export function makeVoWebModule(
         ? wasm.initVFS()
         : withHostBridgeSession(sessionId, () => wasm.initVFS())
     ),
-    preloadExtModule: (path, bytes, jsGlueUrl = '') =>
+    preloadExtModule: (path, bytes, jsGlueSource = '') =>
       sessionId == null
-        ? wasm.preloadExtModule(path, bytes, jsGlueUrl)
+        ? wasm.preloadExtModule(path, bytes, jsGlueSource)
         : withHostBridgeSession(
           sessionId,
-          () => wasm.preloadExtModule(path, bytes, jsGlueUrl),
+          () => wasm.preloadExtModule(path, bytes, jsGlueSource),
         ),
     VoVm: {
       withExterns: (bytecode) => {

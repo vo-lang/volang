@@ -140,8 +140,6 @@ impl ToolchainHost for EngineToolchainHost {
     }
 
     fn save_bytecode_binary(&self, module: &ToolchainModule, path: &Path) -> Result<(), String> {
-        vo_common_core::verifier::verify_module(&module.module)
-            .map_err(|err| format!("invalid bytecode: {err}"))?;
         let bytes = module
             .module
             .serialize()
@@ -152,7 +150,8 @@ impl ToolchainHost for EngineToolchainHost {
     fn load_bytecode_binary(&self, path: &Path) -> Result<ToolchainModule, String> {
         let bytes = vo_common_core::serialize::read_vob_file(path).map_err(|e| e.to_string())?;
         let module = Module::deserialize(&bytes).map_err(|error| error.to_string())?;
-        vo_common_core::verifier::verify_module(&module)
+        let module = vo_common_core::verifier::verify_loaded_module(module)
+            .map(Arc::new)
             .map_err(|err| format!("invalid bytecode: {err}"))?;
         let source_root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         Ok(ToolchainModule {

@@ -6,7 +6,6 @@ mod call_helpers;
 mod capability;
 mod compile_common;
 mod contract;
-mod contract_graph;
 mod effects;
 mod func_compiler;
 mod helpers;
@@ -14,7 +13,6 @@ mod intrinsics;
 pub mod loop_analysis;
 mod loop_compiler;
 mod metadata;
-mod metadata_contract;
 mod semantics;
 #[cfg(test)]
 mod test_fixtures;
@@ -22,38 +20,67 @@ mod translate;
 mod translator;
 mod verifier;
 
-pub use capability::{capability_matrix, opcode_capability, BackendStatus, RuntimePathPolicy};
-pub use contract_graph::{jit_contract_graph, ContractEdge};
-pub use func_compiler::FunctionCompiler;
 pub use loop_analysis::LoopInfo;
-pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc};
-pub use semantics::{
-    opcode_semantic_matrix, opcode_semantics, static_call_target_from_semantics, OpcodeSemantics,
-};
-pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
-pub use verifier::{
-    verify_jit_metadata, verify_module, verify_module_after_common, JitMetadataError,
-    VerifiedModule,
-};
+pub use loop_compiler::LoopFunc;
+
+use func_compiler::FunctionCompiler;
+use loop_compiler::{CompiledLoop, LoopCompiler};
+use verifier::JitMetadataError;
 
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
+use std::sync::Arc;
 
-use cranelift_codegen::ir::{types, AbiParam, FuncRef, Signature};
+use cranelift_codegen::ir::{types, AbiParam, Signature};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::FunctionBuilderContext;
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Module};
+use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
+use cranelift_module::{Module, ModuleReloc};
 
-use vo_runtime::bytecode::{FunctionDef, Module as VoModule, ResolvedExtern, ResolvedExternTable};
+use vo_runtime::bytecode::{
+    DynamicCallsiteMap, FunctionDef, LoadedModule, Module as VoModule, ResolvedExternTable,
+};
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitContext, JitResult};
 
-use helpers::HelperFuncIds;
+use helpers::{HelperFuncIds, HelperRefs};
+
+#[cfg(test)]
+fn test_frontend_config() -> cranelift_codegen::isa::TargetFrontendConfig {
+    cranelift_native::builder()
+        .expect("native ISA")
+        .finish(settings::Flags::new(settings::builder()))
+        .expect("native ISA flags")
+        .frontend_config()
+}
+
+/// Default persistent native-code budget for one JIT module / Island family.
+pub const DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum explicit native stack storage reserved by one compiled artifact.
+pub const MAX_JIT_NATIVE_FRAME_BYTES: usize = 256 * 1024;
+/// Default persistent budget for shared JIT analysis state.
+pub const MAX_JIT_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum estimated transient compiler work owned by one artifact.
+///
+/// Cranelift IR is substantially wider than Vo bytecode. Bounding the input
+/// shape before analysis and translation prevents one valid but adversarial
+/// function from consuming an unbounded amount of host memory.
+pub const MAX_JIT_COMPILE_WORK_BYTES: usize = 256 * 1024 * 1024;
 
 // =============================================================================
 // JitError
 // =============================================================================
+
+/// Stable classification used by VM dispatch policy and observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitFailureKind {
+    /// The verified program uses a construct this JIT backend cannot compile.
+    SemanticUnsupported,
+    /// A configured JIT memory or compilation-work budget rejected the artifact.
+    ResourceRejected,
+    /// The request reached an unexpected compiler, metadata, or scope failure.
+    CompilerFault,
+}
 
 #[derive(Debug)]
 pub enum JitError {
@@ -73,7 +100,57 @@ pub enum JitError {
         opcode: Opcode,
         layout: &'static str,
     },
+    CodeMemoryLimitExceeded {
+        limit_bytes: usize,
+        used_bytes: usize,
+        requested_bytes: usize,
+    },
+    NativeFrameLimitExceeded {
+        limit_bytes: usize,
+        requested_bytes: usize,
+    },
+    AnalysisResourceLimitExceeded {
+        limit_bytes: usize,
+        requested_bytes: usize,
+    },
+    CompileWorkLimitExceeded {
+        limit_bytes: usize,
+        requested_bytes: usize,
+    },
+    CodeMemoryReservationFailed {
+        requested_bytes: usize,
+        message: String,
+    },
     Internal(String),
+}
+
+impl JitError {
+    pub const fn failure_kind(&self) -> JitFailureKind {
+        match self {
+            Self::UnsupportedOpcode(_) | Self::MissingJitLayout { .. } => {
+                JitFailureKind::SemanticUnsupported
+            }
+            Self::CodeMemoryLimitExceeded { .. }
+            | Self::NativeFrameLimitExceeded { .. }
+            | Self::AnalysisResourceLimitExceeded { .. }
+            | Self::CompileWorkLimitExceeded { .. }
+            | Self::CodeMemoryReservationFailed { .. }
+            | Self::Module(cranelift_module::ModuleError::Allocation { .. }) => {
+                JitFailureKind::ResourceRejected
+            }
+            Self::Module(_)
+            | Self::Codegen(_)
+            | Self::FunctionNotFound(_)
+            | Self::InvalidOsrTarget(_)
+            | Self::ModuleScopeChanged
+            | Self::CompileEnvScopeChanged
+            | Self::FunctionScopeChanged
+            | Self::LoopScopeChanged
+            | Self::InvalidMetadata(_)
+            | Self::LoopAnalysis(_)
+            | Self::Internal(_) => JitFailureKind::CompilerFault,
+        }
+    }
 }
 
 impl std::fmt::Display for JitError {
@@ -105,6 +182,42 @@ impl std::fmt::Display for JitError {
             JitError::MissingJitLayout { pc, opcode, layout } => {
                 write!(f, "missing JIT {layout} layout for {opcode:?} at pc {pc}")
             }
+            JitError::CodeMemoryLimitExceeded {
+                limit_bytes,
+                used_bytes,
+                requested_bytes,
+            } => write!(
+                f,
+                "JIT code memory limit exceeded: limit {limit_bytes} bytes, used {used_bytes} bytes, requested {requested_bytes} bytes"
+            ),
+            JitError::NativeFrameLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            } => write!(
+                f,
+                "JIT native frame limit exceeded: limit {limit_bytes} bytes, requested {requested_bytes} bytes"
+            ),
+            JitError::AnalysisResourceLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            } => write!(
+                f,
+                "JIT analysis resource limit exceeded: limit {limit_bytes} bytes, requested {requested_bytes} bytes"
+            ),
+            JitError::CompileWorkLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            } => write!(
+                f,
+                "JIT compile work limit exceeded: limit {limit_bytes} bytes, requested {requested_bytes} bytes"
+            ),
+            JitError::CodeMemoryReservationFailed {
+                requested_bytes,
+                message,
+            } => write!(
+                f,
+                "JIT native memory reservation of {requested_bytes} bytes failed: {message}"
+            ),
             JitError::Internal(msg) => write!(f, "internal error: {}", msg),
         }
     }
@@ -142,23 +255,6 @@ impl From<loop_analysis::LoopAnalysisError> for JitError {
 
 pub struct CompiledFunction {
     code_ptr: *const u8,
-    code_size: usize,
-    param_slots: u16,
-    ret_slots: u16,
-}
-
-impl CompiledFunction {
-    pub fn code_size(&self) -> usize {
-        self.code_size
-    }
-
-    pub fn param_slots(&self) -> u16 {
-        self.param_slots
-    }
-
-    pub fn ret_slots(&self) -> u16 {
-        self.ret_slots
-    }
 }
 
 unsafe impl Send for CompiledFunction {}
@@ -187,25 +283,21 @@ pub struct JitCompileEnv<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct JitCompileEnvScope {
-    extern_entries_identity: (*const ResolvedExtern, usize),
-    externs: Vec<ResolvedExtern>,
+    externs: ResolvedExternTable,
     backend_caps: JitBackendCaps,
 }
 
 impl JitCompileEnvScope {
     fn from_env(env: JitCompileEnv<'_>) -> Self {
-        let entries = env.externs.entries();
         Self {
-            extern_entries_identity: (entries.as_ptr(), entries.len()),
-            externs: entries.to_vec(),
+            externs: env.externs.clone(),
             backend_caps: env.backend_caps,
         }
     }
 
-    fn is_same_immutable_table(&self, env: JitCompileEnv<'_>) -> bool {
-        let entries = env.externs.entries();
-        self.extern_entries_identity == (entries.as_ptr(), entries.len())
-            && self.backend_caps == env.backend_caps
+    fn matches(&self, env: JitCompileEnv<'_>) -> bool {
+        self.backend_caps == env.backend_caps
+            && (self.externs.shares_storage_with(env.externs) || self.externs == *env.externs)
     }
 }
 
@@ -214,25 +306,62 @@ impl JitCompileEnvScope {
 // =============================================================================
 
 struct JitCache {
-    functions: HashMap<u32, CompiledFunction>,
+    functions: Vec<Option<CompiledFunction>>,
     loops: HashMap<(u32, usize), CompiledLoop>,
+    analyses: Vec<Option<Arc<analysis::FunctionAnalysis>>>,
+    analysis_access_ticks: Vec<u64>,
+    analysis_tick: u64,
+    analysis_eviction_count: usize,
+    rejected_analysis_count: usize,
+    rejected_functions: Vec<Option<CodeMemoryRejection>>,
+    rejected_loops: HashMap<(u32, usize), (LoopInfo, CodeMemoryRejection)>,
+    function_bytes: usize,
+    loop_bytes: usize,
+    function_committed_bytes: usize,
+    loop_committed_bytes: usize,
+    code_allocation_granularity_bytes: usize,
+    analysis_bytes: usize,
+    analysis_memory_limit_bytes: usize,
+    code_memory_limit_bytes: usize,
 }
 
 impl JitCache {
-    fn new() -> Self {
+    fn new(code_memory_limit_bytes: usize, analysis_memory_limit_bytes: usize) -> Self {
         Self {
-            functions: HashMap::new(),
+            functions: Vec::new(),
             loops: HashMap::new(),
+            analyses: Vec::new(),
+            analysis_access_ticks: Vec::new(),
+            analysis_tick: 0,
+            analysis_eviction_count: 0,
+            rejected_analysis_count: 0,
+            rejected_functions: Vec::new(),
+            rejected_loops: HashMap::new(),
+            function_bytes: 0,
+            loop_bytes: 0,
+            function_committed_bytes: 0,
+            loop_committed_bytes: 0,
+            code_allocation_granularity_bytes: region::page::size(),
+            analysis_bytes: 0,
+            analysis_memory_limit_bytes,
+            code_memory_limit_bytes,
         }
     }
-    fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
-        self.functions.get(&func_id)
+    fn bind_function_count(&mut self, count: usize) {
+        if self.functions.is_empty() {
+            self.functions.resize_with(count, || None);
+            self.analyses.resize_with(count, || None);
+            self.analysis_access_ticks.resize(count, 0);
+            self.rejected_functions.resize_with(count, || None);
+        }
     }
     fn insert(&mut self, func_id: u32, func: CompiledFunction) {
-        self.functions.insert(func_id, func);
+        self.functions[func_id as usize] = Some(func);
     }
     fn contains(&self, func_id: u32) -> bool {
-        self.functions.contains_key(&func_id)
+        self.functions
+            .get(func_id as usize)
+            .is_some_and(Option::is_some)
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
@@ -241,7 +370,8 @@ impl JitCache {
     /// been permanently retired.
     unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.functions
-            .get(&func_id)
+            .get(func_id as usize)
+            .and_then(Option::as_ref)
             .map(|f| std::mem::transmute(f.code_ptr))
     }
     fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
@@ -250,12 +380,166 @@ impl JitCache {
     fn insert_loop(&mut self, func_id: u32, begin_pc: usize, compiled: CompiledLoop) {
         self.loops.insert((func_id, begin_pc), compiled);
     }
+    fn get_or_analyze(
+        &mut self,
+        func_id: u32,
+        func: &FunctionDef,
+        vo_module: &VoModule,
+        dynamic_callsites: Arc<DynamicCallsiteMap>,
+    ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
+        self.analysis_tick = self.analysis_tick.saturating_add(1);
+        if let Some(analysis) = self.analyses.get(func_id as usize).and_then(Option::as_ref) {
+            self.analysis_access_ticks[func_id as usize] = self.analysis_tick;
+            return Ok(Arc::clone(analysis));
+        }
+        let analysis = match analysis::FunctionAnalysis::for_function(
+            func_id,
+            func,
+            vo_module,
+            dynamic_callsites,
+            self.analysis_memory_limit_bytes,
+        ) {
+            Ok(analysis) => Arc::new(analysis),
+            Err(JitError::AnalysisResourceLimitExceeded {
+                requested_bytes, ..
+            }) => {
+                self.rejected_analysis_count = self.rejected_analysis_count.saturating_add(1);
+                return Err(JitError::AnalysisResourceLimitExceeded {
+                    limit_bytes: self.analysis_memory_limit_bytes,
+                    requested_bytes,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let retained_bytes = analysis.retained_bytes();
+        while retained_bytes
+            > self
+                .analysis_memory_limit_bytes
+                .saturating_sub(self.analysis_bytes)
+        {
+            let candidate = self
+                .analyses
+                .iter()
+                .enumerate()
+                .filter(|(index, entry)| {
+                    *index != func_id as usize
+                        && entry
+                            .as_ref()
+                            .is_some_and(|analysis| Arc::strong_count(analysis) == 1)
+                })
+                .min_by_key(|(index, _)| self.analysis_access_ticks[*index])
+                .map(|(index, _)| index);
+            let Some(candidate) = candidate else {
+                self.rejected_analysis_count = self.rejected_analysis_count.saturating_add(1);
+                return Err(JitError::AnalysisResourceLimitExceeded {
+                    limit_bytes: self.analysis_memory_limit_bytes,
+                    requested_bytes: self.analysis_bytes.saturating_add(retained_bytes),
+                });
+            };
+            if let Some(evicted) = self.analyses[candidate].take() {
+                self.analysis_bytes = self.analysis_bytes.saturating_sub(evicted.retained_bytes());
+                self.analysis_access_ticks[candidate] = 0;
+                self.analysis_eviction_count = self.analysis_eviction_count.saturating_add(1);
+            }
+        }
+        self.analysis_bytes = self.analysis_bytes.saturating_add(retained_bytes);
+        self.analysis_access_ticks[func_id as usize] = self.analysis_tick;
+        self.analyses[func_id as usize] = Some(Arc::clone(&analysis));
+        Ok(analysis)
+    }
+    fn committed_artifact_bytes(&self, emitted_bytes: usize) -> usize {
+        if emitted_bytes == 0 {
+            return 0;
+        }
+        let page = self.code_allocation_granularity_bytes.max(1);
+        emitted_bytes
+            .checked_add(page - 1)
+            .map(|bytes| bytes / page * page)
+            .unwrap_or(usize::MAX)
+    }
+    fn ensure_code_capacity(&self, requested_bytes: usize) -> Result<(), JitError> {
+        let used_bytes = self
+            .function_committed_bytes
+            .saturating_add(self.loop_committed_bytes);
+        if requested_bytes > self.code_memory_limit_bytes.saturating_sub(used_bytes) {
+            return Err(JitError::CodeMemoryLimitExceeded {
+                limit_bytes: self.code_memory_limit_bytes,
+                used_bytes,
+                requested_bytes,
+            });
+        }
+        Ok(())
+    }
+    fn ensure_artifact_slot(&self) -> Result<(), JitError> {
+        self.ensure_code_capacity(self.code_allocation_granularity_bytes)
+    }
+    fn record_function_allocation(&mut self, emitted_bytes: usize, committed_bytes: usize) {
+        self.function_bytes = self.function_bytes.saturating_add(emitted_bytes);
+        self.function_committed_bytes = self
+            .function_committed_bytes
+            .saturating_add(committed_bytes);
+    }
+    fn record_loop_allocation(&mut self, emitted_bytes: usize, committed_bytes: usize) {
+        self.loop_bytes = self.loop_bytes.saturating_add(emitted_bytes);
+        self.loop_committed_bytes = self.loop_committed_bytes.saturating_add(committed_bytes);
+    }
+    fn rejected_function(&self, func_id: u32) -> Option<JitError> {
+        self.rejected_functions
+            .get(func_id as usize)
+            .and_then(Option::as_ref)
+            .map(|rejection| rejection.to_error(self.code_memory_limit_bytes))
+    }
+    fn reject_function(&mut self, func_id: u32, rejection: CodeMemoryRejection) {
+        let retained = &mut self.rejected_functions[func_id as usize];
+        if retained.is_none() {
+            *retained = Some(rejection);
+        }
+    }
+    fn rejected_loop(
+        &self,
+        func_id: u32,
+        loop_info: &LoopInfo,
+    ) -> Result<Option<JitError>, JitError> {
+        let Some((cached_info, rejection)) =
+            self.rejected_loops.get(&(func_id, loop_info.begin_pc))
+        else {
+            return Ok(None);
+        };
+        if cached_info != loop_info {
+            return Err(JitError::LoopScopeChanged);
+        }
+        Ok(Some(rejection.to_error(self.code_memory_limit_bytes)))
+    }
+    fn reject_loop(&mut self, func_id: u32, loop_info: &LoopInfo, rejection: CodeMemoryRejection) {
+        self.rejected_loops
+            .entry((func_id, loop_info.begin_pc))
+            .or_insert_with(|| (loop_info.clone(), rejection));
+    }
     fn code_memory_stats(&self) -> JitCodeMemoryStats {
         JitCodeMemoryStats {
-            function_count: self.functions.len(),
+            function_count: self.functions.iter().flatten().count(),
             loop_count: self.loops.len(),
-            function_bytes: self.functions.values().map(|func| func.code_size).sum(),
-            loop_bytes: self.loops.values().map(|loop_| loop_.code_size).sum(),
+            function_bytes: self.function_bytes,
+            loop_bytes: self.loop_bytes,
+            function_committed_bytes: self.function_committed_bytes,
+            loop_committed_bytes: self.loop_committed_bytes,
+            allocation_granularity_bytes: self.code_allocation_granularity_bytes,
+            limit_bytes: self.code_memory_limit_bytes,
+            rejected_artifact_count: self
+                .rejected_functions
+                .iter()
+                .flatten()
+                .count()
+                .saturating_add(self.rejected_loops.len()),
+        }
+    }
+    fn analysis_memory_stats(&self) -> JitAnalysisMemoryStats {
+        JitAnalysisMemoryStats {
+            analysis_count: self.analyses.iter().flatten().count(),
+            retained_bytes: self.analysis_bytes,
+            limit_bytes: self.analysis_memory_limit_bytes,
+            rejected_analysis_count: self.rejected_analysis_count,
+            eviction_count: self.analysis_eviction_count,
         }
     }
     /// # Safety
@@ -268,24 +552,85 @@ impl JitCache {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CodeMemoryRejection {
+    used_bytes: usize,
+    requested_bytes: usize,
+}
+
+impl CodeMemoryRejection {
+    fn from_error(error: &JitError) -> Option<Self> {
+        let JitError::CodeMemoryLimitExceeded {
+            used_bytes,
+            requested_bytes,
+            ..
+        } = error
+        else {
+            return None;
+        };
+        Some(Self {
+            used_bytes: *used_bytes,
+            requested_bytes: *requested_bytes,
+        })
+    }
+
+    fn to_error(self, limit_bytes: usize) -> JitError {
+        JitError::CodeMemoryLimitExceeded {
+            limit_bytes,
+            used_bytes: self.used_bytes,
+            requested_bytes: self.requested_bytes,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct JitCodeMemoryStats {
     pub function_count: usize,
     pub loop_count: usize,
     pub function_bytes: usize,
     pub loop_bytes: usize,
+    pub function_committed_bytes: usize,
+    pub loop_committed_bytes: usize,
+    pub allocation_granularity_bytes: usize,
+    pub limit_bytes: usize,
+    pub rejected_artifact_count: usize,
 }
 
 impl JitCodeMemoryStats {
-    pub fn total_bytes(self) -> usize {
+    pub fn total_emitted_bytes(self) -> usize {
         self.function_bytes.saturating_add(self.loop_bytes)
+    }
+
+    /// Native pages charged to the hard code-memory budget.
+    pub fn total_bytes(self) -> usize {
+        self.function_committed_bytes
+            .saturating_add(self.loop_committed_bytes)
+    }
+
+    pub fn remaining_bytes(self) -> usize {
+        self.limit_bytes.saturating_sub(self.total_bytes())
     }
 }
 
-impl Default for JitCache {
-    fn default() -> Self {
-        Self::new()
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitAnalysisMemoryStats {
+    pub analysis_count: usize,
+    pub retained_bytes: usize,
+    pub limit_bytes: usize,
+    pub rejected_analysis_count: usize,
+    pub eviction_count: usize,
+}
+
+impl JitAnalysisMemoryStats {
+    pub fn remaining_bytes(self) -> usize {
+        self.limit_bytes.saturating_sub(self.retained_bytes)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JitArtifactKind {
+    Function,
+    Loop,
 }
 
 // =============================================================================
@@ -295,13 +640,14 @@ impl Default for JitCache {
 pub struct JitCompiler {
     module: ManuallyDrop<JITModule>,
     ctx: cranelift_codegen::Context,
+    func_ctx: FunctionBuilderContext,
     cache: JitCache,
-    func_decl_ids: HashMap<u32, FuncId>,
-    callee_func_refs_buf: Vec<Option<FuncRef>>,
     helper_funcs: HelperFuncIds,
-    verified_module: Option<VerifiedModule>,
-    immutable_module_identity: Option<(*const FunctionDef, usize)>,
+    #[cfg(test)]
+    verified_module_identity: Option<*const VoModule>,
+    loaded_module: Option<Arc<LoadedModule>>,
     verified_env: Option<JitCompileEnvScope>,
+    dynamic_callsites: Option<Arc<DynamicCallsiteMap>>,
     debug_ir: bool,
 }
 
@@ -311,6 +657,21 @@ impl JitCompiler {
     }
 
     pub fn with_debug(debug_ir: bool) -> Result<Self, JitError> {
+        Self::with_code_memory_limit(debug_ir, DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES)
+    }
+
+    pub fn with_code_memory_limit(
+        debug_ir: bool,
+        code_memory_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
+        Self::with_resource_limits(debug_ir, code_memory_limit_bytes, MAX_JIT_ANALYSIS_BYTES)
+    }
+
+    pub fn with_resource_limits(
+        debug_ir: bool,
+        code_memory_limit_bytes: usize,
+        analysis_memory_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
         let mut flag_builder = settings::builder();
         flag_builder
             .set("opt_level", "speed")
@@ -323,6 +684,14 @@ impl JitCompiler {
             .map_err(|e| JitError::Internal(e.to_string()))?;
 
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let arena_bytes = code_memory_limit_bytes.max(region::page::size());
+        let arena = ArenaMemoryProvider::new_with_size(arena_bytes).map_err(|error| {
+            JitError::CodeMemoryReservationFailed {
+                requested_bytes: arena_bytes,
+                message: error.to_string(),
+            }
+        })?;
+        builder.memory_provider(Box::new(arena));
 
         // Register runtime helper symbols
         helpers::register_symbols(&mut builder);
@@ -335,62 +704,59 @@ impl JitCompiler {
         Ok(Self {
             module: ManuallyDrop::new(module),
             ctx,
-            cache: JitCache::new(),
-            func_decl_ids: HashMap::new(),
-            callee_func_refs_buf: Vec::new(),
+            func_ctx: FunctionBuilderContext::new(),
+            cache: JitCache::new(code_memory_limit_bytes, analysis_memory_limit_bytes),
             helper_funcs,
-            verified_module: None,
-            immutable_module_identity: None,
+            #[cfg(test)]
+            verified_module_identity: None,
+            loaded_module: None,
             verified_env: None,
+            dynamic_callsites: None,
             debug_ir,
         })
     }
 
-    fn get_helper_refs(&mut self) -> HelperFuncs {
-        helpers::get_helper_refs(&mut self.module, &mut self.ctx.func, &self.helper_funcs)
-    }
-
+    #[cfg(test)]
     fn verify_module_once(&mut self, vo_module: &VoModule) -> Result<(), JitError> {
-        if let Some(verified) = self.verified_module {
-            if self.immutable_module_identity
-                == Some((vo_module.functions.as_ptr(), vo_module.functions.len()))
-            {
-                return Ok(());
-            }
-            if verified.matches(vo_module)? {
-                return Ok(());
-            }
-            return Err(JitError::ModuleScopeChanged);
+        let identity = core::ptr::from_ref(vo_module);
+        if let Some(verified_identity) = self.verified_module_identity {
+            return if verified_identity == identity {
+                Ok(())
+            } else {
+                Err(JitError::ModuleScopeChanged)
+            };
         }
-        self.verified_module = Some(verifier::verify_module(vo_module)?);
+        verifier::verify_module(vo_module)?;
+        self.verified_module_identity = Some(identity);
+        self.cache.bind_function_count(vo_module.functions.len());
+        self.dynamic_callsites = Some(Arc::new(DynamicCallsiteMap::for_module(vo_module)));
         Ok(())
     }
 
-    /// Bind the compiler to a VM-owned module that cannot mutate for the
-    /// compiler's remaining lifetime.
-    ///
-    /// # Safety
-    ///
-    /// The module's functions and all module-level facts consumed by codegen
-    /// must remain immutable. This permits subsequent compiles to use stable
-    /// function-buffer identity instead of serializing and hashing the module.
-    pub unsafe fn bind_immutable_module_scope(
-        &mut self,
-        vo_module: &VoModule,
-    ) -> Result<(), JitError> {
-        self.verify_module_once(vo_module)?;
-        self.immutable_module_identity =
-            Some((vo_module.functions.as_ptr(), vo_module.functions.len()));
+    /// Bind the compiler to the common-verifier-owned immutable image. The
+    /// compiler retains the owner, so codegen never relies on a caller-managed
+    /// raw lifetime contract.
+    pub fn bind_loaded_module_scope(&mut self, loaded: Arc<LoadedModule>) -> Result<(), JitError> {
+        let vo_module = loaded.module();
+        if let Some(bound) = &self.loaded_module {
+            if !Arc::ptr_eq(bound, &loaded) {
+                return Err(JitError::ModuleScopeChanged);
+            }
+            return Ok(());
+        }
+        self.cache.bind_function_count(vo_module.functions.len());
+        self.dynamic_callsites = Some(loaded.shared_dynamic_callsite_map());
+        #[cfg(test)]
+        {
+            self.verified_module_identity = Some(core::ptr::from_ref(vo_module));
+        }
+        self.loaded_module = Some(loaded);
         Ok(())
     }
 
     fn verify_env_once(&mut self, env: JitCompileEnv<'_>) -> Result<(), JitError> {
         if let Some(verified) = &self.verified_env {
-            if verified.is_same_immutable_table(env) {
-                return Ok(());
-            }
-            let scope = JitCompileEnvScope::from_env(env);
-            if verified.externs == scope.externs && verified.backend_caps == scope.backend_caps {
+            if verified.matches(env) {
                 return Ok(());
             }
             return Err(JitError::CompileEnvScopeChanged);
@@ -399,6 +765,7 @@ impl JitCompiler {
         Ok(())
     }
 
+    #[cfg(test)]
     fn verify_function_scope(
         &self,
         func_id: u32,
@@ -414,162 +781,283 @@ impl JitCompiler {
         Ok(())
     }
 
-    fn rebuild_callee_func_refs(
-        &mut self,
-        refs: &mut Vec<Option<FuncRef>>,
-        func_count: usize,
-        available_direct_callees: &[u32],
-        self_entry: Option<(u32, FuncRef)>,
-    ) {
-        refs.clear();
-        refs.resize(func_count, None);
-
-        if let Some((self_func_id, self_ref)) = self_entry {
-            if (self_func_id as usize) < refs.len() {
-                refs[self_func_id as usize] = Some(self_ref);
-            }
-        }
-
-        for &callee_id in available_direct_callees {
-            if (callee_id as usize) >= refs.len() {
-                continue;
-            }
-            if refs[callee_id as usize].is_some() {
-                continue;
-            }
-            if let Some(&decl_id) = self.func_decl_ids.get(&callee_id) {
-                let callee_ref = self
-                    .module
-                    .declare_func_in_func(decl_id, &mut self.ctx.func);
-                refs[callee_id as usize] = Some(callee_ref);
-            }
-        }
-    }
-
     fn finalize_function(
         &mut self,
         func_id_cl: cranelift_module::FuncId,
         name: &str,
-    ) -> Result<(*const u8, usize), JitError> {
-        let flags = settings::Flags::new(settings::builder());
-        cranelift_codegen::verifier::verify_function(&self.ctx.func, &flags).map_err(|errors| {
-            JitError::Internal(format!(
-                "Cranelift IR verification failed for {name}: {errors}"
-            ))
-        })?;
-        if self.debug_ir {
-            eprintln!("[JIT VERIFY OK] {}", name);
+        artifact_kind: JitArtifactKind,
+    ) -> Result<*const u8, JitError> {
+        let compile_result: Result<(usize, usize), JitError> = (|| {
+            cranelift_codegen::verifier::verify_function(&self.ctx.func, self.module.isa().flags())
+                .map_err(|errors| {
+                    JitError::Internal(format!(
+                        "Cranelift IR verification failed for {name}: {errors}"
+                    ))
+                })?;
+            if self.debug_ir {
+                eprintln!("[JIT VERIFY OK] {}", name);
+            }
+
+            self.ctx
+                .compile(self.module.isa(), &mut Default::default())
+                .map_err(cranelift_module::ModuleError::from)?;
+            let compiled = self
+                .ctx
+                .compiled_code()
+                .ok_or_else(|| JitError::Internal(format!("missing compiled code for {name}")))?;
+            let code_size = compiled.code_info().total_size as usize;
+            let committed_size = self.cache.committed_artifact_bytes(code_size);
+            self.cache.ensure_code_capacity(committed_size)?;
+            let relocs = compiled
+                .buffer
+                .relocs()
+                .iter()
+                .map(|reloc| ModuleReloc::from_mach_reloc(reloc, &self.ctx.func, func_id_cl))
+                .collect::<Vec<_>>();
+            self.module
+                .define_function_bytes(
+                    func_id_cl,
+                    u64::from(compiled.buffer.alignment),
+                    compiled.code_buffer(),
+                    &relocs,
+                )
+                .map_err(JitError::from)?;
+            Ok((code_size, committed_size))
+        })();
+        self.module.clear_context(&mut self.ctx);
+        let (code_size, committed_size) = compile_result?;
+
+        match artifact_kind {
+            JitArtifactKind::Function => self
+                .cache
+                .record_function_allocation(code_size, committed_size),
+            JitArtifactKind::Loop => self.cache.record_loop_allocation(code_size, committed_size),
         }
+        self.module.finalize_definitions()?;
 
-        let module = &mut self.module;
-        module.define_function(func_id_cl, &mut self.ctx)?;
-        let code_size = self
-            .ctx
-            .compiled_code()
-            .map(|code| code.code_info().total_size as usize)
-            .ok_or_else(|| JitError::Internal(format!("missing compiled code for {name}")))?;
-        module.clear_context(&mut self.ctx);
-        module.finalize_definitions()?;
-
-        Ok((module.get_finalized_function(func_id_cl), code_size))
+        Ok(self.module.get_finalized_function(func_id_cl))
     }
 
-    pub fn compile(
+    fn finish_translation(&mut self, result: Result<(), JitError>) -> Result<(), JitError> {
+        if result.is_err() {
+            // FunctionBuilderContext clears itself on finalize. A lowering
+            // error exits before finalize, so discard that partial state.
+            self.func_ctx = FunctionBuilderContext::new();
+            self.module.clear_context(&mut self.ctx);
+        }
+        result
+    }
+
+    fn verify_native_frame_budget(&self) -> Result<(), JitError> {
+        let requested_bytes = self
+            .ctx
+            .func
+            .sized_stack_slots
+            .values()
+            .try_fold(0usize, |total, slot| total.checked_add(slot.size as usize))
+            .unwrap_or(usize::MAX);
+        if requested_bytes > MAX_JIT_NATIVE_FRAME_BYTES {
+            return Err(JitError::NativeFrameLimitExceeded {
+                limit_bytes: MAX_JIT_NATIVE_FRAME_BYTES,
+                requested_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_compile_work_budget(func: &FunctionDef) -> Result<(), JitError> {
+        // The factors are conservative ownership estimates for Cranelift IR,
+        // block/fact maps, and per-slot compiler state. All arithmetic saturates
+        // so malformed or future wider inputs fail closed.
+        let requested_bytes = func
+            .code
+            .len()
+            .saturating_mul(512)
+            .saturating_add(func.instruction_metadata.len().saturating_mul(32))
+            .saturating_add(usize::from(func.local_slots).saturating_mul(64));
+        if requested_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+            return Err(JitError::CompileWorkLimitExceeded {
+                limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+                requested_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Compile a function from the retained, commonly verified module image.
+    pub fn compile_loaded(&mut self, func_id: u32, env: JitCompileEnv<'_>) -> Result<(), JitError> {
+        let loaded = Arc::clone(
+            self.loaded_module
+                .as_ref()
+                .ok_or_else(|| JitError::Internal("JIT compiler has no loaded module".into()))?,
+        );
+        let vo_module = loaded.module();
+        let func = vo_module
+            .functions
+            .get(func_id as usize)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
+        self.compile_bound(func_id, func, vo_module, env)
+    }
+
+    fn compile_bound(
         &mut self,
         func_id: u32,
         func: &FunctionDef,
         vo_module: &VoModule,
         env: JitCompileEnv<'_>,
-        available_direct_callees: &[u32],
     ) -> Result<(), JitError> {
-        self.verify_module_once(vo_module)?;
         self.verify_env_once(env)?;
-        self.verify_function_scope(func_id, func, vo_module)?;
 
         if self.cache.contains(func_id) {
             return Ok(());
         }
+        if let Some(error) = self.cache.rejected_function(func_id) {
+            return Err(error);
+        }
+        if let Err(error) = self.cache.ensure_artifact_slot() {
+            if let Some(rejection) = CodeMemoryRejection::from_error(&error) {
+                self.cache.reject_function(func_id, rejection);
+            }
+            return Err(error);
+        }
+        Self::verify_compile_work_budget(func)?;
+        let dynamic_callsites = self
+            .dynamic_callsites
+            .as_ref()
+            .expect("verified module must carry dynamic callsite facts");
+        let analysis =
+            self.cache
+                .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
 
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
         let module = &self.module;
-        let ptr_type = module.target_config().pointer_type();
-        let mut sig = Signature::new(module.target_config().default_call_conv);
+        let target_config = module.target_config();
+        let ptr_type = target_config.pointer_type();
+        let mut sig = Signature::new(target_config.default_call_conv);
         sig.params.push(AbiParam::new(ptr_type)); // ctx
         sig.params.push(AbiParam::new(ptr_type)); // args
         sig.params.push(AbiParam::new(ptr_type)); // ret
         sig.returns.push(AbiParam::new(types::I32));
 
-        let func_name = format!("vo_jit_{}", func_id);
-        let func_id_cl =
-            self.module
-                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
-        self.func_decl_ids.insert(func_id, func_id_cl);
-
         self.ctx.func.signature = sig;
         self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0, func_id);
 
-        let mut func_ctx = FunctionBuilderContext::new();
-        let helpers = self.get_helper_refs();
-        // Get FuncRef for self-recursive calls optimization
-        let self_func_ref = self
-            .module
-            .declare_func_in_func(func_id_cl, &mut self.ctx.func);
-        let mut callee_func_refs = std::mem::take(&mut self.callee_func_refs_buf);
-        self.rebuild_callee_func_refs(
-            &mut callee_func_refs,
-            vo_module.functions.len(),
-            available_direct_callees,
-            Some((func_id, self_func_ref)),
-        );
+        let helpers = HelperRefs::new(&mut self.module, self.helper_funcs);
         let compile_result = {
             let compiler = FunctionCompiler::new(
                 &mut self.ctx.func,
-                &mut func_ctx,
+                &mut self.func_ctx,
                 func_id,
                 func,
                 vo_module,
                 env,
                 helpers,
-                &callee_func_refs,
-            )?;
-            compiler.compile()
+                &analysis,
+            );
+            compiler.compile(target_config)
         };
-        self.callee_func_refs_buf = callee_func_refs;
-        compile_result?;
+        self.finish_translation(compile_result)?;
+        let frame_budget_result = self.verify_native_frame_budget();
+        self.finish_translation(frame_budget_result)?;
+
+        let func_name = format!("vo_jit_{}", func_id);
+        let func_id_cl = self.module.declare_function(
+            &func_name,
+            cranelift_module::Linkage::Local,
+            &self.ctx.func.signature,
+        )?;
 
         if self.debug_ir {
             eprintln!("=== JIT IR for func_{} {} ===", func_id, func.name);
             eprintln!("{}", self.ctx.func.display());
         }
 
-        let (code_ptr, code_size) =
-            self.finalize_function(func_id_cl, &format!("func_{} {}", func_id, func.name))?;
-        let compiled = CompiledFunction {
-            code_ptr,
-            code_size,
-            param_slots: func.param_slots,
-            ret_slots: func.ret_slots,
-        };
+        let finalize_result = self.finalize_function(
+            func_id_cl,
+            &format!("func_{} {}", func_id, func.name),
+            JitArtifactKind::Function,
+        );
+        if let Err(error) = &finalize_result {
+            if let Some(rejection) = CodeMemoryRejection::from_error(error) {
+                self.cache.reject_function(func_id, rejection);
+            }
+        }
+        let code_ptr = finalize_result?;
+        let compiled = CompiledFunction { code_ptr };
         self.cache.insert(func_id, compiled);
         Ok(())
     }
 
-    pub fn compile_loop(
+    /// Unit-test adapter for malformed-module and scope-rejection coverage.
+    #[cfg(test)]
+    pub fn compile(
+        &mut self,
+        func_id: u32,
+        func: &FunctionDef,
+        vo_module: &VoModule,
+        env: JitCompileEnv<'_>,
+    ) -> Result<(), JitError> {
+        self.verify_module_once(vo_module)?;
+        self.verify_function_scope(func_id, func, vo_module)?;
+        self.compile_bound(func_id, func, vo_module, env)
+    }
+
+    /// Compile an OSR loop from the retained, commonly verified module image.
+    pub fn compile_loaded_loop(
+        &mut self,
+        func_id: u32,
+        env: JitCompileEnv<'_>,
+        loop_info: &LoopInfo,
+    ) -> Result<(), JitError> {
+        let loaded = Arc::clone(
+            self.loaded_module
+                .as_ref()
+                .ok_or_else(|| JitError::Internal("JIT compiler has no loaded module".into()))?,
+        );
+        let vo_module = loaded.module();
+        let func = vo_module
+            .functions
+            .get(func_id as usize)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
+        self.compile_bound_loop(func_id, func, vo_module, env, loop_info)
+    }
+
+    /// Return the shared loop catalogue retained with the function analysis.
+    pub fn analyzed_loaded_loops(&mut self, func_id: u32) -> Result<Arc<[LoopInfo]>, JitError> {
+        let loaded = Arc::clone(
+            self.loaded_module
+                .as_ref()
+                .ok_or_else(|| JitError::Internal("JIT compiler has no loaded module".into()))?,
+        );
+        let vo_module = loaded.module();
+        let func = vo_module
+            .functions
+            .get(func_id as usize)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
+        Self::verify_compile_work_budget(func)?;
+        let dynamic_callsites = self
+            .dynamic_callsites
+            .as_ref()
+            .expect("verified module must carry dynamic callsite facts");
+        let analysis =
+            self.cache
+                .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
+        Ok(analysis.shared_loops())
+    }
+
+    fn compile_bound_loop(
         &mut self,
         func_id: u32,
         func: &FunctionDef,
         vo_module: &VoModule,
         env: JitCompileEnv<'_>,
         loop_info: &LoopInfo,
-        available_direct_callees: &[u32],
     ) -> Result<(), JitError> {
-        validate_loop_info(func, loop_info)?;
+        validate_loop_bounds(func, loop_info)?;
         let begin_pc = loop_info.begin_pc;
-        self.verify_module_once(vo_module)?;
         self.verify_env_once(env)?;
-        self.verify_function_scope(func_id, func, vo_module)?;
 
         if let Some(cached_loop) = self.cache.get_loop(func_id, begin_pc) {
             if cached_loop.loop_info != *loop_info {
@@ -577,77 +1065,114 @@ impl JitCompiler {
             }
             return Ok(());
         }
+        if let Some(error) = self.cache.rejected_loop(func_id, loop_info)? {
+            return Err(error);
+        }
+        if let Err(error) = self.cache.ensure_artifact_slot() {
+            if let Some(rejection) = CodeMemoryRejection::from_error(&error) {
+                self.cache.reject_loop(func_id, loop_info, rejection);
+            }
+            return Err(error);
+        }
+        Self::verify_compile_work_budget(func)?;
+        let dynamic_callsites = self
+            .dynamic_callsites
+            .as_ref()
+            .expect("verified module must carry dynamic callsite facts");
+        let analysis =
+            self.cache
+                .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
 
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
         let module = &self.module;
-        let ptr_type = module.target_config().pointer_type();
-        let mut sig = Signature::new(module.target_config().default_call_conv);
+        let target_config = module.target_config();
+        let ptr_type = target_config.pointer_type();
+        let mut sig = Signature::new(target_config.default_call_conv);
         sig.params.push(AbiParam::new(ptr_type)); // ctx
         sig.params.push(AbiParam::new(ptr_type)); // locals_ptr
         sig.returns.push(AbiParam::new(types::I32));
 
-        let func_name = format!("vo_loop_{}_{}", func_id, begin_pc);
-        let func_id_cl =
-            self.module
-                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
-
         self.ctx.func.signature = sig;
-        self.ctx.func.name =
-            cranelift_codegen::ir::UserFuncName::user(1, func_id * 10000 + begin_pc as u32);
-
-        let mut func_ctx = FunctionBuilderContext::new();
-        let helpers = self.get_helper_refs();
-        let mut callee_func_refs = std::mem::take(&mut self.callee_func_refs_buf);
-        self.rebuild_callee_func_refs(
-            &mut callee_func_refs,
-            vo_module.functions.len(),
-            available_direct_callees,
-            None,
+        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(
+            func_id
+                .checked_add(1)
+                .expect("verified function id must leave namespace zero for full functions"),
+            begin_pc as u32,
         );
+
+        let helpers = HelperRefs::new(&mut self.module, self.helper_funcs);
         let compile_result = {
             let compiler = LoopCompiler::new(
                 &mut self.ctx.func,
-                &mut func_ctx,
+                &mut self.func_ctx,
                 func_id,
                 func,
                 vo_module,
                 env,
                 loop_info,
                 helpers,
-                &callee_func_refs,
-            );
-            compiler.compile()
+                &analysis,
+            )?;
+            compiler.compile(target_config)
         };
-        self.callee_func_refs_buf = callee_func_refs;
-        compile_result?;
+        self.finish_translation(compile_result)?;
+        let frame_budget_result = self.verify_native_frame_budget();
+        self.finish_translation(frame_budget_result)?;
 
-        let (code_ptr, code_size) =
-            self.finalize_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc))?;
+        let func_name = format!("vo_loop_{}_{}", func_id, begin_pc);
+        let func_id_cl = self.module.declare_function(
+            &func_name,
+            cranelift_module::Linkage::Local,
+            &self.ctx.func.signature,
+        )?;
+
+        let finalize_result = self.finalize_function(
+            func_id_cl,
+            &format!("loop_{}_{}", func_id, begin_pc),
+            JitArtifactKind::Loop,
+        );
+        if let Err(error) = &finalize_result {
+            if let Some(rejection) = CodeMemoryRejection::from_error(error) {
+                self.cache.reject_loop(func_id, loop_info, rejection);
+            }
+        }
+        let code_ptr = finalize_result?;
         let compiled = CompiledLoop {
             code_ptr,
-            code_size,
             loop_info: loop_info.clone(),
         };
         self.cache.insert_loop(func_id, begin_pc, compiled);
         Ok(())
     }
 
-    pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
-        self.cache.get(func_id)
+    /// Unit-test adapter for malformed-module and scope-rejection coverage.
+    #[cfg(test)]
+    pub fn compile_loop(
+        &mut self,
+        func_id: u32,
+        func: &FunctionDef,
+        vo_module: &VoModule,
+        env: JitCompileEnv<'_>,
+        loop_info: &LoopInfo,
+    ) -> Result<(), JitError> {
+        self.verify_module_once(vo_module)?;
+        self.verify_function_scope(func_id, func, vo_module)?;
+        self.compile_bound_loop(func_id, func, vo_module, env, loop_info)
     }
 
     pub fn code_memory_stats(&self) -> JitCodeMemoryStats {
         self.cache.code_memory_stats()
     }
+
+    pub fn analysis_memory_stats(&self) -> JitAnalysisMemoryStats {
+        self.cache.analysis_memory_stats()
+    }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.cache.get_func_ptr(func_id)
-    }
-    pub fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
-        self.cache.get_loop(func_id, begin_pc)
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
@@ -667,21 +1192,9 @@ impl Drop for JitCompiler {
     }
 }
 
-fn validate_loop_info(func: &FunctionDef, loop_info: &LoopInfo) -> Result<(), JitError> {
+fn validate_loop_bounds(func: &FunctionDef, loop_info: &LoopInfo) -> Result<(), JitError> {
     if loop_info.begin_pc > loop_info.end_pc || loop_info.end_pc >= func.code.len() {
         return Err(JitError::InvalidOsrTarget(loop_info.begin_pc));
-    }
-    let local_slots = func.local_slots as usize;
-    if let Some(slot) = loop_info
-        .live_in
-        .iter()
-        .chain(loop_info.live_out.iter())
-        .copied()
-        .find(|slot| *slot as usize >= local_slots)
-    {
-        return Err(JitError::Internal(format!(
-            "loop OSR live slot {slot} exceeds local slot count {local_slots}"
-        )));
     }
     Ok(())
 }
@@ -693,8 +1206,36 @@ fn validate_loop_info(func: &FunctionDef, loop_info: &LoopInfo) -> Result<(), Ji
 /// GC, panic/unwind, call, schedule, observe frames, touch interfaces, need
 /// write barriers, or materialize closures can still be JIT-compiled, but their
 /// callers must use a VM-frame/prepared call path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitFrameEntryEligibility {
+    pub frame_elided: bool,
+    pub prepared_shadow: bool,
+}
+
+pub fn jit_frame_entry_eligibility(
+    func: &vo_runtime::bytecode::FunctionDef,
+) -> JitFrameEntryEligibility {
+    let contract = crate::contract::function_contract(func);
+    let has_direct_returns = func.heap_ret_gcref_count == 0;
+    JitFrameEntryEligibility {
+        frame_elided: has_direct_returns && contract.permits_frame_elision(),
+        prepared_shadow: has_direct_returns && contract.permits_prepared_shadow_frame(),
+    }
+}
+
 pub fn can_elide_frame_for_direct_jit(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-    crate::contract::function_contract(func).permits_frame_elision()
+    jit_frame_entry_eligibility(func).frame_elided
+}
+
+/// Check if a prepared call's complete shadow stack window may enter JIT code.
+///
+/// A shadow window has precise slots and a current JIT function id, but it has
+/// no `Fiber::CallFrame` until a non-OK result is materialized. It can therefore
+/// run instructions that need spilling or trap handling. Allocation, unwind,
+/// scheduling, and instructions that own or observe frame transitions remain
+/// excluded.
+pub fn can_enter_prepared_shadow_frame_for_jit(func: &vo_runtime::bytecode::FunctionDef) -> bool {
+    jit_frame_entry_eligibility(func).prepared_shadow
 }
 
 /// Check if a materialized VM frame may re-enter its compiled JIT body.

@@ -1,6 +1,5 @@
 use vo_runtime::instruction::Instruction;
 
-use crate::metadata;
 use crate::semantics::{
     RegisterCondition, RegisterCount, RegisterEffectOperand, RegisterOperand, RegisterRangeStart,
 };
@@ -36,50 +35,23 @@ fn condition_matches(inst: &Instruction, condition: RegisterCondition) -> bool {
 fn register_count(
     inst: &Instruction,
     count: RegisterCount,
-    access: &'static str,
+    _access: &'static str,
 ) -> Result<u16, EffectError> {
     match count {
-        RegisterCount::Fixed(slots) => Ok(slots),
         RegisterCount::OperandB => Ok(inst.b),
-        RegisterCount::OperandC => Ok(inst.c),
         RegisterCount::Flags => Ok(inst.flags as u16),
         RegisterCount::CopyNCount => Ok(inst.copy_n_count()),
-        RegisterCount::PackedArgSlots => Ok(inst.packed_arg_slots()),
-        RegisterCount::PackedRetSlots => Ok(inst.packed_ret_slots()),
-        RegisterCount::ElemSlotsFromFlags => {
-            if inst.flags == 0 {
-                Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"))
-            } else {
-                Ok(slice_elem_slots_from_flags(inst.flags))
-            }
-        }
         RegisterCount::MapIterSlots => Ok(MAP_ITER_SLOTS),
-        RegisterCount::MapIterKeyValueSlots => {
-            let key_slots = inst.map_iter_key_slots();
-            key_slots
-                .checked_add(inst.map_iter_val_slots())
-                .ok_or_else(|| SlotRangeError::new(access, inst.a, key_slots).into())
-        }
     }
 }
 
 fn register_range_start(
     inst: &Instruction,
     start: RegisterRangeStart,
-    access: &'static str,
+    _access: &'static str,
 ) -> Result<u16, EffectError> {
     match start {
         RegisterRangeStart::Operand(operand) => Ok(operand_slot(inst, operand)),
-        RegisterRangeStart::OperandOffset(operand, offset) => {
-            checked_slot_offset(operand_slot(inst, operand), offset, access).map_err(Into::into)
-        }
-        RegisterRangeStart::BPlusPackedArgSlots => {
-            checked_slot_offset(inst.b, inst.packed_arg_slots(), access).map_err(Into::into)
-        }
-        RegisterRangeStart::SliceAppendValueStart => {
-            let offset = if inst.flags == 0 { 2 } else { 1 };
-            checked_slot_offset(inst.c, offset, access).map_err(Into::into)
-        }
     }
 }
 
@@ -97,11 +69,6 @@ fn push_register_effect_operand(
                 offset,
                 access,
             )?);
-        }
-        RegisterEffectOperand::ConditionalSlot { condition, operand } => {
-            if condition_matches(inst, condition) {
-                regs.push(operand_slot(inst, operand));
-            }
         }
         RegisterEffectOperand::ConditionalSlotOffset {
             condition,
@@ -154,12 +121,4 @@ pub fn try_push_slot_range(
         regs.push(start + i);
     }
     Ok(())
-}
-
-pub fn slice_elem_slots_from_flags(flags: u8) -> u16 {
-    assert_ne!(
-        flags, 0,
-        "dynamic element layouts must use per-instruction metadata"
-    );
-    metadata::elem_layout_from_flags(flags).slots
 }

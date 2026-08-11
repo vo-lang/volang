@@ -24,18 +24,13 @@ pub struct JitContextCallbackCallsite {
 }
 
 impl JitContextCallbackCallsite {
+    #[cfg(test)]
     pub fn abi(self) -> &'static JitCallbackAbiField {
         callback_abi(self.kind).expect("declared JitContext callback ABI manifest row")
     }
 
     fn try_abi(self) -> Result<&'static JitCallbackAbiField, JitError> {
         callback_abi(self.kind)
-    }
-
-    #[cfg(test)]
-    pub fn requires_pre_call_spill(self) -> bool {
-        let abi = self.abi();
-        abi.may_gc || abi.observes_frame
     }
 
     fn try_requires_pre_call_spill(self) -> Result<bool, JitError> {
@@ -104,6 +99,7 @@ pub const NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE: JitContextCallbackCallsit
         call_kind: JitContextCallbackCallKind::CheckedJitResult,
     };
 
+#[cfg(test)]
 pub fn jit_context_callback_callsites() -> &'static [JitContextCallbackCallsite] {
     &[
         STACK_LIMIT_OVERFLOW_CALLSITE,

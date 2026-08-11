@@ -14,14 +14,9 @@ use codespan_reporting::diagnostic::{
     Diagnostic as CSDiagnostic, Label as CSLabel, LabelStyle, Severity as CSSeverity,
 };
 use codespan_reporting::files::SimpleFiles;
-#[cfg(not(feature = "terminal"))]
-use codespan_reporting::term::Config;
+use codespan_reporting::term::{self, termcolor, Config};
 #[cfg(feature = "terminal")]
-use codespan_reporting::term::{
-    self,
-    termcolor::{ColorChoice, StandardStream, WriteColor},
-    Config,
-};
+use termcolor::{ColorChoice, StandardStream, WriteColor};
 
 use crate::source::SourceMap;
 use crate::span::Span;
@@ -359,7 +354,6 @@ impl fmt::Debug for DiagnosticSink {
 /// A diagnostic emitter that renders diagnostics to output.
 pub struct DiagnosticEmitter<'a> {
     source_map: &'a SourceMap,
-    #[allow(dead_code)]
     config: Config,
 }
 
@@ -393,18 +387,13 @@ impl<'a> DiagnosticEmitter<'a> {
         let _ = term::emit(writer, &self.config, &files, &cs_diagnostic);
     }
 
-    /// Emits a diagnostic to a string (with formatting but no colors).
-    #[cfg(feature = "terminal")]
+    /// Emits a diagnostic to a string with stable formatting and no colors.
     pub fn emit_to_string(&self, diagnostic: &Diagnostic) -> String {
+        let files = self.build_files();
+        let cs_diagnostic = self.to_codespan(diagnostic);
         let mut buffer = termcolor::Buffer::no_color();
-        self.emit_to(&mut buffer, diagnostic);
+        let _ = term::emit(&mut buffer, &self.config, &files, &cs_diagnostic);
         String::from_utf8_lossy(buffer.as_slice()).into_owned()
-    }
-
-    /// Emits a diagnostic to a string (simple format, no terminal features).
-    #[cfg(not(feature = "terminal"))]
-    pub fn emit_to_string(&self, diagnostic: &Diagnostic) -> String {
-        self.format_simple(diagnostic)
     }
 
     /// Emits all diagnostics from a sink.

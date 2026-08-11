@@ -26,7 +26,7 @@ fn function(local_slots: u16) -> FunctionDef {
         has_calls: true,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::Value; local_slots as usize],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
                 SlotType::Value;
@@ -89,17 +89,55 @@ fn add_named_receiver_method(
 }
 
 #[test]
+fn shared_iface_ic_keeps_interpreter_and_jit_views_coherent() {
+    let mut entry = vo_runtime::DynCallIC {
+        jit_func_ptr: 0x1234,
+        ..Default::default()
+    };
+    let first = CallIfaceTarget {
+        func_id: 7,
+        local_slots: 12,
+        gc_scan_slots: 5,
+    };
+
+    fill_call_iface_ic(&mut entry, 0xaaaa, first);
+    assert_eq!(
+        entry.jit_func_ptr, 0,
+        "a different target retires stale native code"
+    );
+    assert_eq!(probe_call_iface_ic(&entry, 0xaaaa).unwrap().func_id, 7);
+
+    entry.jit_func_ptr = 0x5678;
+    entry.valid = 0;
+    fill_call_iface_ic(&mut entry, 0xaaaa, first);
+    assert_eq!(
+        entry.jit_func_ptr, 0x5678,
+        "interpreter validation preserves JIT code for the same target"
+    );
+
+    let second = CallIfaceTarget {
+        func_id: 8,
+        local_slots: 9,
+        gc_scan_slots: 3,
+    };
+    fill_call_iface_ic(&mut entry, 0xbbbb, second);
+    assert_eq!(entry.jit_func_ptr, 0);
+    assert!(probe_call_iface_ic(&entry, 0xaaaa).is_none());
+    let hit = probe_call_iface_ic(&entry, 0xbbbb).unwrap();
+    assert_eq!((hit.func_id, hit.local_slots, hit.gc_scan_slots), (8, 9, 3));
+}
+
+#[test]
 fn call_iface_missing_itab_is_jit_error_instead_of_raw_panic() {
     let mut module = Module::new("missing-itab-test".to_string());
     let mut caller = function(4);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
@@ -207,7 +245,7 @@ fn vm_call_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
 fn vm_call_closure_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
     let mut module = Module::new("call-closure-frame-shape-test".to_string());
     let mut caller = function(1);
-    caller.jit_metadata = vec![vo_runtime::bytecode::JitInstructionMetadata::CallLayout {
+    caller.instruction_metadata = vec![vo_runtime::bytecode::InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
     }];
@@ -248,14 +286,13 @@ fn vm_call_iface_rejects_scan_slots_beyond_locals_before_ic_mutation_062() {
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     let mut target = iface_target_function(1, 1, 0, 1);
     target.gc_scan_slots = 2;
@@ -274,13 +311,7 @@ fn vm_call_iface_rejects_scan_slots_beyond_locals_before_ic_mutation_062() {
     fiber.current_frame_mut().unwrap().pc = 1;
     let before_frames = fiber.frames.len();
     let before_sp = fiber.sp;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache)
@@ -295,24 +326,19 @@ fn vm_call_iface_rejects_scan_slots_beyond_locals_before_ic_mutation_062() {
     }
     assert_eq!(fiber.frames.len(), before_frames);
     assert_eq!(fiber.sp, before_sp);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "frame-shape drift must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
 fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_frame_push() {
     let mut module = Module::new("call-iface-arg-shape-test".to_string());
     let mut caller = function(5);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     let mut target = iface_target_function(3, 1, 0, 4);
     target.slot_types[0] = SlotType::GcRef;
@@ -335,13 +361,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_
     fiber.stack[bp] = interface::pack_slot0(1, receiver_rttid, ValueKind::String);
     fiber.stack[bp + 1] = 123;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        2,
-        vo_runtime::instruction::pack_call_shape(1, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -352,24 +372,19 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_
         other => panic!("arg shape drift should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "arg shape drift must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
 fn vm_closure_call_signature_002_call_iface_rejects_return_slot_shape_drift_before_frame_push() {
     let mut module = Module::new("call-iface-ret-shape-test".to_string());
     let mut caller = function(5);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     module.functions.push(iface_target_function(2, 1, 1, 3));
     let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::Int, 1, 0);
@@ -384,13 +399,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_return_slot_shape_drift_befo
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        2,
-        vo_runtime::instruction::pack_call_shape(1, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -401,10 +410,6 @@ fn vm_closure_call_signature_002_call_iface_rejects_return_slot_shape_drift_befo
         other => panic!("return shape drift should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "return shape drift must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -415,14 +420,13 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
     caller.slot_types[1] = SlotType::Interface1;
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     module.functions.push(iface_target_function(2, 1, 0, 2));
     let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::Int, 1, 0);
@@ -437,13 +441,7 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        u16::MAX,
-        vo_runtime::instruction::pack_call_shape(1, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, u16::MAX, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -454,10 +452,6 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
         other => panic!("return offset overflow should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "return offset overflow must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -472,14 +466,13 @@ fn vm_call_iface_contract_061_rejects_frame_capacity_before_ic_mutation() {
     ];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     module.functions.push(iface_target_function(2, 1, 0, 2));
     let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::Int, 1, 0);
@@ -500,23 +493,13 @@ fn vm_call_iface_contract_061_rejects_frame_capacity_before_ic_mutation() {
     fiber.stack[bp + 1] = 456;
     fiber.stack[bp + 2] = 789;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        2,
-        vo_runtime::instruction::pack_call_shape(1, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
     assert!(
         matches!(result, ExecResult::Panic),
         "frame capacity failure should become a runtime stack-overflow panic, got {result:?}"
-    );
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "frame capacity failure must fail before IC allocation or mutation"
     );
 }
 
@@ -532,14 +515,13 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
     ];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut target = iface_target_function(2, 1, 0, 2);
@@ -562,13 +544,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
     fiber.stack[bp + 1] = 456;
     fiber.stack[bp + 2] = 789;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        2,
-        vo_runtime::instruction::pack_call_shape(1, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -582,10 +558,6 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
         other => panic!("metadata drift should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "metadata drift must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -595,14 +567,13 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut target = iface_target_function(1, 1, 0, 1);
@@ -622,13 +593,7 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
     fiber.stack[bp] = interface::pack_slot0(0, ValueKind::Int as u32, ValueKind::Int);
     fiber.stack[bp + 1] = 0xdead_beef;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -641,10 +606,6 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
         }
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "receiver layout drift must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -654,14 +615,13 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut target = iface_target_function(1, 1, 0, 1);
@@ -681,13 +641,7 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
     fiber.stack[bp] = interface::pack_slot0(0, 16, ValueKind::Interface);
     fiber.stack[bp + 1] = 0xdead_beef;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -698,10 +652,6 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
         other => panic!("raw interface-kind receiver should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "raw interface-kind receiver must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -750,14 +700,13 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut target = iface_target_function(1, 1, 0, 1);
@@ -777,13 +726,7 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
     fiber.stack[bp] = interface::pack_slot0(0, 1, ValueKind::Int64);
     fiber.stack[bp + 1] = 123;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -794,10 +737,6 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
         other => panic!("foreign itab target should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "foreign itab target must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -837,14 +776,13 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut target = iface_target_function(1, 1, 0, 1);
@@ -864,13 +802,7 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
     fiber.stack[bp] = interface::pack_slot0(0, 1, ValueKind::String);
     fiber.stack[bp + 1] = 0x1234;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -881,10 +813,6 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
         other => panic!("pointer-receiver itab target should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "pointer-receiver target mismatch must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -923,14 +851,13 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut target = iface_target_function(1, 1, 0, 1);
@@ -950,13 +877,7 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
     fiber.stack[bp] = interface::pack_slot0(0, 1, ValueKind::Pointer);
     fiber.stack[bp + 1] = 0x1234;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -969,10 +890,6 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
         }
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "non-canonical receiver metadata must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -980,14 +897,13 @@ fn vm_closure_call_signature_002_call_iface_rejects_unadvanced_pc_before_ic_muta
     let mut module = Module::new("call-iface-unadvanced-pc-test".to_string());
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
     module.functions.push(iface_target_function(1, 1, 0, 1));
     let cache = ItabCache::from_module_itabs(vec![Itab {
@@ -1000,13 +916,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_unadvanced_pc_before_ic_muta
     let bp = fiber.push_frame(0, 2, 0, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, ValueKind::Int as u32, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -1020,10 +930,6 @@ fn vm_closure_call_signature_002_call_iface_rejects_unadvanced_pc_before_ic_muta
         other => panic!("unadvanced pc should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "invalid caller pc must fail before IC allocation or mutation"
-    );
 }
 
 #[test]
@@ -1087,14 +993,13 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     caller.borrowed_scan_slots_prefix =
         FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.jit_metadata = vec![
-        vo_runtime::bytecode::JitInstructionMetadata::CallIfaceLayout {
+    caller.instruction_metadata =
+        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
             method_idx: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
-        },
-    ];
+        }];
     module.functions.push(caller);
 
     let mut method_m = iface_target_function(1, 1, 0, 1);
@@ -1123,13 +1028,7 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
     fiber.stack[bp] = interface::pack_slot0(1, 1, ValueKind::Int64);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;
-    let inst = Instruction::with_flags(
-        Opcode::CallIface,
-        0,
-        0,
-        1,
-        vo_runtime::instruction::pack_call_shape(0, 0).unwrap(),
-    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
 
     let result = exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache);
 
@@ -1140,8 +1039,4 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
         other => panic!("foreign same-shape itab should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert!(
-        fiber.call_iface_ic_table.is_empty(),
-        "foreign same-shape itab must fail before IC allocation or mutation"
-    );
 }

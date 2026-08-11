@@ -1,4 +1,5 @@
 use super::*;
+use crate::fiber::{PendingSpawn, MAX_RETAINED_STACK_SLOTS};
 
 fn queue_wait_key(scheduler: &Scheduler, fid: FiberId) -> u64 {
     FiberWakeKey::new(fid.to_raw(), scheduler.get_fiber(fid).generation).as_packed()
@@ -68,18 +69,18 @@ fn assert_scheduler_wait_invariants(scheduler: &Scheduler) {
         );
     }
 
-    for waiter in &scheduler.host_event_waiters {
-        let fiber = scheduler.get_fiber(waiter.key.wake_key.fiber_id());
-        assert_eq!(fiber.generation, waiter.key.wake_key.generation);
-        match (&fiber.state, waiter.key.source) {
+    for key in scheduler.host_event_waiters.keys() {
+        let fiber = scheduler.get_fiber(key.wake_key.fiber_id());
+        assert_eq!(fiber.generation, key.wake_key.generation);
+        match (&fiber.state, key.source) {
             (FiberState::Blocked(BlockReason::HostEvent { token, .. }), HostWaitSource::Timer) => {
-                assert_eq!(*token, waiter.key.token)
+                assert_eq!(*token, key.token)
             }
             (
                 FiberState::Blocked(BlockReason::HostEventReplay { token, source }),
                 HostWaitSource::Replay(wait_source),
             ) => {
-                assert_eq!(*token, waiter.key.token);
+                assert_eq!(*token, key.token);
                 assert_eq!(*source, wait_source);
             }
             other => panic!("host waiter does not match blocked fiber state: {other:?}"),
@@ -115,15 +116,12 @@ fn block_for_host_event_sets_state_and_records_waiter() {
             })
     );
     assert_eq!(scheduler.host_event_waiters.len(), 1);
-    let waiter = &scheduler.host_event_waiters[0];
-    assert_eq!(waiter.key.source, HostWaitSource::Timer);
-    assert_eq!(waiter.key.token, 77);
-    assert_eq!(waiter.delay_ms, 123);
-    assert_eq!(waiter.key.wake_key.slot, fid.to_raw());
-    assert_eq!(
-        waiter.key.wake_key.generation,
-        scheduler.get_fiber(fid).generation
-    );
+    let (&key, &delay_ms) = scheduler.host_event_waiters.iter().next().unwrap();
+    assert_eq!(key.source, HostWaitSource::Timer);
+    assert_eq!(key.token, 77);
+    assert_eq!(delay_ms, 123);
+    assert_eq!(key.wake_key.slot, fid.to_raw());
+    assert_eq!(key.wake_key.generation, scheduler.get_fiber(fid).generation);
 }
 
 #[test]
@@ -145,7 +143,7 @@ fn block_for_host_event_replay_sets_state_and_records_waiter() {
     );
     assert_eq!(scheduler.host_event_waiters.len(), 1);
     assert_eq!(
-        scheduler.host_event_waiters[0].key.source,
+        scheduler.host_event_waiters.keys().next().unwrap().source,
         HostWaitSource::replay(HostEventReplaySource::GuiEvent)
     );
 }
@@ -236,7 +234,7 @@ fn host_event_timer_and_replay_tokens_do_not_cross_wake() {
     assert_eq!(scheduler.get_fiber(replay).resume_host_event_token, Some(1));
     assert_eq!(scheduler.host_event_waiters.len(), 1);
     assert_eq!(
-        scheduler.host_event_waiters[0].key.source,
+        scheduler.host_event_waiters.keys().next().unwrap().source,
         HostWaitSource::Timer
     );
 
@@ -381,12 +379,13 @@ fn wake_queue_sender_closed_marks_simple_sender_without_rewriting_pc() {
         fiber.push_frame(0, 1, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 3;
     }
-    let waiter = QueueWaiter::simple_queue(
+    let waiter = QueueWaiter::try_queue(
         0,
         queue_wait_key(&scheduler, fid),
         0x1000,
         SelectWaitKind::Send,
-    );
+    )
+    .unwrap();
     scheduler
         .current_fiber_mut()
         .unwrap()
@@ -411,7 +410,8 @@ fn wake_queue_waiter_rejects_raw_slot_identity() {
     scheduler.schedule_next();
     scheduler.block_for_queue();
 
-    let waiter = QueueWaiter::simple(0, fid.to_raw() as u64);
+    let waiter =
+        QueueWaiter::try_queue(0, fid.to_raw() as u64, 0x1000, SelectWaitKind::Recv).unwrap();
 
     assert!(!scheduler.wake_queue_waiter(&waiter));
     assert_eq!(scheduler.blocked_count, 1);
@@ -431,7 +431,7 @@ fn wake_queue_waiter_rejects_stale_generation_key() {
     let stale_key = queue_wait_key(&scheduler, fid);
     scheduler.get_fiber_mut(fid).generation = scheduler.get_fiber(fid).generation.wrapping_add(1);
 
-    let waiter = QueueWaiter::simple(0, stale_key);
+    let waiter = QueueWaiter::try_queue(0, stale_key, 0x1000, SelectWaitKind::Recv).unwrap();
 
     assert!(!scheduler.wake_queue_waiter(&waiter));
     assert_eq!(scheduler.blocked_count, 1);
@@ -473,14 +473,15 @@ fn wake_queue_waiter_rejects_stale_select_identity() {
     }
     scheduler.block_for_queue();
 
-    let stale = QueueWaiter::selecting(
+    let stale = QueueWaiter::try_select(
         0,
         queue_wait_key(&scheduler, fid),
         0,
         8,
         0x1000,
         SelectWaitKind::Recv,
-    );
+    )
+    .unwrap();
 
     assert!(!scheduler.wake_queue_waiter(&stale));
     assert_eq!(scheduler.blocked_count, 1);
@@ -532,17 +533,11 @@ fn vm_wake_registration_002_select_wake_rejects_queue_or_kind_identity_mismatch(
     scheduler.block_for_queue();
     let key = queue_wait_key(&scheduler, fid);
 
-    let wrong_queue = QueueWaiter::selecting(0, key, 0, 9, 0x2000, SelectWaitKind::Recv);
-    let wrong_kind = QueueWaiter::selecting(0, key, 0, 9, 0x1000, SelectWaitKind::Send);
-    let mut split_queue = QueueWaiter::selecting(0, key, 0, 9, 0x1000, SelectWaitKind::Recv);
-    split_queue.queue_ref = 0x2000;
-    let mut split_kind = QueueWaiter::selecting(0, key, 0, 9, 0x1000, SelectWaitKind::Recv);
-    split_kind.kind = Some(SelectWaitKind::Send);
+    let wrong_queue = QueueWaiter::try_select(0, key, 0, 9, 0x2000, SelectWaitKind::Recv).unwrap();
+    let wrong_kind = QueueWaiter::try_select(0, key, 0, 9, 0x1000, SelectWaitKind::Send).unwrap();
 
     assert!(!scheduler.wake_queue_waiter(&wrong_queue));
     assert!(!scheduler.wake_queue_waiter(&wrong_kind));
-    assert!(!scheduler.wake_queue_waiter(&split_queue));
-    assert!(!scheduler.wake_queue_waiter(&split_kind));
     assert_eq!(scheduler.blocked_count, 1);
     assert!(scheduler.ready_queue.is_empty());
     let fiber = scheduler.get_fiber(fid);
@@ -556,8 +551,8 @@ fn vm_wake_registration_002_simple_queue_wake_rejects_stale_queue_identity() {
     let fid = scheduler.spawn(Fiber::new(0));
     scheduler.schedule_next();
     let key = queue_wait_key(&scheduler, fid);
-    let old_waiter = QueueWaiter::simple_queue(0, key, 0x1000, SelectWaitKind::Recv);
-    let current_waiter = QueueWaiter::simple_queue(0, key, 0x2000, SelectWaitKind::Recv);
+    let old_waiter = QueueWaiter::try_queue(0, key, 0x1000, SelectWaitKind::Recv).unwrap();
+    let current_waiter = QueueWaiter::try_queue(0, key, 0x2000, SelectWaitKind::Recv).unwrap();
 
     scheduler
         .current_fiber_mut()
@@ -585,9 +580,12 @@ fn vm_wake_registration_060_simple_queue_wake_rejects_stale_wait_registration() 
     let fid = scheduler.spawn(Fiber::new(0));
     scheduler.schedule_next();
     let key = queue_wait_key(&scheduler, fid);
-    let old_waiter = QueueWaiter::simple_queue(0, key, 0x1000, SelectWaitKind::Recv);
-    let current_waiter = QueueWaiter::simple_queue(0, key, 0x1000, SelectWaitKind::Recv);
-    assert_ne!(old_waiter.registration_id, current_waiter.registration_id);
+    let old_waiter = QueueWaiter::try_queue(0, key, 0x1000, SelectWaitKind::Recv).unwrap();
+    let current_waiter = QueueWaiter::try_queue(0, key, 0x1000, SelectWaitKind::Recv).unwrap();
+    assert_ne!(
+        old_waiter.registration_id(),
+        current_waiter.registration_id()
+    );
 
     scheduler
         .current_fiber_mut()
@@ -607,80 +605,6 @@ fn vm_wake_registration_060_simple_queue_wake_rejects_stale_wait_registration() 
     assert_eq!(scheduler.blocked_count, 0);
     assert_eq!(scheduler.get_fiber(fid).state, FiberState::Runnable);
     assert!(scheduler.get_fiber(fid).queue_wait_state.is_none());
-}
-
-#[test]
-fn vm_wake_registration_002_simple_queue_wake_rejects_legacy_identityless_waiter() {
-    let mut scheduler = Scheduler::new();
-    let fid = scheduler.spawn(Fiber::new(0));
-    scheduler.schedule_next();
-    let key = queue_wait_key(&scheduler, fid);
-    let current_waiter = QueueWaiter::simple_queue(0, key, 0x2000, SelectWaitKind::Recv);
-    let legacy_waiter = QueueWaiter::simple(0, key);
-
-    scheduler
-        .current_fiber_mut()
-        .unwrap()
-        .begin_queue_wait(&current_waiter);
-    scheduler.block_for_queue();
-
-    assert!(!scheduler.wake_queue_waiter(&legacy_waiter));
-    assert_eq!(scheduler.blocked_count, 1);
-    assert!(scheduler.ready_queue.is_empty());
-    assert_eq!(
-        scheduler.get_fiber(fid).state,
-        FiberState::Blocked(BlockReason::Queue)
-    );
-
-    assert!(scheduler.wake_queue_waiter(&current_waiter));
-    assert_eq!(scheduler.blocked_count, 0);
-    assert_eq!(scheduler.get_fiber(fid).state, FiberState::Runnable);
-    assert!(scheduler.get_fiber(fid).queue_wait_state.is_none());
-}
-
-#[test]
-fn vm_wake_registration_002_legacy_simple_wake_rejects_select_blocked_fiber() {
-    let mut scheduler = Scheduler::new();
-    let fid = scheduler.spawn(Fiber::new(0));
-    scheduler.schedule_next();
-    {
-        let fiber = scheduler.current_fiber_mut().unwrap();
-        fiber.select_state = Some(SelectState {
-            cases: vec![SelectCase {
-                kind: SelectCaseKind::Recv,
-                result_index: 0,
-                queue_reg: 0,
-                val_reg: 1,
-                elem_slots: 1,
-                elem_layout: None,
-                has_ok: false,
-            }],
-            expected_cases: 1,
-            has_default: false,
-            woken_index: None,
-            woken_result: None,
-            select_id: 9,
-            registered_queues: vec![SelectRegisteredQueue {
-                case_index: 0,
-                queue: 0x1000 as vo_runtime::gc::GcRef,
-                kind: SelectCaseKind::Recv,
-            }],
-        });
-        fiber.clear_queue_wait();
-    }
-    scheduler.block_for_queue();
-    let key = queue_wait_key(&scheduler, fid);
-    let legacy_waiter = QueueWaiter::simple(0, key);
-
-    assert!(!scheduler.wake_queue_waiter(&legacy_waiter));
-    assert!(!scheduler
-        .wake_queue_sender_closed(&legacy_waiter)
-        .expect("closed wake"));
-    assert_eq!(scheduler.blocked_count, 1);
-    assert!(scheduler.ready_queue.is_empty());
-    let fiber = scheduler.get_fiber(fid);
-    assert_eq!(fiber.state, FiberState::Blocked(BlockReason::Queue));
-    assert_eq!(fiber.select_state.as_ref().unwrap().woken_index, None);
 }
 
 #[test]
@@ -760,18 +684,90 @@ fn endpoint_response_key_rejects_stale_reused_fiber_slot() {
 fn max_generation_fiber_slot_is_retired_instead_of_reused() {
     let mut scheduler = Scheduler::new();
     let retired = scheduler.spawn(Fiber::new(0));
-    scheduler.get_fiber_mut(retired).generation = u32::MAX;
+    let fiber = scheduler.get_fiber_mut(retired);
+    fiber.generation = u32::MAX;
+    fiber.ensure_capacity(MAX_RETAINED_STACK_SLOTS + 1);
     let stale_key = scheduler.get_fiber(retired).wake_key_packed();
     scheduler.schedule_next().expect("retired fiber");
     scheduler.kill_current();
+    assert_eq!(scheduler.get_fiber(retired).stack.capacity(), 0);
 
-    let replacement = scheduler.try_reuse_or_spawn().expect("fresh slot");
+    let replacement = scheduler
+        .try_spawn_pending(PendingSpawn::for_test(1))
+        .expect("fresh slot");
 
     assert_ne!(replacement, retired);
     assert!(scheduler
         .try_get_fiber_mut_by_endpoint_response_key(stale_key)
         .is_none());
     assert_eq!(scheduler.get_fiber(replacement).generation, 1);
+}
+
+#[test]
+fn pending_spawn_identity_is_assigned_only_at_commit() {
+    let mut scheduler = Scheduler::new();
+    let pending = PendingSpawn::for_test(7);
+    assert!(scheduler.fibers.is_empty());
+
+    let first = scheduler.try_spawn_pending(pending).expect("first slot");
+    let first_key = scheduler.get_fiber(first).wake_key_packed();
+    assert_eq!((first.to_raw(), first_key), (0, 1_u64 << 32));
+    scheduler
+        .get_fiber_mut(first)
+        .ensure_capacity(MAX_RETAINED_STACK_SLOTS + 1);
+    let retained_capacity = scheduler.get_fiber(first).stack.capacity();
+    scheduler.schedule_next().expect("pending fiber");
+    scheduler.kill_current();
+    assert_eq!(
+        scheduler.get_fiber(first).stack.capacity(),
+        retained_capacity
+    );
+    scheduler.release_oversized_dead_fiber_storage();
+    assert_eq!(scheduler.get_fiber(first).stack.capacity(), 0);
+
+    let reused = scheduler
+        .try_spawn_pending(PendingSpawn::for_test(8))
+        .expect("reused slot");
+    assert_eq!(reused, first);
+    assert_eq!(scheduler.get_fiber(reused).generation, 2);
+    assert_ne!(scheduler.get_fiber(reused).wake_key_packed(), first_key);
+}
+
+#[test]
+fn repeated_pending_spawns_reuse_stack_and_zero_gc_tail() {
+    let mut scheduler = Scheduler::new();
+    let first = scheduler
+        .try_spawn_pending(PendingSpawn::try_new(7, 8, 4, 0, vec![1]).expect("initial spawn shape"))
+        .expect("initial slot");
+    {
+        let fiber = scheduler.get_fiber_mut(first);
+        let grown = fiber.stack.len() * 2;
+        fiber.try_ensure_capacity(grown).expect("grow stack");
+        fiber.stack[..4].fill(u64::MAX);
+    }
+    let retained_ptr = scheduler.get_fiber(first).stack.as_ptr();
+    let retained_len = scheduler.get_fiber(first).stack.len();
+    let retained_capacity = scheduler.get_fiber(first).stack.capacity();
+    scheduler.schedule_next().expect("initial fiber");
+    scheduler.kill_current();
+
+    for iteration in 0..1000_u32 {
+        let value = u64::from(iteration) + 10;
+        let reused = scheduler
+            .try_spawn_pending(
+                PendingSpawn::try_new(8, 8, 4, 0, vec![value]).expect("reused spawn shape"),
+            )
+            .expect("reused slot");
+        assert_eq!(reused, first);
+        let fiber = scheduler.get_fiber(reused);
+        assert_eq!(fiber.generation, iteration + 2);
+        assert_eq!(fiber.stack.as_ptr(), retained_ptr);
+        assert_eq!(fiber.stack.len(), retained_len);
+        assert_eq!(fiber.stack.capacity(), retained_capacity);
+        assert_eq!(&fiber.stack[..4], &[value, 0, 0, 0]);
+        scheduler.schedule_next().expect("reused fiber");
+        scheduler.kill_current();
+    }
 }
 
 #[test]
@@ -841,9 +837,12 @@ fn scheduler_wake_model_deterministic_fuzz_smoke_preserves_wait_invariants() {
             }
             4 => {
                 if !scheduler.host_event_waiters.is_empty() {
-                    let key = scheduler.host_event_waiters
-                        [rng.range(scheduler.host_event_waiters.len())]
-                    .key;
+                    let key = scheduler
+                        .host_event_waiters
+                        .keys()
+                        .nth(rng.range(scheduler.host_event_waiters.len()))
+                        .copied()
+                        .unwrap();
                     if key.source.is_replay() && rng.range(2) == 0 {
                         scheduler.wake_host_event_with_data(key, vec![step as u8]);
                     } else {
@@ -853,9 +852,12 @@ fn scheduler_wake_model_deterministic_fuzz_smoke_preserves_wait_invariants() {
             }
             5 => {
                 if !scheduler.host_event_waiters.is_empty() {
-                    let mut key = scheduler.host_event_waiters
-                        [rng.range(scheduler.host_event_waiters.len())]
-                    .key;
+                    let mut key = scheduler
+                        .host_event_waiters
+                        .keys()
+                        .nth(rng.range(scheduler.host_event_waiters.len()))
+                        .copied()
+                        .unwrap();
                     key.wake_key.generation = key.wake_key.generation.wrapping_add(1);
                     assert!(!scheduler.wake_host_event(key));
                 }
@@ -882,7 +884,13 @@ fn scheduler_wake_model_deterministic_fuzz_smoke_preserves_wait_invariants() {
                     .collect();
                 if !queue_blocked.is_empty() {
                     let fid = queue_blocked[rng.range(queue_blocked.len())];
-                    let waiter = QueueWaiter::simple(0, queue_wait_key(&scheduler, fid));
+                    let waiter = QueueWaiter::try_queue(
+                        0,
+                        queue_wait_key(&scheduler, fid),
+                        0x1000,
+                        SelectWaitKind::Recv,
+                    )
+                    .unwrap();
                     let _ = scheduler.wake_queue_waiter(&waiter);
                 }
             }
@@ -902,10 +910,14 @@ fn scheduler_wake_model_deterministic_fuzz_smoke_preserves_wait_invariants() {
                         fid.to_raw(),
                         scheduler.get_fiber(fid).generation.wrapping_add(1),
                     );
-                    let waiter = QueueWaiter::simple(0, stale.as_packed());
+                    let waiter =
+                        QueueWaiter::try_queue(0, stale.as_packed(), 0x1000, SelectWaitKind::Recv)
+                            .unwrap();
                     assert!(!scheduler.wake_queue_waiter(&waiter));
                 } else {
-                    assert!(!scheduler.wake_queue_waiter(&QueueWaiter::simple(0, 0)));
+                    assert!(!scheduler.wake_queue_waiter(
+                        &QueueWaiter::try_queue(0, 0, 0x1000, SelectWaitKind::Recv).unwrap()
+                    ));
                 }
             }
             _ => {

@@ -733,27 +733,11 @@ fn vostd_register_impl(parsed: VostdRegisterInput) -> TokenStream2 {
             registry: &mut vo_runtime::ffi::ExternRegistry,
             externs: &[vo_runtime::bytecode::ExternDef],
         ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-            for (id, def) in externs.iter().enumerate() {
-                for entry in __VO_STDLIB_ENTRIES {
-                    if def.name == entry.name() {
-                        let builtin_intrinsic_is_authoritative = registry
-                            .registered_by_name(entry.name())
-                            .is_some_and(|registered| {
-                                registered.source()
-                                    == vo_runtime::bytecode::RegisteredExternSource::Builtin
-                                    && registered.trust()
-                                        == vo_runtime::bytecode::ProviderTrust::IntrinsicEligible
-                                    && vo_runtime::ffi::jit_intrinsic_extern_names()
-                                        .contains(&entry.name())
-                            });
-                        if !builtin_intrinsic_is_authoritative {
-                            entry.try_register(registry, id as u32)?;
-                        }
-                        break;
-                    }
-                }
-            }
-            Ok(())
+            vo_runtime::ffi::register_stdlib_providers(
+                registry,
+                externs,
+                __VO_STDLIB_ENTRIES,
+            )
         }
     }
 }
@@ -2169,11 +2153,9 @@ mod tests {
 
         let generated: VostdRegisterInput = syn::parse_str(r#""math": Sqrt"#).unwrap();
         let tokens = vostd_register_impl(generated).to_string();
-        assert!(tokens.contains("RegisteredExternSource :: Builtin"));
-        assert!(tokens.contains("ProviderTrust :: IntrinsicEligible"));
-        assert!(tokens.contains("jit_intrinsic_extern_names"));
-        assert!(tokens.contains("entry . try_register"));
-        assert!(!tokens.contains("registered_by_name (entry . name ()) . is_none"));
+        assert!(tokens.contains("register_stdlib_providers"));
+        assert!(!tokens.contains("registered_by_name"));
+        assert!(!tokens.contains("entry . try_register"));
     }
 
     #[test]

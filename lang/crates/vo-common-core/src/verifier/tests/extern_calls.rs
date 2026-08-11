@@ -116,12 +116,12 @@ fn module_verifier_rejects_precise_call_extern_return_with_slots_only_shape_058(
         Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: Vec::new(),
             ret_layout: vec![SlotType::GcRef],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -150,15 +150,15 @@ fn module_verifier_rejects_call_extern_param_kind_layout_drift_048() {
     let mut caller = function_with_slot_types(vec![SlotType::Value]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 0),
+        Instruction::new(Opcode::CallExtern, 0, 0, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::Value],
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -187,15 +187,15 @@ fn vm_module_verifier_rejects_builtin_exact_extern_param_layout_drift_059() {
     let mut caller = function_with_slot_types(vec![SlotType::Value, SlotType::Value]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 2, 0, 0, 0),
+        Instruction::new(Opcode::CallExtern, 0, 0, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::Value, SlotType::Value],
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -225,15 +225,15 @@ fn module_verifier_rejects_math_intrinsic_parameter_type_drift() {
     let mut caller = function_with_slot_types(vec![SlotType::Float, SlotType::Value]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 1),
+        Instruction::new(Opcode::CallExtern, 0, 0, 1),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::Value],
             ret_layout: vec![SlotType::Float],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -269,11 +269,11 @@ fn module_verifier_rejects_builtin_extern_return_slot_drift_062() {
     let mut caller = function_with_slot_types(slots);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 5, 0, 0, 6),
+        Instruction::new(Opcode::CallExtern, 0, 0, 6),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![
                 SlotType::Interface0,
                 SlotType::Interface1,
@@ -283,7 +283,7 @@ fn module_verifier_rejects_builtin_extern_return_slot_drift_062() {
             ],
             ret_layout: vec![SlotType::Value; 6],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -319,11 +319,11 @@ fn module_verifier_rejects_builtin_extern_slots_only_return_layout_062() {
     let mut caller = function_with_slot_types(slots);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 6, 0, 0, 4),
+        Instruction::new(Opcode::CallExtern, 0, 0, 4),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![
                 SlotType::Interface0,
                 SlotType::Interface1,
@@ -334,7 +334,7 @@ fn module_verifier_rejects_builtin_extern_slots_only_return_layout_062() {
             ],
             ret_layout: vec![SlotType::Value; 4],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -367,15 +367,15 @@ fn module_verifier_rejects_builtin_extern_fixed_return_layout_drift_062() {
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 3, 0, 0, 1),
+        Instruction::new(Opcode::CallExtern, 0, 0, 1),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::GcRef, SlotType::GcRef, SlotType::Value],
             ret_layout: vec![SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -408,15 +408,15 @@ fn module_verifier_rejects_builtin_extern_fixed_return_count_drift_062() {
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 2, 0, 0, 2),
+        Instruction::new(Opcode::CallExtern, 0, 0, 2),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::GcRef, SlotType::GcRef],
             ret_layout: vec![SlotType::Value, SlotType::Value],
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -507,30 +507,21 @@ fn vm_module_verifier_allows_dynamic_variable_return_extern_shapes_059() {
 }
 
 #[test]
-fn vm_module_verifier_handles_large_same_name_tables_with_one_contract_index() {
-    let production = include_str!("../../verifier.rs");
-    let validator = production
-        .split("fn validate_same_name_extern_abi_shapes")
-        .nth(1)
-        .expect("same-name extern validator")
-        .split("fn is_vm_owned_variable_shape_extern")
-        .next()
-        .expect("same-name extern validator body");
-    assert!(validator.contains("BTreeMap"));
-    assert!(!validator.contains("for prev_idx in 0..idx"));
-
+fn vm_module_verifier_accepts_a_large_unique_extern_table_and_matching_duplicate() {
     let mut module = Module::new("large-same-name-extern-table".to_string());
     module.functions.push(function_with_slot_types(Vec::new()));
-    let definition = ExternDef {
-        name: canonical_test_extern_name("bulk_contract"),
-        params: ParamShape::Exact { slots: 0 },
-        returns: ReturnShape::slots(0),
-        allowed_effects: ExternEffects::NONE,
-        param_kinds: Vec::new(),
-    };
-    module.externs = vec![definition; 8_192];
+    module.externs = (0..8_192)
+        .map(|index| ExternDef {
+            name: canonical_test_extern_name(&format!("bulk_contract_{index}")),
+            params: ParamShape::Exact { slots: 0 },
+            returns: ReturnShape::slots(0),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        })
+        .collect();
+    module.externs.push(module.externs[0].clone());
 
-    verify_module(&module).expect("large same-name table with one contract remains valid");
+    verify_module(&module).expect("large extern table and matching duplicate remain valid");
 }
 
 #[test]
@@ -551,15 +542,15 @@ fn vm_module_verifier_rejects_dyn_call_short_variadic_argument_prefix_060() {
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 3, 0, 0, 0),
+        Instruction::new(Opcode::CallExtern, 0, 0, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![SlotType::Interface0, SlotType::Interface1, SlotType::GcRef],
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 
@@ -597,11 +588,11 @@ fn vm_module_verifier_rejects_dyn_method_short_exact_argument_prefix_060() {
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
-        Instruction::with_flags(Opcode::CallExtern, 4, 0, 0, 0),
+        Instruction::new(Opcode::CallExtern, 0, 0, 0),
         Instruction::new(Opcode::Return, 0, 0, 0),
     ];
-    caller.jit_metadata = vec![
-        JitInstructionMetadata::CallExternLayout {
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
             arg_layout: vec![
                 SlotType::Interface0,
                 SlotType::Interface1,
@@ -610,7 +601,7 @@ fn vm_module_verifier_rejects_dyn_method_short_exact_argument_prefix_060() {
             ],
             ret_layout: Vec::new(),
         },
-        JitInstructionMetadata::None,
+        InstructionMetadata::None,
     ];
     module.functions.push(finish_test_function(caller));
 

@@ -1,6 +1,9 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlags, StackSlot, Value};
-use vo_runtime::jit_api::{DynCallIC, JitContext, PreparedCall};
+use cranelift_codegen::ir::{
+    types, Block, InstBuilder, MemFlagsData as MemFlags, StackSlot, Value,
+};
+use vo_runtime::jit_api::{JitContextField, PreparedCall};
+use vo_runtime::DynCallIC;
 
 use crate::translator::IrEmitter;
 use crate::JitError;
@@ -23,7 +26,6 @@ pub(super) struct IcHitParams {
     pub(super) ctx: Value,
     pub(super) ic_jit_ptr: Value,
     pub(super) ic_args_ptr: Value,
-    pub(super) ic_arg_offset: Value,
     pub(super) ic_local_slots: Value,
     pub(super) ic_func_id: Value,
     pub(super) ret_ptr: Value,
@@ -37,8 +39,13 @@ pub(super) struct IcHitParams {
     pub(super) resume_pc: usize,
 }
 
-pub(super) struct IcMissParams {
-    pub(super) ic_entry: Value,
+pub(super) struct IcUpdateParams {
+    pub(super) entry: Value,
+    pub(super) receiver_slot0: Value,
+}
+
+pub(super) struct DynamicMissParams {
+    pub(super) ic_update: Option<IcUpdateParams>,
     pub(super) ret_ptr: Value,
     pub(super) out_slot: StackSlot,
     pub(super) ret_slot: StackSlot,
@@ -50,14 +57,10 @@ pub(super) struct IcMissParams {
     pub(super) ret_reg_val: Value,
     pub(super) ret_slots_val: Value,
     pub(super) merge_block: Block,
-    pub(super) ic_owner_key_val: Value,
-    pub(super) ic_key_val: Value,
-    pub(super) ic_key_extra_val: Value,
 }
 
 pub(super) struct DynamicIcHitFields {
     pub(super) local_slots: Value,
-    pub(super) arg_offset: Value,
     pub(super) func_id: Value,
 }
 
@@ -68,17 +71,13 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     p: IcHitParams,
     user_arg_vals: &[Value],
 ) -> Result<(), JitError> {
-    let arg_offset_bytes = emitter.builder().ins().ishl_imm(p.ic_arg_offset, 3);
-    let arg_offset_i64 = emitter
-        .builder()
-        .ins()
-        .uextend(types::I64, arg_offset_bytes);
-    let user_dst_base = emitter.builder().ins().iadd(p.ic_args_ptr, arg_offset_i64);
     for (i, val) in user_arg_vals.iter().enumerate() {
-        emitter
-            .builder()
-            .ins()
-            .store(MemFlags::trusted(), *val, user_dst_base, (i * 8) as i32);
+        emitter.builder().ins().store(
+            MemFlags::trusted(),
+            *val,
+            p.ic_args_ptr,
+            ((i + 1) * 8) as i32,
+        );
     }
 
     let new_bp = p.old_fiber_sp;
@@ -96,20 +95,10 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
-    let caller_func_id = load_current_func_id(emitter, p.ctx);
+    let caller_func_id = load_current_func_id(emitter);
     let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        new_bp,
-        p.ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        new_sp,
-        p.ctx,
-        JitContext::OFFSET_FIBER_SP,
-    );
+    emitter.store_context_field(new_bp, JitContextField::JitBp);
+    emitter.store_context_field(new_sp, JitContextField::FiberSp);
 
     let jit_func_sig = import_jit_func_sig(emitter);
     let jit_call = emitter.builder().ins().call_indirect(
@@ -118,7 +107,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         &[p.ctx, p.ic_args_ptr, p.ret_ptr],
     );
     let jit_result = emitter.builder().inst_results(jit_call)[0];
-    emit_call_depth_leave(emitter, p.ctx, old_call_depth);
+    emit_call_depth_leave(emitter, old_call_depth);
 
     let ok_val = emitter
         .builder()
@@ -129,7 +118,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         .ins()
         .icmp(IntCC::Equal, jit_result, ok_val);
     let ic_ok_block = emitter.builder().create_block();
-    let ic_non_ok_block = emitter.builder().create_block();
+    let ic_non_ok_block = crate::compile_common::cold_block(emitter.builder());
     emitter
         .builder()
         .ins()
@@ -137,7 +126,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(ic_ok_block);
     emitter.builder().seal_block(ic_ok_block);
-    restore_caller_execution_context(emitter, p.ctx, p.caller_bp, p.old_fiber_sp, caller_func_id);
+    restore_caller_execution_context(emitter, p.caller_bp, p.old_fiber_sp, caller_func_id);
     emitter.builder().ins().jump(p.merge_block, &[]);
 
     emitter.builder().switch_to_block(ic_non_ok_block);
@@ -177,139 +166,102 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
 /// Emit the shared IC miss path: conditionally update IC entry, then dispatch
 /// via a prepared call. Called after prepare callback returns.
-pub(super) fn emit_ic_miss_update_and_dispatch<'a, E: IrEmitter<'a>>(
+pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
-    p: IcMissParams,
+    p: DynamicMissParams,
 ) -> Result<(), crate::JitError> {
-    let out_func_id =
+    if let Some(update) = p.ic_update {
+        let out_func_id = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I32,
+            p.out_slot,
+            PreparedCall::OFFSET_FUNC_ID,
+        );
+        let out_ic_jit_ptr = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I64,
+            p.out_slot,
+            PreparedCall::OFFSET_IC_JIT_FUNC_PTR,
+        );
+        let out_local_slots = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I32,
+            p.out_slot,
+            PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS,
+        );
+        let null_jit = emitter.builder().ins().iconst(types::I64, 0);
+        let has_jit = emitter
+            .builder()
+            .ins()
+            .icmp(IntCC::NotEqual, out_ic_jit_ptr, null_jit);
+        let max_slots = emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, MAX_IC_NATIVE_SLOTS as i64);
+        let fits = emitter.builder().ins().icmp(
+            IntCC::UnsignedLessThanOrEqual,
+            out_local_slots,
+            max_slots,
+        );
+        let can_cache = emitter.builder().ins().band(has_jit, fits);
+        let ic_update_block = emitter.builder().create_block();
+        let ic_skip_block = emitter.builder().create_block();
         emitter
             .builder()
             .ins()
-            .stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_FUNC_ID);
-    let out_jit_ptr = emitter.builder().ins().stack_load(
-        types::I64,
-        p.out_slot,
-        PreparedCall::OFFSET_JIT_FUNC_PTR,
-    );
-    let out_local_slots = emitter.builder().ins().stack_load(
-        types::I32,
-        p.out_slot,
-        PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS,
-    );
-    let out_arg_offset =
-        emitter
-            .builder()
-            .ins()
-            .stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_ARG_OFFSET);
-    let out_slot0_kind =
-        emitter
-            .builder()
-            .ins()
-            .stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_SLOT0_KIND);
+            .brif(can_cache, ic_update_block, &[], ic_skip_block, &[]);
 
-    let null_jit = emitter.builder().ins().iconst(types::I64, 0);
-    let has_jit = emitter
-        .builder()
-        .ins()
-        .icmp(IntCC::NotEqual, out_jit_ptr, null_jit);
-    let max_slots = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, MAX_IC_NATIVE_SLOTS as i64);
-    let fits =
-        emitter
-            .builder()
-            .ins()
-            .icmp(IntCC::UnsignedLessThanOrEqual, out_local_slots, max_slots);
-    let can_cache = emitter.builder().ins().band(has_jit, fits);
-    let ic_update_block = emitter.builder().create_block();
-    let ic_skip_block = emitter.builder().create_block();
-    emitter
-        .builder()
-        .ins()
-        .brif(can_cache, ic_update_block, &[], ic_skip_block, &[]);
+        emitter.builder().switch_to_block(ic_update_block);
+        emitter.builder().seal_block(ic_update_block);
+        let invalid = emitter.builder().ins().iconst(types::I16, 0);
+        emitter.builder().ins().store(
+            MemFlags::trusted(),
+            invalid,
+            update.entry,
+            DynCallIC::OFFSET_VALID,
+        );
+        for (value, offset) in [
+            (update.receiver_slot0, DynCallIC::OFFSET_RECEIVER_SLOT0),
+            (out_ic_jit_ptr, DynCallIC::OFFSET_JIT_FUNC_PTR),
+        ] {
+            emitter
+                .builder()
+                .ins()
+                .store(MemFlags::trusted(), value, update.entry, offset);
+        }
+        for (value, offset) in [
+            (out_local_slots, DynCallIC::OFFSET_LOCAL_SLOTS),
+            (out_func_id, DynCallIC::OFFSET_FUNC_ID),
+        ] {
+            emitter
+                .builder()
+                .ins()
+                .store(MemFlags::trusted(), value, update.entry, offset);
+        }
+        emitter.builder().ins().jump(ic_skip_block, &[]);
 
-    emitter.builder().switch_to_block(ic_update_block);
-    emitter.builder().seal_block(ic_update_block);
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.ic_owner_key_val,
-        p.ic_entry,
-        DynCallIC::OFFSET_OWNER_KEY,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.ic_key_val,
-        p.ic_entry,
-        DynCallIC::OFFSET_KEY,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.ic_key_extra_val,
-        p.ic_entry,
-        DynCallIC::OFFSET_KEY_EXTRA,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        out_local_slots,
-        p.ic_entry,
-        DynCallIC::OFFSET_LOCAL_SLOTS,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        out_jit_ptr,
-        p.ic_entry,
-        DynCallIC::OFFSET_JIT_FUNC_PTR,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        out_arg_offset,
-        p.ic_entry,
-        DynCallIC::OFFSET_ARG_OFFSET,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        out_slot0_kind,
-        p.ic_entry,
-        DynCallIC::OFFSET_SLOT0_KIND,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        out_func_id,
-        p.ic_entry,
-        DynCallIC::OFFSET_FUNC_ID,
-    );
-    let out_is_leaf =
-        emitter
-            .builder()
-            .ins()
-            .stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_IS_LEAF);
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        out_is_leaf,
-        p.ic_entry,
-        DynCallIC::OFFSET_IS_LEAF,
-    );
-    emitter.builder().ins().jump(ic_skip_block, &[]);
-
-    emitter.builder().switch_to_block(ic_skip_block);
-    emitter.builder().seal_block(ic_skip_block);
+        emitter.builder().switch_to_block(ic_skip_block);
+        emitter.builder().seal_block(ic_skip_block);
+    }
 
     let jit_func_ptr = emitter.builder().ins().stack_load(
+        types::I64,
         types::I64,
         p.out_slot,
         PreparedCall::OFFSET_JIT_FUNC_PTR,
     );
     let callee_args_ptr = emitter.builder().ins().stack_load(
         types::I64,
+        types::I64,
         p.out_slot,
         PreparedCall::OFFSET_CALLEE_ARGS_PTR,
     );
-    let func_id =
-        emitter
-            .builder()
-            .ins()
-            .stack_load(types::I32, p.out_slot, PreparedCall::OFFSET_FUNC_ID);
+    let func_id = emitter.builder().ins().stack_load(
+        types::I64,
+        types::I32,
+        p.out_slot,
+        PreparedCall::OFFSET_FUNC_ID,
+    );
 
     emit_prepared_call(
         emitter,
@@ -332,36 +284,16 @@ pub(super) fn emit_ic_miss_update_and_dispatch<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
-pub(super) fn dynamic_ic_entry<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    ctx: Value,
-    caller_func_id: u32,
-    callsite_pc: usize,
-) -> Value {
-    let ic_table = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_IC_TABLE,
-    );
-    let ic_index = ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc as u32))
-        & DynCallIC::TABLE_MASK;
+pub(super) fn dynamic_ic_entry<'a, E: IrEmitter<'a>>(emitter: &mut E, callsite_pc: usize) -> Value {
+    let ic_table = emitter.load_context_field(types::I64, JitContextField::InlineCacheTable);
+    let ic_index = emitter
+        .dynamic_callsite_index(callsite_pc)
+        .expect("verified CallIface must have a dense callsite index");
     let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
     emitter
         .builder()
         .ins()
-        .iadd_imm(ic_table, ic_byte_offset as i64)
-}
-
-pub(super) fn dynamic_ic_owner_key<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    caller_func_id: u32,
-    callsite_pc: usize,
-) -> Value {
-    emitter.builder().ins().iconst(
-        types::I64,
-        DynCallIC::owner_key(caller_func_id, callsite_pc as u32) as i64,
-    )
+        .iadd_imm_u(ic_table, ic_byte_offset as i64)
 }
 
 pub(super) fn branch_on_dynamic_ic_hit<'a, E: IrEmitter<'a>>(
@@ -377,7 +309,7 @@ pub(super) fn branch_on_dynamic_ic_hit<'a, E: IrEmitter<'a>>(
     let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
 
     let ic_hit_block = emitter.builder().create_block();
-    let ic_miss_block = emitter.builder().create_block();
+    let ic_miss_block = crate::compile_common::cold_block(emitter.builder());
     let merge_block = emitter.builder().create_block();
 
     emitter
@@ -397,55 +329,7 @@ pub(super) fn load_jit_ptr<'a, E: IrEmitter<'a>>(emitter: &mut E, ic_entry: Valu
     )
 }
 
-pub(super) fn tagged_ic_key<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    kind: u64,
-    payload: Value,
-) -> Value {
-    let tag = emitter
-        .builder()
-        .ins()
-        .iconst(types::I64, (kind << DynCallIC::KEY_KIND_SHIFT) as i64);
-    emitter.builder().ins().bor(tag, payload)
-}
-
-pub(super) fn closure_ic_key<'a, E: IrEmitter<'a>>(emitter: &mut E, func_id: Value) -> Value {
-    let func_id_u64 = emitter.builder().ins().uextend(types::I64, func_id);
-    tagged_ic_key(emitter, DynCallIC::KEY_KIND_CLOSURE, func_id_u64)
-}
-
-pub(super) fn iface_ic_key<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    slot0: Value,
-    method_idx: u32,
-) -> (Value, Value) {
-    let itab_id = emitter.builder().ins().ushr_imm(slot0, 32);
-    let method_idx_val_i32 = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, method_idx as i64);
-    let method_idx_val_u64 = emitter
-        .builder()
-        .ins()
-        .uextend(types::I64, method_idx_val_i32);
-    let method_key = emitter.builder().ins().ishl_imm(method_idx_val_u64, 32);
-    let tagged_method_key = tagged_ic_key(emitter, DynCallIC::KEY_KIND_IFACE, method_key);
-    (
-        emitter.builder().ins().bor(tagged_method_key, itab_id),
-        slot0,
-    )
-}
-
-pub(super) fn load_cached_key<'a, E: IrEmitter<'a>>(emitter: &mut E, ic_entry: Value) -> Value {
-    emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_KEY,
-    )
-}
-
-pub(super) fn load_cached_owner_key<'a, E: IrEmitter<'a>>(
+pub(super) fn load_cached_receiver_slot0<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     ic_entry: Value,
 ) -> Value {
@@ -453,19 +337,7 @@ pub(super) fn load_cached_owner_key<'a, E: IrEmitter<'a>>(
         types::I64,
         MemFlags::trusted(),
         ic_entry,
-        DynCallIC::OFFSET_OWNER_KEY,
-    )
-}
-
-pub(super) fn load_cached_key_extra<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    ic_entry: Value,
-) -> Value {
-    emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_KEY_EXTRA,
+        DynCallIC::OFFSET_RECEIVER_SLOT0,
     )
 }
 
@@ -479,12 +351,6 @@ pub(super) fn load_hit_fields<'a, E: IrEmitter<'a>>(
         ic_entry,
         DynCallIC::OFFSET_LOCAL_SLOTS,
     );
-    let arg_offset = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_ARG_OFFSET,
-    );
     let func_id = emitter.builder().ins().load(
         types::I32,
         MemFlags::trusted(),
@@ -493,155 +359,6 @@ pub(super) fn load_hit_fields<'a, E: IrEmitter<'a>>(
     );
     DynamicIcHitFields {
         local_slots,
-        arg_offset,
         func_id,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    fn compact_source_without_non_dominating_blocks(compact: &[u8]) -> Vec<u8> {
-        vo_source_contract::compact_rust_source_without_non_dominating_blocks_for_contract(compact)
-    }
-
-    fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
-        vo_source_contract::compact_pattern_position(compact, pattern)
-    }
-
-    fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-        vo_source_contract::compact_region_between(source, marker, terminator)
-    }
-
-    fn ic_hit_publishes_logical_call_depth_062(source: &str) -> bool {
-        let src = vo_source_contract::production_source_without_test_modules(source);
-        let Some(jit_region) = compact_region_between(
-            &src,
-            "letold_call_depth=emit_call_depth_enter(emitter,p.ctx)?;",
-            "letok_val=emitter",
-        ) else {
-            return false;
-        };
-        let jit_region = compact_source_without_non_dominating_blocks(&jit_region);
-        let Some(call_pos) = compact_pattern_position(&jit_region, ".call_indirect(") else {
-            return false;
-        };
-        let Some(leave_pos) = compact_pattern_position(
-            &jit_region,
-            "emit_call_depth_leave(emitter,p.ctx,old_call_depth);",
-        ) else {
-            return false;
-        };
-        call_pos < leave_pos
-    }
-
-    #[test]
-    fn vm_jit_current_func_metadata_037_ic_hit_ok_path_restores_caller_func_id() {
-        let src = vo_source_contract::production_source_without_test_modules(include_str!("ic.rs"));
-        let ok_region = src
-            .split("emitter.builder().switch_to_block(ic_ok_block);")
-            .nth(1)
-            .expect("dynamic IC hit OK block should exist")
-            .split("emitter.builder().ins().jump(p.merge_block")
-            .next()
-            .expect("dynamic IC hit OK block should jump to merge");
-        assert!(
-            ok_region.contains("restore_caller_execution_context"),
-            "dynamic IC JIT-to-JIT OK path must restore the full caller execution context before returning to caller helpers"
-        );
-    }
-
-    #[test]
-    fn dynamic_ic_native_slot_budget_only_controls_cache_admission() {
-        let src = vo_source_contract::production_source_without_test_modules(include_str!("ic.rs"));
-        let miss = src
-            .split("fn emit_ic_miss_update_and_dispatch")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(super) fn dynamic_ic_entry").next())
-            .expect("dynamic IC miss dispatcher");
-        let budget_check = miss
-            .find("MAX_IC_NATIVE_SLOTS")
-            .expect("native-stack cache-admission budget");
-        let rejoin = miss
-            .find("switch_to_block(ic_skip_block)")
-            .expect("cache-admission branches must rejoin");
-        let prepared_dispatch = miss
-            .find("emit_prepared_call(")
-            .expect("all misses must dispatch the validated PreparedCall");
-
-        assert!(budget_check < rejoin && rejoin < prepared_dispatch);
-        assert!(
-            miss.contains("brif(can_cache, ic_update_block, &[], ic_skip_block, &[])")
-                && miss.contains("jump(ic_skip_block, &[])")
-                && miss.contains("callee_args_ptr"),
-            "oversized dynamic callees must skip IC insertion and continue through PreparedCall dispatch"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_replay_scope_062_ic_hit_publishes_logical_call_depth() {
-        assert!(
-            ic_hit_publishes_logical_call_depth_062(include_str!("ic.rs")),
-            "dynamic IC direct JIT call depth must cover callee execution"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_replay_scope_062_rejects_comment_spoofed_ic_hit_call_depth() {
-        let spoof = r#"
-            fn lower_ic_hit() {
-                // let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
-                emitter.builder().ins().call_indirect(jit_func_sig, jit_func_ptr, &[p.ctx, callee_args_ptr, p.ret_ptr]);
-                // emit_call_depth_leave(emitter, p.ctx, old_call_depth);
-                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
-            }
-        "#;
-
-        assert!(
-            !ic_hit_publishes_logical_call_depth_062(spoof),
-            "comment-only IC hit call-depth enter/leave facts must not satisfy source contracts"
-        );
-    }
-
-    #[test]
-    fn vm_jit_extern_replay_scope_062_rejects_non_dominating_ic_hit_call_depth_leave() {
-        let closure_spoof = r#"
-            fn lower_ic_hit() {
-                let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
-                emitter.builder().ins().call_indirect(jit_func_sig, jit_func_ptr, &[p.ctx, callee_args_ptr, p.ret_ptr]);
-                let _leave = || {
-                    emit_call_depth_leave(emitter, p.ctx, old_call_depth);
-                };
-                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
-            }
-        "#;
-        let unreachable_spoof = r#"
-            fn lower_ic_hit() {
-                let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
-                emitter.builder().ins().call_indirect(jit_func_sig, jit_func_ptr, &[p.ctx, callee_args_ptr, p.ret_ptr]);
-                if false {
-                    emit_call_depth_leave(emitter, p.ctx, old_call_depth);
-                }
-                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
-            }
-        "#;
-        let macro_spoof = r#"
-            fn lower_ic_hit() {
-                let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
-                emitter.builder().ins().call_indirect(jit_func_sig, jit_func_ptr, &[p.ctx, callee_args_ptr, p.ret_ptr]);
-                macro_rules! leave_depth {
-                    () => {
-                        emit_call_depth_leave(emitter, p.ctx, old_call_depth);
-                    };
-                }
-                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
-            }
-        "#;
-
-        for spoof in [closure_spoof, unreachable_spoof, macro_spoof] {
-            assert!(
-                !ic_hit_publishes_logical_call_depth_062(spoof),
-                "IC hit call-depth leave must dominate the OK result path"
-            );
-        }
     }
 }

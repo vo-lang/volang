@@ -526,7 +526,7 @@ fn module_verifier_rejects_invalid_opcode() {
         b: 0,
         c: 0,
     }];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
 
     assert!(matches!(
@@ -540,7 +540,7 @@ fn module_verifier_rejects_trunc_zero_width_flags_028() {
     let mut module = Module::new("trunc-zero-width".to_string());
     let mut func = function_with_slot_types(vec![SlotType::Value, SlotType::Value]);
     func.code = vec![Instruction::with_flags(Opcode::Trunc, 0, 0, 1, 0)];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
 
     let err =
@@ -555,7 +555,7 @@ fn module_verifier_rejects_trunc_unsupported_width_flags_028() {
     let mut module = Module::new("trunc-unsupported-width".to_string());
     let mut func = function_with_slot_types(vec![SlotType::Value, SlotType::Value]);
     func.code = vec![Instruction::with_flags(Opcode::Trunc, 3, 0, 1, 0)];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
 
     let err = verify_module(&module)
@@ -573,7 +573,7 @@ fn module_verifier_accepts_conversion_flags_and_rejects_reserved_bits() {
         let mut module = Module::new(format!("conv-i2f-flags-{flags}"));
         let mut func = function_with_slot_types(vec![SlotType::Float, SlotType::Value]);
         func.code = vec![Instruction::with_flags(Opcode::ConvI2F, flags, 0, 1, 0)];
-        func.jit_metadata = vec![JitInstructionMetadata::None];
+        func.instruction_metadata = vec![InstructionMetadata::None];
         module.functions.push(func);
         verify_module(&module)
             .unwrap_or_else(|err| panic!("valid ConvI2F flags {flags:#x}: {err}"));
@@ -583,7 +583,7 @@ fn module_verifier_accepts_conversion_flags_and_rejects_reserved_bits() {
         let mut module = Module::new(format!("conv-f2i-flags-{flags}"));
         let mut func = function_with_slot_types(vec![SlotType::Value, SlotType::Float]);
         func.code = vec![Instruction::with_flags(Opcode::ConvF2I, flags, 0, 1, 0)];
-        func.jit_metadata = vec![JitInstructionMetadata::None];
+        func.instruction_metadata = vec![InstructionMetadata::None];
         module.functions.push(func);
         verify_module(&module)
             .unwrap_or_else(|err| panic!("valid ConvF2I flags {flags:#x}: {err}"));
@@ -606,7 +606,7 @@ fn module_verifier_accepts_conversion_flags_and_rejects_reserved_bits() {
         let mut module = Module::new(format!("reserved-{opcode:?}"));
         let mut func = function_with_slot_types(slots);
         func.code = vec![Instruction::with_flags(opcode, flags, 0, 1, 0)];
-        func.jit_metadata = vec![JitInstructionMetadata::None];
+        func.instruction_metadata = vec![InstructionMetadata::None];
         module.functions.push(func);
         assert!(matches!(
             verify_module(&module),
@@ -629,7 +629,7 @@ fn module_verifier_accepts_shift_signedness_and_rejects_reserved_flags() {
             let mut func =
                 function_with_slot_types(vec![SlotType::Value, SlotType::Value, SlotType::Value]);
             func.code = vec![Instruction::with_flags(opcode, flags, 0, 1, 2)];
-            func.jit_metadata = vec![JitInstructionMetadata::None];
+            func.instruction_metadata = vec![InstructionMetadata::None];
             module.functions.push(func);
             verify_module(&module).unwrap_or_else(|err| panic!("valid shift flags: {err}"));
         }
@@ -638,7 +638,7 @@ fn module_verifier_accepts_shift_signedness_and_rejects_reserved_flags() {
         let mut func =
             function_with_slot_types(vec![SlotType::Value, SlotType::Value, SlotType::Value]);
         func.code = vec![Instruction::with_flags(opcode, 0x02, 0, 1, 2)];
-        func.jit_metadata = vec![JitInstructionMetadata::None];
+        func.instruction_metadata = vec![InstructionMetadata::None];
         module.functions.push(func);
         assert!(matches!(
             verify_module(&module),
@@ -664,7 +664,7 @@ fn module_verifier_rejects_error_return_flag_without_error_ret_slot_058() {
         2,
         0,
     )];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(finish_test_function(func));
 
     let err = verify_module(&module)
@@ -693,7 +693,7 @@ fn module_verifier_rejects_heap_error_return_flag_without_error_ret_slot_058() {
         1,
         0,
     )];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(finish_test_function(func));
 
     let err = verify_module(&module)
@@ -1233,6 +1233,20 @@ fn runtime_value_containment_cycles_are_rejected_iteratively() {
 }
 
 #[test]
+fn array_elements_cannot_use_tuple_signature_metadata() {
+    let mut module = Module::new("tuple-array".to_string());
+    module.runtime_types.push(RuntimeType::Tuple(Vec::new()));
+    module.runtime_types.push(RuntimeType::Array {
+        len: 1,
+        elem: ValueRttid::new(0, ValueKind::Void),
+    });
+    module.functions.push(function_with_slot_types(Vec::new()));
+
+    let err = verify_module(&module).expect_err("tuple array elements must be rejected");
+    assert!(err.to_string().contains("Void/tuple metadata"), "{err}");
+}
+
+#[test]
 fn deep_acyclic_runtime_value_containment_is_stack_safe() {
     const DEPTH: usize = 4_096;
 
@@ -1559,7 +1573,7 @@ fn module_verifier_checks_debug_info_refs() {
     let mut module = Module::new("debug-info".to_string());
     let mut func = function_with_slot_types(Vec::new());
     func.code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
-    func.jit_metadata = vec![JitInstructionMetadata::None];
+    func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
     module.debug_info.funcs.push(FuncDebugInfo {
         entries: vec![DebugLoc {
@@ -1582,46 +1596,47 @@ fn module_verifier_checks_debug_info_refs() {
 
 #[test]
 fn module_verifier_checks_instruction_metadata_layout_shape() {
-    let mut module = Module::new("instruction-metadata-layout".to_string());
-    let mut func = function_with_slot_types(Vec::new());
-    func.code = vec![Instruction::new(Opcode::Hint, 0, 0, 0)];
-    func.jit_metadata = vec![JitInstructionMetadata::ElemLayout {
+    let func = function_with_slot_types(Vec::new());
+    let metadata = InstructionMetadata::ElemLayout {
         elem_bytes: 9,
         needs_sign_extend: false,
         slot_layout: vec![SlotType::Value],
-    }];
-    module.functions.push(func);
+    };
 
-    let err = verify_module(&module).unwrap_err();
+    let err = validate_instruction_metadata_shape(&func, 0, &metadata).unwrap_err();
     assert!(err.to_string().contains(
             "instruction metadata at pc 0: ElemLayout slot_layout.len()=1 but elem_bytes=9 requires 2 slots"
         ));
 
-    module.functions[0].jit_metadata = vec![JitInstructionMetadata::ElemLayout {
+    let metadata = InstructionMetadata::ElemLayout {
         elem_bytes: 0,
         needs_sign_extend: false,
         slot_layout: Vec::new(),
-    }];
-    verify_module(&module).expect("zero-size element metadata verifies");
+    };
+    validate_instruction_metadata_shape(&func, 0, &metadata)
+        .expect("zero-size element metadata verifies");
 
-    module.functions[0].jit_metadata = vec![JitInstructionMetadata::ElemLayout {
+    let metadata = InstructionMetadata::ElemLayout {
         elem_bytes: 0,
         needs_sign_extend: false,
         slot_layout: vec![SlotType::Value],
-    }];
-    verify_module(&module).expect("zero-size logical empty-struct metadata verifies");
+    };
+    validate_instruction_metadata_shape(&func, 0, &metadata)
+        .expect("zero-size logical empty-struct metadata verifies");
 
-    module.functions[0].jit_metadata = vec![JitInstructionMetadata::ElemLayout {
+    let metadata = InstructionMetadata::ElemLayout {
         elem_bytes: 16,
         needs_sign_extend: false,
         slot_layout: vec![SlotType::Value, SlotType::GcRef],
-    }];
-    verify_module(&module).expect("valid element metadata layout verifies");
+    };
+    validate_instruction_metadata_shape(&func, 0, &metadata)
+        .expect("valid element metadata layout verifies");
 
-    module.functions[0].jit_metadata = vec![JitInstructionMetadata::PtrLayout {
+    let metadata = InstructionMetadata::PtrLayout {
         value_layout: vec![SlotType::Interface0],
-    }];
-    verify_module(&module).expect("projected pointer metadata layout verifies");
+    };
+    validate_instruction_metadata_shape(&func, 0, &metadata)
+        .expect("projected pointer metadata layout verifies");
 }
 
 #[test]
@@ -1648,11 +1663,11 @@ fn module_verifier_rejects_array_new_metadata_layout_drift_053() {
         Instruction::new(Opcode::LoadConst, 3, 2, 0),
         Instruction::new(Opcode::ArrayNew, 0, 1, 2),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::ElemLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::ElemLayout {
             elem_bytes: 8,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::GcRef],
@@ -1664,7 +1679,7 @@ fn module_verifier_rejects_array_new_metadata_layout_drift_053() {
         verify_module(&module).expect_err("ArrayNew must reject runtime metadata/JIT layout drift");
     assert!(
         err.to_string().contains(
-            "ArrayNew element metadata layout [Value] does not match JIT metadata [GcRef]"
+            "ArrayNew element metadata layout [Value] does not match instruction metadata [GcRef]"
         ),
         "{err}"
     );
@@ -1697,12 +1712,12 @@ fn module_verifier_rejects_slice_new_metadata_layout_drift_053() {
         Instruction::new(Opcode::LoadConst, 4, 3, 0),
         Instruction::new(Opcode::SliceNew, 0, 1, 2),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::ElemLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::ElemLayout {
             elem_bytes: 8,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::GcRef],
@@ -1714,7 +1729,7 @@ fn module_verifier_rejects_slice_new_metadata_layout_drift_053() {
         verify_module(&module).expect_err("SliceNew must reject runtime metadata/JIT layout drift");
     assert!(
         err.to_string().contains(
-            "SliceNew element metadata layout [Value] does not match JIT metadata [GcRef]"
+            "SliceNew element metadata layout [Value] does not match instruction metadata [GcRef]"
         ),
         "{err}"
     );
@@ -1735,11 +1750,11 @@ fn module_verifier_rejects_slice_append_metadata_layout_drift_057() {
     ]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 2, 0, 0),
-        Instruction::with_flags(Opcode::SliceAppend, 8, 0, 1, 2),
+        Instruction::new(Opcode::SliceAppend, 0, 1, 2),
     ];
-    func.jit_metadata = vec![
-        JitInstructionMetadata::None,
-        JitInstructionMetadata::ElemLayout {
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::ElemLayout {
             elem_bytes: 8,
             needs_sign_extend: false,
             slot_layout: vec![SlotType::GcRef],
@@ -1751,7 +1766,7 @@ fn module_verifier_rejects_slice_append_metadata_layout_drift_057() {
         .expect_err("SliceAppend must reject runtime metadata/JIT layout drift");
     assert!(
         err.to_string().contains(
-            "SliceAppend element metadata layout [Value] does not match JIT metadata [GcRef]"
+            "SliceAppend element metadata layout [Value] does not match instruction metadata [GcRef]"
         ),
         "{err}"
     );

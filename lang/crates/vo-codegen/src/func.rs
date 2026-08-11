@@ -4,11 +4,10 @@ use std::collections::HashMap;
 use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common_core::instruction::{
-    copy_n_mirror_flags, pack_u8_slot_count, queue_new_metadata_flags, queue_recv_metadata_flags,
-    queue_send_metadata_flags, slot_n_mirror_flags, HINT_LOOP, LOOP_FLAG_HAS_DEFER,
-    LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
+    pack_u8_slot_count, HINT_LOOP, IFACE_ASSERT_HAS_OK_FLAG, QUEUE_KIND_PORT_FLAG,
+    QUEUE_RECV_HAS_OK_FLAG,
 };
-use vo_common_core::{JitInstructionMetadata, TransferType};
+use vo_common_core::{InstructionMetadata, TransferType};
 use vo_runtime::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
@@ -175,29 +174,19 @@ pub struct CaptureVar {
 
 /// Loop/switch context for break/continue and Hint generation.
 struct LoopContext {
-    depth: usize,      // loop nesting depth (0 = outermost)
-    hint_pc: usize,    // PC of HINT_LOOP (0 for switch)
-    loop_start: usize, // PC where loop body starts (Jump target)
+    hint_pc: usize, // PC of HINT_LOOP (0 for switch)
     continue_pc: usize,
     continue_patches: Vec<usize>, // for patching continue jumps later
     break_patches: Vec<usize>,
     label: Option<Symbol>,
-    has_defer: bool,            // loop body contains defer
-    has_labeled_break: bool,    // loop body has break to outer loop
-    has_labeled_continue: bool, // loop body has continue to outer loop
-    is_switch: bool,            // true if this is a switch statement
+    is_switch: bool, // true if this is a switch statement
 }
 
 /// Loop exit info returned by exit_loop.
 pub struct LoopExitInfo {
     pub break_patches: Vec<usize>,
     pub continue_patches: Vec<usize>,
-    pub hint_pc: usize,    // PC of HINT_LOOP
-    pub loop_start: usize, // PC where loop body starts (Jump target)
-    pub depth: usize,
-    pub has_defer: bool,
-    pub has_labeled_break: bool,
-    pub has_labeled_continue: bool,
+    pub hint_pc: usize, // PC of HINT_LOOP
 }
 
 /// Function builder.
@@ -215,7 +204,7 @@ pub struct FuncBuilder {
     slot_types: Vec<SlotType>,
     stack_array_elem_layouts: HashMap<u16, Vec<SlotType>>,
     code: Vec<Instruction>,
-    jit_metadata: Vec<JitInstructionMetadata>,
+    instruction_metadata: Vec<InstructionMetadata>,
     active_call_span: Option<Span>,
     call_debug_locs: Vec<(u32, Span)>,
     loop_stack: Vec<LoopContext>,
@@ -260,7 +249,7 @@ impl FuncBuilder {
             slot_types: Vec::new(),
             stack_array_elem_layouts: HashMap::new(),
             code: Vec::new(),
-            jit_metadata: Vec::new(),
+            instruction_metadata: Vec::new(),
             active_call_span: None,
             call_debug_locs: Vec::new(),
             loop_stack: Vec::new(),
@@ -987,17 +976,17 @@ impl FuncBuilder {
     }
 
     pub fn emit(&mut self, inst: Instruction) {
-        self.emit_with_metadata(inst, JitInstructionMetadata::None);
+        self.emit_with_metadata(inst, InstructionMetadata::None);
     }
 
     pub fn emit_op(&mut self, op: Opcode, a: u16, b: u16, c: u16) {
-        self.emit_with_metadata(Instruction::new(op, a, b, c), JitInstructionMetadata::None);
+        self.emit_with_metadata(Instruction::new(op, a, b, c), InstructionMetadata::None);
     }
 
     pub fn emit_with_flags(&mut self, op: Opcode, flags: u8, a: u16, b: u16, c: u16) {
         self.emit_with_metadata(
             Instruction::with_flags(op, flags, a, b, c),
-            JitInstructionMetadata::None,
+            InstructionMetadata::None,
         );
     }
 
@@ -1036,52 +1025,37 @@ impl FuncBuilder {
     ) {
         let extern_id = self.checked_u16_operand_or_record(extern_id, "CallExtern extern id");
         let arg_layout = self.get_slot_types(args_start, arg_slots);
-        let arg_flags = u8::try_from(arg_slots).unwrap_or_default();
         self.emit_with_flags_and_metadata(
             Opcode::CallExtern,
-            arg_flags,
+            0,
             dst,
             extern_id,
             args_start,
-            JitInstructionMetadata::CallExternLayout {
+            InstructionMetadata::CallExternLayout {
                 arg_layout,
                 ret_layout: ret_slot_types.to_vec(),
             },
         );
     }
 
-    pub fn emit_static_call(
-        &mut self,
-        func_id: u32,
-        args_start: u16,
-        arg_slots: u16,
-        ret_slots: u16,
-    ) {
-        let packed_shape = crate::type_info::encode_static_call_args(arg_slots, ret_slots);
+    pub fn emit_static_call(&mut self, func_id: u32, args_start: u16) {
         let Some((func_id_low, func_id_high)) = self.encoded_func_id_or_record(func_id, "Call")
         else {
             return;
         };
-        self.emit_with_flags(
-            Opcode::Call,
-            func_id_high,
-            func_id_low,
-            args_start,
-            packed_shape,
-        );
+        self.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, 0);
     }
 
     pub fn emit_call_closure(
         &mut self,
         closure_reg: u16,
         args_start: u16,
-        packed_shape: u16,
         arg_layout: &[SlotType],
         ret_layout: &[SlotType],
     ) {
         self.emit_with_metadata(
-            Instruction::new(Opcode::CallClosure, closure_reg, args_start, packed_shape),
-            JitInstructionMetadata::CallLayout {
+            Instruction::new(Opcode::CallClosure, closure_reg, args_start, 0),
+            InstructionMetadata::CallLayout {
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: ret_layout.to_vec(),
             },
@@ -1095,18 +1069,16 @@ impl FuncBuilder {
         method_idx: u32,
         iface_slot: u16,
         args_start: u16,
-        packed_shape: u16,
         arg_layout: &[SlotType],
         ret_layout: &[SlotType],
     ) {
-        let method_idx_mirror = u8::try_from(method_idx).unwrap_or_default();
         self.emit_with_flags_and_metadata(
             Opcode::CallIface,
-            method_idx_mirror,
+            0,
             iface_slot,
             args_start,
-            packed_shape,
-            JitInstructionMetadata::CallIfaceLayout {
+            0,
+            InstructionMetadata::CallIfaceLayout {
                 iface_meta_id,
                 method_idx,
                 arg_layout: arg_layout.to_vec(),
@@ -1122,14 +1094,13 @@ impl FuncBuilder {
         args_start: u16,
         arg_layout: &[SlotType],
     ) {
-        let arg_flags = u8::try_from(arg_layout.len()).unwrap_or_default();
         self.emit_with_flags_and_metadata(
             Opcode::GoIsland,
-            arg_flags,
+            0,
             island_reg,
             closure_reg,
             args_start,
-            JitInstructionMetadata::CallLayout {
+            InstructionMetadata::CallLayout {
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: Vec::new(),
             },
@@ -1150,23 +1121,21 @@ impl FuncBuilder {
             ),
             "shared closure call metadata is only valid for go/defer opcodes"
         );
-        let arg_slots =
-            self.checked_u16_count_or_record(arg_layout.len(), "shared closure arg slot count");
         self.emit_with_flags_and_metadata(
             opcode,
             1,
             closure_reg,
             args_start,
-            arg_slots,
-            JitInstructionMetadata::CallLayout {
+            0,
+            InstructionMetadata::CallLayout {
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: Vec::new(),
             },
         );
     }
 
-    pub fn emit_go_start_static(&mut self, func_id: u32, args_start: u16, arg_slots: u16) {
-        self.emit_shared_static_call(Opcode::GoStart, func_id, args_start, arg_slots, "GoStart");
+    pub fn emit_go_start_static(&mut self, func_id: u32, args_start: u16) {
+        self.emit_shared_static_call(Opcode::GoStart, func_id, args_start, "GoStart");
     }
 
     pub fn emit_shared_static_call(
@@ -1174,7 +1143,6 @@ impl FuncBuilder {
         opcode: Opcode,
         func_id: u32,
         args_start: u16,
-        arg_slots: u16,
         context: &str,
     ) {
         assert!(
@@ -1189,41 +1157,17 @@ impl FuncBuilder {
         else {
             return;
         };
-        if opcode == Opcode::GoStart {
-            let arg_layout = self.get_slot_types(args_start, arg_slots as usize);
-            self.emit_with_flags_and_metadata(
-                opcode,
-                func_id_high << 1,
-                func_id_low,
-                args_start,
-                arg_slots,
-                JitInstructionMetadata::CallLayout {
-                    arg_layout,
-                    ret_layout: Vec::new(),
-                },
-            );
-        } else {
-            // Static defer targets derive their argument layout from the
-            // FunctionDef. CallLayout metadata is reserved for closure-shaped
-            // defer instructions by the JIT metadata contract.
-            self.emit_with_flags(
-                opcode,
-                func_id_high << 1,
-                func_id_low,
-                args_start,
-                arg_slots,
-            );
-        }
+        self.emit_with_flags(opcode, func_id_high << 1, func_id_low, args_start, 0);
     }
 
     pub fn emit_queue_send(&mut self, queue: u16, value: u16, elem_layout: &[SlotType]) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueSend,
-            queue_send_metadata_flags(),
+            0,
             queue,
             value,
             0,
-            JitInstructionMetadata::QueueLayout {
+            InstructionMetadata::QueueLayout {
                 elem_layout: elem_layout.to_vec(),
             },
         );
@@ -1238,11 +1182,11 @@ impl FuncBuilder {
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueRecv,
-            queue_recv_metadata_flags(has_ok),
+            if has_ok { QUEUE_RECV_HAS_OK_FLAG } else { 0 },
             dst,
             queue,
             0,
-            JitInstructionMetadata::QueueLayout {
+            InstructionMetadata::QueueLayout {
                 elem_layout: elem_layout.to_vec(),
             },
         );
@@ -1258,11 +1202,11 @@ impl FuncBuilder {
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueNew,
-            queue_new_metadata_flags(is_port),
+            if is_port { QUEUE_KIND_PORT_FLAG } else { 0 },
             dst,
             packed_type,
             cap,
-            JitInstructionMetadata::QueueLayout {
+            InstructionMetadata::QueueLayout {
                 elem_layout: elem_layout.to_vec(),
             },
         );
@@ -1277,11 +1221,11 @@ impl FuncBuilder {
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::SelectSend,
-            queue_send_metadata_flags(),
+            0,
             queue,
             value,
             case_idx,
-            JitInstructionMetadata::QueueLayout {
+            InstructionMetadata::QueueLayout {
                 elem_layout: elem_layout.to_vec(),
             },
         );
@@ -1297,11 +1241,11 @@ impl FuncBuilder {
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::SelectRecv,
-            queue_recv_metadata_flags(has_ok),
+            if has_ok { QUEUE_RECV_HAS_OK_FLAG } else { 0 },
             dst,
             queue,
             case_idx,
-            JitInstructionMetadata::QueueLayout {
+            InstructionMetadata::QueueLayout {
                 elem_layout: elem_layout.to_vec(),
             },
         );
@@ -1312,17 +1256,16 @@ impl FuncBuilder {
         iter_kv: u16,
         iter: u16,
         ok: u16,
-        flags: u8,
         key_layout: &[SlotType],
         val_layout: &[SlotType],
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::MapIterNext,
-            flags,
+            0,
             iter_kv,
             iter,
             ok,
-            JitInstructionMetadata::MapIterNext {
+            InstructionMetadata::MapIterNext {
                 key_layout: key_layout.to_vec(),
                 val_layout: val_layout.to_vec(),
             },
@@ -1338,19 +1281,18 @@ impl FuncBuilder {
         target_id: u32,
         result_layout: &[SlotType],
     ) {
-        let result_slots = u16::try_from(result_layout.len())
-            .expect("interface assertion layout exceeds the register address space");
-        let flags =
-            vo_common_core::instruction::pack_iface_assert_flags(assert_kind, has_ok, result_slots)
-                .expect("codegen produced an invalid interface assertion kind/layout");
-        let target_mirror = u16::try_from(target_id).unwrap_or(u16::MAX);
+        assert!(assert_kind <= 1, "invalid interface assertion kind");
+        assert!(
+            assert_kind == 0 || result_layout == [SlotType::Interface0, SlotType::Interface1],
+            "interface-to-interface assertion must produce an interface pair"
+        );
         self.emit_with_flags_and_metadata(
             Opcode::IfaceAssert,
-            flags,
+            if has_ok { IFACE_ASSERT_HAS_OK_FLAG } else { 0 },
             dst,
             iface_reg,
-            target_mirror,
-            JitInstructionMetadata::IfaceAssertLayout {
+            0,
+            InstructionMetadata::IfaceAssertLayout {
                 assert_kind,
                 target_id,
                 result_layout: result_layout.to_vec(),
@@ -1358,7 +1300,7 @@ impl FuncBuilder {
         );
     }
 
-    fn emit_with_metadata(&mut self, inst: Instruction, metadata: JitInstructionMetadata) {
+    fn emit_with_metadata(&mut self, inst: Instruction, metadata: InstructionMetadata) {
         if matches!(
             inst.opcode(),
             Opcode::Call | Opcode::CallExtern | Opcode::CallClosure | Opcode::CallIface
@@ -1375,15 +1317,15 @@ impl FuncBuilder {
             }
         }
         self.code.push(inst);
-        self.jit_metadata.push(metadata);
+        self.instruction_metadata.push(metadata);
     }
 
     fn patch_loop_end_metadata(&mut self, hint_pc: usize, end_pc: usize) {
         let metadata = self
-            .jit_metadata
+            .instruction_metadata
             .get_mut(hint_pc)
             .unwrap_or_else(|| panic!("patch_loop_end_metadata: hint_pc {} out of range", hint_pc));
-        *metadata = JitInstructionMetadata::LoopEnd {
+        *metadata = InstructionMetadata::LoopEnd {
             end_pc: u32::try_from(end_pc).expect("loop end pc exceeds u32"),
         };
     }
@@ -1395,19 +1337,19 @@ impl FuncBuilder {
         a: u16,
         b: u16,
         c: u16,
-        metadata: JitInstructionMetadata,
+        metadata: InstructionMetadata,
     ) {
         self.emit_with_metadata(Instruction::with_flags(op, flags, a, b, c), metadata);
     }
 
-    fn try_elem_metadata(elem: ElemLayoutSpec<'_>) -> Result<JitInstructionMetadata, String> {
+    fn try_elem_metadata(elem: ElemLayoutSpec<'_>) -> Result<InstructionMetadata, String> {
         let elem_bytes = u32::try_from(elem.bytes).map_err(|_| {
             format!(
-                "element byte width exceeds JIT metadata encoding: {} bytes",
+                "element byte width exceeds instruction metadata encoding: {} bytes",
                 elem.bytes
             )
         })?;
-        Ok(JitInstructionMetadata::ElemLayout {
+        Ok(InstructionMetadata::ElemLayout {
             elem_bytes,
             needs_sign_extend: matches!(
                 elem.value_kind,
@@ -1419,37 +1361,36 @@ impl FuncBuilder {
         })
     }
 
-    fn elem_metadata_or_record(&mut self, elem: ElemLayoutSpec<'_>) -> JitInstructionMetadata {
+    fn elem_metadata_or_record(&mut self, elem: ElemLayoutSpec<'_>) -> InstructionMetadata {
         match Self::try_elem_metadata(elem) {
             Ok(metadata) => metadata,
             Err(error) => {
                 if self.layout_error.is_none() {
                     self.layout_error = Some(error);
                 }
-                JitInstructionMetadata::None
+                InstructionMetadata::None
             }
         }
     }
 
-    fn emit_with_flags_and_elem_metadata(
+    fn emit_with_elem_metadata(
         &mut self,
         op: Opcode,
-        flags: u8,
         a: u16,
         b: u16,
         c: u16,
         elem: ElemLayoutSpec<'_>,
     ) {
         let metadata = self.elem_metadata_or_record(elem);
-        self.emit_with_flags_and_metadata(op, flags, a, b, c, metadata);
+        self.emit_with_metadata(Instruction::new(op, a, b, c), metadata);
     }
 
-    /// Emit PtrNew: a=dst, b=meta register, c=heap slot count.
+    /// Emit PtrNew: a=dst, b=meta register. PtrLayout owns the heap layout.
     pub fn emit_ptr_new(&mut self, dst: u16, meta_reg: u16, slot_types: &[SlotType]) {
-        let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrNew heap slot layout");
+        self.checked_u16_count_or_record(slot_types.len(), "PtrNew heap slot layout");
         self.emit_with_metadata(
-            Instruction::new(Opcode::PtrNew, dst, meta_reg, slots),
-            JitInstructionMetadata::PtrLayout {
+            Instruction::new(Opcode::PtrNew, dst, meta_reg, 0),
+            InstructionMetadata::PtrLayout {
                 value_layout: slot_types.to_vec(),
             },
         );
@@ -1487,7 +1428,7 @@ impl FuncBuilder {
         if slots == 1 {
             self.emit_op(Opcode::Copy, dst, src, 0);
         } else {
-            self.emit_with_flags(Opcode::CopyN, copy_n_mirror_flags(slots), dst, src, slots);
+            self.emit_op(Opcode::CopyN, dst, src, slots);
         }
     }
 
@@ -1511,31 +1452,16 @@ impl FuncBuilder {
         {
             return;
         }
-        let mut copied = 0;
-        while copied < slots {
-            let remaining = slots - copied;
-            let chunk = remaining.min(u8::MAX as u16);
-            let chunk_dst = dst + copied;
-            let chunk_offset = offset + copied;
-            let metadata = JitInstructionMetadata::PtrLayout {
-                value_layout: slot_types[copied as usize..(copied + chunk) as usize].to_vec(),
-            };
-            if chunk == 1 {
-                self.emit_with_metadata(
-                    Instruction::new(Opcode::PtrGet, chunk_dst, ptr, chunk_offset),
-                    metadata,
-                );
-            } else {
-                self.emit_with_flags_and_metadata(
-                    Opcode::PtrGetN,
-                    chunk as u8,
-                    chunk_dst,
-                    ptr,
-                    chunk_offset,
-                    metadata,
-                );
-            }
-            copied += chunk;
+        let metadata = InstructionMetadata::PtrLayout {
+            value_layout: slot_types.to_vec(),
+        };
+        if slots == 1 {
+            self.emit_with_metadata(Instruction::new(Opcode::PtrGet, dst, ptr, offset), metadata);
+        } else if slots > 1 {
+            self.emit_with_metadata(
+                Instruction::new(Opcode::PtrGetN, dst, ptr, offset),
+                metadata,
+            );
         }
     }
 
@@ -1545,68 +1471,24 @@ impl FuncBuilder {
     }
 
     /// Emit PtrSet or PtrSetN based on slot count.
-    /// WARNING: This does NOT emit write barriers. Use emit_ptr_set_with_slot_types for assignment
-    /// to existing objects when the value may contain GcRefs.
+    /// Multi-slot values containing GC references must use
+    /// `emit_ptr_set_with_slot_types` so each reference slot receives a barrier.
     pub fn emit_ptr_set(&mut self, ptr: u16, offset: u16, src: u16, slots: u16) {
         if !self.checked_slot_range_or_record(offset, slots, "PtrSet object range")
             || !self.checked_slot_range_or_record(src, slots, "PtrSet source")
         {
             return;
         }
-        let mut copied = 0;
-        while copied < slots {
-            let remaining = slots - copied;
-            let chunk = remaining.min(u8::MAX as u16);
-            let chunk_offset = offset + copied;
-            let chunk_src = src + copied;
-            let metadata = JitInstructionMetadata::PtrLayout {
-                value_layout: self.get_slot_types(chunk_src, chunk as usize),
-            };
-            if chunk == 1 {
-                self.emit_with_metadata(
-                    Instruction::new(Opcode::PtrSet, ptr, chunk_offset, chunk_src),
-                    metadata,
-                );
-            } else {
-                self.emit_with_flags_and_metadata(
-                    Opcode::PtrSetN,
-                    chunk as u8,
-                    ptr,
-                    chunk_offset,
-                    chunk_src,
-                    metadata,
-                );
-            }
-            copied += chunk;
-        }
-    }
-
-    /// Emit PtrSet with explicit barrier flag (single slot only).
-    /// For multi-slot with GcRefs, use emit_ptr_set_with_slot_types instead.
-    pub fn emit_ptr_set_with_barrier(
-        &mut self,
-        ptr: u16,
-        offset: u16,
-        src: u16,
-        slots: u16,
-        is_gcref: bool,
-    ) {
+        let metadata = InstructionMetadata::PtrLayout {
+            value_layout: self.get_slot_types(src, slots as usize),
+        };
         if slots == 1 {
-            let flags = if is_gcref { 1 } else { 0 };
-            self.emit_with_flags_and_metadata(
-                Opcode::PtrSet,
-                flags,
-                ptr,
-                offset,
-                src,
-                JitInstructionMetadata::PtrLayout {
-                    value_layout: self.get_slot_types(src, 1),
-                },
+            self.emit_with_metadata(Instruction::new(Opcode::PtrSet, ptr, offset, src), metadata);
+        } else if slots > 1 {
+            self.emit_with_metadata(
+                Instruction::new(Opcode::PtrSetN, ptr, offset, src),
+                metadata,
             );
-        } else {
-            // Multi-slot: emit PtrSetN (no barrier in instruction itself)
-            // If caller passed is_gcref=true, they should use emit_ptr_set_with_slot_types instead
-            self.emit_ptr_set(ptr, offset, src, slots);
         }
     }
 
@@ -1631,27 +1513,25 @@ impl FuncBuilder {
             return;
         }
 
-        // Check if any slot needs barrier
+        // Check if any slot needs a barrier.
         let has_gc_refs = slot_types
             .iter()
             .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
 
         if !has_gc_refs {
-            // No GcRefs - use simple PtrSetN
+            // Plain values can use a single PtrSetN.
             self.emit_ptr_set(ptr, offset, src, slots);
         } else {
-            // Has GcRefs - emit individual PtrSet for each slot with appropriate barrier flag
+            // Emit individual stores so reference slots receive precise barriers.
             for (i, st) in slot_types.iter().enumerate() {
                 let i = u16::try_from(i).expect("checked PtrSet layout index must fit u16");
-                let is_gcref = matches!(st, SlotType::GcRef | SlotType::Interface1);
-                let flags = if is_gcref { 1 } else { 0 };
                 self.emit_with_flags_and_metadata(
                     Opcode::PtrSet,
-                    flags,
+                    0,
                     ptr,
                     offset + i,
                     src + i,
-                    JitInstructionMetadata::PtrLayout {
+                    InstructionMetadata::PtrLayout {
                         value_layout: vec![*st],
                     },
                 );
@@ -1841,22 +1721,14 @@ impl FuncBuilder {
         let elem_slots =
             self.checked_u16_count_or_record(elem_slot_types.len(), "SlotGetN element slot count");
         let elem_layout = elem_slot_types.to_vec();
-        let metadata = JitInstructionMetadata::SlotLayout { elem_layout };
+        let metadata = InstructionMetadata::SlotLayout { elem_layout };
         if elem_slots == 1 {
             self.emit_with_metadata(
                 Instruction::new(Opcode::SlotGet, dst, base, index),
                 metadata,
             );
         } else {
-            let elem_flags = slot_n_mirror_flags(elem_slots);
-            self.emit_with_flags_and_metadata(
-                Opcode::SlotGetN,
-                elem_flags,
-                dst,
-                base,
-                index,
-                metadata,
-            );
+            self.emit_with_flags_and_metadata(Opcode::SlotGetN, 0, dst, base, index, metadata);
         }
     }
 
@@ -1871,44 +1743,27 @@ impl FuncBuilder {
         let elem_slots =
             self.checked_u16_count_or_record(elem_slot_types.len(), "SlotSetN element slot count");
         let elem_layout = elem_slot_types.to_vec();
-        let metadata = JitInstructionMetadata::SlotLayout { elem_layout };
+        let metadata = InstructionMetadata::SlotLayout { elem_layout };
         if elem_slots == 1 {
             self.emit_with_metadata(
                 Instruction::new(Opcode::SlotSet, base, index, src),
                 metadata,
             );
         } else {
-            let elem_flags = slot_n_mirror_flags(elem_slots);
-            self.emit_with_flags_and_metadata(
-                Opcode::SlotSetN,
-                elem_flags,
-                base,
-                index,
-                src,
-                metadata,
-            );
+            self.emit_with_flags_and_metadata(Opcode::SlotSetN, 0, base, index, src, metadata);
         }
     }
 
     // === Array/Slice element access helpers ===
-    // These handle the dynamic elem_flags == 0 case where elem_bytes must be passed in a register.
 
     pub fn emit_array_new(
         &mut self,
         dst: u16,
         elem_meta: u16,
         len_reg: u16,
-        flags: u8,
         elem: ElemLayoutSpec<'_>,
     ) {
-        self.emit_with_flags_and_elem_metadata(
-            Opcode::ArrayNew,
-            flags,
-            dst,
-            elem_meta,
-            len_reg,
-            elem,
-        );
+        self.emit_with_elem_metadata(Opcode::ArrayNew, dst, elem_meta, len_reg, elem);
     }
 
     pub fn emit_slice_new(
@@ -1916,186 +1771,38 @@ impl FuncBuilder {
         dst: u16,
         elem_meta: u16,
         len_cap_reg: u16,
-        flags: u8,
         elem: ElemLayoutSpec<'_>,
     ) {
-        self.emit_with_flags_and_elem_metadata(
-            Opcode::SliceNew,
-            flags,
-            dst,
-            elem_meta,
-            len_cap_reg,
-            elem,
-        );
+        self.emit_with_elem_metadata(Opcode::SliceNew, dst, elem_meta, len_cap_reg, elem);
     }
 
-    /// Emit ArrayGet with proper handling of dynamic elem_bytes.
-    /// When flags == 0, allocates extra register for elem_bytes.
-    pub fn emit_array_get(
-        &mut self,
-        dst: u16,
-        arr: u16,
-        idx: u16,
-        elem: ElemLayoutSpec<'_>,
-        ctx: &mut crate::context::CodegenContext,
-    ) {
-        let flags = vo_common_core::elem_flags(elem.bytes, elem.value_kind);
-        if flags == 0 {
-            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
-            let eb_idx = ctx.const_int(elem.bytes as i64);
-            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_elem_metadata(
-                Opcode::ArrayGet,
-                flags,
-                dst,
-                arr,
-                index_and_eb,
-                elem,
-            );
-        } else {
-            self.emit_with_flags_and_elem_metadata(Opcode::ArrayGet, flags, dst, arr, idx, elem);
-        }
+    pub fn emit_array_get(&mut self, dst: u16, arr: u16, idx: u16, elem: ElemLayoutSpec<'_>) {
+        self.emit_with_elem_metadata(Opcode::ArrayGet, dst, arr, idx, elem);
     }
 
-    /// Emit ArraySet with proper handling of dynamic elem_bytes.
-    pub fn emit_array_set(
-        &mut self,
-        arr: u16,
-        idx: u16,
-        val: u16,
-        elem: ElemLayoutSpec<'_>,
-        ctx: &mut crate::context::CodegenContext,
-    ) {
-        let flags = vo_common_core::elem_flags(elem.bytes, elem.value_kind);
-        if flags == 0 {
-            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
-            let eb_idx = ctx.const_int(elem.bytes as i64);
-            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_elem_metadata(
-                Opcode::ArraySet,
-                flags,
-                arr,
-                index_and_eb,
-                val,
-                elem,
-            );
-        } else {
-            self.emit_with_flags_and_elem_metadata(Opcode::ArraySet, flags, arr, idx, val, elem);
-        }
+    /// Emit ArraySet using the per-PC element layout.
+    pub fn emit_array_set(&mut self, arr: u16, idx: u16, val: u16, elem: ElemLayoutSpec<'_>) {
+        self.emit_with_elem_metadata(Opcode::ArraySet, arr, idx, val, elem);
     }
 
-    /// Emit SliceGet with proper handling of dynamic elem_bytes.
-    pub fn emit_slice_get(
-        &mut self,
-        dst: u16,
-        slice: u16,
-        idx: u16,
-        elem: ElemLayoutSpec<'_>,
-        ctx: &mut crate::context::CodegenContext,
-    ) {
-        let flags = vo_common_core::elem_flags(elem.bytes, elem.value_kind);
-        if flags == 0 {
-            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
-            let eb_idx = ctx.const_int(elem.bytes as i64);
-            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_elem_metadata(
-                Opcode::SliceGet,
-                flags,
-                dst,
-                slice,
-                index_and_eb,
-                elem,
-            );
-        } else {
-            self.emit_with_flags_and_elem_metadata(Opcode::SliceGet, flags, dst, slice, idx, elem);
-        }
+    /// Emit SliceGet using the per-PC element layout.
+    pub fn emit_slice_get(&mut self, dst: u16, slice: u16, idx: u16, elem: ElemLayoutSpec<'_>) {
+        self.emit_with_elem_metadata(Opcode::SliceGet, dst, slice, idx, elem);
     }
 
-    /// Emit SliceSet with proper handling of dynamic elem_bytes.
-    pub fn emit_slice_set(
-        &mut self,
-        slice: u16,
-        idx: u16,
-        val: u16,
-        elem: ElemLayoutSpec<'_>,
-        ctx: &mut crate::context::CodegenContext,
-    ) {
-        let flags = vo_common_core::elem_flags(elem.bytes, elem.value_kind);
-        if flags == 0 {
-            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
-            let eb_idx = ctx.const_int(elem.bytes as i64);
-            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_elem_metadata(
-                Opcode::SliceSet,
-                flags,
-                slice,
-                index_and_eb,
-                val,
-                elem,
-            );
-        } else {
-            self.emit_with_flags_and_elem_metadata(Opcode::SliceSet, flags, slice, idx, val, elem);
-        }
+    /// Emit SliceSet using the per-PC element layout.
+    pub fn emit_slice_set(&mut self, slice: u16, idx: u16, val: u16, elem: ElemLayoutSpec<'_>) {
+        self.emit_with_elem_metadata(Opcode::SliceSet, slice, idx, val, elem);
     }
 
     /// Emit ArrayAddr with the same element layout metadata used by ArrayGet/ArraySet.
-    pub fn emit_array_addr(
-        &mut self,
-        dst: u16,
-        arr: u16,
-        idx: u16,
-        elem: ElemLayoutSpec<'_>,
-        ctx: &mut crate::context::CodegenContext,
-    ) {
-        let flags = vo_common_core::elem_flags(elem.bytes, elem.value_kind);
-        if flags == 0 {
-            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
-            let eb_idx = ctx.const_int(elem.bytes as i64);
-            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_elem_metadata(
-                Opcode::ArrayAddr,
-                flags,
-                dst,
-                arr,
-                index_and_eb,
-                elem,
-            );
-        } else {
-            self.emit_with_flags_and_elem_metadata(Opcode::ArrayAddr, flags, dst, arr, idx, elem);
-        }
+    pub fn emit_array_addr(&mut self, dst: u16, arr: u16, idx: u16, elem: ElemLayoutSpec<'_>) {
+        self.emit_with_elem_metadata(Opcode::ArrayAddr, dst, arr, idx, elem);
     }
 
     /// Emit SliceAddr with the same element layout metadata used by SliceGet/SliceSet.
-    pub fn emit_slice_addr(
-        &mut self,
-        dst: u16,
-        slice: u16,
-        idx: u16,
-        elem: ElemLayoutSpec<'_>,
-        ctx: &mut crate::context::CodegenContext,
-    ) {
-        let flags = vo_common_core::elem_flags(elem.bytes, elem.value_kind);
-        if flags == 0 {
-            let index_and_eb = self.alloc_slots(&[SlotType::Value, SlotType::Value]);
-            self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
-            let eb_idx = ctx.const_int(elem.bytes as i64);
-            self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_elem_metadata(
-                Opcode::SliceAddr,
-                flags,
-                dst,
-                slice,
-                index_and_eb,
-                elem,
-            );
-        } else {
-            self.emit_with_flags_and_elem_metadata(Opcode::SliceAddr, flags, dst, slice, idx, elem);
-        }
+    pub fn emit_slice_addr(&mut self, dst: u16, slice: u16, idx: u16, elem: ElemLayoutSpec<'_>) {
+        self.emit_with_elem_metadata(Opcode::SliceAddr, dst, slice, idx, elem);
     }
 
     pub fn emit_slice_append(
@@ -2103,31 +1810,23 @@ impl FuncBuilder {
         dst: u16,
         slice: u16,
         meta_and_elem: u16,
-        flags: u8,
         elem: ElemLayoutSpec<'_>,
     ) {
-        self.emit_with_flags_and_elem_metadata(
-            Opcode::SliceAppend,
-            flags,
-            dst,
-            slice,
-            meta_and_elem,
-            elem,
-        );
+        self.emit_with_elem_metadata(Opcode::SliceAppend, dst, slice, meta_and_elem, elem);
     }
 
     pub fn emit_map_get(
         &mut self,
         dst: u16,
         map: u16,
-        meta_and_key: u16,
+        key_start: u16,
         key_layout: &[SlotType],
         val_layout: &[SlotType],
         has_ok: bool,
     ) {
         self.emit_with_metadata(
-            Instruction::new(Opcode::MapGet, dst, map, meta_and_key),
-            JitInstructionMetadata::MapGet {
+            Instruction::new(Opcode::MapGet, dst, map, key_start),
+            InstructionMetadata::MapGet {
                 key_layout: key_layout.to_vec(),
                 val_layout: val_layout.to_vec(),
                 has_ok,
@@ -2142,14 +1841,9 @@ impl FuncBuilder {
         key_layout: &[SlotType],
         val_layout: &[SlotType],
     ) {
-        let key_slots =
-            self.checked_u16_count_or_record(key_layout.len(), "MapNew key layout slot count");
-        let val_slots =
-            self.checked_u16_count_or_record(val_layout.len(), "MapNew value layout slot count");
-        let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
         self.emit_with_metadata(
-            Instruction::new(Opcode::MapNew, dst, packed_meta, slots_arg),
-            JitInstructionMetadata::MapNew {
+            Instruction::new(Opcode::MapNew, dst, packed_meta, 0),
+            InstructionMetadata::MapNew {
                 key_layout: key_layout.to_vec(),
                 val_layout: val_layout.to_vec(),
             },
@@ -2158,30 +1852,25 @@ impl FuncBuilder {
 
     pub fn emit_map_set(
         &mut self,
-        flags: u8,
         map: u16,
-        meta_and_key: u16,
+        key_start: u16,
         val: u16,
         key_layout: &[SlotType],
         val_layout: &[SlotType],
     ) {
-        self.emit_with_flags_and_metadata(
-            Opcode::MapSet,
-            flags,
-            map,
-            meta_and_key,
-            val,
-            JitInstructionMetadata::MapSet {
+        self.emit_with_metadata(
+            Instruction::new(Opcode::MapSet, map, key_start, val),
+            InstructionMetadata::MapSet {
                 key_layout: key_layout.to_vec(),
                 val_layout: val_layout.to_vec(),
             },
         );
     }
 
-    pub fn emit_map_delete(&mut self, map: u16, meta_and_key: u16, key_layout: &[SlotType]) {
+    pub fn emit_map_delete(&mut self, map: u16, key_start: u16, key_layout: &[SlotType]) {
         self.emit_with_metadata(
-            Instruction::new(Opcode::MapDelete, map, meta_and_key, 0),
-            JitInstructionMetadata::MapDelete {
+            Instruction::new(Opcode::MapDelete, map, key_start, 0),
+            InstructionMetadata::MapDelete {
                 key_layout: key_layout.to_vec(),
             },
         );
@@ -2199,7 +1888,7 @@ impl FuncBuilder {
         let pc = self.code.len();
         self.emit_with_metadata(
             Instruction::new(op, cond_reg, 0, 0),
-            JitInstructionMetadata::None,
+            InstructionMetadata::None,
         );
         pc
     }
@@ -2212,7 +1901,7 @@ impl FuncBuilder {
         let (b, c) = Self::encode_jump_offset(offset);
         self.emit_with_metadata(
             Instruction::new(op, cond_reg, b, c),
-            JitInstructionMetadata::None,
+            InstructionMetadata::None,
         );
     }
 
@@ -2282,7 +1971,7 @@ impl FuncBuilder {
                     limit_slot,
                     offset as u16,
                 ),
-                JitInstructionMetadata::None,
+                InstructionMetadata::None,
             );
             return current_pc;
         }
@@ -2325,88 +2014,37 @@ impl FuncBuilder {
 
     // === Loop ===
 
-    /// Enter a loop: emit HINT_LOOP (outside loop) and set loop_start.
+    /// Enter a loop and emit its HINT_LOOP marker.
     ///
-    /// The HINT_LOOP is emitted once before the loop starts, providing metadata
-    /// for JIT analysis. The loop_start is where the back-edge Jump will target.
-    ///
-    /// Returns the PC of HINT_LOOP (for patching exit_pc/end_pc later).
-    pub fn enter_loop(&mut self, loop_start: usize, label: Option<Symbol>) -> usize {
-        let depth = self
-            .loop_stack
-            .iter()
-            .filter(|context| !context.is_switch)
-            .count();
+    /// The marker is emitted once immediately before the loop starts. Its
+    /// LoopEnd metadata records the back-edge PC.
+    pub fn enter_loop(&mut self, label: Option<Symbol>) {
         let hint_pc = self.current_pc();
 
-        // Emit HINT_LOOP with placeholder values (will be patched in finalize_loop_hint)
-        // Format: flags=HINT_LOOP, a=loop_info, bc=exit_pc
-        // loop_info: bits 0-3 = flags, bits 4-7 = a saturated depth mirror,
-        // bits 8-15 = end_offset. JIT derives the authoritative full depth
-        // from the validated loop intervals.
-        self.emit_hint_loop_placeholder(depth);
+        self.emit_with_metadata(
+            Instruction::with_flags(Opcode::Hint, HINT_LOOP, 0, 0, 0),
+            InstructionMetadata::None,
+        );
 
         self.loop_stack.push(LoopContext {
-            depth,
             hint_pc,
-            loop_start,
             continue_pc: 0, // Will be set by caller if needed
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             label,
-            has_defer: false,
-            has_labeled_break: false,
-            has_labeled_continue: false,
             is_switch: false,
         });
-
-        hint_pc
-    }
-
-    /// Set the loop_start for the current loop (called after enter_loop when loop_start is known).
-    pub fn set_loop_start(&mut self, loop_start: usize) {
-        if let Some(ctx) = self.loop_stack.last_mut() {
-            ctx.loop_start = loop_start;
-        }
-    }
-
-    /// Emit HINT_LOOP with placeholder values.
-    fn emit_hint_loop_placeholder(&mut self, depth: usize) {
-        // 0xF is the compact sentinel/mirror for every depth >= 15.
-        let compact_depth = u16::try_from(depth.min(0x0F))
-            .expect("depth mirror is bounded to the 4-bit HINT_LOOP field");
-        let loop_info = compact_depth << 4;
-        self.emit_with_metadata(
-            Instruction::with_flags(Opcode::Hint, HINT_LOOP, loop_info, 0, 0),
-            JitInstructionMetadata::None,
-        );
-    }
-
-    /// Mark current loop as containing defer.
-    pub fn mark_loop_has_defer(&mut self) {
-        if let Some(ctx) = self.loop_stack.last_mut() {
-            ctx.has_defer = true;
-        }
     }
 
     /// Enter a breakable non-loop context (switch, type switch, select).
     /// These support `break` but not `continue`.
     pub fn enter_breakable(&mut self, label: Option<Symbol>) {
         self.loop_stack.push(LoopContext {
-            depth: self
-                .loop_stack
-                .iter()
-                .filter(|context| !context.is_switch)
-                .count(),
-            hint_pc: 0,    // not used for breakable
-            loop_start: 0, // not used for breakable
+            hint_pc: 0, // not used for breakable
             continue_pc: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             label,
-            has_defer: false,
-            has_labeled_break: false,
-            has_labeled_continue: false,
             is_switch: true, // marks as non-loop (no continue)
         });
     }
@@ -2419,9 +2057,7 @@ impl FuncBuilder {
             .break_patches
     }
 
-    /// Exit loop: record end_pc and return LoopExitInfo for patching.
-    ///
-    /// The end_pc will be encoded into HINT_LOOP by finalize_loop_hint.
+    /// Exit a loop and return its pending jumps and HINT_LOOP location.
     pub fn exit_loop(&mut self) -> LoopExitInfo {
         let ctx = self.loop_stack.pop().expect("exit_loop without enter_loop");
 
@@ -2429,29 +2065,13 @@ impl FuncBuilder {
             break_patches: ctx.break_patches,
             continue_patches: ctx.continue_patches,
             hint_pc: ctx.hint_pc,
-            loop_start: ctx.loop_start,
-            depth: ctx.depth,
-            has_defer: ctx.has_defer,
-            has_labeled_break: ctx.has_labeled_break,
-            has_labeled_continue: ctx.has_labeled_continue,
         }
     }
 
-    /// Finalize loop: patch HINT_LOOP with flags, end_pc, and exit_pc.
+    /// Finalize loop: patch HINT_LOOP with end_pc and exit_pc.
     ///
-    /// HINT_LOOP format after patching:
-    /// - a: bits 0-3 = flags, bits 4-7 = saturated depth mirror,
-    ///   bits 8-15 = end_offset (end_pc - hint_pc)
-    /// - bc: exit_pc (32-bit)
-    pub fn finalize_loop_hint(
-        &mut self,
-        hint_pc: usize,
-        end_pc: usize,
-        exit_pc: usize,
-        has_defer: bool,
-        has_labeled_break: bool,
-        has_labeled_continue: bool,
-    ) {
+    /// `bc` stores exit_pc; LoopEnd metadata stores end_pc.
+    pub fn finalize_loop_hint(&mut self, hint_pc: usize, end_pc: usize, exit_pc: usize) {
         assert!(
             hint_pc < self.code.len(),
             "finalize_loop_hint: hint_pc {} out of range",
@@ -2464,46 +2084,11 @@ impl FuncBuilder {
             hint_pc
         );
 
-        // Calculate end_offset (distance from hint_pc to end_pc, capped at 255).
-        // A zero compact offset means the JIT must read the explicit LoopEnd metadata.
-        let offset = end_pc - hint_pc;
-        let end_offset = if offset > 255 { 0 } else { offset as u8 };
-
-        // Build flags
-        let mut flags = 0u8;
-        if has_defer {
-            flags |= LOOP_FLAG_HAS_DEFER;
-        }
-        if has_labeled_break {
-            flags |= LOOP_FLAG_HAS_LABELED_BREAK;
-        }
-        if has_labeled_continue {
-            flags |= LOOP_FLAG_HAS_LABELED_CONTINUE;
-        }
-
-        // Preserve the saturated depth mirror from the placeholder. Full loop
-        // depth is structural and is derived by JIT loop analysis.
-        let existing_a = self.code[hint_pc].a;
-        let compact_depth = (existing_a >> 4) & 0x0F;
-
-        let loop_info = ((end_offset as u16) << 8) | (compact_depth << 4) | (flags as u16 & 0x0F);
-        self.code[hint_pc].a = loop_info;
-
         // Update exit_pc in bc fields
         let (b, c) = Self::encode_jump_offset(exit_pc as i32);
         self.code[hint_pc].b = b;
         self.code[hint_pc].c = c;
         self.patch_loop_end_metadata(hint_pc, end_pc);
-    }
-
-    /// Get the depth of the current innermost loop.
-    pub fn current_loop_depth(&self) -> Option<usize> {
-        self.loop_stack.last().map(|ctx| ctx.depth)
-    }
-
-    /// Get loop_start (Jump target) of loop at given index.
-    pub fn loop_start_pc(&self, idx: usize) -> Option<usize> {
-        self.loop_stack.get(idx).map(|ctx| ctx.loop_start)
     }
 
     /// Find breakable context index by label (includes both loops and switches)
@@ -2550,17 +2135,6 @@ impl FuncBuilder {
         })?;
         let pc = self.emit_jump(Opcode::Jump, 0);
         self.loop_stack[idx].break_patches.push(pc);
-
-        // If breaking to an outer context (labeled break), mark all inner loops
-        let innermost = self.loop_stack.len() - 1;
-        if label.is_some() && idx < innermost {
-            // Mark loops between as having labeled break (skip switches)
-            for i in idx..=innermost {
-                if !self.loop_stack[i].is_switch {
-                    self.loop_stack[i].has_labeled_break = true;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -2570,14 +2144,6 @@ impl FuncBuilder {
                 "validated continue target missing during codegen: {label:?}"
             ))
         })?;
-        // If continuing to an outer loop (labeled continue), mark all inner loops
-        let innermost = self.loop_stack.len() - 1;
-        if label.is_some() && idx < innermost {
-            for i in idx..=innermost {
-                self.loop_stack[i].has_labeled_continue = true;
-            }
-        }
-
         let continue_pc = self.loop_stack[idx].continue_pc;
         if continue_pc != 0 {
             // continue_pc is known, jump directly
@@ -2746,7 +2312,7 @@ impl FuncBuilder {
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&self.slot_types);
         let borrowed_scan_slots_prefix =
             FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
-        assert_eq!(self.code.len(), self.jit_metadata.len());
+        assert_eq!(self.code.len(), self.instruction_metadata.len());
 
         let call_debug_locs = core::mem::take(&mut self.call_debug_locs);
         let function = FunctionDef {
@@ -2767,7 +2333,7 @@ impl FuncBuilder {
             has_calls,
             has_call_extern,
             code: self.code,
-            jit_metadata: self.jit_metadata,
+            instruction_metadata: self.instruction_metadata,
             slot_types: self.slot_types,
             borrowed_scan_slots_prefix,
             capture_types: self.capture_types,
@@ -2861,7 +2427,7 @@ mod tests {
     #[test]
     fn function_id_operands_reject_truncation_before_emission() {
         let mut static_call = FuncBuilder::new("wide_static_call");
-        static_call.emit_static_call(crate::type_info::MAX_ENCODED_FUNCTION_ID + 1, 0, 0, 0);
+        static_call.emit_static_call(crate::type_info::MAX_ENCODED_FUNCTION_ID + 1, 0);
         assert!(static_call.code.is_empty());
         assert!(static_call
             .check_layout_error()
@@ -2869,7 +2435,7 @@ mod tests {
             .contains("24-bit operand domain"));
 
         let mut shared_call = FuncBuilder::new("wide_shared_call");
-        shared_call.emit_go_start_static(crate::type_info::MAX_SHARED_STATIC_FUNCTION_ID + 1, 0, 0);
+        shared_call.emit_go_start_static(crate::type_info::MAX_SHARED_STATIC_FUNCTION_ID + 1, 0);
         assert!(shared_call.code.is_empty());
         assert!(shared_call
             .check_layout_error()
@@ -2926,17 +2492,16 @@ mod tests {
     }
 
     #[test]
-    fn loop_hint_depth_saturates_without_wrapping() {
+    fn loop_hint_reserves_layout_operand() {
         let mut func = FuncBuilder::new("deep_loop_hints");
         for _ in 0..20 {
-            func.enter_loop(0, None);
+            func.enter_loop(None);
         }
 
-        assert_eq!(func.current_loop_depth(), Some(19));
-        for (depth, instruction) in func.code.iter().enumerate() {
+        assert_eq!(func.code.len(), 20);
+        for instruction in &func.code {
             assert_eq!(instruction.opcode(), Opcode::Hint);
-            let compact_depth = usize::from((instruction.a >> 4) & 0x0F);
-            assert_eq!(compact_depth, depth.min(0x0F));
+            assert_eq!(instruction.a, 0);
         }
     }
 
@@ -2948,13 +2513,12 @@ mod tests {
             0,
             1,
             2,
-            0,
             ElemLayoutSpec::new(72, ValueKind::Struct, &[SlotType::Value; 9]),
         );
 
         assert!(matches!(
-            func.jit_metadata.as_slice(),
-            [JitInstructionMetadata::ElemLayout {
+            func.instruction_metadata.as_slice(),
+            [InstructionMetadata::ElemLayout {
                 elem_bytes: 72,
                 needs_sign_extend: false,
                 slot_layout,
@@ -2971,13 +2535,12 @@ mod tests {
             0,
             1,
             2,
-            0,
             ElemLayoutSpec::new(72, ValueKind::Struct, &[SlotType::Value; 9]),
         );
 
         assert!(matches!(
-            func.jit_metadata.as_slice(),
-            [JitInstructionMetadata::ElemLayout {
+            func.instruction_metadata.as_slice(),
+            [InstructionMetadata::ElemLayout {
                 elem_bytes: 72,
                 needs_sign_extend: false,
                 slot_layout,
@@ -2997,7 +2560,7 @@ mod tests {
 
         assert!(matches!(
             metadata,
-            JitInstructionMetadata::ElemLayout {
+            InstructionMetadata::ElemLayout {
                 elem_bytes: 0,
                 needs_sign_extend: false,
                 slot_layout,
@@ -3015,66 +2578,11 @@ mod tests {
             &[],
         ));
 
-        assert_eq!(metadata, JitInstructionMetadata::None);
+        assert_eq!(metadata, InstructionMetadata::None);
         assert_eq!(
             func.check_layout_error().unwrap_err(),
-            "element byte width exceeds JIT metadata encoding: 4294967296 bytes"
+            "element byte width exceeds instruction metadata encoding: 4294967296 bytes"
         );
-    }
-
-    #[test]
-    fn packed_operand_slot_counts_use_checked_encoders() {
-        let audited_sources = [
-            ("context.rs", include_str!("context.rs")),
-            ("stmt/for_range.rs", include_str!("stmt/for_range.rs")),
-            ("stmt/mod.rs", include_str!("stmt/mod.rs")),
-            ("stmt/select.rs", include_str!("stmt/select.rs")),
-            ("stmt/switch.rs", include_str!("stmt/switch.rs")),
-            ("stmt/defer_go.rs", include_str!("stmt/defer_go.rs")),
-            ("stmt/dyn_assign.rs", include_str!("stmt/dyn_assign.rs")),
-            ("expr/builtin.rs", include_str!("expr/builtin.rs")),
-            ("expr/call.rs", include_str!("expr/call.rs")),
-            ("expr/conversion.rs", include_str!("expr/conversion.rs")),
-            ("expr/dyn_access.rs", include_str!("expr/dyn_access.rs")),
-            ("expr/mod.rs", include_str!("expr/mod.rs")),
-            ("expr/selector.rs", include_str!("expr/selector.rs")),
-            ("lvalue.rs", include_str!("lvalue.rs")),
-            ("lib.rs", include_str!("lib.rs")),
-            ("wrapper.rs", include_str!("wrapper.rs")),
-        ];
-        let forbidden = [
-            "(kn as u8) | ((vn as u8) << 4)",
-            "((elem_slots as u8) << 1)",
-            "info.queue_elem_slots(queue_type) as u8",
-            "info.queue_elem_slots(target_type) as u8",
-            "info.type_slot_count(target_type) as u8",
-            "info.type_slot_count(type_key) as u8",
-            "slots as u8) << 3",
-            "Opcode::GlobalGetN, slots as u8",
-            "Opcode::GlobalSetN, slots as u8",
-            "(2 + arg_count * 2) as u8",
-            "(actual_count * 2) as u8",
-            "call_arg_count as u8",
-            "total_arg_slots as u8",
-            "arg_slots as u8",
-            "emit_with_flags(Opcode::CallExtern",
-            "emit_with_flags(Opcode::Call,",
-            "emit_with_flags(\n        Opcode::CallExtern",
-            "emit_with_flags(\n            Opcode::CallExtern",
-            "emit_with_flags(\n            Opcode::Call,",
-            "emit_with_flags(\n                Opcode::CallExtern",
-            "emit_with_flags(\n                Opcode::Call,",
-            "emit_with_flags(\n            Opcode::GoIsland",
-        ];
-
-        for (path, source) in audited_sources {
-            for needle in forbidden {
-                assert!(
-                    !source.contains(needle),
-                    "{path} must use checked packed-operand encoders instead of `{needle}`"
-                );
-            }
-        }
     }
 
     #[test]
@@ -3100,59 +2608,6 @@ mod tests {
         );
     }
 
-    fn production_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-        let start_index = source
-            .find(start)
-            .expect("source region start should exist");
-        let after_start = &source[start_index..];
-        let end_index = after_start
-            .find(end)
-            .expect("source region end should exist");
-        &after_start[..end_index]
-    }
-
-    #[test]
-    fn queue_emitters_own_metadata_width_sentinel_flags() {
-        let source = include_str!("func.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("func source should contain tests section");
-
-        for signature in [
-            "pub fn emit_queue_send(&mut self, queue: u16, value: u16, elem_layout: &[SlotType])",
-            "pub fn emit_select_send(\n        &mut self,\n        queue: u16,\n        value: u16,\n        case_idx: u16,\n        elem_layout: &[SlotType],\n    )",
-        ] {
-            assert!(
-                source.contains(signature),
-                "QueueSend/SelectSend emitters must derive flags internally: {signature}"
-            );
-        }
-
-        for (name, region) in [
-            (
-                "emit_queue_send",
-                production_source_between(
-                    source,
-                    "pub fn emit_queue_send",
-                    "pub fn emit_queue_recv",
-                ),
-            ),
-            (
-                "emit_select_send",
-                production_source_between(
-                    source,
-                    "pub fn emit_select_send",
-                    "pub fn emit_select_recv",
-                ),
-            ),
-        ] {
-            assert!(
-                region.contains("queue_send_metadata_flags()"),
-                "{name} must emit the QueueLayout width sentinel"
-            );
-        }
-    }
-
     #[test]
     fn call_extern_uses_metadata_for_wide_arg_layout() {
         let mut func = FuncBuilder::new("call_extern_arg_width");
@@ -3165,8 +2620,8 @@ mod tests {
             .expect("CallExtern metadata owns the full argument layout");
         assert_eq!(func.code.last().unwrap().flags, 0);
         assert!(matches!(
-            func.jit_metadata.last(),
-            Some(JitInstructionMetadata::CallExternLayout { arg_layout, .. })
+            func.instruction_metadata.last(),
+            Some(InstructionMetadata::CallExternLayout { arg_layout, .. })
                 if arg_layout.len() == 256
         ));
     }
@@ -3195,49 +2650,45 @@ mod tests {
             .expect("GoIsland metadata owns the full argument layout");
         assert_eq!(func.code.last().unwrap().flags, 0);
         assert!(matches!(
-            func.jit_metadata.last(),
-            Some(JitInstructionMetadata::CallLayout { arg_layout, .. })
+            func.instruction_metadata.last(),
+            Some(InstructionMetadata::CallLayout { arg_layout, .. })
                 if arg_layout.len() == 256
         ));
     }
 
     #[test]
-    fn metadata_owned_u8_call_fields_preserve_zero_255_256_boundaries() {
+    fn metadata_owned_call_fields_preserve_zero_255_256_boundaries() {
         for arg_slots in [0_usize, 255, 256] {
-            let expected_mirror = u8::try_from(arg_slots).unwrap_or_default();
             let arg_layout = vec![SlotType::Value; arg_slots];
 
             let mut extern_func = FuncBuilder::new("call_extern_arg_boundary");
             let args_start = extern_func.alloc_slots(&arg_layout);
             extern_func.emit_call_extern(0, 0, args_start, arg_slots, &[]);
-            assert_eq!(extern_func.code.last().unwrap().flags, expected_mirror);
+            assert_eq!(extern_func.code.last().unwrap().flags, 0);
             assert!(matches!(
-                extern_func.jit_metadata.last(),
-                Some(JitInstructionMetadata::CallExternLayout { arg_layout, .. })
+                extern_func.instruction_metadata.last(),
+                Some(InstructionMetadata::CallExternLayout { arg_layout, .. })
                     if arg_layout.len() == arg_slots
             ));
 
             let mut island_func = FuncBuilder::new("go_island_arg_boundary");
             let args_start = island_func.alloc_slots(&arg_layout);
             island_func.emit_go_island(0, 1, args_start, &arg_layout);
-            assert_eq!(island_func.code.last().unwrap().flags, expected_mirror);
+            assert_eq!(island_func.code.last().unwrap().flags, 0);
             assert!(matches!(
-                island_func.jit_metadata.last(),
-                Some(JitInstructionMetadata::CallLayout { arg_layout, ret_layout })
+                island_func.instruction_metadata.last(),
+                Some(InstructionMetadata::CallLayout { arg_layout, ret_layout })
                     if arg_layout.len() == arg_slots && ret_layout.is_empty()
             ));
         }
 
         let mut iface_func = FuncBuilder::new("call_iface_method_boundary");
         for method_idx in [0_u32, 255, 256] {
-            iface_func.emit_call_iface(0, method_idx, 0, 2, 0, &[], &[]);
-            assert_eq!(
-                iface_func.code.last().unwrap().flags,
-                u8::try_from(method_idx).unwrap_or_default()
-            );
+            iface_func.emit_call_iface(0, method_idx, 0, 2, &[], &[]);
+            assert_eq!(iface_func.code.last().unwrap().flags, 0);
             assert!(matches!(
-                iface_func.jit_metadata.last(),
-                Some(JitInstructionMetadata::CallIfaceLayout {
+                iface_func.instruction_metadata.last(),
+                Some(InstructionMetadata::CallIfaceLayout {
                     method_idx: actual,
                     ..
                 }) if *actual == method_idx
@@ -3247,7 +2698,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_send_emits_metadata_width_sentinel() {
+    fn queue_send_emits_metadata_layout() {
         let mut func = FuncBuilder::new("queue_send_arg_width");
         let elem_layout = vec![SlotType::Value; 4];
         let value = func.alloc_slots(&elem_layout);
@@ -3257,10 +2708,15 @@ mod tests {
         func.check_layout_error()
             .expect("QueueSend width is owned by QueueLayout");
         assert_eq!(func.code.last().unwrap().flags, 0);
+        assert!(matches!(
+            func.instruction_metadata.last(),
+            Some(InstructionMetadata::QueueLayout { elem_layout: actual })
+                if actual == &elem_layout
+        ));
     }
 
     #[test]
-    fn select_send_emits_metadata_width_sentinel() {
+    fn select_send_emits_metadata_layout() {
         let mut func = FuncBuilder::new("select_send_arg_width");
         let elem_layout = vec![SlotType::Value; 4];
         let value = func.alloc_slots(&elem_layout);
@@ -3270,6 +2726,11 @@ mod tests {
         func.check_layout_error()
             .expect("SelectSend width is owned by QueueLayout");
         assert_eq!(func.code.last().unwrap().flags, 0);
+        assert!(matches!(
+            func.instruction_metadata.last(),
+            Some(InstructionMetadata::QueueLayout { elem_layout: actual })
+                if actual == &elem_layout
+        ));
     }
 
     #[test]

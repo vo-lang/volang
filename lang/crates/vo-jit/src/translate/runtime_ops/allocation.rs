@@ -2,20 +2,28 @@ use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind};
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::Instruction;
 
-use crate::translate::{emit_jit_error_if_zero, require_helper};
-use crate::translator::{emit_funcref_call, RuntimeOpsEmitter};
+use crate::translate::emit_jit_error_if_zero;
+use crate::translator::{emit_runtime_helper_call, HelperKind, RuntimeOpsEmitter};
 use crate::JitError;
 
 pub(in crate::translate) fn ptr_new<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().gc_alloc, "gc_alloc")?;
+    let func = e.helper(HelperKind::gc_alloc);
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
-    let slots_i32 = e.builder().ins().iconst(types::I32, inst.c as i64);
-    let call = emit_funcref_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
+    let slots = e
+        .ptr_layout()
+        .ok_or(JitError::MissingJitLayout {
+            pc: e.current_pc(),
+            opcode: inst.opcode(),
+            layout: "PtrLayout",
+        })?
+        .len();
+    let slots_i32 = e.builder().ins().iconst(types::I32, slots as i64);
+    let call = emit_runtime_helper_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
     let result = e.builder().inst_results(call)[0];
     emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
@@ -26,7 +34,7 @@ pub(in crate::translate) fn str_new<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = require_helper(e.helpers().str_new, "str_new")?;
+    let func = e.helper(HelperKind::str_new);
     let const_idx = inst.b as usize;
     let bytes: Vec<u8> = match e.vo_module().constants.get(const_idx) {
         Some(Constant::String(s)) => s.as_bytes().to_vec(),
@@ -58,11 +66,11 @@ pub(in crate::translate) fn str_new<'a>(
             let byte_val = e.builder().ins().iconst(types::I8, b as i64);
             e.builder()
                 .ins()
-                .stack_store(byte_val, stack_slot, i as i32);
+                .stack_store(types::I64, byte_val, stack_slot, i as i32);
         }
         let data_ptr = e.builder().ins().stack_addr(types::I64, stack_slot, 0);
         let len_val = e.builder().ins().iconst(types::I64, len as i64);
-        let call = emit_funcref_call(e, func, &[gc_ptr, data_ptr, len_val]);
+        let call = emit_runtime_helper_call(e, func, &[gc_ptr, data_ptr, len_val]);
         let result = e.builder().inst_results(call)[0];
         emit_jit_error_if_zero(e, result);
         e.write_var(inst.a, result);

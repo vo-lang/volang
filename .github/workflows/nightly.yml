@@ -45,7 +45,7 @@ jobs:
         run: cargo build -p vo-dev --locked
 
       - name: Run complete native release matrix
-        run: ./target/debug/vo-dev test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,nostd,compile --release
+        run: ./target/debug/vo-dev test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,gc-osr,nostd,compile --release
 
   language_release_wasm:
     name: language-release-wasm
@@ -110,6 +110,10 @@ jobs:
             targets: jit,osr
             tags: jit
             repeat: 5
+          - name: gc-osr
+            targets: vm,gc-vm,gc-osr
+            tags: jit,osr,contract
+            repeat: 5
           - name: scheduler
             targets: vm,jit
             tags: scheduler
@@ -165,6 +169,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Run native language smoke matrix
+        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets native,gc-vm,gc-osr --release
 
       - name: Run workspace tests
         run: cargo test --workspace --all-targets --locked

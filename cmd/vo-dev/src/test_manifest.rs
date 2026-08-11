@@ -1,4 +1,4 @@
-use crate::test_config::{load_test_config, TestConfig};
+use crate::test_config::{load_test_config, TestConfig, TestTarget};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -1147,7 +1147,8 @@ fn validate_jit_loop_entry_contract(
     expect: &CaseExpect,
     test_config: &TestConfig,
 ) -> Result<()> {
-    if expect.jit_loop_entries_min.unwrap_or(0) == 0 {
+    let is_osr_contract = case.matrix.as_deref() == Some("osr-contract");
+    if expect.jit_loop_entries_min.unwrap_or(0) == 0 && !is_osr_contract {
         return Ok(());
     }
     for required_tag in ["jit", "osr", "contract"] {
@@ -1159,28 +1160,86 @@ fn validate_jit_loop_entry_contract(
             );
         }
     }
-    if case.matrix.as_deref() != Some("osr-only") {
+    if !is_osr_contract {
         bail!(
-            "case {} requires jit_loop_entries_min > 0 and must use matrix = \"osr-only\"",
+            "case {} requires jit_loop_entries_min > 0 and must use matrix = \"osr-contract\"",
             case.id
         );
     }
-    let selects_jit_backend = resolved_case_targets(case, test_config)?
+    let targets = resolved_case_targets(case, test_config)?;
+    let enabled_targets = targets
         .iter()
-        .filter(|target| !has_target_name(&case.skip, target))
-        .any(|target| {
-            test_config
-                .targets
-                .get(target)
-                .is_some_and(|target| target.backend == "jit")
-        });
-    if !selects_jit_backend {
+        .filter(|name| !has_target_name(&case.skip, name))
+        .filter_map(|name| test_config.targets.get(name).map(|target| (name, target)))
+        .collect::<Vec<_>>();
+    let loop_jit_targets = enabled_targets
+        .iter()
+        .copied()
+        .filter(|(_, target)| is_loop_jit_target(target))
+        .collect::<Vec<_>>();
+    if !loop_jit_targets
+        .iter()
+        .any(|(_, target)| !has_gc_profile(target))
+    {
         bail!(
-            "case {} requires jit_loop_entries_min > 0 and must select an enabled JIT-backed target",
+            "case {} osr-contract must select an enabled native non-GC loop-JIT target",
             case.id
         );
+    }
+    if !loop_jit_targets
+        .iter()
+        .any(|(_, target)| has_verified_gc_stress_profile(target))
+    {
+        bail!(
+            "case {} osr-contract must select an enabled native GC-stress+verify loop-JIT target",
+            case.id
+        );
+    }
+    for (name, target) in loop_jit_targets {
+        let has_matching_vm_baseline = enabled_targets.iter().any(|(_, baseline)| {
+            baseline.kind == "native"
+                && baseline.backend == "vm"
+                && same_gc_profile(baseline, target)
+        });
+        if !has_matching_vm_baseline {
+            bail!(
+                "case {} loop-JIT target {} requires an enabled native VM differential baseline with the same GC environment",
+                case.id,
+                name
+            );
+        }
     }
     Ok(())
+}
+
+const GC_PROFILE_ENV_KEYS: &[&str] = &["VO_GC_STRESS", "VO_GC_VERIFY", "VO_GC_DEBUG"];
+
+fn target_threshold(target: &TestTarget, key: &str) -> Option<u64> {
+    target.env.get(key)?.parse().ok()
+}
+
+fn is_loop_jit_target(target: &TestTarget) -> bool {
+    target.kind == "native"
+        && target.backend == "jit"
+        && target_threshold(target, "VO_JIT_LOOP_THRESHOLD") == Some(1)
+        && target_threshold(target, "VO_JIT_CALL_THRESHOLD").is_some_and(|threshold| threshold > 1)
+}
+
+fn has_gc_profile(target: &TestTarget) -> bool {
+    GC_PROFILE_ENV_KEYS
+        .iter()
+        .any(|key| target.env.contains_key(*key))
+}
+
+fn has_verified_gc_stress_profile(target: &TestTarget) -> bool {
+    target.env.get("VO_GC_STRESS").map(String::as_str) == Some("1")
+        && target.env.get("VO_GC_VERIFY").map(String::as_str) == Some("1")
+}
+
+fn same_gc_profile(baseline: &TestTarget, candidate: &TestTarget) -> bool {
+    GC_PROFILE_ENV_KEYS
+        .iter()
+        .all(|key| baseline.env.get(*key) == candidate.env.get(*key))
 }
 
 fn validate_manifest_label(case_id: &str, field: &str, value: &str) -> Result<()> {
@@ -1450,14 +1509,31 @@ mod tests {
         use crate::test_config::TestTarget;
 
         let mut targets = std::collections::HashMap::new();
-        for (name, backend) in [("vm", "vm"), ("jit", "jit"), ("osr", "jit")] {
+        for (name, backend, call_threshold, loop_threshold, gc_stress) in [
+            ("vm", "vm", None, None, false),
+            ("jit", "jit", Some("1"), None, false),
+            ("osr", "jit", Some("1000"), Some("1"), false),
+            ("gc-vm", "vm", None, None, true),
+            ("gc-osr", "jit", Some("1000"), Some("1"), true),
+        ] {
+            let mut env = BTreeMap::new();
+            if let Some(threshold) = call_threshold {
+                env.insert("VO_JIT_CALL_THRESHOLD".to_string(), threshold.to_string());
+            }
+            if let Some(threshold) = loop_threshold {
+                env.insert("VO_JIT_LOOP_THRESHOLD".to_string(), threshold.to_string());
+            }
+            if gc_stress {
+                env.insert("VO_GC_STRESS".to_string(), "1".to_string());
+                env.insert("VO_GC_VERIFY".to_string(), "1".to_string());
+            }
             targets.insert(
                 name.to_string(),
                 TestTarget {
                     name: name.to_string(),
                     kind: "native".to_string(),
                     backend: backend.to_string(),
-                    env: BTreeMap::new(),
+                    env,
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
@@ -1473,7 +1549,16 @@ mod tests {
                     "default".to_string(),
                     vec!["vm".to_string(), "jit".to_string(), "osr".to_string()],
                 ),
-                ("osr-only".to_string(), vec!["osr".to_string()]),
+                (
+                    "osr-contract".to_string(),
+                    vec![
+                        "vm".to_string(),
+                        "jit".to_string(),
+                        "osr".to_string(),
+                        "gc-vm".to_string(),
+                        "gc-osr".to_string(),
+                    ],
+                ),
             ]),
             default_targets: vec!["vm".to_string(), "jit".to_string()],
             required_file_pass_targets: Vec::new(),
@@ -1553,8 +1638,8 @@ mod tests {
             path_case(
                 "http-osr",
                 "cases/bugs/./http.vo",
-                "osr-only",
-                &[],
+                "osr-contract",
+                &["vm", "jit"],
                 Some("dedicated OSR loop-entry contract"),
             ),
         ];
@@ -1576,8 +1661,8 @@ mod tests {
             path_case(
                 "http-osr",
                 "cases/bugs/http.vo",
-                "osr-only",
-                &[],
+                "osr-contract",
+                &["vm", "jit"],
                 Some("dedicated OSR loop-entry contract"),
             ),
         ];
@@ -1681,7 +1766,7 @@ mod tests {
             kind: "file".to_string(),
             path: "cases/runtime/loop_entry_contract.vo".to_string(),
             targets: Vec::new(),
-            matrix: Some("osr-only".to_string()),
+            matrix: Some("osr-contract".to_string()),
             tags: vec!["jit".to_string(), "osr".to_string(), "contract".to_string()],
             owner: Some("runtime".to_string()),
             skip: Vec::new(),
@@ -1744,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn positive_jit_loop_entry_contract_requires_osr_only_matrix() {
+    fn positive_jit_loop_entry_contract_requires_osr_contract_matrix() {
         let mut case = jit_loop_entry_contract_case();
         case.matrix = Some("default".to_string());
         let expect = parse_case_expect(&case).unwrap();
@@ -1753,11 +1838,33 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("matrix = \"osr-only\""), "{error}");
+        assert!(error.contains("matrix = \"osr-contract\""), "{error}");
     }
 
     #[test]
-    fn positive_jit_loop_entry_contract_requires_enabled_jit_backend() {
+    fn positive_jit_loop_entry_contract_requires_matching_vm_baseline() {
+        let mut case = jit_loop_entry_contract_case();
+        case.skip.push("vm".to_string());
+        let expect = parse_case_expect(&case).unwrap();
+
+        let error = validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("same GC environment"), "{error}");
+
+        case.skip.clear();
+        let mut config = duplicate_path_test_config();
+        config.targets.get_mut("vm").unwrap().backend = "jit".to_string();
+        let error = validate_jit_loop_entry_contract(&case, &expect, &config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("same GC environment"), "{error}");
+    }
+
+    #[test]
+    fn positive_jit_loop_entry_contract_requires_non_gc_loop_jit_target() {
         let mut case = jit_loop_entry_contract_case();
         case.skip.push("osr".to_string());
         let expect = parse_case_expect(&case).unwrap();
@@ -1766,7 +1873,7 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("enabled JIT-backed target"), "{error}");
+        assert!(error.contains("non-GC loop-JIT target"), "{error}");
 
         case.skip.clear();
         let mut config = duplicate_path_test_config();
@@ -1775,6 +1882,52 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("enabled JIT-backed target"), "{error}");
+        assert!(error.contains("non-GC loop-JIT target"), "{error}");
+    }
+
+    #[test]
+    fn positive_jit_loop_entry_contract_requires_verified_gc_loop_jit_target() {
+        let mut case = jit_loop_entry_contract_case();
+        case.skip.push("gc-osr".to_string());
+        let expect = parse_case_expect(&case).unwrap();
+
+        let error = validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config())
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("GC-stress+verify loop-JIT target"),
+            "{error}"
+        );
+
+        case.skip.clear();
+        let mut config = duplicate_path_test_config();
+        config
+            .targets
+            .get_mut("gc-osr")
+            .unwrap()
+            .env
+            .remove("VO_GC_VERIFY");
+        let error = validate_jit_loop_entry_contract(&case, &expect, &config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("GC-stress+verify loop-JIT target"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn positive_jit_loop_entry_contract_requires_gc_profile_vm_baseline() {
+        let mut case = jit_loop_entry_contract_case();
+        case.skip.push("gc-vm".to_string());
+        let expect = parse_case_expect(&case).unwrap();
+
+        let error = validate_jit_loop_entry_contract(&case, &expect, &duplicate_path_test_config())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("same GC environment"), "{error}");
     }
 }

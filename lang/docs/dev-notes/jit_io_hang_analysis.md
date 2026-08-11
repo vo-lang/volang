@@ -1,3 +1,12 @@
+---
+date: 2026-08-10
+status: implemented
+area: jit
+owner: volang
+supersedes: []
+superseded_by: []
+---
+
 # Eliminate `execute_func_sync`: Unified Suspend/Replay Architecture
 
 ## Problem
@@ -722,7 +731,7 @@ if fiber.closure_replay_depth > 0 && fiber.frames.len() < fiber.closure_replay_d
 
 4. **GC root scanning**: `resume_closure_result` can contain GcRefs that must survive GC during extern replay. Conservative scanning (treat all values as potential GcRefs) is safe and simple.
 
-5. **Latent stack_ptr bug** (pre-existing, NOT introduced by this refactor): If `jit_push_frame` causes `fiber.stack` reallocation, `spill_all_vars` in a later non-OK path uses a stale `stack_ptr` Value from function entry. In practice, the 64KB initial stack capacity prevents reallocation. This is NOT a blocker for this refactor.
+5. **Resolved stack_ptr risk**: `jit_push_frame` may reallocate `fiber.stack`, so later spill paths must refresh their pointer and capacity view. Current transition and side-exit paths do this explicitly; runtime correctness no longer depends on a large startup reservation.
 
 6. **`vo-web::call_closure`**: Also uses `execute_func_sync` but from outside extern functions. Needs separate fix (direct frame push + run_scheduled).
 

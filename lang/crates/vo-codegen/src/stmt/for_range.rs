@@ -5,7 +5,6 @@
 
 use vo_analysis::objects::TypeKey;
 use vo_common_core::bytecode::MAP_ITER_SLOT_TYPES;
-use vo_common_core::instruction::pack_map_iter_next_flags;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
@@ -57,11 +56,10 @@ impl IndexLoop {
         let end_jump = func.emit_jump(Opcode::JumpIfNot, cmp_slot);
 
         // HINT_LOOP after bounds check
-        func.enter_loop(0, label);
+        func.enter_loop(label);
 
         // body_start is AFTER HINT_LOOP - this is where ForLoop will jump
         let body_start = func.current_pc();
-        func.set_loop_start(body_start);
 
         Self {
             idx_slot,
@@ -98,15 +96,8 @@ impl IndexLoop {
         let exit_pc = func.current_pc();
         func.patch_jump(self.end_jump, exit_pc);
 
-        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
-        func.finalize_loop_hint(
-            exit_info.hint_pc,
-            end_pc,
-            exit_pc,
-            exit_info.has_defer,
-            exit_info.has_labeled_break,
-            exit_info.has_labeled_continue,
-        );
+        // Finalize HINT_LOOP with end_pc and exit_pc.
+        func.finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
 
         for pc in exit_info.break_patches {
             func.patch_jump(pc, exit_pc);
@@ -508,7 +499,6 @@ pub(crate) fn compile_for_range(
                 array_ref,
                 lp.idx_slot(),
                 ElemLayoutSpec::new(eb, evk, &elem_slot_types),
-                sc.ctx,
             );
         }
         emit_range_assignments(
@@ -545,7 +535,6 @@ pub(crate) fn compile_for_range(
                 reg,
                 lp.idx_slot(),
                 ElemLayoutSpec::new(eb, evk, &elem_slot_types),
-                sc.ctx,
             );
         }
         emit_range_assignments(
@@ -579,9 +568,8 @@ pub(crate) fn compile_for_range(
         sc.func.emit_op(Opcode::StrLen, len, reg, 0);
 
         // Emit HINT_LOOP outside the loop
-        sc.func.enter_loop(0, label);
+        sc.func.enter_loop(label);
         let loop_start = sc.func.current_pc();
-        sc.func.set_loop_start(loop_start);
 
         sc.func.emit_op(Opcode::GeI, cmp, pos, len);
         let end_jump = sc.func.emit_jump(Opcode::JumpIf, cmp);
@@ -619,15 +607,9 @@ pub(crate) fn compile_for_range(
         let exit_pc = sc.func.current_pc();
         sc.func.patch_jump(end_jump, exit_pc);
 
-        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
-        sc.func.finalize_loop_hint(
-            exit_info.hint_pc,
-            end_pc,
-            exit_pc,
-            exit_info.has_defer,
-            exit_info.has_labeled_break,
-            exit_info.has_labeled_continue,
-        );
+        // Finalize HINT_LOOP with end_pc and exit_pc.
+        sc.func
+            .finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
 
         for pc in exit_info.break_patches {
             sc.func.patch_jump(pc, exit_pc);
@@ -669,22 +651,11 @@ pub(crate) fn compile_for_range(
         sc.func.emit_op(Opcode::MapIterInit, iter_slot, map_reg, 0);
 
         // Emit HINT_LOOP outside the loop
-        sc.func.enter_loop(0, label);
+        sc.func.enter_loop(label);
         let loop_start = sc.func.current_pc();
-        sc.func.set_loop_start(loop_start);
 
-        // Small layouts mirror their width in flags; zero delegates the exact
-        // key/value widths to MapIterNext metadata.
-        let iter_flags = pack_map_iter_next_flags(kn, vn)
-            .expect("MapIterNext width encoding always has a metadata sentinel");
-        sc.func.emit_map_iter_next(
-            iter_kv_slot,
-            iter_slot,
-            ok_slot,
-            iter_flags,
-            &key_layout,
-            &val_layout,
-        );
+        sc.func
+            .emit_map_iter_next(iter_kv_slot, iter_slot, ok_slot, &key_layout, &val_layout);
 
         // if !ok { goto end }
         let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);
@@ -723,15 +694,9 @@ pub(crate) fn compile_for_range(
         let exit_pc = sc.func.current_pc();
         sc.func.patch_jump(end_jump, exit_pc);
 
-        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
-        sc.func.finalize_loop_hint(
-            exit_info.hint_pc,
-            end_pc,
-            exit_pc,
-            exit_info.has_defer,
-            exit_info.has_labeled_break,
-            exit_info.has_labeled_continue,
-        );
+        // Finalize HINT_LOOP with end_pc and exit_pc.
+        sc.func
+            .finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
 
         for pc in exit_info.break_patches {
             sc.func.patch_jump(pc, exit_pc);
@@ -756,9 +721,8 @@ pub(crate) fn compile_for_range(
         let ok_slot = recv_slot + elem_slots;
 
         // Emit HINT_LOOP outside the loop
-        sc.func.enter_loop(0, label);
+        sc.func.enter_loop(label);
         let loop_start = sc.func.current_pc();
-        sc.func.set_loop_start(loop_start);
 
         // v, ok := <-ch
         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
@@ -793,15 +757,9 @@ pub(crate) fn compile_for_range(
         let exit_pc = sc.func.current_pc();
         sc.func.patch_jump(end_jump, exit_pc);
 
-        // Finalize HINT_LOOP with end_pc, exit_pc, and flags
-        sc.func.finalize_loop_hint(
-            exit_info.hint_pc,
-            end_pc,
-            exit_pc,
-            exit_info.has_defer,
-            exit_info.has_labeled_break,
-            exit_info.has_labeled_continue,
-        );
+        // Finalize HINT_LOOP with end_pc and exit_pc.
+        sc.func
+            .finalize_loop_hint(exit_info.hint_pc, end_pc, exit_pc);
 
         for pc in exit_info.break_patches {
             sc.func.patch_jump(pc, exit_pc);

@@ -1,10 +1,12 @@
 use super::*;
 use crate::test_support::queue;
+use crate::vm::Vm;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use vo_common_core::bytecode::{FieldMeta, MethodInfo, NamedTypeMeta, StructMeta};
 use vo_common_core::{ChanDir, RuntimeType, StructField};
-use vo_runtime::bytecode::{FunctionDef, JitInstructionMetadata, Module, TransferType};
+use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module, TransferType};
 use vo_runtime::ffi::SentinelErrorCache;
 use vo_runtime::itab::ItabCache;
 use vo_runtime::jit_api::{
@@ -46,7 +48,7 @@ fn minimal_func() -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::Value],
         borrowed_scan_slots_prefix: vec![0, 0],
         capture_types: Vec::new(),
@@ -56,7 +58,7 @@ fn minimal_func() -> FunctionDef {
 }
 
 fn install_go_callsite(func: &mut FunctionDef, arg_layout: Vec<SlotType>) {
-    func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+    func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout,
         ret_layout: Vec::new(),
     }];
@@ -125,7 +127,7 @@ fn direct_method_one_slot_struct_func() -> FunctionDef {
         has_calls: false,
         has_call_extern: false,
         code: Vec::new(),
-        jit_metadata: Vec::new(),
+        instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::GcRef],
         borrowed_scan_slots_prefix: vec![0, 1],
         capture_types: Vec::new(),
@@ -195,7 +197,6 @@ fn test_context<'a>(
     module: &'a Module,
     fiber: &'a mut Fiber,
     itab_cache: &'a mut ItabCache,
-    safepoint_flag: &'a bool,
     panic_flag: &'a mut bool,
     is_user_panic: &'a mut bool,
     panic_msg: &'a mut InterfaceSlot,
@@ -204,10 +205,11 @@ fn test_context<'a>(
     output: &'a CaptureSink,
     host_output: &'a mut Option<Vec<u8>>,
 ) -> JitContext {
+    vm.module = Some(crate::vm::test_loaded_module(module.clone()));
+    let loaded_module = Arc::as_ptr(vm.module.as_ref().expect("test loaded module"));
     JitContext {
         gc: &mut vm.state.gc,
         globals: core::ptr::null_mut(),
-        safepoint_flag,
         panic_flag,
         is_user_panic,
         panic_msg,
@@ -218,21 +220,17 @@ fn test_context<'a>(
         runtime_trap_pc: u32::MAX,
         current_func_id: u32::MAX,
         infra_error_message: core::ptr::null_mut(),
-        vm: vm as *mut Vm as *mut c_void,
+        callback_state: vm as *mut Vm as *mut c_void,
         fiber: fiber as *mut Fiber as *mut c_void,
         itab_cache,
         extern_registry: core::ptr::null(),
-        call_extern_fn: None,
-        module,
+        callbacks: &vo_runtime::jit_api::JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
-        direct_call_table: core::ptr::null(),
-        direct_call_count: 0,
         program_args,
         sentinel_errors,
         output: output as *const dyn vo_runtime::output::OutputSink,
         host_output,
-        #[cfg(feature = "std")]
         io: core::ptr::null_mut(),
         call_func_id: 0,
         call_arg_start: 0,
@@ -240,7 +238,6 @@ fn test_context<'a>(
         call_ret_slots: 0,
         call_ret_reg: 0,
         call_kind: 0,
-        #[cfg(feature = "std")]
         wait_io_token: 0,
         loop_exit_pc: 0,
         stack_ptr: core::ptr::null_mut(),
@@ -254,20 +251,6 @@ fn test_context<'a>(
         pop_frame_fn: None,
         stack_overflow_fn: None,
         push_resume_point_fn: None,
-        create_island_fn: None,
-        queue_len_fn: None,
-        queue_cap_fn: None,
-        queue_close_fn: None,
-        queue_send_fn: None,
-        queue_recv_fn: None,
-        go_start_fn: None,
-        go_island_fn: None,
-        defer_push_fn: None,
-        recover_fn: None,
-        select_begin_fn: None,
-        select_send_fn: None,
-        select_recv_fn: None,
-        select_exec_fn: None,
         is_error_return: 0,
         ret_gcref_start: 0,
         ret_is_heap: 0,
@@ -276,6 +259,8 @@ fn test_context<'a>(
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        host_services_v2: core::ptr::null(),
+        loaded_module,
     }
 }
 
@@ -285,7 +270,6 @@ fn assert_invalid_regular_go_start_rejected(func: FunctionDef, arg_slots: u32) {
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -299,7 +283,6 @@ fn assert_invalid_regular_go_start_rejected(func: FunctionDef, arg_slots: u32) {
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -318,7 +301,7 @@ fn assert_invalid_regular_go_start_rejected(func: FunctionDef, arg_slots: u32) {
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
     );
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -336,7 +319,6 @@ fn vm_jit_go_callback_abi_rejects_noncanonical_closure_boolean_before_spawn() {
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -349,7 +331,6 @@ fn vm_jit_go_callback_abi_rejects_noncanonical_closure_boolean_before_spawn() {
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -364,7 +345,7 @@ fn vm_jit_go_callback_abi_rejects_noncanonical_closure_boolean_before_spawn() {
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -374,7 +355,6 @@ fn vm_jit_go_callback_abi_012_nil_closure_rejects_null_non_empty_args_before_tra
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -387,7 +367,6 @@ fn vm_jit_go_callback_abi_012_nil_closure_rejects_null_non_empty_args_before_tra
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -404,7 +383,7 @@ fn vm_jit_go_callback_abi_012_nil_closure_rejects_null_non_empty_args_before_tra
     assert_eq!(ctx.runtime_trap_kind, JitRuntimeTrapKind::None as u8);
     assert!(!unsafe { *ctx.panic_flag });
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -415,7 +394,6 @@ fn vm_jit_goisland_callback_abi_012_nil_closure_rejects_null_non_empty_args_befo
     let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -428,7 +406,6 @@ fn vm_jit_goisland_callback_abi_012_nil_closure_rejects_null_non_empty_args_befo
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -445,7 +422,7 @@ fn vm_jit_goisland_callback_abi_012_nil_closure_rejects_null_non_empty_args_befo
     assert_eq!(ctx.runtime_trap_kind, JitRuntimeTrapKind::None as u8);
     assert!(!unsafe { *ctx.panic_flag });
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.state.outbound_commands.is_empty());
 }
 
@@ -455,7 +432,6 @@ fn vm_jit_go_callback_abi_057_nil_closure_requires_active_caller_frame_before_tr
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -468,7 +444,6 @@ fn vm_jit_go_callback_abi_057_nil_closure_requires_active_caller_frame_before_tr
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -486,7 +461,7 @@ fn vm_jit_go_callback_abi_057_nil_closure_requires_active_caller_frame_before_tr
     assert_eq!(ctx.runtime_trap_kind, JitRuntimeTrapKind::None as u8);
     assert!(!unsafe { *ctx.panic_flag });
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -496,7 +471,6 @@ fn vm_jit_goisland_callback_abi_057_nil_island_requires_active_caller_frame_befo
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -509,7 +483,6 @@ fn vm_jit_goisland_callback_abi_057_nil_island_requires_active_caller_frame_befo
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -527,7 +500,7 @@ fn vm_jit_goisland_callback_abi_057_nil_island_requires_active_caller_frame_befo
     assert_eq!(ctx.runtime_trap_kind, JitRuntimeTrapKind::None as u8);
     assert!(!unsafe { *ctx.panic_flag });
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.state.outbound_commands.is_empty());
 }
 
@@ -537,11 +510,17 @@ fn vm_jit_gostart_pending_001_go_start_spawn_survives_later_terminal_result() {
     let mut module = Module::new("go-start-pending-spawn-test".to_string());
     let mut func = minimal_func();
     install_go_callsite(&mut func, Vec::new());
+    func.code = vec![vo_runtime::instruction::Instruction::with_flags(
+        vo_runtime::instruction::Opcode::GoStart,
+        0,
+        0,
+        0,
+        0,
+    )];
     module.functions.push(func);
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -554,7 +533,6 @@ fn vm_jit_gostart_pending_001_go_start_spawn_survives_later_terminal_result() {
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -575,7 +553,6 @@ fn vm_jit_gostart_pending_001_go_start_spawn_survives_later_terminal_result() {
     );
     assert_eq!(vm.scheduler.fibers.len(), 0);
     assert!(vm
-        .state
         .pending_runtime_transitions
         .iter()
         .any(|transition| { !transition.spawns.is_empty() }));
@@ -583,7 +560,7 @@ fn vm_jit_gostart_pending_001_go_start_spawn_survives_later_terminal_result() {
     let result = vm.attach_pending_runtime_transitions(crate::vm::ExecResult::Panic);
 
     assert!(matches!(result, crate::vm::ExecResult::Panic));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.scheduler.fibers.len(), 1);
 }
 
@@ -601,7 +578,6 @@ fn vm_jit_gostart_pending_001_go_island_command_survives_later_terminal_result()
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -614,7 +590,6 @@ fn vm_jit_gostart_pending_001_go_island_command_survives_later_terminal_result()
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -641,7 +616,6 @@ fn vm_jit_gostart_pending_001_go_island_command_survives_later_terminal_result()
     );
     assert_eq!(vm.state.outbound_commands.len(), 0);
     assert!(vm
-        .state
         .pending_runtime_transitions
         .iter()
         .any(|transition| { !transition.island_commands.is_empty() }));
@@ -649,7 +623,7 @@ fn vm_jit_gostart_pending_001_go_island_command_survives_later_terminal_result()
     let result = vm.attach_pending_runtime_transitions(crate::vm::ExecResult::Panic);
 
     assert!(matches!(result, crate::vm::ExecResult::Panic));
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.state.outbound_commands.len(), 1);
     let (island_id, command) = vm.state.outbound_commands.front().unwrap();
     assert_eq!(*island_id, 99);
@@ -673,7 +647,6 @@ fn vm_jit_goisland_route_preflight_058_missing_target_route_preserves_no_pending
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -686,7 +659,6 @@ fn vm_jit_goisland_route_preflight_058_missing_target_route_preserves_no_pending
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -709,7 +681,7 @@ fn vm_jit_goisland_route_preflight_058_missing_target_route_preserves_no_pending
     assert_invalid_callback_state(&ctx);
     drop(ctx);
     assert_eq!(fiber.jit_extern_suspend.take(), None);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.state.outbound_commands.is_empty());
 }
 
@@ -745,7 +717,6 @@ fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint
     unsafe { closure::set_capture(closure_ref, 0, capture_box as u64) };
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -758,7 +729,6 @@ fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -843,7 +813,6 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
     unsafe { closure::set_capture(closure_ref, 1, malformed_string_capture as u64) };
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -856,7 +825,6 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -883,39 +851,8 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
         "later capture-box drift must fail before local endpoint state is published"
     );
     assert!(!vm.state.endpoint_registry.has_live());
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.state.outbound_commands.len(), 0);
-}
-
-#[test]
-fn vm_jit_goisland_transfer_commit_061_source_attaches_runtime_rollback() {
-    let src = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../goroutine.rs"
-    ));
-    let helper = src
-        .split("fn commit_go_island_commands")
-        .nth(1)
-        .expect("GoIsland command helper should exist")
-        .split("/// JIT callback to spawn a new goroutine")
-        .next()
-        .expect("helper should precede go callback docs");
-    assert!(
-        helper.contains("Option<crate::runtime_boundary::RuntimeRollback>")
-            && helper.contains("transition.set_rollback(rollback)"),
-        "JIT GoIsland helper must carry queue-transfer rollback in the pending transition"
-    );
-
-    let callback = src
-        .split("pub extern \"C\" fn jit_go_island")
-        .nth(1)
-        .expect("jit_go_island callback should exist");
-    assert!(
-        callback.contains("let rollback = transfer_commit.into_runtime_rollback()")
-            && callback.contains(
-                "commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback)"
-            ),
-        "JIT GoIsland callback must consume QueueTransferCommit into runtime rollback"
-    );
 }
 
 #[cfg(feature = "jit")]
@@ -940,7 +877,6 @@ fn vm_direct_method_capture_protocol_006_jit_goisland_transfers_one_slot_struct_
     unsafe { closure::set_capture(closure_ref, 0, port as u64) };
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -953,7 +889,6 @@ fn vm_direct_method_capture_protocol_006_jit_goisland_transfers_one_slot_struct_
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1024,7 +959,6 @@ fn vm_closure_spawn_shape_002_jit_go_start_rejects_closure_arg_slot_drift_before
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1038,7 +972,6 @@ fn vm_closure_spawn_shape_002_jit_go_start_rejects_closure_arg_slot_drift_before
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1053,7 +986,7 @@ fn vm_closure_spawn_shape_002_jit_go_start_rejects_closure_arg_slot_drift_before
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -1067,7 +1000,6 @@ fn vm_gostart_closure_signature_003_jit_rejects_arg_slot_metadata_drift_before_s
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1081,7 +1013,6 @@ fn vm_gostart_closure_signature_003_jit_rejects_arg_slot_metadata_drift_before_s
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1097,7 +1028,7 @@ fn vm_gostart_closure_signature_003_jit_rejects_arg_slot_metadata_drift_before_s
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -1114,7 +1045,6 @@ fn vm_goisland_remote_shape_002_jit_rejects_arg_slot_metadata_drift_before_islan
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1128,7 +1058,6 @@ fn vm_goisland_remote_shape_002_jit_rejects_arg_slot_metadata_drift_before_islan
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1150,7 +1079,7 @@ fn vm_goisland_remote_shape_002_jit_rejects_arg_slot_metadata_drift_before_islan
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert_eq!(vm.state.outbound_commands.len(), 0);
     assert!(vm.scheduler.fibers.is_empty());
 }
@@ -1164,7 +1093,6 @@ fn vm_goisland_object_kind_002_jit_rejects_null_non_empty_args_before_island_eff
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1177,7 +1105,6 @@ fn vm_goisland_object_kind_002_jit_rejects_null_non_empty_args_before_island_eff
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1198,7 +1125,7 @@ fn vm_goisland_object_kind_002_jit_rejects_null_non_empty_args_before_island_eff
     assert_eq!(result, JitResult::JitError);
     assert_invalid_callback_state(&ctx);
     drop(ctx);
-    assert!(vm.state.pending_runtime_transitions.is_empty());
+    assert!(vm.pending_runtime_transitions.is_empty());
     assert!(vm.scheduler.fibers.is_empty());
 }
 
@@ -1214,47 +1141,6 @@ fn vm_jit_001_go_start_rejects_param_slots_past_local_bounds() {
 }
 
 #[test]
-fn vm_jit_go_start_frame_shape_062_static_path_uses_shared_validator_before_spawn() {
-    let src = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../goroutine.rs"
-    ));
-    let abi_body = src
-        .split("fn validate_regular_go_start_abi")
-        .nth(1)
-        .expect("regular GoStart ABI helper should exist")
-        .split("fn validate_closure_go_abi")
-        .next()
-        .expect("regular GoStart ABI helper precedes closure helper");
-    assert!(
-        abi_body.contains("validate_function_arg_shape"),
-        "JIT GoStart static ABI validation must use shared frame-call shape helper"
-    );
-
-    let go_start_body = src
-        .split("pub extern \"C\" fn jit_go_start")
-        .nth(1)
-        .expect("jit_go_start should exist")
-        .split("pub extern \"C\" fn jit_go_island")
-        .next()
-        .expect("jit_go_start precedes jit_go_island");
-    let validator = go_start_body
-        .find("validate_regular_go_start_abi")
-        .expect("JIT GoStart static path must call regular ABI validator");
-    let frame_push = go_start_body
-        .find("new_fiber.try_push_frame")
-        .expect("JIT GoStart static path pushes a spawned frame");
-    let spawn_publish = frame_push
-        + go_start_body[frame_push..]
-            .find("commit_go_spawn")
-            .expect("JIT GoStart static path publishes a spawned fiber");
-
-    assert!(
-        validator < frame_push && validator < spawn_publish,
-        "JIT GoStart must prove static callee frame shape before frame push or spawn publication"
-    );
-}
-
-#[test]
 fn vm_goisland_object_kind_002_jit_rejects_nil_island_before_object_header_read() {
     let mut module = Module::new("test".to_string());
     let mut caller = minimal_func();
@@ -1263,7 +1149,6 @@ fn vm_goisland_object_kind_002_jit_rejects_nil_island_before_object_header_read(
     let mut vm = Vm::new();
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1276,7 +1161,6 @@ fn vm_goisland_object_kind_002_jit_rejects_nil_island_before_object_header_read(
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1306,7 +1190,6 @@ fn vm_goisland_object_kind_002_jit_rejects_nil_closure_before_object_header_read
     let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1319,7 +1202,6 @@ fn vm_goisland_object_kind_002_jit_rejects_nil_closure_before_object_header_read
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1345,7 +1227,6 @@ fn vm_goisland_object_kind_002_jit_rejects_non_island_gcref_before_island_header
     let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1358,7 +1239,6 @@ fn vm_goisland_object_kind_002_jit_rejects_non_island_gcref_before_island_header
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,
@@ -1393,7 +1273,6 @@ fn vm_goisland_object_kind_002_jit_rejects_non_closure_gcref_before_closure_head
     let wrong_closure = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
     let mut fiber = Fiber::new(0);
     let mut itab_cache = ItabCache::new();
-    let safepoint_flag = false;
     let mut panic_flag = false;
     let mut is_user_panic = false;
     let mut panic_msg = InterfaceSlot::nil();
@@ -1406,7 +1285,6 @@ fn vm_goisland_object_kind_002_jit_rejects_non_closure_gcref_before_closure_head
         &module,
         &mut fiber,
         &mut itab_cache,
-        &safepoint_flag,
         &mut panic_flag,
         &mut is_user_panic,
         &mut panic_msg,

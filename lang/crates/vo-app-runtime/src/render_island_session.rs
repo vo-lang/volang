@@ -28,8 +28,16 @@ impl RenderIslandSession {
         self.session.vm_mut()
     }
 
+    pub fn set_gc_stress_every_step(&mut self, enabled: bool) {
+        self.vm_mut().set_gc_stress_every_step(enabled);
+    }
+
     pub fn gc_step(&mut self) {
         self.session.gc_step();
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        self.vm().exit_code()
     }
 
     // ── Core step methods ───────────────────────────────────────────────

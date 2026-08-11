@@ -164,7 +164,7 @@ fn emit_call_and_return(
     ret_slot_types: &[SlotType],
 ) {
     let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
-    builder.emit_static_call(func_id, args_start, arg_slots, ret_slots);
+    builder.emit_static_call(func_id, args_start);
     builder.set_ret_slot_types(ret_slot_types.to_vec());
     let ret_start = args_start + arg_slots;
     builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);
@@ -286,7 +286,6 @@ pub fn generate_iface_wrapper(
                     data_slot,
                     index_reg,
                     ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
-                    ctx,
                 );
             }
         }
@@ -689,13 +688,11 @@ fn generate_embedded_iface_wrapper_impl(
     }
 
     // CallIface: result at args_start + param_slots (new call buffer layout)
-    let c = ctx.dynamic_call_shape_or_record(forwarded_slot_types.len(), ret_slot_types.len());
     builder.emit_call_iface(
         iface_meta_id,
         method_idx,
         iface_slot,
         args_start,
-        c,
         &forwarded_slot_types,
         &ret_slot_types,
     );
@@ -747,14 +744,12 @@ fn generate_iface_call_wrapper(
     }
 
     // CallIface
-    let c = ctx.dynamic_call_shape_or_record(forwarded_slot_types.len(), call_ret_slot_types.len());
     let method_idx = ctx.call_iface_method_index_or_record(method_idx);
     builder.emit_call_iface(
         iface_meta_id,
         method_idx,
         iface_slot,
         args_start,
-        c,
         &forwarded_slot_types,
         &call_ret_slot_types,
     );
@@ -822,7 +817,6 @@ pub fn generate_method_expr_iface_wrapper(
         builder.emit_copy(args_start, first_param, computed_param_slots);
     }
 
-    let c = ctx.dynamic_call_shape_or_record(forwarded_slot_types.len(), ret_slot_types.len());
     let iface_meta_id = ctx.get_or_create_interface_meta_id(
         iface_type,
         &info.project.tc_objs,
@@ -834,7 +828,6 @@ pub fn generate_method_expr_iface_wrapper(
         method_idx,
         iface_slot,
         args_start,
-        c,
         &forwarded_slot_types,
         &ret_slot_types,
     );
@@ -1068,7 +1061,7 @@ pub fn generate_defer_iface_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::{ExtSlotKind, JitInstructionMetadata, ParamShape};
+    use vo_runtime::bytecode::{ExtSlotKind, InstructionMetadata, ParamShape};
 
     fn return_shape(slot_types: Vec<SlotType>) -> ReturnShape {
         ReturnShape::try_with_slot_types(slot_types).expect("test return shape should be valid")
@@ -1098,23 +1091,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_builders_use_context_registration_owner() {
-        let source = include_str!("wrapper.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("wrapper source should contain tests section");
-
-        assert!(
-            !source.contains("ctx.add_function(builder.build())"),
-            "wrapper builders must not bypass context-owned layout error recording"
-        );
-        assert!(
-            !source.contains("let func_def = builder.build()"),
-            "wrapper builders must not build before context-owned registration"
-        );
-    }
-
-    #[test]
     fn defer_iface_wrapper_preserves_wide_method_index_in_metadata() {
         let mut ctx = CodegenContext::new("call-iface-method-idx-width");
         let _ = generate_defer_iface_wrapper(&mut ctx, 0, "wide", 256, Vec::new(), Vec::new());
@@ -1124,13 +1100,13 @@ mod tests {
             function
                 .code
                 .iter()
-                .zip(&function.jit_metadata)
+                .zip(&function.instruction_metadata)
                 .any(|(inst, metadata)| {
                     inst.opcode() == Opcode::CallIface
                         && inst.flags == 0
                         && matches!(
                             metadata,
-                            JitInstructionMetadata::CallIfaceLayout {
+                            InstructionMetadata::CallIfaceLayout {
                                 method_idx: 256,
                                 ..
                             }
@@ -1207,13 +1183,13 @@ mod tests {
             function
                 .code
                 .iter()
-                .zip(&function.jit_metadata)
+                .zip(&function.instruction_metadata)
                 .any(|(inst, metadata)| {
                     inst.opcode() == Opcode::CallExtern
                         && inst.flags == 0
                         && matches!(
                             metadata,
-                            JitInstructionMetadata::CallExternLayout { arg_layout, .. }
+                            InstructionMetadata::CallExternLayout { arg_layout, .. }
                                 if arg_layout.len() == 256
                         )
                 })
@@ -1293,9 +1269,9 @@ mod tests {
         assert_eq!(wrapper.param_slots, 1);
         assert_eq!(wrapper.slot_types.first().copied(), Some(SlotType::GcRef));
         assert!(
-            wrapper.jit_metadata.iter().any(|metadata| matches!(
+            wrapper.instruction_metadata.iter().any(|metadata| matches!(
                 metadata,
-                vo_common_core::JitInstructionMetadata::CallExternLayout { arg_layout, .. }
+                vo_common_core::InstructionMetadata::CallExternLayout { arg_layout, .. }
                     if arg_layout == &vec![SlotType::GcRef]
             )),
             "defer extern wrapper must call extern with the same precise argument layout it exposes"

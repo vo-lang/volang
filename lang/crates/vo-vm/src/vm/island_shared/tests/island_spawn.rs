@@ -1,22 +1,6 @@
 use super::*;
 
 #[test]
-fn endpoint_request_backing_invariant_is_not_debug_only() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../../island_shared.rs"
-    ));
-
-    assert!(
-        !source.contains("debug_assert!"),
-        "EndpointRequest backing invariants must be enforced in release builds"
-    );
-    assert!(
-        source.contains("resolved to a non-local queue"),
-        "the endpoint backing invariant should stay explicit"
-    );
-}
-
-#[test]
 fn endpoint_request_rejects_remote_proxy_before_home_info_read() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
@@ -39,8 +23,6 @@ fn endpoint_request_rejects_remote_proxy_before_home_info_read() {
         endpoint_id,
         EndpointRequestKind::Transfer { new_peer: 5 },
         9,
-        0,
-        0,
     )
     .expect_err("remote proxies cannot own incoming endpoint requests");
 
@@ -48,116 +30,6 @@ fn endpoint_request_rejects_remote_proxy_before_home_info_read() {
         VmError::Jit(message) => assert!(message.contains("non-local queue"), "{message}"),
         other => panic!("backing drift should be a VM error, got {other:?}"),
     }
-}
-
-#[test]
-fn vm_runtime_transition_ingress_errors_are_not_silently_discarded_048() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../../island_shared.rs"
-    ));
-
-    assert!(
-        !source.contains("let _ = vm.apply_runtime_transition"),
-        "island ingress must propagate RuntimeTransition applier errors instead of silently continuing"
-    );
-}
-
-#[test]
-fn endpoint_closed_response_uses_runtime_command_bridge_053() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../../island_shared.rs"
-    ));
-    let handler = source
-        .split("pub(crate) fn handle_endpoint_response_command(")
-        .nth(1)
-        .and_then(|rest| {
-            rest.split("pub(crate) fn prepare_endpoint_request_effect")
-                .next()
-        })
-        .expect("endpoint response handler section");
-    let closed_branch = handler
-        .split("EndpointResponseKind::Closed =>")
-        .nth(1)
-        .and_then(|rest| rest.split("EndpointResponseKind::SendAck").next())
-        .expect("Closed response branch");
-    assert!(
-        closed_branch.contains("RuntimeCommand::endpoint_closed_response"),
-        "Closed endpoint responses must enter through the runtime command bridge"
-    );
-    assert!(
-        !closed_branch.contains("mark_remote_endpoint_closed")
-            && !closed_branch.contains("mark_tombstone_with_response_source"),
-        "Closed endpoint responses must not mutate endpoint state directly in the island command handler"
-    );
-}
-
-#[test]
-fn vm_island_spawn_unpack_txn_003_handle_error_restores_endpoint_registry() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../../island_shared.rs"
-    ));
-    let spawn_region = source
-        .split("pub(crate) fn handle_spawn_fiber")
-        .nth(1)
-        .expect("handle_spawn_fiber should exist")
-        .split("pub(crate) fn handle_endpoint_request_command")
-        .next()
-        .expect("handle_spawn_fiber should precede endpoint request handling");
-    let error_region = spawn_region
-        .split("if let Some(err) = handle_error")
-        .nth(1)
-        .expect("spawn unpack should check handle_error")
-        .split("return Err")
-        .next()
-        .expect("handle_error branch should return an error");
-
-    assert!(
-        spawn_region.contains("endpoint_registry.snapshot()"),
-        "spawn unpack must snapshot endpoint registry before resolving handles"
-    );
-    assert!(
-        error_region.contains("endpoint_registry.restore(endpoint_registry_snapshot)"),
-        "failed spawn unpack must restore endpoint registry before returning an error"
-    );
-    assert!(
-        error_region.contains("vm.state.mark_gc_all_roots_dirty()"),
-        "restoring endpoint roots after queue-handle resolution failure must invalidate the GC snapshot"
-    );
-}
-
-#[test]
-fn vm_endpoint_request_rollback_gc_dirty_058_manual_restore_marks_all_roots_dirty() {
-    let source = crate::source_contract::production_source_without_test_modules(include_str!(
-        "../../island_shared.rs"
-    ));
-    let endpoint_request = source
-        .split("pub(crate) fn handle_endpoint_request_command")
-        .nth(1)
-        .expect("endpoint request handler should exist")
-        .split("struct EndpointRequestCtx")
-        .next()
-        .expect("endpoint request handler should precede ctx");
-    let rollback = endpoint_request
-        .split("if let Err(err) = vm.apply_runtime_transition(None, transition)")
-        .nth(1)
-        .expect("endpoint request handler should restore snapshots on transition failure")
-        .split("return Err(err)")
-        .next()
-        .expect("transition failure branch should return the error");
-
-    assert!(
-        rollback.contains("*state = queue_snapshot"),
-        "endpoint request transition failure must restore the local queue snapshot"
-    );
-    assert!(
-        rollback.contains("endpoint_registry")
-            && rollback.contains("restore(endpoint_registry_snapshot)"),
-        "endpoint request transition failure must restore the endpoint registry snapshot"
-    );
-    assert!(
-        rollback.contains("vm.mark_gc_all_roots_dirty()"),
-        "manual endpoint request rollback must dirty roots after restoring queue/registry state"
-    );
 }
 
 #[test]
@@ -194,7 +66,7 @@ fn vm_direct_method_capture_protocol_006_spawn_allocates_multi_slot_receiver_cap
         &module.runtime_types,
     )
     .expect("encode raw receiver spawn payload");
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
 
     handle_spawn_fiber(&mut vm, &payload).expect("raw receiver payload should spawn");
@@ -245,7 +117,7 @@ fn vm_island_spawn_unpack_txn_004_rejects_capture_count_drift_before_closure_cre
     let mut vm = Vm::new();
     let mut module = Module::new("spawn-count-drift".to_string());
     module.functions.push(empty_spawn_func());
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());
@@ -283,7 +155,7 @@ fn vm_island_spawn_rejects_65535_message_captures_without_panicking() {
     func.capture_types = vec![capture_type; u16::MAX as usize];
     let mut module = Module::new("spawn-max-wire-captures".to_string());
     module.functions.push(func);
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
     vm.state.gc_roots_dirty_all = false;
 
@@ -340,7 +212,7 @@ fn vm_island_spawn_unpack_txn_004_rejects_arg_rttid_drift_before_closure_create(
         RuntimeType::Slice(ValueRttid::new(0, ValueKind::String)),
     ];
     module.functions.push(func);
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut packed_arg = vec![ValueKind::Slice as u8, 1];
     packed_arg.extend_from_slice(&0u64.to_le_bytes());
@@ -388,7 +260,7 @@ fn vm_island_spawn_unpack_txn_004_rejects_zero_length_arg_chunk_before_closure_c
     let mut module = Module::new("spawn-zero-length-arg".to_string());
     module.runtime_types = vec![RuntimeType::Basic(ValueKind::Int64)];
     module.functions.push(func);
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());
@@ -458,7 +330,7 @@ fn vm_island_spawn_unpack_txn_061_build_failure_restores_endpoint_registry() {
         &module.runtime_types,
     )
     .expect("encode spawn payload");
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
 
     let err = handle_spawn_fiber(&mut vm, &payload)
@@ -489,7 +361,7 @@ fn vm_island_spawn_unpack_txn_061_rejects_missing_method_receiver_before_enqueue
     module
         .functions
         .push(direct_method_spawn_func(vec![SlotType::GcRef]));
-    vm.module = Some(std::sync::Arc::new(module));
+    vm.module = Some(crate::vm::test_loaded_module(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());

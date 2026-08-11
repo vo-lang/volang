@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { FrameworkContract } from '../lib/types';
+import type { FrameworkContract, RendererBridgeVfsSnapshot } from '../lib/types';
 
 export type RuntimeKind = 'console' | 'gui' | null;
 export type RuntimeStatus = 'idle' | 'running' | 'ready';
@@ -11,6 +11,7 @@ export interface GuiRuntimeState {
   gameRenderBytes: Uint8Array | null;
   framework: FrameworkContract | null;
   providerFrameworks: FrameworkContract[];
+  vfsSnapshot: RendererBridgeVfsSnapshot | null;
   sessionId: number | null;
 }
 
@@ -32,6 +33,7 @@ export const IDLE_GUI: GuiRuntimeState = {
   gameRenderBytes: null,
   framework: null,
   providerFrameworks: [],
+  vfsSnapshot: null,
   sessionId: null,
 };
 

@@ -1,7 +1,6 @@
 use vo_runtime::jit_api::JitContext;
 
-use crate::vm::jit_mgr::JitSideExitReason;
-use crate::vm::Vm;
+use crate::vm::{JitSideExitReason, Vm};
 
 pub(super) fn record(vm: &mut Vm, reason: JitSideExitReason) {
     if let Some(jit_mgr) = vm.jit.manager_mut() {

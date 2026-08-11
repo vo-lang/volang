@@ -1224,6 +1224,7 @@ mod tests {
             crate::math::__VO_STDLIB_ENTRIES,
             crate::bits::__VO_STDLIB_ENTRIES,
             crate::rand::__VO_STDLIB_ENTRIES,
+            crate::rand::native::__VO_STDLIB_ENTRIES,
             crate::bytes::__VO_STDLIB_ENTRIES,
             crate::errors::__VO_STDLIB_ENTRIES,
             crate::strings::__VO_STDLIB_ENTRIES,
@@ -1236,6 +1237,7 @@ mod tests {
             crate::filepath::__VO_STDLIB_ENTRIES,
             crate::exec::__VO_STDLIB_ENTRIES,
             crate::fmt::__VO_STDLIB_ENTRIES,
+            crate::fmt::native::__VO_STDLIB_ENTRIES,
             crate::io::REGISTERED_EXTERNS,
             crate::time::REGISTERED_EXTERNS,
             crate::toolchain::REGISTERED_EXTERNS,
@@ -1448,6 +1450,7 @@ mod tests {
             ("math", crate::math::__VO_STDLIB_ENTRIES),
             ("math_bits", crate::bits::__VO_STDLIB_ENTRIES),
             ("math_rand", crate::rand::__VO_STDLIB_ENTRIES),
+            ("math_rand_native", crate::rand::native::__VO_STDLIB_ENTRIES),
             ("bytes", crate::bytes::__VO_STDLIB_ENTRIES),
             ("errors", crate::errors::__VO_STDLIB_ENTRIES),
             ("strings", crate::strings::__VO_STDLIB_ENTRIES),
@@ -1459,6 +1462,8 @@ mod tests {
             ("os", crate::os::__VO_STDLIB_ENTRIES),
             ("path_filepath", crate::filepath::__VO_STDLIB_ENTRIES),
             ("os_exec", crate::exec::__VO_STDLIB_ENTRIES),
+            ("fmt", crate::fmt::__VO_STDLIB_ENTRIES),
+            ("fmt_native", crate::fmt::native::__VO_STDLIB_ENTRIES),
         ];
         for (label, entries) in tables {
             assert_provider_table(label, entries, &manifest);
@@ -1470,7 +1475,6 @@ mod tests {
     fn handwritten_stdlib_register_tables_match_manifest() {
         let manifest = manifest_map();
         let tables: &[(&str, &[vo_runtime::ffi::StdlibEntry])] = &[
-            ("fmt", crate::fmt::__VO_STDLIB_ENTRIES),
             ("io", crate::io::REGISTERED_EXTERNS),
             ("time", crate::time::REGISTERED_EXTERNS),
             ("toolchain", crate::toolchain::REGISTERED_EXTERNS),

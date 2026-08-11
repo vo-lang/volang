@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 
 import type { Backend } from '../src/lib/backend/backend.ts';
 import { ProjectService, type BuiltinExampleSessionSpec } from '../src/lib/services/project_service.ts';
-import { WorkspaceService } from '../src/lib/services/workspace_service.ts';
 import { parseHash, resolveDocsFile } from '../src/lib/router.ts';
 import type {
   BackendPlatform,
@@ -25,12 +24,18 @@ function createFixture(workspaceRoot = '/workspace/', platform: BackendPlatform 
     createError: Error | null;
     prepareError: Error | null;
     activateError: Error | null;
+    restoreError: Error | null;
     sessionOverride: SessionInfo | null;
+    activationSessionOverride: SessionInfo | null;
+    restoreSessionOverride: SessionInfo | null;
   } = {
     createError: null,
     prepareError: null,
     activateError: null,
+    restoreError: null,
     sessionOverride: null,
+    activationSessionOverride: null,
+    restoreSessionOverride: null,
   };
   const bootstrap: BootstrapContext = {
     workspaceRoot,
@@ -76,14 +81,15 @@ function createFixture(workspaceRoot = '/workspace/', platform: BackendPlatform 
       if (controls.activateError) throw controls.activateError;
       assert.deepEqual(candidate, pending);
       rollback = active;
-      active = candidate.session;
+      active = controls.activationSessionOverride ?? candidate.session;
       pending = null;
       return active;
     },
     async restoreSession(previous: SessionInfo) {
       events.push({ kind: 'restore', previous });
       assert.deepEqual(previous, rollback);
-      active = previous;
+      if (controls.restoreError) throw controls.restoreError;
+      active = controls.restoreSessionOverride ?? previous;
       rollback = null;
       return active;
     },
@@ -99,13 +105,11 @@ function createFixture(workspaceRoot = '/workspace/', platform: BackendPlatform 
       return 'module main';
     },
   } as unknown as Backend;
-  const workspace = new WorkspaceService(backend);
-  const project = new ProjectService(backend, workspace);
+  const project = new ProjectService(backend);
   return {
     controls,
     events,
     project,
-    workspace,
     activeSession: () => active,
     pendingSession: () => pending,
   };
@@ -143,7 +147,6 @@ assert.deepEqual(session, {
   share: null,
 });
 assert.equal(first.project.sessionInfo, session);
-assert.equal(first.workspace.session, session);
 
 const native = createFixture('/workspace/module-root', 'native');
 await native.project.initialize();
@@ -170,7 +173,7 @@ assert.deepEqual(
     workspaceDiscovery: 'disabled',
   },
 );
-assert.equal(native.workspace.session?.workspaceDiscovery, 'disabled');
+assert.equal(native.project.sessionInfo?.workspaceDiscovery, 'disabled');
 
 const linkedWorkspace = createFixture('/linked/workspace', 'native');
 await linkedWorkspace.project.initialize();
@@ -210,7 +213,7 @@ const windowsSession = await windowsNative.project.openBuiltinExampleSession({
   entryName: 'channels.vo',
   content: 'module main',
 });
-assert.equal(windowsNative.workspace.session, windowsSession);
+assert.equal(windowsNative.project.sessionInfo, windowsSession);
 
 const isolated = createFixture('/workspace');
 await isolated.project.initialize();
@@ -243,7 +246,6 @@ const transactionCandidate = await transaction.project.prepareSession({
   mode: 'dev',
 });
 assert.equal(transaction.project.sessionInfo, transactionPrevious);
-assert.equal(transaction.workspace.session, transactionPrevious);
 assert.equal(transaction.activeSession(), transactionPrevious);
 assert.equal(transaction.pendingSession(), transactionCandidate);
 assert.deepEqual(
@@ -264,13 +266,104 @@ const activatedCandidate = await transaction.project.prepareSession({
 });
 const activatedSession = await transaction.project.activatePreparedSession(activatedCandidate);
 assert.equal(transaction.project.sessionInfo, activatedSession);
-assert.equal(transaction.workspace.session, activatedSession);
 assert.equal(transaction.activeSession(), activatedSession);
 const restoredSession = await transaction.project.restoreSession(transactionPrevious);
 assert.deepEqual(restoredSession, transactionPrevious);
 assert.equal(transaction.project.sessionInfo, transactionPrevious);
-assert.equal(transaction.workspace.session, transactionPrevious);
 assert.equal(transaction.activeSession(), transactionPrevious);
+
+const activationMismatch = createFixture('/workspace');
+const mismatchCandidate = await activationMismatch.project.prepareSession({
+  proj: '/workspace/requested.vo',
+  mode: 'dev',
+});
+const unexpectedActivation = {
+  ...mismatchCandidate.session,
+  root: '/workspace/unexpected',
+} satisfies SessionInfo;
+activationMismatch.controls.activationSessionOverride = unexpectedActivation;
+await assert.rejects(
+  activationMismatch.project.activatePreparedSession(mismatchCandidate),
+  /activated a different session/,
+);
+assert.equal(activationMismatch.project.sessionInfo, unexpectedActivation);
+assert.equal(activationMismatch.activeSession(), unexpectedActivation);
+assert.deepEqual(activationMismatch.events.map((event) => event.kind), ['prepare', 'activate']);
+
+const activationMismatchWithPrevious = createFixture('/workspace');
+const mismatchPrevious = await activationMismatchWithPrevious.project.openSession({
+  proj: '/workspace/previous.vo',
+  mode: 'dev',
+});
+const nextMismatchCandidate = await activationMismatchWithPrevious.project.prepareSession({
+  proj: '/workspace/requested.vo',
+  mode: 'dev',
+});
+activationMismatchWithPrevious.controls.activationSessionOverride = {
+  ...nextMismatchCandidate.session,
+  root: '/workspace/unexpected',
+};
+activationMismatchWithPrevious.events.length = 0;
+await assert.rejects(
+  activationMismatchWithPrevious.project.activatePreparedSession(nextMismatchCandidate),
+  /activated a different session/,
+);
+assert.equal(activationMismatchWithPrevious.project.sessionInfo, mismatchPrevious);
+assert.equal(activationMismatchWithPrevious.activeSession(), mismatchPrevious);
+assert.deepEqual(
+  activationMismatchWithPrevious.events.map((event) => event.kind),
+  ['activate', 'restore'],
+);
+
+const activationRollbackFailure = createFixture('/workspace');
+await activationRollbackFailure.project.openSession({
+  proj: '/workspace/previous.vo',
+  mode: 'dev',
+});
+const rollbackFailureCandidate = await activationRollbackFailure.project.prepareSession({
+  proj: '/workspace/requested.vo',
+  mode: 'dev',
+});
+const activeAfterFailedRollback = {
+  ...rollbackFailureCandidate.session,
+  root: '/workspace/unexpected-active',
+} satisfies SessionInfo;
+activationRollbackFailure.controls.activationSessionOverride = activeAfterFailedRollback;
+activationRollbackFailure.controls.restoreError = new Error('restore failed');
+activationRollbackFailure.events.length = 0;
+await assert.rejects(
+  activationRollbackFailure.project.activatePreparedSession(rollbackFailureCandidate),
+  /restore failed/,
+);
+assert.equal(activationRollbackFailure.project.sessionInfo, activeAfterFailedRollback);
+assert.equal(activationRollbackFailure.activeSession(), activeAfterFailedRollback);
+assert.deepEqual(
+  activationRollbackFailure.events.map((event) => event.kind),
+  ['activate', 'restore'],
+);
+
+const restoreMismatch = createFixture('/workspace');
+const restorePrevious = await restoreMismatch.project.openSession({
+  proj: '/workspace/previous.vo',
+  mode: 'dev',
+});
+await restoreMismatch.project.openSession({
+  proj: '/workspace/current.vo',
+  mode: 'dev',
+});
+const unexpectedRestore = {
+  ...restorePrevious,
+  root: '/workspace/unexpected-restore',
+} satisfies SessionInfo;
+restoreMismatch.controls.restoreSessionOverride = unexpectedRestore;
+restoreMismatch.events.length = 0;
+await assert.rejects(
+  restoreMismatch.project.restoreSession(restorePrevious),
+  /restored a different session/,
+);
+assert.equal(restoreMismatch.project.sessionInfo, unexpectedRestore);
+assert.equal(restoreMismatch.activeSession(), unexpectedRestore);
+assert.deepEqual(restoreMismatch.events.map((event) => event.kind), ['restore']);
 
 const invalid = createFixture();
 await invalid.project.initialize();
@@ -305,7 +398,6 @@ await assert.rejects(
   /create failed/,
 );
 assert.equal(createFailure.project.sessionInfo, null);
-assert.equal(createFailure.workspace.session, null);
 assert.deepEqual(createFailure.events.map((event) => event.kind), ['create']);
 
 const prepareFailure = createFixture();
@@ -318,7 +410,6 @@ await assert.rejects(
   /prepare failed/,
 );
 assert.equal(prepareFailure.project.sessionInfo, previousSession);
-assert.equal(prepareFailure.workspace.session, previousSession);
 assert.equal(prepareFailure.activeSession(), previousSession);
 assert.deepEqual(prepareFailure.events.map((event) => event.kind), ['create', 'prepare']);
 
@@ -339,7 +430,6 @@ await assert.rejects(
   /activation failed/,
 );
 assert.equal(activationFailure.project.sessionInfo, activationPrevious);
-assert.equal(activationFailure.workspace.session, activationPrevious);
 assert.equal(activationFailure.activeSession(), activationPrevious);
 assert.equal(activationFailure.pendingSession(), null);
 assert.deepEqual(
@@ -364,7 +454,6 @@ await assert.rejects(
   /invalid built-in example session/,
 );
 assert.equal(invalidContract.project.sessionInfo, null);
-assert.equal(invalidContract.workspace.session, null);
 assert.equal(invalidContract.activeSession(), null);
 assert.equal(invalidContract.pendingSession(), null);
 assert.deepEqual(invalidContract.events.map((event) => event.kind), ['create', 'prepare', 'discard']);

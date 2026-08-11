@@ -53,6 +53,7 @@ pub mod filepath;
 pub mod net;
 #[cfg(feature = "std")]
 pub mod os;
+#[cfg(feature = "std")]
 pub mod time;
 
 #[cfg(feature = "source")]
@@ -70,18 +71,20 @@ use vo_runtime::ffi::ExternRegistry;
 /// clock providers should call this function before registering those host
 /// providers. Native embedders can use [`register_externs`] to install the
 /// complete standard host implementation.
-pub fn register_portable_externs(
+fn register_cross_platform_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
+    register_rand: impl FnOnce(
+        &mut ExternRegistry,
+        &[ExternDef],
+    ) -> Result<(), vo_runtime::ffi::ExternContractError>,
 ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-    // Register runtime builtins (builtin, dynamic)
     vo_runtime::builtins::builtin::register_externs(registry, externs)?;
     vo_runtime::builtins::dynamic::register_externs(registry, externs)?;
 
-    // Cross-platform
     math::register_externs(registry, externs)?;
     bits::register_externs(registry, externs)?;
-    rand::register_externs(registry, externs)?;
+    register_rand(registry, externs)?;
     bytes::register_externs(registry, externs)?;
     errors::register_externs(registry, externs)?;
     strings::register_externs(registry, externs)?;
@@ -92,10 +95,16 @@ pub fn register_portable_externs(
     toml_pkg::register_externs(registry, externs)?;
     io::register_externs(registry, externs)?;
 
-    // cross-platform (no std required)
     regexp::register_externs(registry, externs)?;
 
     Ok(())
+}
+
+pub fn register_portable_externs(
+    registry: &mut ExternRegistry,
+    externs: &[ExternDef],
+) -> Result<(), vo_runtime::ffi::ExternContractError> {
+    register_cross_platform_externs(registry, externs, rand::register_externs)
 }
 
 /// Register every stdlib extern implementation available for this target.
@@ -103,17 +112,16 @@ pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[ExternDef],
 ) -> Result<(), vo_runtime::ffi::ExternContractError> {
-    register_portable_externs(registry, externs)?;
-
     #[cfg(feature = "std")]
-    toolchain::register_externs(registry, externs)?;
+    register_cross_platform_externs(registry, externs, rand::native::register_externs)?;
+    #[cfg(not(feature = "std"))]
+    register_cross_platform_externs(registry, externs, rand::register_externs)?;
 
-    // time has explicit no_std stubs for host builds without platform support.
-    time::register_externs(registry, externs)?;
-
-    // std-only
     #[cfg(feature = "std")]
     {
+        fmt::native::register_externs(registry, externs)?;
+        toolchain::register_externs(registry, externs)?;
+        time::register_externs(registry, externs)?;
         os::register_externs(registry, externs)?;
         net::register_externs(registry, externs)?;
         net::http::register_externs(registry, externs)?;
@@ -177,7 +185,12 @@ mod tests {
     fn portable_registration_leaves_platform_providers_to_the_embedder() {
         let portable_name = vo_runtime::vo_extern_name!("math", "Sqrt");
         let platform_name = vo_runtime::vo_extern_name!("time", "localOffsetAt");
-        let externs = [extern_def(portable_name), extern_def(platform_name)];
+        let stdin_name = vo_runtime::vo_extern_name!("fmt", "nativeReadLine");
+        let externs = [
+            extern_def(portable_name),
+            extern_def(platform_name),
+            extern_def(stdin_name),
+        ];
         let mut registry = ExternRegistry::new();
 
         register_portable_externs(&mut registry, &externs)
@@ -185,13 +198,15 @@ mod tests {
 
         assert!(registry.registered_by_name(portable_name).is_some());
         assert!(registry.registered_by_name(platform_name).is_none());
+        assert!(registry.registered_by_name(stdin_name).is_none());
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn complete_native_registration_still_installs_platform_providers() {
         let platform_name = vo_runtime::vo_extern_name!("time", "localOffsetAt");
-        let externs = [extern_def(platform_name)];
+        let stdin_name = vo_runtime::vo_extern_name!("fmt", "nativeReadLine");
+        let externs = [extern_def(platform_name), extern_def(stdin_name)];
         let mut registry = ExternRegistry::new();
 
         register_externs(&mut registry, &externs).expect("register complete native stdlib");
@@ -203,5 +218,6 @@ mod tests {
                 .source(),
             RegisteredExternSource::Stdlib
         );
+        assert!(registry.registered_by_name(stdin_name).is_some());
     }
 }

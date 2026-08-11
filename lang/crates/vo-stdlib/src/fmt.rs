@@ -1341,37 +1341,6 @@ fn native_sscanf(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-/// nativeReadLine - read a line from stdin
-#[vostd_fn("fmt", "nativeReadLine", std)]
-fn native_read_line(call: &mut ExternCallContext) -> ExternResult {
-    use std::io::BufRead;
-    let stdin = std::io::stdin();
-    let mut line = Vec::new();
-    match stdin.lock().read_until(b'\n', &mut line) {
-        Ok(0) => {
-            // EOF: stdin closed
-            call.ret_string_bytes(slots::RET_0, b"");
-            call.ret_error_msg(slots::RET_1, "EOF");
-        }
-        Ok(_) => {
-            // Trim trailing newline
-            if line.last() == Some(&b'\n') {
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-            }
-            call.ret_string_bytes(slots::RET_0, &line);
-            call.ret_nil_error(slots::RET_1);
-        }
-        Err(e) => {
-            call.ret_string_bytes(slots::RET_0, b"");
-            call.ret_error_msg(slots::RET_1, &e.to_string());
-        }
-    }
-    ExternResult::Ok
-}
-
 vo_ffi_macro::vostd_register!("fmt":
     nativeWrite,
     nativeSprint,
@@ -1379,8 +1348,43 @@ vo_ffi_macro::vostd_register!("fmt":
     nativeSprintf,
     nativeSscan,
     nativeSscanf,
-    nativeReadLine,
 );
+
+/// Providers backed by native process resources.
+#[cfg(feature = "std")]
+pub(crate) mod native {
+    use super::*;
+    use std::io::BufRead;
+
+    #[vostd_fn("fmt", "nativeReadLine")]
+    fn native_read_line(call: &mut ExternCallContext) -> ExternResult {
+        let stdin = std::io::stdin();
+        let mut line = Vec::new();
+        match stdin.lock().read_until(b'\n', &mut line) {
+            Ok(0) => {
+                call.ret_string_bytes(slots::RET_0, b"");
+                call.ret_error_msg(slots::RET_1, "EOF");
+            }
+            Ok(_) => {
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                }
+                call.ret_string_bytes(slots::RET_0, &line);
+                call.ret_nil_error(slots::RET_1);
+            }
+            Err(error) => {
+                call.ret_string_bytes(slots::RET_0, b"");
+                call.ret_error_msg(slots::RET_1, &error.to_string());
+            }
+        }
+        ExternResult::Ok
+    }
+
+    vo_ffi_macro::vostd_register!("fmt": nativeReadLine);
+}
 
 #[cfg(test)]
 mod tests {

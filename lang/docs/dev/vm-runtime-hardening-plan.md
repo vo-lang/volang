@@ -390,14 +390,14 @@ Severity: P1
 
 Status: implemented by the VM runtime-boundary work.
 
-Endpoint send/recv waiters use a generation-keyed endpoint response key so
+Endpoint send/recv waiters use a typed, generation-keyed `EndpointWaitKey` so
 stale responses cannot wake a reused fiber slot and so
 `pending_island_responses` is decremented in one place. Home endpoint close now
 keeps remote send/recv completions on the endpoint-response path, preserves the
-full generation-bearing `fiber_key`, and routes local wake effects through
-`RuntimeTransition` wake commands. Endpoint tombstone broadcasts use
-`EndpointResponseKind::Closed` as endpoint state notification, not as raw fiber
-wake authority.
+full generation-bearing fiber key, and routes local wake effects through
+`RuntimeTransition` wake commands. Targeted response kinds carry the typed key;
+endpoint tombstone broadcasts use `EndpointResponseKind::Closed` as an
+untargeted state notification.
 
 Current references:
 
@@ -409,7 +409,7 @@ Current references:
 Implemented behavior:
 
 - `QueueWaiter` stores `fiber_key`, not a raw `fiber_id`;
-- remote close responses use `send_endpoint_response(..., fiber_key)` and
+- remote close completions embed `EndpointWaitKey` in the response kind and
   resume through `RuntimeCommand::endpoint_response`;
 - local queue close wakes use `WakeCommand::queue_closed_receiver` or
   `WakeCommand::queue_closed_sender` and are applied by the transition applier;
@@ -419,13 +419,13 @@ Implemented behavior:
 
 Implemented tests:
 
-- `vm::types::tests::closed_remote_sender_uses_endpoint_response_fiber_key`
-- `vm::types::tests::closed_remote_receiver_uses_endpoint_response_fiber_key`
-- `vm::island_shared::tests::endpoint_response_ignores_stale_fiber_generation_key`
-- `vm::island_shared::tests::endpoint_response_rejects_wrong_wait_source`
-- `vm::island_shared::tests::endpoint_response_rejects_wrong_endpoint_id`
-- `vm::island_shared::tests::endpoint_response_rejects_wrong_response_kind`
-- `vm::tests::runtime_command_island_wake_rejects_stale_generation_key`
+- `vm::types::tests::closed_remote_sender_rejects_direct_endpoint_response_bypass_062`
+- `vm::types::tests::closed_remote_receiver_rejects_direct_endpoint_response_bypass_062`
+- `vm::island_shared::tests::endpoint_response::endpoint_response_ignores_stale_fiber_generation_key`
+- `vm::island_shared::tests::endpoint_response::endpoint_response_rejects_wrong_wait_source`
+- `vm::island_shared::tests::endpoint_response::endpoint_response_rejects_wrong_endpoint_id`
+- `vm::island_shared::tests::endpoint_response::endpoint_response_rejects_wrong_response_kind`
+- `scheduler::tests::runtime_waits::wake_queue_waiter_rejects_stale_generation_key`
 
 ### F10. Host-event wake data can leak into an unrelated extern call
 
@@ -558,10 +558,11 @@ Implemented tests:
 
 Status: implemented by the VM runtime-boundary work.
 
-Queue, select, endpoint response, I/O, host-event, and island wake identities
+Queue, select, endpoint response, I/O, and host-event identities
 now use generation-bearing `FiberWakeKey`/`WaitRegistration` data. The island
-wire format carries `fiber_key: u64` for `WakeFiber`, `EndpointRequest`, and
-`EndpointResponse`, so the high-generation bits are not truncated in transport.
+wire format embeds `EndpointWaitKey` in waiting request/response variants, so
+the high-generation bits are not truncated and the wait ID cannot be zero.
+Close, transfer, and broadcast variants omit the key entirely.
 
 Implemented behavior:
 
@@ -570,11 +571,12 @@ Implemented behavior:
   fiber;
 - select wake additionally validates active `select_id` and case identity;
 - host-event and I/O waits record `WaitRegistration` with `WaitSource`;
-- island wake ingress uses `RuntimeCommand::island_wake`.
+- queue waiters encode queue, select, and endpoint targets as distinct variants,
+  so zero sentinels and split target identities cannot enter the scheduler.
 
 Implemented tests cover raw slot rejection, stale generation rejection,
-source-mismatch rejection, stale select identity, and island command codec
-round-tripping of high generation bits.
+source-mismatch rejection, stale select identity, endpoint response identity,
+and island command codec round-tripping of high generation bits.
 
 ### H2. `jit_extern_suspend` can temporarily hold unscanned GC refs
 

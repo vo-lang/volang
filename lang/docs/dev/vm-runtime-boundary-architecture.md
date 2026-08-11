@@ -386,7 +386,9 @@ pub struct RuntimeTransition {
     pub resume: ResumePolicy,
     pub wakes: Vec<WakeCommand>,
     pub gc_roots: GcRootEffect,
-    pub spawns: Vec<Fiber>,
+    pub island_commands: Vec<IslandCommandEffect>,
+    pub endpoint_tombstones: Vec<EndpointTombstone>,
+    pub spawns: Vec<PendingSpawn>,
 }
 
 pub enum RuntimeBoundary {
@@ -394,27 +396,54 @@ pub enum RuntimeBoundary {
     Done,
     Yield,
     Block(BlockReason),
-    Replay(ReplayRequest),
-    CallClosure(ClosureReplayRequest),
-    Panic(RuntimePanic),
+    Panic(String),
     FatalInfra(String),
 }
 
 pub enum ResumePolicy {
-    NextInstruction,
-    ReplayCurrentInstruction,
+    PreserveFramePc,
+    NextInstruction { pc: u32 },
+    ReplayCurrentInstruction { pc: u32 },
     MaterializeAt { pc: u32 },
 }
 
-pub struct RuntimeCommand {
-    pub source: WaitSource,
-    pub target: RuntimeCommandTarget,
-    pub wake_key: Option<FiberWakeKey>,
-    pub registration: Option<WaitRegistrationKey>,
-    pub source_token: SourceWakeToken,
-    pub resume: ResumePolicy,
-    pub payload: RuntimePayload,
-    pub gc_roots: GcRootEffect,
+pub enum RuntimeCommand {
+    HostEvent {
+        key: HostWaitKey,
+        data: Option<Vec<u8>>,
+    },
+    IoReady {
+        key: IoWaitKey,
+    },
+    EndpointResponse {
+        endpoint_id: u64,
+        from_island: u32,
+        kind: EndpointResponseKind,
+    },
+    EndpointClosed {
+        endpoint_id: u64,
+        from_island: u32,
+    },
+}
+
+pub struct EndpointWaitKey {
+    fiber_key: u64,
+    wait_id: NonZeroU64,
+}
+
+pub enum PreparedQueueAction {
+    Continue,
+    Block(QueueWaitMode),
+    Trap(RuntimeTrapKind),
+    Transition {
+        transition: RuntimeTransition,
+        wait: Option<QueueWaitMode>,
+    },
+}
+
+pub enum QueueWaitMode {
+    Resume,
+    Replay,
 }
 ```
 
@@ -431,6 +460,29 @@ while the current fiber keeps running or yields voluntarily.
 applied, the scheduling loop must keep the current fiber as the next runnable
 fiber when it is still `Running`; otherwise interpreter-only side-effect
 boundaries can drop the current turn while JIT continues, breaking parity.
+
+Queue send, receive, close, and select effects pass through one
+`prepare_queue_action` implementation. It owns endpoint wait allocation,
+rollback attachment, wake construction, close tombstones, and JIT terminal
+policy. The interpreter maps a completed action to `Yield` and a waiting action
+to `Block`; JIT publishes the same transition and exits generated code with
+`RuntimeTransition` or `WaitQueue`. A completed queue effect therefore reaches
+the transition applier before the following bytecode instruction can observe
+queue state. This preserves each backend's scheduling policy without
+duplicating effect construction.
+
+Ordinary buffered sends and direct local sends do not clone the queue or the
+endpoint registry. A direct cross-island delivery carries a narrow rollback
+journal containing the removed receiver plus any endpoint-transfer changes.
+Only multi-item operations such as close and select retain broader snapshots.
+Route and payload validation is performed once before the mutation owned by the
+queue core, keeping both the common local path and failure compensation small.
+
+Waiting endpoint request/response variants embed `EndpointWaitKey`. Its
+non-zero wait ID makes a response obligation structural. Close broadcasts,
+transfer notifications, and other fire-and-forget variants have no place to
+store a wait identity, so zero sentinels and a parallel `pending_response`
+boolean are unnecessary.
 
 JIT callbacks may publish local runtime side effects as pending transitions
 while generated code continues to the next VM boundary. Each pending transition
@@ -459,9 +511,10 @@ changes; a bug exists only if such a committed queue-local mutation can make a
 waiter depend on a pending wake that is later discarded without rollback or
 another commit path.
 
-`RuntimeCommand` is the external-ingress envelope. It is not a second scheduler
-API. The command bridge validates it with the same identity, resume, and GC-root
-rules as an in-fiber transition before any scheduler state is mutated.
+`RuntimeCommand` is the typed external-ingress envelope. The command bridge
+validates the source, target, generation, and registration identity required by
+each variant, then applies that variant's fixed resume and GC-root semantics
+before any scheduler state is mutated.
 
 ## Runtime Boundary
 
@@ -493,7 +546,7 @@ Initial ingress inventory to migrate or wrap includes:
 - `Vm::process_island_commands` and island thread command handlers;
 - endpoint response registration and response delivery;
 - queue/select wake helpers and close wake paths;
-- generic `IslandCommand::WakeFiber` and any equivalent raw slot wake command;
+- typed queue/select wakes produced through `WakeCommand`;
 - `vo-app-runtime` frame, mailbox, and event dispatch;
 - bare `vo-web` async runner wake paths;
 - WASM `runtime-wasm` extern bridge tags, including host event wait and replay;
@@ -526,6 +579,14 @@ Outbound island spawn, endpoint request/response, endpoint close finalization,
 and queue-handle transfer work is represented as `IslandCommandEffect` on
 `RuntimeTransition`; low-level `VmState` send helpers are applier-owned
 transport primitives, not VM opcode/JIT callback publication paths.
+
+An island transport frame serializes `target_island_id`, `source_island_id`,
+and the typed `IslandCommand`. Endpoint request and response payloads do not
+repeat source identity. Decoding validates frame structure only; it does not
+authenticate the encoded source. Public ingress accepts frames only from a
+trusted transport or certified renderer whose owning session controls frame
+production. Arbitrary caller-supplied bytes do not acquire source authority by
+passing the decoder.
 
 Every command that can resume or wake VM work carries:
 
@@ -652,7 +713,6 @@ pub enum WaitSource {
     HostEvent,
     HostEventReplay,
     IslandEndpoint,
-    IslandWake,
 }
 
 pub struct FiberWakeKey {
@@ -717,10 +777,10 @@ Each storage adapter must expose the same semantic contract:
 - dirty-root marking for any wake payload or registration mutation that changes
   blocked-fiber resume state, endpoint state, or another GC-visible root owner.
 
-The implemented wake scope includes host event waiters, I/O waiters, queue
-waiter lists, select waiter state, endpoint responses, and
-`IslandCommand::WakeFiber`. These protocols now use generation-bearing wake
-identity with source-specific validation.
+The implemented wake scope includes host event waiters, I/O waiters, typed
+queue waiter commands, select waiter state, and endpoint responses. These
+protocols use generation-bearing wake identity with source-specific
+validation.
 
 ## Extern ABI
 

@@ -6,8 +6,8 @@ gc_regression_alias = "gc"
 [matrices.default]
 targets = ["vm", "jit", "osr", "nostd", "wasm"]
 
-[matrices.osr-only]
-targets = ["osr"]
+[matrices.osr-contract]
+targets = ["vm", "jit", "osr", "gc-vm", "gc-osr"]
 
 [matrices.native]
 targets = ["vm", "jit", "osr"]
@@ -78,6 +78,13 @@ name = "gc-jit"
 kind = "native"
 backend = "jit"
 env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1", VO_JIT_CALL_THRESHOLD = "1" }
+default_timeout_sec = 90
+
+[[target]]
+name = "gc-osr"
+kind = "native"
+backend = "jit"
+env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1", VO_JIT_CALL_THRESHOLD = "1000", VO_JIT_LOOP_THRESHOLD = "1" }
 default_timeout_sec = 90
 
 [[target]]

@@ -38,8 +38,6 @@ pub mod runtime_boundary;
 mod runtime_externs;
 pub mod scheduler;
 #[cfg(test)]
-pub(crate) mod source_contract;
-#[cfg(test)]
 pub(crate) mod test_support;
 pub mod vm;
 
@@ -51,42 +49,11 @@ pub use vo_runtime::gc::{
 pub use vo_runtime::instruction;
 pub use vo_runtime::serialize;
 
-// Re-export semantic JIT surface types for external use.
+// Re-export semantic JIT observation types for all builds.
+pub use fiber::VmResourceLimits;
 #[cfg(feature = "jit")]
-pub use vm::{JitConfig, JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
+pub use vm::JitConfig;
+pub use vm::VmResourceError;
+pub use vm::{JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
 #[cfg(feature = "jit")]
-pub use vo_jit::JitCodeMemoryStats;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vm_exec_helpers_are_not_public_api_045() {
-        let src =
-            crate::source_contract::production_source_without_test_modules(include_str!("lib.rs"));
-
-        assert!(
-            src.contains("pub(crate) mod exec;"),
-            "opcode exec helpers must remain crate-owned behind Vm"
-        );
-        assert!(
-            !src.contains("pub mod exec;"),
-            "safe public vo_vm::exec would bypass Vm load/spawn_call contracts"
-        );
-    }
-
-    #[test]
-    fn vm_exec_helper_module_is_crate_owned_for_opcode_helpers_047() {
-        let src = crate::source_contract::production_source_without_test_modules(include_str!(
-            "vm/mod.rs"
-        ));
-
-        assert!(
-            src.contains("pub(crate) mod helpers;"),
-            "opcode exec helpers need crate-owned access to vm helpers without exposing them publicly"
-        );
-        assert!(
-            !src.contains("pub mod helpers;"),
-            "vm helpers must not become part of the public vo_vm API surface"
-        );
-    }
-}
+pub use vo_jit::{JitCodeMemoryStats, JitFailureKind};

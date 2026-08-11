@@ -5,7 +5,7 @@
 
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::jit_api::{
-    set_jit_infra_error, DynCallIC, JitContext, JitResult, JitRuntimeTrapKind, PreparedCall,
+    set_jit_infra_error, JitContext, JitResult, JitRuntimeTrapKind, PreparedCall,
     JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_MISSING_CALLBACK,
     JIT_INFRA_ERROR_SENTINEL,
 };
@@ -25,19 +25,15 @@ use crate::frame_call::{
 
 use super::helpers::{record_runtime_trap, validate_callback_context};
 
+/// Look up an eligible function in the shared JIT table.
+///
+/// Eligibility is selected by the caller because prepared closure calls own a
+/// complete shadow stack window, while interface IC entries must remain safe
+/// for frame-elided hits.
 #[inline]
-fn can_use_direct_call_table_entry(func_def: &FunctionDef) -> bool {
-    vo_jit::can_elide_frame_for_direct_jit(func_def)
-}
-
-/// Look up a function in the direct_call_table for JIT-to-JIT fast path.
-/// Returns non-null only when callee is a no-defer leaf accepted by
-/// vo_jit::can_elide_frame_for_direct_jit. The local predicate keeps the callback safe
-/// even if an older or test-built table is over-populated.
-#[inline]
-fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef) -> *const u8 {
-    if can_use_direct_call_table_entry(func_def) && func_id < ctx.direct_call_count {
-        unsafe { *ctx.direct_call_table.add(func_id as usize) }
+fn lookup_jit_ptr(table: *const *const u8, count: u32, func_id: u32, eligible: bool) -> *const u8 {
+    if eligible && !table.is_null() && func_id < count {
+        unsafe { *table.add(func_id as usize) }
     } else {
         core::ptr::null()
     }
@@ -46,7 +42,7 @@ fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef
 #[inline]
 unsafe fn write_trapped_prepared_call(out: *mut PreparedCall) {
     if !out.is_null() && (out as usize).is_multiple_of(core::mem::align_of::<PreparedCall>()) {
-        *out = PreparedCall::vm_materialization(0, 0);
+        *out = PreparedCall::default();
     }
 }
 
@@ -79,8 +75,6 @@ struct PreparedCallShape {
     user_arg_count: u32,
     expected_ret_slots: u32,
     ret_slots: u32,
-    user_args: *const u64,
-    ret_ptr: *mut u64,
 }
 
 #[inline]
@@ -89,9 +83,6 @@ fn validate_prepared_call_shape(
     out: *mut PreparedCall,
     shape: PreparedCallShape,
 ) -> Option<JitResult> {
-    if out.is_null() {
-        return Some(reject_prepared_call_state(ctx, out, 0));
-    }
     if shape.user_arg_count as usize != shape.expected_user_arg_count {
         return Some(reject_prepared_call_state(
             ctx,
@@ -100,16 +91,6 @@ fn validate_prepared_call_shape(
         ));
     }
     if shape.ret_slots != shape.expected_ret_slots {
-        return Some(reject_prepared_call_state(ctx, out, shape.ret_slots as u64));
-    }
-    if shape.user_arg_count != 0 && shape.user_args.is_null() {
-        return Some(reject_prepared_call_state(
-            ctx,
-            out,
-            shape.user_arg_count as u64,
-        ));
-    }
-    if shape.ret_slots != 0 && shape.ret_ptr.is_null() {
         return Some(reject_prepared_call_state(ctx, out, shape.ret_slots as u64));
     }
     None
@@ -121,28 +102,14 @@ fn validate_prepared_call_raw_abi(
     out: *mut PreparedCall,
     user_args: *const u64,
     user_arg_count: u32,
-    ret_ptr: *mut u64,
-    ret_slots: u32,
 ) -> Option<JitResult> {
     if out.is_null() || !(out as usize).is_multiple_of(core::mem::align_of::<PreparedCall>()) {
         return Some(reject_prepared_call_state(ctx, out, 0));
     }
-    if u16::try_from(user_arg_count).is_err() || u16::try_from(ret_slots).is_err() {
-        return Some(reject_prepared_call_state(
-            ctx,
-            out,
-            u64::from(user_arg_count.max(ret_slots)),
-        ));
-    }
     if user_arg_count != 0 && user_args.is_null() {
         return Some(reject_prepared_call_state(ctx, out, user_arg_count as u64));
     }
-    if ret_slots != 0 && ret_ptr.is_null() {
-        return Some(reject_prepared_call_state(ctx, out, ret_slots as u64));
-    }
-    if (user_arg_count != 0 && !(user_args as usize).is_multiple_of(core::mem::align_of::<u64>()))
-        || (ret_slots != 0 && !(ret_ptr as usize).is_multiple_of(core::mem::align_of::<u64>()))
-    {
+    if user_arg_count != 0 && !(user_args as usize).is_multiple_of(core::mem::align_of::<u64>()) {
         return Some(reject_prepared_call_state(ctx, out, 0));
     }
     None
@@ -284,7 +251,8 @@ fn validate_jit_iface_callsite(
 /// Prepare a closure call for JIT dispatch.
 ///
 /// Always does push_frame + arg layout so callee_args_ptr is valid for both paths.
-/// jit_func_ptr is non-null only when callee is in direct_call_table (safe for fast path).
+/// The prepared shadow window allows compiled callees that do not need to
+/// observe or own a materialized `Fiber::CallFrame`.
 pub extern "C" fn jit_prepare_closure_call(
     ctx: *mut JitContext,
     closure_ref: u64,
@@ -293,7 +261,6 @@ pub extern "C" fn jit_prepare_closure_call(
     caller_resume_pc: u32,
     user_args: *const u64,
     user_arg_count: u32,
-    ret_ptr: *mut u64,
     out: *mut PreparedCall,
 ) -> JitResult {
     if let Err(result) = validate_callback_context(
@@ -304,14 +271,14 @@ pub extern "C" fn jit_prepare_closure_call(
         return result;
     }
     let ctx = unsafe { &mut *ctx };
-    if ctx.direct_call_count != 0 && ctx.direct_call_table.is_null() {
-        let detail = ctx.direct_call_count as u64;
+    if ctx.jit_func_count != 0 && ctx.jit_func_table.is_null() {
+        let detail = ctx.jit_func_count as u64;
         return reject_prepared_call_state(ctx, out, detail);
     }
-    let module = unsafe { &*(ctx.module) };
-    if let Some(result) =
-        validate_prepared_call_raw_abi(ctx, out, user_args, user_arg_count, ret_ptr, ret_slots)
-    {
+    let module_ptr = unsafe { ctx.module_ptr() };
+    let module =
+        unsafe { module_ptr.as_ref() }.expect("validated JIT callback context must carry a module");
+    if let Some(result) = validate_prepared_call_raw_abi(ctx, out, user_args, user_arg_count) {
         return result;
     }
     let callsite_pc = match validate_prepared_call_resume_pc(ctx, out, caller_resume_pc) {
@@ -359,8 +326,6 @@ pub extern "C" fn jit_prepare_closure_call(
             user_arg_count,
             expected_ret_slots: func_def.ret_slots as u32,
             ret_slots,
-            user_args,
-            ret_ptr,
         },
     ) {
         return result;
@@ -374,12 +339,14 @@ pub extern "C" fn jit_prepare_closure_call(
         return result;
     }
 
-    // 2. Determine if callee can use JIT fast path
-    let jit_func_ptr = if layout.receiver_capture_count > 1 {
-        core::ptr::null()
-    } else {
-        lookup_direct_call_ptr(ctx, func_id, func_def)
-    };
+    // 2. The callback prepares a complete callee stack window below. A non-OK
+    // result materializes its CallFrame before VM-owned handling resumes.
+    let jit_func_ptr = lookup_jit_ptr(
+        ctx.jit_func_table,
+        ctx.jit_func_count,
+        func_id,
+        vo_jit::can_enter_prepared_shadow_frame_for_jit(func_def),
+    );
 
     // 3. push_frame: always allocate callee frame on fiber.stack.
     //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
@@ -416,27 +383,13 @@ pub extern "C" fn jit_prepare_closure_call(
         }
     }
 
-    // Determine slot0_kind for IC population
-    // Safety: closure_gcref passed the object-kind and layout validation above.
-    let cap_count = unsafe { closure::capture_count(closure_gcref) };
-    let slot0_kind = if layout.receiver_capture_count == 1 {
-        DynCallIC::SLOT0_CAPTURE0
-    } else if cap_count > 0 || func_def.is_closure {
-        DynCallIC::SLOT0_CLOSURE_REF
-    } else {
-        DynCallIC::SLOT0_NONE
-    };
-
     unsafe {
         *out = PreparedCall {
             jit_func_ptr,
             callee_args_ptr,
-            ret_ptr,
+            ic_jit_func_ptr: core::ptr::null(),
             callee_local_slots: local_slots as u32,
             func_id,
-            arg_offset: arg_offset as u32,
-            slot0_kind,
-            is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
     }
     JitResult::Ok
@@ -455,7 +408,6 @@ pub extern "C" fn jit_prepare_iface_call(
     caller_resume_pc: u32,
     user_args: *const u64,
     user_arg_count: u32,
-    ret_ptr: *mut u64,
     out: *mut PreparedCall,
 ) -> JitResult {
     use vo_runtime::objects::interface;
@@ -468,17 +420,18 @@ pub extern "C" fn jit_prepare_iface_call(
         return result;
     }
     let ctx_ref = unsafe { &mut *ctx };
-    if ctx_ref.direct_call_count != 0 && ctx_ref.direct_call_table.is_null() {
-        let detail = ctx_ref.direct_call_count as u64;
+    if ctx_ref.jit_func_count != 0 && ctx_ref.jit_func_table.is_null() {
+        let detail = ctx_ref.jit_func_count as u64;
         return reject_prepared_call_state(ctx_ref, out, detail);
     }
-    let module = unsafe { &*(ctx_ref.module) };
+    let module_ptr = unsafe { ctx_ref.module_ptr() };
+    let Some(module) = (unsafe { module_ptr.as_ref() }) else {
+        return reject_prepared_call_state(ctx_ref, out, 0);
+    };
     let Some(itab_cache) = (unsafe { ctx_ref.itab_cache.as_ref() }) else {
         return reject_prepared_call_state(ctx_ref, out, 0);
     };
-    if let Some(result) =
-        validate_prepared_call_raw_abi(ctx_ref, out, user_args, user_arg_count, ret_ptr, ret_slots)
-    {
+    if let Some(result) = validate_prepared_call_raw_abi(ctx_ref, out, user_args, user_arg_count) {
         return result;
     }
     let callsite_pc = match validate_prepared_call_resume_pc(ctx_ref, out, caller_resume_pc) {
@@ -575,8 +528,6 @@ pub extern "C" fn jit_prepare_iface_call(
             user_arg_count,
             expected_ret_slots: func_def.ret_slots as u32,
             ret_slots,
-            user_args,
-            ret_ptr,
         },
     ) {
         return result;
@@ -599,8 +550,20 @@ pub extern "C" fn jit_prepare_iface_call(
         return result;
     }
 
-    // 2. Determine if callee can use JIT fast path
-    let jit_func_ptr = lookup_direct_call_ptr(ctx_ref, func_id, func_def);
+    // 2. The prepared miss owns a shadow stack window. IC hits do not, so they
+    // receive a separate pointer gated by the stricter frame-elision contract.
+    let eligibility = vo_jit::jit_frame_entry_eligibility(func_def);
+    let jit_func_ptr = lookup_jit_ptr(
+        ctx_ref.jit_func_table,
+        ctx_ref.jit_func_count,
+        func_id,
+        eligibility.frame_elided || eligibility.prepared_shadow,
+    );
+    let ic_jit_func_ptr = if eligibility.frame_elided {
+        jit_func_ptr
+    } else {
+        core::ptr::null()
+    };
 
     // 3. push_frame: always allocate callee frame on fiber.stack
     let Some(push_frame_fn) = ctx_ref.push_frame_fn else {
@@ -632,12 +595,9 @@ pub extern "C" fn jit_prepare_iface_call(
         *out = PreparedCall {
             jit_func_ptr,
             callee_args_ptr,
-            ret_ptr,
+            ic_jit_func_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
-            arg_offset: recv_slots as u32,
-            slot0_kind: DynCallIC::SLOT0_IFACE_RECEIVER,
-            is_leaf: (!func_def.has_calls && !func_def.has_call_extern) as u32,
         };
     }
     JitResult::Ok

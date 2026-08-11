@@ -238,6 +238,129 @@ fn cache_miss_compiles_the_captured_project_snapshot_after_a_live_edit() {
 }
 
 #[test]
+fn cache_entry_for_captured_generation_survives_a_prepublication_edit() {
+    let root = temp_dir("vo_compile_cache_prepublication_edit");
+    fs::create_dir_all(&root).expect("create cache generation test root");
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"github.com/acme/cache-generation\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .expect("write cache generation manifest");
+    let entry = root.join("main.vo");
+    let captured_source = "package main\ntype CapturedGeneration struct{}\nfunc main() {}\n";
+    fs::write(&entry, captured_source).expect("write captured generation");
+
+    let mut context = super::load_real_path_compile_context_with_options(
+        &root,
+        &vo_module::project::ProjectContextOptions::default(),
+    )
+    .expect("load cache generation context");
+    context.mod_cache = context
+        .mod_cache
+        .canonicalize()
+        .unwrap_or_else(|_| context.mod_cache.clone());
+    let stdlib_fingerprint = vo_stdlib::EmbeddedStdlib::new().source_fingerprint();
+    let captured =
+        super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
+            .expect("capture cache generation");
+    let fingerprint = captured.fingerprint().to_string();
+    let output =
+        super::compile_source_at(captured_source, &root).expect("compile cache generation payload");
+    let slot = super::cache::compile_cache_slot(&root, None);
+    super::cache::save_compile_cache(&slot, &fingerprint, &output);
+
+    fs::write(
+        &entry,
+        "package main\ntype NewGeneration struct{}\nfunc main() {}\n",
+    )
+    .expect("edit source before final publication validation");
+    let error =
+        super::validate_live_compile_input_generation(&context, &stdlib_fingerprint, &fingerprint)
+            .expect_err("changed live generation must reject this invocation");
+    assert_eq!(
+        error.module_system().map(|error| error.kind()),
+        Some(super::ModuleSystemErrorKind::Mismatch),
+    );
+    assert!(
+        super::cache::try_load_cache(&slot, &root, &fingerprint).is_some(),
+        "the immutable old-generation cache entry remains valid for its content fingerprint",
+    );
+
+    fs::remove_dir_all(root).expect("remove cache generation test root");
+}
+
+#[test]
+fn cache_miss_scans_the_input_closure_only_for_capture_and_final_validation() {
+    let root = temp_dir("vo_compile_cache_scan_count");
+    let module_cache = root.join("module-cache");
+    fs::create_dir_all(&root).expect("create cache scan test root");
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"github.com/acme/cache-scan\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .expect("write cache scan manifest");
+    fs::write(root.join("main.vo"), "package main\nfunc main() {}\n")
+        .expect("write cache scan source");
+    let canonical_root = root.canonicalize().expect("canonicalize cache scan root");
+    let before = super::host_input::directory_enumeration_count(&canonical_root);
+
+    super::with_mod_cache_root_override(&module_cache, || {
+        super::compile_with_cache_with_options(
+            root.to_str().unwrap(),
+            &vo_module::project::ProjectContextOptions::default(),
+        )
+        .expect("compile cache miss");
+    });
+
+    let enumerations = super::host_input::directory_enumeration_count(&canonical_root) - before;
+    assert_eq!(
+        enumerations, 8,
+        "a miss performs two bounded capture passes and two bounded final-validation passes",
+    );
+    fs::remove_dir_all(root).expect("remove cache scan test root");
+}
+
+#[test]
+fn prepared_compile_output_revalidates_its_original_project_generation() {
+    let root = temp_dir("vo_prepared_compile_generation");
+    let module_cache = root.join("module-cache");
+    fs::create_dir_all(&root).expect("create prepared generation test root");
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"github.com/acme/prepared-generation\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .expect("write prepared generation manifest");
+    let entry = root.join("main.vo");
+    fs::write(&entry, "package main\nfunc main() {}\n").expect("write prepared generation source");
+
+    let prepared = super::with_mod_cache_root_override(&module_cache, || {
+        super::compile_with_auto_install_prepared_with_options(
+            root.to_str().unwrap(),
+            &vo_module::project::ProjectContextOptions::default(),
+        )
+        .expect("prepare guarded compile output")
+    });
+    prepared
+        .validate_generation()
+        .expect("unchanged prepared generation");
+    assert!(!prepared.output().module.functions.is_empty());
+
+    fs::write(
+        &entry,
+        "package main\ntype ChangedAfterCompile struct{}\nfunc main() {}\n",
+    )
+    .expect("change prepared generation source");
+    let error = prepared
+        .into_validated_output()
+        .expect_err("changed prepared generation must be rejected");
+    assert_eq!(
+        error.module_system().map(|error| error.kind()),
+        Some(super::ModuleSystemErrorKind::Mismatch),
+    );
+    fs::remove_dir_all(root).expect("remove prepared generation test root");
+}
+
+#[test]
 fn generated_sources_extend_only_the_captured_compile_snapshot_authority() {
     let root = temp_dir("vo_compile_generated_snapshot_authority");
     fs::create_dir_all(&root).expect("create generated snapshot test root");

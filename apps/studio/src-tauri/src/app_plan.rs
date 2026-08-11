@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -26,7 +27,6 @@ const MAX_HOST_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct FrameworkProviderBinding {
-    pub module_key: String,
     pub capabilities: Vec<vo_app_runtime::CapabilityId>,
     pub providers: Vec<FrameworkProviderTemplateBinding>,
 }
@@ -40,7 +40,7 @@ pub(crate) struct FrameworkProviderTemplateBinding {
 pub(crate) fn framework_provider_bindings(
     runtime: &vo_web::BrowserRuntimePlan,
     plan: &ResolvedAppRuntimePlan,
-) -> Result<Vec<FrameworkProviderBinding>, String> {
+) -> Result<BTreeMap<String, FrameworkProviderBinding>, String> {
     let mut frameworks = runtime.graph.frameworks.iter().collect::<Vec<_>>();
     frameworks.sort_by(|left, right| {
         left.module_key
@@ -89,23 +89,25 @@ pub(crate) fn framework_provider_bindings(
                 .collect::<Vec<_>>();
             capabilities.sort();
             capabilities.dedup();
-            Ok(FrameworkProviderBinding {
-                module_key: framework.module_key.clone(),
-                capabilities,
-                providers: providers
-                    .into_iter()
-                    .map(|provider| FrameworkProviderTemplateBinding {
-                        template_id: provider.template.template_id,
-                        loaded: LoadedProviderFactory {
-                            factory_id: provider.template.factory.factory_id,
-                            artifact_digest: provider.template.factory.artifact_digest,
-                            role: provider.template.role,
-                            abi_fingerprint: provider.template.factory.abi_fingerprint,
-                            schema_fingerprint: provider.template.factory.schema_fingerprint,
-                        },
-                    })
-                    .collect(),
-            })
+            Ok((
+                framework.module_key.clone(),
+                FrameworkProviderBinding {
+                    capabilities,
+                    providers: providers
+                        .into_iter()
+                        .map(|provider| FrameworkProviderTemplateBinding {
+                            template_id: provider.template.template_id,
+                            loaded: LoadedProviderFactory {
+                                factory_id: provider.template.factory.factory_id,
+                                artifact_digest: provider.template.factory.artifact_digest,
+                                role: provider.template.role,
+                                abi_fingerprint: provider.template.factory.abi_fingerprint,
+                                schema_fingerprint: provider.template.factory.schema_fingerprint,
+                            },
+                        })
+                        .collect(),
+                },
+            ))
         })
         .collect()
 }

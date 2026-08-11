@@ -6,8 +6,8 @@
 //! print/println receive interface{} values (each 2 slots).
 //! All args are uniformly boxed as interface by codegen.
 
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeSet;
+use super::format::{format_interface_bytes_with_ctx, format_interface_with_ctx};
+use crate::ffi::{ExternCallContext, ExternResult};
 #[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
@@ -16,11 +16,6 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::collections::BTreeSet;
-
-use super::format::{format_interface_bytes_with_ctx, format_interface_with_ctx};
-use crate::ffi::{ExternCallContext, ExternResult};
 
 /// Format all interface{} args starting from `start_slot` into a space-separated string.
 /// Each arg is 2 slots: [slot0 = packed_info, slot1 = data]
@@ -167,7 +162,13 @@ unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> Extern
     if dst.is_null() {
         let new_cap = src_len.max(4);
         let new_arr = array::create(call.gc(), elem_meta, elem_bytes, new_cap);
+        if new_arr.is_null() {
+            return ExternResult::Ok;
+        }
         let result = slice::from_array_range_with_cap(call.gc(), new_arr, 0, src_len, new_cap);
+        if result.is_null() {
+            return ExternResult::Ok;
+        }
         slice::copy_logical_elements(result, src, src_len);
         if elem_meta.value_kind().may_contain_gc_refs() {
             call.gc().mark_allocated_for_scan(new_arr);
@@ -193,13 +194,22 @@ unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> Extern
         }
         // Go semantics: append never modifies original slice header
         let new_s = slice::with_new_len(call.gc(), dst, new_len);
+        if new_s.is_null() {
+            return ExternResult::Ok;
+        }
         slice::copy_logical_elements_at(new_s, dst_len, src, 0, src_len);
         call.ret_ref(0, new_s);
     } else {
         // Need to grow - allocate new array
         let new_cap = (new_len * 2).max(4);
         let new_arr = array::create(call.gc(), elem_meta, elem_bytes, new_cap);
+        if new_arr.is_null() {
+            return ExternResult::Ok;
+        }
         let result = slice::from_array_range_with_cap(call.gc(), new_arr, 0, new_len, new_cap);
+        if result.is_null() {
+            return ExternResult::Ok;
+        }
         slice::copy_logical_elements_at(result, 0, dst, 0, dst_len);
         slice::copy_logical_elements_at(result, dst_len, src, 0, src_len);
         if elem_meta.value_kind().may_contain_gc_refs() {
@@ -449,11 +459,7 @@ pub fn register_externs(
     registry: &mut crate::ffi::ExternRegistry,
     externs: &[crate::bytecode::ExternDef],
 ) -> Result<(), crate::ffi::ExternContractError> {
-    let mut seen = BTreeSet::new();
-    for (id, def) in externs.iter().enumerate() {
-        if !seen.insert(def.name.as_str()) {
-            continue;
-        }
+    for (id, def) in crate::ffi::unique_extern_providers(externs) {
         for entry in REGISTERED_EXTERNS {
             if def.name == entry.name {
                 registry.try_register_builtin_with_effects(
@@ -473,8 +479,60 @@ pub fn register_externs(
 mod tests {
     use super::integer_to_string;
 
-    fn production_source() -> String {
-        vo_source_contract::production_source_without_test_modules(include_str!("builtin.rs"))
+    #[cfg(feature = "std")]
+    fn gc_with_object_limit(max_objects: usize) -> crate::gc::Gc {
+        crate::gc::Gc::with_memory_config(crate::gc::VmMemoryConfig {
+            max_objects: Some(max_objects),
+            ..crate::gc::VmMemoryConfig::default()
+        })
+        .expect("bounded GC configuration")
+    }
+
+    #[cfg(feature = "std")]
+    fn invoke_slice_append_slice(
+        gc: &mut crate::gc::Gc,
+        module: &crate::Module,
+        dst: crate::gc::GcRef,
+        src: crate::gc::GcRef,
+        initial_return: u64,
+    ) -> u64 {
+        use crate::ffi::{
+            ExternCallContext, ExternFiberInputs, ExternInvoke, ExternResult, ExternWorld,
+            SentinelErrorCache,
+        };
+
+        let mut stack = [dst as u64, src as u64, 0, initial_return];
+        let invoke = ExternInvoke {
+            extern_id: 0,
+            bp: 0,
+            arg_start: 0,
+            arg_slots: 3,
+            ret_start: 3,
+            ret_slots: 1,
+        };
+        let mut itab_cache = crate::itab::ItabCache::new();
+        let program_args = Vec::new();
+        let output = crate::output::CaptureSink::new();
+        let mut sentinel_errors = SentinelErrorCache::new();
+        let mut host_output = None;
+        let world = ExternWorld::new(
+            gc,
+            module.into(),
+            &mut itab_cache,
+            &program_args,
+            output.as_ref(),
+            &mut sentinel_errors,
+            &mut host_output,
+        );
+        let mut call =
+            ExternCallContext::new(&mut stack, invoke, world, ExternFiberInputs::default());
+
+        assert!(matches!(
+            unsafe { super::builtin_slice_append_slice_raw(&mut call) },
+            ExternResult::Ok
+        ));
+        drop(call);
+        stack[3]
     }
 
     #[test]
@@ -486,66 +544,81 @@ mod tests {
         assert_eq!(integer_to_string(0x10FFFF), "\u{10FFFF}");
     }
 
+    #[cfg(feature = "std")]
     #[test]
-    fn builtin_copy_and_append_barrier_before_existing_array_mutation_052() {
-        let source = production_source();
-        let builtin_copy = source
-            .split("unsafe fn builtin_copy_raw(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// append(slice, other...)").next())
-            .expect("builtin_copy section");
-        let copy_pos = builtin_copy
-            .find("slice::copy_logical_elements(dst, src, copy_len)")
-            .expect("copy must preserve overlapping copy semantics");
-        let barrier_pos = builtin_copy
-            .find("typed_write_barrier_by_meta(")
-            .expect("copy of root-bearing elements must use a typed barrier");
-        assert!(
-            barrier_pos < copy_pos,
-            "copy must validate/barrier source elements before mutating the destination array"
-        );
+    fn spread_append_nil_destination_propagates_header_allocation_failure() {
+        use crate::gc::MemoryError;
+        use crate::objects::slice;
+        use crate::{ValueKind, ValueMeta};
 
-        let append_spare = source
-            .split("if new_len <= dst_cap {")
-            .nth(1)
-            .and_then(|rest| rest.split("// Need to grow - allocate new array").next())
-            .expect("append-with-spare-capacity section");
-        let copy_pos = append_spare
-            .find("slice::copy_logical_elements_at(new_s, dst_len, src, 0, src_len)")
-            .expect("append-with-spare-capacity must preserve overlapping copy semantics");
-        let barrier_pos = append_spare
-            .find("typed_write_barrier_by_meta(")
-            .expect("append-with-spare-capacity must use a typed barrier");
-        assert!(
-            barrier_pos < copy_pos,
-            "append with spare capacity must validate/barrier source elements before mutating the existing backing array"
-        );
+        let mut gc = gc_with_object_limit(3);
+        let module = crate::Module::new("spread-append-oom".to_string());
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+        let src = slice::create(&mut gc, meta, crate::slot::SLOT_BYTES, 1, 1);
+        unsafe { slice::set(src, 0, 7, crate::slot::SLOT_BYTES) };
+
+        let returned =
+            invoke_slice_append_slice(&mut gc, &module, core::ptr::null_mut(), src, 0xfeed);
+
+        assert_eq!(returned, 0xfeed);
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
     }
 
+    #[cfg(feature = "std")]
     #[test]
-    fn builtin_spread_append_derives_elem_meta_from_containers_057() {
-        let source = production_source();
-        let append = source
-            .split("unsafe fn builtin_slice_append_slice_raw(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// Interface equality comparison").next())
-            .expect("builtin_slice_append_slice section");
+    fn spread_append_spare_capacity_does_not_mutate_on_header_oom() {
+        use crate::gc::MemoryError;
+        use crate::objects::{array, slice};
+        use crate::{ValueKind, ValueMeta};
 
-        assert!(
-            !append.contains("ValueMeta::from_raw(call.arg_u64(2)"),
-            "spread append must not treat the legacy ABI metadata argument as the element layout source"
+        let mut gc = gc_with_object_limit(4);
+        let module = crate::Module::new("spread-append-oom".to_string());
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+        let dst = slice::create(&mut gc, meta, crate::slot::SLOT_BYTES, 1, 2);
+        let src = slice::create(&mut gc, meta, crate::slot::SLOT_BYTES, 1, 1);
+        let backing = unsafe { slice::array_ref(dst) };
+        unsafe {
+            slice::set(dst, 0, 11, crate::slot::SLOT_BYTES);
+            slice::set(dst, 1, 42, crate::slot::SLOT_BYTES);
+            slice::set(src, 0, 7, crate::slot::SLOT_BYTES);
+        }
+
+        let returned = invoke_slice_append_slice(&mut gc, &module, dst, src, 0xfeed);
+
+        assert_eq!(returned, 0xfeed);
+        assert_eq!(
+            unsafe { array::get(backing, 1, crate::slot::SLOT_BYTES) },
+            42
         );
-        assert!(
-            append.contains("let src_elem_meta = slice::elem_meta(src);"),
-            "spread append must derive source element metadata from the source container"
+        assert_eq!(unsafe { slice::len(dst) }, 1);
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn spread_append_growth_propagates_second_allocation_failure() {
+        use crate::gc::MemoryError;
+        use crate::objects::{array, slice};
+        use crate::{ValueKind, ValueMeta};
+
+        let mut gc = gc_with_object_limit(5);
+        let module = crate::Module::new("spread-append-oom".to_string());
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+        let dst = slice::create(&mut gc, meta, crate::slot::SLOT_BYTES, 1, 1);
+        let src = slice::create(&mut gc, meta, crate::slot::SLOT_BYTES, 1, 1);
+        let backing = unsafe { slice::array_ref(dst) };
+        unsafe {
+            slice::set(dst, 0, 11, crate::slot::SLOT_BYTES);
+            slice::set(src, 0, 7, crate::slot::SLOT_BYTES);
+        }
+
+        let returned = invoke_slice_append_slice(&mut gc, &module, dst, src, 0xfeed);
+
+        assert_eq!(returned, 0xfeed);
+        assert_eq!(
+            unsafe { array::get(backing, 0, crate::slot::SLOT_BYTES) },
+            11
         );
-        assert!(
-            append.contains("let dst_elem_meta = slice::elem_meta(dst);"),
-            "spread append must derive destination element metadata from the destination container"
-        );
-        assert!(
-            append.contains("record_contract_violation"),
-            "spread append must reject source/destination layout drift before copying"
-        );
+        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
     }
 }

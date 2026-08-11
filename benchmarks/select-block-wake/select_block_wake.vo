@@ -1,0 +1,49 @@
+package main
+
+const selectIterations = 262144
+
+func selectCoordinator(gate chan int, jobs chan int, done chan int) {
+	for i := 0; i < selectIterations; i++ {
+		token := <-gate
+		jobs <- token
+	}
+	done <- 1
+}
+
+func selectCourier(jobs chan int, left chan int, right chan int, done chan int) {
+	for i := 0; i < selectIterations; i++ {
+		token := <-jobs
+		value := (token & 1023) + 1
+		if (token & 1) == 0 {
+			left <- value
+		} else {
+			right <- value
+		}
+	}
+	done <- 1
+}
+
+func main() {
+	gate := make(chan int)
+	jobs := make(chan int)
+	left := make(chan int)
+	right := make(chan int)
+	done := make(chan int, 2)
+	go selectCourier(jobs, left, right, done)
+	go selectCoordinator(gate, jobs, done)
+	checksum := 0
+	for i := 0; i < selectIterations; i++ {
+		gate <- i
+		select {
+			case value := <-left:
+				checksum += value
+			case value := <-right:
+				checksum += value
+		}
+	}
+	<-done
+	<-done
+	expected := (selectIterations / 1024) * (1024 * 1025 / 2)
+	assert(checksum == expected, "select block/wake checksum mismatch")
+	println(checksum)
+}

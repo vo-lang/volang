@@ -6,7 +6,7 @@
     restartRendererBridge,
     isRendererBridgeActive,
     loadHostBridgeModule, unloadHostBridgeModule,
-    fetchVfsSnapshot,
+    combineHostBridgeModules,
     type HostBridgeModule,
     type VfsSnapshot,
   } from '../lib/gui/renderer_bridge';
@@ -62,6 +62,8 @@
   let rendererBridgeActive = false;
   let rendererBridgeLaunching = false;
   let rendererBridgeLaunchGeneration = 0;
+  let rendererBridgeLaunchAbort: AbortController | null = null;
+  let rendererBridgeLaunchingSessionId: number | null = null;
   let rendererBridgeSessionId: number | null = null;
   let rendererBridgeFailedSessionId: number | null = null;
   let rendererBridgeError: string | null = null;
@@ -153,23 +155,6 @@
     previewPanelSharedState.rendererSurfaceHosts.delete(sessionId);
   }
 
-  function combineHostBridgeModules(modules: HostBridgeModule[]): HostBridgeModule {
-    return {
-      buildImports(ctx) {
-        const imports: Record<string, (...args: number[]) => number | void> = {};
-        for (const module of modules) {
-          const next = module.buildImports(ctx);
-          for (const [name, handler] of Object.entries(next)) {
-            if (!(name in imports)) {
-              imports[name] = handler;
-            }
-          }
-        }
-        return imports;
-      },
-    };
-  }
-
   $: isGuiApp = $runtime.kind === 'gui' && $runtime.isRunning;
   $: guiFramework = $runtime.gui.framework;
   $: providerFrameworks = $runtime.gui.providerFrameworks;
@@ -187,6 +172,15 @@
   $: if (!isGuiApp) {
     rendererBridgeError = null;
     rendererBridgeFailedSessionId = null;
+  }
+
+  $: if (
+    rendererBridgeLaunchingSessionId != null
+    && $runtime.gui.sessionId !== rendererBridgeLaunchingSessionId
+  ) {
+    rendererBridgeLaunchGeneration += 1;
+    rendererBridgeLaunchAbort?.abort(new Error('Renderer bridge session changed during startup'));
+    stopRendererBridge(rendererBridgeLaunchingSessionId);
   }
 
   // Launch renderer bridge when GUI app with renderer becomes active.
@@ -238,20 +232,23 @@
     && rendererBridgeSessionId != null
     && registry
     && $runtime.gui.gameRenderBytes
+    && $runtime.gui.vfsSnapshot
     && $runtime.gui.gameRenderBytes !== lastGameRenderBytes
   ) {
     const bytes = $runtime.gui.gameRenderBytes;
+    const sessionId = rendererBridgeSessionId;
+    const vfsSnapshot = $runtime.gui.vfsSnapshot;
     lastGameRenderBytes = bytes;
-    void deliverGameRenderBytes(rendererBridgeSessionId, bytes)
+    void deliverGameRenderBytes(sessionId, bytes)
       .then((result) => (
         result
-          ? registry?.runtime.submitGameRenderResult(result, rendererBridgeSessionId!)
+          ? registry?.runtime.submitGameRenderResult(result, sessionId)
           : undefined
       ))
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         rendererBridgeError = message;
-        void recoverRendererBridge(rendererBridgeSessionId!, message);
+        void recoverRendererBridge(sessionId, message, vfsSnapshot);
       });
   }
 
@@ -310,6 +307,9 @@
     if (!registry || rendererBridgeLaunching) return;
     const launchGeneration = ++rendererBridgeLaunchGeneration;
     const sessionId = $runtime.gui.sessionId;
+    const launchAbort = new AbortController();
+    rendererBridgeLaunchAbort = launchAbort;
+    rendererBridgeLaunchingSessionId = sessionId;
     rendererBridgeLaunching = true;
     try {
       const moduleBytes = $runtime.gui.moduleBytes;
@@ -322,18 +322,14 @@
       if ($runtime.gui.sessionId !== sessionId || !($runtime.kind === 'gui' && $runtime.isRunning)) {
         return;
       }
-      // Fetch VFS snapshot once and share across all framework module loaders.
+      // Share the launch-bound VFS snapshot across all framework module loaders.
       const framework = $runtime.gui.framework;
       const providerFrameworks = $runtime.gui.providerFrameworks;
       const artifactPlan = planFrameworkArtifacts(framework, providerFrameworks);
       const bridgeFrameworks = artifactPlan.frameworks;
-      let vfsSnapshot: VfsSnapshot | undefined;
-      let vfsFiles: VfsSnapshot['files'] | undefined;
-      const needsVfs = artifactPlan.needsVfs;
-      if (needsVfs && registry) {
-        vfsSnapshot = await fetchVfsSnapshot(registry.backend, entryPath, sessionId);
-        vfsFiles = vfsSnapshot.files;
-      }
+      const vfsSnapshot = $runtime.gui.vfsSnapshot;
+      if (!vfsSnapshot) throw new Error('Renderer bridge VFS snapshot is unavailable');
+      const vfsFiles = vfsSnapshot.files;
       const hostBridgeModules: HostBridgeModule[] = [];
       for (const provider of bridgeFrameworks) {
         const hostBridgePath = frameworkJsModulePath(provider, 'host_bridge');
@@ -344,11 +340,12 @@
           hostBridgeModules.push(await loadHostBridgeModule(
             sessionId,
             hostBridgePath,
-            registry.backend,
             entryPath,
             vfsFiles,
+            launchAbort.signal,
           ));
         } catch (e) {
+          if (launchAbort.signal.aborted) throw e;
           console.warn('[PreviewPanel] host bridge module load failed, WASM host functions may be unavailable:', e);
         }
       }
@@ -376,7 +373,7 @@
           rendererBridgeError = message;
           void recoverRendererBridge(sessionId, message, vfsSnapshot);
         },
-      }, vfsSnapshot);
+      }, vfsSnapshot, launchAbort.signal);
       if (launchGeneration !== rendererBridgeLaunchGeneration || !($runtime.kind === 'gui' && $runtime.isRunning) || $runtime.gui.sessionId !== sessionId) {
         stopRendererBridge(sessionId);
         if (!isRendererBridgeActive(sessionId)) {
@@ -393,9 +390,7 @@
       rendererBridgeFailedSessionId = null;
       rendererBridgeRecoveryAttemptedSessionId = null;
     } catch (e) {
-      rendererBridgeFailedSessionId = sessionId;
-      rendererBridgeError = e instanceof Error ? e.message : String(e);
-      stopRendererBridge(sessionId);
+      if (sessionId != null) stopRendererBridge(sessionId);
       if (sessionId != null) {
         removeCanvas(sessionId);
         removeRendererSurfaceHost(sessionId);
@@ -404,16 +399,24 @@
         unloadHostBridgeModule(sessionId);
         clearHostBridgeForSession(sessionId);
       }
-      console.error('[PreviewPanel] renderer bridge start failed:', e);
+      if (!launchAbort.signal.aborted && launchGeneration === rendererBridgeLaunchGeneration) {
+        rendererBridgeFailedSessionId = sessionId;
+        rendererBridgeError = e instanceof Error ? e.message : String(e);
+        console.error('[PreviewPanel] renderer bridge start failed:', e);
+      }
     } finally {
-      rendererBridgeLaunching = false;
+      if (rendererBridgeLaunchAbort === launchAbort) {
+        rendererBridgeLaunchAbort = null;
+        rendererBridgeLaunchingSessionId = null;
+        rendererBridgeLaunching = false;
+      }
     }
   }
 
   async function recoverRendererBridge(
     sessionId: number,
     cause: string,
-    knownVfsSnapshot?: VfsSnapshot,
+    vfsSnapshot: VfsSnapshot,
   ): Promise<void> {
     if (
       rendererBridgeRecovering
@@ -436,10 +439,6 @@
       if (!surface) throw new Error('Renderer bridge recovery Surface host is unavailable');
       const framework = $runtime.gui.framework;
       const providerFrameworks = $runtime.gui.providerFrameworks;
-      const vfsSnapshot = knownVfsSnapshot
-        ?? (planFrameworkArtifacts(framework, providerFrameworks).needsVfs
-          ? await fetchVfsSnapshot(registry.backend, entryPath, sessionId)
-          : undefined);
       await restartRendererBridge(
         canvasIdForSession(sessionId),
         surface,
@@ -479,8 +478,11 @@
     }
   }
 
-  function teardownRendererBridge(sessionId = rendererBridgeSessionId): void {
+  function teardownRendererBridge(
+    sessionId = rendererBridgeSessionId ?? rendererBridgeLaunchingSessionId,
+  ): void {
     rendererBridgeLaunchGeneration++;
+    rendererBridgeLaunchAbort?.abort(new Error('Renderer bridge torn down during startup'));
     rendererBridgeActive = false;
     rendererBridgeSessionId = null;
     lastGameRenderBytes = null;

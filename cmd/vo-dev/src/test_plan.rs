@@ -347,23 +347,25 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
         let expect = parse_case_expect(case)?;
         if expect.kind == "fail" {
             let case_targets = resolved_case_targets(case, &test_config)?;
-            if requested
-                .iter()
-                .any(|target| target_runs_native_compile_fail(target))
-                && compile_fail_enabled_for_targets(&case_targets, "compile")
-            {
+            if requested.iter().any(|name| {
+                targets
+                    .get(name)
+                    .is_some_and(target_runs_native_compile_fail)
+            }) {
                 let target = targets
                     .get("compile")
                     .ok_or_else(|| anyhow!("eng/tests.toml must define target compile"))?;
-                jobs.push(compile_fail_job(
-                    root,
-                    &manifest,
-                    case,
-                    target,
-                    &expect,
-                    "compile",
-                    &selection_reasons_for_case(case, opts, &case_targets, "compile"),
-                )?);
+                if compile_fail_enabled_for_target(&case_targets, target) {
+                    jobs.push(compile_fail_job(
+                        root,
+                        &manifest,
+                        case,
+                        target,
+                        &expect,
+                        "compile",
+                        &selection_reasons_for_case(case, opts, &case_targets, "compile"),
+                    )?);
+                }
             }
             for target_name in &effective_targets {
                 let target = targets
@@ -372,7 +374,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 if target.kind != "wasm" {
                     continue;
                 }
-                if !compile_fail_enabled_for_targets(&case_targets, target_name) {
+                if !compile_fail_enabled_for_target(&case_targets, target) {
                     continue;
                 }
                 jobs.push(compile_fail_job(
@@ -560,13 +562,15 @@ fn case_timeout(case: &ManifestCase, target: &str, default_timeout_sec: u64) -> 
         .unwrap_or(default_timeout_sec)
 }
 
-fn target_runs_native_compile_fail(target: &str) -> bool {
-    matches!(target, "compile" | "vm" | "jit" | "osr" | "nostd")
+fn target_runs_native_compile_fail(target: &TestTarget) -> bool {
+    matches!(target.kind.as_str(), "native" | "embed" | "compile")
 }
 
-fn compile_fail_enabled_for_targets(case_targets: &[String], target: &str) -> bool {
+fn compile_fail_enabled_for_target(case_targets: &[String], target: &TestTarget) -> bool {
     case_targets.is_empty()
-        || case_targets.iter().any(|case_target| case_target == target)
+        || case_targets
+            .iter()
+            .any(|case_target| case_target == &target.name)
         || case_targets
             .iter()
             .any(|case_target| case_target == "compile")
@@ -877,6 +881,62 @@ mod tests {
             value["jobs"][0]["selection_reasons"][0],
             "target vm selected by matrix default"
         );
+    }
+
+    #[test]
+    fn osr_contract_plan_includes_gc_osr_and_its_gc_vm_baseline() {
+        let root = workspace_root();
+        let opts = TestArgs::parse(
+            &root,
+            vec![
+                "--matrix".to_string(),
+                "osr-contract".to_string(),
+                "--path".to_string(),
+                "cases/dyn/osr_dynamic_set_from_get_contract.vo".to_string(),
+            ],
+        )
+        .expect("parse OSR contract selection");
+        let plan = build_plan(&root, &opts).expect("build OSR contract plan");
+        let targets = plan
+            .jobs
+            .iter()
+            .map(|job| job.target.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            targets,
+            BTreeSet::from(["vm", "jit", "osr", "gc-vm", "gc-osr"])
+        );
+        let gc_osr = plan
+            .jobs
+            .iter()
+            .find(|job| job.target == "gc-osr")
+            .expect("gc-osr plan job");
+        assert_eq!(gc_osr.backend, "jit");
+        for (key, value) in [
+            ("VO_GC_STRESS", "1"),
+            ("VO_GC_VERIFY", "1"),
+            ("VO_JIT_CALL_THRESHOLD", "1000"),
+            ("VO_JIT_LOOP_THRESHOLD", "1"),
+        ] {
+            assert_eq!(gc_osr.env.get(key).map(String::as_str), Some(value));
+        }
+    }
+
+    #[test]
+    fn native_compile_failure_selection_uses_target_kind() {
+        let root = workspace_root();
+        let config = load_test_config(&root).expect("load test target config");
+
+        for name in [
+            "vm", "jit", "osr", "gc-vm", "gc-jit", "gc-osr", "nostd", "compile",
+        ] {
+            assert!(
+                target_runs_native_compile_fail(&config.targets[name]),
+                "{name} should select native compile-failure coverage"
+            );
+        }
+        assert!(!target_runs_native_compile_fail(&config.targets["wasm"]));
     }
 
     #[test]

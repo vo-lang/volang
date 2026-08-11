@@ -9,7 +9,7 @@
 //! canonical metadata until serialization or reconstruction completes.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use hashbrown::HashMap;
 
@@ -17,7 +17,9 @@ use crate::gc::{Gc, GcRef};
 use crate::objects::queue_state::QueueKind;
 use crate::objects::{array, map, queue, slice, string};
 use crate::slot::SLOT_BYTES;
-use vo_common_core::bytecode::{Module, NamedTypeMeta, RuntimeTypeResolver, StructMeta};
+use vo_common_core::bytecode::{
+    NamedTypeMeta, RuntimeTypeMetadata, RuntimeTypeResolver, StructMeta,
+};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
 use vo_common_core::RuntimeType;
 
@@ -166,6 +168,22 @@ struct SliceBackingKey {
     flat_storage: bool,
 }
 
+fn reserve_pack_graph_entry<K, V>(packed: &mut PackedValue, map: &mut HashMap<K, V>) -> bool
+where
+    K: core::hash::Hash + Eq,
+{
+    if map.try_reserve(1).is_err() {
+        packed.output_error = Some(PackOutputError::AllocationFailed {
+            requested: map
+                .len()
+                .saturating_add(1)
+                .saturating_mul(core::mem::size_of::<(K, V)>()),
+        });
+        return false;
+    }
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PackedPointerRef {
     Null,
@@ -214,10 +232,72 @@ struct ValidatedAllocation {
     kind: ValidatedAllocationKind,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Copy)]
+enum ValidateCacheInsert {
+    Allocation(u64),
+    Map(u64),
+}
+
+#[derive(Default)]
 pub(crate) struct ValidateObjectCache {
     allocations: HashMap<u64, ValidatedAllocation>,
     maps: HashMap<u64, (ValueMeta, ValueMeta, usize, usize)>,
+    transaction_log: Vec<ValidateCacheInsert>,
+}
+
+impl ValidateObjectCache {
+    fn begin_transaction(&mut self) {
+        debug_assert!(self.transaction_log.is_empty());
+    }
+
+    fn insert_allocation(
+        &mut self,
+        object_id: u64,
+        allocation: ValidatedAllocation,
+    ) -> Result<(), PackedLayoutError> {
+        self.transaction_log
+            .try_reserve(1)
+            .map_err(|_| PackedLayoutError)?;
+        self.allocations
+            .try_reserve(1)
+            .map_err(|_| PackedLayoutError)?;
+        self.allocations.insert(object_id, allocation);
+        self.transaction_log
+            .push(ValidateCacheInsert::Allocation(object_id));
+        Ok(())
+    }
+
+    fn insert_map(
+        &mut self,
+        object_id: u64,
+        metadata: (ValueMeta, ValueMeta, usize, usize),
+    ) -> Result<(), PackedLayoutError> {
+        self.transaction_log
+            .try_reserve(1)
+            .map_err(|_| PackedLayoutError)?;
+        self.maps.try_reserve(1).map_err(|_| PackedLayoutError)?;
+        self.maps.insert(object_id, metadata);
+        self.transaction_log
+            .push(ValidateCacheInsert::Map(object_id));
+        Ok(())
+    }
+
+    fn commit_transaction(&mut self) {
+        self.transaction_log.clear();
+    }
+
+    fn rollback_transaction(&mut self) {
+        for insertion in self.transaction_log.drain(..).rev() {
+            match insertion {
+                ValidateCacheInsert::Allocation(object_id) => {
+                    self.allocations.remove(&object_id);
+                }
+                ValidateCacheInsert::Map(object_id) => {
+                    self.maps.remove(&object_id);
+                }
+            }
+        }
+    }
 }
 
 type UnpackPointerCache = UnpackObjectCache;
@@ -391,6 +471,35 @@ pub unsafe fn try_pack_slots_with_named_type_metas(
         value_meta,
         PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
     )
+}
+
+/// Fallibly serializes a rooted value with an explicit output budget.
+///
+/// # Safety
+///
+/// The safety contract matches [`try_pack_slots_with_named_type_metas`].
+pub unsafe fn try_pack_slots_with_named_type_metas_limited(
+    gc: &Gc,
+    src: &[u64],
+    value_meta: ValueMeta,
+    struct_metas: &[StructMeta],
+    named_type_metas: &[NamedTypeMeta],
+    runtime_types: &[RuntimeType],
+    max_output_len: usize,
+) -> Result<PackedValue, PackOutputError> {
+    let mut object_graph = PackObjectGraph::default();
+    unsafe {
+        pack_slots_with_named_type_metas_and_cache_limited(
+            gc,
+            src,
+            value_meta,
+            struct_metas,
+            named_type_metas,
+            runtime_types,
+            &mut object_graph,
+            max_output_len,
+        )
+    }
 }
 
 unsafe fn try_pack_slots_with_context(
@@ -682,24 +791,24 @@ pub(crate) fn validate_packed_slots_expected_with_named_type_metas_and_cache(
 ) -> Result<(), PackedLayoutError> {
     let context = PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types);
     let mut cursor = 0;
-    // A definition must be visible while its recursive payload is validated so
-    // cycles can resolve back-references. Stage those registrations and publish
-    // them only after the complete chunk, including its extent, is valid.
-    let mut staged_cache = pointer_cache.clone();
-    validate_packed_value(
+    // Definitions become visible immediately so recursive back-references can
+    // resolve. A compact insertion log rolls them back if the chunk fails,
+    // avoiding a full clone of every previously validated object.
+    pointer_cache.begin_transaction();
+    let result = validate_packed_value(
         data,
         &mut cursor,
         expected_meta,
         Some(expected_rttid),
         context,
-        &mut staged_cache,
-    )?;
-    if cursor == data.len() {
-        *pointer_cache = staged_cache;
-        Ok(())
-    } else {
-        Err(PackedLayoutError)
+        pointer_cache,
+    );
+    if result.is_ok() && cursor == data.len() {
+        pointer_cache.commit_transaction();
+        return Ok(());
     }
+    pointer_cache.rollback_transaction();
+    Err(PackedLayoutError)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -819,7 +928,9 @@ impl RuntimeLayoutCache {
             self.slot_count_resolutions += 1;
         }
         let resolved = context.resolver().slot_count_for_value_rttid(value_rttid);
-        self.slot_counts.insert(value_rttid, resolved);
+        if self.slot_counts.try_reserve(1).is_ok() {
+            self.slot_counts.insert(value_rttid, resolved);
+        }
         resolved
     }
 
@@ -837,7 +948,9 @@ impl RuntimeLayoutCache {
             self.array_layout_resolutions += 1;
         }
         let resolved = self.compute_array_value_layout(value_meta, context);
-        self.array_layouts.insert(cache_key, resolved);
+        if self.array_layouts.try_reserve(1).is_ok() {
+            self.array_layouts.insert(cache_key, resolved);
+        }
         resolved
     }
 
@@ -945,9 +1058,30 @@ fn checked_expected_meta_for_rttid(
         .ok_or(PackedLayoutError)
 }
 
+#[derive(Clone, Copy)]
+struct PackSlots {
+    ptr: *const u64,
+    len: usize,
+}
+
+impl PackSlots {
+    #[inline]
+    fn from_slice(slots: &[u64]) -> Self {
+        Self {
+            ptr: slots.as_ptr(),
+            len: slots.len(),
+        }
+    }
+
+    #[inline]
+    unsafe fn as_slice<'a>(self) -> &'a [u64] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
 enum PackTask {
     Value {
-        src: Box<[u64]>,
+        src: PackSlots,
         value_meta: ValueMeta,
     },
     SequenceElements {
@@ -958,14 +1092,15 @@ enum PackTask {
         elem_bytes: usize,
         storage_stride: usize,
         flat_storage: bool,
+        scratch: Box<[u64]>,
     },
     InlineArrayElements {
-        src: Box<[u64]>,
+        src: PackSlots,
         layout: ArrayValueLayout,
         index: usize,
     },
     StructFields {
-        src: Box<[u64]>,
+        src: PackSlots,
         meta_id: usize,
         field_index: usize,
     },
@@ -976,10 +1111,36 @@ enum PackTask {
     },
     MapValue {
         iter: map::MapIterator,
-        val: Box<[u64]>,
+        val: PackSlots,
         key_meta: ValueMeta,
         val_meta: ValueMeta,
     },
+}
+
+fn push_pack_task(packed: &mut PackedValue, tasks: &mut Vec<PackTask>, task: PackTask) -> bool {
+    if tasks.len() == tasks.capacity() && tasks.try_reserve(1).is_err() {
+        packed.output_error = Some(PackOutputError::AllocationFailed {
+            requested: tasks
+                .len()
+                .saturating_add(1)
+                .saturating_mul(core::mem::size_of::<PackTask>()),
+        });
+        return false;
+    }
+    tasks.push(task);
+    true
+}
+
+fn try_zeroed_pack_slots(packed: &mut PackedValue, len: usize) -> Option<Box<[u64]>> {
+    let mut slots = Vec::new();
+    if slots.try_reserve_exact(len).is_err() {
+        packed.output_error = Some(PackOutputError::AllocationFailed {
+            requested: len.saturating_mul(SLOT_BYTES),
+        });
+        return None;
+    }
+    slots.resize(len, 0);
+    Some(slots.into_boxed_slice())
 }
 
 unsafe fn pack_value(
@@ -991,10 +1152,15 @@ unsafe fn pack_value(
     object_graph: &mut PackObjectGraph,
 ) {
     let mut layout_cache = RuntimeLayoutCache::default();
-    let mut tasks = vec![PackTask::Value {
-        src: src.to_vec().into_boxed_slice(),
-        value_meta,
-    }];
+    let mut tasks = Vec::new();
+    push_pack_task(
+        packed,
+        &mut tasks,
+        PackTask::Value {
+            src: PackSlots::from_slice(src),
+            value_meta,
+        },
+    );
     while packed.output_error.is_none() {
         let Some(task) = tasks.pop() else {
             break;
@@ -1004,7 +1170,7 @@ unsafe fn pack_value(
                 pack_value_inner(
                     packed,
                     gc,
-                    &src,
+                    src.as_slice(),
                     value_meta,
                     context,
                     object_graph,
@@ -1020,62 +1186,77 @@ unsafe fn pack_value(
                 elem_bytes,
                 storage_stride,
                 flat_storage,
+                mut scratch,
             } => {
                 if index >= length {
                     continue;
                 }
                 let elem_slots =
                     sequence_elem_slots(elem_meta, elem_bytes, context, &mut layout_cache);
-                let mut elem_buf = vec![0u64; elem_slots];
-                if flat_storage {
+                let elem_src = if flat_storage {
                     assert_eq!(
                         storage_stride,
                         elem_slots * SLOT_BYTES,
                         "pack_slice: flat element stride does not match logical slot width"
                     );
-                    core::ptr::copy_nonoverlapping(
-                        data_ptr.add(index * storage_stride),
-                        elem_buf.as_mut_ptr() as *mut u8,
-                        storage_stride,
-                    );
+                    PackSlots {
+                        ptr: data_ptr.add(index * storage_stride).cast::<u64>(),
+                        len: elem_slots,
+                    }
                 } else {
-                    read_element(data_ptr, index, elem_bytes, elem_meta, &mut elem_buf);
-                }
-                tasks.push(PackTask::SequenceElements {
-                    data_ptr,
-                    length,
-                    index: index + 1,
-                    elem_meta,
-                    elem_bytes,
-                    storage_stride,
-                    flat_storage,
-                });
-                tasks.push(PackTask::Value {
-                    src: elem_buf.into_boxed_slice(),
-                    value_meta: elem_meta,
-                });
+                    scratch.fill(0);
+                    read_element(data_ptr, index, elem_bytes, elem_meta, &mut scratch);
+                    PackSlots::from_slice(&scratch)
+                };
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::SequenceElements {
+                        data_ptr,
+                        length,
+                        index: index + 1,
+                        elem_meta,
+                        elem_bytes,
+                        storage_stride,
+                        flat_storage,
+                        scratch,
+                    },
+                );
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::Value {
+                        src: elem_src,
+                        value_meta: elem_meta,
+                    },
+                );
             }
             PackTask::InlineArrayElements { src, layout, index } => {
                 if index >= layout.len {
                     continue;
                 }
-                let elem_src = if layout.elem_slots == 0 {
-                    Box::default()
-                } else {
-                    let start = index * layout.elem_slots;
-                    src[start..start + layout.elem_slots]
-                        .to_vec()
-                        .into_boxed_slice()
+                let start = index * layout.elem_slots;
+                let elem_src = PackSlots {
+                    ptr: src.ptr.add(start),
+                    len: layout.elem_slots,
                 };
-                tasks.push(PackTask::InlineArrayElements {
-                    src,
-                    layout,
-                    index: index + 1,
-                });
-                tasks.push(PackTask::Value {
-                    src: elem_src,
-                    value_meta: layout.elem_meta,
-                });
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::InlineArrayElements {
+                        src,
+                        layout,
+                        index: index + 1,
+                    },
+                );
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::Value {
+                        src: elem_src,
+                        value_meta: layout.elem_meta,
+                    },
+                );
             }
             PackTask::StructFields {
                 src,
@@ -1098,35 +1279,54 @@ unsafe fn pack_value(
                             field.type_info.rttid()
                         )
                     });
-                let field_src = src[slot_idx..slot_idx + field_slots]
-                    .to_vec()
-                    .into_boxed_slice();
-                tasks.push(PackTask::StructFields {
-                    src,
-                    meta_id,
-                    field_index: field_index + 1,
-                });
-                tasks.push(PackTask::Value {
-                    src: field_src,
-                    value_meta: field_meta,
-                });
+                let field_src = PackSlots {
+                    ptr: src.ptr.add(slot_idx),
+                    len: field_slots,
+                };
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::StructFields {
+                        src,
+                        meta_id,
+                        field_index: field_index + 1,
+                    },
+                );
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::Value {
+                        src: field_src,
+                        value_meta: field_meta,
+                    },
+                );
             }
             PackTask::MapEntries {
                 mut iter,
                 key_meta,
                 val_meta,
             } => {
-                if let Some((key, val)) = map::iter_next(&mut iter) {
-                    tasks.push(PackTask::MapValue {
-                        iter,
-                        val,
-                        key_meta,
-                        val_meta,
-                    });
-                    tasks.push(PackTask::Value {
-                        src: key,
-                        value_meta: key_meta,
-                    });
+                if let Some((key, val)) = map::with_next(&mut iter, |entry| {
+                    entry.map(|(key, val)| (PackSlots::from_slice(key), PackSlots::from_slice(val)))
+                }) {
+                    push_pack_task(
+                        packed,
+                        &mut tasks,
+                        PackTask::MapValue {
+                            iter,
+                            val,
+                            key_meta,
+                            val_meta,
+                        },
+                    );
+                    push_pack_task(
+                        packed,
+                        &mut tasks,
+                        PackTask::Value {
+                            src: key,
+                            value_meta: key_meta,
+                        },
+                    );
                 }
             }
             PackTask::MapValue {
@@ -1135,15 +1335,23 @@ unsafe fn pack_value(
                 key_meta,
                 val_meta,
             } => {
-                tasks.push(PackTask::MapEntries {
-                    iter,
-                    key_meta,
-                    val_meta,
-                });
-                tasks.push(PackTask::Value {
-                    src: val,
-                    value_meta: val_meta,
-                });
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::MapEntries {
+                        iter,
+                        key_meta,
+                        val_meta,
+                    },
+                );
+                push_pack_task(
+                    packed,
+                    &mut tasks,
+                    PackTask::Value {
+                        src: val,
+                        value_meta: val_meta,
+                    },
+                );
             }
         }
     }
@@ -1417,6 +1625,9 @@ unsafe fn pack_slice_owner_view(
     let (id, is_definition) = if let Some(&id) = object_graph.allocation_ids.get(&(base as usize)) {
         (id, false)
     } else {
+        if !reserve_pack_graph_entry(packed, &mut object_graph.allocation_ids) {
+            return;
+        }
         object_graph.next_id = object_graph
             .next_id
             .checked_add(1)
@@ -1458,6 +1669,10 @@ unsafe fn pack_slice_backing_view(
     if let Some(&id) = object_graph.slice_backing_ids.get(&key) {
         packed.push_encoded(SLICE_BACKING_BACK_REFERENCE);
         packed.extend_encoded(&id.to_le_bytes());
+        return;
+    }
+
+    if !reserve_pack_graph_entry(packed, &mut object_graph.slice_backing_ids) {
         return;
     }
 
@@ -1536,15 +1751,28 @@ unsafe fn pack_sequence_allocation_payload(
         return;
     }
     packed.push_encoded(SEQUENCE_ENCODING_ELEMENTS);
-    tasks.push(PackTask::SequenceElements {
-        data_ptr,
-        length,
-        index: 0,
-        elem_meta,
-        elem_bytes,
-        storage_stride,
-        flat_storage,
-    });
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, context, layout_cache);
+    let Some(scratch) = (if flat_storage {
+        Some(Box::default())
+    } else {
+        try_zeroed_pack_slots(packed, elem_slots)
+    }) else {
+        return;
+    };
+    push_pack_task(
+        packed,
+        tasks,
+        PackTask::SequenceElements {
+            data_ptr,
+            length,
+            index: 0,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            flat_storage,
+            scratch,
+        },
+    );
 }
 
 unsafe fn pack_array(
@@ -1581,15 +1809,24 @@ unsafe fn pack_array(
     }
     packed.push_encoded(SEQUENCE_ENCODING_ELEMENTS);
 
-    tasks.push(PackTask::SequenceElements {
-        data_ptr: array::data_ptr_bytes(arr_ref),
-        length,
-        index: 0,
-        elem_meta,
-        elem_bytes,
-        storage_stride: elem_bytes,
-        flat_storage: false,
-    });
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, context, layout_cache);
+    let Some(scratch) = try_zeroed_pack_slots(packed, elem_slots) else {
+        return;
+    };
+    push_pack_task(
+        packed,
+        tasks,
+        PackTask::SequenceElements {
+            data_ptr: array::data_ptr_bytes(arr_ref),
+            length,
+            index: 0,
+            elem_meta,
+            elem_bytes,
+            storage_stride: elem_bytes,
+            flat_storage: false,
+            scratch,
+        },
+    );
 }
 
 unsafe fn pack_array_value_inline(
@@ -1614,11 +1851,15 @@ unsafe fn pack_array_value_inline(
     packed.extend_encoded(&layout.elem_meta.to_raw().to_le_bytes());
     packed.extend_encoded(&(layout.elem_slots as u64).to_le_bytes());
 
-    tasks.push(PackTask::InlineArrayElements {
-        src: src.to_vec().into_boxed_slice(),
-        layout,
-        index: 0,
-    });
+    push_pack_task(
+        packed,
+        tasks,
+        PackTask::InlineArrayElements {
+            src: PackSlots::from_slice(src),
+            layout,
+            index: 0,
+        },
+    );
 }
 
 unsafe fn pack_struct_inline(
@@ -1639,11 +1880,15 @@ unsafe fn pack_struct_inline(
     packed.extend_encoded(&(meta_id as u32).to_le_bytes());
     packed.extend_encoded(&(slot_count as u32).to_le_bytes());
 
-    tasks.push(PackTask::StructFields {
-        src: src.to_vec().into_boxed_slice(),
-        meta_id,
-        field_index: 0,
-    });
+    push_pack_task(
+        packed,
+        tasks,
+        PackTask::StructFields {
+            src: PackSlots::from_slice(src),
+            meta_id,
+            field_index: 0,
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1685,14 +1930,17 @@ unsafe fn pack_allocation_payload(
     packed.push_encoded(ALLOCATION_KIND_STRUCT);
     packed.extend_encoded(&allocation_meta.to_raw().to_le_bytes());
     packed.extend_encoded(&(allocation_slots as u32).to_le_bytes());
-    let mut allocation_data = vec![0u64; allocation_slots];
-    for (index, slot) in allocation_data.iter_mut().enumerate() {
-        *slot = unsafe { Gc::read_slot(base, index) };
-    }
-    tasks.push(PackTask::Value {
-        src: allocation_data.into_boxed_slice(),
-        value_meta: allocation_meta,
-    });
+    push_pack_task(
+        packed,
+        tasks,
+        PackTask::Value {
+            src: PackSlots {
+                ptr: base.cast_const(),
+                len: allocation_slots,
+            },
+            value_meta: allocation_meta,
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1719,6 +1967,9 @@ unsafe fn pack_pointer(
         if let Some(&id) = object_graph.allocation_ids.get(&(base as usize)) {
             PackedPointerRef::BackReference { id, offset }
         } else {
+            if !reserve_pack_graph_entry(packed, &mut object_graph.allocation_ids) {
+                return;
+            }
             object_graph.next_id = object_graph
                 .next_id
                 .checked_add(1)
@@ -1787,6 +2038,9 @@ unsafe fn pack_map(
         packed.extend_encoded(&id.to_le_bytes());
         return;
     }
+    if !reserve_pack_graph_entry(packed, &mut object_graph.map_ids) {
+        return;
+    }
     object_graph.next_id = object_graph
         .next_id
         .checked_add(1)
@@ -1810,24 +2064,33 @@ unsafe fn pack_map(
     packed.extend_encoded(&(val_slots as u16).to_le_bytes());
     packed.extend_encoded(&key_rttid.to_le_bytes());
 
-    tasks.push(PackTask::MapEntries {
-        iter: map::iter_init(map_ref),
-        key_meta,
-        val_meta,
-    });
+    push_pack_task(
+        packed,
+        tasks,
+        PackTask::MapEntries {
+            iter: map::iter_init(map_ref),
+            key_meta,
+            val_meta,
+        },
+    );
 }
 
-fn map_key_context_module(key_meta: ValueMeta, context: PackTypeContext<'_>) -> Option<Module> {
-    match key_meta.value_kind() {
-        ValueKind::Struct | ValueKind::Interface => {
-            let mut module = Module::new("pack-map-key-context".into());
-            module.struct_metas = context.struct_metas.to_vec();
-            module.named_type_metas = context.named_type_metas.to_vec();
-            module.runtime_types = context.runtime_types.to_vec();
-            Some(module)
-        }
-        _ => None,
-    }
+fn map_runtime_type_metadata(
+    key_meta: ValueMeta,
+    val_meta: ValueMeta,
+    context: PackTypeContext<'_>,
+) -> Option<RuntimeTypeMetadata<'_>> {
+    let needs_types = matches!(
+        key_meta.value_kind(),
+        ValueKind::Struct | ValueKind::Array | ValueKind::Interface
+    ) || matches!(val_meta.value_kind(), ValueKind::Struct | ValueKind::Array);
+    needs_types.then(|| {
+        RuntimeTypeMetadata::new(
+            context.struct_metas,
+            context.named_type_metas,
+            context.runtime_types,
+        )
+    })
 }
 
 // =============================================================================
@@ -2003,6 +2266,15 @@ enum ValidateTask {
     },
 }
 
+fn push_validate_task(
+    tasks: &mut Vec<ValidateTask>,
+    task: ValidateTask,
+) -> Result<(), PackedLayoutError> {
+    tasks.try_reserve(1).map_err(|_| PackedLayoutError)?;
+    tasks.push(task);
+    Ok(())
+}
+
 fn validate_packed_sequence(
     data: &[u8],
     cursor: &mut usize,
@@ -2042,11 +2314,14 @@ fn validate_packed_sequence(
         return Err(PackedLayoutError);
     }
     let _ = elem_layout.logical_slots;
-    tasks.push(ValidateTask::SequenceElements {
-        remaining: sequence.length,
-        elem_meta: sequence.elem_meta,
-        elem_rttid: sequence.elem_rttid,
-    });
+    push_validate_task(
+        tasks,
+        ValidateTask::SequenceElements {
+            remaining: sequence.length,
+            elem_meta: sequence.elem_meta,
+            elem_rttid: sequence.elem_rttid,
+        },
+    )?;
     Ok(())
 }
 
@@ -2572,11 +2847,14 @@ fn validate_and_register_allocation_definition(
                     slots,
                 },
             };
-            object_cache.allocations.insert(object_id, allocation);
-            tasks.push(ValidateTask::Value {
-                expected_meta: allocation_meta,
-                expected_rttid: None,
-            });
+            object_cache.insert_allocation(object_id, allocation)?;
+            push_validate_task(
+                tasks,
+                ValidateTask::Value {
+                    expected_meta: allocation_meta,
+                    expected_rttid: None,
+                },
+            )?;
             Ok(allocation)
         }
         ALLOCATION_KIND_ARRAY => {
@@ -2594,7 +2872,7 @@ fn validate_and_register_allocation_definition(
                     len: length,
                 },
             };
-            object_cache.allocations.insert(object_id, allocation);
+            object_cache.insert_allocation(object_id, allocation)?;
             validate_packed_sequence(
                 data,
                 cursor,
@@ -2751,7 +3029,7 @@ fn validate_packed_slice_backing(
         }
         let data_bytes = checked_array_allocation_data_bytes(backing_len, backing_bytes)
             .ok_or(PackedLayoutError)?;
-        object_cache.allocations.insert(
+        object_cache.insert_allocation(
             object_id,
             ValidatedAllocation {
                 data_bytes,
@@ -2761,7 +3039,7 @@ fn validate_packed_slice_backing(
                     len: backing_len,
                 },
             },
-        );
+        )?;
         return validate_packed_sequence(
             data,
             cursor,
@@ -2833,10 +3111,14 @@ fn validate_packed_value(
     object_cache: &mut ValidatePointerCache,
 ) -> Result<(), PackedLayoutError> {
     let mut layout_cache = RuntimeLayoutCache::default();
-    let mut tasks = vec![ValidateTask::Value {
-        expected_meta,
-        expected_rttid,
-    }];
+    let mut tasks = Vec::new();
+    push_validate_task(
+        &mut tasks,
+        ValidateTask::Value {
+            expected_meta,
+            expected_rttid,
+        },
+    )?;
     while let Some(task) = tasks.pop() {
         match task {
             ValidateTask::Value {
@@ -2860,15 +3142,21 @@ fn validate_packed_value(
                 if remaining == 0 {
                     continue;
                 }
-                tasks.push(ValidateTask::SequenceElements {
-                    remaining: remaining - 1,
-                    elem_meta,
-                    elem_rttid,
-                });
-                tasks.push(ValidateTask::Value {
-                    expected_meta: elem_meta,
-                    expected_rttid: elem_rttid,
-                });
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::SequenceElements {
+                        remaining: remaining - 1,
+                        elem_meta,
+                        elem_rttid,
+                    },
+                )?;
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::Value {
+                        expected_meta: elem_meta,
+                        expected_rttid: elem_rttid,
+                    },
+                )?;
             }
             ValidateTask::StructFields {
                 meta_id,
@@ -2878,14 +3166,20 @@ fn validate_packed_value(
                 let Some(field) = meta.fields.get(field_index) else {
                     continue;
                 };
-                tasks.push(ValidateTask::StructFields {
-                    meta_id,
-                    field_index: field_index + 1,
-                });
-                tasks.push(ValidateTask::Value {
-                    expected_meta: expected_meta_for_rttid(field.type_info, context),
-                    expected_rttid: Some(field.type_info),
-                });
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::StructFields {
+                        meta_id,
+                        field_index: field_index + 1,
+                    },
+                )?;
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::Value {
+                        expected_meta: expected_meta_for_rttid(field.type_info, context),
+                        expected_rttid: Some(field.type_info),
+                    },
+                )?;
             }
             ValidateTask::MapEntries {
                 remaining,
@@ -2897,17 +3191,23 @@ fn validate_packed_value(
                 if remaining == 0 {
                     continue;
                 }
-                tasks.push(ValidateTask::MapValue {
-                    remaining,
-                    key_meta,
-                    key_rttid,
-                    val_meta,
-                    val_rttid,
-                });
-                tasks.push(ValidateTask::Value {
-                    expected_meta: key_meta,
-                    expected_rttid: key_rttid,
-                });
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::MapValue {
+                        remaining,
+                        key_meta,
+                        key_rttid,
+                        val_meta,
+                        val_rttid,
+                    },
+                )?;
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::Value {
+                        expected_meta: key_meta,
+                        expected_rttid: key_rttid,
+                    },
+                )?;
             }
             ValidateTask::MapValue {
                 remaining,
@@ -2916,17 +3216,23 @@ fn validate_packed_value(
                 val_meta,
                 val_rttid,
             } => {
-                tasks.push(ValidateTask::MapEntries {
-                    remaining: remaining - 1,
-                    key_meta,
-                    key_rttid,
-                    val_meta,
-                    val_rttid,
-                });
-                tasks.push(ValidateTask::Value {
-                    expected_meta: val_meta,
-                    expected_rttid: val_rttid,
-                });
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::MapEntries {
+                        remaining: remaining - 1,
+                        key_meta,
+                        key_rttid,
+                        val_meta,
+                        val_rttid,
+                    },
+                )?;
+                push_validate_task(
+                    &mut tasks,
+                    ValidateTask::Value {
+                        expected_meta: val_meta,
+                        expected_rttid: val_rttid,
+                    },
+                )?;
             }
         }
     }
@@ -3063,11 +3369,14 @@ fn validate_packed_value_inner(
                         return Err(PackedLayoutError);
                     }
                 }
-                tasks.push(ValidateTask::SequenceElements {
-                    remaining: length,
-                    elem_meta,
-                    elem_rttid,
-                });
+                push_validate_task(
+                    tasks,
+                    ValidateTask::SequenceElements {
+                        remaining: length,
+                        elem_meta,
+                        elem_rttid,
+                    },
+                )?;
                 Ok(())
             } else {
                 if marker == 0 {
@@ -3119,10 +3428,13 @@ fn validate_packed_value_inner(
             if slot_count != expected_slots {
                 return Err(PackedLayoutError);
             }
-            tasks.push(ValidateTask::StructFields {
-                meta_id,
-                field_index: 0,
-            });
+            push_validate_task(
+                tasks,
+                ValidateTask::StructFields {
+                    meta_id,
+                    field_index: 0,
+                },
+            )?;
             Ok(())
         }
         ValueKind::Pointer => {
@@ -3263,16 +3575,17 @@ fn validate_packed_value_inner(
                     return Err(PackedLayoutError);
                 }
             }
-            pointer_cache
-                .maps
-                .insert(object_id, (key_meta, val_meta, key_slots, val_slots));
-            tasks.push(ValidateTask::MapEntries {
-                remaining: length,
-                key_meta,
-                key_rttid,
-                val_meta,
-                val_rttid,
-            });
+            pointer_cache.insert_map(object_id, (key_meta, val_meta, key_slots, val_slots))?;
+            push_validate_task(
+                tasks,
+                ValidateTask::MapEntries {
+                    remaining: length,
+                    key_meta,
+                    key_rttid,
+                    val_meta,
+                    val_rttid,
+                },
+            )?;
             Ok(())
         }
         ValueKind::Channel | ValueKind::Port => unreachable!("queue kinds handled above"),
@@ -3323,11 +3636,12 @@ struct UnpackSequenceState {
     index: usize,
     elem_meta: ValueMeta,
     elem_bytes: usize,
+    elem_buf: Box<[u64]>,
     mark_for_scan: bool,
     finish: UnpackSequenceFinish,
 }
 
-struct UnpackMapState {
+struct UnpackMapState<'a> {
     dst: *mut u64,
     map_ref: GcRef,
     remaining: usize,
@@ -3335,20 +3649,17 @@ struct UnpackMapState {
     val_meta: ValueMeta,
     key_buf: Box<[u64]>,
     val_buf: Box<[u64]>,
-    key_context_module: Option<Module>,
+    runtime_type_metadata: Option<RuntimeTypeMetadata<'a>>,
 }
 
-enum UnpackTask {
+enum UnpackTask<'a> {
     Value {
         dst: *mut u64,
         dst_len: usize,
         expected_meta: Option<ValueMeta>,
     },
-    SequenceNext(Box<UnpackSequenceState>),
-    SequenceCommit {
-        state: Box<UnpackSequenceState>,
-        elem_buf: Box<[u64]>,
-    },
+    SequenceNext(UnpackSequenceState),
+    SequenceCommit(UnpackSequenceState),
     InlineArrayElements {
         dst: *mut u64,
         length: usize,
@@ -3376,19 +3687,42 @@ enum UnpackTask {
         slots: Box<[u64]>,
         view: UnpackSliceView,
     },
-    MapKey(Box<UnpackMapState>),
-    MapValue(Box<UnpackMapState>),
-    MapCommit(Box<UnpackMapState>),
+    MapKey(UnpackMapState<'a>),
+    MapValue(UnpackMapState<'a>),
+    MapCommit(UnpackMapState<'a>),
+}
+
+fn push_unpack_task<'a>(
+    gc: &mut Gc,
+    tasks: &mut Vec<UnpackTask<'a>>,
+    task: UnpackTask<'a>,
+) -> bool {
+    if tasks.len() == tasks.capacity() && tasks.try_reserve(1).is_err() {
+        gc.record_system_allocation_failure();
+        return false;
+    }
+    tasks.push(task);
+    true
+}
+
+fn try_zeroed_unpack_slots(gc: &mut Gc, len: usize) -> Option<Box<[u64]>> {
+    let mut slots = Vec::new();
+    if slots.try_reserve_exact(len).is_err() {
+        gc.record_system_allocation_failure();
+        return None;
+    }
+    slots.resize(len, 0);
+    Some(slots.into_boxed_slice())
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn unpack_value<F>(
+unsafe fn unpack_value<'a, F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: &mut [u64],
     expected_meta: Option<ValueMeta>,
-    context: PackTypeContext<'_>,
+    context: PackTypeContext<'a>,
     queue_handle_cache: &mut UnpackQueueHandleCache,
     object_cache: &mut UnpackPointerCache,
     resolve_queue_handle: &mut F,
@@ -3396,11 +3730,16 @@ unsafe fn unpack_value<F>(
     F: FnMut(&mut Gc, QueueHandleInfo) -> GcRef,
 {
     let mut layout_cache = RuntimeLayoutCache::default();
-    let mut tasks = vec![UnpackTask::Value {
-        dst: dst.as_mut_ptr(),
-        dst_len: dst.len(),
-        expected_meta,
-    }];
+    let mut tasks = Vec::new();
+    push_unpack_task(
+        gc,
+        &mut tasks,
+        UnpackTask::Value {
+            dst: dst.as_mut_ptr(),
+            dst_len: dst.len(),
+            expected_meta,
+        },
+    );
     while let Some(task) = tasks.pop() {
         match task {
             UnpackTask::Value {
@@ -3431,29 +3770,31 @@ unsafe fn unpack_value<F>(
                     finish_unpacked_sequence(gc, object_cache, state.allocation, state.finish);
                     continue;
                 }
-                let elem_slots = sequence_elem_slots(
-                    state.elem_meta,
-                    state.elem_bytes,
-                    context,
-                    &mut layout_cache,
-                );
-                let mut elem_buf = vec![0u64; elem_slots].into_boxed_slice();
-                let elem_dst = elem_buf.as_mut_ptr();
+                let mut state = state;
+                state.elem_buf.fill(0);
+                let elem_dst = state.elem_buf.as_mut_ptr();
+                let elem_slots = state.elem_buf.len();
                 let elem_meta = state.elem_meta;
-                tasks.push(UnpackTask::SequenceCommit { state, elem_buf });
-                tasks.push(UnpackTask::Value {
-                    dst: elem_dst,
-                    dst_len: elem_slots,
-                    expected_meta: Some(elem_meta),
-                });
+                push_unpack_task(gc, &mut tasks, UnpackTask::SequenceCommit(state));
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::Value {
+                        dst: elem_dst,
+                        dst_len: elem_slots,
+                        expected_meta: Some(elem_meta),
+                    },
+                );
             }
-            UnpackTask::SequenceCommit {
-                mut state,
-                elem_buf,
-            } => {
-                write_element(state.data_ptr, state.index, state.elem_bytes, &elem_buf);
+            UnpackTask::SequenceCommit(mut state) => {
+                write_element(
+                    state.data_ptr,
+                    state.index,
+                    state.elem_bytes,
+                    &state.elem_buf,
+                );
                 state.index += 1;
-                tasks.push(UnpackTask::SequenceNext(state));
+                push_unpack_task(gc, &mut tasks, UnpackTask::SequenceNext(state));
             }
             UnpackTask::InlineArrayElements {
                 dst,
@@ -3465,18 +3806,26 @@ unsafe fn unpack_value<F>(
                 if index >= length {
                     continue;
                 }
-                tasks.push(UnpackTask::InlineArrayElements {
-                    dst,
-                    length,
-                    index: index + 1,
-                    elem_meta,
-                    elem_slots,
-                });
-                tasks.push(UnpackTask::Value {
-                    dst: dst.add(index * elem_slots),
-                    dst_len: elem_slots,
-                    expected_meta: Some(elem_meta),
-                });
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::InlineArrayElements {
+                        dst,
+                        length,
+                        index: index + 1,
+                        elem_meta,
+                        elem_slots,
+                    },
+                );
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::Value {
+                        dst: dst.add(index * elem_slots),
+                        dst_len: elem_slots,
+                        expected_meta: Some(elem_meta),
+                    },
+                );
             }
             UnpackTask::StructFields {
                 dst,
@@ -3494,17 +3843,25 @@ unsafe fn unpack_value<F>(
                     .checked_add(field_slots)
                     .filter(|end| *end <= dst_len)
                     .expect("unpack struct field range exceeds destination layout");
-                tasks.push(UnpackTask::StructFields {
-                    dst,
-                    dst_len,
-                    meta_id,
-                    field_index: field_index + 1,
-                });
-                tasks.push(UnpackTask::Value {
-                    dst: dst.add(field_start),
-                    dst_len: field_end - field_start,
-                    expected_meta: Some(expected_meta_for_rttid(field.type_info, context)),
-                });
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::StructFields {
+                        dst,
+                        dst_len,
+                        meta_id,
+                        field_index: field_index + 1,
+                    },
+                );
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::Value {
+                        dst: dst.add(field_start),
+                        dst_len: field_end - field_start,
+                        expected_meta: Some(expected_meta_for_rttid(field.type_info, context)),
+                    },
+                );
             }
             UnpackTask::PointerStructCommit {
                 dst,
@@ -3547,32 +3904,40 @@ unsafe fn unpack_value<F>(
                 let key_dst = state.key_buf.as_mut_ptr();
                 let key_slots = state.key_buf.len();
                 let key_meta = state.key_meta;
-                tasks.push(UnpackTask::MapValue(state));
-                tasks.push(UnpackTask::Value {
-                    dst: key_dst,
-                    dst_len: key_slots,
-                    expected_meta: Some(key_meta),
-                });
+                push_unpack_task(gc, &mut tasks, UnpackTask::MapValue(state));
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::Value {
+                        dst: key_dst,
+                        dst_len: key_slots,
+                        expected_meta: Some(key_meta),
+                    },
+                );
             }
             UnpackTask::MapValue(mut state) => {
                 state.val_buf.fill(0);
                 let val_dst = state.val_buf.as_mut_ptr();
                 let val_slots = state.val_buf.len();
                 let val_meta = state.val_meta;
-                tasks.push(UnpackTask::MapCommit(state));
-                tasks.push(UnpackTask::Value {
-                    dst: val_dst,
-                    dst_len: val_slots,
-                    expected_meta: Some(val_meta),
-                });
+                push_unpack_task(gc, &mut tasks, UnpackTask::MapCommit(state));
+                push_unpack_task(
+                    gc,
+                    &mut tasks,
+                    UnpackTask::Value {
+                        dst: val_dst,
+                        dst_len: val_slots,
+                        expected_meta: Some(val_meta),
+                    },
+                );
             }
             UnpackTask::MapCommit(mut state) => {
-                let result = map::set_checked(
+                let result = map::set_checked_with_type_metadata(
                     gc,
                     state.map_ref,
                     &state.key_buf,
                     &state.val_buf,
-                    state.key_context_module.as_ref(),
+                    state.runtime_type_metadata,
                 );
                 match result {
                     Ok(()) => {}
@@ -3580,7 +3945,7 @@ unsafe fn unpack_value<F>(
                     Err(_) => panic!("packed map keys must be hashable"),
                 }
                 state.remaining -= 1;
-                tasks.push(UnpackTask::MapKey(state));
+                push_unpack_task(gc, &mut tasks, UnpackTask::MapKey(state));
             }
         }
         if gc.last_memory_error().is_some() {
@@ -3677,17 +4042,17 @@ unsafe fn unpacked_slice_view(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn unpack_value_inner<F>(
+unsafe fn unpack_value_inner<'a, F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: &mut [u64],
     expected_meta: Option<ValueMeta>,
-    context: PackTypeContext<'_>,
+    context: PackTypeContext<'a>,
     queue_handle_cache: &mut UnpackQueueHandleCache,
     pointer_cache: &mut UnpackPointerCache,
     resolve_queue_handle: &mut F,
-    tasks: &mut Vec<UnpackTask>,
+    tasks: &mut Vec<UnpackTask<'a>>,
     layout_cache: &mut RuntimeLayoutCache,
 ) where
     F: FnMut(&mut Gc, QueueHandleInfo) -> GcRef,
@@ -3755,6 +4120,7 @@ unsafe fn unpack_value_inner<F>(
                 if marker == ARRAY_VALUE_INLINE_MARKER {
                     *cursor += 1;
                     unpack_array_value_inline(
+                        gc,
                         data,
                         cursor,
                         dst,
@@ -3777,7 +4143,7 @@ unsafe fn unpack_value_inner<F>(
             }
 
             ValueKind::Struct => {
-                unpack_struct_inline(data, cursor, dst, expected_meta, context, tasks);
+                unpack_struct_inline(gc, data, cursor, dst, expected_meta, context, tasks);
             }
 
             ValueKind::Pointer => {
@@ -3948,6 +4314,13 @@ unsafe fn unpack_slice(
             let slots = read_u32(data, cursor) as usize;
             let slots_u16 = u16::try_from(slots)
                 .expect("unpack_slice: owner allocation slot count exceeds u16::MAX");
+            let Some(mut slots) = try_zeroed_unpack_slots(gc, slots) else {
+                return;
+            };
+            if object_cache.allocations.try_reserve(1).is_err() {
+                gc.record_system_allocation_failure();
+                return;
+            }
             let allocation = gc.alloc(allocation_meta, slots_u16);
             if allocation.is_null() {
                 return;
@@ -3963,20 +4336,27 @@ unsafe fn unpack_slice(
                     kind: UnpackedAllocationKind::Struct,
                 },
             );
-            let mut slots = vec![0u64; slots].into_boxed_slice();
             let slots_dst = slots.as_mut_ptr();
             let slots_len = slots.len();
-            tasks.push(UnpackTask::SliceStructCommit {
-                object_id,
-                allocation,
-                slots,
-                view,
-            });
-            tasks.push(UnpackTask::Value {
-                dst: slots_dst,
-                dst_len: slots_len,
-                expected_meta: Some(allocation_meta),
-            });
+            push_unpack_task(
+                gc,
+                tasks,
+                UnpackTask::SliceStructCommit {
+                    object_id,
+                    allocation,
+                    slots,
+                    view,
+                },
+            );
+            push_unpack_task(
+                gc,
+                tasks,
+                UnpackTask::Value {
+                    dst: slots_dst,
+                    dst_len: slots_len,
+                    expected_meta: Some(allocation_meta),
+                },
+            );
         }
         ALLOCATION_KIND_ARRAY => {
             unpack_array_allocation_payload(
@@ -4024,6 +4404,11 @@ unsafe fn unpack_array_allocation_payload(
     }
     validate_sequence_elem_layout(elem_meta, elem_bytes, context, layout_cache);
 
+    if object_cache.allocations.try_reserve(1).is_err() {
+        gc.record_system_allocation_failure();
+        return core::ptr::null_mut();
+    }
+
     let backing = array::create(gc, elem_meta, elem_bytes, backing_len);
     if backing.is_null() {
         return backing;
@@ -4042,6 +4427,7 @@ unsafe fn unpack_array_allocation_payload(
             },
         },
     );
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, context, layout_cache);
     schedule_unpack_sequence(
         data,
         cursor,
@@ -4049,8 +4435,10 @@ unsafe fn unpack_array_allocation_payload(
         backing_len,
         elem_meta,
         elem_bytes,
+        elem_slots,
         finish,
         tasks,
+        gc,
     );
     backing
 }
@@ -4063,21 +4451,28 @@ unsafe fn schedule_unpack_sequence(
     length: usize,
     elem_meta: ValueMeta,
     elem_bytes: usize,
+    elem_slots: usize,
     finish: UnpackSequenceFinish,
     tasks: &mut Vec<UnpackTask>,
+    gc: &mut Gc,
 ) {
     let data_ptr = array::data_ptr_bytes(allocation);
     if elem_bytes == 0 {
-        tasks.push(UnpackTask::SequenceNext(Box::new(UnpackSequenceState {
-            allocation,
-            data_ptr,
-            length,
-            index: length,
-            elem_meta,
-            elem_bytes,
-            mark_for_scan: false,
-            finish,
-        })));
+        push_unpack_task(
+            gc,
+            tasks,
+            UnpackTask::SequenceNext(UnpackSequenceState {
+                allocation,
+                data_ptr,
+                length,
+                index: length,
+                elem_meta,
+                elem_bytes,
+                elem_buf: Box::default(),
+                mark_for_scan: false,
+                finish,
+            }),
+        );
         return;
     }
 
@@ -4088,32 +4483,45 @@ unsafe fn schedule_unpack_sequence(
             .checked_mul(elem_bytes)
             .expect("unpack raw sequence byte length overflow");
         unpack_raw_sequence_bytes(data, cursor, data_ptr, byte_len);
-        tasks.push(UnpackTask::SequenceNext(Box::new(UnpackSequenceState {
-            allocation,
-            data_ptr,
-            length,
-            index: length,
-            elem_meta,
-            elem_bytes,
-            mark_for_scan: false,
-            finish,
-        })));
+        push_unpack_task(
+            gc,
+            tasks,
+            UnpackTask::SequenceNext(UnpackSequenceState {
+                allocation,
+                data_ptr,
+                length,
+                index: length,
+                elem_meta,
+                elem_bytes,
+                elem_buf: Box::default(),
+                mark_for_scan: false,
+                finish,
+            }),
+        );
         return;
     }
     assert_eq!(
         encoding, SEQUENCE_ENCODING_ELEMENTS,
         "pack: invalid sequence encoding {encoding}"
     );
-    tasks.push(UnpackTask::SequenceNext(Box::new(UnpackSequenceState {
-        allocation,
-        data_ptr,
-        length,
-        index: 0,
-        elem_meta,
-        elem_bytes,
-        mark_for_scan: elem_meta.value_kind().may_contain_gc_refs(),
-        finish,
-    })));
+    let Some(elem_buf) = try_zeroed_unpack_slots(gc, elem_slots) else {
+        return;
+    };
+    push_unpack_task(
+        gc,
+        tasks,
+        UnpackTask::SequenceNext(UnpackSequenceState {
+            allocation,
+            data_ptr,
+            length,
+            index: 0,
+            elem_meta,
+            elem_bytes,
+            elem_buf,
+            mark_for_scan: elem_meta.value_kind().may_contain_gc_refs(),
+            finish,
+        }),
+    );
 }
 
 unsafe fn unpack_array(
@@ -4139,6 +4547,7 @@ unsafe fn unpack_array(
     if new_arr.is_null() {
         return;
     }
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, context, layout_cache);
     schedule_unpack_sequence(
         data,
         cursor,
@@ -4146,13 +4555,16 @@ unsafe fn unpack_array(
         length,
         elem_meta,
         elem_bytes,
+        elem_slots,
         UnpackSequenceFinish::Array { dst },
         tasks,
+        gc,
     );
 }
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn unpack_array_value_inline(
+    gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: &mut [u64],
@@ -4188,17 +4600,22 @@ unsafe fn unpack_array_value_inline(
         );
     }
 
-    tasks.push(UnpackTask::InlineArrayElements {
-        dst: dst.as_mut_ptr(),
-        length,
-        index: 0,
-        elem_meta,
-        elem_slots,
-    });
+    push_unpack_task(
+        gc,
+        tasks,
+        UnpackTask::InlineArrayElements {
+            dst: dst.as_mut_ptr(),
+            length,
+            index: 0,
+            elem_meta,
+            elem_slots,
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn unpack_struct_inline(
+    gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: &mut [u64],
@@ -4229,12 +4646,16 @@ unsafe fn unpack_struct_inline(
         );
     }
 
-    tasks.push(UnpackTask::StructFields {
-        dst: dst.as_mut_ptr(),
-        dst_len: dst.len(),
-        meta_id,
-        field_index: 0,
-    });
+    push_unpack_task(
+        gc,
+        tasks,
+        UnpackTask::StructFields {
+            dst: dst.as_mut_ptr(),
+            dst_len: dst.len(),
+            meta_id,
+            field_index: 0,
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4278,6 +4699,13 @@ unsafe fn unpack_pointer(
                 let slots = read_u32(data, cursor) as usize;
                 let slots_u16 = u16::try_from(slots)
                     .expect("unpack_pointer: allocation slot count exceeds u16::MAX");
+                let Some(mut slots) = try_zeroed_unpack_slots(gc, slots) else {
+                    return;
+                };
+                if pointer_cache.allocations.try_reserve(1).is_err() {
+                    gc.record_system_allocation_failure();
+                    return;
+                }
                 let new_obj = gc.alloc(allocation_meta, slots_u16);
                 if new_obj.is_null() {
                     return;
@@ -4293,22 +4721,29 @@ unsafe fn unpack_pointer(
                         kind: UnpackedAllocationKind::Struct,
                     },
                 );
-                let mut slots = vec![0u64; slots].into_boxed_slice();
                 let slots_dst = slots.as_mut_ptr();
                 let slots_len = slots.len();
-                tasks.push(UnpackTask::PointerStructCommit {
-                    dst,
-                    object_id,
-                    offset,
-                    expected_slots,
-                    allocation: new_obj,
-                    slots,
-                });
-                tasks.push(UnpackTask::Value {
-                    dst: slots_dst,
-                    dst_len: slots_len,
-                    expected_meta: Some(allocation_meta),
-                });
+                push_unpack_task(
+                    gc,
+                    tasks,
+                    UnpackTask::PointerStructCommit {
+                        dst,
+                        object_id,
+                        offset,
+                        expected_slots,
+                        allocation: new_obj,
+                        slots,
+                    },
+                );
+                push_unpack_task(
+                    gc,
+                    tasks,
+                    UnpackTask::Value {
+                        dst: slots_dst,
+                        dst_len: slots_len,
+                        expected_meta: Some(allocation_meta),
+                    },
+                );
                 return;
             }
             ALLOCATION_KIND_ARRAY => {
@@ -4372,14 +4807,14 @@ unsafe fn unpacked_pointer_target(
     unsafe { (allocation.base as *mut u8).add(offset) as GcRef }
 }
 
-unsafe fn unpack_map(
+unsafe fn unpack_map<'a>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
     dst: *mut u64,
-    context: PackTypeContext<'_>,
+    context: PackTypeContext<'a>,
     pointer_cache: &mut UnpackPointerCache,
-    tasks: &mut Vec<UnpackTask>,
+    tasks: &mut Vec<UnpackTask<'a>>,
 ) {
     let marker = data[*cursor];
     *cursor += 1;
@@ -4409,6 +4844,17 @@ unsafe fn unpack_map(
     let val_slots = read_u16(data, cursor);
     let key_rttid = read_u32(data, cursor);
 
+    let Some(key_buf) = try_zeroed_unpack_slots(gc, key_slots as usize) else {
+        return;
+    };
+    let Some(val_buf) = try_zeroed_unpack_slots(gc, val_slots as usize) else {
+        return;
+    };
+    if pointer_cache.maps.try_reserve(1).is_err() || tasks.try_reserve(1).is_err() {
+        gc.record_system_allocation_failure();
+        return;
+    }
+
     // Create new map
     let new_map = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
     if new_map.is_null() {
@@ -4416,16 +4862,20 @@ unsafe fn unpack_map(
     }
     pointer_cache.maps.insert(object_id, new_map);
 
-    tasks.push(UnpackTask::MapKey(Box::new(UnpackMapState {
-        dst,
-        map_ref: new_map,
-        remaining: length,
-        key_meta,
-        val_meta,
-        key_buf: vec![0u64; key_slots as usize].into_boxed_slice(),
-        val_buf: vec![0u64; val_slots as usize].into_boxed_slice(),
-        key_context_module: map_key_context_module(key_meta, context),
-    })));
+    push_unpack_task(
+        gc,
+        tasks,
+        UnpackTask::MapKey(UnpackMapState {
+            dst,
+            map_ref: new_map,
+            remaining: length,
+            key_meta,
+            val_meta,
+            key_buf,
+            val_buf,
+            runtime_type_metadata: map_runtime_type_metadata(key_meta, val_meta, context),
+        }),
+    );
 }
 
 // =============================================================================
@@ -4530,7 +4980,14 @@ where
             return existing.chan_ref;
         }
     }
+    if queue_handle_cache.try_reserve(1).is_err() {
+        gc.record_system_allocation_failure();
+        return core::ptr::null_mut();
+    }
     let chan_ref = resolve_queue_handle(gc, handle);
+    if chan_ref.is_null() {
+        return chan_ref;
+    }
     queue_handle_cache.insert(handle.endpoint_id, CachedQueueHandle { handle, chan_ref });
     chan_ref
 }

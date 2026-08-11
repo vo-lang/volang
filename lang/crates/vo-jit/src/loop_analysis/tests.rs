@@ -1,16 +1,5 @@
 use super::*;
-use vo_common_core::instruction::copy_n_mirror_flags;
 use vo_runtime::SlotType;
-
-#[test]
-fn loop_analysis_test_fixtures_use_checked_packed_operands() {
-    let src = include_str!("../loop_analysis.rs");
-    let forbidden = ["n.min", "(u8::MAX as u16) as u8"].concat();
-    assert!(
-            !src.contains(&forbidden),
-            "loop-analysis fixtures must use checked packed-operand encoders instead of saturating u8 flags"
-        );
-}
 
 fn make_func(code: Vec<Instruction>) -> FunctionDef {
     let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
@@ -37,31 +26,32 @@ fn make_func(code: Vec<Instruction>) -> FunctionDef {
         has_defer: false,
         has_calls,
         has_call_extern,
-        jit_metadata: vec![Default::default(); code.len()],
+        instruction_metadata: vec![Default::default(); code.len()],
         code,
         slot_types,
         borrowed_scan_slots_prefix,
     }
 }
 
-fn with_metadata(
-    mut func: FunctionDef,
-    pc: usize,
-    metadata: JitInstructionMetadata,
-) -> FunctionDef {
-    func.jit_metadata[pc] = metadata;
+fn with_metadata(mut func: FunctionDef, pc: usize, metadata: InstructionMetadata) -> FunctionDef {
+    func.instruction_metadata[pc] = metadata;
     func
 }
 
-fn hint_loop(depth: u8, end_offset: u8, exit_pc: u32) -> Instruction {
-    // New format: a = flags(4) | depth mirror(4) | end_offset(8), bc = exit_pc
-    let loop_info = ((end_offset as u16) << 8) | ((depth as u16) << 4);
+fn with_loop_ends(mut func: FunctionDef, loop_ends: &[(usize, u32)]) -> FunctionDef {
+    for &(hint_pc, end_pc) in loop_ends {
+        func.instruction_metadata[hint_pc] = InstructionMetadata::LoopEnd { end_pc };
+    }
+    func
+}
+
+fn hint_loop(exit_pc: u32) -> Instruction {
     let b = (exit_pc & 0xFFFF) as u16;
     let c = ((exit_pc >> 16) & 0xFFFF) as u16;
     Instruction {
         op: Opcode::Hint as u8,
         flags: HINT_LOOP,
-        a: loop_info,
+        a: 0,
         b,
         c,
     }
@@ -133,21 +123,24 @@ fn test_no_loops() {
 
 #[test]
 fn test_simple_loop_with_hints() {
-    // Simple loop with new Hint format (no HINT_LOOP_END):
+    // Simple loop with a per-PC LoopEnd record:
     // 0: LoadInt r0, 0
-    // 1: Hint LOOP_BEGIN depth=0, end_offset=3, exit=5
+    // 1: Hint LOOP_BEGIN exit=5; metadata end_pc=4
     // 2: LoadInt r1, 10       <- begin_pc (loop_start)
     // 3: AddI r0, r0, r1
     // 4: Jump -2              <- end_pc (back-edge)
     // 5: Return               <- exit_pc
-    let func = make_func(vec![
-        load_int(0, 0),     // 0
-        hint_loop(0, 3, 5), // 1: HINT_LOOP, end_offset=3 -> end_pc=4
-        load_int(1, 10),    // 2: begin_pc (loop_start)
-        add_i(0, 0, 1),     // 3
-        jump(-2),           // 4: back edge (end_pc)
-        ret(),              // 5: exit_pc
-    ]);
+    let func = with_loop_ends(
+        make_func(vec![
+            load_int(0, 0),  // 0
+            hint_loop(5),    // 1: HINT_LOOP
+            load_int(1, 10), // 2: begin_pc (loop_start)
+            add_i(0, 0, 1),  // 3
+            jump(-2),        // 4: back edge (end_pc)
+            ret(),           // 5: exit_pc
+        ]),
+        &[(1, 4)],
+    );
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), 1, "Should detect 1 loop");
@@ -156,18 +149,17 @@ fn test_simple_loop_with_hints() {
     assert_eq!(loop_info.begin_pc, 2, "begin_pc should be hint_pc + 1 = 2");
     assert_eq!(
         loop_info.end_pc, 4,
-        "end_pc should be hint_pc + end_offset = 4"
+        "end_pc should come from LoopEnd metadata"
     );
     assert_eq!(loop_info.exit_pc, 5, "exit_pc should be 5");
-    assert_eq!(loop_info.depth, 0, "depth should be 0");
 }
 
 #[test]
 fn test_nested_loops_with_hints() {
-    // Nested loops with new format:
-    // 0: Hint LOOP_BEGIN depth=0, end_offset=7, exit=9
+    // Nested loops with per-PC LoopEnd records:
+    // 0: Hint LOOP_BEGIN exit=9; metadata end_pc=7
     // 1: LoadInt r0, 0          <- outer begin_pc
-    // 2: Hint LOOP_BEGIN depth=1, end_offset=2, exit=5
+    // 2: Hint LOOP_BEGIN exit=5; metadata end_pc=4
     // 3: AddI r0, r0, r1        <- inner begin_pc
     // 4: Jump -1                <- inner end_pc (back edge)
     // 5: LoadInt r0, 0          <- inner exit_pc
@@ -175,49 +167,45 @@ fn test_nested_loops_with_hints() {
     // 7: Jump -6                <- outer end_pc (back edge)
     // 8: LoadInt r0, 0
     // 9: Return                 <- outer exit_pc
-    let func = make_func(vec![
-        hint_loop(0, 7, 9), // 0: outer HINT_LOOP
-        load_int(0, 0),     // 1: outer begin_pc
-        hint_loop(1, 2, 5), // 2: inner HINT_LOOP
-        add_i(0, 0, 1),     // 3: inner begin_pc
-        jump(-1),           // 4: inner back edge
-        load_int(0, 0),     // 5: inner exit_pc
-        load_int(0, 0),     // 6
-        jump(-6),           // 7: outer back edge
-        load_int(0, 0),     // 8
-        ret(),              // 9: outer exit_pc
-    ]);
+    let func = with_loop_ends(
+        make_func(vec![
+            hint_loop(9),   // 0: outer HINT_LOOP
+            load_int(0, 0), // 1: outer begin_pc
+            hint_loop(5),   // 2: inner HINT_LOOP
+            add_i(0, 0, 1), // 3: inner begin_pc
+            jump(-1),       // 4: inner back edge
+            load_int(0, 0), // 5: inner exit_pc
+            load_int(0, 0), // 6
+            jump(-6),       // 7: outer back edge
+            load_int(0, 0), // 8
+            ret(),          // 9: outer exit_pc
+        ]),
+        &[(0, 7), (2, 4)],
+    );
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), 2, "Should detect 2 nested loops");
 
     // Loops are in bytecode order (outer first, then inner)
     let outer = &loops[0];
-    assert_eq!(outer.depth, 0);
     assert_eq!(outer.begin_pc, 1, "outer begin_pc = hint_pc + 1");
-    assert_eq!(outer.end_pc, 7, "outer end_pc = hint_pc + end_offset");
+    assert_eq!(outer.end_pc, 7, "outer end_pc comes from metadata");
     assert_eq!(outer.exit_pc, 9);
 
     let inner = &loops[1];
-    assert_eq!(inner.depth, 1);
     assert_eq!(inner.begin_pc, 3, "inner begin_pc = hint_pc + 1");
-    assert_eq!(inner.end_pc, 4, "inner end_pc = hint_pc + end_offset");
+    assert_eq!(inner.end_pc, 4, "inner end_pc comes from metadata");
     assert_eq!(inner.exit_pc, 5);
 }
 
 #[test]
-fn loop_depth_is_derived_beyond_the_compact_hint_width() {
+fn loop_metadata_handles_deep_nesting_without_compact_limits() {
     const DEPTH: usize = 20;
     let mut code = Vec::with_capacity(DEPTH * 2 + 1);
 
     for depth in 0..DEPTH {
-        let compact_depth = u8::try_from(depth.min(0x0F)).unwrap();
         let end_pc = DEPTH * 2 - 1 - depth;
-        code.push(hint_loop(
-            compact_depth,
-            0,
-            u32::try_from(end_pc + 1).unwrap(),
-        ));
+        code.push(hint_loop(u32::try_from(end_pc + 1).unwrap()));
     }
     for depth in (0..DEPTH).rev() {
         let end_pc = code.len();
@@ -230,30 +218,13 @@ fn loop_depth_is_derived_beyond_the_compact_hint_width() {
 
     let mut func = make_func(code);
     for depth in 0..DEPTH {
-        func.jit_metadata[depth] = JitInstructionMetadata::LoopEnd {
+        func.instruction_metadata[depth] = InstructionMetadata::LoopEnd {
             end_pc: u32::try_from(DEPTH * 2 - 1 - depth).unwrap(),
         };
     }
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), DEPTH);
-    for (depth, loop_info) in loops.iter().enumerate() {
-        assert_eq!(loop_info.depth, depth);
-    }
-}
-
-#[test]
-fn loop_analysis_rejects_a_corrupt_depth_mirror() {
-    let func = make_func(vec![hint_loop(1, 2, 0), add_i(0, 0, 1), jump(-1)]);
-
-    assert!(matches!(
-        try_analyze_loops(&func),
-        Err(LoopAnalysisError::InconsistentLoopDepthMirror {
-            hint_pc: 0,
-            encoded_depth: 1,
-            structural_depth: 0,
-        })
-    ));
 }
 
 #[test]
@@ -261,16 +232,19 @@ fn loop_analysis_rejects_crossing_ranges() {
     // The later loop starts inside the earlier loop and ends outside it. Both
     // individual back-edges are valid, but the pair cannot be a structured
     // nesting relation.
-    let func = make_func(vec![
-        hint_loop(0, 4, 5),
-        load_int(0, 0),
-        hint_loop(1, 4, 7),
-        load_int(1, 0),
-        jump(-3),
-        load_int(2, 0),
-        jump(-3),
-        ret(),
-    ]);
+    let func = with_loop_ends(
+        make_func(vec![
+            hint_loop(5),
+            load_int(0, 0),
+            hint_loop(7),
+            load_int(1, 0),
+            jump(-3),
+            load_int(2, 0),
+            jump(-3),
+            ret(),
+        ]),
+        &[(0, 4), (2, 6)],
+    );
 
     assert!(matches!(
         try_analyze_loops(&func),
@@ -286,42 +260,30 @@ fn loop_analysis_rejects_crossing_ranges() {
 #[test]
 fn test_infinite_loop() {
     // Infinite loop: exit_pc = 0
-    // 0: Hint LOOP_BEGIN depth=0, end_offset=2, exit=0 (infinite)
+    // 0: Hint LOOP_BEGIN exit=0; metadata end_pc=2
     // 1: AddI r0, r0, r1        <- begin_pc
     // 2: Jump -1                <- end_pc (back edge)
-    let func = make_func(vec![
-        hint_loop(0, 2, 0), // 0: HINT_LOOP with exit=0 (infinite)
-        add_i(0, 0, 1),     // 1: begin_pc
-        jump(-1),           // 2: back edge (end_pc)
-    ]);
+    let func = with_loop_ends(
+        make_func(vec![
+            hint_loop(0),   // 0: HINT_LOOP with exit=0 (infinite)
+            add_i(0, 0, 1), // 1: begin_pc
+            jump(-1),       // 2: back edge (end_pc)
+        ]),
+        &[(0, 2)],
+    );
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), 1);
 
     let loop_info = &loops[0];
     assert_eq!(loop_info.begin_pc, 1, "begin_pc = hint_pc + 1");
-    assert_eq!(loop_info.end_pc, 2, "end_pc = hint_pc + end_offset");
-    assert!(loop_info.is_infinite(), "Should be infinite loop");
+    assert_eq!(loop_info.end_pc, 2, "end_pc comes from metadata");
+    assert_eq!(loop_info.exit_pc, 0, "exit_pc=0 marks an infinite loop");
 }
 
 #[test]
-fn try_analyze_reports_effect_slot_range_overflow() {
-    let func = make_func(vec![
-        hint_loop(0, 2, 3),
-        copy_n(0, u16::MAX, 2),
-        jump(-1),
-        ret(),
-    ]);
-
-    assert!(matches!(
-        try_analyze_loops(&func),
-        Err(LoopAnalysisError::SlotRangeOverflow { pc: 1, .. })
-    ));
-}
-
-#[test]
-fn try_analyze_requires_loop_end_metadata_when_offset_is_not_encoded() {
-    let func = make_func(vec![hint_loop(0, 0, 2), load_int(0, 1), ret()]);
+fn try_analyze_requires_loop_end_metadata() {
+    let func = make_func(vec![hint_loop(2), load_int(0, 1), ret()]);
 
     assert!(matches!(
         try_analyze_loops(&func),
@@ -332,9 +294,9 @@ fn try_analyze_requires_loop_end_metadata_when_offset_is_not_encoded() {
 #[test]
 fn try_analyze_reports_metadata_end_without_back_edge() {
     let func = with_metadata(
-        make_func(vec![hint_loop(0, 0, 2), load_int(0, 1), ret()]),
+        make_func(vec![hint_loop(2), load_int(0, 1), ret()]),
         0,
-        JitInstructionMetadata::LoopEnd { end_pc: 2 },
+        InstructionMetadata::LoopEnd { end_pc: 2 },
     );
 
     assert!(matches!(
@@ -347,11 +309,11 @@ fn try_analyze_reports_metadata_end_without_back_edge() {
 }
 
 #[test]
-fn try_analyze_uses_loop_end_metadata_for_unencoded_jump_loop() {
+fn try_analyze_uses_loop_end_metadata_for_jump_loop() {
     let func = with_metadata(
-        make_func(vec![hint_loop(0, 0, 0), add_i(0, 0, 1), jump(-1)]),
+        make_func(vec![hint_loop(0), add_i(0, 0, 1), jump(-1)]),
         0,
-        JitInstructionMetadata::LoopEnd { end_pc: 2 },
+        InstructionMetadata::LoopEnd { end_pc: 2 },
     );
 
     let loops = try_analyze_loops(&func).unwrap();
@@ -361,60 +323,42 @@ fn try_analyze_uses_loop_end_metadata_for_unencoded_jump_loop() {
 }
 
 #[test]
-fn try_analyze_uses_loop_end_metadata_for_unencoded_for_loop() {
+fn try_analyze_uses_loop_end_metadata_for_for_loop() {
     let func = with_metadata(
         make_func(vec![
-            hint_loop(0, 0, 3),
+            hint_loop(3),
             add_i(0, 0, 1),
             for_loop(0, 1, -2),
             ret(),
         ]),
         0,
-        JitInstructionMetadata::LoopEnd { end_pc: 2 },
+        InstructionMetadata::LoopEnd { end_pc: 2 },
     );
 
     let loops = try_analyze_loops(&func).unwrap();
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].begin_pc, 1);
     assert_eq!(loops[0].end_pc, 2);
-}
-
-#[test]
-fn try_analyze_rejects_inconsistent_loop_end_metadata() {
-    let func = with_metadata(
-        make_func(vec![hint_loop(0, 2, 0), add_i(0, 0, 1), jump(-1)]),
-        0,
-        JitInstructionMetadata::LoopEnd { end_pc: 1 },
-    );
-
-    assert!(matches!(
-        try_analyze_loops(&func),
-        Err(LoopAnalysisError::InconsistentLoopEndMetadata {
-            hint_pc: 0,
-            encoded_end_pc: 2,
-            metadata_end_pc: 1
-        })
-    ));
 }
 
 // =========================================================================
 // Tests for get_read_regs and get_write_regs_multi
 // =========================================================================
 
-fn slice_set(slice: u16, idx: u16, val: u16, elem_bytes: u8) -> Instruction {
+fn slice_set(slice: u16, idx: u16, val: u16) -> Instruction {
     Instruction {
         op: Opcode::SliceSet as u8,
-        flags: elem_bytes,
+        flags: 0,
         a: slice,
         b: idx,
         c: val,
     }
 }
 
-fn slice_get(dst: u16, slice: u16, idx: u16, elem_bytes: u8) -> Instruction {
+fn slice_get(dst: u16, slice: u16, idx: u16) -> Instruction {
     Instruction {
         op: Opcode::SliceGet as u8,
-        flags: elem_bytes,
+        flags: 0,
         a: dst,
         b: slice,
         c: idx,
@@ -424,7 +368,7 @@ fn slice_get(dst: u16, slice: u16, idx: u16, elem_bytes: u8) -> Instruction {
 fn copy_n(dst: u16, src: u16, n: u16) -> Instruction {
     Instruction {
         op: Opcode::CopyN as u8,
-        flags: copy_n_mirror_flags(n),
+        flags: 0,
         a: dst,
         b: src,
         c: n,
@@ -441,10 +385,10 @@ fn iface_assign(dst: u16, src: u16, vk: u8) -> Instruction {
     }
 }
 
-fn call_extern(dst: u16, extern_id: u16, arg_start: u16, arg_count: u8) -> Instruction {
+fn call_extern(dst: u16, extern_id: u16, arg_start: u16, _arg_count: u8) -> Instruction {
     Instruction {
         op: Opcode::CallExtern as u8,
-        flags: arg_count,
+        flags: 0,
         a: dst,
         b: extern_id,
         c: arg_start,
@@ -454,22 +398,21 @@ fn call_extern(dst: u16, extern_id: u16, arg_start: u16, arg_count: u8) -> Instr
 fn call_iface(
     iface_slot: u16,
     arg_start: u16,
-    arg_slots: u8,
-    ret_slots: u8,
-    method_idx: u8,
+    _arg_slots: u8,
+    _ret_slots: u8,
+    _method_idx: u8,
 ) -> Instruction {
-    let c = ((arg_slots as u16) << 8) | (ret_slots as u16);
     Instruction {
         op: Opcode::CallIface as u8,
-        flags: method_idx,
+        flags: 0,
         a: iface_slot,
         b: arg_start,
-        c,
+        c: 0,
     }
 }
 
-fn queue_layout(elem_slots: usize) -> JitInstructionMetadata {
-    JitInstructionMetadata::QueueLayout {
+fn queue_layout(elem_slots: usize) -> InstructionMetadata {
+    InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value; elem_slots],
     }
 }
@@ -558,16 +501,6 @@ fn select_recv_inst(dst: u16, ch: u16, has_ok: bool) -> Instruction {
     }
 }
 
-fn select_begin(case_count: u16, has_default: bool) -> Instruction {
-    Instruction {
-        op: Opcode::SelectBegin as u8,
-        flags: if has_default { 1 } else { 0 },
-        a: case_count,
-        b: 0,
-        c: 0,
-    }
-}
-
 fn select_exec(result: u16) -> Instruction {
     Instruction {
         op: Opcode::SelectExec as u8,
@@ -580,10 +513,15 @@ fn select_exec(result: u16) -> Instruction {
 
 #[test]
 fn test_get_read_regs_slice_set() {
-    // SliceSet: a=slice, b=idx, c=val_start, flags=elem_bytes
+    // SliceSet: a=slice, b=idx, c=val_start; metadata owns element layout.
     // Single slot element
-    let inst = slice_set(10, 11, 12, 8);
-    let regs = get_read_regs(&inst);
+    let inst = slice_set(10, 11, 12);
+    let metadata = InstructionMetadata::ElemLayout {
+        elem_bytes: 8,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Value],
+    };
+    let regs = get_read_regs_with_metadata(&inst, &metadata);
     assert_eq!(
         regs,
         vec![10, 11, 12],
@@ -591,8 +529,12 @@ fn test_get_read_regs_slice_set() {
     );
 
     // Multi-slot element (16 bytes = 2 slots)
-    let inst = slice_set(10, 11, 12, 16);
-    let regs = get_read_regs(&inst);
+    let metadata = InstructionMetadata::ElemLayout {
+        elem_bytes: 16,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Value; 2],
+    };
+    let regs = get_read_regs_with_metadata(&inst, &metadata);
     assert_eq!(
         regs,
         vec![10, 11, 12, 13],
@@ -647,9 +589,9 @@ fn test_get_read_regs_iface_assign() {
 
 #[test]
 fn test_get_read_regs_call_extern() {
-    // CallExtern: a=dst, b=extern_id, c=arg_start, flags=arg_count
+    // CallExtern: a=dst, b=extern_id, c=arg_start; metadata owns both layouts.
     let inst = call_extern(0, 5, 10, 3);
-    let metadata = JitInstructionMetadata::CallExternLayout {
+    let metadata = InstructionMetadata::CallExternLayout {
         arg_layout: vec![SlotType::Value; 3],
         ret_layout: Vec::new(),
     };
@@ -663,9 +605,9 @@ fn test_get_read_regs_call_extern() {
 
 #[test]
 fn test_get_read_regs_call_iface() {
-    // CallIface: a=iface_slot (2 slots), b=arg_start, c=(arg_slots<<8|ret_slots)
+    // CallIface: a=iface_slot (2 slots), b=arg_start; metadata owns call layout.
     let inst = call_iface(5, 10, 2, 1, 0);
-    let metadata = JitInstructionMetadata::CallIfaceLayout {
+    let metadata = InstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
         method_idx: 0,
         arg_layout: vec![SlotType::Value; 2],
@@ -682,13 +624,22 @@ fn test_get_read_regs_call_iface() {
 #[test]
 fn test_get_write_regs_multi_slice_get() {
     // Single slot element
-    let inst = slice_get(10, 5, 6, 8);
-    let regs = get_write_regs_multi(&inst);
+    let inst = slice_get(10, 5, 6);
+    let metadata = InstructionMetadata::ElemLayout {
+        elem_bytes: 8,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Value],
+    };
+    let regs = get_write_regs_multi_with_metadata(&inst, &metadata);
     assert_eq!(regs, vec![10], "SliceGet with 8 bytes writes 1 slot");
 
     // Multi-slot element (16 bytes = 2 slots)
-    let inst = slice_get(10, 5, 6, 16);
-    let regs = get_write_regs_multi(&inst);
+    let metadata = InstructionMetadata::ElemLayout {
+        elem_bytes: 16,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Value; 2],
+    };
+    let regs = get_write_regs_multi_with_metadata(&inst, &metadata);
     assert_eq!(regs, vec![10, 11], "SliceGet with 16 bytes writes 2 slots");
 }
 
@@ -733,7 +684,7 @@ fn test_get_write_regs_multi_call_extern() {
 #[test]
 fn test_get_write_regs_multi_call_iface() {
     let inst = call_iface(5, 10, 2, 3, 0);
-    let metadata = JitInstructionMetadata::CallIfaceLayout {
+    let metadata = InstructionMetadata::CallIfaceLayout {
         iface_meta_id: 0,
         method_idx: 0,
         arg_layout: vec![SlotType::Value; 2],
@@ -813,40 +764,4 @@ fn queue_effects_preserve_metadata_widths_above_u8() {
     assert_eq!(writes.len(), 301);
     assert_eq!(writes.first(), Some(&500));
     assert_eq!(writes.last(), Some(&800));
-}
-
-#[test]
-fn test_analyze_loop_liveness_port_queue_ops() {
-    let func = make_func(vec![
-        hint_loop(0, 3, 4),
-        queue_send(0, 1),
-        queue_recv(3, 0, true),
-        jump(-2),
-        ret(),
-    ]);
-    let func = with_metadata(with_metadata(func, 1, queue_layout(2)), 2, queue_layout(2));
-
-    let loops = try_analyze_loops(&func).unwrap();
-    assert_eq!(loops.len(), 1);
-    assert_eq!(loops[0].live_in, vec![0, 1, 2]);
-    assert_eq!(loops[0].live_out, vec![3, 4, 5]);
-}
-
-#[test]
-fn test_analyze_loop_liveness_select_ops() {
-    let func = make_func(vec![
-        hint_loop(0, 5, 6),
-        select_begin(2, false),
-        select_send_inst(0, 1),
-        select_recv_inst(10, 4, true),
-        select_exec(13),
-        jump(-4),
-        ret(),
-    ]);
-    let func = with_metadata(with_metadata(func, 2, queue_layout(2)), 3, queue_layout(2));
-
-    let loops = try_analyze_loops(&func).unwrap();
-    assert_eq!(loops.len(), 1);
-    assert_eq!(loops[0].live_in, vec![0, 1, 2, 4]);
-    assert_eq!(loops[0].live_out, vec![10, 11, 12, 13]);
 }

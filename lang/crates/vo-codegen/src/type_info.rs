@@ -9,9 +9,6 @@ use vo_analysis::objects::PackageKey;
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
-use vo_common_core::instruction::{
-    pack_call_shape, pack_map_get_meta, pack_map_new_slots, pack_map_set_meta,
-};
 use vo_runtime::SlotType;
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Ident;
@@ -1536,47 +1533,6 @@ pub fn encode_i32(val: i32) -> (u16, u16) {
     ((bits & 0xFFFF) as u16, ((bits >> 16) & 0xFFFF) as u16)
 }
 
-// === Meta encoding helpers ===
-
-/// Encode the compact MapSet width mirror. Zero selects exact MapSet metadata.
-#[inline]
-pub fn encode_map_set_meta(key_slots: u16, val_slots: u16) -> u32 {
-    pack_map_set_meta(key_slots, val_slots)
-}
-
-/// Encode the compact MapGet width mirror plus its semantic comma-ok bit.
-/// Zero width bits select exact MapGet metadata.
-#[inline]
-pub fn encode_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> u32 {
-    pack_map_get_meta(key_slots, val_slots, has_ok)
-}
-
-/// Encode the compact MapNew width mirror. Zero selects exact MapNew metadata.
-#[inline]
-pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
-    pack_map_new_slots(key_slots, val_slots)
-}
-
-/// Encode the dynamic CallClosure/CallIface packed shape mirror.
-///
-/// Per-call layout metadata is authoritative. When either side exceeds the
-/// 8-bit mirror, encode zero so no consumer can observe a truncated count.
-#[inline]
-pub fn encode_dynamic_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
-    pack_call_shape(arg_slots, ret_slots).unwrap_or_default()
-}
-
-/// Encode the static Call packed shape mirror.
-///
-/// Static Call verifier/lowering use the callee FunctionDef param_slots/ret_slots
-/// as authority. When either side exceeds the 8-bit mirror, encode zero instead
-/// of a truncated count so consumers cannot accidentally treat it as
-/// authoritative.
-#[inline]
-pub fn encode_static_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
-    pack_call_shape(arg_slots, ret_slots).unwrap_or_default()
-}
-
 /// Largest function ID representable by Call and ClosureNew.
 pub const MAX_ENCODED_FUNCTION_ID: u32 = 0xFF_FFFF;
 
@@ -1600,11 +1556,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_new_wide_key_uses_metadata_width_sentinel() {
-        assert_eq!(encode_map_new_slots(256, 1), 0);
-    }
-
-    #[test]
     fn function_id_encoding_rejects_high_bit_truncation() {
         assert_eq!(
             encode_func_id(MAX_ENCODED_FUNCTION_ID),
@@ -1612,58 +1563,5 @@ mod tests {
         );
         assert_eq!(encode_func_id(MAX_ENCODED_FUNCTION_ID + 1), None);
         assert_eq!(MAX_SHARED_STATIC_FUNCTION_ID, 0x7F_FFFF);
-    }
-
-    #[test]
-    fn map_new_wide_value_uses_metadata_width_sentinel() {
-        assert_eq!(encode_map_new_slots(1, 256), 0);
-    }
-
-    #[test]
-    fn map_set_wide_key_uses_metadata_width_sentinel() {
-        assert_eq!(encode_map_set_meta(256, 1), 0);
-    }
-
-    #[test]
-    fn map_set_wide_value_uses_metadata_width_sentinel() {
-        assert_eq!(encode_map_set_meta(1, 256), 0);
-    }
-
-    #[test]
-    fn map_get_wide_value_uses_metadata_width_sentinel_and_preserves_ok() {
-        assert_eq!(encode_map_get_meta(1, 32768, false), 0);
-        assert_eq!(encode_map_get_meta(1, 32768, true), 1);
-    }
-
-    #[test]
-    fn dynamic_call_args_use_zero_sentinel_for_wide_args() {
-        assert_eq!(encode_dynamic_call_args(256, 1), 0);
-    }
-
-    #[test]
-    fn dynamic_call_args_use_zero_sentinel_for_wide_returns() {
-        assert_eq!(encode_dynamic_call_args(1, 256), 0);
-        assert_eq!(encode_dynamic_call_args(2, 3), (2 << 8) | 3);
-    }
-
-    #[test]
-    fn dynamic_call_args_preserve_exact_boundary_mirrors() {
-        for arg_slots in [0_u16, 255, 256] {
-            for ret_slots in [0_u16, 255, 256] {
-                let expected = pack_call_shape(arg_slots, ret_slots).unwrap_or_default();
-                assert_eq!(
-                    encode_dynamic_call_args(arg_slots, ret_slots),
-                    expected,
-                    "args={arg_slots} returns={ret_slots}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn static_call_args_do_not_encode_truncated_packed_shape() {
-        assert_eq!(encode_static_call_args(2, 3), (2 << 8) | 3);
-        assert_eq!(encode_static_call_args(1, 301), 0);
-        assert_eq!(encode_static_call_args(301, 1), 0);
     }
 }

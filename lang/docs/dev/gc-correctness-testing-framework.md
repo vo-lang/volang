@@ -338,13 +338,14 @@ Compatibility rule:
 
 Suggested target split:
 
-- `gc-vm`: regular VM GC regressions
-- `gc-jit`: regular JIT GC regressions
-- `gc-stress-vm`: VM regressions with stress and verify enabled
-- `gc-stress-jit`: JIT regressions with stress and verify enabled
+- `gc-vm`: VM with stress and verification
+- `gc-jit`: eager full-function JIT with stress and verification
+- `gc-osr`: forced loop JIT with stress and verification
 
-The default `./d.py test gc` should stay fast. Longer stress suites can be
-separate targets or CI-only tasks if needed.
+Cases that require a loop entry use the `osr-contract` matrix. The manifest
+lint requires native and GC-stress loop-JIT targets plus VM baselines with the
+same GC profile. CI must select `gc-osr`; defining the target alone provides no
+coverage.
 
 ## Precise GC Verification
 

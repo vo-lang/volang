@@ -1,6 +1,3 @@
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use vo_runtime::bytecode::Module;
 #[cfg(test)]
 use vo_runtime::instruction::Instruction;
@@ -149,38 +146,67 @@ fn invoke_jit_and_handle(
     jit_bp: usize,
     ret_slots: usize,
 ) -> ExecResult {
-    if let Some(jit_mgr) = vm.jit.manager_mut() {
-        jit_mgr.record_function_entry();
-    }
-    let mut ctx = match build_jit_context(vm, fiber, module) {
+    let mut ctx = match build_jit_context(vm, fiber) {
         Ok(ctx) => ctx,
         Err(err) => return ExecResult::JitError(err),
     };
     ctx.ctx.stack_ptr = fiber.stack_ptr();
     ctx.ctx.stack_cap = fiber.stack.len() as u32;
     ctx.ctx.jit_bp = jit_bp as u32;
-    ctx.ctx.current_func_id = fiber
-        .frames
-        .last()
-        .map(|frame| frame.func_id)
-        .unwrap_or(u32::MAX);
+    let entry_func_id = fiber.frames.last().map(|frame| frame.func_id);
+    ctx.ctx.current_func_id = entry_func_id.unwrap_or(u32::MAX);
+    let budget_before = ctx.ctx.execution_budget;
 
     // Stack buffer for return values - avoids heap allocation for the common case (<=16 slots).
     // Most functions return 0-4 slots; 16 covers all practical cases.
     const RET_STACK_MAX: usize = 16;
     let mut ret_stack_buf = [0u64; RET_STACK_MAX];
-    let mut ret_heap_buf: Vec<u64>;
+    let mut ret_heap_buf = core::mem::take(&mut fiber.jit_return_scratch);
     let ret: &mut [u64] = if ret_slots <= RET_STACK_MAX {
         &mut ret_stack_buf[..ret_slots.max(1)]
     } else {
-        ret_heap_buf = vec![0u64; ret_slots];
-        &mut ret_heap_buf
+        if ret_slots > ret_heap_buf.len()
+            && ret_heap_buf
+                .try_reserve_exact(ret_slots - ret_heap_buf.len())
+                .is_err()
+        {
+            fiber.jit_return_scratch = ret_heap_buf;
+            return ExecResult::JitError("JIT return scratch allocation failed".into());
+        }
+        ret_heap_buf.resize(ret_slots, 0);
+        ret_heap_buf[..ret_slots].fill(0);
+        &mut ret_heap_buf[..ret_slots]
     };
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
+    if let Some(jit_mgr) = vm.jit.manager_mut() {
+        jit_mgr.record_function_entry();
+    }
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
-    fiber.execution_budget = ctx.ctx.execution_budget;
+    let budget_after = ctx.ctx.execution_budget;
+    fiber.execution_budget = budget_after;
 
-    handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret)
+    if let (Some(func_id), Some(jit_mgr)) = (entry_func_id, vm.jit.manager_mut()) {
+        let disabled =
+            match jit_mgr.record_function_outcome(func_id, result, budget_before, budget_after) {
+                Ok(disabled) => disabled,
+                Err(err) => {
+                    return ExecResult::JitError(format!(
+                        "JIT execution feedback failed for function {func_id}: {err}"
+                    ));
+                }
+            };
+        if disabled {
+            for entry in &mut vm.state.dynamic_call_ic {
+                if entry.func_id == func_id {
+                    entry.jit_func_ptr = 0;
+                }
+            }
+        }
+    }
+
+    let outcome = handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret);
+    fiber.jit_return_scratch = ret_heap_buf;
+    outcome
 }
 
 fn handle_jit_result(
@@ -298,10 +324,11 @@ mod tests {
         func.heap_ret_slots = vec![2];
         func.error_ret_slot = 0;
         module.functions.push(func);
+        vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.ret_is_heap = 1;
         ctx.ctx.ret_gcref_start = u16::MAX;
 
@@ -321,10 +348,11 @@ mod tests {
         func.ret_slots = 1;
         func.error_ret_slot = 1;
         module.functions.push(func);
+        vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0, 0);
-        let ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         match handle_jit_result(&mut vm, &mut fiber, &module, JitResult::Ok, ctx, 1, &[0]) {
             ExecResult::JitError(msg) => {
@@ -385,6 +413,7 @@ mod tests {
         func.has_defer = true;
         module.functions.push(func);
         module.functions.push(function(0, 0));
+        vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0, 0);
@@ -406,7 +435,7 @@ mod tests {
             is_errdefer: true,
             registered_at_generation: 0,
         });
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.ret_is_heap = 1;
         ctx.ctx.ret_gcref_start = 0;
         ctx.ctx.is_error_return = 0;

@@ -2,8 +2,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
 
@@ -25,8 +23,6 @@ const TREE_FILE: &str = "vo.tree.json";
 const MAX_RELEASE_MANIFEST_CACHE_ENTRIES: usize = 256;
 const MAX_RELEASE_MANIFEST_CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PACKAGED_RELEASE_CAPABILITIES: usize = 10_000;
-const RELEASES_PER_PAGE: usize = 100;
-const MAX_RELEASE_PAGES: usize = (vo_module::MAX_REGISTRY_RELEASES - 1) / RELEASES_PER_PAGE + 1;
 const REGISTRY_FETCH_IDLE_TIMEOUT_MS: i32 = 30_000;
 
 thread_local! {
@@ -140,89 +136,6 @@ fn validate_packaged_release_capability_spec(
     })
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    draft: bool,
-    immutable: bool,
-}
-
-struct GitHubReleasePage(Vec<GitHubRelease>);
-
-impl<'de> Deserialize<'de> for GitHubReleasePage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct GitHubReleasePageVisitor;
-
-        impl<'de> Visitor<'de> for GitHubReleasePageVisitor {
-            type Value = GitHubReleasePage;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(
-                    formatter,
-                    "a GitHub release array with at most {RELEASES_PER_PAGE} entries"
-                )
-            }
-
-            fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                if sequence
-                    .size_hint()
-                    .is_some_and(|length| length > RELEASES_PER_PAGE)
-                {
-                    return Err(de::Error::custom(format!(
-                        "GitHub release page contains more than {RELEASES_PER_PAGE} entries"
-                    )));
-                }
-                let mut releases = Vec::new();
-                releases
-                    .try_reserve(sequence.size_hint().unwrap_or(0).min(RELEASES_PER_PAGE))
-                    .map_err(|_| de::Error::custom("failed to reserve GitHub release entries"))?;
-                loop {
-                    if releases.len() == RELEASES_PER_PAGE {
-                        if sequence.next_element::<IgnoredAny>()?.is_some() {
-                            return Err(de::Error::custom(format!(
-                                "GitHub release page contains more than {RELEASES_PER_PAGE} entries"
-                            )));
-                        }
-                        break;
-                    }
-                    let Some(release) = sequence.next_element::<GitHubRelease>()? else {
-                        break;
-                    };
-                    releases.push(release);
-                }
-                Ok(GitHubReleasePage(releases))
-            }
-        }
-
-        deserializer.deserialize_seq(GitHubReleasePageVisitor)
-    }
-}
-
-fn parse_github_release_page(raw: &[u8], api_url: &str) -> Result<Vec<GitHubRelease>> {
-    let mut deserializer = serde_json::Deserializer::from_slice(raw);
-    let releases = GitHubReleasePage::deserialize(&mut deserializer)
-        .map_err(|error| Error::RegistryError(format!("invalid JSON from {api_url}: {error}")))?
-        .0;
-    deserializer.end().map_err(|error| {
-        Error::RegistryError(format!("invalid trailing data from {api_url}: {error}"))
-    })?;
-    Ok(releases)
-}
-
-fn immutable_release_version(module: &ModulePath, release: &GitHubRelease) -> Option<ExactVersion> {
-    if release.draft || !release.immutable {
-        return None;
-    }
-    vo_module::registry::version_from_tag(module, &release.tag_name)
-        .filter(|version| module.accepts_version(version))
-}
-
 struct FetchDeadline {
     window: web_sys::Window,
     controller: web_sys::AbortController,
@@ -290,13 +203,6 @@ pub async fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 impl AsyncRegistry for BrowserRegistry {
-    fn list_version_candidates<'a>(
-        &'a self,
-        module: &'a ModulePath,
-    ) -> BoxFuture<'a, Result<Vec<ExactVersion>>> {
-        Box::pin(async move { fetch_module_release_versions(module).await })
-    }
-
     fn fetch_manifest_raw<'a>(
         &'a self,
         module: &'a ModulePath,
@@ -1047,43 +953,6 @@ fn packaged_file_path_at_root(root: &str, rel_path: &str) -> Result<String> {
     Ok(format!("{root}/{rel_path}"))
 }
 
-async fn fetch_module_release_versions(module: &ModulePath) -> Result<Vec<ExactVersion>> {
-    require_remote_github_module(module)?;
-    let repo = vo_module::registry::repository_id(module);
-    let mut versions = Vec::new();
-    let mut processed_listing_bytes = 0usize;
-    for page in 1..=MAX_RELEASE_PAGES + 1 {
-        let api_url = format!(
-            "https://api.github.com/repos/{}/{}/releases?per_page={RELEASES_PER_PAGE}&page={page}",
-            encode_component(&repo.owner),
-            encode_component(&repo.repo),
-        );
-        let raw = fetch_bytes_typed(&api_url, vo_common::vfs::MAX_TEXT_FILE_BYTES).await?;
-        processed_listing_bytes =
-            vo_module::registry::charge_registry_listing_bytes(processed_listing_bytes, raw.len())?;
-        let releases = parse_github_release_page(&raw, &api_url)?;
-        if page > MAX_RELEASE_PAGES {
-            if releases.is_empty() {
-                break;
-            }
-            return Err(Error::RegistryError(format!(
-                "release listing for {} exceeds {} pages",
-                module, MAX_RELEASE_PAGES
-            )));
-        }
-        let count = releases.len();
-        versions.extend(
-            releases
-                .iter()
-                .filter_map(|release| immutable_release_version(module, release)),
-        );
-        if count < RELEASES_PER_PAGE {
-            break;
-        }
-    }
-    Ok(versions)
-}
-
 fn require_remote_github_module(module: &ModulePath) -> Result<()> {
     if !module.is_local() && module.host() == "github.com" {
         return Ok(());
@@ -1096,30 +965,6 @@ fn require_remote_github_module(module: &ModulePath) -> Result<()> {
     })
 }
 
-fn encode_component(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char)
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(hex_digit(byte >> 4));
-                encoded.push(hex_digit(byte & 0x0f));
-            }
-        }
-    }
-    encoded
-}
-
-fn hex_digit(value: u8) -> char {
-    match value {
-        0..=9 => (b'0' + value) as char,
-        10..=15 => (b'A' + (value - 10)) as char,
-        _ => unreachable!(),
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1543,67 +1388,6 @@ mod tests {
         )
         .is_err());
         assert!(fixture.transport.requests.borrow().is_empty());
-    }
-
-    #[test]
-    fn github_release_page_is_stream_bounded_and_rejects_trailing_data() {
-        let entries = (0..RELEASES_PER_PAGE)
-            .map(|index| {
-                serde_json::json!({
-                    "tag_name": format!("v0.0.{index}"),
-                    "draft": false,
-                    "immutable": true,
-                })
-            })
-            .collect::<Vec<_>>();
-        let raw = serde_json::to_vec(&entries).unwrap();
-        assert_eq!(
-            parse_github_release_page(&raw, "test://releases")
-                .unwrap()
-                .len(),
-            RELEASES_PER_PAGE,
-        );
-
-        let mut oversized = entries;
-        oversized.push(serde_json::json!({
-            "tag_name": "v0.0.overflow",
-            "draft": false,
-        }));
-        let error =
-            parse_github_release_page(&serde_json::to_vec(&oversized).unwrap(), "test://releases")
-                .unwrap_err()
-                .to_string();
-        assert!(error.contains("more than 100"), "{error}");
-
-        let error = parse_github_release_page(b"[] trailing", "test://releases")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("trailing data"), "{error}");
-
-        let module = ModulePath::parse("github.com/acme/lib").unwrap();
-        for raw in [
-            br#"[{"tag_name":"v1.2.3","draft":false,"immutable":false}]"#.as_slice(),
-            br#"[{"tag_name":"v1.2.3","draft":true,"immutable":true}]"#.as_slice(),
-        ] {
-            let release = &parse_github_release_page(raw, "test://releases").unwrap()[0];
-            assert!(immutable_release_version(&module, release).is_none());
-        }
-        for raw in [
-            br#"[{"tag_name":"v1.2.3","immutable":true}]"#.as_slice(),
-            br#"[{"tag_name":"v1.2.3","draft":false}]"#.as_slice(),
-        ] {
-            let error = parse_github_release_page(raw, "test://releases").unwrap_err();
-            assert!(error.to_string().contains("missing field"), "{error}");
-        }
-        let release = &parse_github_release_page(
-            br#"[{"tag_name":"v1.2.3","draft":false,"immutable":true}]"#,
-            "test://releases",
-        )
-        .unwrap()[0];
-        assert_eq!(
-            immutable_release_version(&module, release),
-            Some(ExactVersion::parse("1.2.3").unwrap())
-        );
     }
 
     #[test]

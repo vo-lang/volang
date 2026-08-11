@@ -1,4 +1,17 @@
+---
+date: 2026-08-10
+status: implemented
+area: bytecode
+owner: volang
+supersedes: []
+superseded_by: []
+---
+
 # ForLoop Instruction Design
+
+> Historical design note. `HINT_LOOP` no longer carries defer or labeled
+> break/continue flags; those low four bits are reserved and verified as zero.
+> Loop boundaries and structural depth metadata remain active.
 
 ## Overview
 

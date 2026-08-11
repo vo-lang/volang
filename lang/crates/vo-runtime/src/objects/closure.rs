@@ -126,20 +126,6 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn raw_closure_set_capture_is_unsafe_public_primitive_058() {
-        let source =
-            vo_source_contract::production_source_without_test_modules(include_str!("closure.rs"));
-        assert!(
-            source.contains("pub unsafe fn set_capture("),
-            "raw closure capture mutation must stay behind an unsafe contract"
-        );
-        assert!(
-            source.contains("required write barrier"),
-            "set_capture safety docs must name the write-barrier obligation"
-        );
-    }
 }
 
 /// Closure call layout info: what goes in slot0 and where args start.

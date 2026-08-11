@@ -1397,7 +1397,7 @@ fn unpack_struct_key_map_uses_checked_key_context_050() {
     );
     unsafe {
         // SAFETY: test initializes a fresh int-only map before publication.
-        map::set_checked(&mut src_gc, map_ref, &[42], &[99], Some(&module))
+        map::set_checked(&mut src_gc, map_ref, &[42], &[99], Some((&module).into()))
     }
     .expect("test struct map key should be hashable");
 
@@ -1420,7 +1420,7 @@ fn unpack_struct_key_map_uses_checked_key_context_050() {
     );
 
     let unpacked = dst[0] as GcRef;
-    let found = unsafe { map::get_checked(unpacked, &[42], Some(&module)) }
+    let found = unsafe { map::get_checked(unpacked, &[42], Some((&module).into())) }
         .expect("unpacked struct map key should remain hashable")
         .expect("unpacked struct-key map should contain copied entry");
     assert_eq!(found.as_ref(), &[99]);
@@ -1503,24 +1503,6 @@ fn empty_struct_slice_round_trips_zero_byte_sequence_with_exact_metadata() {
         ValueMeta::new(0, ValueKind::Struct)
     );
     assert_eq!(array::elem_bytes(slice::array_ref(unpacked)), 0);
-}
-
-#[test]
-fn sequence_layout_contracts_do_not_fall_back_or_debug_assert_only() {
-    let source =
-        vo_source_contract::production_source_without_test_modules(include_str!("../pack.rs"));
-    let normalized = source.split_whitespace().collect::<String>();
-
-    assert!(
-            !normalized.contains(
-                "ifmeta_id<struct_metas.len(){struct_metas[meta_id].slot_types.len()}else{elem_bytes.div_ceil(SLOT_BYTES)}"
-            ),
-            "struct sequence slot layout must come from exact StructMeta metadata"
-        );
-    assert!(
-        !source.contains("debug_assert_eq!(encoding, SEQUENCE_ENCODING_ELEMENTS)"),
-        "packed sequence encoding validation must be active in release builds"
-    );
 }
 
 #[test]

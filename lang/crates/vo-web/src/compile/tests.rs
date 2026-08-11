@@ -167,6 +167,102 @@ fn app_workspace_source_lock() -> String {
     )
 }
 
+fn capability_import_fixture() -> (MemoryFs, MemoryFs) {
+    let app_mod = APP_LIB_MOD;
+    let lib_mod = concat!(
+        "format = 1\n",
+        "module = \"github.com/acme/lib\"\n",
+        "version = \"0.1.0\"\n",
+        "vo = \"0.1.0\"\n\n",
+        "[capabilities.privileged]\n",
+        "packages = [\"github.com/acme/lib/restricted\"]\n",
+    );
+    let sources = [
+        ("lib.vo", "package lib\nfunc Hello() {}\n"),
+        (
+            "restricted/restricted.vo",
+            "package restricted\nfunc Hello() {}\n",
+        ),
+    ];
+    let mut files = sources
+        .iter()
+        .map(|(path, source)| SourceFileEntry {
+            path: (*path).to_string(),
+            mode: SourceFileMode::Regular,
+            size: source.len() as u64,
+            digest: Digest::from_sha256(source.as_bytes()),
+        })
+        .collect::<Vec<_>>();
+    files.push(SourceFileEntry {
+        path: "vo.mod".to_string(),
+        mode: SourceFileMode::Regular,
+        size: lib_mod.len() as u64,
+        digest: Digest::from_sha256(lib_mod.as_bytes()),
+    });
+    let tree = TreeManifest { format: 1, files }.render().unwrap();
+    let parsed_lib_mod = vo_module::schema::modfile::ModFile::parse(lib_mod).unwrap();
+    let release = ReleaseManifest {
+        format: 1,
+        module: ModulePath::parse("github.com/acme/lib").unwrap(),
+        version: ExactVersion::parse("0.1.0").unwrap(),
+        vo: ToolchainConstraint::parse("0.1.0").unwrap(),
+        intent: vo_module::lock::module_intent_digest(&parsed_lib_mod).unwrap(),
+        dependencies: Vec::new(),
+        profiles: Default::default(),
+        default_profile: None,
+        capabilities: parsed_lib_mod.capabilities.declarations(),
+        artifact_variants: Vec::new(),
+        source_recipes: Vec::new(),
+        source: ManifestSource {
+            name: "source.tar.gz".to_string(),
+            size: 3,
+            digest: Digest::from_sha256(b"src"),
+            tree: Digest::from_sha256(&tree),
+        },
+        artifacts: Vec::new(),
+    }
+    .render()
+    .unwrap();
+    let locked = LockedModule {
+        path: ModulePath::parse("github.com/acme/lib").unwrap(),
+        version: ExactVersion::parse("0.1.0").unwrap(),
+        origin: LockOrigin::Registry,
+        release: Some(Digest::from_sha256(release.as_bytes())),
+        intent: None,
+        selection: None,
+    };
+
+    let mut mod_fs = MemoryFs::new();
+    let module_dir = vo_module::cache::layout::relative_module_dir(&locked.path, &locked.version);
+    mod_fs.add_file(module_dir.join("vo.mod"), lib_mod);
+    for (path, source) in sources {
+        mod_fs.add_file(module_dir.join(path), source);
+    }
+    mod_fs.add_bytes(module_dir.join("vo.tree.json"), tree);
+    mod_fs.add_file(module_dir.join("vo.release.json"), release);
+    mod_fs.add_file(
+        module_dir.join(vo_module::cache::layout::VERSION_MARKER),
+        format!("{}\n", locked.version),
+    );
+    mod_fs.add_file(
+        module_dir.join(vo_module::cache::layout::SOURCE_DIGEST_MARKER),
+        format!("{}\n", Digest::from_sha256(b"src")),
+    );
+
+    let mut local_fs = MemoryFs::new();
+    local_fs.add_file("vo.mod", app_mod);
+    local_fs.add_file("vo.lock", rendered_lock(app_mod, vec![locked]));
+    local_fs.add_file(
+        "main.vo",
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/lib/restricted\"\n",
+            "func main() { restricted.Hello() }\n",
+        ),
+    );
+    (local_fs, mod_fs)
+}
+
 #[test]
 fn compile_source_output_passes_shared_module_verifier() {
     let bytes = compile_source_with_std_fs(
@@ -208,6 +304,52 @@ fn test_compile_entry_with_mod_fs_uses_vo_lock() {
         Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
         Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
     }
+}
+
+#[test]
+fn browser_compile_rejects_import_without_selected_capability() {
+    let (local_fs, mod_fs) = capability_import_fixture();
+    let error = compile_entry_with_mod_fs("main.vo", local_fs, build_stdlib_fs(), mod_fs)
+        .expect_err("a protected browser import must require its selected capability");
+    assert!(
+        error.contains(
+            "import \"github.com/acme/lib/restricted\" requires missing capabilities [privileged]"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn browser_compile_allows_import_authorized_by_ready_module() {
+    let (local_fs, mod_fs) = capability_import_fixture();
+    let input =
+        prepare_entry_input_with_options("main.vo", local_fs, &ProjectContextOptions::default())
+            .unwrap();
+    validate_materialized_graph(&input, &mod_fs).unwrap();
+    let ready = ReadyModule::try_new_with_capability_contract(
+        ModulePath::parse("github.com/acme/lib").unwrap(),
+        ExactVersion::parse("0.1.0").unwrap(),
+        WASM_TARGET,
+        Vec::new(),
+        None,
+        vo_module::profile::CapabilityCatalog::from_declarations(
+            std::collections::BTreeMap::from([(
+                "privileged".to_string(),
+                vo_module::profile::CapabilityDeclaration {
+                    packages: vec!["github.com/acme/lib/restricted".to_string()],
+                    ..Default::default()
+                },
+            )]),
+            "test capabilities",
+        )
+        .unwrap(),
+        vo_module::profile::CapabilitySet::normalize(["privileged"], "test selected capabilities")
+            .unwrap(),
+    )
+    .unwrap();
+    let bytecode = compile_with_ready_fs_modules(input, build_stdlib_fs(), mod_fs, &[ready])
+        .expect("the ready module's selected capability should authorize the import");
+    assert!(!bytecode.is_empty());
 }
 
 #[test]
@@ -365,6 +507,42 @@ fn test_compile_entry_resolves_current_module_canonical_imports() {
         Err(e) => panic!("compile_entry_with_mod_fs failed: {}", e),
         Ok(bytes) => assert!(!bytes.is_empty(), "empty bytecode"),
     }
+}
+
+#[test]
+fn compile_entry_preserves_subpackage_identity_and_internal_visibility() {
+    let mut local_fs = MemoryFs::new();
+    local_fs.add_file(
+        "vo.mod",
+        "format = 1\nmodule = \"github.com/acme/subdir-app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    );
+    local_fs.add_file(
+        "cmd/internal/secret/secret.vo",
+        "package secret\nconst Value = 9\n",
+    );
+    local_fs.add_file(
+        "cmd/tool/main.vo",
+        concat!(
+            "package main\n",
+            "import \"github.com/acme/subdir-app/cmd/internal/secret\"\n",
+            "type marker struct{}\n",
+            "var Value = secret.Value\n",
+            "func main() {}\n",
+        ),
+    );
+
+    let bytes = compile_entry_with_mod_fs(
+        "cmd/tool/main.vo",
+        local_fs,
+        build_stdlib_fs(),
+        MemoryFs::new(),
+    )
+    .expect("the exact subpackage identity should authorize its internal import");
+    let module = vo_common_core::bytecode::Module::deserialize(&bytes).expect("bytecode");
+    assert!(module
+        .named_type_metas
+        .iter()
+        .any(|metadata| { metadata.name == "github.com/acme/subdir-app/cmd/tool.marker" }));
 }
 
 #[test]
@@ -642,12 +820,17 @@ version = \"0.1.0\"
 vo = \"0.1.0\"
 */
 package main
+type marker struct{}
 func main() {}
 ";
     let std_fs = build_stdlib_fs();
     let bytes = compile_source_with_std_fs(source, "main.vo", std_fs)
         .unwrap_or_else(|msg| panic!("expected ephemeral inline-mod compile to succeed: {msg}"));
-    assert!(!bytes.is_empty());
+    let module = vo_common_core::bytecode::Module::deserialize(&bytes).expect("bytecode");
+    assert!(module
+        .named_type_metas
+        .iter()
+        .any(|metadata| metadata.name == "local/demo.marker"));
 }
 
 #[test]

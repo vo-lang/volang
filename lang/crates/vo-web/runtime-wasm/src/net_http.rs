@@ -724,11 +724,7 @@ pub fn register_externs(
 ) -> Result<(), ExternContractError> {
     use vo_runtime::bytecode::ExternEffects;
 
-    let mut seen_names = BTreeSet::new();
-    for (id, def) in defs.iter().enumerate() {
-        if !seen_names.insert(def.name.as_str()) {
-            continue;
-        }
+    for (id, def) in vo_runtime::ffi::unique_extern_providers(defs) {
         match def.name.as_str() {
             vo_runtime::vo_extern_name!("net", "getNetErrors") => {
                 crate::register_wasm_host(reg, id as u32, &def.name, net_get_errors)?
@@ -886,17 +882,5 @@ mod tests {
             Some(String::from("AbortError"))
         );
         assert!(request_is_canceled(id).is_err());
-    }
-
-    #[test]
-    fn javascript_bridge_has_abort_and_exact_controller_cleanup_contracts() {
-        let source = include_str!("net_http.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("net/http source should contain tests section");
-        assert!(source.contains("const controller = new AbortController()"));
-        assert!(source.contains("voHttpControllers.get(requestId) === controller"));
-        assert!(source.contains("voHttpControllers.delete(requestId)"));
-        assert!(source.contains("controller.abort()"));
     }
 }

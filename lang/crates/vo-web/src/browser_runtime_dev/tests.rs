@@ -12,6 +12,16 @@ use vo_module::version::{ExactVersion, ToolchainConstraint};
 
 use crate::browser_runtime::MAX_BROWSER_SNAPSHOT_FILE_BYTES;
 
+fn capture_snapshot_files(
+    snapshot: &BrowserSnapshotPlan,
+    runtime: &BrowserRuntimePlan,
+    project_root: Option<&Path>,
+    entry_path: &Path,
+) -> Result<Vec<BrowserSnapshotFile>, String> {
+    capture_browser_snapshot_from_fs(snapshot, runtime, project_root, entry_path)
+        .map(|captured| captured.files)
+}
+
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vo-web-{}-{}-{}",
@@ -43,6 +53,10 @@ fn parse_manifest(content: &str) -> vo_module::ext_manifest::ExtensionManifest {
         Path::new("/tmp/vo.mod"),
     )
     .unwrap()
+}
+
+fn module_path(value: &str) -> ModulePath {
+    ModulePath::parse(value).unwrap()
 }
 
 fn resolved_artifact(kind: &str, name: &str) -> ResolvedArtifact {
@@ -204,7 +218,7 @@ fn browser_artifact_plan_from_fs_plans_local_bindgen_island() {
 
     let runtime = browser_runtime_plan_from_manifest(
         &root.to_string_lossy(),
-        Some("github.com/vo-lang/voplay"),
+        &module_path("github.com/vo-lang/voplay"),
         &parse_manifest(
             r#"
 [extension]
@@ -450,13 +464,12 @@ renderer = "js/dist/demo-renderer.js"
 
     let plan = published_browser_runtime_plan_from_fs(&[locked], &cache_root).unwrap();
 
-    assert_eq!(plan.runtime_modules.len(), 1);
     assert_eq!(plan.graph.frameworks.len(), 1);
     assert_eq!(plan.wasm_bindings.len(), 1);
-    assert_eq!(plan.wasm_extensions.len(), 1);
-    assert_eq!(plan.runtime_modules[0].module_key, "github.com/acme/demo");
+    let binding = &plan.wasm_bindings[0];
+    assert_eq!(plan.graph.frameworks[0].module_key, "github.com/acme/demo");
     assert_eq!(
-        plan.runtime_modules[0].module_root,
+        plan.graph.frameworks[0].module_root,
         module_dir.to_string_lossy().to_string()
     );
     assert_eq!(plan.wasm_bindings[0].module_key, "github.com/acme/demo");
@@ -465,17 +478,23 @@ renderer = "js/dist/demo-renderer.js"
         BrowserArtifactSource::ReadyModule
     );
     assert_eq!(
-        plan.runtime_modules[0]
+        plan.graph.frameworks[0]
             .contract
             .js_modules
             .get("renderer")
             .unwrap(),
         &expected_renderer_path,
     );
-    assert_eq!(plan.wasm_extensions[0].wasm_path, expected_wasm_path);
     assert_eq!(
-        plan.wasm_extensions[0].js_glue_path.as_deref(),
-        Some(expected_js_glue_path.as_str()),
+        crate::browser_runtime::resolve_asset_ref(&binding.module_root, &binding.wasm_asset),
+        expected_wasm_path
+    );
+    assert_eq!(
+        crate::browser_runtime::resolve_asset_ref(
+            &binding.module_root,
+            binding.js_glue_asset.as_ref().unwrap()
+        ),
+        expected_js_glue_path,
     );
     assert_eq!(
         plan.primary_framework_split()
@@ -540,10 +559,9 @@ protocol = "js/dist/app-protocol.js"
 
     let plan = debug_local_project_browser_runtime_plan_from_fs(&project_root).unwrap();
 
-    assert_eq!(plan.runtime_modules.len(), 1);
     assert_eq!(plan.graph.frameworks.len(), 1);
     assert_eq!(plan.wasm_bindings.len(), 1);
-    assert_eq!(plan.runtime_modules[0].module_key, "github.com/acme/app");
+    assert_eq!(plan.graph.frameworks[0].module_key, "github.com/acme/app");
     assert_eq!(
         plan.wasm_bindings[0].source,
         BrowserArtifactSource::LocalManifest
@@ -647,7 +665,8 @@ renderer = "js/dist/local-renderer.js"
     .unwrap();
 
     let module_keys = plan
-        .runtime_modules
+        .graph
+        .frameworks
         .iter()
         .map(|module| module.module_key.as_str())
         .collect::<Vec<_>>();
@@ -737,7 +756,7 @@ renderer = "js/dist/demo-renderer.js"
 
     let runtime = browser_runtime_plan_from_manifest(
         &root.to_string_lossy(),
-        Some("github.com/vo-lang/demo"),
+        &module_path("github.com/vo-lang/demo"),
         &parse_manifest(
             r#"
 [extension]
@@ -782,10 +801,17 @@ renderer = "js/dist/demo-renderer.js"
     let snapshot = runtime
         .snapshot_plan(crate::browser_runtime::BrowserSnapshotRoot::ProjectRoot)
         .unwrap();
-    let materialized =
-        materialize_browser_snapshot_from_fs(&snapshot, &runtime, Some(&root), &entry_path)
-            .unwrap();
-    let materialized = materialized
+    let launch = materialize_browser_runtime_snapshot_from_fs(
+        &intent,
+        &runtime,
+        &snapshot,
+        Some(&root),
+        &entry_path,
+    )
+    .unwrap();
+    assert_eq!(launch.artifacts.len(), 3);
+    let materialized = launch
+        .files
         .into_iter()
         .map(|file| (file.path, file.bytes))
         .collect::<std::collections::HashMap<_, _>>();
@@ -804,7 +830,7 @@ renderer = "js/dist/demo-renderer.js"
 }
 
 #[test]
-fn materialize_browser_snapshot_from_fs_projects_virtual_wasm_paths() {
+fn capture_snapshot_files_projects_virtual_wasm_paths() {
     let root = temp_dir("snapshot-fs");
     let js_dir = root.join("js").join("dist");
     let wasm_dir = root.join("rust").join("pkg-island");
@@ -822,7 +848,7 @@ fn materialize_browser_snapshot_from_fs_projects_virtual_wasm_paths() {
 
     let runtime = browser_runtime_plan_from_manifest(
         &root.to_string_lossy(),
-        Some("github.com/vo-lang/voplay"),
+        &module_path("github.com/vo-lang/voplay"),
         &parse_manifest(
             r#"
 [extension]
@@ -851,8 +877,7 @@ renderer = "js/dist/voplay-renderer.js"
     let snapshot = runtime
         .snapshot_plan(crate::browser_runtime::BrowserSnapshotRoot::ProjectRoot)
         .unwrap();
-    let files = materialize_browser_snapshot_from_fs(&snapshot, &runtime, Some(&root), &entry_path)
-        .unwrap();
+    let files = capture_snapshot_files(&snapshot, &runtime, Some(&root), &entry_path).unwrap();
     let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
 
     assert!(paths.contains(&entry_path.to_string_lossy().to_string()));
@@ -869,7 +894,7 @@ renderer = "js/dist/voplay-renderer.js"
 }
 
 #[test]
-fn materialize_browser_snapshot_from_fs_handles_single_component_assets() {
+fn capture_snapshot_files_handles_single_component_assets() {
     let root = temp_dir("snapshot-single-component");
     let entry_path = root.join("main.vo");
     let renderer_path = root.join("renderer.js");
@@ -880,7 +905,7 @@ fn materialize_browser_snapshot_from_fs_handles_single_component_assets() {
 
     let runtime = browser_runtime_plan_from_manifest(
         &root.to_string_lossy(),
-        Some("github.com/vo-lang/demo"),
+        &module_path("github.com/vo-lang/demo"),
         &parse_manifest(
             r#"
 [extension]
@@ -928,8 +953,7 @@ renderer = "renderer.js"
         kind: BrowserSnapshotMountKind::File,
     }));
 
-    let files =
-        materialize_browser_snapshot_from_fs(&snapshot, &runtime, None, &entry_path).unwrap();
+    let files = capture_snapshot_files(&snapshot, &runtime, None, &entry_path).unwrap();
     let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
     assert!(paths.contains(&entry_path.to_string_lossy().to_string()));
     assert!(paths.contains(&renderer_path.to_string_lossy().to_string()));
@@ -939,7 +963,7 @@ renderer = "renderer.js"
 }
 
 #[test]
-fn materialize_browser_snapshot_from_fs_rejects_nonportable_public_mounts() {
+fn capture_snapshot_files_rejects_nonportable_public_mounts() {
     let root = temp_dir("snapshot-nonportable-mount");
     let entry_path = root.join("main.vo");
     fs::write(&entry_path, "main").unwrap();
@@ -952,13 +976,9 @@ fn materialize_browser_snapshot_from_fs_rejects_nonportable_public_mounts() {
         }],
     };
 
-    let error = materialize_browser_snapshot_from_fs(
-        &snapshot,
-        &BrowserRuntimePlan::default(),
-        None,
-        &entry_path,
-    )
-    .expect_err("public snapshot mounts must use normalized portable paths");
+    let error =
+        capture_snapshot_files(&snapshot, &BrowserRuntimePlan::default(), None, &entry_path)
+            .expect_err("public snapshot mounts must use normalized portable paths");
     assert!(error.contains("virtual_prefix"), "{error}");
 
     fs::remove_dir_all(&root).unwrap();
@@ -1004,7 +1024,7 @@ fn native_snapshot_paths_share_one_platform_neutral_vfs_mapping() {
 }
 
 #[test]
-fn materialize_browser_snapshot_from_fs_is_deterministic() {
+fn capture_snapshot_files_is_deterministic() {
     let root = temp_dir("snapshot-deterministic");
     fs::create_dir_all(root.join("nested")).unwrap();
     fs::write(root.join("z.txt"), b"z").unwrap();
@@ -1021,7 +1041,7 @@ fn materialize_browser_snapshot_from_fs_is_deterministic() {
         }],
     };
 
-    let files = materialize_browser_snapshot_from_fs(
+    let files = capture_snapshot_files(
         &snapshot,
         &BrowserRuntimePlan::default(),
         Some(&root),
@@ -1037,7 +1057,77 @@ fn materialize_browser_snapshot_from_fs_is_deterministic() {
 }
 
 #[test]
-fn materialize_browser_snapshot_from_fs_rejects_oversized_file_before_reading_it() {
+fn project_snapshot_excludes_host_metadata_dependencies_and_build_outputs() {
+    let root = temp_dir("snapshot-project-exclusions");
+    let entry_path = root.join("main.vo");
+    fs::write(&entry_path, b"main").unwrap();
+    for directory in PROJECT_SNAPSHOT_EXCLUDED_DIRECTORIES {
+        let excluded = root.join(directory);
+        fs::create_dir_all(&excluded).unwrap();
+        fs::write(excluded.join("private.bin"), b"private").unwrap();
+    }
+    let assets = root.join("assets");
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(assets.join("visible.bin"), b"visible").unwrap();
+    let snapshot = BrowserSnapshotPlan {
+        mounts: vec![BrowserSnapshotMount {
+            source: BrowserSnapshotSourceRef::ProjectRoot,
+            virtual_prefix: String::new(),
+            strip_prefix: None,
+            kind: BrowserSnapshotMountKind::Directory,
+        }],
+    };
+
+    let files = capture_snapshot_files(
+        &snapshot,
+        &BrowserRuntimePlan::default(),
+        Some(&root),
+        &entry_path,
+    )
+    .unwrap();
+    let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
+    assert!(paths.contains(&entry_path.to_string_lossy().into_owned()));
+    assert!(paths.contains(&assets.join("visible.bin").to_string_lossy().into_owned()));
+    for directory in PROJECT_SNAPSHOT_EXCLUDED_DIRECTORIES {
+        let excluded = root.join(directory).to_string_lossy().into_owned();
+        assert!(paths.iter().all(|path| !path.starts_with(&excluded)));
+    }
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_snapshot_files_rejects_symlink_entry() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("snapshot-symlink-entry");
+    let private = root.join("private.bin");
+    let entry_path = root.join("linked.bin");
+    fs::write(&private, b"private").unwrap();
+    symlink(&private, &entry_path).unwrap();
+    let snapshot = BrowserSnapshotPlan {
+        mounts: vec![BrowserSnapshotMount {
+            source: BrowserSnapshotSourceRef::EntryFile,
+            virtual_prefix: String::new(),
+            strip_prefix: None,
+            kind: BrowserSnapshotMountKind::File,
+        }],
+    };
+
+    let error =
+        capture_snapshot_files(&snapshot, &BrowserRuntimePlan::default(), None, &entry_path)
+            .expect_err("browser snapshots must reject symbolic-link inputs");
+    assert!(
+        error.contains("symbolic") || error.contains("without following links"),
+        "{error}"
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn capture_snapshot_files_rejects_oversized_file_before_reading_it() {
     let root = temp_dir("snapshot-oversized");
     let entry_path = root.join("large.bin");
     let file = fs::File::create(&entry_path).unwrap();
@@ -1052,13 +1142,9 @@ fn materialize_browser_snapshot_from_fs_rejects_oversized_file_before_reading_it
         }],
     };
 
-    let error = materialize_browser_snapshot_from_fs(
-        &snapshot,
-        &BrowserRuntimePlan::default(),
-        None,
-        &entry_path,
-    )
-    .expect_err("oversized browser snapshot input must fail");
+    let error =
+        capture_snapshot_files(&snapshot, &BrowserRuntimePlan::default(), None, &entry_path)
+            .expect_err("oversized browser snapshot input must fail");
     assert!(error.contains(&MAX_BROWSER_SNAPSHOT_FILE_BYTES.to_string()));
 
     fs::remove_dir_all(&root).unwrap();

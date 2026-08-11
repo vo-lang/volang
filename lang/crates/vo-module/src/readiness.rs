@@ -7,8 +7,8 @@ use vo_common::vfs::FileSystem;
 use crate::artifact::required_artifacts_for_target;
 use crate::cache::layout;
 use crate::cache::validate::{
-    validate_installed_artifact_at_relative_path, validate_installed_module_with_metadata,
-    InstalledModuleError,
+    validate_installed_artifact_from_metadata_at_relative_path,
+    validate_installed_module_with_metadata, InstalledModuleError, InstalledModuleMetadata,
 };
 use crate::digest::Digest;
 use crate::ext_manifest::ExtensionManifest;
@@ -34,7 +34,8 @@ pub struct ReadyModule {
     version: ExactVersion,
     target: String,
     artifacts: Vec<ResolvedArtifact>,
-    ext_manifest: Option<ExtensionManifest>,
+    // Keep the large, uncommon extension contract out of the ready-graph element stride.
+    ext_manifest: Option<Box<ExtensionManifest>>,
     capability_catalog: crate::profile::CapabilityCatalog,
     selected_capabilities: crate::profile::CapabilitySet,
 }
@@ -199,7 +200,7 @@ impl ReadyModule {
             version,
             target,
             artifacts,
-            ext_manifest,
+            ext_manifest: ext_manifest.map(Box::new),
             capability_catalog,
             selected_capabilities,
         })
@@ -226,7 +227,7 @@ impl ReadyModule {
     }
 
     pub fn ext_manifest(&self) -> Option<&ExtensionManifest> {
-        self.ext_manifest.as_ref()
+        self.ext_manifest.as_deref()
     }
 
     pub fn selected_capabilities(&self) -> &crate::profile::CapabilitySet {
@@ -242,7 +243,7 @@ impl ReadyModule {
     }
 }
 
-fn validate_ready_target(target: &str) -> Result<(), String> {
+pub(crate) fn validate_ready_target(target: &str) -> Result<(), String> {
     crate::schema::validate_portable_path_component(target)
         .map_err(|_| "ready-module target must be a portable path component".to_string())?;
     if target.matches('-').count() < 2
@@ -263,12 +264,6 @@ fn format_artifact_ids(ids: &BTreeSet<ArtifactId>) -> String {
         return "none".to_string();
     }
     crate::summarize_diagnostic_items(ids.iter().map(ToString::to_string), "artifact(s)")
-}
-
-#[derive(Debug)]
-pub enum ModuleReadiness {
-    Ready(Box<ReadyModule>),
-    NotReady(ReadinessFailure),
 }
 
 #[derive(Debug)]
@@ -303,81 +298,69 @@ pub fn check_module_readiness<F: FileSystem>(
     fs: &F,
     locked: &LockedModule,
     target: &str,
-) -> ModuleReadiness {
+) -> Result<ReadyModule, ReadinessFailure> {
     let mut budget = crate::registry::MaterializedGraphBudget::default();
     check_module_readiness_with_budget(fs, locked, target, &mut budget)
 }
 
-fn check_module_readiness_with_budget<F: FileSystem>(
+pub(crate) fn check_module_readiness_with_budget<F: FileSystem>(
     fs: &F,
     locked: &LockedModule,
     target: &str,
     budget: &mut crate::registry::MaterializedGraphBudget,
-) -> ModuleReadiness {
+) -> Result<ReadyModule, ReadinessFailure> {
     let module_dir = layout::relative_module_dir(&locked.path, &locked.version);
     let manifest_path = module_dir.join("vo.mod");
-    if let Err(error) =
-        crate::schema::lockfile::validate_materialized_module_limits(std::slice::from_ref(locked))
-    {
-        return ModuleReadiness::NotReady(ReadinessFailure::LockedGraphInvalid {
-            error: Box::new(error),
-        });
-    }
     if let Err(detail) = validate_ready_target(target) {
-        return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            manifest_path: scoped_path(fs, &manifest_path),
-            error: Box::new(Error::InvalidReleaseMetadata(detail)),
-        });
+        return Err(artifact_resolution_failure(
+            fs,
+            locked,
+            &manifest_path,
+            Error::InvalidReleaseMetadata(detail),
+        ));
     }
-    let metadata = match validate_installed_module_with_metadata(fs, &module_dir, locked) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            return ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady {
+    let metadata =
+        validate_installed_module_with_metadata(fs, &module_dir, locked).map_err(|error| {
+            ReadinessFailure::SourceNotReady {
                 error: Box::new(error),
-            });
-        }
-    };
-    if let Err(error) = budget.charge_release(
-        metadata.release_manifest_bytes,
-        metadata.release.artifacts.len(),
-    ) {
-        return ModuleReadiness::NotReady(ReadinessFailure::LockedGraphInvalid {
+            }
+        })?;
+    budget
+        .charge_release(
+            metadata.release_manifest_bytes,
+            metadata.release.artifacts.len(),
+        )
+        .map_err(|error| ReadinessFailure::LockedGraphInvalid {
             error: Box::new(error),
-        });
-    }
+        })?;
+    check_module_readiness_from_metadata(fs, locked, target, metadata)
+}
+
+/// Complete readiness from metadata authenticated against this lock entry.
+/// The target must already be validated. Callers sharing a graph-wide budget
+/// must also charge the release bytes and artifact count before entering.
+pub(crate) fn check_module_readiness_from_metadata<F: FileSystem>(
+    fs: &F,
+    locked: &LockedModule,
+    target: &str,
+    metadata: InstalledModuleMetadata,
+) -> Result<ReadyModule, ReadinessFailure> {
+    let module_dir = layout::relative_module_dir(&locked.path, &locked.version);
+    let manifest_path = module_dir.join("vo.mod");
+    let resolution_failure = |error| artifact_resolution_failure(fs, locked, &manifest_path, error);
 
     let ext_manifest = metadata.extension;
-    let capability_catalog = match crate::profile::CapabilityCatalog::from_declarations(
-        metadata.release.capabilities.clone(),
+    let capability_catalog = crate::profile::CapabilityCatalog::from_declarations(
+        metadata.release.capabilities,
         "capabilities",
-    ) {
-        Ok(catalog) => catalog,
-        Err(error) => {
-            return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                module: locked.path.as_str().to_string(),
-                version: locked.version.to_string(),
-                manifest_path: scoped_path(fs, &manifest_path),
-                error: Box::new(error),
-            });
-        }
-    };
+    )
+    .map_err(&resolution_failure)?;
     let selected_capabilities = match locked.selection.as_ref() {
-        Some(selection) => match crate::profile::CapabilitySet::normalize(
+        Some(selection) => crate::profile::CapabilitySet::normalize(
             &selection.capabilities,
             "vo.lock selection capabilities",
-        ) {
-            Ok(capabilities) => capabilities,
-            Err(error) => {
-                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                    module: locked.path.as_str().to_string(),
-                    version: locked.version.to_string(),
-                    manifest_path: scoped_path(fs, &manifest_path),
-                    error: Box::new(error),
-                });
-            }
-        },
+        )
+        .map_err(&resolution_failure)?,
         None => crate::profile::CapabilitySet::default(),
     };
     let published_artifacts = metadata.release.artifacts;
@@ -386,7 +369,7 @@ fn check_module_readiness_with_budget<F: FileSystem>(
         .as_ref()
         .is_some_and(|manifest| requires_declared_native_target(manifest, target))
     {
-        return ModuleReadiness::NotReady(ReadinessFailure::UnsupportedNativeTarget {
+        return Err(ReadinessFailure::UnsupportedNativeTarget {
             module: locked.path.as_str().to_string(),
             version: locked.version.to_string(),
             target: target.to_string(),
@@ -399,108 +382,69 @@ fn check_module_readiness_with_budget<F: FileSystem>(
             if selection.mode == crate::schema::lockfile::LockedArtifactMode::SourceRecipe =>
         {
             if selection.target != target {
-                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                    module: locked.path.as_str().to_string(),
-                    version: locked.version.to_string(),
-                    manifest_path: scoped_path(fs, &manifest_path),
-                    error: Box::new(Error::MissingReleaseArtifact {
+                return Err(artifact_resolution_failure(
+                    fs,
+                    locked,
+                    &manifest_path,
+                    Error::MissingReleaseArtifact {
                         module: locked.path.as_str().to_string(),
                         version: locked.version.to_string(),
                         detail: format!(
                             "vo.lock fixes target {}, so it cannot be replayed for {target}",
                             selection.target
                         ),
-                    }),
-                });
+                    },
+                ));
             }
-            match crate::attestation::load_materialized_source_artifacts(fs, locked) {
-                Ok((_, artifacts)) => artifacts,
-                Err(error) => {
-                    return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                        module: locked.path.as_str().to_string(),
-                        version: locked.version.to_string(),
-                        manifest_path: scoped_path(fs, &manifest_path),
-                        error: Box::new(error),
-                    });
-                }
-            }
+            crate::attestation::load_materialized_source_artifacts(fs, locked)
+                .map(|(_, artifacts)| artifacts)
+                .map_err(&resolution_failure)?
         }
         _ => Vec::new(),
     };
 
-    let required = match required_artifacts_for_target(
-        locked,
-        &published_artifacts,
-        ext_manifest.as_ref(),
-        target,
-    ) {
-        Ok(required) => required,
-        Err(error) => {
-            return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                module: locked.path.as_str().to_string(),
-                version: locked.version.to_string(),
-                manifest_path: scoped_path(fs, &manifest_path),
-                error: Box::new(error),
-            });
-        }
-    };
+    let required =
+        required_artifacts_for_target(locked, &published_artifacts, ext_manifest.as_ref(), target)
+            .map_err(&resolution_failure)?;
 
     let mut artifacts = Vec::with_capacity(required.len());
     for required_artifact in required {
         let artifact_path = module_dir.join(&required_artifact.cache_relative_path);
-        if let Err(error) = validate_installed_artifact_at_relative_path(
+        if let Err(error) = validate_installed_artifact_from_metadata_at_relative_path(
             fs,
             &module_dir,
             locked,
-            &required_artifact.artifact.id,
+            required_artifact.artifact,
             &required_artifact.cache_relative_path,
         ) {
-            return ModuleReadiness::NotReady(ReadinessFailure::ArtifactNotReady {
+            return Err(ReadinessFailure::ArtifactNotReady {
                 module: locked.path.as_str().to_string(),
                 version: locked.version.to_string(),
                 artifact_path: scoped_path(fs, &artifact_path),
                 error: Box::new(error),
             });
         }
-        let resolved = match ResolvedArtifact::try_new_at_path(
+        let resolved = ResolvedArtifact::try_new_at_path(
             required_artifact.artifact.id.clone(),
             required_artifact.artifact.size,
             required_artifact.artifact.digest.clone(),
             required_artifact.cache_relative_path,
-        ) {
-            Ok(resolved) => resolved,
-            Err(detail) => {
-                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                    module: locked.path.as_str().to_string(),
-                    version: locked.version.to_string(),
-                    manifest_path: scoped_path(fs, &manifest_path),
-                    error: Box::new(Error::InvalidReleaseMetadata(detail)),
-                });
-            }
-        };
+        )
+        .map_err(|detail| resolution_failure(Error::InvalidReleaseMetadata(detail)))?;
         artifacts.push(resolved);
     }
     for materialized in materialized_source_artifacts {
-        let resolved = match ResolvedArtifact::try_new_at_path(
+        let resolved = ResolvedArtifact::try_new_at_path(
             materialized.id,
             materialized.size,
             materialized.digest,
             materialized.cache_relative_path,
-        ) {
-            Ok(resolved) => resolved,
-            Err(detail) => {
-                return ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                    module: locked.path.as_str().to_string(),
-                    version: locked.version.to_string(),
-                    manifest_path: scoped_path(fs, &manifest_path),
-                    error: Box::new(Error::InvalidReleaseMetadata(detail)),
-                });
-            }
-        };
+        )
+        .map_err(|detail| resolution_failure(Error::InvalidReleaseMetadata(detail)))?;
         artifacts.push(resolved);
     }
 
-    match ReadyModule::try_new_with_capability_contract(
+    ReadyModule::try_new_with_capability_contract(
         locked.path.clone(),
         locked.version.clone(),
         target,
@@ -508,15 +452,8 @@ fn check_module_readiness_with_budget<F: FileSystem>(
         ext_manifest,
         capability_catalog,
         selected_capabilities,
-    ) {
-        Ok(ready) => ModuleReadiness::Ready(Box::new(ready)),
-        Err(detail) => ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-            module: locked.path.as_str().to_string(),
-            version: locked.version.to_string(),
-            manifest_path: scoped_path(fs, &manifest_path),
-            error: Box::new(Error::InvalidReleaseMetadata(detail)),
-        }),
-    }
+    )
+    .map_err(|detail| resolution_failure(Error::InvalidReleaseMetadata(detail)))
 }
 
 pub fn check_project_readiness<F: FileSystem>(
@@ -715,12 +652,28 @@ pub fn check_materialized_modules_readiness<F: FileSystem>(
     let mut budget = crate::registry::MaterializedGraphBudget::default();
     let mut ready = Vec::with_capacity(locked_modules.len());
     for locked in locked_modules {
-        match check_module_readiness_with_budget(fs, locked, target, &mut budget) {
-            ModuleReadiness::Ready(module) => ready.push(*module),
-            ModuleReadiness::NotReady(failure) => return Err(failure),
-        }
+        ready.push(check_module_readiness_with_budget(
+            fs,
+            locked,
+            target,
+            &mut budget,
+        )?);
     }
     Ok(ready)
+}
+
+fn artifact_resolution_failure<F: FileSystem>(
+    fs: &F,
+    locked: &LockedModule,
+    manifest_path: &Path,
+    error: Error,
+) -> ReadinessFailure {
+    ReadinessFailure::ArtifactResolutionFailed {
+        module: locked.path.as_str().to_string(),
+        version: locked.version.to_string(),
+        manifest_path: scoped_path(fs, manifest_path),
+        error: Box::new(error),
+    }
 }
 
 fn scoped_path<F: FileSystem>(fs: &F, path: &Path) -> PathBuf {
@@ -942,13 +895,13 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
 
         match readiness {
-            ModuleReadiness::Ready(ready) => {
+            Ok(ready) => {
                 assert_eq!(ready.module(), &locked.path);
                 assert_eq!(ready.version(), &locked.version);
                 assert_eq!(ready.module_dir(), module_dir);
                 assert!(ready.artifacts().is_empty());
             }
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 
@@ -959,11 +912,11 @@ js = "{js}"
         let readiness = check_module_readiness(&MemoryFs::new(), &locked, "INVALID");
 
         match readiness {
-            ModuleReadiness::NotReady(ReadinessFailure::ArtifactResolutionFailed {
-                error, ..
-            }) => assert!(error.to_string().contains("ready-module target"), "{error}"),
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {failure}"),
-            ModuleReadiness::Ready(_) => panic!("invalid target unexpectedly became ready"),
+            Err(ReadinessFailure::ArtifactResolutionFailed { error, .. }) => {
+                assert!(error.to_string().contains("ready-module target"), "{error}")
+            }
+            Err(failure) => panic!("unexpected failure: {failure}"),
+            Ok(_) => panic!("invalid target unexpectedly became ready"),
         }
     }
 
@@ -996,7 +949,7 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
 
         match readiness {
-            ModuleReadiness::Ready(ready) => {
+            Ok(ready) => {
                 assert_eq!(ready.artifacts().len(), 1);
                 assert_eq!(ready.artifacts()[0].id().name, library);
                 assert_eq!(
@@ -1008,7 +961,7 @@ js = "{js}"
                     crate::artifact::artifact_relative_path(&artifact_id).unwrap()
                 );
             }
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 
@@ -1020,15 +973,15 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
 
         match readiness {
-            ModuleReadiness::Ready(_) => panic!("expected readiness failure"),
-            ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady { error }) => {
+            Ok(_) => panic!("expected readiness failure"),
+            Err(ReadinessFailure::SourceNotReady { error }) => {
                 assert!(
                     error.to_string().contains("missing vo.release.json"),
                     "{}",
                     error
                 );
             }
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 
@@ -1056,8 +1009,8 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
 
         match readiness {
-            ModuleReadiness::Ready(_) => panic!("expected readiness failure"),
-            ModuleReadiness::NotReady(ReadinessFailure::ArtifactNotReady {
+            Ok(_) => panic!("expected readiness failure"),
+            Err(ReadinessFailure::ArtifactNotReady {
                 artifact_path,
                 error,
                 ..
@@ -1066,7 +1019,7 @@ js = "{js}"
                     .ends_with(crate::artifact::artifact_relative_path(&artifact_id).unwrap()));
                 assert!(error.to_string().contains("missing"), "{}", error);
             }
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 
@@ -1086,15 +1039,15 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
 
         match readiness {
-            ModuleReadiness::Ready(_) => panic!("expected readiness failure"),
-            ModuleReadiness::NotReady(ReadinessFailure::SourceNotReady { error }) => {
+            Ok(_) => panic!("expected readiness failure"),
+            Err(ReadinessFailure::SourceNotReady { error }) => {
                 assert_eq!(
                     error.field,
                     crate::cache::validate::InstalledModuleField::ExtManifest
                 );
                 assert!(error.to_string().contains("missing declared artifacts"));
             }
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 
@@ -1123,8 +1076,8 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "x86_64-unknown-linux-gnu");
 
         match readiness {
-            ModuleReadiness::Ready(_) => panic!("expected readiness failure"),
-            ModuleReadiness::NotReady(ReadinessFailure::UnsupportedNativeTarget {
+            Ok(_) => panic!("expected readiness failure"),
+            Err(ReadinessFailure::UnsupportedNativeTarget {
                 module,
                 version,
                 target,
@@ -1134,7 +1087,7 @@ js = "{js}"
                 assert_eq!(version, "1.2.3");
                 assert_eq!(target, "x86_64-unknown-linux-gnu");
             }
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 
@@ -1170,8 +1123,8 @@ js = "{js}"
         let readiness = check_module_readiness(&fs, &locked, "aarch64-apple-darwin");
 
         match readiness {
-            ModuleReadiness::Ready(ready) => assert!(ready.artifacts().is_empty()),
-            ModuleReadiness::NotReady(failure) => panic!("unexpected failure: {}", failure),
+            Ok(ready) => assert!(ready.artifacts().is_empty()),
+            Err(failure) => panic!("unexpected failure: {}", failure),
         }
     }
 

@@ -81,20 +81,14 @@ pub use compile::{
 
 #[cfg(feature = "compiler")]
 pub use browser_runtime::{
-    browser_artifact_intent_from_runtime_plan, browser_runtime_graph_from_manifest,
-    browser_runtime_module_from_manifest, browser_runtime_plan_from_manifest,
-    browser_runtime_view_from_graph, browser_snapshot_plan_from_runtime_plan,
-    browser_wasm_extension_from_manifest, merge_browser_runtime_graphs,
-    merge_browser_runtime_plans, plan_ready_browser_runtime, plan_ready_browser_runtime_at,
-    ready_browser_runtime_graph, ready_browser_runtime_module, ready_browser_runtime_modules,
-    ready_browser_wasm_extension, ready_browser_wasm_extensions, split_primary_provider_view,
-    BrowserArtifactAssetBinding, BrowserArtifactFamily, BrowserArtifactIntent,
-    BrowserArtifactSource, BrowserFrameworkBinding, BrowserFrameworkId, BrowserFrameworkPlan,
-    BrowserRoleIndex, BrowserRuntimeContract, BrowserRuntimeGraph, BrowserRuntimeModule,
-    BrowserRuntimePlan, BrowserRuntimeView, BrowserRuntimeViewFramework, BrowserSnapshotFile,
-    BrowserSnapshotMount, BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotRoot,
-    BrowserSnapshotSourceRef, BrowserWasmExtensionBinding, BrowserWasmExtensionSpec,
-    MaterializedBrowserArtifact, MaterializedBrowserArtifactFamily,
+    browser_artifact_intent_from_runtime_plan, browser_snapshot_plan_from_runtime_plan,
+    merge_browser_runtime_graphs, merge_browser_runtime_plans, plan_ready_browser_runtime,
+    plan_ready_browser_runtime_at, ready_browser_runtime_graph, BrowserArtifactAssetBinding,
+    BrowserArtifactFamily, BrowserArtifactIntent, BrowserArtifactSource, BrowserFrameworkBinding,
+    BrowserFrameworkId, BrowserFrameworkPlan, BrowserRoleIndex, BrowserRuntimeContract,
+    BrowserRuntimeGraph, BrowserRuntimePlan, BrowserSnapshotFile, BrowserSnapshotMount,
+    BrowserSnapshotMountKind, BrowserSnapshotPlan, BrowserSnapshotRoot, BrowserSnapshotSourceRef,
+    BrowserWasmExtensionBinding, MaterializedBrowserArtifact, MaterializedBrowserArtifactFamily,
     MaterializedBrowserArtifactRole, PrimaryFrameworkSplit, RequiredBrowserArtifact,
     MAX_BROWSER_RUNTIME_ITEMS, MAX_BROWSER_SNAPSHOT_BYTES, MAX_BROWSER_SNAPSHOT_COMPONENT_BYTES,
     MAX_BROWSER_SNAPSHOT_DEPTH, MAX_BROWSER_SNAPSHOT_ENTRIES, MAX_BROWSER_SNAPSHOT_FILES,
@@ -112,15 +106,16 @@ pub use browser_runtime::{
 pub use browser_runtime_dev::{
     browser_artifact_plan_from_fs, browser_snapshot_vfs_path_from_fs,
     debug_local_project_browser_runtime_plan_from_fs, execute_browser_artifact_plan,
-    locked_browser_runtime_plan_from_fs, materialize_browser_snapshot_from_fs,
-    materialized_browser_artifacts_from_fs, native_gui_browser_runtime_plan_from_fs,
-    published_browser_runtime_plan_from_fs, ArtifactActionSpec, BrowserArtifactPlan,
-    EnsurePkgIslandAction, EnsureStandaloneWasmAction,
+    locked_browser_runtime_plan_from_fs, materialize_browser_runtime_snapshot_from_fs,
+    native_gui_browser_runtime_plan_from_fs, published_browser_runtime_plan_from_fs,
+    ArtifactActionSpec, BrowserArtifactPlan, EnsurePkgIslandAction, EnsureStandaloneWasmAction,
+    MaterializedBrowserRuntimeSnapshot,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use compile::{
     compile_entry_with_vfs, compile_entry_with_vfs_with_options, compile_ephemeral_entry_with_vfs,
+    compile_ready_entry_with_vfs,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
@@ -131,11 +126,7 @@ pub use browser_registry::{
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use wasm_ext_runtime::{
-    collect_browser_wasm_extensions_from_vfs, collect_ready_wasm_extensions_from_vfs,
-    load_browser_wasm_extensions_from_vfs, load_ready_wasm_extension_from_vfs,
-    load_ready_wasm_extensions_from_vfs, load_wasm_extension_bytes,
-    read_browser_wasm_extension_spec_from_vfs, read_ready_wasm_extension_from_vfs,
-    ReadyWasmExtensionBytes,
+    collect_browser_wasm_extensions_from_vfs, load_wasm_extensions, ReadyWasmExtensionBytes,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]

@@ -1,4 +1,4 @@
-use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlagsData as MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::SlotType;
@@ -171,25 +171,6 @@ impl<'a> CompilerStorage<'a> {
             self.local_count(),
             copy_frame_slots,
         );
-    }
-
-    pub(crate) fn sync_ssa_slots_to_memory(
-        self,
-        builder: &mut FunctionBuilder<'_>,
-        base_ptr: Value,
-        start_slot: u16,
-        slot_count: u16,
-        context: &'static str,
-    ) -> Result<(), JitError> {
-        sync_ssa_slots_to_memory(
-            builder,
-            self.vars,
-            base_ptr,
-            start_slot,
-            slot_count,
-            self.memory_only_start,
-            context,
-        )
     }
 
     pub(crate) fn load_memory_slot_range(
@@ -428,22 +409,14 @@ pub(crate) fn copy_memory_slot_suffix_with_helper(
         return;
     }
     let byte_offset = (start_slot * 8) as i64;
-    let src = builder.ins().iadd_imm(src_ptr, byte_offset);
-    let dst = builder.ins().iadd_imm(dst_ptr, byte_offset);
+    let src = builder.ins().iadd_imm_s(src_ptr, byte_offset);
+    let dst = builder.ins().iadd_imm_s(dst_ptr, byte_offset);
     let slot_count = builder
         .ins()
         .iconst(types::I32, (end_slot - start_slot) as i64);
-    if cfg!(target_arch = "aarch64") {
-        let sig = builder.func.dfg.ext_funcs[copy_frame_slots].signature;
-        let func_addr = builder.ins().func_addr(types::I64, copy_frame_slots);
-        builder
-            .ins()
-            .call_indirect(sig, func_addr, &[dst, src, slot_count]);
-    } else {
-        builder
-            .ins()
-            .call(copy_frame_slots, &[dst, src, slot_count]);
-    }
+    builder
+        .ins()
+        .call(copy_frame_slots, &[dst, src, slot_count]);
 }
 
 pub(crate) fn reload_vars_from_memory(
@@ -473,31 +446,6 @@ pub(crate) fn checked_sync_range(
         ))
     })?;
     Ok(start_slot..end_slot.min(local_count))
-}
-
-pub(crate) fn sync_ssa_slots_to_memory(
-    builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
-    base_ptr: Value,
-    start_slot: u16,
-    slot_count: u16,
-    memory_only_start: u16,
-    context: &'static str,
-) -> Result<(), JitError> {
-    if slot_count == 0 {
-        return Ok(());
-    }
-    let local_count = vars.len() as u16;
-    let range = checked_sync_range(start_slot, slot_count, local_count, context)?;
-    let spill_end = range.end.min(memory_only_start);
-    if range.start >= spill_end {
-        return Ok(());
-    }
-    for slot in range.start..spill_end {
-        let val = builder.use_var(vars[slot as usize]);
-        store_memory_slot(builder, base_ptr, slot, val);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -556,40 +504,6 @@ mod tests {
         assert!(
             matches!(err, JitError::Internal(ref message) if message.contains("test sync slot range overflow")),
             "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn vm_jit_frame_materialization_061_uses_bulk_memory_suffix_copy() {
-        let src =
-            vo_source_contract::production_source_without_test_modules(include_str!("slots.rs"));
-        let spill = src
-            .split("pub(crate) fn spill_for_materialized_frame")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn load_memory_slot_range").next())
-            .expect("spill_for_materialized_frame body should be present");
-        assert!(
-            spill.contains("copy_frame_slots: FuncRef"),
-            "materialized frame spill must receive the manifest-declared bulk copy helper"
-        );
-        assert!(
-            spill.contains("copy_memory_slot_suffix_with_helper"),
-            "memory-only frame suffix must be copied through one bulk helper call"
-        );
-
-        let suffix_copy = src
-            .split("pub(crate) fn copy_memory_slot_suffix_with_helper")
-            .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn load_memory_slot").next())
-            .expect("bulk suffix copy helper body should be present");
-        assert!(
-            suffix_copy.contains("call(copy_frame_slots")
-                || suffix_copy.contains("call_indirect(sig, func_addr"),
-            "bulk suffix copy must lower to a single helper call"
-        );
-        assert!(
-            !suffix_copy.contains("for i in start_slot..end_slot"),
-            "materializing memory-only frame suffix must not emit per-slot load/store IR"
         );
     }
 }

@@ -50,98 +50,147 @@ pub type QueueTransferResult = Result<(), String>;
 
 #[derive(Debug, Default)]
 pub struct QueueTransferCommit {
-    state: QueueTransferCommitState,
-    home_info_snapshots: Vec<(GcRef, Option<vo_runtime::objects::queue::HomeInfoSnapshot>)>,
-}
-
-#[derive(Debug, Default)]
-enum QueueTransferCommitState {
-    #[default]
-    Uncommitted,
-    Committed {
-        endpoint_registry: crate::vm::EndpointRegistrySnapshot,
-    },
+    committed: bool,
+    endpoint_registry: crate::vm::EndpointRegistryUndo,
+    home_info_undos: Vec<(GcRef, vo_runtime::objects::queue::HomeInfoUndo)>,
 }
 
 impl QueueTransferCommit {
     #[inline]
     pub fn requires_terminal_commit(&self) -> bool {
-        matches!(self.state, QueueTransferCommitState::Committed { .. })
+        self.committed
     }
 
-    fn snapshot_local_endpoint_state(&mut self, state: &crate::vm::VmState, chan_ref: GcRef) {
-        if matches!(self.state, QueueTransferCommitState::Uncommitted) {
-            self.state = QueueTransferCommitState::Committed {
-                endpoint_registry: state.endpoint_registry.snapshot(),
-            };
-        }
+    fn try_reserve(&mut self, additional: usize) -> Result<(), String> {
+        self.home_info_undos
+            .try_reserve(additional)
+            .map_err(|_| "queue transfer rollback allocation failed".to_string())?;
+        Ok(self.endpoint_registry.try_reserve(additional)?)
+    }
+
+    fn snapshot_local_endpoint_state(&mut self, chan_ref: GcRef, target_island: u32) {
+        self.committed = true;
         if !self
-            .home_info_snapshots
+            .home_info_undos
             .iter()
             .any(|(existing, _)| *existing == chan_ref)
         {
             // Safety: transfer preflight stores only canonical live queue handles.
-            self.home_info_snapshots.push((chan_ref, unsafe {
-                vo_runtime::objects::queue::home_info_snapshot(chan_ref)
+            self.home_info_undos.push((chan_ref, unsafe {
+                vo_runtime::objects::queue::home_info_undo(chan_ref, target_island)
             }));
         }
     }
 
-    fn commit_local_endpoint_state(&mut self, state: &crate::vm::VmState, chan_ref: GcRef) {
-        self.snapshot_local_endpoint_state(state, chan_ref);
+    fn commit_local_endpoint_state(&mut self, chan_ref: GcRef, target_island: u32) {
+        self.snapshot_local_endpoint_state(chan_ref, target_island);
+    }
+
+    fn record_endpoint_registry_entry(&mut self, state: &crate::vm::VmState, endpoint_id: u64) {
+        self.endpoint_registry
+            .record(&state.endpoint_registry, endpoint_id);
     }
 
     pub(crate) fn absorb(&mut self, other: Self) {
-        let QueueTransferCommitState::Committed { endpoint_registry } = other.state else {
+        if !other.committed {
             return;
-        };
-        if matches!(self.state, QueueTransferCommitState::Uncommitted) {
-            self.state = QueueTransferCommitState::Committed { endpoint_registry };
         }
-        for (chan_ref, snapshot) in other.home_info_snapshots {
+        if !self.committed {
+            *self = other;
+            return;
+        }
+        self.committed = true;
+        self.endpoint_registry.absorb(other.endpoint_registry);
+        for (chan_ref, undo) in other.home_info_undos {
             if !self
-                .home_info_snapshots
+                .home_info_undos
                 .iter()
                 .any(|(existing, _)| *existing == chan_ref)
             {
-                self.home_info_snapshots.push((chan_ref, snapshot));
+                self.home_info_undos.push((chan_ref, undo));
             }
         }
     }
 
     pub(crate) fn restore_committed_local_endpoint_state(self, state: &mut crate::vm::VmState) {
-        let QueueTransferCommitState::Committed { endpoint_registry } = self.state else {
+        if !self.committed {
             return;
-        };
-        for (chan_ref, snapshot) in self.home_info_snapshots {
-            // Safety: snapshots retain their live queue handle until rollback.
-            unsafe { vo_runtime::objects::queue::restore_home_info_snapshot(chan_ref, snapshot) };
         }
-        state.endpoint_registry.restore(endpoint_registry);
+        for (chan_ref, undo) in self.home_info_undos {
+            // Safety: undo records retain their live queue handle until rollback.
+            unsafe { vo_runtime::objects::queue::restore_home_info_undo(chan_ref, undo) };
+        }
+        self.endpoint_registry.restore(&mut state.endpoint_registry);
         state.mark_gc_all_roots_dirty();
     }
 
     pub(crate) fn into_runtime_rollback(self) -> Option<RuntimeRollback> {
-        let QueueTransferCommitState::Committed { endpoint_registry } = self.state else {
+        if !self.committed {
             return None;
-        };
+        }
         Some(RuntimeRollback::endpoint_transfer(
-            endpoint_registry,
-            self.home_info_snapshots,
+            self.endpoint_registry,
+            self.home_info_undos,
         ))
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QueueTransferPass {
-    Validate,
-    Commit,
+#[derive(Default)]
+struct QueueTransferPlan {
+    handles: Vec<GcRef>,
+    seen: HashSet<usize>,
 }
 
-impl QueueTransferPass {
-    #[inline]
-    fn commits(self) -> bool {
-        matches!(self, Self::Commit)
+impl QueueTransferPlan {
+    fn record(&mut self, chan_ref: GcRef) -> QueueTransferResult {
+        if self.seen.contains(&(chan_ref as usize)) {
+            return Ok(());
+        }
+        self.handles
+            .try_reserve(1)
+            .map_err(|_| "queue transfer plan allocation failed".to_string())?;
+        self.seen
+            .try_reserve(1)
+            .map_err(|_| "queue transfer plan allocation failed".to_string())?;
+        self.seen.insert(chan_ref as usize);
+        self.handles.push(chan_ref);
+        Ok(())
+    }
+
+    fn commit(
+        self,
+        target_island: u32,
+        state: &mut crate::vm::VmState,
+        island_effects: &mut Vec<IslandCommandEffect>,
+    ) -> Result<QueueTransferCommit, String> {
+        let original_island_effects_len = island_effects.len();
+        island_effects
+            .try_reserve(self.handles.len())
+            .map_err(|_| "queue transfer effect allocation failed".to_string())?;
+        let mut notified_remote_endpoints = HashSet::new();
+        notified_remote_endpoints
+            .try_reserve(self.handles.len())
+            .map_err(|_| "queue transfer endpoint set allocation failed".to_string())?;
+        let mut commit = QueueTransferCommit::default();
+        commit.try_reserve(self.handles.len())?;
+        state
+            .endpoint_registry
+            .try_reserve_live(self.handles.len())?;
+        for chan_ref in self.handles {
+            if let Err(error) = prepare_single_queue_handle(
+                chan_ref,
+                target_island,
+                state,
+                &mut notified_remote_endpoints,
+                island_effects,
+                &mut commit,
+            ) {
+                commit.restore_committed_local_endpoint_state(state);
+                island_effects.truncate(original_island_effects_len);
+                return Err(error);
+            }
+        }
+        Ok(commit)
     }
 }
 
@@ -476,9 +525,7 @@ pub fn prepare_queue_handles_for_transfer(
     state: &mut crate::vm::VmState,
     island_effects: &mut Vec<IslandCommandEffect>,
 ) -> Result<QueueTransferCommit, String> {
-    let mut validation_notified_remote_endpoints = HashSet::new();
-    let mut validation_island_effects = Vec::new();
-    let mut validation_commit = QueueTransferCommit::default();
+    let mut plan = QueueTransferPlan::default();
     prepare_queue_handles_for_transfer_pass(
         result,
         target_island,
@@ -488,29 +535,9 @@ pub fn prepare_queue_handles_for_transfer(
         named_type_metas,
         runtime_types,
         state,
-        &mut validation_notified_remote_endpoints,
-        &mut validation_island_effects,
-        &mut validation_commit,
-        QueueTransferPass::Validate,
+        &mut plan,
     )?;
-
-    let mut notified_remote_endpoints = HashSet::new();
-    let mut commit = QueueTransferCommit::default();
-    prepare_queue_handles_for_transfer_pass(
-        result,
-        target_island,
-        capture_types,
-        param_types,
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-        state,
-        &mut notified_remote_endpoints,
-        island_effects,
-        &mut commit,
-        QueueTransferPass::Commit,
-    )?;
-    Ok(commit)
+    plan.commit(target_island, state, island_effects)
 }
 
 fn prepare_queue_handles_for_transfer_pass(
@@ -522,10 +549,7 @@ fn prepare_queue_handles_for_transfer_pass(
     named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[vo_common_core::RuntimeType],
     state: &mut crate::vm::VmState,
-    notified_remote_endpoints: &mut HashSet<u64>,
-    island_effects: &mut Vec<IslandCommandEffect>,
-    commit: &mut QueueTransferCommit,
-    pass: QueueTransferPass,
+    plan: &mut QueueTransferPlan,
 ) -> QueueTransferResult {
     let mut visited_pointers = HashSet::new();
     if result.receiver_capture_slots > 0 {
@@ -561,11 +585,8 @@ fn prepare_queue_handles_for_transfer_pass(
             named_type_metas,
             runtime_types,
             state,
-            notified_remote_endpoints,
-            island_effects,
-            commit,
+            plan,
             &mut visited_pointers,
-            pass,
         )?;
     } else {
         for (i, &slot) in result.capture_data.iter().enumerate() {
@@ -606,11 +627,8 @@ fn prepare_queue_handles_for_transfer_pass(
                 named_type_metas,
                 runtime_types,
                 state,
-                notified_remote_endpoints,
-                island_effects,
-                commit,
+                plan,
                 &mut visited_pointers,
-                pass,
             )?;
         }
     }
@@ -645,11 +663,8 @@ fn prepare_queue_handles_for_transfer_pass(
             named_type_metas,
             runtime_types,
             state,
-            notified_remote_endpoints,
-            island_effects,
-            commit,
+            plan,
             &mut visited_pointers,
-            pass,
         )?;
         arg_slot_idx = arg_slot_end;
     }
@@ -699,7 +714,8 @@ pub fn prepare_value_queue_handles_for_transfer_with_commit(
     state: &mut crate::vm::VmState,
     island_effects: &mut Vec<IslandCommandEffect>,
 ) -> Result<QueueTransferCommit, String> {
-    validate_value_queue_handles_for_transfer(
+    let mut plan = QueueTransferPlan::default();
+    collect_value_queue_handles_for_transfer(
         slots,
         value_meta,
         target_island,
@@ -707,32 +723,9 @@ pub fn prepare_value_queue_handles_for_transfer_with_commit(
         named_type_metas,
         runtime_types,
         state,
+        &mut plan,
     )?;
-
-    let original_island_effects_len = island_effects.len();
-    let mut notified_remote_endpoints = HashSet::new();
-    let mut commit = QueueTransferCommit::default();
-    let mut visited_pointers = HashSet::new();
-    let result = prepare_value_queue_handles_for_transfer_inner(
-        slots,
-        value_meta,
-        target_island,
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-        state,
-        &mut notified_remote_endpoints,
-        island_effects,
-        &mut commit,
-        &mut visited_pointers,
-        QueueTransferPass::Commit,
-    );
-    if let Err(error) = result {
-        commit.restore_committed_local_endpoint_state(state);
-        island_effects.truncate(original_island_effects_len);
-        return Err(error);
-    }
-    Ok(commit)
+    plan.commit(target_island, state, island_effects)
 }
 
 pub fn validate_value_queue_handles_for_transfer(
@@ -744,9 +737,30 @@ pub fn validate_value_queue_handles_for_transfer(
     runtime_types: &[vo_common_core::RuntimeType],
     state: &mut crate::vm::VmState,
 ) -> QueueTransferResult {
-    let mut validation_notified_remote_endpoints = HashSet::new();
-    let mut validation_island_effects = Vec::new();
-    let mut validation_commit = QueueTransferCommit::default();
+    let mut plan = QueueTransferPlan::default();
+    collect_value_queue_handles_for_transfer(
+        slots,
+        value_meta,
+        target_island,
+        struct_metas,
+        named_type_metas,
+        runtime_types,
+        state,
+        &mut plan,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_value_queue_handles_for_transfer(
+    slots: &[u64],
+    value_meta: vo_runtime::ValueMeta,
+    target_island: u32,
+    struct_metas: &[vo_common_core::bytecode::StructMeta],
+    named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
+    runtime_types: &[vo_common_core::RuntimeType],
+    state: &crate::vm::VmState,
+    plan: &mut QueueTransferPlan,
+) -> QueueTransferResult {
     let mut visited_pointers = HashSet::new();
     prepare_value_queue_handles_for_transfer_inner(
         slots,
@@ -756,11 +770,8 @@ pub fn validate_value_queue_handles_for_transfer(
         named_type_metas,
         runtime_types,
         state,
-        &mut validation_notified_remote_endpoints,
-        &mut validation_island_effects,
-        &mut validation_commit,
+        plan,
         &mut visited_pointers,
-        QueueTransferPass::Validate,
     )
 }
 
@@ -1467,12 +1478,9 @@ fn prepare_value_queue_handles_for_transfer_inner(
     struct_metas: &[vo_common_core::bytecode::StructMeta],
     named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[vo_common_core::RuntimeType],
-    state: &mut crate::vm::VmState,
-    notified_remote_endpoints: &mut HashSet<u64>,
-    island_effects: &mut Vec<IslandCommandEffect>,
-    commit: &mut QueueTransferCommit,
+    state: &crate::vm::VmState,
+    plan: &mut QueueTransferPlan,
     visited_pointers: &mut HashSet<usize>,
-    pass: QueueTransferPass,
 ) -> QueueTransferResult {
     use vo_runtime::gc::{Gc, GcRef};
     use vo_runtime::objects::map::MapIterator;
@@ -1745,16 +1753,7 @@ fn prepare_value_queue_handles_for_transfer_inner(
                     ));
                 }
                 preflight_queue_transfer_route(chan_ref, target_island, state)?;
-                if pass.commits() {
-                    prepare_single_queue_handle(
-                        chan_ref,
-                        target_island,
-                        state,
-                        notified_remote_endpoints,
-                        island_effects,
-                        commit,
-                    )?;
-                }
+                plan.record(chan_ref)?;
             }
 
             ValueKind::Struct => {
@@ -2061,15 +2060,17 @@ fn prepare_single_queue_handle(
 
     match unsafe { vo_runtime::objects::queue_state::backing(chan_ref) } {
         QueueBacking::Local => {
-            commit.commit_local_endpoint_state(state, chan_ref);
+            commit.commit_local_endpoint_state(chan_ref, target_island);
             if unsafe { queue::home_info(chan_ref) }.is_none() {
                 let eid = state
                     .allocate_endpoint_id()
                     .map_err(|error| error.to_string())?;
-                unsafe { queue::install_home_info(chan_ref, eid, state.current_island_id) };
+                unsafe { queue::try_install_home_info(chan_ref, eid, state.current_island_id) }
+                    .map_err(|_| "local port HomeInfo allocation failed".to_string())?;
             }
             let endpoint_id = unsafe { queue::add_home_peer(chan_ref, target_island) }
                 .map_err(|_| "local port transfer lost its HomeInfo".to_string())?;
+            commit.record_endpoint_registry_entry(state, endpoint_id);
             state.endpoint_registry.ensure_live(endpoint_id, chan_ref);
             state.mark_gc_all_roots_dirty();
         }
@@ -2080,7 +2081,6 @@ fn prepare_single_queue_handle(
                     proxy.home_island,
                     proxy.endpoint_id,
                     target_island,
-                    state.current_island_id,
                 ));
             }
         }

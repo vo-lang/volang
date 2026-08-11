@@ -13,6 +13,12 @@ owner = "runtime"
 languages = ["vo", "go", "lua", "js", "java"]
 
 [[benchmark]]
+id = "channel-block-wake"
+path = "channel-block-wake"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
 id = "fannkuch"
 path = "fannkuch"
 owner = "runtime"
@@ -77,6 +83,24 @@ id = "recursive-tree"
 path = "recursive-tree"
 owner = "runtime"
 languages = ["vo", "go", "lua", "js", "py", "rb", "java", "c"]
+
+[[benchmark]]
+id = "scheduler-spawn-recycle"
+path = "scheduler-spawn-recycle"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "scheduler-spawn-peak"
+path = "scheduler-spawn-peak"
+owner = "runtime"
+languages = ["vo"]
+
+[[benchmark]]
+id = "select-block-wake"
+path = "select-block-wake"
+owner = "runtime"
+languages = ["vo"]
 
 [[benchmark]]
 id = "sieve"
