@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use vo_jit::{
-    JitArtifactMetadata, JitCompileEnv, JitCompiler, JitError, JitFailureKind, JitFunc, LoopFunc,
-    LoopInfo,
+    JitArtifactMetadata, JitCompileEnv, JitCompiler, JitError, JitFailureKind,
+    JitFrameEntryEligibility, JitFunc, LoopFunc, LoopInfo,
 };
 
 use super::{JitExecutionStats, JitSideExitReason};
@@ -135,6 +135,9 @@ struct FunctionJitInfo {
 
     /// Lock-free metadata handle used while native code is paused in a callback.
     metadata: Option<Arc<JitArtifactMetadata>>,
+
+    /// Exact module-wide transitive effect contract used by dynamic calls.
+    entry_eligibility: Option<JitFrameEntryEligibility>,
 }
 
 impl FunctionJitInfo {
@@ -146,6 +149,7 @@ impl FunctionJitInfo {
             compile_error: None,
             full_low_progress_exit_streak: 0,
             metadata: None,
+            entry_eligibility: None,
         }
     }
 }
@@ -679,6 +683,14 @@ impl JitManager {
         }
     }
 
+    #[inline]
+    pub(crate) fn function_entry_eligibility(
+        &self,
+        func_id: u32,
+    ) -> Option<JitFrameEntryEligibility> {
+        self.funcs.get(func_id as usize)?.entry_eligibility
+    }
+
     pub(crate) fn interpreter_reason(
         &self,
         func_id: u32,
@@ -809,9 +821,15 @@ impl JitManager {
             let metadata = compiler.function_metadata_handle(func_id).ok_or_else(|| {
                 JitError::Internal("compiled function has no native metadata".into())
             })?;
-            Ok::<_, JitError>((ptr, metadata))
+            let entry_eligibility =
+                compiler
+                    .function_entry_eligibility(func_id)
+                    .ok_or_else(|| {
+                        JitError::Internal("compiled function has no entry eligibility".into())
+                    })?;
+            Ok::<_, JitError>((ptr, metadata, entry_eligibility))
         })();
-        let (ptr, metadata) = match compile_result {
+        let (ptr, metadata, entry_eligibility) = match compile_result {
             Ok(compiled) => compiled,
             Err(e) => {
                 if let Some(info) = self.funcs.get_mut(idx) {
@@ -828,6 +846,7 @@ impl JitManager {
             info.compile_error = None;
             info.full_low_progress_exit_streak = 0;
             info.metadata = Some(metadata);
+            info.entry_eligibility = Some(entry_eligibility);
         }
         self.func_table[idx] = ptr as *const u8;
 
@@ -1156,6 +1175,12 @@ mod tests {
             manager
                 .compile_full(0, loaded.verified_module(), env)
                 .expect("compile caller after callee");
+            let eligibility = manager
+                .function_entry_eligibility(0)
+                .expect("compiled caller entry contract");
+            assert!(!eligibility.frame_elided);
+            assert!(!eligibility.prepared_shadow);
+            assert!(!eligibility.may_gc);
             manager.get_entry(0).expect("compiled caller entry")
         };
 

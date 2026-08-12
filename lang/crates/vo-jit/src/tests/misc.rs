@@ -101,6 +101,115 @@ fn compiled_artifact_retains_precise_live_gcref_stack_maps() {
 }
 
 #[test]
+fn native_stack_maps_exclude_dead_gcref_slots_per_safepoint() {
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::StrSlice, 3, 0, 1),
+            Instruction::new(Opcode::StrSlice, 4, 3, 1),
+            Instruction::new(Opcode::Return, 4, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::GcRef,
+        ],
+        3,
+        3,
+        1,
+    );
+    func.ret_slot_types = vec![SlotType::GcRef];
+    let mut module = VoModule::new("jit-native-root-liveness".into());
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create JIT compiler");
+
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+    )
+    .expect("compile root-liveness probe");
+
+    let metadata = jit.function_metadata(0).expect("artifact metadata");
+    assert_eq!(metadata.stack_maps.len(), 2);
+    assert!(metadata.stack_maps.iter().all(|map| map.roots.len() == 1));
+    assert!(metadata
+        .stack_maps
+        .iter()
+        .all(|map| !map.requires_frame_materialization));
+}
+
+#[test]
+fn interface_materialization_marker_is_live_per_safepoint() {
+    let load_meta = |slot, meta: ValueMeta| {
+        let raw = meta.to_raw();
+        Instruction::new(Opcode::LoadInt, slot, raw as u16, (raw >> 16) as u16)
+    };
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![
+            load_meta(2, ValueMeta::new(0, ValueKind::Interface)),
+            load_meta(5, ValueMeta::new(0, ValueKind::String)),
+            Instruction::new(Opcode::SliceAppend, 0, 1, 2),
+            Instruction::new(Opcode::SliceAppend, 7, 0, 5),
+            Instruction::new(Opcode::Return, 7, 1, 0),
+        ],
+        vec![
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::GcRef,
+        ],
+        3,
+        7,
+        1,
+    );
+    func.ret_slot_types = vec![SlotType::GcRef];
+    func.instruction_metadata[2] = InstructionMetadata::ElemLayout {
+        elem_bytes: 16,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::Interface0, SlotType::Interface1],
+    };
+    func.instruction_metadata[3] = InstructionMetadata::ElemLayout {
+        elem_bytes: 8,
+        needs_sign_extend: false,
+        slot_layout: vec![SlotType::GcRef],
+    };
+    let mut module = VoModule::new("jit-native-interface-liveness".into());
+    module
+        .interface_metas
+        .push(vo_runtime::bytecode::InterfaceMeta {
+            name: String::new(),
+            method_names: Vec::new(),
+            methods: Vec::new(),
+        });
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create JIT compiler");
+
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+    )
+    .expect("compile interface-liveness probe");
+
+    let metadata = jit.function_metadata(0).expect("artifact metadata");
+    assert_eq!(metadata.stack_maps.len(), 2);
+    assert!(metadata.stack_maps[0].requires_frame_materialization);
+    assert_eq!(metadata.stack_maps[0].roots.len(), 2);
+    assert!(!metadata.stack_maps[1].requires_frame_materialization);
+    assert_eq!(metadata.stack_maps[1].roots.len(), 2);
+}
+
+#[test]
 fn native_metadata_budget_rejects_before_artifact_publication() {
     let func = make_func(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 0);
     let mut module = VoModule::new("jit-native-metadata-budget".into());

@@ -22,7 +22,6 @@ pub(crate) fn instrument_function(
     func_id: u32,
     artifact_kind: u32,
     osr_pc: u32,
-    has_conditional_roots: bool,
 ) -> Result<(), JitError> {
     let instructions = func
         .layout
@@ -126,20 +125,6 @@ pub(crate) fn instrument_function(
                 offset: 0,
             },
         );
-        if has_conditional_roots {
-            // I16 is a metadata-only marker. Interface data roots depend on
-            // the adjacent runtime tag, so the VM materializes this frame
-            // before collection instead of treating the data word as an
-            // unconditional pointer.
-            func.dfg.append_user_stack_map_entry(
-                inst,
-                UserStackMapEntry {
-                    ty: types::I16,
-                    slot: record,
-                    offset: 0,
-                },
-            );
-        }
         let source_id = safepoint_id
             .checked_add(1)
             .ok_or_else(|| JitError::Internal("native safepoint identifier overflow".into()))?;
@@ -232,7 +217,6 @@ mod tests {
             7,
             JitNativeFrame::ARTIFACT_FUNCTION,
             u32::MAX,
-            false,
         )
         .expect("instrument native frame");
 

@@ -70,6 +70,21 @@ impl JitCallbackVm<'_> {
     }
 }
 
+/// Read the module-wide transitive entry contract published alongside a JIT
+/// function. ABI-only callback tests intentionally omit an owning VM and use
+/// the conservative per-function fallback at the call site.
+pub(super) fn exact_entry_eligibility_if_available(
+    ctx: *const JitContext,
+    func_id: u32,
+) -> Option<vo_jit::JitFrameEntryEligibility> {
+    let ctx = unsafe { ctx.as_ref() }?;
+    if ctx.callback_state.is_null() {
+        return None;
+    }
+    let vm = unsafe { &*(ctx.callback_state as *const Vm) };
+    vm.jit.manager()?.function_entry_eligibility(func_id)
+}
+
 /// Decode the restricted VM capability carried by a JIT callback context.
 ///
 /// # Safety

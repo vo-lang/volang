@@ -139,6 +139,7 @@ impl NativeScratchKind {
 pub struct NativeRootSpill {
     slot: StackSlot,
     root_count: u32,
+    has_conditional_roots: bool,
 }
 
 /// Explicit, type-precise shadow roots for calls that can actually reach a GC
@@ -146,18 +147,9 @@ pub struct NativeRootSpill {
 /// forcing Cranelift to spill GcRefs at every non-GC runtime helper call.
 pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + MetadataAccess {
     fn spill_native_roots(&mut self) -> Option<NativeRootSpill> {
-        let root_slots = self
-            .function_def()
-            .slot_types
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, ty)| (*ty == vo_runtime::SlotType::GcRef).then_some(slot as u16))
-            .collect::<Vec<_>>();
-        let has_conditional_roots = self
-            .function_def()
-            .slot_types
-            .contains(&vo_runtime::SlotType::Interface0);
-        if root_slots.is_empty() && !has_conditional_roots {
+        let root_slots = self.native_root_slots_for_current_pc();
+        let has_conditional_roots = self.has_conditional_roots_at_current_pc();
+        if root_slots.is_empty() && !has_conditional_roots && !self.has_native_root_frame() {
             return None;
         }
 
@@ -172,6 +164,7 @@ pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + Metadata
         Some(NativeRootSpill {
             slot: shadow,
             root_count: root_slots.len() as u32,
+            has_conditional_roots,
         })
     }
 
@@ -189,6 +182,16 @@ pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + Metadata
                 offset: 0,
             },
         );
+        if spill.has_conditional_roots {
+            self.builder().func.dfg.append_user_stack_map_entry(
+                inst,
+                UserStackMapEntry {
+                    ty: types::I16,
+                    slot: spill.slot,
+                    offset: 0,
+                },
+            );
+        }
         for root in 0..spill.root_count {
             self.builder().func.dfg.append_user_stack_map_entry(
                 inst,
@@ -331,6 +334,18 @@ pub trait MetadataAccess {
 
     /// Dense verified index of the dynamic callsite at `pc`.
     fn dynamic_callsite_index(&self, pc: usize) -> Option<u32>;
+
+    /// Direct scalar roots live at the current allocation/call safepoint.
+    fn native_root_slots_for_current_pc(&self) -> Vec<u16>;
+
+    /// Interface/tagged roots live at the current safepoint require typed VM
+    /// frame materialization until native pair maps are available.
+    fn has_conditional_roots_at_current_pc(&self) -> bool;
+
+    /// The artifact owns a native frame anchor even when this particular
+    /// safepoint has no live roots. Rootless safepoints still need the marker
+    /// so nested-frame validation observes an active record.
+    fn has_native_root_frame(&self) -> bool;
 
     /// Get JIT metadata attached to the instruction at current_pc, if present.
     fn current_instruction_metadata(&self) -> Option<&InstructionMetadata> {
@@ -501,6 +516,41 @@ macro_rules! impl_shared_compiler_traits {
 
             fn dynamic_callsite_index(&self, pc: usize) -> Option<u32> {
                 self.core.analysis.dynamic_callsite_index(pc)
+            }
+
+            fn native_root_slots_for_current_pc(&self) -> Vec<u16> {
+                self.core
+                    .analysis
+                    .native_root_liveness(self.core.current_pc)
+                    .map(|liveness| liveness.direct_roots.to_vec())
+                    .unwrap_or_else(|| {
+                        self.core
+                            .func_def
+                            .slot_types
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(slot, ty)| {
+                                (*ty == vo_runtime::SlotType::GcRef).then_some(slot as u16)
+                            })
+                            .collect()
+                    })
+            }
+
+            fn has_conditional_roots_at_current_pc(&self) -> bool {
+                self.core
+                    .analysis
+                    .native_root_liveness(self.core.current_pc)
+                    .map(|liveness| liveness.has_conditional_roots)
+                    .unwrap_or_else(|| {
+                        self.core
+                            .func_def
+                            .slot_types
+                            .contains(&vo_runtime::SlotType::Interface0)
+                    })
+            }
+
+            fn has_native_root_frame(&self) -> bool {
+                $crate::function_needs_native_root_frame(self.core.func_def)
             }
         }
 

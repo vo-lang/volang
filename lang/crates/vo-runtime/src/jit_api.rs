@@ -891,6 +891,19 @@ pub enum JitRuntimeHelperPanicPolicy {
     RecordsUserPanic,
 }
 
+/// VM-owned state a runtime helper reads from the current JIT activation.
+///
+/// `InstructionIdentity` helpers use the published function/PC only to
+/// validate bytecode metadata or report a trap. They do not read register
+/// slots, so generated code can keep its register file in SSA form on the
+/// successful path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitRuntimeHelperFrameAccess {
+    None,
+    InstructionIdentity,
+    FrameSlots,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitRuntimeHelperAbi {
     pub name: &'static str,
@@ -904,14 +917,25 @@ pub struct JitRuntimeHelperAbi {
 }
 
 impl JitRuntimeHelperAbi {
+    pub fn frame_access(self) -> JitRuntimeHelperFrameAccess {
+        match self.name {
+            "vo_iface_eq" | "vo_iface_assert" | "vo_map_len" | "vo_map_get" | "vo_map_set"
+            | "vo_map_delete" | "vo_map_iter_init" | "vo_map_iter_next" => {
+                JitRuntimeHelperFrameAccess::InstructionIdentity
+            }
+            _ if self.observes_frame => JitRuntimeHelperFrameAccess::FrameSlots,
+            _ => JitRuntimeHelperFrameAccess::None,
+        }
+    }
+
     /// Generated code must publish its SSA frame before helpers that can
     /// schedule or otherwise inspect VM-owned frame state.
     ///
     /// Allocation helpers only accrue GC debt. Their separate pre-allocation
     /// safepoint poll materializes the frame on the taken slow path, so the
     /// capacity-available path does not need an unconditional spill.
-    pub const fn requires_frame_sync(self) -> bool {
-        self.may_schedule || self.observes_frame
+    pub fn requires_frame_sync(self) -> bool {
+        self.may_schedule || matches!(self.frame_access(), JitRuntimeHelperFrameAccess::FrameSlots)
     }
 
     /// Helpers that can consume fresh managed-heap capacity poll the VM before
@@ -4209,7 +4233,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::RecordsRuntimeTrap,
             may_gc: false,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_iface_assert",
@@ -4219,7 +4243,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsJitResult,
             may_gc: true,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_set_call_request",
@@ -4269,7 +4293,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_get",
@@ -4279,7 +4303,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_set",
@@ -4289,7 +4313,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: true,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_delete",
@@ -4299,7 +4323,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_iter_init",
@@ -4309,7 +4333,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_iter_next",
@@ -4319,7 +4343,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: true,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_island_new",

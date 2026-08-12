@@ -554,7 +554,49 @@ fn jit_map_set_uses_deferred_allocation_poll_contract() {
         .expect("vo_map_set helper ABI entry");
     assert!(helper.may_gc);
     assert!(!helper.requires_gc_poll());
+    assert_eq!(
+        helper.frame_access(),
+        JitRuntimeHelperFrameAccess::InstructionIdentity
+    );
+    assert!(!helper.requires_frame_sync());
     assert_eq!(helper.params.len(), 7);
+}
+
+#[test]
+fn metadata_only_helpers_do_not_materialize_jit_frame_slots() {
+    let metadata_only = [
+        "vo_iface_eq",
+        "vo_iface_assert",
+        "vo_map_len",
+        "vo_map_get",
+        "vo_map_set",
+        "vo_map_delete",
+        "vo_map_iter_init",
+        "vo_map_iter_next",
+    ];
+    for name in metadata_only {
+        let helper = runtime_helper_abi_fields()
+            .iter()
+            .find(|helper| helper.name == name)
+            .unwrap_or_else(|| panic!("missing runtime helper ABI entry for {name}"));
+        assert!(!helper.observes_frame);
+        assert_eq!(
+            helper.frame_access(),
+            JitRuntimeHelperFrameAccess::InstructionIdentity,
+            "{name} should only observe the published function/PC"
+        );
+        assert!(
+            !helper.requires_frame_sync(),
+            "{name} should keep JIT registers in SSA form"
+        );
+    }
+
+    let trap = runtime_helper_abi_fields()
+        .iter()
+        .find(|helper| helper.name == "vo_runtime_trap")
+        .expect("vo_runtime_trap helper ABI entry");
+    assert_eq!(trap.frame_access(), JitRuntimeHelperFrameAccess::FrameSlots);
+    assert!(trap.requires_frame_sync());
 }
 
 #[test]

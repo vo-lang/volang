@@ -52,19 +52,19 @@ SP-relative root。
 
 ### 4.1 直接 GcRef
 
-JIT 为每个真实安全点生成独立的 type-precise shadow-root 区。所有
-`SlotType::GcRef` 在该点同步到连续 I64 slot；Cranelift user stack map 只描述这些显式
-slot，并用 I32 metadata entry 标记该 call 为 GC 安全点。普通 runtime call 不再迫使
-Cranelift 把 GcRef SSA 值广泛溢出。
+JIT 通过共享 instruction-effect 表对 verified CFG 做反向活跃性分析，并为每个真实安全点
+生成独立的 type-precise shadow-root 区。仅在该点活跃的 `SlotType::GcRef` 会同步到连续
+I64 slot；Cranelift user stack map 只描述这些显式 slot，并用 I32 metadata entry 标记该
+call 为 GC 安全点。普通 runtime call 不会迫使 Cranelift 把 GcRef SSA 值广泛溢出。
 
 运行时按 safepoint id 精确查表并访问对应 root slot。该位置也适合将来由移动
 collector 原地更新。
 
 ### 4.2 Interface 条件 root
 
-interface 数据槽是否为 GcRef 取决于相邻 tag。含 interface slot 的 artifact 在
-stack map 中带 materialization marker。当前 collector 在 GC side exit 完成后扫描
-typed VM frame，由 `SlotType::Interface0/Interface1` 和 tag 共同决定数据槽是否为根。
+interface 数据槽是否为 GcRef 取决于相邻 tag。仅当 interface pair 在当前安全点活跃时，
+stack map 才携带 materialization marker。当前 collector 在 GC side exit 完成后扫描 typed
+VM frame，由 `SlotType::Interface0/Interface1` 和 tag 共同决定数据槽是否为根。
 
 此选择保留精确性，也避免把标量 interface payload 当作指针。原生 map 的能力边界
 保持机器可读，后续若引入原生 conditional root area，可沿用同一 marker 协议升级。
@@ -116,14 +116,21 @@ GC 未在任意普通 allocation helper 内隐式运行。这个约束允许 all
 同时缓存目标的 `jit_may_gc`。无分配目标走零 root-spill call site，可能分配的目标进入
 带 root map 的 call site。动态目标切换不会复用错误的 effect。
 
+传递 `may_gc` 与 frame-entry 资格分别计算。普通 acyclic caller 继续要求 materialized
+frame，以便任意 VM bridge exit 能重建 caller 链；frame-elided entry 只覆盖满足完整局部
+contract 的 leaf 与经过 SCC 校验的纯递归成员。
+
 ## 6. Effect 拆分
 
-`may_gc` 表示 helper 会增加托管堆债务或接触 GC 状态。它本身不再触发无条件 frame
+`may_gc` 表示 helper 会增加托管堆债务或接触 GC 状态。它本身不会触发无条件 frame
 spill。以下效果仍要求同步 VM frame：
 
 - `may_schedule`；
-- `observes_frame`；
+- 读取 frame slots 的 `observes_frame`；
 - panic/unwind、defer/recover、需要 VM materialization 的调用边界。
+
+只读取已发布 `(func_id, pc)` 来校验 bytecode metadata 的 map/interface helper 属于
+`InstructionIdentity`，无需同步 SSA slots。
 
 分配 poll 的 slow path 独立拥有 spill，因此容量充足的分配路径不会重复写整个 frame。
 
@@ -133,6 +140,7 @@ spill。以下效果仍要求同步 VM frame：
 - 达到 native 校验预算后仍执行 GC side exit；完整 root 工作转交可恢复 VM scanner。
 - map 缺失、artifact kind 错误、context 链不一致会产生 JIT infrastructure error。
 - rootless native chain 合法；它表示当前所有暂停的原生 caller 都没有直接 root。
+- root 活跃性矩阵和保留后的 safepoint map 都计入独立编译/metadata 预算；超限时拒绝 JIT。
 - map backing generation 在增量扫描 cursor 中持久记录；resize/rehash 后从新 backing
   开头恢复有界扫描。
 - OOM helper 返回既有 typed/sentinel 结果，生成代码在任何对象访问前转成受管错误。
@@ -150,7 +158,8 @@ back-edge 都受同一上限约束。
 合入条件包括：
 
 - full JIT 与 OSR artifact 都保留 root map；
-- 活跃 GcRef 跨分配 helper 时出现在 map 中；
+- 活跃 GcRef 跨分配 helper 时出现在 map 中，已经死亡的 GcRef 不进入该点 map；
+- interface materialization marker 只出现在 interface pair 活跃的安全点；
 - GC 待处理时 helper 尚未执行，side exit pc 指向当前指令；
 - allocation-only 直接 callee 的两层 NativeFrame 和 roots 均可见；
 - pure static/dynamic callee 不生成调用点 root spill，effect 变化会选择独立的安全调用点；

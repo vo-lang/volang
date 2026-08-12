@@ -890,6 +890,15 @@ impl JitCompiler {
         }))
     }
 
+    /// Exact transitive entry contract cached for the retained module image.
+    /// Compilation initializes this table before publishing any code pointer.
+    pub fn function_entry_eligibility(&self, func_id: u32) -> Option<JitFrameEntryEligibility> {
+        self.entry_eligibility
+            .as_ref()?
+            .get(func_id as usize)
+            .copied()
+    }
+
     #[cfg(test)]
     fn verify_function_scope(
         &self,
@@ -936,36 +945,39 @@ impl JitCompiler {
                 let code_size = compiled.code_info().total_size as usize;
                 let committed_size = self.cache.committed_artifact_bytes(code_size);
                 self.cache.ensure_code_capacity(committed_size)?;
-                let native_stack_maps = compiled
-                    .buffer
-                    .user_stack_maps()
-                    .iter()
-                    .map(|(return_address, frame_size, map)| {
-                        let source = compiled
-                            .buffer
-                            .get_srclocs_sorted()
-                            .iter()
-                            .find(|source| {
-                                source.start < *return_address && *return_address <= source.end
-                            })
-                            .ok_or_else(|| {
-                                JitError::Internal(format!(
-                                    "native stack map for {name} has no safepoint source location"
-                                ))
-                            })?;
-                        let safepoint_id = source.loc.bits().checked_sub(1).ok_or_else(|| {
+                let stack_maps = compiled.buffer.user_stack_maps();
+                let source_locs = compiled.buffer.get_srclocs_sorted();
+                let mut source_index = 0usize;
+                let mut native_stack_maps = Vec::with_capacity(stack_maps.len());
+                for (return_address, frame_size, map) in stack_maps {
+                    while source_locs
+                        .get(source_index)
+                        .is_some_and(|source| source.end < *return_address)
+                    {
+                        source_index += 1;
+                    }
+                    let source = source_locs
+                        .get(source_index)
+                        .filter(|source| {
+                            source.start < *return_address && *return_address <= source.end
+                        })
+                        .ok_or_else(|| {
                             JitError::Internal(format!(
-                                "native stack map for {name} has an invalid safepoint source location"
+                                "native stack map for {name} has no safepoint source location"
                             ))
                         })?;
-                        Ok((
-                            safepoint_id,
-                            *return_address,
-                            *frame_size,
-                            map.entries().collect::<Vec<_>>(),
+                    let safepoint_id = source.loc.bits().checked_sub(1).ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "native stack map for {name} has an invalid safepoint source location"
                         ))
-                    })
-                    .collect::<Result<Vec<_>, JitError>>()?;
+                    })?;
+                    native_stack_maps.push((
+                        safepoint_id,
+                        *return_address,
+                        *frame_size,
+                        map.entries().collect::<Vec<_>>(),
+                    ));
+                }
                 let metadata = Arc::new(JitArtifactMetadata::from_entries(
                     code_size,
                     native_stack_maps,
@@ -1137,7 +1149,6 @@ impl JitCompiler {
                 func_id,
                 vo_runtime::jit_api::JitNativeFrame::ARTIFACT_FUNCTION,
                 u32::MAX,
-                func.slot_types.contains(&vo_runtime::SlotType::Interface0),
             );
             self.finish_translation(native_frame_result)?;
         }
@@ -1309,7 +1320,6 @@ impl JitCompiler {
                 func_id,
                 vo_runtime::jit_api::JitNativeFrame::ARTIFACT_OSR_LOOP,
                 u32::try_from(begin_pc).unwrap_or(u32::MAX),
-                func.slot_types.contains(&vo_runtime::SlotType::Interface0),
             );
             self.finish_translation(native_frame_result)?;
         }

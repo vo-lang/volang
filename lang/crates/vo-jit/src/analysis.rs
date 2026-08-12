@@ -3,6 +3,7 @@
 //! Full-function JIT and loop OSR should consume the same metadata/effects/
 //! register facts so they cannot silently diverge on operand semantics.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use vo_runtime::bytecode::{DynamicCallsiteMap, FunctionDef, Module as VoModule};
@@ -20,7 +21,21 @@ pub struct FunctionAnalysis {
     loop_memory_only_starts: Vec<u16>,
     func_id: u32,
     dynamic_callsites: Arc<DynamicCallsiteMap>,
+    native_root_liveness: Vec<NativeRootLivenessPoint>,
     retained_bytes: usize,
+}
+
+#[derive(Debug)]
+struct NativeRootLivenessPoint {
+    pc: u32,
+    direct_roots: Box<[u16]>,
+    has_conditional_roots: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NativeRootLiveness<'a> {
+    pub direct_roots: &'a [u16],
+    pub has_conditional_roots: bool,
 }
 
 impl FunctionAnalysis {
@@ -48,6 +63,29 @@ impl FunctionAnalysis {
                 requested_bytes: active_loop_bytes,
             });
         }
+        let native_root_liveness =
+            compute_native_root_liveness(func_def, vo_module, MAX_JIT_COMPILE_WORK_BYTES)?;
+        let native_root_liveness_bytes = native_root_liveness
+            .len()
+            .saturating_mul(core::mem::size_of::<NativeRootLivenessPoint>())
+            .saturating_add(
+                native_root_liveness
+                    .iter()
+                    .map(|point| {
+                        point
+                            .direct_roots
+                            .len()
+                            .saturating_mul(core::mem::size_of::<u16>())
+                    })
+                    .sum::<usize>(),
+            );
+        let fixed_analysis_bytes = loop_bytes.saturating_add(native_root_liveness_bytes);
+        if fixed_analysis_bytes > retained_limit_bytes {
+            return Err(JitError::AnalysisResourceLimitExceeded {
+                limit_bytes: retained_limit_bytes,
+                requested_bytes: fixed_analysis_bytes,
+            });
+        }
         let (reg_const_facts, reg_const_facts_bytes) =
             crate::translator::try_compute_reg_const_facts_with_context(
                 &func_def.code,
@@ -57,14 +95,14 @@ impl FunctionAnalysis {
                 &vo_module.externs,
                 0,
                 func_def.code.len(),
-                retained_limit_bytes - loop_bytes,
+                retained_limit_bytes - fixed_analysis_bytes,
             )
             .map_err(|requested_bytes| JitError::AnalysisResourceLimitExceeded {
                 limit_bytes: retained_limit_bytes,
-                requested_bytes: loop_bytes.saturating_add(requested_bytes),
+                requested_bytes: fixed_analysis_bytes.saturating_add(requested_bytes),
             })?;
 
-        let requested_bytes = loop_bytes.saturating_add(reg_const_facts_bytes);
+        let requested_bytes = fixed_analysis_bytes.saturating_add(reg_const_facts_bytes);
         let mut loop_memory_only_starts = Vec::new();
         loop_memory_only_starts
             .try_reserve_exact(loops.len())
@@ -110,6 +148,7 @@ impl FunctionAnalysis {
         debug_assert!(active_loops.is_empty());
         let retained_bytes = reg_const_facts_bytes
             .saturating_add(loops.len().saturating_mul(core::mem::size_of::<LoopInfo>()))
+            .saturating_add(native_root_liveness_bytes)
             .saturating_add(
                 loop_memory_only_starts
                     .capacity()
@@ -129,6 +168,7 @@ impl FunctionAnalysis {
             loop_memory_only_starts,
             func_id,
             dynamic_callsites,
+            native_root_liveness,
             retained_bytes,
         })
     }
@@ -141,6 +181,19 @@ impl FunctionAnalysis {
     #[inline]
     pub fn dynamic_callsite_index(&self, pc: usize) -> Option<u32> {
         self.dynamic_callsites.index(self.func_id, pc)
+    }
+
+    pub(crate) fn native_root_liveness(&self, pc: usize) -> Option<NativeRootLiveness<'_>> {
+        let pc = u32::try_from(pc).ok()?;
+        let point = self
+            .native_root_liveness
+            .binary_search_by_key(&pc, |point| point.pc)
+            .ok()
+            .map(|index| &self.native_root_liveness[index])?;
+        Some(NativeRootLiveness {
+            direct_roots: &point.direct_roots,
+            has_conditional_roots: point.has_conditional_roots,
+        })
     }
 
     pub fn shared_loops(&self) -> Arc<[LoopInfo]> {
@@ -182,6 +235,223 @@ impl FunctionAnalysis {
                 )?))
             })
     }
+}
+
+fn compute_native_root_liveness(
+    func: &FunctionDef,
+    module: &VoModule,
+    work_limit_bytes: usize,
+) -> Result<Vec<NativeRootLivenessPoint>, JitError> {
+    let has_native_roots = func.slot_types.iter().any(|slot| {
+        matches!(
+            slot,
+            vo_runtime::SlotType::GcRef
+                | vo_runtime::SlotType::Interface0
+                | vo_runtime::SlotType::Interface1
+        )
+    });
+    let safepoint_pcs = func
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, inst)| {
+            crate::contract::opcode_contract(inst.opcode())
+                .may_gc
+                .then_some(pc)
+        })
+        .collect::<Vec<_>>();
+    if !has_native_roots || safepoint_pcs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let instruction_count = func.code.len();
+    let word_count = usize::from(func.local_slots).div_ceil(u64::BITS as usize);
+    let live_cells = instruction_count.checked_mul(word_count).ok_or_else(|| {
+        JitError::CompileWorkLimitExceeded {
+            limit_bytes: work_limit_bytes,
+            requested_bytes: usize::MAX,
+        }
+    })?;
+    let live_bytes = live_cells
+        .checked_mul(core::mem::size_of::<u64>())
+        .ok_or_else(|| JitError::CompileWorkLimitExceeded {
+            limit_bytes: work_limit_bytes,
+            requested_bytes: usize::MAX,
+        })?;
+    if live_bytes > work_limit_bytes {
+        return Err(JitError::CompileWorkLimitExceeded {
+            limit_bytes: work_limit_bytes,
+            requested_bytes: live_bytes,
+        });
+    }
+
+    let mut live = Vec::new();
+    live.try_reserve_exact(live_cells)
+        .map_err(|_| JitError::CompileWorkLimitExceeded {
+            limit_bytes: work_limit_bytes,
+            requested_bytes: live_bytes,
+        })?;
+    live.resize(live_cells, 0_u64);
+    let mut successors_by_pc = Vec::with_capacity(instruction_count);
+    let mut predecessors = vec![Vec::<usize>::new(); instruction_count];
+    for (pc, inst) in func.code.iter().enumerate() {
+        let successors = instruction_successors(pc, inst, instruction_count)?;
+        for &successor in &successors {
+            predecessors[successor].push(pc);
+        }
+        successors_by_pc.push(successors);
+    }
+
+    let mut effects_by_pc = Vec::with_capacity(instruction_count);
+    for (pc, inst) in func.code.iter().enumerate() {
+        let facts = effects::EffectFacts::from_instruction(func.instruction_metadata.get(pc));
+        let instruction_effects = effects::try_instruction_effects_with_module_context(
+            inst,
+            facts,
+            &module.externs,
+            &module.functions,
+        )
+        .map_err(|error| {
+            JitError::Internal(format!(
+                "verified root-liveness effects failed for {} at pc {pc}: {error:?}",
+                func.name
+            ))
+        })?;
+        effects_by_pc.push((instruction_effects.reads, instruction_effects.writes));
+    }
+
+    let mut pending = (0..instruction_count).rev().collect::<VecDeque<_>>();
+    let mut queued = vec![true; instruction_count];
+    let mut next = vec![0_u64; word_count];
+    while let Some(pc) = pending.pop_front() {
+        queued[pc] = false;
+        next.fill(0);
+        for &successor in &successors_by_pc[pc] {
+            let successor_live = &live[successor * word_count..(successor + 1) * word_count];
+            for (word, successor_word) in next.iter_mut().zip(successor_live) {
+                *word |= *successor_word;
+            }
+        }
+        let (reads, writes) = &effects_by_pc[pc];
+        for &slot in writes {
+            clear_live_slot(&mut next, slot, func.local_slots, func, pc)?;
+        }
+        for &slot in reads {
+            set_live_slot(&mut next, slot, func.local_slots, func, pc)?;
+        }
+
+        let current = &mut live[pc * word_count..(pc + 1) * word_count];
+        if current != next {
+            current.copy_from_slice(&next);
+            for &predecessor in &predecessors[pc] {
+                if !queued[predecessor] {
+                    queued[predecessor] = true;
+                    pending.push_back(predecessor);
+                }
+            }
+        }
+    }
+
+    let mut points = Vec::with_capacity(safepoint_pcs.len());
+    for pc in safepoint_pcs {
+        let live_at_pc = &live[pc * word_count..(pc + 1) * word_count];
+        let mut direct_roots = Vec::new();
+        let mut has_conditional_roots = false;
+        for (slot, ty) in func.slot_types.iter().copied().enumerate() {
+            if !live_slot(live_at_pc, slot) {
+                continue;
+            }
+            match ty {
+                vo_runtime::SlotType::GcRef => direct_roots.push(slot as u16),
+                vo_runtime::SlotType::Interface0 | vo_runtime::SlotType::Interface1 => {
+                    has_conditional_roots = true;
+                }
+                _ => {}
+            }
+        }
+        points.push(NativeRootLivenessPoint {
+            pc: pc as u32,
+            direct_roots: direct_roots.into_boxed_slice(),
+            has_conditional_roots,
+        });
+    }
+    Ok(points)
+}
+
+fn instruction_successors(
+    pc: usize,
+    inst: &vo_runtime::instruction::Instruction,
+    code_len: usize,
+) -> Result<Vec<usize>, JitError> {
+    use vo_runtime::instruction::Opcode;
+    let fallthrough = || (pc + 1 < code_len).then_some(pc + 1);
+    let successors = match inst.opcode() {
+        Opcode::Jump => vec![crate::compile_common::checked_branch_target(
+            code_len,
+            pc,
+            inst.imm32(),
+            inst.opcode(),
+        )?],
+        Opcode::JumpIf | Opcode::JumpIfNot => {
+            let mut successors = fallthrough().into_iter().collect::<Vec<_>>();
+            successors.push(crate::compile_common::checked_branch_target(
+                code_len,
+                pc,
+                inst.imm32(),
+                inst.opcode(),
+            )?);
+            successors
+        }
+        Opcode::ForLoop => {
+            let mut successors = fallthrough().into_iter().collect::<Vec<_>>();
+            successors.push(crate::compile_common::checked_forloop_target(
+                code_len, pc, inst,
+            )?);
+            successors
+        }
+        Opcode::Return | Opcode::Panic => Vec::new(),
+        _ => fallthrough().into_iter().collect(),
+    };
+    Ok(successors)
+}
+
+fn set_live_slot(
+    words: &mut [u64],
+    slot: u16,
+    local_slots: u16,
+    func: &FunctionDef,
+    pc: usize,
+) -> Result<(), JitError> {
+    if slot >= local_slots {
+        return Err(JitError::Internal(format!(
+            "verified root-liveness read for {} at pc {pc} exceeds local slots: {slot} >= {local_slots}",
+            func.name
+        )));
+    }
+    words[usize::from(slot) / u64::BITS as usize] |= 1_u64 << (slot % u64::BITS as u16);
+    Ok(())
+}
+
+fn clear_live_slot(
+    words: &mut [u64],
+    slot: u16,
+    local_slots: u16,
+    func: &FunctionDef,
+    pc: usize,
+) -> Result<(), JitError> {
+    if slot >= local_slots {
+        return Err(JitError::Internal(format!(
+            "verified root-liveness write for {} at pc {pc} exceeds local slots: {slot} >= {local_slots}",
+            func.name
+        )));
+    }
+    words[usize::from(slot) / u64::BITS as usize] &= !(1_u64 << (slot % u64::BITS as u16));
+    Ok(())
+}
+
+#[inline]
+fn live_slot(words: &[u64], slot: usize) -> bool {
+    words[slot / u64::BITS as usize] & (1_u64 << (slot % u64::BITS as usize)) != 0
 }
 
 fn instruction_memory_start(
@@ -409,5 +679,52 @@ mod tests {
         .expect("sparse facts fit the analysis budget");
 
         assert!(analysis.retained_bytes() < 256 * 1024);
+    }
+
+    #[test]
+    fn native_root_liveness_merges_verified_cfg_edges() {
+        fn with_imm32(opcode: Opcode, a: u16, value: i32) -> Instruction {
+            Instruction::with_flags(
+                opcode,
+                0,
+                a,
+                value as u32 as u16,
+                (value as u32 >> 16) as u16,
+            )
+        }
+
+        let code = vec![
+            with_imm32(Opcode::JumpIf, 4, 3),
+            Instruction::new(Opcode::StrSlice, 2, 0, 5),
+            with_imm32(Opcode::Jump, 0, 2),
+            Instruction::new(Opcode::StrSlice, 2, 1, 5),
+            Instruction::new(Opcode::Return, 2, 1, 0),
+        ];
+        let mut func = make_func(code, vec![InstructionMetadata::None; 5]);
+        func.local_slots = 7;
+        func.slot_types = vec![
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::Value,
+        ];
+        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        let mut module = VoModule::new("root-liveness-cfg".to_string());
+        module.functions.push(func);
+
+        let points =
+            compute_native_root_liveness(&module.functions[0], &module, MAX_JIT_COMPILE_WORK_BYTES)
+                .expect("valid root liveness");
+
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].pc, 1);
+        assert_eq!(&*points[0].direct_roots, &[0]);
+        assert_eq!(points[1].pc, 3);
+        assert_eq!(&*points[1].direct_roots, &[1]);
     }
 }

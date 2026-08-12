@@ -213,13 +213,10 @@ pub(crate) fn function_contract_in_env(
 
 /// Compute call-entry eligibility for the complete immutable module image.
 ///
-/// Static calls are lowered by the JIT call boundary itself, but treating every
-/// call as locally unsafe prevents pure recursion from ever using that path.
-/// Ignore only calls that stay inside a genuinely recursive SCC. Calls outside
-/// that SCC retain the conservative bytecode contract, so this optimization
-/// does not broaden native entry to unrelated acyclic multi-function chains.
-/// An unsafe member is propagated back through the reverse call graph and
-/// disqualifies the complete recursive component.
+/// Static calls are lowered by the JIT call boundary itself. GC reachability is
+/// propagated through the complete call graph, while frame-elided entry stays
+/// limited to calls inside a genuinely recursive SCC. An acyclic caller still
+/// needs a materialized frame if a nested call exits through the VM bridge.
 pub(crate) fn module_frame_entry_eligibility(
     module: &Module,
     env: JitCompileEnv<'_>,
@@ -241,22 +238,27 @@ pub(crate) fn module_frame_entry_eligibility(
         }
     }
     let (component_ids, recursive_components) = recursive_call_components(&callees, &callers);
+    let local_contracts = module
+        .functions
+        .iter()
+        .map(|func| local_function_contract_in_env(func, module, env))
+        .collect::<Vec<_>>();
     let mut eligibility = module
         .functions
         .iter()
         .enumerate()
         .map(|(func_id, func)| {
-            crate::jit_frame_entry_eligibility_for_contract(
-                func,
-                local_function_contract_in_env(
-                    func,
-                    func_id,
-                    module,
-                    env,
-                    &component_ids,
-                    &recursive_components,
-                ),
-            )
+            let mut frame_contract = local_contracts[func_id];
+            let has_non_recursive_call = callees[func_id].iter().any(|&callee_id| {
+                component_ids[callee_id] != component_ids[func_id]
+                    || !recursive_components[component_ids[func_id]]
+            });
+            if has_non_recursive_call {
+                frame_contract = frame_contract.union(opcode_contract(Opcode::Call));
+            }
+            let mut entry = crate::jit_frame_entry_eligibility_for_contract(func, frame_contract);
+            entry.may_gc = local_contracts[func_id].may_gc;
+            entry
         })
         .collect::<Vec<_>>();
 
@@ -375,11 +377,8 @@ fn propagate_ineligible_callers(
 
 fn local_function_contract_in_env(
     func: &FunctionDef,
-    func_id: usize,
     module: &Module,
     env: JitCompileEnv<'_>,
-    component_ids: &[usize],
-    recursive_components: &[bool],
 ) -> EffectContract {
     let reg_const_facts = crate::translator::try_compute_reg_const_facts_with_context(
         &func.code,
@@ -405,20 +404,7 @@ fn local_function_contract_in_env(
 
     for (pc, inst) in func.code.iter().enumerate() {
         if inst.opcode() == Opcode::Call {
-            let callee_id = inst.static_call_func_id() as usize;
-            let same_recursive_component = component_ids
-                .get(callee_id)
-                .zip(component_ids.get(func_id))
-                .is_some_and(|(callee_component, caller_component)| {
-                    callee_component == caller_component
-                        && recursive_components
-                            .get(*caller_component)
-                            .copied()
-                            .unwrap_or(false)
-                });
-            if same_recursive_component {
-                continue;
-            }
+            continue;
         }
         if inst.opcode() == Opcode::CallExtern
             && env
@@ -575,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn acyclic_static_call_chain_keeps_conservative_entry_contract() {
+    fn pure_acyclic_static_call_chain_keeps_exact_gc_effect() {
         let mut module = Module::new("acyclic-static-call".to_string());
         module.functions = vec![
             function_with_sig(
@@ -596,7 +582,7 @@ mod tests {
 
         assert!(!eligibility[0].frame_elided);
         assert!(!eligibility[0].prepared_shadow);
-        assert!(eligibility[0].may_gc);
+        assert!(!eligibility[0].may_gc);
         assert!(eligibility[1].frame_elided);
         assert!(eligibility[1].prepared_shadow);
         assert!(!eligibility[1].may_gc);

@@ -344,7 +344,8 @@ pub extern "C" fn jit_prepare_closure_call(
 
     // 2. The callback prepares a complete callee stack window below. A non-OK
     // result materializes its CallFrame before VM-owned handling resumes.
-    let eligibility = vo_jit::jit_frame_entry_eligibility(func_def);
+    let eligibility = super::helpers::exact_entry_eligibility_if_available(ctx_ptr, func_id)
+        .unwrap_or_else(|| vo_jit::jit_frame_entry_eligibility(func_def));
     let jit_func_ptr = lookup_jit_ptr(
         ctx.jit_func_table,
         ctx.jit_func_count,
@@ -573,7 +574,8 @@ pub extern "C" fn jit_prepare_iface_call(
     // 2. The prepared miss owns a shadow stack window. An IC hit can recreate
     // that window in native scratch for an ordinary one-slot pointer receiver;
     // boxed value-receiver wrappers stay on the miss path.
-    let eligibility = vo_jit::jit_frame_entry_eligibility(func_def);
+    let eligibility = super::helpers::exact_entry_eligibility_if_available(ctx, func_id)
+        .unwrap_or_else(|| vo_jit::jit_frame_entry_eligibility(func_def));
     let jit_func_ptr = lookup_jit_ptr(
         ctx_ref.jit_func_table,
         ctx_ref.jit_func_count,
