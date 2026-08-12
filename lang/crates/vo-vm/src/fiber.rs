@@ -765,13 +765,12 @@ pub(crate) const MAX_RETAINED_STACK_SLOTS: usize = 1 << 12;
 /// Keep the failure at the VM stack boundary so the reported error points at
 /// the actual execution problem.
 pub const MAX_STACK_CAPACITY: usize = 1 << 20;
-/// Maximum slot budget for JIT direct-call native stack chains.
+/// Maximum slot budget for JIT direct-call shadow stack chains.
 ///
-/// JIT-to-JIT direct calls use native stack slots for locals before materializing
-/// frames back to `fiber.stack` on side exits. Keep this limit lower than the VM
-/// stack limit so large-frame recursion trips a Vo panic before host stack
-/// exhaustion.
-pub const MAX_JIT_NATIVE_STACK_SLOTS: usize = 1 << 15;
+/// JIT-to-JIT direct calls reserve unmaterialized windows in `fiber.stack` and
+/// materialize real frames only on side exits. Keep a separate bound so deep
+/// native call chains fail at the language stack boundary.
+pub const MAX_JIT_DIRECT_STACK_SLOTS: usize = 1 << 15;
 /// Maximum nested direct JIT call depth before converting recursion into a
 /// recoverable Vo stack overflow.
 pub const MAX_JIT_CALL_DEPTH: usize = 512;

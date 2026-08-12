@@ -3,7 +3,7 @@ use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::bytecode::Module;
 use vo_runtime::instruction::Instruction;
 
-use super::MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS;
+use super::MAX_DIRECT_JIT_FRAME_SLOTS;
 #[cfg(test)]
 use crate::JitCompileEnv;
 use crate::JitFrameEntryEligibility;
@@ -87,16 +87,16 @@ impl CallPlan {
         }
     }
 
-    pub fn fits_direct_native_frame(self) -> bool {
-        self.callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS
+    pub fn fits_direct_frame(self) -> bool {
+        self.callee_local_slots <= MAX_DIRECT_JIT_FRAME_SLOTS
     }
 
     pub fn can_use_direct_jit(self) -> bool {
-        self.eligibility.frame_elided && self.fits_direct_native_frame()
+        self.eligibility.frame_elided && self.fits_direct_frame()
     }
 
     pub fn can_use_prepared_jit(self) -> bool {
-        self.eligibility.prepared_shadow && self.fits_direct_native_frame()
+        self.eligibility.prepared_shadow && self.fits_direct_frame()
     }
 
     pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {

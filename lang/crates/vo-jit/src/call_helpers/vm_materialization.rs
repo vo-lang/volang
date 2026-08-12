@@ -76,7 +76,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
 ///
 /// Fast path (JIT-to-JIT):
-/// - Args passed via native stack slot (no fiber.stack access)
+/// - Args passed through the capacity-checked fiber shadow window
 /// - No push_frame/pop_frame calls
 ///
 /// VM materialization path:
@@ -99,20 +99,6 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     for i in 0..plan.arg_slots {
         arg_values.push(emitter.read_var((plan.arg_start + i) as u16));
     }
-
-    let args_slot = emitter.native_scratch_slot(
-        NativeScratchKind::StaticArgs,
-        plan.callee_local_slots.max(1) * 8,
-    );
-    let args_ptr = emitter.builder().ins().stack_addr(types::I64, args_slot, 0);
-
-    for (i, val) in arg_values.iter().enumerate() {
-        emitter
-            .builder()
-            .ins()
-            .stack_store(types::I64, *val, args_slot, (i * 8) as i32);
-    }
-
     let ret_slot = emitter.native_scratch_slot(
         NativeScratchKind::StaticReturns,
         plan.call_ret_slots.max(1) * 8,
@@ -167,6 +153,16 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(capacity_ok_block);
     emitter.store_context_field(new_bp, JitContextField::JitBp);
     emitter.store_context_field(new_sp, JitContextField::FiberSp);
+    let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
+    let bp_offset = emitter.builder().ins().uextend(types::I64, new_bp);
+    let bp_offset = emitter.builder().ins().imul_imm_u(bp_offset, 8);
+    let args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
+    for (i, val) in arg_values.iter().enumerate() {
+        emitter
+            .builder()
+            .ins()
+            .store(MemFlags::trusted(), *val, args_ptr, (i * 8) as i32);
+    }
 
     let merge_block = emitter.builder().create_block();
 
@@ -244,7 +240,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             ret_reg_val,
             ret_slots_val,
             caller_resume_pc_val,
-            copy_args: Some((args_slot, plan.arg_slots)),
+            copy_args: None,
         },
     )?;
 

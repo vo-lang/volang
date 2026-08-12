@@ -114,7 +114,6 @@ pub trait IrBuilder<'a> {
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub enum NativeScratchKind {
-    StaticArgs,
     StaticReturns,
     DynamicReturns,
     DynamicIcArgs,
@@ -126,7 +125,7 @@ pub enum NativeScratchKind {
 }
 
 impl NativeScratchKind {
-    const COUNT: usize = 9;
+    const COUNT: usize = 8;
 
     #[inline]
     const fn index(self) -> usize {

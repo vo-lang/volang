@@ -93,8 +93,8 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
     })?;
     emit_return_jit_error_if_null_callee_args(emitter, callee_fiber_args_ptr);
 
-    // Self-recursive calls pass args via native stack slot. Regular/indirect
-    // calls already have callee state spilled into fiber.stack.
+    // Dynamic calls may pass args via native stack scratch. Static direct calls
+    // already placed callee state in the fiber shadow window.
     if let Some((args_slot, arg_count)) = p.copy_args {
         for i in 0..arg_count {
             let val = emitter.builder().ins().stack_load(

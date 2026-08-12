@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn call_capability_matches_call_plan_routes() {
-        use crate::call_helpers::{CallPlan, CallRoute, MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS};
+        use crate::call_helpers::{CallPlan, CallRoute, MAX_DIRECT_JIT_FRAME_SLOTS};
         use vo_runtime::bytecode::FunctionDef;
 
         fn func(local_slots: u16, has_defer: bool) -> FunctionDef {
@@ -158,11 +158,7 @@ mod tests {
         );
         assert_eq!(direct.route_for_loop(), CallRoute::DynamicJitTable);
 
-        let large = CallPlan::new(
-            8,
-            2,
-            &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
-        );
+        let large = CallPlan::new(8, 2, &func((MAX_DIRECT_JIT_FRAME_SLOTS + 1) as u16, false));
         assert_eq!(
             large.route_for_full_function(7),
             CallRoute::VmCallMaterialization

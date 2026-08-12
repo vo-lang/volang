@@ -38,9 +38,11 @@ pub use result_flow::{
 };
 pub use vm_materialization::{emit_call_via_vm, emit_jit_call_with_vm_materialization};
 
-/// Maximum callee local_slots for direct static JIT calls from a function body.
-/// Larger frames use the VM path so fiber stack limits fire before host stack exhaustion.
-pub const MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS: usize = 512;
+/// Maximum callee local-slot width for direct static JIT calls.
+///
+/// Wider frames use the VM route so direct-call shadow windows and callee
+/// prologue initialization stay bounded independently from the guest stack.
+pub const MAX_DIRECT_JIT_FRAME_SLOTS: usize = 512;
 
 fn current_call_conv<'a, E: IrEmitter<'a>>(emitter: &mut E) -> cranelift_codegen::isa::CallConv {
     emitter.builder().func.signature.call_conv
@@ -304,11 +306,7 @@ mod tests {
             CallRoute::VmCallMaterialization
         );
 
-        let large = CallPlan::new(
-            7,
-            2,
-            &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
-        );
+        let large = CallPlan::new(7, 2, &func((MAX_DIRECT_JIT_FRAME_SLOTS + 1) as u16, false));
         assert_eq!(
             large.route_for_full_function(7),
             CallRoute::VmCallMaterialization

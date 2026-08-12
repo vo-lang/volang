@@ -9,9 +9,9 @@
 //!
 //! ## fiber.stack ABI
 //!
-//! Top-level JIT entries use `fiber.stack[jit_bp..]` as their ABI buffer. Nested
-//! direct JIT calls may pass arguments through native stack slots on the OK path,
-//! then spill/materialize into `fiber.stack` before any side-exit.
+//! Top-level JIT entries and nested static direct calls use capacity-checked
+//! `fiber.stack` windows as their ABI buffers. Dynamic calls may use bounded
+//! native scratch before their target and complete layout are known.
 //!
 //! ## Shadow Frame Design
 //!

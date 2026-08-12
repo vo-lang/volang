@@ -10052,10 +10052,10 @@ id = "stdlib.base64-semantics"
 kind = "file"
 path = "cases/stdlib/base64_semantics.vo"
 matrix = "default"
-tags = ["stdlib", "encoding", "regression"]
+tags = ["stdlib", "encoding", "jit", "regression"]
 owner = "stdlib"
 timeout = { jit = 120 }
-reason = "covers streaming behavior, custom alphabets, strict trailing bits, partial output, and hostile Reader/Writer contracts"
+reason = "covers base64 semantics and the wide decodeQuantum direct-JIT argument ABI"
 expect = "pass"
 
 [[case]]
