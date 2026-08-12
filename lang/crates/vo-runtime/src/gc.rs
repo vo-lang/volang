@@ -6,7 +6,7 @@ mod heap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use heap::{HeapError, HeapStats, SpanHeap};
+use heap::{HeapError, HeapObjectCursor, HeapStats, HeapWalkStep, SpanHeap};
 
 use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -75,9 +75,12 @@ pub(crate) const WHITE0_BIT: u8 = 1 << 3; // bit 3
 pub(crate) const WHITE1_BIT: u8 = 1 << 4; // bit 4
 pub(crate) const BLACK_BIT: u8 = 1 << 5; // bit 5
 pub(crate) const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
+pub const JIT_GC_HEADER_MARKED_OFFSET: i32 = -(GcHeader::SIZE as i32);
+pub const JIT_GC_AGE_MASK: u8 = AGE_MASK;
+pub const JIT_GC_WHITE_BITS: u8 = WHITE_BITS;
+pub const JIT_GC_BLACK_BIT: u8 = BLACK_BIT;
 pub(crate) const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
 pub(crate) const RUNTIME_BACKING_OBJECT_BIT: u8 = 1 << 1;
-const REMEMBERED_FORGET_PENDING_BIT: u8 = 1 << 2;
 
 // Age values (for generational GC)
 pub const G_YOUNG: u8 = 0;
@@ -153,12 +156,6 @@ struct GcLeaseEntry {
     root: GcRef,
     generation: u32,
     retired: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AllocationExtent {
-    data_size: usize,
-    remembered_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,24 +545,70 @@ impl GcHeader {
     fn set_runtime_backing_object(&mut self) {
         self._reserved |= RUNTIME_BACKING_OBJECT_BIT;
     }
-
-    #[inline]
-    fn remembered_forget_pending(&self) -> bool {
-        (self._reserved & REMEMBERED_FORGET_PENDING_BIT) != 0
-    }
-
-    #[inline]
-    fn set_remembered_forget_pending(&mut self, pending: bool) {
-        if pending {
-            self._reserved |= REMEMBERED_FORGET_PENDING_BIT;
-        } else {
-            self._reserved &= !REMEMBERED_FORGET_PENDING_BIT;
-        }
-    }
 }
 
 /// GC reference - pointer to GcObject data (after header).
 pub type GcRef = *mut Slot;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct JitSmallAllocLane {
+    cursor: *mut u8,
+    limit: *mut u8,
+    bitmap_word: *mut u64,
+    logical_size_cursor: *mut u16,
+    live_cells: *mut u16,
+    logical_bytes: *mut usize,
+    next_bit: u64,
+}
+
+impl Default for JitSmallAllocLane {
+    fn default() -> Self {
+        Self {
+            cursor: core::ptr::null_mut(),
+            limit: core::ptr::null_mut(),
+            bitmap_word: core::ptr::null_mut(),
+            logical_size_cursor: core::ptr::null_mut(),
+            live_cells: core::ptr::null_mut(),
+            logical_bytes: core::ptr::null_mut(),
+            next_bit: 0,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitSmallAllocLaneField {
+    Cursor,
+    Limit,
+    BitmapWord,
+    LogicalSizeCursor,
+    LiveCells,
+    LogicalBytes,
+    NextBit,
+}
+
+impl JitSmallAllocLaneField {
+    /// Resolve one lane field for a small allocation size. Returning `None`
+    /// keeps unsupported/large shapes on the runtime helper path.
+    pub fn offset_for_size(self, size: usize) -> Option<i32> {
+        let (class_index, _) = heap::allocation_class(size)?;
+        let lane = core::mem::offset_of!(Gc, jit_small_alloc_lanes)
+            .checked_add(class_index.checked_mul(core::mem::size_of::<JitSmallAllocLane>())?)?;
+        let field = match self {
+            Self::Cursor => core::mem::offset_of!(JitSmallAllocLane, cursor),
+            Self::Limit => core::mem::offset_of!(JitSmallAllocLane, limit),
+            Self::BitmapWord => core::mem::offset_of!(JitSmallAllocLane, bitmap_word),
+            Self::LogicalSizeCursor => {
+                core::mem::offset_of!(JitSmallAllocLane, logical_size_cursor)
+            }
+            Self::LiveCells => core::mem::offset_of!(JitSmallAllocLane, live_cells),
+            Self::LogicalBytes => core::mem::offset_of!(JitSmallAllocLane, logical_bytes),
+            Self::NextBit => core::mem::offset_of!(JitSmallAllocLane, next_bit),
+        };
+        i32::try_from(lane.checked_add(field)?).ok()
+    }
+}
 
 /// Garbage collector.
 #[repr(C)]
@@ -576,6 +619,8 @@ pub struct Gc {
 
     // ========== Island Heap ==========
     heap: SpanHeap,
+    jit_small_alloc_lanes: [JitSmallAllocLane; heap::CLASS_COUNT],
+    jit_active_small_alloc_lane: Option<u8>,
     initial_reserve_bytes: usize,
     gc_mode: GcMode,
     automatic_gc: bool,
@@ -593,28 +638,25 @@ pub struct Gc {
     wasm_maximum_pages: Option<u64>,
 
     // ========== Object Storage ==========
-    all_objects: Vec<GcRef>,
-    all_object_data_sizes: Vec<usize>,
-    allocation_extents: hashbrown::HashMap<usize, AllocationExtent>,
+    // Object identity and enumeration live in SpanHeap block metadata. The
+    // collector keeps only roots/work queues here.
     leases: Vec<GcLeaseEntry>,
     free_lease_indices: Vec<u32>,
 
     // ========== Mark Queues ==========
     gray: Vec<GcRef>,
-    remembered: Vec<GcRef>,
-    remembered_forget: Vec<GcRef>,
     pending_object_scan: Option<GcRef>,
     pending_trace_cursor: GcTraceCursor,
     pending_remembered_parent: Option<GcRef>,
     pending_remembered_has_young: bool,
-    remembered_scan_pos: usize,
-    remembered_scan_end: usize,
+    remembered_scan_cursor: HeapObjectCursor,
+    remembered_scan_complete: bool,
 
     // ========== State ==========
     state: GcState,
-    current_white: u8,      // Current white bit (WHITE0_BIT or WHITE1_BIT)
-    sweep_pos: usize,       // Read position in sweep phase
-    sweep_write_pos: usize, // Write position for live objects in sweep phase
+    current_white: u8, // Current white bit (WHITE0_BIT or WHITE1_BIT)
+    sweep_cursor: HeapObjectCursor,
+    sweep_complete: bool,
 
     // ========== Memory Stats ==========
     total_bytes: usize, // Total allocated bytes
@@ -674,7 +716,14 @@ pub struct Gc {
 pub enum JitGcPollField {
     Required,
     AutomaticGc,
+    Mode,
     State,
+    CurrentWhite,
+    TotalBytes,
+    LiveObjectCount,
+    YoungLiveBytes,
+    AllocatedSpanBytes,
+    AllocationBytesTotal,
     Debt,
     StressEveryStep,
 }
@@ -685,7 +734,17 @@ impl JitGcPollField {
         match self {
             Self::Required => core::mem::offset_of!(Gc, jit_poll_required) as i32,
             Self::AutomaticGc => core::mem::offset_of!(Gc, automatic_gc) as i32,
+            Self::Mode => core::mem::offset_of!(Gc, gc_mode) as i32,
             Self::State => core::mem::offset_of!(Gc, state) as i32,
+            Self::CurrentWhite => core::mem::offset_of!(Gc, current_white) as i32,
+            Self::TotalBytes => core::mem::offset_of!(Gc, total_bytes) as i32,
+            Self::LiveObjectCount => core::mem::offset_of!(Gc, live_object_count) as i32,
+            Self::YoungLiveBytes => core::mem::offset_of!(Gc, young_live_bytes) as i32,
+            Self::AllocatedSpanBytes => {
+                (core::mem::offset_of!(Gc, heap)
+                    + core::mem::offset_of!(SpanHeap, allocated_span_bytes)) as i32
+            }
+            Self::AllocationBytesTotal => core::mem::offset_of!(Gc, allocation_bytes_total) as i32,
             Self::Debt => core::mem::offset_of!(Gc, debt) as i32,
             Self::StressEveryStep => core::mem::offset_of!(Gc, stress_every_step) as i32,
         }
@@ -727,31 +786,11 @@ impl Gc {
                     .saturating_mul(Self::NO_GROWTH_LEASES_PER_BLOCK)
             })
         });
-        let mut all_objects = Vec::new();
-        let mut all_object_data_sizes = Vec::new();
-        let mut allocation_extents = hashbrown::HashMap::new();
         let mut leases = Vec::new();
         let mut free_lease_indices = Vec::new();
         let mut gray = Vec::new();
-        let mut remembered = Vec::new();
-        let mut remembered_forget = Vec::new();
         if let Some(max_objects) = max_objects {
-            all_objects
-                .try_reserve_exact(max_objects)
-                .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            all_object_data_sizes
-                .try_reserve_exact(max_objects)
-                .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            allocation_extents
-                .try_reserve(max_objects)
-                .map_err(|_| MemoryError::SystemAllocationFailed)?;
             gray.try_reserve_exact(max_objects)
-                .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            remembered
-                .try_reserve_exact(max_objects)
-                .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            remembered_forget
-                .try_reserve_exact(max_objects)
                 .map_err(|_| MemoryError::SystemAllocationFailed)?;
         }
         if let Some(max_leases) = max_leases {
@@ -765,6 +804,8 @@ impl Gc {
         Ok(Self {
             owner_dispatch: None,
             heap,
+            jit_small_alloc_lanes: [JitSmallAllocLane::default(); heap::CLASS_COUNT],
+            jit_active_small_alloc_lane: None,
             initial_reserve_bytes: config.initial_reserve_bytes,
             gc_mode: config.gc_mode,
             automatic_gc: config.automatic_gc,
@@ -780,24 +821,19 @@ impl Gc {
             unknown_external_provider_count: 0,
             wasm_current_pages: 0,
             wasm_maximum_pages: None,
-            all_objects,
-            all_object_data_sizes,
-            allocation_extents,
             leases,
             free_lease_indices,
             gray,
-            remembered,
-            remembered_forget,
             pending_object_scan: None,
             pending_trace_cursor: GcTraceCursor::default(),
             pending_remembered_parent: None,
             pending_remembered_has_young: false,
-            remembered_scan_pos: 0,
-            remembered_scan_end: 0,
+            remembered_scan_cursor: HeapObjectCursor::default(),
+            remembered_scan_complete: true,
             state: GcState::Pause,
             current_white: WHITE0_BIT,
-            sweep_pos: 0,
-            sweep_write_pos: 0,
+            sweep_cursor: HeapObjectCursor::default(),
+            sweep_complete: true,
             total_bytes: 0,
             live_object_count: 0,
             young_live_bytes: 0,
@@ -861,22 +897,6 @@ impl Gc {
         self.reject_owner_proxy_api("memory_reserve");
         self.heap.reserve(bytes)?;
         if let Some(max_objects) = self.max_objects {
-            if self.all_objects.capacity() < max_objects {
-                self.all_objects
-                    .try_reserve_exact(max_objects.saturating_sub(self.all_objects.len()))
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
-            if self.all_object_data_sizes.capacity() < max_objects {
-                self.all_object_data_sizes
-                    .try_reserve_exact(max_objects.saturating_sub(self.all_object_data_sizes.len()))
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
-            let extent_remaining = max_objects.saturating_sub(self.allocation_extents.len());
-            if extent_remaining > 0 {
-                self.allocation_extents
-                    .try_reserve(extent_remaining)
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
             self.reserve_object_work_queues(max_objects)?;
         }
         if let Some(max_leases) = self.max_leases {
@@ -894,23 +914,77 @@ impl Gc {
         Ok(self.memory_stats())
     }
 
-    /// Keep every object-indexed collector queue large enough for the complete
-    /// live-object set. Queue insertion can then remain infallible after an
-    /// object color or remembered-set bit has changed, and a bounded GC slice
-    /// never hides a whole-Vec reallocation in one work unit.
+    /// Keep the tracing work queue large enough for the complete live-object
+    /// set. Object identity and remembered membership live in SpanHeap block
+    /// metadata and require no per-object Rust allocation.
     fn reserve_object_work_queues(&mut self, object_capacity: usize) -> Result<(), MemoryError> {
-        for queue in [
-            &mut self.gray,
-            &mut self.remembered,
-            &mut self.remembered_forget,
-        ] {
-            if queue.capacity() < object_capacity {
-                queue
-                    .try_reserve_exact(object_capacity.saturating_sub(queue.len()))
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
+        if self.gray.capacity() < object_capacity {
+            self.gray
+                .try_reserve_exact(object_capacity.saturating_sub(self.gray.len()))
+                .map_err(|_| MemoryError::SystemAllocationFailed)?;
         }
         Ok(())
+    }
+
+    fn invalidate_jit_small_alloc_lanes(&mut self) {
+        let Some(class_index) = self.jit_active_small_alloc_lane.take() else {
+            return;
+        };
+        let lane = &mut self.jit_small_alloc_lanes[usize::from(class_index)];
+        self.heap.release_jit_bump_lane(lane.cursor, lane.limit);
+        *lane = JitSmallAllocLane::default();
+    }
+
+    /// Prepare a bounded run of fresh cells for generated code. This is a
+    /// cache-only optimization: inability to reserve native queue capacity or
+    /// another heap block leaves later allocations on the ordinary helper and
+    /// does not turn an already successful allocation into an error.
+    pub(crate) fn prepare_jit_small_alloc_lane(&mut self, size: usize) {
+        #[cfg(feature = "gc-debug")]
+        {
+            let _ = size;
+        }
+
+        #[cfg(not(feature = "gc-debug"))]
+        {
+            if self.owner_dispatch.is_some() || self.state != GcState::Pause {
+                return;
+            }
+            let Some((class_index, _)) = heap::allocation_class(size) else {
+                return;
+            };
+            let remaining_objects = self
+                .max_objects
+                .map(|limit| limit.saturating_sub(self.live_object_count))
+                .unwrap_or(64)
+                .min(64);
+            if remaining_objects == 0 {
+                return;
+            }
+            let required_gray = self.live_object_count.saturating_add(remaining_objects);
+            if self.gray.capacity() < required_gray
+                && self
+                    .gray
+                    .try_reserve(required_gray.saturating_sub(self.gray.len()))
+                    .is_err()
+            {
+                return;
+            }
+            let Ok(Some(lane)) = self.heap.reserve_jit_bump_lane(size, remaining_objects) else {
+                return;
+            };
+            debug_assert_eq!(lane.class_size, heap::allocation_class(size).unwrap().1);
+            self.jit_small_alloc_lanes[class_index] = JitSmallAllocLane {
+                cursor: lane.cursor,
+                limit: lane.limit,
+                bitmap_word: lane.bitmap_word,
+                logical_size_cursor: lane.logical_size_cursor,
+                live_cells: lane.live_cells,
+                logical_bytes: lane.logical_bytes,
+                next_bit: lane.first_bit,
+            };
+            self.jit_active_small_alloc_lane = Some(class_index as u8);
+        }
     }
 
     #[inline]
@@ -920,22 +994,6 @@ impl Gc {
             let max_objects = self
                 .max_objects
                 .unwrap_or_else(|| self.heap.max_min_cell_allocations());
-            if self.all_objects.capacity() < max_objects {
-                self.all_objects
-                    .try_reserve_exact(max_objects.saturating_sub(self.all_objects.len()))
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
-            if self.all_object_data_sizes.capacity() < max_objects {
-                self.all_object_data_sizes
-                    .try_reserve_exact(max_objects.saturating_sub(self.all_object_data_sizes.len()))
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
-            let extent_additional = max_objects.saturating_sub(self.allocation_extents.len());
-            if extent_additional > 0 {
-                self.allocation_extents
-                    .try_reserve(extent_additional)
-                    .map_err(|_| MemoryError::SystemAllocationFailed)?;
-            }
             self.reserve_object_work_queues(max_objects)?;
             self.max_objects = Some(max_objects);
 
@@ -970,6 +1028,9 @@ impl Gc {
     #[inline]
     pub fn memory_set_allocation_allowed(&mut self, allowed: bool) {
         self.reject_owner_proxy_api("memory_set_allocation_allowed");
+        if !allowed {
+            self.invalidate_jit_small_alloc_lanes();
+        }
         self.heap.set_allocation_allowed(allowed);
     }
 
@@ -1230,7 +1291,7 @@ impl Gc {
             work_units_total: self.work_units_total,
             last_step_work_units: self.last_step_stats.total_work_bytes / SLOT_BYTES,
             max_step_work_units: self.max_step_work_units,
-            dirty_cards: self.remembered.len(),
+            dirty_cards: self.heap.remembered_object_count(),
             dirty_root_domains: usize::from(
                 self.pending_root_scan.is_some()
                     || !self.atomic_root_scan_complete
@@ -1329,9 +1390,12 @@ impl Gc {
         if !backing.is_null() {
             unsafe { Self::header_mut(backing) }.set_runtime_backing_object();
             if self.owner_dispatch.is_none() {
-                self.runtime_backing_bytes = self.runtime_backing_bytes.saturating_add(
-                    GcHeader::SIZE.saturating_add(total_slots.saturating_mul(SLOT_BYTES)),
-                );
+                let logical_bytes =
+                    GcHeader::SIZE.saturating_add(total_slots.saturating_mul(SLOT_BYTES));
+                self.runtime_backing_bytes =
+                    self.runtime_backing_bytes.saturating_add(logical_bytes);
+                let raw = unsafe { (backing as *mut u8).sub(GcHeader::SIZE) };
+                self.heap.record_runtime_backing(raw, logical_bytes);
             }
         }
         backing
@@ -1369,6 +1433,11 @@ impl Gc {
             };
         }
 
+        // A runtime allocation can occur between two generated allocations
+        // of another size class. Return every unconsumed lane tail first so a
+        // single mutator never holds overlapping object-capacity admissions.
+        self.invalidate_jit_small_alloc_lanes();
+
         let header_size = GcHeader::SIZE;
         let data_size = match slots.checked_mul(SLOT_BYTES) {
             Some(s) => s,
@@ -1393,30 +1462,25 @@ impl Gc {
 
         if self
             .max_objects
-            .is_some_and(|max_objects| self.all_objects.len() >= max_objects)
+            .is_some_and(|max_objects| self.live_object_count >= max_objects)
         {
             self.record_allocation_failure(MemoryError::MetadataExhausted);
             return core::ptr::null_mut();
         }
-        if self.all_objects.len() == self.all_objects.capacity()
-            || self.all_object_data_sizes.len() == self.all_object_data_sizes.capacity()
-            || self.allocation_extents.len() == self.allocation_extents.capacity()
-        {
+        let required_work_capacity = self.live_object_count.saturating_add(1);
+        if self.gray.capacity() < required_work_capacity {
             if !self.heap.growth_allowed() {
                 self.record_allocation_failure(MemoryError::MetadataExhausted);
                 return core::ptr::null_mut();
             }
-            if self.all_objects.try_reserve(1).is_err()
-                || self.all_object_data_sizes.try_reserve(1).is_err()
-                || self.allocation_extents.try_reserve(1).is_err()
+            if self
+                .gray
+                .try_reserve(required_work_capacity.saturating_sub(self.gray.len()))
+                .is_err()
             {
                 self.record_allocation_failure(MemoryError::SystemAllocationFailed);
                 return core::ptr::null_mut();
             }
-        }
-        if let Err(error) = self.reserve_object_work_queues(self.all_objects.capacity()) {
-            self.record_allocation_failure(error);
-            return core::ptr::null_mut();
         }
 
         let allocation = match self.heap.allocate(total_size) {
@@ -1438,19 +1502,17 @@ impl Gc {
 
         let data_ptr = unsafe { ptr.add(header_size) as GcRef };
 
-        self.all_objects.push(data_ptr);
-        self.all_object_data_sizes.push(data_size);
-        let replaced_extent = self.allocation_extents.insert(
-            data_ptr as usize,
-            AllocationExtent {
-                data_size,
-                remembered_index: None,
-            },
-        );
-        assert!(
-            replaced_extent.is_none(),
-            "new allocation must not replace a live allocation extent"
-        );
+        let finalizable = (value_meta.value_kind() == ValueKind::Map
+            && header_slots == crate::objects::map::DATA_SLOTS)
+            || (value_meta.value_kind().is_queue()
+                && header_slots == crate::objects::queue_state::DATA_SLOTS);
+        self.heap
+            .record_small_allocation(ptr, total_size, finalizable)
+            .expect("new allocation must have heap block metadata");
+        if self.state != GcState::Pause {
+            self.heap.record_marked(ptr, self.cycle_id);
+        }
+
         self.total_bytes += total_size;
         self.live_object_count += 1;
         self.young_live_bytes += total_size;
@@ -1545,9 +1607,40 @@ impl Gc {
     }
 
     fn allocated_data_size_bytes_for_base(&self, obj: GcRef) -> Option<usize> {
-        self.allocation_extents
-            .get(&(obj as usize))
-            .map(|extent| extent.data_size)
+        let located = self.heap.locate(obj as usize, GcHeader::SIZE)?;
+        let base = unsafe { located.raw.add(GcHeader::SIZE) as GcRef };
+        if base != obj {
+            return None;
+        }
+        located.logical_bytes.checked_sub(GcHeader::SIZE)
+    }
+
+    fn logical_data_size_within_allocation(
+        obj: GcRef,
+        capacity: usize,
+        allocation_bytes: usize,
+    ) -> Option<usize> {
+        use crate::objects::array;
+
+        let header = unsafe { Self::header(obj) };
+        // Runtime backing allocations may exceed the u16 header slot field and
+        // intentionally carry a scalar ValueMeta rather than ArrayHeader. Their
+        // heap-owned exact extent is the only complete size representation.
+        if header.is_runtime_backing_object() {
+            let data_size = allocation_bytes.checked_sub(GcHeader::SIZE)?;
+            return (allocation_bytes <= capacity && data_size.is_multiple_of(SLOT_BYTES))
+                .then_some(data_size);
+        }
+        let slots = if header.is_value_slots_object() {
+            header.slots as usize
+        } else if header.slots == 0 && header.kind() == ValueKind::Array {
+            unsafe { array::total_slots(obj) }
+        } else {
+            header.slots as usize
+        };
+        let data_size = slots.checked_mul(SLOT_BYTES)?;
+        let logical_bytes = GcHeader::SIZE.checked_add(data_size)?;
+        (logical_bytes == allocation_bytes && logical_bytes <= capacity).then_some(data_size)
     }
 
     pub fn allocated_data_size_bytes(&self, obj: GcRef) -> Option<usize> {
@@ -1597,22 +1690,23 @@ impl Gc {
             return None;
         }
 
-        // Ordinary traced references point at the first data slot.  Keep that
-        // overwhelmingly common case on the object table's single lookup
-        // path; heap location is only needed to recover an allocation from an
-        // interior reference.
-        if self.allocation_extents.contains_key(&addr) {
-            return Some(obj);
-        }
-
         let located = self.heap.locate(addr, GcHeader::SIZE)?;
         let base = unsafe { located.raw.add(GcHeader::SIZE) as GcRef };
-        let data_size = self.allocated_data_size_bytes_for_base(base)?;
-        if GcHeader::SIZE.saturating_add(data_size) > located.capacity {
-            return None;
-        }
+        let data_size = located.logical_bytes.checked_sub(GcHeader::SIZE)?;
         let data_end = (base as usize).checked_add(data_size)?;
         (addr == base as usize || addr < data_end).then_some(base)
+    }
+
+    fn canonicalize_ref_for_mark(&mut self, obj: GcRef) -> Option<GcRef> {
+        let addr = obj as usize;
+        if (addr & (SLOT_BYTES - 1)) != 0 || addr < 4096 {
+            return None;
+        }
+
+        let raw = self
+            .heap
+            .canonicalize_and_record_marked(addr, GcHeader::SIZE, self.cycle_id)?;
+        Some(unsafe { raw.add(GcHeader::SIZE) as GcRef })
     }
 
     /// Mark an object as gray (pending scan).
@@ -1626,14 +1720,14 @@ impl Gc {
         if obj.is_null() {
             return;
         }
-        let Some(obj) = self.canonicalize_ref(obj) else {
+        let Some(obj) = self.canonicalize_ref_for_mark(obj) else {
             self.mark_gray_fail(obj);
         };
         if self.pending_remembered_parent.is_some() && unsafe { Self::header(obj) }.age() < G_OLD {
             self.pending_remembered_has_young = true;
         }
         if self.state == GcState::Sweep {
-            self.mark_dead_white_gray(obj);
+            self.shade_dead_white_gray(obj);
             return;
         }
         let header = unsafe { Self::header_mut(obj) };
@@ -1646,6 +1740,13 @@ impl Gc {
 
     #[inline]
     fn mark_dead_white_gray(&mut self, obj: GcRef) {
+        let raw = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
+        self.heap.record_marked(raw, self.cycle_id);
+        self.shade_dead_white_gray(obj);
+    }
+
+    #[inline]
+    fn shade_dead_white_gray(&mut self, obj: GcRef) {
         let dead_white = self.other_white();
         let header = unsafe { Self::header_mut(obj) };
         if header.marked & WHITE_BITS == dead_white {
@@ -1698,44 +1799,17 @@ impl Gc {
     }
 
     fn remember_parent(&mut self, parent: GcRef) {
-        let key = parent as usize;
-        let already_remembered = self
-            .allocation_extents
-            .get(&key)
-            .and_then(|extent| extent.remembered_index)
-            .is_some();
-        if already_remembered {
-            unsafe { Self::header_mut(parent) }.set_remembered_forget_pending(false);
-            return;
-        }
-        let index = self.remembered.len();
-        debug_assert!(self.remembered.len() < self.remembered.capacity());
-        self.remembered.push(parent);
-        self.allocation_extents
-            .get_mut(&key)
-            .expect("live parent must have allocation metadata")
-            .remembered_index = Some(index);
+        let raw = unsafe { (parent as *mut u8).sub(GcHeader::SIZE) };
+        self.heap
+            .remember(raw)
+            .expect("live parent must have heap allocation metadata");
     }
 
     fn forget_remembered_parent(&mut self, parent: GcRef) {
-        unsafe { Self::header_mut(parent) }.set_remembered_forget_pending(false);
-        let key = parent as usize;
-        let Some(index) = self
-            .allocation_extents
-            .get_mut(&key)
-            .and_then(|extent| extent.remembered_index.take())
-        else {
-            return;
-        };
-        let moved = self.remembered.swap_remove(index);
-        debug_assert_eq!(moved, parent);
-        if index < self.remembered.len() {
-            let replacement = self.remembered[index];
-            self.allocation_extents
-                .get_mut(&(replacement as usize))
-                .expect("remembered parent must have allocation metadata")
-                .remembered_index = Some(index);
-        }
+        let raw = unsafe { (parent as *mut u8).sub(GcHeader::SIZE) };
+        self.heap
+            .forget_remembered(raw)
+            .expect("live parent must have heap allocation metadata");
     }
 
     /// Typed new-value barrier shared by the interpreter, JIT, stdlib, and FFI.
@@ -2058,6 +2132,7 @@ impl Gc {
         if work_unit_limit == 0 {
             return 0;
         }
+        self.invalidate_jit_small_alloc_lanes();
         let mut work = 0usize;
         let requested_limit = work_unit_limit.saturating_mul(SLOT_BYTES);
         let base = self.stepsize * self.stepmul as usize / 100;
@@ -2068,7 +2143,7 @@ impl Gc {
             heap_bytes_before: self.total_bytes,
             debt_before: self.debt,
             gray_len_before: self.gray.len(),
-            remembered_len_before: self.remembered.len(),
+            remembered_len_before: self.heap.remembered_object_count(),
             ..GcStepStats::default()
         };
 
@@ -2165,12 +2240,8 @@ impl Gc {
                     self.force_major_cycle = false;
                     self.cycle_id = self.cycle_id.saturating_add(1);
                     self.current_white ^= WHITE_BITS;
-                    debug_assert!(self.remembered_forget.is_empty());
-                    self.remembered_scan_pos = 0;
-                    // Snapshot the stable remembered-parent prefix. New
-                    // old-to-young stores shade their child immediately and
-                    // join the next minor cycle's prefix.
-                    self.remembered_scan_end = self.remembered.len();
+                    self.remembered_scan_cursor = self.heap.object_cursor();
+                    self.remembered_scan_complete = self.cycle_kind != GcCycleKind::Minor;
                     self.atomic_root_scan_complete = false;
                     self.sweep_root_scan_complete = false;
                     self.pending_root_scan = Some(GcRootScanKind::StartCycle);
@@ -2186,12 +2257,12 @@ impl Gc {
                     let remembered_work = if self.cycle_kind == GcCycleKind::Minor {
                         self.remembered_step(phase_limit.saturating_sub(work))
                     } else {
-                        self.remembered_scan_pos = self.remembered_scan_end;
+                        self.remembered_scan_complete = true;
                         0
                     };
                     stats.propagate_work_bytes += remembered_work;
                     work += remembered_work;
-                    if work >= phase_limit || self.remembered_scan_pos < self.remembered_scan_end {
+                    if work >= phase_limit || !self.remembered_scan_complete {
                         break;
                     }
                     let propagate_work = {
@@ -2210,14 +2281,9 @@ impl Gc {
                     stats.propagate_work_bytes += propagate_work;
                     work += propagate_work;
 
-                    let forget_work = self.remembered_forget_step(phase_limit.saturating_sub(work));
-                    stats.propagate_work_bytes += forget_work;
-                    work += forget_work;
-
                     if self.gray.is_empty()
                         && self.pending_object_scan.is_none()
-                        && self.remembered_scan_pos >= self.remembered_scan_end
-                        && self.remembered_forget.is_empty()
+                        && self.remembered_scan_complete
                     {
                         self.state = GcState::Atomic;
                         break;
@@ -2254,8 +2320,8 @@ impl Gc {
                         break;
                     }
                     self.state = GcState::Sweep;
-                    self.sweep_pos = 0;
-                    self.sweep_write_pos = 0;
+                    self.sweep_cursor = self.heap.object_cursor();
+                    self.sweep_complete = false;
                     // Snapshot sweep budget at sweep start. total_bytes here includes
                     // all objects (alive + dead). Using a fixed budget prevents the
                     // convergence problem: if we recomputed total_bytes/TARGET each step,
@@ -2309,7 +2375,7 @@ impl Gc {
                     work += sweep_work;
                     self.sweep_root_scan_complete = false;
 
-                    if self.sweep_pos >= self.all_objects.len() {
+                    if self.sweep_complete {
                         if self.heap.stats().pending_reclaim_bytes == 0 {
                             self.finish_cycle();
                             stats.cycle_finished = true;
@@ -2347,7 +2413,7 @@ impl Gc {
         stats.heap_bytes_after = self.total_bytes;
         stats.debt_after = self.debt;
         stats.gray_len_after = self.gray.len();
-        stats.remembered_len_after = self.remembered.len();
+        stats.remembered_len_after = self.heap.remembered_object_count();
         let step_units = work.div_ceil(SLOT_BYTES);
         self.work_units_total = self.work_units_total.saturating_add(step_units as u64);
         self.max_step_work_units = self.max_step_work_units.max(step_units);
@@ -2355,46 +2421,38 @@ impl Gc {
         work
     }
 
-    /// Queue the stable prefix of old parents known to contain young edges.
+    /// Queue old parents recorded in the heap-local remembered bitmap. The
+    /// cursor snapshots the segment frontier at cycle start, while writes
+    /// after that frontier shade their child immediately through the barrier.
     fn remembered_step(&mut self, limit: usize) -> usize {
-        let entry_budget = limit / SLOT_BYTES;
-        if entry_budget == 0 {
+        if limit < SLOT_BYTES || self.remembered_scan_complete {
             return 0;
         }
-        let start = self.remembered_scan_pos;
-        let end = self
-            .remembered_scan_pos
-            .saturating_add(entry_budget)
-            .min(self.remembered_scan_end);
-        while self.remembered_scan_pos < end {
-            let obj = self.remembered[self.remembered_scan_pos];
-            self.remembered_scan_pos += 1;
-            let header = unsafe { Self::header(obj) };
-            debug_assert!(header.age() >= G_OLD);
-            if header.is_white() {
-                unsafe { Self::header_mut(obj) }.set_gray();
-                debug_assert!(self.gray.len() < self.gray.capacity());
-                self.gray.push(obj);
+        let mut work = 0usize;
+        while work.saturating_add(SLOT_BYTES) <= limit {
+            match self
+                .heap
+                .walk_remembered_step(&mut self.remembered_scan_cursor)
+            {
+                HeapWalkStep::Object(allocation) => {
+                    work += SLOT_BYTES;
+                    let obj = unsafe { allocation.raw.add(GcHeader::SIZE) as GcRef };
+                    let header = unsafe { Self::header(obj) };
+                    debug_assert!(header.age() >= G_OLD);
+                    if header.is_white() {
+                        unsafe { Self::header_mut(obj) }.set_gray();
+                        debug_assert!(self.gray.len() < self.gray.capacity());
+                        self.gray.push(obj);
+                    }
+                }
+                HeapWalkStep::Metadata => work += SLOT_BYTES,
+                HeapWalkStep::Done => {
+                    self.remembered_scan_complete = true;
+                    break;
+                }
             }
         }
-        (end - start) * SLOT_BYTES
-    }
-
-    /// Retire remembered parents after the stable prefix has been queued.
-    /// Delaying swap-removal keeps the snapshot cursor valid across small
-    /// incremental budgets.
-    fn remembered_forget_step(&mut self, limit: usize) -> usize {
-        let count = (limit / SLOT_BYTES).min(self.remembered_forget.len());
-        for _ in 0..count {
-            let parent = self
-                .remembered_forget
-                .pop()
-                .expect("bounded remembered retirement count must be available");
-            if unsafe { Self::header(parent) }.remembered_forget_pending() {
-                self.forget_remembered_parent(parent);
-            }
-        }
-        count * SLOT_BYTES
+        work
     }
 
     /// Propagate marking incrementally. Returns work done.
@@ -2435,10 +2493,8 @@ impl Gc {
             if self.pending_remembered_parent.is_none()
                 && self.cycle_kind == GcCycleKind::Minor
                 && self
-                    .allocation_extents
-                    .get(&(obj as usize))
-                    .and_then(|extent| extent.remembered_index)
-                    .is_some()
+                    .heap
+                    .is_remembered(unsafe { (obj as *mut u8).sub(GcHeader::SIZE) })
             {
                 self.pending_remembered_parent = Some(obj);
                 self.pending_remembered_has_young = false;
@@ -2461,15 +2517,21 @@ impl Gc {
             self.pending_trace_cursor = cursor;
             work = work.saturating_add(chunk.work_bytes);
             if chunk.done {
-                unsafe { Self::header_mut(obj) }.set_black();
+                let header = unsafe { Self::header_mut(obj) };
+                if self.state == GcState::Sweep {
+                    // Sweep rescue proves this object live for the current
+                    // cycle. Whiten it immediately: an allocation or rescued
+                    // object may sit behind the persistent sweep cursor and
+                    // therefore cannot rely on a later sweep visit to
+                    // normalize black back to current-white.
+                    header.set_white(self.current_white);
+                } else {
+                    header.set_black();
+                }
                 if self.pending_remembered_parent == Some(obj) {
                     self.pending_remembered_parent = None;
                     if !core::mem::take(&mut self.pending_remembered_has_young) {
-                        unsafe { Self::header_mut(obj) }.set_remembered_forget_pending(true);
-                        debug_assert!(
-                            self.remembered_forget.len() < self.remembered_forget.capacity()
-                        );
-                        self.remembered_forget.push(obj);
+                        self.forget_remembered_parent(obj);
                     }
                 }
                 self.pending_object_scan = None;
@@ -2509,31 +2571,72 @@ impl Gc {
         limit: usize,
         stats: &mut GcStepStats,
     ) -> usize {
-        let mut work = 0;
+        let mut work = 0usize;
         let dead_white = self.other_white();
 
-        while self.sweep_pos < self.all_objects.len() && work < limit {
-            let obj = self.all_objects[self.sweep_pos];
+        while work.saturating_add(SLOT_BYTES) <= limit && !self.sweep_complete {
+            let allocation = match self.heap.walk_allocated_step(&mut self.sweep_cursor) {
+                HeapWalkStep::Metadata => {
+                    work += SLOT_BYTES;
+                    continue;
+                }
+                HeapWalkStep::Done => {
+                    self.sweep_complete = true;
+                    break;
+                }
+                HeapWalkStep::Object(allocation) => allocation,
+            };
+            work += SLOT_BYTES;
+
+            let obj = unsafe { allocation.raw.add(GcHeader::SIZE) as GcRef };
             let header = unsafe { Self::header(obj) };
             let obj_white = header.marked & WHITE_BITS;
             let age = header.age();
             let runtime_backing = header.is_runtime_backing_object();
-            let data_size = self.all_object_data_sizes[self.sweep_pos];
+            let data_size = Self::logical_data_size_within_allocation(
+                obj,
+                allocation.capacity,
+                allocation.logical_bytes,
+            )
+            .expect("live heap allocation must have a valid logical size");
 
-            // Gray objects should never exist during sweep — atomic phase processes all of them.
-            // If one leaks here, it would be silently dropped (memory leak). Catch it early.
             debug_assert!(
                 header.is_black() || obj_white != 0,
                 "sweep_step: gray object {:p} found during sweep (neither white nor black)",
                 obj
             );
 
-            // Compute size once — both alive and dead branches need it for work accounting.
             let size_bytes = GcHeader::SIZE + data_size;
-
             let retained_old = self.cycle_kind == GcCycleKind::Minor && age >= G_OLD;
+            if obj_white == dead_white && !retained_old {
+                // Debug builds keep per-object lifetime hooks observable.
+                // Production can release a proven-dead, all-young block in
+                // one metadata transition when it owns no native finalizer.
+                #[cfg(not(feature = "gc-debug"))]
+                if let Some(reclaimed) = self
+                    .heap
+                    .try_reclaim_unmarked_young_block(allocation.raw, self.cycle_id)
+                {
+                    self.total_bytes = self.total_bytes.saturating_sub(reclaimed.logical_bytes);
+                    self.live_object_count = self
+                        .live_object_count
+                        .saturating_sub(reclaimed.object_count);
+                    self.young_live_bytes = self
+                        .young_live_bytes
+                        .saturating_sub(reclaimed.logical_bytes);
+                    self.runtime_backing_bytes = self
+                        .runtime_backing_bytes
+                        .saturating_sub(reclaimed.runtime_backing_bytes);
+                    stats.finalized_objects = stats
+                        .finalized_objects
+                        .saturating_add(reclaimed.object_count);
+                    stats.sweep_freed_bytes = stats
+                        .sweep_freed_bytes
+                        .saturating_add(reclaimed.logical_bytes);
+                    continue;
+                }
+            }
             if header.is_black() || obj_white == self.current_white || retained_old {
-                // Alive: reset to current white
                 let mut promoted_to_old = false;
                 let header = unsafe { Self::header_mut(obj) };
                 if self.gc_mode == GcMode::Generational && age < G_OLD {
@@ -2545,23 +2648,16 @@ impl Gc {
                 if promoted_to_old {
                     self.young_live_bytes -= size_bytes;
                     self.old_live_bytes += size_bytes;
+                    self.heap.record_promoted(allocation.raw);
                     self.remember_parent(obj);
                 }
-                self.all_objects[self.sweep_write_pos] = obj;
-                self.all_object_data_sizes[self.sweep_write_pos] = data_size;
-                self.sweep_write_pos += 1;
-                // Sweeping one allocation is one bounded metadata operation.
-                work += SLOT_BYTES;
             } else if obj_white == dead_white {
-                // Dead: free it
                 #[cfg(feature = "gc-debug")]
                 crate::gc_debug::on_free(obj);
 
                 finalize_object(obj);
                 stats.finalized_objects += 1;
                 stats.sweep_freed_bytes += size_bytes;
-                self.all_objects[self.sweep_pos] = core::ptr::null_mut();
-                self.all_object_data_sizes[self.sweep_pos] = 0;
                 self.total_bytes -= size_bytes;
                 self.live_object_count -= 1;
                 if age >= G_OLD {
@@ -2575,31 +2671,21 @@ impl Gc {
                 if runtime_backing {
                     self.runtime_backing_bytes -= size_bytes;
                 }
-                work += SLOT_BYTES;
 
-                self.forget_remembered_parent(obj);
-                let removed_extent = self.allocation_extents.remove(&(obj as usize));
-                assert_eq!(
-                    removed_extent,
-                    Some(AllocationExtent {
-                        data_size,
-                        remembered_index: None,
-                    }),
-                    "sweep must remove the exact allocation extent for every live object record"
-                );
-                let raw_ptr = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
+                let finalizable = (header.kind() == ValueKind::Map
+                    && header.slots == crate::objects::map::DATA_SLOTS)
+                    || (header.kind().is_queue()
+                        && header.slots == crate::objects::queue_state::DATA_SLOTS);
                 self.heap
-                    .free(raw_ptr)
+                    .free_recorded(
+                        allocation.raw,
+                        size_bytes,
+                        age >= G_OLD,
+                        finalizable,
+                        runtime_backing,
+                    )
                     .expect("sweep must release an allocation owned by the Island heap");
             }
-
-            self.sweep_pos += 1;
-        }
-
-        // If sweep complete, truncate the vector
-        if self.sweep_pos >= self.all_objects.len() {
-            self.all_objects.truncate(self.sweep_write_pos);
-            self.all_object_data_sizes.truncate(self.sweep_write_pos);
         }
 
         work
@@ -2645,10 +2731,16 @@ impl Gc {
 
     pub fn objects(&self) -> impl Iterator<Item = GcRef> + '_ {
         self.reject_owner_proxy_api("objects");
-        self.all_objects
-            .iter()
-            .copied()
-            .filter(|obj| !obj.is_null())
+        let mut cursor = self.heap.object_cursor();
+        core::iter::from_fn(move || loop {
+            match self.heap.walk_allocated_step(&mut cursor) {
+                HeapWalkStep::Object(allocation) => {
+                    return Some(unsafe { allocation.raw.add(GcHeader::SIZE) as GcRef });
+                }
+                HeapWalkStep::Metadata => {}
+                HeapWalkStep::Done => return None,
+            }
+        })
     }
 
     pub fn debt(&self) -> i64 {

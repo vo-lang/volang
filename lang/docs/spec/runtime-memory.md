@@ -37,7 +37,16 @@ The runtime managed heap uses 64KiB blocks.
 - Larger allocations use a contiguous block run.
 - Allocation size includes the collector header and object data.
 - Newly allocated object storage is zero initialized.
+- Small-block allocation metadata MUST be the authoritative source for object
+  identity, enumeration, and sweep membership. A second per-object registry
+  MUST NOT be required for correctness.
+- The heap directory MUST retain the exact requested extent independently of
+  the object header, so a corrupted header cannot enlarge an object's logical
+  range merely because the forged range fits in the same size class.
 - An empty small block becomes reusable free-block capacity.
+- A small block MAY be reclaimed as one sweep operation only when the mark
+  cycle observed no survivor, every resident object is young, and no resident
+  object requires a native finalizer.
 - A dead large allocation enters bounded block-by-block reclaim before its
   complete extent becomes reusable.
 
@@ -79,6 +88,13 @@ taken path MUST publish the current bytecode pc and all materializable frame
 state before returning to the scheduler. Native-frame validation and the
 subsequent VM root scan MUST each have finite work budgets. Allocation helpers
 MUST NOT start an implicit collection while generated frames remain active.
+Generated code MAY allocate a verified constant-layout small object from a
+runtime-owned lane. Each consumed cell MUST commit allocation membership,
+initialize its header, and update live-byte, object-count, allocation-total,
+and debt counters before the object becomes visible. A collector step, an
+ordinary runtime allocation, or disabling allocation MUST invalidate the lane
+and return every unconsumed tail cell. Outstanding lane admission across all
+size classes MUST remain within `max_objects` and collector-work capacity.
 Helpers that allocate only on a structural slow path SHOULD defer that
 allocation, let generated code poll, and retry with explicit allocation
 permission. A replay credential MUST be scoped to one exact function and
@@ -102,7 +118,7 @@ When `growth_allowed` is false:
 
 - the managed heap MUST NOT obtain another segment from its page provider;
 - free cells and free blocks already owned by the Island remain usable;
-- collector object and lease metadata MUST have an admitted capacity;
+- collector tracing-work and lease metadata MUST have an admitted capacity;
 - exhaustion of admitted collector metadata MUST produce
   `MetadataExhausted`.
 
@@ -172,6 +188,10 @@ The precise root set includes all live guest references in:
 A root mutation during remark or sweep rescue MUST invalidate the affected
 root-domain scan and participate in fixed-point completion.
 
+An object whose rescue scan completes during sweep MUST be normalized to the
+current white before the collector can return to pause. Correctness MUST NOT
+depend on the persistent sweep cursor visiting that object again.
+
 ### 4.4 Write barrier
 
 Every heap mutation that stores a GC-bearing value MUST execute the typed
@@ -181,6 +201,12 @@ The barrier MUST:
 
 1. shade a white child written by a black parent during incremental marking;
 2. record an old-to-young edge during generational collection.
+
+Remembered membership MUST live in heap-owned metadata. An implementation MAY
+use a segment/block summary to skip heap regions with no remembered objects.
+Generated code MAY inline the verified no-action predicate; every state that
+can mutate remembered membership, marking state, or sweep reachability MUST
+enter the shared runtime slow path.
 
 Interpreter operations, JIT lowering, runtime containers, standard-library
 native helpers, and native-extension host callbacks MUST preserve this

@@ -41,6 +41,12 @@ fn empty_closure_scan_layout(_: u32) -> crate::gc_types::ClosureScanLayout<'stat
     crate::gc_types::ClosureScanLayout::default()
 }
 
+fn begin_test_sweep(gc: &mut Gc) {
+    gc.state = GcState::Sweep;
+    gc.sweep_cursor = gc.heap.object_cursor();
+    gc.sweep_complete = false;
+}
+
 #[test]
 fn bounded_step_never_exceeds_requested_work_units() {
     let mut gc = Gc::new();
@@ -168,22 +174,20 @@ fn minor_remembered_scan_frontier_does_not_chase_new_allocations() {
     };
     step_one(&mut gc);
     assert_eq!(gc.cycle_kind, GcCycleKind::Minor);
-    assert_eq!(gc.remembered_scan_end, 32);
+    assert!(!gc.remembered_scan_complete);
 
     for _ in 0..64 {
         assert!(!gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0).is_null());
     }
-    assert_eq!(gc.all_objects.len(), 97);
-    assert_eq!(gc.remembered_scan_end, 32);
+    assert_eq!(gc.object_count(), 97);
 
-    for _ in 0..64 {
-        if gc.remembered_scan_pos == gc.remembered_scan_end {
+    for _ in 0..256 {
+        if gc.remembered_scan_complete {
             break;
         }
         step_one(&mut gc);
     }
-    assert_eq!(gc.remembered_scan_pos, 32);
-    assert_eq!(gc.remembered_scan_end, 32);
+    assert!(gc.remembered_scan_complete);
 }
 
 #[test]
@@ -209,8 +213,7 @@ fn minor_remembered_retirement_is_bounded_and_cursor_stable() {
         };
         assert!(work <= SLOT_BYTES);
         if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > 0 {
-            assert!(gc.remembered.is_empty());
-            assert!(gc.remembered_forget.is_empty());
+            assert_eq!(gc.heap.remembered_object_count(), 0);
             return;
         }
         assert!(
@@ -237,7 +240,7 @@ fn old_to_young_write_after_minor_frontier_keeps_child_alive() {
             |_| {},
         );
     }
-    assert_eq!(gc.remembered_scan_end, 0);
+    assert_eq!(gc.heap.remembered_object_count(), 0);
     assert!(matches!(gc.state(), GcState::Propagate | GcState::Atomic));
 
     gc.write_barrier(parent, child);
@@ -292,8 +295,7 @@ fn incremental_step_returns_with_a_sub_slot_phase_budget_remainder() {
 
     assert_eq!(work, SLOT_BYTES);
     assert_eq!(gc.state(), GcState::Propagate);
-    assert_eq!(gc.remembered_scan_pos, 1);
-    assert_eq!(gc.remembered_scan_end, 2);
+    assert!(!gc.remembered_scan_complete);
 }
 
 #[test]
@@ -405,12 +407,7 @@ fn disabling_growth_preallocates_all_collector_object_worklists() {
         .expect("metadata admission before no-growth");
     let max_objects = gc.max_objects.expect("no-growth object bound");
 
-    assert!(gc.all_objects.capacity() >= max_objects);
-    assert!(gc.all_object_data_sizes.capacity() >= max_objects);
-    assert!(gc.allocation_extents.capacity() >= max_objects);
     assert!(gc.gray.capacity() >= max_objects);
-    assert!(gc.remembered.capacity() >= max_objects);
-    assert!(gc.remembered_forget.capacity() >= max_objects);
     assert!(gc.leases.capacity() >= gc.max_leases.expect("no-growth lease bound"));
     assert!(gc.free_lease_indices.capacity() >= gc.max_leases.expect("no-growth lease bound"));
 
@@ -491,6 +488,38 @@ fn explicit_max_objects_keeps_its_earlier_admission_limit() {
 }
 
 #[test]
+fn runtime_allocation_returns_unconsumed_jit_lane_admission() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        growth_allowed: false,
+        max_objects: Some(2),
+        ..VmMemoryConfig::default()
+    })
+    .expect("bounded collector");
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    assert!(!gc.alloc(meta, 0).is_null());
+
+    gc.prepare_jit_small_alloc_lane(GcHeader::SIZE);
+    let lane = gc.jit_small_alloc_lanes[0];
+    assert!(lane.cursor < lane.limit);
+    assert_eq!(gc.jit_active_small_alloc_lane, Some(0));
+
+    let second = gc.alloc(meta, 1);
+    assert_eq!(
+        unsafe { (second as *mut u8).sub(GcHeader::SIZE) },
+        lane.cursor,
+        "ordinary allocation must reuse the returned lane tail"
+    );
+    assert!(gc
+        .jit_small_alloc_lanes
+        .iter()
+        .all(|lane| lane.cursor.is_null() && lane.limit.is_null()));
+    assert_eq!(gc.jit_active_small_alloc_lane, None);
+    assert!(gc.alloc(meta, 0).is_null());
+    assert_eq!(gc.object_count(), 2);
+}
+
+#[test]
 fn test_canonicalize_ref_base_uses_base_index() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(1, ValueKind::Struct);
@@ -527,7 +556,7 @@ fn vm_jit_typed_barrier_001_no_ref_struct_scalar_is_not_barriered() {
 
     assert!(test_header(parent).is_black());
     assert!(
-        gc.remembered.is_empty(),
+        gc.heap.remembered_object_count() == 0,
         "no-ref struct scalar should not trigger a GC write barrier"
     );
 }
@@ -626,9 +655,7 @@ fn test_canonicalize_ref_forgets_freed_object_during_partial_sweep() {
     assert_eq!(gc.canonicalize_ref(dead_interior), Some(dead));
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     test_header_mut(live).set_black();
 
     let dead_size = Gc::object_size_bytes(dead);
@@ -661,7 +688,10 @@ fn test_sweep_removes_dead_object_from_live_index() {
     }
 
     assert!(work > 0);
-    assert_eq!(finalized, vec![obj]);
+    assert!(
+        finalized.is_empty(),
+        "plain block needs no native finalizer"
+    );
     assert_eq!(gc.state(), GcState::Pause);
     assert_eq!(gc.object_count(), 0);
     assert_eq!(gc.canonicalize_ref(obj), None);
@@ -683,8 +713,37 @@ fn test_zero_slot_struct_sweeps_as_header_only_object() {
         }
     }
 
-    assert_eq!(finalized, vec![obj]);
+    assert!(
+        finalized.is_empty(),
+        "plain block needs no native finalizer"
+    );
     assert_eq!(gc.total_bytes(), 0);
+    assert_eq!(gc.object_count(), 0);
+}
+
+#[test]
+fn bulk_sweep_preserves_native_finalizer_callbacks() {
+    let mut gc = Gc::new();
+    let scalar = ValueMeta::new(0, ValueKind::Uint64);
+    let map = crate::objects::map::create(&mut gc, scalar, scalar, 1, 1, 0);
+    let mut finalized = Vec::new();
+
+    for _ in 0..32 {
+        gc_step(
+            &mut gc,
+            |_| {},
+            |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
+            |dead| {
+                finalized.push(dead);
+                unsafe { crate::gc_types::finalize_object(dead) };
+            },
+        );
+        if gc.state() == GcState::Pause && gc.object_count() == 0 {
+            break;
+        }
+    }
+
+    assert_eq!(finalized, vec![map]);
     assert_eq!(gc.object_count(), 0);
 }
 
@@ -788,9 +847,7 @@ fn test_sweep_write_barrier_rescues_old_white_child() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     unsafe {
         Gc::write_slot(parent, 0, child as u64);
     }
@@ -801,7 +858,7 @@ fn test_sweep_write_barrier_rescues_old_white_child() {
     assert!(test_header(child).is_gray());
 
     gc.atomic_phase(&mut |_, _| {});
-    assert!(test_header(child).is_black());
+    assert_eq!(test_header(child).marked & WHITE_BITS, gc.current_white);
 
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
 
@@ -815,7 +872,7 @@ fn test_sweep_write_barrier_rescues_old_white_child() {
 }
 
 #[test]
-fn allocation_extent_uses_collector_metadata_when_object_header_is_corrupted() {
+fn block_directory_preserves_allocation_extent_when_header_is_corrupted() {
     let mut gc = Gc::new();
     let object = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
     assert_eq!(gc.allocated_data_size_bytes(object), Some(0));
@@ -825,6 +882,33 @@ fn allocation_extent_uses_collector_metadata_when_object_header_is_corrupted() {
     assert_eq!(gc.allocated_data_size_bytes(object), Some(0));
     assert_eq!(gc.canonicalize_ref(object), Some(object));
     assert_eq!(gc.canonicalize_ref(unsafe { object.add(1) }), None);
+}
+
+#[test]
+fn large_runtime_backing_uses_heap_extent_during_sweep() {
+    let mut gc = Gc::new();
+    let total_slots = usize::from(u16::MAX) + 1;
+    let backing = gc.alloc_runtime_backing(total_slots);
+    assert!(!backing.is_null());
+    assert_eq!(
+        gc.allocated_data_size_bytes(backing),
+        Some(total_slots * SLOT_BYTES)
+    );
+
+    gc.gc_request_cycle();
+    while gc.state() != GcState::Pause || gc.memory_stats().cycle_id == 0 {
+        gc_step(
+            &mut gc,
+            |gc| gc.mark_gray(backing),
+            |_, _| {},
+            |_| panic!("rooted runtime backing was finalized"),
+        );
+    }
+
+    assert_eq!(
+        gc.allocated_data_size_bytes(backing),
+        Some(total_slots * SLOT_BYTES)
+    );
 }
 
 #[test]
@@ -912,7 +996,7 @@ fn test_step_stats_record_mark_work() {
 fn test_step_stats_record_sweep_frees() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(1, ValueKind::Struct);
-    let dead = gc.alloc(meta, 0);
+    let _dead = gc.alloc(meta, 0);
     let mut finalized = Vec::new();
 
     gc_step(&mut gc, |_| {}, |_, _| {}, |_| {});
@@ -922,7 +1006,10 @@ fn test_step_stats_record_sweep_frees() {
     let work = gc_step(&mut gc, |_| {}, |_, _| {}, |obj| finalized.push(obj));
     let stats = gc.last_step_stats();
 
-    assert_eq!(finalized, vec![dead]);
+    assert!(
+        finalized.is_empty(),
+        "plain block needs no native finalizer"
+    );
     assert_eq!(stats.phase_before, GcState::Sweep);
     assert_eq!(stats.phase_after, GcState::Pause);
     assert!(stats.cycle_finished);
@@ -1011,9 +1098,7 @@ fn test_sweep_write_barrier_rescues_old_white_parent() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     unsafe {
         Gc::write_slot(parent, 0, child as u64);
     }
@@ -1028,7 +1113,7 @@ fn test_sweep_write_barrier_rescues_old_white_parent() {
             gc.mark_gray(raw_child as GcRef);
         }
     });
-    assert!(test_header(parent).is_black());
+    assert_eq!(test_header(parent).marked & WHITE_BITS, gc.current_white);
 
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
 
@@ -1050,9 +1135,7 @@ fn test_sweep_write_barrier_rescans_rescued_string_child() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     unsafe {
         Gc::write_slot(parent, 0, child as u64);
     }
@@ -1085,9 +1168,7 @@ fn test_sweep_rescans_roots_added_after_atomic() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     gc.sweep_budget = usize::MAX;
 
     let work = gc_step(
@@ -1128,9 +1209,7 @@ fn test_sweep_allocated_clone_scans_copied_old_child() {
     }
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     gc.sweep_budget = usize::MAX;
 
     let clone = unsafe { gc.ptr_clone(source) };
@@ -1168,9 +1247,7 @@ fn test_sweep_range_barrier_rescues_copied_string_refs() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     gc.sweep_budget = usize::MAX;
     test_header_mut(arr).set_black();
 
@@ -1233,9 +1310,7 @@ fn test_sweep_initialized_array_scans_copied_old_child() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     gc.sweep_budget = usize::MAX;
 
     let new_arr = crate::objects::array::create(&mut gc, elem_meta, SLOT_BYTES, 1);
@@ -1272,9 +1347,7 @@ fn test_sweep_initialized_map_scans_copied_old_child() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     gc.sweep_budget = usize::MAX;
 
     let new_map = crate::objects::map::create(&mut gc, str_meta, str_meta, 1, 1, 0);
@@ -1315,15 +1388,13 @@ fn test_object_allocated_after_partial_sweep_survives_as_late_root() {
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
-    gc.state = GcState::Sweep;
-    gc.sweep_pos = 0;
-    gc.sweep_write_pos = 0;
+    begin_test_sweep(&mut gc);
     gc.sweep_budget = usize::MAX;
 
     let partial_work = gc.sweep_step(&mut |dead| finalized.push(dead), GcHeader::SIZE);
     assert!(partial_work > 0);
     assert_eq!(gc.state(), GcState::Sweep);
-    assert!(gc.sweep_pos > 0);
+    assert_ne!(gc.sweep_cursor, HeapObjectCursor::default());
 
     let late_root =
         crate::objects::slice::create(&mut gc, ValueMeta::new(0, ValueKind::Uint8), 1, 16, 16);
@@ -1343,6 +1414,10 @@ fn test_object_allocated_after_partial_sweep_survives_as_late_root() {
     );
     assert_eq!(gc.state(), GcState::Pause);
     assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
+    assert!(
+        !test_header(late_root).is_black(),
+        "sweep rescue must normalize objects behind the sweep cursor"
+    );
 }
 
 #[test]

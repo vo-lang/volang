@@ -1372,7 +1372,16 @@ pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
     };
     unsafe {
         let gc = &mut *gc;
-        gc.alloc(value_meta, slots) as u64
+        let object = gc.alloc(value_meta, slots);
+        if !object.is_null() {
+            if let Some(size) = usize::from(slots)
+                .checked_mul(crate::slot::SLOT_BYTES)
+                .and_then(|bytes| crate::gc::GcHeader::SIZE.checked_add(bytes))
+            {
+                gc.prepare_jit_small_alloc_lane(size);
+            }
+        }
+        object as u64
     }
 }
 

@@ -19,6 +19,8 @@ Volang 采用一套按 Island 隔离的稳定地址托管堆：
 8. 普通程序默认允许增长并自动 GC；宿主可在创建 Island 时设置 reserve、hard limit、no-growth、GC mode、自动 GC 和 OOM policy。
 9. Voplay 负责 ECS、stage、渲染和音频等领域缓冲区复用，语言层不增加游戏专用内存概念。
 10. 标准库提供只读 telemetry 与安全点 GC 请求，不允许 guest 任意修改全局内存策略。
+11. block allocation bitmap 是对象身份、枚举与 sweep 的唯一权威；collector 不再维护平行对象表或地址哈希。
+12. JIT 对常量布局的小对象使用 runtime 授权的单活动 bump lane，并内联 typed barrier 的常见无操作分支。
 
 该设计保留 Volang 普通程序的自动内存体验，同时给嵌入式、WASM、Studio 和游戏宿主提供可验证边界。
 
@@ -68,12 +70,13 @@ Vm
     ├── SpanHeap
     │   ├── 64KiB segments/blocks
     │   ├── small size-class cells
+    │   ├── allocation/remembered bitmap 与 block summary
     │   └── large block runs
     ├── precise collector
     │   ├── roots and dirty-root epochs
     │   ├── gray/grayagain queues
     │   ├── object trace cursors
-    │   ├── cards and generations
+    │   ├── remembered blocks and generations
     │   └── sweep/reclaim cursors
     ├── managed runtime backing
     │   ├── map buckets
@@ -109,18 +112,19 @@ provider 函数本身可以共享，调用上下文始终由目标 Island 现场
 - block 固定为 64KiB，与 WebAssembly page 大小一致；
 - small size class 为 16、32、64……32768 字节；
 - 一个 small block 只服务一个 size class；
-- small cell 的 allocation bitmap、free chain 与 dirty-card bitmap由 block metadata 保存；
+- small cell 的 allocation bitmap、精确申请长度、free chain 与 remembered bitmap 由 block metadata 保存；
+- segment 为 remembered block 保存一层稀疏 summary，minor GC 无需遍历无关 block；
 - 超过 32KiB 的分配使用一个或多个连续 block；
 - 对象 header 包含精确 `ValueMeta`、颜色和 age；
 - object lookup 根据 segment/block/cell 定位 canonical allocation。
 
-对象请求大小包含 header 和 data。cell 与 large span 在分配时清零。
+对象请求大小包含 header 和 data。cell 与 large span 在分配时清零。canonical object identity 与精确申请长度都由 block 目录回答，因此 header layout 漂移即使仍落在同一个 size class 内也能 fail closed。
 
 ### 增长与预留
 
 `memory_reserve(bytes)` 以 block 为单位向 Island 增加已提交容量。自动增长使用逐步增大的 segment，单次增长最多 256 blocks。
 
-`hard_limit_bytes` 限制 managed heap committed bytes。达到该值会得到 `HardLimitExceeded`。Native collector 元数据仍由 Rust allocator 持有，no-growth admission 会提前为对象表、对象索引、gray/grayagain 和 lease table 预留容量：
+`hard_limit_bytes` 限制 managed heap committed bytes。达到该值会得到 `HardLimitExceeded`。对象身份与枚举直接来自随 block 一次性分配的 bitmap，不需要按对象增长的平行表或地址哈希。Native collector 元数据仍由 Rust allocator 持有，no-growth admission 会提前为 gray work queue 和 lease table 预留容量：
 
 - 显式 `max_objects` / `max_leases` 是宿主声明的固定上限；
 - 未显式声明且动态关闭 growth 时，根据当前 committed blocks 推导保守上限；
@@ -132,6 +136,8 @@ provider 函数本身可以共享，调用上下文始终由目标 Island 现场
 
 - small object 死亡后 cell 回到 free chain；
 - small block 全空后回到 Island free-block pool；
+- mark phase 从未触达、全部为 young 且没有 native finalizer 的 small block 可在 sweep 中聚合回收；
+- 含 survivor、old object 或 native finalizer 的 block 继续逐对象 sweep，保持资源释放与分代语义；
 - large span 先 O(1) 标记为 pending reclaim；
 - `Reclaim` 状态按 block 逐步发布 large span，避免单个大对象造成长停顿；
 - Native segment 在 Island 销毁时归还系统 allocator；
@@ -153,13 +159,15 @@ Pause
 
 `Atomic` 代表 remark 语义，并不要求一次调用完成。root rescan、grayagain drain 和 fixed-point 判定均可跨 step 恢复。
 
+`Sweep` 期间仍允许屏障或 root mutation 抢救对象。抢救扫描完成后，对象立即归一化为当前 white；这样即使对象位于持久 sweep 游标已经越过的位置，也不会把 black 状态泄漏到下一个 `Pause` 周期。
+
 ### Work unit
 
 一个 work unit 对应一个有界的 collector 元数据或 slot 工作。主要规则：
 
 - root scanner 返回实际扫描 slot 数；
 - object scanner每个引用/布局游标推进都计费；
-- remembered-set card、sweep object 和 reclaim block 都计费；
+- remembered summary/bitmap、sweep allocation 和 reclaim block 都计费；
 - `gc_step_units(N)` 的完成量不会超过请求上限；
 - `N=0` 不启动工作；
 - runtime type fact 查询不分配内存，也不隐藏递归布局遍历；
@@ -181,7 +189,7 @@ Pause
 `GcMode::Generational` 默认执行 minor cycle：
 
 - young/survival 对象参与回收；
-- old object 由 dirty card 与 touched 状态进入 remembered scan；
+- old object 由 heap-local remembered bitmap 进入 scan，segment summary 跳过无 old→young 边的 block；
 - survivor 提升 age；
 -周期性或显式 major request 扫描全部代。
 
@@ -202,9 +210,11 @@ root domain 带 dirty epoch。remark 或 sweep rescue 期间发生 root mutation
 typed barrier执行两项动作：
 
 1. 增量 cycle 中，黑色 parent 写入白色 child 时将 child 置灰；
-2. generational mode 中，old parent 写入 young child 时标记 512B card。
+2. generational mode 中，old parent 写入 young child 时标记 parent 对应的 remembered cell，并置位所在 block 的 summary。
 
-Interpreter mutation、JIT lowering、map/queue/slice/struct helper 和 FFI host callback 都经过同一语义入口。JIT 分配 helper 返回 null 后，生成代码在任何解引用或后续副作用前退出当前 fiber。
+Interpreter mutation、JIT lowering、map/queue/slice/struct helper 和 FFI host callback 都遵守同一屏障语义。JIT 对已验证 `GcRef` store 直接检查 nil、collector state、generation 和颜色；只有 old→young、marking violation 或 sweep rescue 才进入 runtime helper。依赖动态 tag 的 interface store 保留完整 helper 校验。
+
+常量布局的 `PtrNew` 在 safepoint poll 后优先从 runtime-owned small-object lane 分配。lane 只覆盖同一个 allocation-bitmap word，生成代码同时提交 bitmap、header 和 GC counters。任意普通 runtime 分配、collector step 或 allocation policy 收紧都会先归还未消费的 tail；每个 Island 同时只有一个活动 admission，避免 `max_objects` 与 mark-work capacity 超订。lane 缺失或耗尽时调用统一 helper，null 结果仍会在解引用和后续 guest 副作用前退出当前 fiber。
 
 ## Runtime container 与 native 内存
 
@@ -383,8 +393,10 @@ Voplay 的 stage 执行由 `GameEngine` 持有并复用：
 基线实现已经覆盖：
 
 - SpanHeap small/large allocation、hard limit、reserve、no-growth 与 bounded reclaim；
-- incremental/generational cycle、cards、dirty roots 和 resumable scanners；
-- Interpreter/JIT/FFI/container barrier；
+- block bitmap 单一对象权威、segment remembered summary 与无 finalizer young-block 聚合回收；
+- incremental/generational cycle、remembered metadata、dirty roots 和 resumable scanners；
+- Interpreter/JIT/FFI/container barrier，以及 JIT verified-`GcRef` inline fast path；
+- JIT `PtrNew` runtime-owned small-object allocation lane；
 - map backing 与 queue guest payload managed 化；
 - child-Island policy 继承；
 - sticky Island OOM 与 terminal teardown；
@@ -419,7 +431,7 @@ Voplay 的 stage 执行由 `GameEngine` 持有并复用：
 - `gc_step_units(N)` 完成量不超过 `N`；
 - sweep/reclaim 不执行用户代码或阻塞 I/O；
 - no-growth 后 SpanHeap 不调用 page provider；
-- no-growth 前 collector object/lease metadata 完成 admission；
+- no-growth 前 collector gray/lease metadata 完成 admission；
 - allocation-disabled路径统一失败。
 
 ### 平台与游戏
