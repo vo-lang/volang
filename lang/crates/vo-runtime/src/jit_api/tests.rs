@@ -172,6 +172,24 @@ fn vm_jit_map_new_rejects_width_narrowing_contract_060() {
 }
 
 #[test]
+fn jit_scalar_map_get_uses_the_shared_generic_fallback_sentinel() {
+    let mut gc = Gc::new();
+    let map = crate::objects::map::create(
+        &mut gc,
+        ValueMeta::new(0, ValueKind::Struct),
+        ValueMeta::new(0, ValueKind::Int64),
+        1,
+        1,
+        0,
+    );
+
+    assert_eq!(
+        vo_map_get_scalar(map as u64, 7),
+        JIT_HELPER_MAP_SCALAR_FALLBACK
+    );
+}
+
+#[test]
 fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
     let mut panic_flag = false;
     let mut is_user_panic = false;

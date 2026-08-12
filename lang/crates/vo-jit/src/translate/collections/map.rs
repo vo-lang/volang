@@ -1,7 +1,11 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, StackSlot, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{
+    types, InstBuilder, MemFlagsData as MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
+};
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::{JitRuntimeTrapKind, JIT_HELPER_MAP_SET_NEEDS_ALLOCATION};
+use vo_runtime::jit_api::{
+    JitRuntimeTrapKind, JIT_HELPER_MAP_SCALAR_FALLBACK, JIT_HELPER_MAP_SET_NEEDS_ALLOCATION,
+};
 
 use crate::translator::{
     emit_gc_safepoint_poll, emit_runtime_helper_call, CollectionEmitter, HelperKind,
@@ -90,7 +94,6 @@ pub(in crate::translate) fn map_get<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = e.helper(HelperKind::map_get);
     let layout = e.map_get_layout(inst).ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
@@ -100,6 +103,11 @@ pub(in crate::translate) fn map_get<'a>(
     let val_slots = layout.val_slots as usize;
     let has_ok = layout.has_ok;
 
+    if key_slots == 1 && val_slots == 1 {
+        return map_get_scalar(e, inst, has_ok);
+    }
+
+    let func = e.helper(HelperKind::map_get);
     let m = e.read_var(inst.b);
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.c, key_slots);
 
@@ -127,11 +135,111 @@ pub(in crate::translate) fn map_get<'a>(
     Ok(())
 }
 
+fn map_get_scalar<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    inst: &Instruction,
+    has_ok: bool,
+) -> Result<(), JitError> {
+    let m = e.read_var(inst.b);
+    let key = e.read_var(inst.c);
+    let scalar_func = e.helper(HelperKind::map_get_scalar);
+    let scalar_call = emit_runtime_helper_call(e, scalar_func, &[m, key]);
+    let value_ptr = e.builder().inst_results(scalar_call)[0];
+    let fallback = e.builder().ins().icmp_imm_u(
+        IntCC::Equal,
+        value_ptr,
+        JIT_HELPER_MAP_SCALAR_FALLBACK as i64,
+    );
+
+    let fallback_block = crate::compile_common::cold_block(e.builder());
+    let scalar_block = e.builder().create_block();
+    let merge_block = e.builder().create_block();
+    e.builder().append_block_param(merge_block, types::I64);
+    e.builder().append_block_param(merge_block, types::I64);
+    e.builder()
+        .ins()
+        .brif(fallback, fallback_block, &[], scalar_block, &[]);
+
+    e.builder().switch_to_block(fallback_block);
+    e.builder().seal_block(fallback_block);
+    let (fallback_value, fallback_found) = emit_map_get_generic_one(e, m, key)?;
+    e.builder()
+        .ins()
+        .jump(merge_block, &[fallback_value.into(), fallback_found.into()]);
+
+    e.builder().switch_to_block(scalar_block);
+    e.builder().seal_block(scalar_block);
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let found = e.builder().ins().icmp(IntCC::NotEqual, value_ptr, zero);
+    let found_block = e.builder().create_block();
+    let missing_block = e.builder().create_block();
+    e.builder()
+        .ins()
+        .brif(found, found_block, &[], missing_block, &[]);
+
+    e.builder().switch_to_block(found_block);
+    e.builder().seal_block(found_block);
+    let value = e
+        .builder()
+        .ins()
+        .load(types::I64, MemFlags::trusted(), value_ptr, 0);
+    let one = e.builder().ins().iconst(types::I64, 1);
+    e.builder()
+        .ins()
+        .jump(merge_block, &[value.into(), one.into()]);
+
+    e.builder().switch_to_block(missing_block);
+    e.builder().seal_block(missing_block);
+    e.builder()
+        .ins()
+        .jump(merge_block, &[zero.into(), zero.into()]);
+
+    e.builder().switch_to_block(merge_block);
+    e.builder().seal_block(merge_block);
+    let value = e.builder().block_params(merge_block)[0];
+    let found = e.builder().block_params(merge_block)[1];
+    e.write_var(inst.a, value);
+    if has_ok {
+        e.write_var(inst.a + 1, found);
+    }
+    Ok(())
+}
+
+fn emit_map_get_generic_one<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    m: Value,
+    key: Value,
+) -> Result<(Value, Value), JitError> {
+    let key_slot =
+        e.builder()
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let val_slot =
+        e.builder()
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    e.builder().ins().stack_store(types::I64, key, key_slot, 0);
+    let key_ptr = e.builder().ins().stack_addr(types::I64, key_slot, 0);
+    let val_ptr = e.builder().ins().stack_addr(types::I64, val_slot, 0);
+    let one_i32 = e.builder().ins().iconst(types::I32, 1);
+    let ctx = e.ctx_param();
+    mark_runtime_trap_pc(e);
+    let func = e.helper(HelperKind::map_get);
+    let call = emit_runtime_helper_call(e, func, &[ctx, m, key_ptr, one_i32, val_ptr, one_i32]);
+    let found = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, found);
+    let panic_code = e.builder().ins().iconst(types::I64, 2);
+    let is_panic = e.builder().ins().icmp(IntCC::Equal, found, panic_code);
+    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
+    let value = e
+        .builder()
+        .ins()
+        .stack_load(types::I64, types::I64, val_slot, 0);
+    Ok((value, found))
+}
+
 pub(in crate::translate) fn map_set<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = e.helper(HelperKind::map_set);
     let layout = e.map_set_layout(inst).ok_or(JitError::MissingJitLayout {
         pc: e.current_pc(),
         opcode: inst.opcode(),
@@ -146,6 +254,22 @@ pub(in crate::translate) fn map_set<'a>(
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, m, zero);
     emit_runtime_trap_if(e, is_nil, JitRuntimeTrapKind::NilMapWrite, None, None);
+
+    if key_slots == 1 && val_slots == 1 {
+        return map_set_scalar(e, inst, m);
+    }
+
+    emit_map_set_generic(e, inst, m, key_slots, val_slots)
+}
+
+fn emit_map_set_generic<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    inst: &Instruction,
+    m: Value,
+    key_slots: usize,
+    val_slots: usize,
+) -> Result<(), JitError> {
+    let func = e.helper(HelperKind::map_set);
 
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b, key_slots);
     let (_, val_ptr, val_slots_i32) = store_to_stack(e, inst.c, val_slots);
@@ -211,8 +335,82 @@ pub(in crate::translate) fn map_set<'a>(
     e.builder().seal_block(complete_block);
     let result = e.builder().block_params(complete_block)[0];
 
+    let zero = e.builder().ins().iconst(types::I64, 0);
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
     emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
+    Ok(())
+}
+
+fn map_set_scalar<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    inst: &Instruction,
+    m: Value,
+) -> Result<(), JitError> {
+    let func = e.helper(HelperKind::map_set_scalar);
+    let ctx = e.ctx_param();
+    let key = e.read_var(inst.b);
+    let val = e.read_var(inst.c);
+    let allocation_deferred = e.builder().ins().iconst(types::I32, 0);
+    let call = emit_runtime_helper_call(e, func, &[ctx, m, key, val, allocation_deferred]);
+    let first_result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, first_result);
+
+    let fallback = e.builder().ins().icmp_imm_u(
+        IntCC::Equal,
+        first_result,
+        JIT_HELPER_MAP_SCALAR_FALLBACK as i64,
+    );
+    let fallback_block = crate::compile_common::cold_block(e.builder());
+    let scalar_block = e.builder().create_block();
+    let done_block = e.builder().create_block();
+    e.builder()
+        .ins()
+        .brif(fallback, fallback_block, &[], scalar_block, &[]);
+
+    e.builder().switch_to_block(fallback_block);
+    e.builder().seal_block(fallback_block);
+    emit_map_set_generic(e, inst, m, 1, 1)?;
+    e.builder().ins().jump(done_block, &[]);
+
+    e.builder().switch_to_block(scalar_block);
+    e.builder().seal_block(scalar_block);
+    let needs_allocation = e.builder().ins().icmp_imm_u(
+        IntCC::Equal,
+        first_result,
+        JIT_HELPER_MAP_SET_NEEDS_ALLOCATION as i64,
+    );
+    let retry_block = crate::compile_common::cold_block(e.builder());
+    let complete_block = e.builder().create_block();
+    e.builder().append_block_param(complete_block, types::I64);
+    e.builder().ins().brif(
+        needs_allocation,
+        retry_block,
+        &[],
+        complete_block,
+        &[first_result.into()],
+    );
+
+    e.builder().switch_to_block(retry_block);
+    e.builder().seal_block(retry_block);
+    emit_gc_safepoint_poll(e);
+    let allocation_allowed = e.builder().ins().iconst(types::I32, 1);
+    let retry = emit_runtime_helper_call(e, func, &[ctx, m, key, val, allocation_allowed]);
+    let retry_result = e.builder().inst_results(retry)[0];
+    emit_return_if_u64_jit_error(e, retry_result);
+    e.builder()
+        .ins()
+        .jump(complete_block, &[retry_result.into()]);
+
+    e.builder().switch_to_block(complete_block);
+    e.builder().seal_block(complete_block);
+    let result = e.builder().block_params(complete_block)[0];
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
+    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
+    e.builder().ins().jump(done_block, &[]);
+
+    e.builder().switch_to_block(done_block);
+    e.builder().seal_block(done_block);
     Ok(())
 }
 
@@ -220,7 +418,6 @@ pub(in crate::translate) fn map_delete<'a>(
     e: &mut impl CollectionEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = e.helper(HelperKind::map_delete);
     let key_slots = e
         .map_delete_key_slots(inst)
         .ok_or(JitError::MissingJitLayout {
@@ -230,6 +427,51 @@ pub(in crate::translate) fn map_delete<'a>(
         })? as usize;
 
     let m = e.read_var(inst.a);
+    if key_slots == 1 {
+        let key = e.read_var(inst.b);
+        let func = e.helper(HelperKind::map_delete_scalar);
+        let call = emit_runtime_helper_call(e, func, &[m, key]);
+        let result = e.builder().inst_results(call)[0];
+        emit_return_if_u64_jit_error(e, result);
+        let fallback = e.builder().ins().icmp_imm_u(
+            IntCC::Equal,
+            result,
+            JIT_HELPER_MAP_SCALAR_FALLBACK as i64,
+        );
+        let fallback_block = crate::compile_common::cold_block(e.builder());
+        let scalar_block = e.builder().create_block();
+        let done_block = e.builder().create_block();
+        e.builder()
+            .ins()
+            .brif(fallback, fallback_block, &[], scalar_block, &[]);
+
+        e.builder().switch_to_block(fallback_block);
+        e.builder().seal_block(fallback_block);
+        emit_map_delete_generic(e, inst, m, 1)?;
+        e.builder().ins().jump(done_block, &[]);
+
+        e.builder().switch_to_block(scalar_block);
+        e.builder().seal_block(scalar_block);
+        let zero = e.builder().ins().iconst(types::I64, 0);
+        let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
+        emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
+        e.builder().ins().jump(done_block, &[]);
+
+        e.builder().switch_to_block(done_block);
+        e.builder().seal_block(done_block);
+        return Ok(());
+    }
+
+    emit_map_delete_generic(e, inst, m, key_slots)
+}
+
+fn emit_map_delete_generic<'a>(
+    e: &mut impl CollectionEmitter<'a>,
+    inst: &Instruction,
+    m: Value,
+    key_slots: usize,
+) -> Result<(), JitError> {
+    let func = e.helper(HelperKind::map_delete);
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b, key_slots);
 
     let ctx = e.ctx_param();

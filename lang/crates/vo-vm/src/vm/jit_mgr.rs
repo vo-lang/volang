@@ -19,6 +19,7 @@ use vo_runtime::jit_api::{JitContext, JitNativeFrame, JitResult};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 use vo_jit::{
     JitArtifactMetadata, JitCompileEnv, JitCompiler, JitError, JitFailureKind,
@@ -37,8 +38,13 @@ fn update_low_progress_streak(
     result: JitResult,
     budget_before: u32,
     budget_after: u32,
+    count_low_work_ok: bool,
 ) -> bool {
     match result {
+        JitResult::Ok if count_low_work_ok => match budget_before.checked_sub(budget_after) {
+            Some(delta) if delta <= LOW_PROGRESS_BUDGET_DELTA => *streak = streak.saturating_add(1),
+            _ => *streak = 0,
+        },
         JitResult::Ok => *streak = 0,
         JitResult::WaitIo
         | JitResult::WaitQueue
@@ -52,6 +58,20 @@ fn update_low_progress_streak(
         JitResult::Call | JitResult::Panic | JitResult::JitError => return false,
     }
     *streak >= LOW_PROGRESS_EXIT_LIMIT
+}
+
+fn is_short_runtime_dominated_function(func: &vo_runtime::bytecode::FunctionDef) -> bool {
+    const MAX_RUNTIME_DOMINATED_CODE_LEN: usize = 8;
+    func.code.len() <= MAX_RUNTIME_DOMINATED_CODE_LEN
+        && func.code.iter().any(|inst| {
+            matches!(
+                inst.opcode(),
+                vo_runtime::instruction::Opcode::QueueSend
+                    | vo_runtime::instruction::Opcode::QueueRecv
+                    | vo_runtime::instruction::Opcode::SelectExec
+                    | vo_runtime::instruction::Opcode::GoStart
+            )
+        })
 }
 
 // =============================================================================
@@ -138,6 +158,23 @@ struct FunctionJitInfo {
 
     /// Exact module-wide transitive effect contract used by dynamic calls.
     entry_eligibility: Option<JitFrameEntryEligibility>,
+
+    /// Permit low-work OK returns to participate in feedback only for a
+    /// narrowly classified runtime-dominated short body.
+    count_low_work_ok: bool,
+
+    /// Per-function telemetry retained for diagnostics and policy tests.
+    telemetry: FunctionJitTelemetry,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FunctionJitTelemetry {
+    pub compile_time_ns: u64,
+    pub code_bytes: u64,
+    pub vm_entries: u64,
+    pub completed_outcomes: u64,
+    pub budget_consumed: u64,
+    pub low_work_outcomes: u64,
 }
 
 impl FunctionJitInfo {
@@ -150,6 +187,8 @@ impl FunctionJitInfo {
             full_low_progress_exit_streak: 0,
             metadata: None,
             entry_eligibility: None,
+            count_low_work_ok: false,
+            telemetry: FunctionJitTelemetry::default(),
         }
     }
 }
@@ -534,9 +573,12 @@ impl JitManager {
     }
 
     #[inline]
-    pub fn record_function_entry(&mut self) {
+    pub fn record_function_entry(&mut self, func_id: u32) {
         self.execution_stats.function_entries =
             self.execution_stats.function_entries.saturating_add(1);
+        if let Some(info) = self.funcs.get_mut(func_id as usize) {
+            info.telemetry.vm_entries = info.telemetry.vm_entries.saturating_add(1);
+        }
     }
 
     #[inline]
@@ -614,11 +656,20 @@ impl JitManager {
             {
                 return Ok(false);
             }
+            info.telemetry.completed_outcomes = info.telemetry.completed_outcomes.saturating_add(1);
+            let consumed = budget_before.saturating_sub(budget_after) as u64;
+            info.telemetry.budget_consumed =
+                info.telemetry.budget_consumed.saturating_add(consumed);
+            if consumed <= u64::from(LOW_PROGRESS_BUDGET_DELTA) {
+                info.telemetry.low_work_outcomes =
+                    info.telemetry.low_work_outcomes.saturating_add(1);
+            }
             update_low_progress_streak(
                 &mut info.full_low_progress_exit_streak,
                 result,
                 budget_before,
                 budget_after,
+                info.count_low_work_ok,
             )
         };
         if !should_disable {
@@ -630,6 +681,12 @@ impl JitManager {
             .execution_stats
             .low_progress_function_disables
             .saturating_add(1);
+        if result == JitResult::Ok {
+            self.execution_stats.runtime_dominated_function_disables = self
+                .execution_stats
+                .runtime_dominated_function_disables
+                .saturating_add(1);
+        }
         self.func_table[idx] = std::ptr::null();
         Ok(true)
     }
@@ -656,6 +713,7 @@ impl JitManager {
             result,
             budget_before,
             budget_after,
+            false,
         ) {
             return Ok(false);
         }
@@ -689,6 +747,11 @@ impl JitManager {
         func_id: u32,
     ) -> Option<JitFrameEntryEligibility> {
         self.funcs.get(func_id as usize)?.entry_eligibility
+    }
+
+    #[cfg(test)]
+    pub(crate) fn function_telemetry(&self, func_id: u32) -> Option<FunctionJitTelemetry> {
+        Some(self.funcs.get(func_id as usize)?.telemetry)
     }
 
     pub(crate) fn interpreter_reason(
@@ -813,9 +876,23 @@ impl JitManager {
             return Ok(());
         }
 
+        let count_low_work_ok = is_short_runtime_dominated_function(
+            verified
+                .module()
+                .functions
+                .get(idx)
+                .ok_or(JitError::FunctionNotFound(func_id))?,
+        );
         let compile_result = (|| {
             let mut compiler = self.shared_code.lock_verified(verified)?;
+            let before = compiler.code_memory_stats().function_bytes;
+            let started = Instant::now();
             compiler.compile_loaded(func_id, env)?;
+            let compile_time_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let code_bytes = compiler
+                .code_memory_stats()
+                .function_bytes
+                .saturating_sub(before) as u64;
             let ptr = unsafe { compiler.get_func_ptr(func_id) }
                 .ok_or_else(|| JitError::Internal("compiled but no pointer".into()))?;
             let metadata = compiler.function_metadata_handle(func_id).ok_or_else(|| {
@@ -827,9 +904,15 @@ impl JitManager {
                     .ok_or_else(|| {
                         JitError::Internal("compiled function has no entry eligibility".into())
                     })?;
-            Ok::<_, JitError>((ptr, metadata, entry_eligibility))
+            Ok::<_, JitError>((
+                ptr,
+                metadata,
+                entry_eligibility,
+                compile_time_ns,
+                code_bytes,
+            ))
         })();
-        let (ptr, metadata, entry_eligibility) = match compile_result {
+        let (ptr, metadata, entry_eligibility, compile_time_ns, code_bytes) = match compile_result {
             Ok(compiled) => compiled,
             Err(e) => {
                 if let Some(info) = self.funcs.get_mut(idx) {
@@ -847,6 +930,25 @@ impl JitManager {
             info.full_low_progress_exit_streak = 0;
             info.metadata = Some(metadata);
             info.entry_eligibility = Some(entry_eligibility);
+            info.count_low_work_ok = count_low_work_ok;
+            info.telemetry.compile_time_ns = compile_time_ns;
+            info.telemetry.code_bytes = code_bytes;
+        }
+        self.execution_stats.function_compilations =
+            self.execution_stats.function_compilations.saturating_add(1);
+        self.execution_stats.compilation_time_ns = self
+            .execution_stats
+            .compilation_time_ns
+            .saturating_add(compile_time_ns);
+        self.execution_stats.compiled_code_bytes = self
+            .execution_stats
+            .compiled_code_bytes
+            .saturating_add(code_bytes);
+        if code_bytes == 0 {
+            self.execution_stats.compilation_cache_hits = self
+                .execution_stats
+                .compilation_cache_hits
+                .saturating_add(1);
         }
         self.func_table[idx] = ptr as *const u8;
 
@@ -934,7 +1036,14 @@ impl JitManager {
         }
         let compile_result = (|| {
             let mut compiler = self.shared_code.lock_verified(verified)?;
+            let before = compiler.code_memory_stats().loop_bytes;
+            let started = Instant::now();
             compiler.compile_loaded_loop(func_id, env, loop_info)?;
+            let compile_time_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let code_bytes = compiler
+                .code_memory_stats()
+                .loop_bytes
+                .saturating_sub(before) as u64;
             let loop_func = unsafe { compiler.get_loop_func_ptr(func_id, loop_info.begin_pc) }
                 .ok_or_else(|| {
                     JitError::Internal(format!(
@@ -945,9 +1054,9 @@ impl JitManager {
             let metadata = compiler
                 .loop_metadata_handle(func_id, loop_info.begin_pc)
                 .ok_or_else(|| JitError::Internal("compiled loop has no native metadata".into()))?;
-            Ok::<_, JitError>((loop_func, metadata))
+            Ok::<_, JitError>((loop_func, metadata, compile_time_ns, code_bytes))
         })();
-        let (loop_func, metadata) = match compile_result {
+        let (loop_func, metadata, compile_time_ns, code_bytes) = match compile_result {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.mark_loop_failed(func_id, loop_info.begin_pc, error.failure_kind())?;
@@ -960,6 +1069,22 @@ impl JitManager {
             .or_default();
         loop_state.entry = Some(loop_func);
         loop_state.metadata = Some(metadata);
+        self.execution_stats.loop_compilations =
+            self.execution_stats.loop_compilations.saturating_add(1);
+        self.execution_stats.compilation_time_ns = self
+            .execution_stats
+            .compilation_time_ns
+            .saturating_add(compile_time_ns);
+        self.execution_stats.compiled_code_bytes = self
+            .execution_stats
+            .compiled_code_bytes
+            .saturating_add(code_bytes);
+        if code_bytes == 0 {
+            self.execution_stats.compilation_cache_hits = self
+                .execution_stats
+                .compilation_cache_hits
+                .saturating_add(1);
+        }
         Ok(loop_func)
     }
 
@@ -1083,13 +1208,20 @@ mod tests {
                 result,
                 100,
                 100 - LOW_PROGRESS_BUDGET_DELTA,
+                false,
             ));
             assert_eq!(streak, 1, "{result:?} should participate");
         }
 
         let mut streak = LOW_PROGRESS_EXIT_LIMIT;
         for result in [JitResult::Call, JitResult::Panic, JitResult::JitError] {
-            assert!(!update_low_progress_streak(&mut streak, result, 100, 100,));
+            assert!(!update_low_progress_streak(
+                &mut streak,
+                result,
+                100,
+                100,
+                false,
+            ));
             assert_eq!(
                 streak, LOW_PROGRESS_EXIT_LIMIT,
                 "{result:?} should leave the streak unchanged"
@@ -1102,6 +1234,7 @@ mod tests {
             JitResult::Ok,
             100,
             100,
+            false,
         ));
         assert_eq!(streak, 0);
         streak = LOW_PROGRESS_EXIT_LIMIT - 1;
@@ -1110,8 +1243,18 @@ mod tests {
             JitResult::WaitIo,
             100,
             100 - LOW_PROGRESS_BUDGET_DELTA - 1,
+            false,
         ));
         assert_eq!(streak, 0);
+
+        let mut streak = LOW_PROGRESS_EXIT_LIMIT - 1;
+        assert!(update_low_progress_streak(
+            &mut streak,
+            JitResult::Ok,
+            100,
+            100 - LOW_PROGRESS_BUDGET_DELTA,
+            true,
+        ));
     }
 
     #[test]
@@ -1143,6 +1286,65 @@ mod tests {
             .record_function_outcome(0, JitResult::WaitQueue, 100, 100)
             .expect("disabled entry ignores later outcomes"));
         assert_eq!(manager.execution_stats().low_progress_function_disables, 1);
+    }
+
+    #[test]
+    fn repeated_low_work_ok_disables_only_runtime_dominated_short_entry() {
+        let mut manager = manager_with_active_entry();
+        manager.funcs[0].count_low_work_ok = true;
+
+        for attempt in 0..LOW_PROGRESS_EXIT_LIMIT {
+            let disabled = manager
+                .record_function_outcome(0, JitResult::Ok, 100, 96)
+                .expect("record low-work OK outcome");
+            assert_eq!(disabled, attempt + 1 == LOW_PROGRESS_EXIT_LIMIT);
+        }
+
+        assert!(manager.get_entry(0).is_none());
+        assert_eq!(manager.execution_stats().low_progress_function_disables, 1);
+        assert_eq!(
+            manager
+                .execution_stats()
+                .runtime_dominated_function_disables,
+            1
+        );
+        assert_eq!(
+            manager.function_telemetry(0),
+            Some(FunctionJitTelemetry {
+                completed_outcomes: u64::from(LOW_PROGRESS_EXIT_LIMIT),
+                budget_consumed: u64::from(LOW_PROGRESS_EXIT_LIMIT) * 4,
+                low_work_outcomes: u64::from(LOW_PROGRESS_EXIT_LIMIT),
+                ..FunctionJitTelemetry::default()
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_dominated_classifier_is_narrow() {
+        let queue_worker = valid_jit_func(
+            "queue-worker",
+            vec![
+                Instruction::new(Opcode::QueueSend, 0, 1, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+        );
+        let scalar_leaf = valid_jit_func(
+            "scalar-leaf",
+            vec![
+                Instruction::new(Opcode::AddI, 0, 1, 2),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+        );
+        let long_queue_body = valid_jit_func(
+            "long-queue-body",
+            (0..9)
+                .map(|_| Instruction::new(Opcode::QueueSend, 0, 1, 0))
+                .collect(),
+        );
+
+        assert!(is_short_runtime_dominated_function(&queue_worker));
+        assert!(!is_short_runtime_dominated_function(&scalar_leaf));
+        assert!(!is_short_runtime_dominated_function(&long_queue_body));
     }
 
     #[test]
@@ -1180,6 +1382,7 @@ mod tests {
                 .expect("compiled caller entry contract");
             assert!(!eligibility.frame_elided);
             assert!(!eligibility.prepared_shadow);
+            assert!(eligibility.static_prepared_shadow);
             assert!(!eligibility.may_gc);
             manager.get_entry(0).expect("compiled caller entry")
         };

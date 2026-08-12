@@ -5,6 +5,7 @@
 
 use vo_runtime::bytecode::InstructionMetadata;
 use vo_runtime::instruction::Instruction;
+use vo_runtime::SlotType;
 
 pub use vo_runtime::bytecode::{
     ElemLayout, IfaceAssertLayout, MapGetLayout, MapIterNextLayout, MapNewLayout, MapSetLayout,
@@ -37,6 +38,13 @@ impl<'a> MetadataFacts<'a> {
 #[inline]
 pub fn elem_layout_from_instruction(metadata: &InstructionMetadata) -> Option<ElemLayout> {
     metadata.elem_layout()
+}
+
+#[inline]
+pub fn slot_layout_needs_write_barrier(layout: &[SlotType]) -> bool {
+    layout
+        .iter()
+        .any(|slot| matches!(slot, SlotType::GcRef | SlotType::Interface1))
 }
 
 #[inline]
@@ -117,4 +125,22 @@ pub fn slot_elem_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16>
 #[inline]
 pub fn ptr_value_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
     facts.instruction?.ptr_value_slots()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_barrier_fact_distinguishes_scalar_and_managed_layouts() {
+        assert!(!slot_layout_needs_write_barrier(&[
+            SlotType::Value,
+            SlotType::Float,
+        ]));
+        assert!(slot_layout_needs_write_barrier(&[SlotType::GcRef]));
+        assert!(slot_layout_needs_write_barrier(&[
+            SlotType::Interface0,
+            SlotType::Interface1,
+        ]));
+    }
 }

@@ -1597,6 +1597,14 @@ impl Gc {
             return None;
         }
 
+        // Ordinary traced references point at the first data slot.  Keep that
+        // overwhelmingly common case on the object table's single lookup
+        // path; heap location is only needed to recover an allocation from an
+        // interior reference.
+        if self.allocation_extents.contains_key(&addr) {
+            return Some(obj);
+        }
+
         let located = self.heap.locate(addr, GcHeader::SIZE)?;
         let base = unsafe { located.raw.add(GcHeader::SIZE) as GcRef };
         let data_size = self.allocated_data_size_bytes_for_base(base)?;

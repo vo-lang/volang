@@ -980,6 +980,34 @@ pub unsafe fn copy_logical_elements_at(
     if count == 0 || slots == 0 {
         return;
     }
+
+    let src_elem_bytes = unsafe { elem_bytes(src) };
+    let dst_elem_bytes = unsafe { elem_bytes(dst) };
+    let src_stride = unsafe { storage_stride(src) };
+    let dst_stride = unsafe { storage_stride(dst) };
+    let same_physical_layout = src_elem_bytes != 0
+        && src_elem_bytes == dst_elem_bytes
+        && src_stride == dst_stride
+        && unsafe { uses_flat_slot_storage(src) } == unsafe { uses_flat_slot_storage(dst) }
+        && unsafe { elem_meta(src) } == unsafe { elem_meta(dst) };
+    if same_physical_layout {
+        let byte_count = count
+            .checked_mul(src_stride)
+            .expect("slice copy byte width overflow");
+        let src_byte_offset = src_start
+            .checked_mul(src_stride)
+            .expect("slice copy source offset overflow");
+        let dst_byte_offset = dst_start
+            .checked_mul(dst_stride)
+            .expect("slice copy destination offset overflow");
+        let src_ptr = unsafe { data_ptr(src).add(src_byte_offset) };
+        let dst_ptr = unsafe { data_ptr(dst).add(dst_byte_offset) };
+        // `copy` deliberately has memmove semantics: source and destination
+        // views may overlap or name the same backing allocation.
+        unsafe { core::ptr::copy(src_ptr, dst_ptr, byte_count) };
+        return;
+    }
+
     let staged_slots = count
         .checked_mul(slots)
         .expect("slice copy staging width overflow");
@@ -1381,6 +1409,102 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 3, 4, 5, 6, 6]
         );
+    }
+
+    #[test]
+    fn logical_element_copy_preserves_memmove_semantics_for_flat_views() {
+        let mut gc = Gc::new();
+        let elem_meta = ValueMeta::new(0, ValueKind::Int64);
+        let owner = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 6);
+        for (index, value) in (1_u64..=6).enumerate() {
+            unsafe { Gc::write_slot(owner, index, value) };
+        }
+
+        let lower = unsafe {
+            from_inline_array_range_with_cap(
+                &mut gc,
+                owner,
+                owner.cast(),
+                6,
+                0,
+                5,
+                5,
+                elem_meta,
+                SLOT_BYTES,
+                SLOT_BYTES,
+            )
+        };
+        let upper = unsafe {
+            from_inline_array_range_with_cap(
+                &mut gc,
+                owner,
+                owner.cast(),
+                6,
+                1,
+                5,
+                5,
+                elem_meta,
+                SLOT_BYTES,
+                SLOT_BYTES,
+            )
+        };
+        unsafe { copy_logical_elements(upper, lower, 5) };
+        assert_eq!(
+            (0..6)
+                .map(|index| unsafe { Gc::read_slot(owner, index) })
+                .collect::<Vec<_>>(),
+            vec![1, 1, 2, 3, 4, 5]
+        );
+
+        for (index, value) in (1_u64..=6).enumerate() {
+            unsafe { Gc::write_slot(owner, index, value) };
+        }
+        unsafe { copy_logical_elements(lower, upper, 5) };
+        assert_eq!(
+            (0..6)
+                .map(|index| unsafe { Gc::read_slot(owner, index) })
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 5, 6, 6]
+        );
+    }
+
+    #[test]
+    fn logical_element_copy_converts_between_packed_and_flat_storage() {
+        let mut gc = Gc::new();
+        let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
+        let packed = create(&mut gc, elem_meta, 1, 3, 3);
+        for (index, value) in [0x11_u64, 0x80, 0xff].into_iter().enumerate() {
+            unsafe { write_logical_slots(packed, index, &[value]) };
+        }
+
+        let owner = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 3);
+        let flat = unsafe {
+            from_inline_array_range_with_cap(
+                &mut gc,
+                owner,
+                owner.cast(),
+                3,
+                0,
+                3,
+                3,
+                elem_meta,
+                1,
+                SLOT_BYTES,
+            )
+        };
+        unsafe { copy_logical_elements(flat, packed, 3) };
+        assert_eq!(
+            (0..3)
+                .map(|index| unsafe { Gc::read_slot(owner, index) })
+                .collect::<Vec<_>>(),
+            vec![0x11, 0x80, 0xff]
+        );
+
+        for (index, value) in [7_u64, 8, 9].into_iter().enumerate() {
+            unsafe { Gc::write_slot(owner, index, value) };
+        }
+        unsafe { copy_logical_elements(packed, flat, 3) };
+        assert_eq!(unsafe { byte_vec(packed) }, [7, 8, 9]);
     }
 
     #[test]

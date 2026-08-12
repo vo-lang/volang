@@ -227,32 +227,36 @@ pub(in crate::translate) fn slice_set<'a>(
     } else if elem_bytes == 8 {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(data_ptr, off);
-        let owner = e
-            .builder()
-            .ins()
-            .load(types::I64, MemFlags::trusted(), s, 0);
-        let elem_meta_raw = e.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            s,
-            (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
-        );
-        emit_typed_write_barrier_single_by_meta(e, owner, val, elem_meta_raw);
+        if e.elem_layout_needs_write_barrier().unwrap_or(true) {
+            let owner = e
+                .builder()
+                .ins()
+                .load(types::I64, MemFlags::trusted(), s, 0);
+            let elem_meta_raw = e.builder().ins().load(
+                types::I32,
+                MemFlags::trusted(),
+                s,
+                (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
+            );
+            emit_typed_write_barrier_single_by_meta(e, owner, val, elem_meta_raw);
+        }
         e.builder().ins().store(MemFlags::trusted(), val, addr, 0);
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
-        // Write barrier for multi-slot elements: load backing array for barrier parent.
-        let owner = e
-            .builder()
-            .ins()
-            .load(types::I64, MemFlags::trusted(), s, 0);
-        let elem_meta_raw = e.builder().ins().load(
-            types::I32,
-            MemFlags::trusted(),
-            s,
-            (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
-        );
-        emit_write_barrier_multi_by_meta(e, owner, elem_meta_raw, inst.c, elem_slots);
+        if e.elem_layout_needs_write_barrier().unwrap_or(true) {
+            // Write barrier for multi-slot elements: load backing array for barrier parent.
+            let owner = e
+                .builder()
+                .ins()
+                .load(types::I64, MemFlags::trusted(), s, 0);
+            let elem_meta_raw = e.builder().ins().load(
+                types::I32,
+                MemFlags::trusted(),
+                s,
+                (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
+            );
+            emit_write_barrier_multi_by_meta(e, owner, elem_meta_raw, inst.c, elem_slots);
+        }
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm_u(off, (i * 8) as i64);

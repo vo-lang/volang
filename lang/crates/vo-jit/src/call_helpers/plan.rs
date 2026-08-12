@@ -96,7 +96,7 @@ impl CallPlan {
     }
 
     pub fn can_use_prepared_jit(self) -> bool {
-        self.eligibility.prepared_shadow && self.fits_direct_frame()
+        self.eligibility.static_prepared_shadow && self.fits_direct_frame()
     }
 
     pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {

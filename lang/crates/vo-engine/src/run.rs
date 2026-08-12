@@ -85,6 +85,12 @@ pub fn render_run_observation_json(
         "side_exits": side_exits,
         "low_progress_function_disables": observation.low_progress_function_disables,
         "low_progress_loop_disables": observation.low_progress_loop_disables,
+        "runtime_dominated_function_disables": observation.runtime_dominated_function_disables,
+        "function_compilations": observation.function_compilations,
+        "loop_compilations": observation.loop_compilations,
+        "compilation_cache_hits": observation.compilation_cache_hits,
+        "compilation_time_ns": observation.compilation_time_ns,
+        "compiled_code_bytes": observation.compiled_code_bytes,
         "closure_prepare_callbacks": observation.closure_prepare_callbacks,
         "iface_prepare_callbacks": observation.iface_prepare_callbacks,
         "prepared_frame_reservations": observation.prepared_frame_reservations,
@@ -508,6 +514,12 @@ mod terminal_outcome_tests {
         assert_eq!(value["loop_entries"], 5);
         assert_eq!(value["low_progress_function_disables"], 1);
         assert_eq!(value["low_progress_loop_disables"], 2);
+        assert_eq!(value["runtime_dominated_function_disables"], 0);
+        assert_eq!(value["function_compilations"], 0);
+        assert_eq!(value["loop_compilations"], 0);
+        assert_eq!(value["compilation_cache_hits"], 0);
+        assert_eq!(value["compilation_time_ns"], 0);
+        assert_eq!(value["compiled_code_bytes"], 0);
         assert_eq!(value["closure_prepare_callbacks"], 0);
         assert_eq!(value["iface_prepare_callbacks"], 0);
         assert_eq!(value["prepared_frame_reservations"], 0);

@@ -372,10 +372,30 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 fn hash_slots(slots: &[u64]) -> u64 {
+    if let [value] = slots {
+        // One-slot scalar keys dominate ordinary maps. A full eight-byte FNV
+        // loop costs eight dependent multiplies; this stable integer mix has
+        // stronger avalanche with three multiplies and is shared by VM and JIT.
+        let mut hash = *value;
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        return hash ^ (hash >> 31);
+    }
     let bytes = unsafe {
         core::slice::from_raw_parts(slots.as_ptr().cast::<u8>(), core::mem::size_of_val(slots))
     };
     hash_bytes(bytes)
+}
+
+#[inline]
+pub unsafe fn supports_trusted_scalar_key(m: GcRef) -> bool {
+    (unsafe { key_slots(m) == 1 && val_slots(m) == 1 })
+        && !matches!(
+            unsafe { key_kind(m) },
+            ValueKind::Struct | ValueKind::Array | ValueKind::Interface
+        )
 }
 
 unsafe fn key_hash_checked(
@@ -629,6 +649,19 @@ pub unsafe fn get_checked_into(
     )
 }
 
+/// Return the borrowed value cell for a metadata-free one-slot key lookup.
+/// The pointer remains valid until the map is mutated or collected.
+pub unsafe fn get_trusted_scalar_ptr(m: GcRef, key: u64) -> Result<*const u64, MapKeyError> {
+    if !unsafe { supports_trusted_scalar_key(m) } {
+        return Err(MapKeyError::SlotCountMismatch);
+    }
+    unsafe {
+        with_value_checked(m, &[key], None, |value| {
+            value.map_or(core::ptr::null(), <[u64]>::as_ptr)
+        })
+    }
+}
+
 pub unsafe fn get_with_ok_checked(
     m: GcRef,
     key: &[u64],
@@ -696,6 +729,20 @@ pub(crate) unsafe fn set_checked_deferred(
             allow_allocation,
         )
     }
+}
+
+pub(crate) unsafe fn set_trusted_scalar_deferred(
+    gc: &mut Gc,
+    m: GcRef,
+    key: u64,
+    val: u64,
+    module: Option<ModuleRuntimeMetadata<'_>>,
+    allow_allocation: bool,
+) -> Result<MapSetOutcome, MapKeyError> {
+    if !unsafe { supports_trusted_scalar_key(m) } {
+        return Err(MapKeyError::SlotCountMismatch);
+    }
+    unsafe { set_checked_deferred(gc, m, &[key], &[val], module, allow_allocation) }
 }
 
 pub(crate) unsafe fn set_checked_with_type_metadata(
@@ -804,6 +851,13 @@ pub unsafe fn delete_checked(
         }
     }
     Ok(())
+}
+
+pub unsafe fn delete_trusted_scalar(m: GcRef, key: u64) -> Result<(), MapKeyError> {
+    if !unsafe { supports_trusted_scalar_key(m) } {
+        return Err(MapKeyError::SlotCountMismatch);
+    }
+    unsafe { delete_checked(m, &[key], None) }
 }
 
 // =============================================================================
@@ -1019,6 +1073,34 @@ mod tests {
                 .as_deref(),
             Some(&[11][..])
         );
+    }
+
+    #[test]
+    fn trusted_scalar_path_matches_generic_get_set_delete() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, int_meta, int_meta, 1, 1, 0);
+
+        assert!(unsafe { supports_trusted_scalar_key(m) });
+        assert_eq!(
+            unsafe { set_trusted_scalar_deferred(&mut gc, m, 7, 21, None, false) },
+            Ok(MapSetOutcome::NeedsAllocation)
+        );
+        assert_eq!(
+            unsafe { set_trusted_scalar_deferred(&mut gc, m, 7, 21, None, true) },
+            Ok(MapSetOutcome::Set)
+        );
+        let value = unsafe { get_trusted_scalar_ptr(m, 7) }.expect("scalar lookup");
+        assert!(!value.is_null());
+        assert_eq!(unsafe { *value }, 21);
+        assert!(unsafe { get_trusted_scalar_ptr(m, 8) }
+            .expect("missing scalar lookup")
+            .is_null());
+
+        unsafe { delete_trusted_scalar(m, 7) }.expect("scalar delete");
+        assert!(unsafe { get_trusted_scalar_ptr(m, 7) }
+            .expect("deleted scalar lookup")
+            .is_null());
     }
 
     #[test]

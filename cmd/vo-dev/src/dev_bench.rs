@@ -87,6 +87,14 @@ pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
         bail!("--arch must be 32 or 64");
     }
 
+    let (run_id, results_dir) = if target == "score" {
+        latest_benchmark_results_dir(root)?
+    } else {
+        let run_id = new_benchmark_run_id();
+        let results_dir = root.join("target/bench/runs").join(&run_id).join("results");
+        (Some(run_id), results_dir)
+    };
+
     let runner = BenchRunner {
         root,
         target,
@@ -98,6 +106,8 @@ pub(crate) fn cmd_bench(root: &Path, args: Vec<String>) -> Result<()> {
         jit_loop_threshold,
         warmup,
         runs,
+        run_id,
+        results_dir,
     };
     runner.run()
 }
@@ -113,6 +123,8 @@ struct BenchRunner<'a> {
     jit_loop_threshold: Option<u64>,
     warmup: u64,
     runs: u64,
+    run_id: Option<String>,
+    results_dir: PathBuf,
 }
 
 impl BenchRunner<'_> {
@@ -137,7 +149,11 @@ impl BenchRunner<'_> {
             bail!("unknown benchmark");
         };
         let scope: Vec<_> = run_info.iter().map(|info| info.name.clone()).collect();
-        self.calculate_scores(Some(&scope), &run_info)
+        self.calculate_scores(Some(&scope), &run_info)?;
+        if let Some(run_id) = &self.run_id {
+            record_latest_benchmark_run(self.root, run_id)?;
+        }
+        Ok(())
     }
 
     fn check_deps(&self) -> Result<()> {
@@ -294,21 +310,23 @@ impl BenchRunner<'_> {
             }
         }
 
-        if let Some(c_file) = c_file {
-            let c_bin = artifact_dir.join("c_bench");
-            for compiler in ["cc", "gcc", "clang"] {
-                if command_exists(compiler) {
-                    if run_status(
-                        self.root,
-                        Command::new(compiler)
-                            .args(["-O3", "-o"])
-                            .arg(&c_bin)
-                            .arg(&c_file),
-                    )? {
-                        commands.push(shell_quote(&c_bin));
-                        names.push("C".to_string());
+        if !self.vo_only {
+            if let Some(c_file) = c_file {
+                let c_bin = artifact_dir.join("c_bench");
+                for compiler in ["cc", "gcc", "clang"] {
+                    if command_exists(compiler) {
+                        if run_status(
+                            self.root,
+                            Command::new(compiler)
+                                .args(["-O3", "-o"])
+                                .arg(&c_bin)
+                                .arg(&c_file),
+                        )? {
+                            commands.push(shell_quote(&c_bin));
+                            names.push("C".to_string());
+                        }
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -318,8 +336,11 @@ impl BenchRunner<'_> {
             return Ok(BenchmarkRunInfo {
                 name: name.to_string(),
                 warning_count: 0,
+                correctness: BenchmarkCorrectness::default(),
             });
         }
+
+        let correctness = validate_benchmark_outputs(self.root, name, &names, &commands)?;
 
         let results_dir = self.bench_results_dir();
         fs::create_dir_all(&results_dir)?;
@@ -354,6 +375,7 @@ impl BenchRunner<'_> {
         Ok(BenchmarkRunInfo {
             name: name.to_string(),
             warning_count,
+            correctness,
         })
     }
 
@@ -391,7 +413,7 @@ impl BenchRunner<'_> {
             return Ok(());
         }
 
-        let mut scores: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut scores: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
         for file in &files {
             let benchmark_name = file.file_stem().unwrap().to_string_lossy();
             println!("Processing: {benchmark_name}");
@@ -435,25 +457,20 @@ impl BenchRunner<'_> {
             if means.is_empty() {
                 continue;
             }
-            let baseline = if self.vo_only {
-                means
-                    .get("Vo-VM")
-                    .copied()
-                    .unwrap_or_else(|| means.values().copied().fold(f64::INFINITY, f64::min))
-            } else {
-                means.values().copied().fold(f64::INFINITY, f64::min)
+            let Some(baseline) = means.get("Vo-VM").copied() else {
+                println!("  Skipping: Vo-VM baseline is missing");
+                continue;
             };
             for (name, mean) in means {
-                let score = if self.vo_only {
-                    (mean / baseline) * 100.0
-                } else {
-                    mean / baseline
-                };
-                scores.entry(name.clone()).or_default().push(score);
+                let score = mean / baseline;
+                scores
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(benchmark_name.to_string(), score);
                 if self.vo_only {
-                    println!("  {name}: {score:.1} (mean: {mean:.4}s)");
+                    println!("  {name}: {:.1} (mean: {mean:.4}s)", score * 100.0);
                 } else {
-                    println!("  {name}: {score:.2}x (mean: {mean:.4}s)");
+                    println!("  {name}: {score:.2}x Vo-VM (mean: {mean:.4}s)");
                 }
             }
         }
@@ -462,29 +479,57 @@ impl BenchRunner<'_> {
             println!("\nNo valid results to analyze.");
             return Ok(());
         }
-        let mut averages: Vec<_> = scores
+        let common_scope = common_benchmark_scope(&scores);
+        if common_scope.is_empty() {
+            println!("\nNo benchmark is shared by every measured implementation.");
+            return Ok(());
+        }
+        println!(
+            "\nCommon comparison scope: {} benchmark(s): {}",
+            common_scope.len(),
+            common_scope.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+        let mut aggregates: Vec<_> = scores
             .iter()
             .map(|(name, values)| {
-                let avg = values.iter().sum::<f64>() / values.len() as f64;
-                (name.clone(), avg)
+                let paired = common_scope
+                    .iter()
+                    .map(|benchmark| values[benchmark])
+                    .collect::<Vec<_>>();
+                (
+                    name.clone(),
+                    geometric_mean(&paired).expect("benchmark ratios are finite and positive"),
+                    common_scope.len(),
+                    values.len(),
+                )
             })
             .collect();
-        averages.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        aggregates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         if self.vo_only {
-            println!("\nLanguage Performance (Vo-VM = 100, lower is faster):");
-            for (idx, (name, score)) in averages.iter().enumerate() {
+            println!("\nPaired Geometric Mean (Vo-VM = 100, lower is faster):");
+            for (idx, (name, score, samples, coverage)) in aggregates.iter().enumerate() {
                 let marker = if name == "Vo-VM" { " <- baseline" } else { "" };
-                println!("{:>2}. {:<10}: {:>7.1}{marker}", idx + 1, name, score);
+                println!(
+                    "{:>2}. {:<28}: {:>7.1}  ({samples} common, {coverage} available){marker}",
+                    idx + 1,
+                    name,
+                    score * 100.0
+                );
             }
         } else {
-            println!("\nLanguage Performance Ranking (lower relative time is better):");
-            for (idx, (name, score)) in averages.iter().enumerate() {
-                println!("{:>2}. {:<10}: {:.2}x", idx + 1, name, score);
+            println!("\nPaired Geometric Mean vs Vo-VM (lower relative time is better):");
+            for (idx, (name, score, samples, coverage)) in aggregates.iter().enumerate() {
+                println!(
+                    "{:>2}. {:<28}: {:.2}x  ({samples} common, {coverage} available)",
+                    idx + 1,
+                    name,
+                    score
+                );
             }
         }
         if !run_info.is_empty() {
-            self.write_summary(only, run_info, &averages)?;
+            self.write_summary(only, run_info, &common_scope, &aggregates)?;
         }
         Ok(())
     }
@@ -493,17 +538,20 @@ impl BenchRunner<'_> {
         &self,
         only: Option<&[String]>,
         run_info: &[BenchmarkRunInfo],
-        ranking: &[(String, f64)],
+        common_scope: &BTreeSet<String>,
+        ranking: &[(String, f64, usize, usize)],
     ) -> Result<()> {
         let results_dir = self.bench_results_dir();
         fs::create_dir_all(&results_dir)?;
         let summary = BenchmarkSummary {
-            schema: "volang.benchmark.summary.v1",
+            schema: "volang.benchmark.summary.v2",
+            run_id: self.run_id.clone(),
             generated_at_unix_sec: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
             scope: only.map(|items| items.to_vec()).unwrap_or_default(),
+            common_scope: common_scope.iter().cloned().collect(),
             config: BenchmarkSummaryConfig {
                 runs: self.runs,
                 warmup: self.warmup,
@@ -518,22 +566,22 @@ impl BenchRunner<'_> {
                 artifacts_dir: path_display(self.root, &self.bench_artifacts_dir()),
                 go_cache_dir: path_display(self.root, &self.bench_go_cache_dir()),
                 vo_binary: path_display(self.root, &self.vo_bench_bin()),
-                score_mode: if self.vo_only {
-                    "vo_vm_100".to_string()
-                } else {
-                    "relative_time".to_string()
-                },
+                score_mode: "common_scope_paired_geomean_ratio_vs_vo_vm".to_string(),
             },
             tools: collect_tool_versions(),
             runs: run_info.to_vec(),
             ranking: ranking
                 .iter()
                 .enumerate()
-                .map(|(idx, (name, score))| BenchmarkRankingEntry {
-                    rank: idx + 1,
-                    name: name.clone(),
-                    score: *score,
-                })
+                .map(
+                    |(idx, (name, score, samples, coverage))| BenchmarkRankingEntry {
+                        rank: idx + 1,
+                        name: name.clone(),
+                        score: *score,
+                        paired_benchmarks: *samples,
+                        available_benchmarks: *coverage,
+                    },
+                )
                 .collect(),
         };
         let path = results_dir.join("summary.json");
@@ -586,7 +634,7 @@ impl BenchRunner<'_> {
     }
 
     fn bench_results_dir(&self) -> PathBuf {
-        self.root.join("target/bench/results")
+        self.results_dir.clone()
     }
 
     fn bench_artifacts_dir(&self) -> PathBuf {
@@ -606,13 +654,31 @@ impl BenchRunner<'_> {
 struct BenchmarkRunInfo {
     name: String,
     warning_count: usize,
+    correctness: BenchmarkCorrectness,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct BenchmarkCorrectness {
+    vo_vm_jit_match: Option<bool>,
+    cross_language_mismatches: usize,
+    outputs: Vec<BenchmarkOutputCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkOutputCheck {
+    command: String,
+    stdout_bytes: usize,
+    stdout_fnv1a64: String,
+    matches_vo_vm: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 struct BenchmarkSummary {
     schema: &'static str,
+    run_id: Option<String>,
     generated_at_unix_sec: u64,
     scope: Vec<String>,
+    common_scope: Vec<String>,
     config: BenchmarkSummaryConfig,
     tools: Vec<ToolVersion>,
     runs: Vec<BenchmarkRunInfo>,
@@ -648,6 +714,8 @@ struct BenchmarkRankingEntry {
     rank: usize,
     name: String,
     score: f64,
+    paired_benchmarks: usize,
+    available_benchmarks: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -718,6 +786,184 @@ fn command_exists(cmd: &str) -> bool {
 
 fn run_status(root: &Path, command: &mut Command) -> Result<bool> {
     Ok(command.current_dir(root).status()?.success())
+}
+
+fn new_benchmark_run_id() -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!(
+        "{}-{:09}-{}",
+        elapsed.as_secs(),
+        elapsed.subsec_nanos(),
+        std::process::id()
+    )
+}
+
+fn latest_benchmark_results_dir(root: &Path) -> Result<(Option<String>, PathBuf)> {
+    let marker = root.join("target/bench/latest-run");
+    match fs::read_to_string(&marker) {
+        Ok(text) => {
+            let run_id = text.trim();
+            if run_id.is_empty()
+                || !run_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            {
+                bail!("invalid benchmark run id in {}", marker.display());
+            }
+            let results_dir = root.join("target/bench/runs").join(run_id).join("results");
+            if !results_dir.is_dir() {
+                bail!(
+                    "latest benchmark results are missing: {}",
+                    results_dir.display()
+                );
+            }
+            Ok((Some(run_id.to_string()), results_dir))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok((None, root.join("target/bench/results")))
+        }
+        Err(error) => Err(error).with_context(|| format!("could not read {}", marker.display())),
+    }
+}
+
+fn record_latest_benchmark_run(root: &Path, run_id: &str) -> Result<()> {
+    let bench_dir = root.join("target/bench");
+    fs::create_dir_all(&bench_dir)?;
+    fs::write(bench_dir.join("latest-run"), format!("{run_id}\n"))?;
+    Ok(())
+}
+
+fn validate_benchmark_outputs(
+    root: &Path,
+    benchmark: &str,
+    names: &[String],
+    commands: &[String],
+) -> Result<BenchmarkCorrectness> {
+    debug_assert_eq!(names.len(), commands.len());
+    let mut outputs = Vec::with_capacity(commands.len());
+    for (name, command) in names.iter().zip(commands) {
+        let output = Command::new("sh")
+            .args(["-c", command])
+            .current_dir(root)
+            .output()
+            .with_context(|| format!("could not preflight {benchmark}/{name}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "benchmark correctness preflight failed for {benchmark}/{name}: {}",
+                stderr.trim()
+            );
+        }
+        outputs.push(normalize_benchmark_output(&output.stdout));
+    }
+
+    let vo_vm_index = names.iter().position(|name| name == "Vo-VM");
+    let mut checks = Vec::with_capacity(outputs.len());
+    let mut cross_language_mismatches = 0;
+    for (index, (name, output)) in names.iter().zip(&outputs).enumerate() {
+        let matches_vo_vm = vo_vm_index.map(|vm_index| output == &outputs[vm_index]);
+        if matches_vo_vm == Some(false) && !name.starts_with("Vo-JIT") {
+            cross_language_mismatches += 1;
+        }
+        checks.push(BenchmarkOutputCheck {
+            command: name.clone(),
+            stdout_bytes: output.len(),
+            stdout_fnv1a64: format!("{:016x}", fnv1a64(output)),
+            matches_vo_vm,
+        });
+
+        debug_assert_eq!(index + 1, checks.len());
+    }
+
+    let jit_indices: Vec<_> = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| name.starts_with("Vo-JIT").then_some(index))
+        .collect();
+    let vo_vm_jit_match = vo_vm_index.and_then(|vm_index| {
+        (!jit_indices.is_empty()).then(|| {
+            jit_indices
+                .iter()
+                .all(|index| outputs[*index] == outputs[vm_index])
+        })
+    });
+    if vo_vm_jit_match == Some(false) {
+        let vm = &checks[vo_vm_index.expect("VM index exists when comparison is available")];
+        let jit = jit_indices
+            .iter()
+            .map(|index| &checks[*index])
+            .find(|check| check.matches_vo_vm == Some(false))
+            .expect("a mismatching JIT output exists");
+        bail!(
+            "benchmark correctness check failed for {benchmark}: Vo-VM output {} differs from {} output {}",
+            vm.stdout_fnv1a64,
+            jit.command,
+            jit.stdout_fnv1a64
+        );
+    }
+    if cross_language_mismatches > 0 {
+        println!(
+            "Output note: {cross_language_mismatches} cross-language result(s) differ textually from Vo-VM; fingerprints are recorded in summary.json"
+        );
+    }
+
+    Ok(BenchmarkCorrectness {
+        vo_vm_jit_match,
+        cross_language_mismatches,
+        outputs: checks,
+    })
+}
+
+fn normalize_benchmark_output(output: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(output.len());
+    let mut index = 0;
+    while index < output.len() {
+        if output[index] == b'\r' && output.get(index + 1) == Some(&b'\n') {
+            normalized.push(b'\n');
+            index += 2;
+        } else {
+            normalized.push(output[index]);
+            index += 1;
+        }
+    }
+    while normalized.last().is_some_and(u8::is_ascii_whitespace) {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn geometric_mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return None;
+    }
+    Some((values.iter().map(|value| value.ln()).sum::<f64>() / values.len() as f64).exp())
+}
+
+fn common_benchmark_scope(scores: &BTreeMap<String, BTreeMap<String, f64>>) -> BTreeSet<String> {
+    let mut series = scores.values();
+    let Some(first) = series.next() else {
+        return BTreeSet::new();
+    };
+    let mut common = first.keys().cloned().collect::<BTreeSet<_>>();
+    for values in series {
+        common.retain(|benchmark| values.contains_key(benchmark));
+    }
+    common
 }
 
 fn parse_positive_u64_arg(name: &str, value: Option<&String>) -> Result<u64> {
@@ -817,4 +1063,59 @@ fn path_display(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_output_normalization_only_ignores_line_endings_and_trailing_space() {
+        assert_eq!(
+            normalize_benchmark_output(b"answer\r\n42\r\n\t"),
+            b"answer\n42"
+        );
+    }
+
+    #[test]
+    fn benchmark_score_uses_geometric_mean() {
+        let mean = geometric_mean(&[0.5, 2.0]).unwrap();
+        assert!((mean - 1.0).abs() < f64::EPSILON);
+        assert_eq!(geometric_mean(&[]), None);
+        assert_eq!(geometric_mean(&[0.0]), None);
+    }
+
+    #[test]
+    fn benchmark_ranking_scope_is_the_series_intersection() {
+        let scores = BTreeMap::from([
+            (
+                "Vo-VM".to_string(),
+                BTreeMap::from([("a".to_string(), 1.0), ("b".to_string(), 1.0)]),
+            ),
+            (
+                "Node".to_string(),
+                BTreeMap::from([("b".to_string(), 0.5), ("c".to_string(), 0.5)]),
+            ),
+        ]);
+
+        assert_eq!(
+            common_benchmark_scope(&scores),
+            BTreeSet::from(["b".to_string()])
+        );
+    }
+
+    #[test]
+    fn benchmark_preflight_requires_vm_and_jit_to_match() {
+        let names = vec!["Vo-VM".to_string(), "Vo-JIT(call=100,loop=50)".to_string()];
+        let matching = vec![
+            "printf 'same\\n'".to_string(),
+            "printf 'same\\r\\n'".to_string(),
+        ];
+        let check = validate_benchmark_outputs(Path::new("."), "test", &names, &matching)
+            .expect("normalized outputs match");
+        assert_eq!(check.vo_vm_jit_match, Some(true));
+
+        let mismatching = vec!["printf vm".to_string(), "printf jit".to_string()];
+        assert!(validate_benchmark_outputs(Path::new("."), "test", &names, &mismatching).is_err());
+    }
 }

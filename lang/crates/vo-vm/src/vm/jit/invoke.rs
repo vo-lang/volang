@@ -178,8 +178,8 @@ fn invoke_jit_and_handle(
         &mut ret_heap_buf[..ret_slots]
     };
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
-    if let Some(jit_mgr) = vm.jit.manager_mut() {
-        jit_mgr.record_function_entry();
+    if let (Some(func_id), Some(jit_mgr)) = (entry_func_id, vm.jit.manager_mut()) {
+        jit_mgr.record_function_entry(func_id);
     }
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
     let budget_after = ctx.ctx.execution_budget;

@@ -102,6 +102,18 @@ pub struct JitExecutionStats {
     pub side_exit_reasons: JitSideExitReasonStats,
     pub low_progress_function_disables: u64,
     pub low_progress_loop_disables: u64,
+    /// Runtime-dominated short functions disabled after repeated low-work OK returns.
+    pub runtime_dominated_function_disables: u64,
+    /// Successfully published full-function artifacts for this VM owner.
+    pub function_compilations: u64,
+    /// Successfully published loop artifacts for this VM owner.
+    pub loop_compilations: u64,
+    /// Publications that reused code already compiled by the shared Island family.
+    pub compilation_cache_hits: u64,
+    /// Wall-clock compilation time, excluding execution, in nanoseconds.
+    pub compilation_time_ns: u64,
+    /// Newly emitted native code attributed to successful publications.
+    pub compiled_code_bytes: u64,
     /// Valid closure prepare callbacks reached after native IC misses.
     pub closure_prepare_callbacks: u64,
     /// Valid interface prepare callbacks reached after native IC misses.

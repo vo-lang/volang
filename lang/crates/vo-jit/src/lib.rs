@@ -1441,7 +1441,12 @@ fn validate_loop_bounds(func: &FunctionDef, loop_info: &LoopInfo) -> Result<(), 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitFrameEntryEligibility {
     pub frame_elided: bool,
+    /// Entry from a dynamic closure/interface callback may use a prepared
+    /// shadow frame.
     pub prepared_shadow: bool,
+    /// A statically resolved native caller may use a prepared shadow frame.
+    /// Module analysis proves this over the complete static callee closure.
+    pub static_prepared_shadow: bool,
     /// Native callers must publish precise roots while this callee runs.
     pub may_gc: bool,
 }
@@ -1461,6 +1466,7 @@ pub(crate) fn jit_frame_entry_eligibility_for_contract(
     JitFrameEntryEligibility {
         frame_elided: has_direct_returns && contract.permits_frame_elision(),
         prepared_shadow: has_direct_returns && contract.permits_prepared_shadow_frame(),
+        static_prepared_shadow: has_direct_returns && contract.permits_prepared_shadow_frame(),
         may_gc: contract.may_gc,
     }
 }

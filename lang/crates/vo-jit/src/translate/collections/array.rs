@@ -129,14 +129,16 @@ pub(in crate::translate) fn array_set<'a>(
     if elem_bytes <= 8 {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(arr, off);
-        if elem_bytes == 8 {
+        if elem_bytes == 8 && e.elem_layout_needs_write_barrier().unwrap_or(true) {
             emit_array_typed_write_barrier_single(e, arr, val);
         }
         store_element(e, addr, val, elem_bytes);
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
         // Use elem_meta from the array header so struct/interface barriers match the VM.
-        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
+        if e.elem_layout_needs_write_barrier().unwrap_or(true) {
+            emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
+        }
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm_u(off, (i * 8) as i64);
@@ -254,9 +256,8 @@ pub(in crate::translate) fn array_addr<'a>(
 ) -> Result<(), JitError> {
     let arr = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    emit_array_bounds_check(e, arr, idx);
-
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode())?;
+    emit_array_bounds_check(e, arr, idx);
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
     let off = e.builder().ins().imul(idx, eb);
     let off = e.builder().ins().iadd_imm_s(off, ARRAY_HEADER_BYTES);

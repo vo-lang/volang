@@ -766,6 +766,7 @@ pub const JIT_INFRA_ERROR_INVALID_CALLBACK_STATE: u64 = 2;
 pub const JIT_INFRA_ERROR_INVALID_METADATA: u64 = 3;
 pub const JIT_HELPER_U64_ERROR: u64 = u64::MAX;
 pub const JIT_HELPER_MAP_SET_NEEDS_ALLOCATION: u64 = 2;
+pub const JIT_HELPER_MAP_SCALAR_FALLBACK: u64 = 3;
 pub const JIT_HELPER_MAP_GET_LAYOUT: u64 = 101;
 pub const JIT_HELPER_MAP_SET_LAYOUT: u64 = 102;
 pub const JIT_HELPER_MAP_DELETE_LAYOUT: u64 = 103;
@@ -2276,6 +2277,25 @@ pub extern "C" fn vo_map_get(
     ok as u64
 }
 
+/// Trusted scalar map lookup used by verified JIT one-slot callsites.
+/// Returns zero for missing, an aligned value-cell pointer for found, and
+/// `JIT_HELPER_MAP_SCALAR_FALLBACK` when the runtime map shape requires the
+/// generic metadata-aware helper.
+pub extern "C" fn vo_map_get_scalar(m: u64, key: u64) -> u64 {
+    use crate::objects::map;
+    if m == 0 {
+        return 0;
+    }
+    let m_ref = m as crate::gc::GcRef;
+    if !unsafe { map::supports_trusted_scalar_key(m_ref) } {
+        return JIT_HELPER_MAP_SCALAR_FALLBACK;
+    }
+    match unsafe { map::get_trusted_scalar_ptr(m_ref, key) } {
+        Ok(ptr) => ptr as u64,
+        Err(_) => JIT_HELPER_MAP_SCALAR_FALLBACK,
+    }
+}
+
 /// Set value in map.
 /// Returns: 0 = success, 1 = panic (interface key with uncomparable type),
 /// 2 = retry after the caller executes its precise allocation safepoint.
@@ -2384,6 +2404,61 @@ pub extern "C" fn vo_map_set(
     0
 }
 
+/// Trusted one-slot map mutation. The helper retains deferred-allocation
+/// status so generated code owns the precise GC safepoint before retrying.
+pub extern "C" fn vo_map_set_scalar(
+    ctx: *mut JitContext,
+    m: u64,
+    key: u64,
+    val: u64,
+    allow_allocation: u32,
+) -> u64 {
+    use crate::objects::map;
+    if m == 0 {
+        return 0;
+    }
+    let allow_allocation = match allow_allocation {
+        0 => false,
+        1 => true,
+        _ => return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT),
+    };
+    let m_ref = m as crate::gc::GcRef;
+    if !unsafe { map::supports_trusted_scalar_key(m_ref) } {
+        return JIT_HELPER_MAP_SCALAR_FALLBACK;
+    }
+    let Some(ctx_ref) = (unsafe { ctx.as_mut() }) else {
+        return JIT_HELPER_U64_ERROR;
+    };
+    let Some(gc) = (unsafe { ctx_ref.gc.as_mut() }) else {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+    };
+    let module = unsafe { ctx_ref.runtime_metadata() };
+    let key_meta = unsafe { map::key_meta(m_ref) };
+    let val_meta = unsafe { map::val_meta(m_ref) };
+    if key_meta.value_kind().may_contain_gc_refs()
+        && crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, &[key], key_meta, module)
+            .is_err()
+    {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+    }
+    if val_meta.value_kind().may_contain_gc_refs()
+        && crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, &[val], val_meta, module)
+            .is_err()
+    {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+    }
+    match unsafe { map::set_trusted_scalar_deferred(gc, m_ref, key, val, module, allow_allocation) }
+    {
+        Ok(map::MapSetOutcome::Set) => 0,
+        Ok(map::MapSetOutcome::NeedsAllocation) => JIT_HELPER_MAP_SET_NEEDS_ALLOCATION,
+        Err(map::MapKeyError::SlotCountMismatch) => JIT_HELPER_MAP_SCALAR_FALLBACK,
+        Err(map::MapKeyError::UnhashableInterfaceKey) => 1,
+        Err(map::MapKeyError::MissingModule | map::MapKeyError::AllocationFailed(_)) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT)
+        }
+    }
+}
+
 /// Delete key from map.
 pub extern "C" fn vo_map_delete(
     ctx: *mut JitContext,
@@ -2441,6 +2516,22 @@ pub extern "C" fn vo_map_delete(
         Err(map::MapKeyError::AllocationFailed(_)) => {
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
         }
+    }
+}
+
+pub extern "C" fn vo_map_delete_scalar(m: u64, key: u64) -> u64 {
+    use crate::objects::map;
+    if m == 0 {
+        return 0;
+    }
+    let m_ref = m as crate::gc::GcRef;
+    if !unsafe { map::supports_trusted_scalar_key(m_ref) } {
+        return JIT_HELPER_MAP_SCALAR_FALLBACK;
+    }
+    match unsafe { map::delete_trusted_scalar(m_ref, key) } {
+        Ok(()) => 0,
+        Err(map::MapKeyError::SlotCountMismatch) => JIT_HELPER_MAP_SCALAR_FALLBACK,
+        Err(_) => JIT_HELPER_U64_ERROR,
     }
 }
 
@@ -3787,8 +3878,11 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_new", vo_map_new as *const u8),
         ("vo_map_len", vo_map_len as *const u8),
         ("vo_map_get", vo_map_get as *const u8),
+        ("vo_map_get_scalar", vo_map_get_scalar as *const u8),
         ("vo_map_set", vo_map_set as *const u8),
+        ("vo_map_set_scalar", vo_map_set_scalar as *const u8),
         ("vo_map_delete", vo_map_delete as *const u8),
+        ("vo_map_delete_scalar", vo_map_delete_scalar as *const u8),
         ("vo_map_iter_init", vo_map_iter_init as *const u8),
         ("vo_map_iter_next", vo_map_iter_next as *const u8),
         ("vo_island_new", vo_island_new as *const u8),
@@ -3849,8 +3943,11 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_map_new",
         "vo_map_len",
         "vo_map_get",
+        "vo_map_get_scalar",
         "vo_map_set",
+        "vo_map_set_scalar",
         "vo_map_delete",
+        "vo_map_delete_scalar",
         "vo_map_iter_init",
         "vo_map_iter_next",
         "vo_island_new",
@@ -4306,8 +4403,28 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             observes_frame: false,
         },
         JitRuntimeHelperAbi {
+            name: "vo_map_get_scalar",
+            params: &[T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
             name: "vo_map_set",
             params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::Ptr, T::U32, T::U32],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_set_scalar",
+            params: &[T::Ptr, T::U64, T::U64, T::U64, T::U32],
             ret: T::U64,
             return_policy: Ret::U64ErrorSentinel,
             panic_policy: Panic::ReturnsStatusOrSentinel,
@@ -4321,6 +4438,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             ret: T::U64,
             return_policy: Ret::U64ErrorSentinel,
             panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_delete_scalar",
+            params: &[T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
             may_gc: false,
             may_schedule: false,
             observes_frame: false,

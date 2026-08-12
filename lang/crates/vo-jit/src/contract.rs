@@ -215,8 +215,9 @@ pub(crate) fn function_contract_in_env(
 ///
 /// Static calls are lowered by the JIT call boundary itself. GC reachability is
 /// propagated through the complete call graph, while frame-elided entry stays
-/// limited to calls inside a genuinely recursive SCC. An acyclic caller still
-/// needs a materialized frame if a nested call exits through the VM bridge.
+/// limited to calls inside a genuinely recursive SCC. Prepared shadow entry
+/// starts from local effects and remains available through a call chain only
+/// when every reachable callee can preserve the shadow-frame contract.
 pub(crate) fn module_frame_entry_eligibility(
     module: &Module,
     env: JitCompileEnv<'_>,
@@ -257,6 +258,9 @@ pub(crate) fn module_frame_entry_eligibility(
                 frame_contract = frame_contract.union(opcode_contract(Opcode::Call));
             }
             let mut entry = crate::jit_frame_entry_eligibility_for_contract(func, frame_contract);
+            entry.static_prepared_shadow =
+                crate::jit_frame_entry_eligibility_for_contract(func, local_contracts[func_id])
+                    .prepared_shadow;
             entry.may_gc = local_contracts[func_id].may_gc;
             entry
         })
@@ -275,6 +279,12 @@ pub(crate) fn module_frame_entry_eligibility(
         &mut eligibility,
         |entry| entry.prepared_shadow,
         |entry| entry.prepared_shadow = false,
+    );
+    propagate_ineligible_callers(
+        &callers,
+        &mut eligibility,
+        |entry| entry.static_prepared_shadow,
+        |entry| entry.static_prepared_shadow = false,
     );
     let mut gc_worklist = eligibility
         .iter()
@@ -561,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn pure_acyclic_static_call_chain_keeps_exact_gc_effect() {
+    fn pure_acyclic_static_call_chain_uses_materializable_shadow_entry() {
         let mut module = Module::new("acyclic-static-call".to_string());
         module.functions = vec![
             function_with_sig(
@@ -582,9 +592,11 @@ mod tests {
 
         assert!(!eligibility[0].frame_elided);
         assert!(!eligibility[0].prepared_shadow);
+        assert!(eligibility[0].static_prepared_shadow);
         assert!(!eligibility[0].may_gc);
         assert!(eligibility[1].frame_elided);
         assert!(eligibility[1].prepared_shadow);
+        assert!(eligibility[1].static_prepared_shadow);
         assert!(!eligibility[1].may_gc);
     }
 
@@ -621,6 +633,51 @@ mod tests {
 
         assert!(eligibility.iter().all(|entry| !entry.frame_elided));
         assert!(eligibility.iter().all(|entry| !entry.prepared_shadow));
+        assert!(eligibility
+            .iter()
+            .all(|entry| !entry.static_prepared_shadow));
         assert!(eligibility.iter().all(|entry| entry.may_gc));
+    }
+
+    #[test]
+    fn recursive_driver_with_acyclic_helpers_keeps_prepared_shadow_chain() {
+        let mut module = Module::new("recursive-helper-chain".to_string());
+        module.functions = vec![
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::Call, 1, 0, 0),
+                    Instruction::new(Opcode::Call, 0, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+            function_with_sig(
+                vec![
+                    Instruction::new(Opcode::Call, 2, 0, 0),
+                    Instruction::new(Opcode::Return, 1, 0, 0),
+                ],
+                1,
+                1,
+                2,
+                1,
+            ),
+            function_with_sig(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 1, 1, 2, 1),
+        ];
+        let externs = ResolvedExternTable::empty();
+
+        let eligibility = module_frame_entry_eligibility(&module, env(&externs));
+
+        assert!(!eligibility[0].frame_elided);
+        assert!(!eligibility[0].prepared_shadow);
+        assert!(eligibility[0].static_prepared_shadow);
+        assert!(!eligibility[1].frame_elided);
+        assert!(!eligibility[1].prepared_shadow);
+        assert!(eligibility[1].static_prepared_shadow);
+        assert!(eligibility[2].frame_elided);
+        assert!(eligibility[2].prepared_shadow);
+        assert!(eligibility[2].static_prepared_shadow);
     }
 }

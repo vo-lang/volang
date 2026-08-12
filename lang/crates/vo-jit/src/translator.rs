@@ -359,6 +359,14 @@ pub trait MetadataAccess {
             .and_then(crate::metadata::elem_layout_from_instruction)
     }
 
+    /// Whether the verifier-owned element slot layout can carry a managed
+    /// reference. Collection stores use this fact to omit typed barriers for
+    /// primitive and scalar aggregate elements.
+    fn elem_layout_needs_write_barrier(&self) -> Option<bool> {
+        let layout = self.current_instruction_metadata()?.elem_slot_layout()?;
+        Some(crate::metadata::slot_layout_needs_write_barrier(layout))
+    }
+
     /// Resolve typed map-get metadata for JIT lowering.
     fn map_get_layout(&self, inst: &Instruction) -> Option<crate::metadata::MapGetLayout> {
         let _ = inst;
