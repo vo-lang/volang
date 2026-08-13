@@ -473,6 +473,26 @@ impl<'a> FunctionCompiler<'a> {
                 }
                 _ => {}
             }
+            if self
+                .core
+                .analysis
+                .fresh_shape_access(self.core.current_pc)
+                .is_some()
+            {
+                match inst.opcode() {
+                    Opcode::PtrGet | Opcode::PtrGetN => {
+                        crate::translate::fresh_ptr_get(self, inst)?;
+                        self.update_virtual_aliases(inst);
+                        return Ok(false);
+                    }
+                    Opcode::PtrSet | Opcode::PtrSetN => {
+                        crate::translate::fresh_ptr_set(self, inst)?;
+                        self.update_virtual_aliases(inst);
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+            }
         }
         match translate_inst(self, inst)? {
             TranslateResult::Completed => {

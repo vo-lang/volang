@@ -321,6 +321,80 @@ fn optimizing_scalar_replacement_executes_without_a_managed_heap() {
 }
 
 #[test]
+fn optimizing_fresh_shape_construction_preserves_managed_children() {
+    let mut function = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 0, 0, 0),
+            Instruction::new(Opcode::PtrNew, 2, 0, 0),
+            Instruction::new(Opcode::PtrNew, 1, 0, 0),
+            Instruction::new(Opcode::PtrSet, 1, 0, 2),
+            Instruction::new(Opcode::PtrGet, 3, 1, 0),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        vec![
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::GcRef,
+        ],
+        0,
+        0,
+        1,
+    );
+    function.ret_slot_types = vec![SlotType::GcRef];
+    for pc in [1, 2, 3, 4] {
+        function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::GcRef],
+        };
+    }
+    let mut module = VoModule::new("jit-fresh-shape".into());
+    module.struct_metas.push(vo_runtime::bytecode::StructMeta {
+        slot_types: vec![SlotType::GcRef],
+        fields: vec![],
+        field_index: std::collections::HashMap::new(),
+    });
+    module.constants.push(Constant::Int(
+        ValueMeta::new(0, ValueKind::Struct).to_raw() as i64
+    ));
+    module.functions.push(function);
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified fresh-shape module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind fresh-shape module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile fresh-shape function");
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing fresh-shape entry")
+    };
+
+    let mut gc = bounded_gc(16);
+    let mut frame = [0_u64; 4];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+    ctx.gc = &mut gc;
+    assert_eq!(
+        entry(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    gc.close_jit_allocation_region_for_boundary();
+    let child = gc
+        .canonicalize_ref(ret[0] as vo_runtime::gc::GcRef)
+        .expect("returned child remains a published object");
+    assert_eq!(gc.object_count(), 2);
+    assert_eq!(unsafe { vo_runtime::gc::Gc::read_slot(child, 0) }, 0);
+}
+
+#[test]
 fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() {
     let mut code = vec![Instruction::new(Opcode::LoadConst, 0, 0, 0)];
     for dst in 1..=5 {

@@ -22,6 +22,7 @@ pub struct FunctionAnalysis {
     dynamic_callsites: Arc<DynamicCallsiteMap>,
     ir: FunctionIr,
     escape_plan: crate::escape::EscapePlan,
+    shape_plan: crate::shape::ShapePlan,
     retained_bytes: usize,
 }
 
@@ -41,6 +42,7 @@ impl FunctionAnalysis {
     ) -> Result<Self, JitError> {
         let ir = FunctionIr::build(func_def, vo_module)?;
         let escape_plan = crate::escape::EscapePlan::analyze(func_def, &ir);
+        let shape_plan = crate::shape::ShapePlan::analyze(func_def, &ir);
         let loops = crate::loop_analysis::try_analyze_loops(func_def)?;
         let loop_bytes = loops
             .len()
@@ -60,7 +62,8 @@ impl FunctionAnalysis {
         }
         let fixed_analysis_bytes = loop_bytes
             .saturating_add(ir.retained_bytes())
-            .saturating_add(escape_plan.retained_bytes());
+            .saturating_add(escape_plan.retained_bytes())
+            .saturating_add(shape_plan.retained_bytes());
         if fixed_analysis_bytes > retained_limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {
                 limit_bytes: retained_limit_bytes,
@@ -139,6 +142,7 @@ impl FunctionAnalysis {
             .saturating_add(loops.len().saturating_mul(core::mem::size_of::<LoopInfo>()))
             .saturating_add(ir.retained_bytes())
             .saturating_add(escape_plan.retained_bytes())
+            .saturating_add(shape_plan.retained_bytes())
             .saturating_add(
                 loop_memory_only_starts
                     .capacity()
@@ -160,6 +164,7 @@ impl FunctionAnalysis {
             dynamic_callsites,
             ir,
             escape_plan,
+            shape_plan,
             retained_bytes,
         })
     }
@@ -190,6 +195,11 @@ impl FunctionAnalysis {
     #[inline]
     pub(crate) fn stack_allocation(&self, pc: usize) -> Option<crate::escape::StackAllocation> {
         self.escape_plan.allocation(pc)
+    }
+
+    #[inline]
+    pub(crate) fn fresh_shape_access(&self, pc: usize) -> Option<crate::shape::FreshShapeAccess> {
+        self.shape_plan.fresh_access(pc)
     }
 
     pub fn shared_loops(&self) -> Arc<[LoopInfo]> {

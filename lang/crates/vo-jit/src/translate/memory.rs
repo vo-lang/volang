@@ -12,6 +12,132 @@ use crate::JitError;
 
 use super::emit_nil_ptr_check_for_slot;
 
+pub(crate) fn fresh_ptr_get<'a>(
+    e: &mut impl MemoryEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let ptr = e.read_var(inst.b);
+    let count = match inst.opcode() {
+        vo_runtime::instruction::Opcode::PtrGet => 1,
+        vo_runtime::instruction::Opcode::PtrGetN => e
+            .ptr_layout()
+            .ok_or(JitError::MissingJitLayout {
+                pc: e.current_pc(),
+                opcode: inst.opcode(),
+                layout: "PtrLayout",
+            })?
+            .len(),
+        _ => {
+            return Err(JitError::Internal(format!(
+                "fresh pointer load received {:?}",
+                inst.opcode()
+            )))
+        }
+    };
+    for index in 0..count {
+        let offset = ((usize::from(inst.c) + index) * vo_runtime::slot::SLOT_BYTES) as i32;
+        let value = e
+            .builder()
+            .ins()
+            .load(types::I64, MemFlags::trusted(), ptr, offset);
+        e.write_var(inst.a + index as u16, value);
+    }
+    Ok(())
+}
+
+pub(crate) fn fresh_ptr_set<'a>(
+    e: &mut impl MemoryEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let ptr = e.read_var(inst.a);
+    let layout = e
+        .ptr_layout()
+        .ok_or(JitError::MissingJitLayout {
+            pc: e.current_pc(),
+            opcode: inst.opcode(),
+            layout: "PtrLayout",
+        })?
+        .to_vec();
+    let count = match inst.opcode() {
+        vo_runtime::instruction::Opcode::PtrSet => 1,
+        vo_runtime::instruction::Opcode::PtrSetN => layout.len(),
+        _ => {
+            return Err(JitError::Internal(format!(
+                "fresh pointer store received {:?}",
+                inst.opcode()
+            )))
+        }
+    };
+
+    for (index, slot_type) in layout.into_iter().take(count).enumerate() {
+        let value = e.read_var(inst.c + index as u16);
+        let slot_offset = inst.b + index as u16;
+        if matches!(
+            slot_type,
+            vo_runtime::SlotType::GcRef | vo_runtime::SlotType::Interface1
+        ) {
+            emit_fresh_parent_write_barrier(e, ptr, slot_offset, value, slot_type);
+        }
+        let offset = usize::from(slot_offset).saturating_mul(vo_runtime::slot::SLOT_BYTES) as i32;
+        e.builder()
+            .ins()
+            .store(MemFlags::trusted(), value, ptr, offset);
+    }
+    Ok(())
+}
+
+/// A newly allocated parent remains young and unscanned until the next GC
+/// boundary.  During `Pause` it cannot need a generational or marking barrier.
+/// Active collector phases retain the ordinary precise barrier path.
+fn emit_fresh_parent_write_barrier<'a>(
+    e: &mut impl MemoryEmitter<'a>,
+    parent: Value,
+    slot_offset: u16,
+    child: Value,
+    slot_type: vo_runtime::SlotType,
+) {
+    let evaluate = e.builder().create_block();
+    let done = e.builder().create_block();
+    let child_non_nil = e.builder().ins().icmp_imm_u(IntCC::NotEqual, child, 0);
+    e.builder()
+        .ins()
+        .brif(child_non_nil, evaluate, &[], done, &[]);
+
+    e.builder().switch_to_block(evaluate);
+    e.builder().seal_block(evaluate);
+    let gc = e.gc_ptr();
+    let state = e.load_trusted(
+        JitMemoryRegion::Gc,
+        types::I8,
+        gc,
+        JitGcPollField::State.offset(),
+    );
+    let paused = e
+        .builder()
+        .ins()
+        .icmp_imm_u(IntCC::Equal, state, GcState::Pause as i64);
+    let active = crate::compile_common::cold_block(e.builder());
+    e.builder().ins().brif(paused, done, &[], active, &[]);
+
+    e.builder().switch_to_block(active);
+    e.builder().seal_block(active);
+    match slot_type {
+        vo_runtime::SlotType::GcRef => {
+            emit_gc_ref_write_barrier(e, parent, slot_offset, child);
+        }
+        vo_runtime::SlotType::Interface1 => {
+            let barrier = e.helper(HelperKind::write_barrier);
+            let offset = e.builder().ins().iconst(types::I32, i64::from(slot_offset));
+            emit_runtime_helper_call(e, barrier, &[gc, parent, offset, child]);
+        }
+        _ => unreachable!("fresh managed store must carry a managed slot type"),
+    }
+    e.builder().ins().jump(done, &[]);
+
+    e.builder().switch_to_block(done);
+    e.builder().seal_block(done);
+}
+
 pub(super) fn global_get<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction) {
     let globals = e.globals_ptr();
     let offset = (inst.b as i32) * 8;

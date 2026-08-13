@@ -21,6 +21,7 @@ mod native_frame;
 mod native_stack_map;
 mod optimizer;
 mod semantics;
+mod shape;
 #[cfg(test)]
 mod test_fixtures;
 mod translate;
