@@ -321,6 +321,100 @@ fn optimizing_scalar_replacement_executes_without_a_managed_heap() {
 }
 
 #[test]
+fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() {
+    let mut code = vec![Instruction::new(Opcode::LoadConst, 0, 0, 0)];
+    for dst in 1..=5 {
+        code.push(Instruction::new(Opcode::PtrNew, dst, 0, 0));
+    }
+    code.push(Instruction::new(Opcode::Return, 5, 1, 0));
+    let mut function = make_func_with_slot_types_and_sig(
+        code,
+        vec![
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::GcRef,
+        ],
+        0,
+        0,
+        1,
+    );
+    function.ret_slot_types = vec![SlotType::GcRef];
+    for pc in 1..=5 {
+        function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::Value],
+        };
+    }
+    let mut module = VoModule::new("jit-allocation-region".into());
+    module.constants.push(Constant::Int(
+        ValueMeta::new(0, ValueKind::Int64).to_raw() as i64
+    ));
+    module.functions.push(function);
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified allocation-region module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create baseline JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind allocation-region module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Baseline,
+    )
+    .expect("compile allocation-region function");
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Baseline)
+            .expect("baseline allocation-region entry")
+    };
+    let mut parts = JitContextParts::new();
+
+    let mut exact_gc = bounded_gc(5);
+    let mut exact_frame = [0_u64; 6];
+    let mut exact_ret = [0_u64; 1];
+    let mut exact_ctx = parts.context(&module, &mut exact_frame);
+    exact_ctx.gc = &mut exact_gc;
+    assert_eq!(
+        entry(
+            &mut exact_ctx,
+            exact_frame.as_mut_ptr(),
+            exact_ret.as_mut_ptr()
+        ),
+        JitResult::Ok
+    );
+    exact_gc.close_jit_allocation_region_for_boundary();
+    assert_eq!(exact_gc.object_count(), 5);
+    assert_eq!(exact_gc.objects().count(), 5);
+    assert!(exact_gc
+        .canonicalize_ref(exact_ret[0] as vo_runtime::gc::GcRef)
+        .is_some());
+
+    let mut limited_gc = bounded_gc(4);
+    let mut limited_frame = [0_u64; 6];
+    let mut limited_ret = [0_u64; 1];
+    let mut limited_ctx = parts.context(&module, &mut limited_frame);
+    limited_ctx.gc = &mut limited_gc;
+    assert_eq!(
+        entry(
+            &mut limited_ctx,
+            limited_frame.as_mut_ptr(),
+            limited_ret.as_mut_ptr()
+        ),
+        JitResult::JitError
+    );
+    limited_gc.close_jit_allocation_region_for_boundary();
+    assert_eq!(limited_gc.object_count(), 4);
+    assert_eq!(limited_gc.objects().count(), 4);
+    assert_eq!(
+        limited_gc.last_memory_error(),
+        Some(vo_runtime::gc::MemoryError::MetadataExhausted)
+    );
+}
+
+#[test]
 fn backend_allocation_failure_is_a_resource_rejection() {
     let error = JitError::Module(cranelift_module::ModuleError::Allocation {
         err: std::io::Error::other("exhausted"),

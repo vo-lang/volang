@@ -204,7 +204,7 @@ macro_rules! runtime_helper_table {
 runtime_helper_table! {
     gc_safepoint => "vo_jit_gc_safepoint",
     tier_up => "vo_jit_tier_up",
-    gc_alloc => "vo_gc_alloc",
+    gc_alloc => "vo_jit_gc_alloc",
     write_barrier => "vo_gc_write_barrier",
     typed_write_barrier_by_meta => "vo_gc_typed_write_barrier_by_meta",
     panic => "vo_panic",

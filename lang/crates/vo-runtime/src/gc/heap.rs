@@ -493,6 +493,21 @@ impl SpanHeap {
         self.active_small[class_index] = Some((segment_index, block_index));
     }
 
+    /// Account cells admitted to a JIT allocation region before generated
+    /// code publishes their bitmap bits. A region is closed before any heap
+    /// walk; unused cells are refunded through the matching release method.
+    pub(super) fn admit_jit_region_cells(&mut self, cells: usize, class_size: usize) {
+        self.allocated_span_bytes = self
+            .allocated_span_bytes
+            .saturating_add(cells.saturating_mul(class_size));
+    }
+
+    pub(super) fn refund_jit_region_cells(&mut self, cells: usize, class_size: usize) {
+        self.allocated_span_bytes = self
+            .allocated_span_bytes
+            .saturating_sub(cells.saturating_mul(class_size));
+    }
+
     fn allocate_small(
         &mut self,
         class_index: usize,

@@ -79,13 +79,14 @@ fn jit_gc_alloc_rejects_u32_slot_width_narrowing() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(0, ValueKind::Struct).to_raw();
 
-    let boundary = vo_gc_alloc(&mut gc, meta, u16::MAX as u32);
+    let boundary = jit_gc_alloc_inner(&mut gc, meta, u16::MAX as u32);
     assert_ne!(boundary, 0);
     assert_eq!(
         unsafe { Gc::header(boundary as crate::gc::GcRef) }.slots,
         u16::MAX
     );
-    assert_eq!(vo_gc_alloc(&mut gc, meta, u16::MAX as u32 + 1), 0);
+    assert_eq!(jit_gc_alloc_inner(&mut gc, meta, u16::MAX as u32 + 1), 0);
+    assert_eq!(vo_jit_gc_alloc(core::ptr::null_mut(), meta, 0), 0);
 }
 
 #[test]

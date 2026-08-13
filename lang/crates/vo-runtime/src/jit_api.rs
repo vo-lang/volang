@@ -15,7 +15,7 @@
 //! JIT Code                    Runtime
 //! --------                    -------
 //!    |                           |
-//!    |-- vo_gc_alloc() --------->|  Allocate GC object
+//!    |-- vo_jit_gc_alloc() ----->|  Allocate GC object / open native region
 //!    |-- vo_gc_write_barrier() ->|  Write barrier for GC
 //!    |-- vo_call_vm() ---------->|  Call VM-interpreted function
 //!    |-- vo_panic() ------------>|  Trigger panic
@@ -1120,7 +1120,7 @@ impl JitRuntimeHelperAbi {
     pub fn requires_gc_poll(self) -> bool {
         matches!(
             self.name,
-            "vo_gc_alloc"
+            "vo_jit_gc_alloc"
                 | "vo_str_new"
                 | "vo_str_concat"
                 | "vo_str_slice"
@@ -1535,7 +1535,7 @@ fn validate_gc_object_kind(
 /// Allocate a new GC object.
 ///
 /// # Arguments
-/// - `gc`: Pointer to GC instance
+/// - `ctx`: Owning JIT context containing the GC instance
 /// - `meta`: ValueMeta for the object (packed meta_id + value_kind)
 /// - `slots`: Number of 64-bit slots to allocate
 ///
@@ -1543,32 +1543,36 @@ fn validate_gc_object_kind(
 /// GcRef (pointer to allocated object data)
 ///
 /// # Safety
-/// - `gc` must be a valid pointer to a Gc instance
-pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
+/// - `ctx` must be a valid pointer to the current JIT context
+pub extern "C" fn vo_jit_gc_alloc(ctx: *mut JitContext, meta: u32, slots: u32) -> u64 {
+    let Some(ctx) = (unsafe { ctx.as_mut() }) else {
+        return 0;
+    };
+    let Some(gc) = (unsafe { ctx.gc.as_mut() }) else {
+        return 0;
+    };
+    jit_gc_alloc_inner(gc, meta, slots)
+}
+
+fn jit_gc_alloc_inner(gc: &mut Gc, meta: u32, slots: u32) -> u64 {
     use crate::ValueMeta;
 
-    if gc.is_null() {
-        return 0;
-    }
     let Some(value_meta) = ValueMeta::try_from_raw(meta) else {
         return 0;
     };
     let Ok(slots) = u16::try_from(slots) else {
         return 0;
     };
-    unsafe {
-        let gc = &mut *gc;
-        let object = gc.alloc(value_meta, slots);
-        if !object.is_null() {
-            if let Some(size) = usize::from(slots)
-                .checked_mul(crate::slot::SLOT_BYTES)
-                .and_then(|bytes| crate::gc::GcHeader::SIZE.checked_add(bytes))
-            {
-                gc.prepare_jit_small_alloc_lane(size);
-            }
+    let object = gc.alloc(value_meta, slots);
+    if !object.is_null() {
+        if let Some(size) = usize::from(slots)
+            .checked_mul(crate::slot::SLOT_BYTES)
+            .and_then(|bytes| crate::gc::GcHeader::SIZE.checked_add(bytes))
+        {
+            gc.prepare_jit_allocation_region(size, value_meta, slots);
         }
-        object as u64
     }
+    object as u64
 }
 
 /// Poll the VM before a JIT helper that may allocate managed memory.
@@ -1576,9 +1580,12 @@ pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
 /// Standalone JIT unit harnesses do not install VM callbacks and therefore
 /// receive `Ok`. Production contexts validate and install the callback.
 pub extern "C" fn vo_jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
-    let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
+    let Some(ctx_ref) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;
     };
+    if let Some(gc) = unsafe { ctx_ref.gc.as_mut() } {
+        gc.close_jit_allocation_region_for_boundary();
+    }
     match ctx_ref.gc_safepoint_fn {
         Some(callback) => callback(ctx),
         None => JitResult::Ok,
@@ -4034,7 +4041,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     &[
         ("vo_jit_gc_safepoint", vo_jit_gc_safepoint as *const u8),
         ("vo_jit_tier_up", vo_jit_tier_up as *const u8),
-        ("vo_gc_alloc", vo_gc_alloc as *const u8),
+        ("vo_jit_gc_alloc", vo_jit_gc_alloc as *const u8),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         (
             "vo_gc_typed_write_barrier_by_meta",
@@ -4112,7 +4119,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
     &[
         "vo_jit_gc_safepoint",
         "vo_jit_tier_up",
-        "vo_gc_alloc",
+        "vo_jit_gc_alloc",
         "vo_gc_write_barrier",
         "vo_gc_typed_write_barrier_by_meta",
         "vo_panic",
@@ -4201,7 +4208,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             observes_frame: false,
         },
         JitRuntimeHelperAbi {
-            name: "vo_gc_alloc",
+            name: "vo_jit_gc_alloc",
             params: &[T::Ptr, T::U32, T::U32],
             ret: T::U64,
             return_policy: Ret::RawU64,

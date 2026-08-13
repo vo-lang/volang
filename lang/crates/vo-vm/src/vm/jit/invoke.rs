@@ -182,6 +182,9 @@ fn invoke_jit_and_handle(
         jit_mgr.record_function_entry(func_id);
     }
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
+    // Native allocation regions pre-admit a bounded run of cells. Close the
+    // run before the VM observes telemetry, object limits, or a side exit.
+    vm.state.gc.close_jit_allocation_region_for_boundary();
     let budget_after = ctx.ctx.execution_budget;
     fiber.execution_budget = budget_after;
 

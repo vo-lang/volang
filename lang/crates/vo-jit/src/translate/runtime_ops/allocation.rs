@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{
     condcodes::IntCC, types, InstBuilder, MemFlagsData as MemFlags, StackSlotData, StackSlotKind,
 };
 use vo_runtime::bytecode::Constant;
-use vo_runtime::gc::{JitGcPollField, JitSmallAllocLaneField, JIT_GC_HEADER_MARKED_OFFSET};
+use vo_runtime::gc::{JitAllocationRegionField, JIT_GC_HEADER_MARKED_OFFSET};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::ValueMeta;
 
@@ -33,7 +33,7 @@ pub(in crate::translate) fn ptr_new<'a>(
         .and_then(ValueMeta::try_from_raw);
 
     if let (Some(total_size), Some(value_meta)) = (total_size, constant_meta) {
-        if JitSmallAllocLaneField::Cursor
+        if JitAllocationRegionField::Cursor
             .offset_for_size(total_size)
             .is_some()
         {
@@ -43,11 +43,11 @@ pub(in crate::translate) fn ptr_new<'a>(
     }
 
     let func = e.helper(HelperKind::gc_alloc);
-    let gc_ptr = e.gc_ptr();
+    let ctx = e.ctx_param();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
     let slots_i32 = e.builder().ins().iconst(types::I32, slots as i64);
-    let call = emit_runtime_helper_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
+    let call = emit_runtime_helper_call(e, func, &[ctx, meta_i32, slots_i32]);
     let result = e.builder().inst_results(call)[0];
     emit_jit_error_if_zero(e, result);
     e.write_var(inst.a, result);
@@ -61,30 +61,41 @@ fn emit_jit_small_ptr_new<'a>(
     total_size: usize,
     meta_raw: u32,
 ) {
-    emit_gc_safepoint_poll(e);
-
+    let _ = slots;
     let gc = e.gc_ptr();
-    let lane_offset = |field: JitSmallAllocLaneField| {
+    let region_offset = |field: JitAllocationRegionField| {
         field
             .offset_for_size(total_size)
-            .expect("verified small allocation must have a JIT lane")
+            .expect("verified small allocation must have a JIT region")
     };
+    let expected_shape = JitAllocationRegionField::shape(total_size, meta_raw);
+    let active_shape = e.load_trusted(
+        JitMemoryRegion::Gc,
+        types::I64,
+        gc,
+        region_offset(JitAllocationRegionField::Shape),
+    );
+    let region_matches =
+        e.builder()
+            .ins()
+            .icmp_imm_u(IntCC::Equal, active_shape, expected_shape as i64);
     let cursor = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        lane_offset(JitSmallAllocLaneField::Cursor),
+        region_offset(JitAllocationRegionField::Cursor),
     );
     let limit = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        lane_offset(JitSmallAllocLaneField::Limit),
+        region_offset(JitAllocationRegionField::Limit),
     );
-    let has_cell = e
+    let cursor_available = e
         .builder()
         .ins()
         .icmp(IntCC::UnsignedLessThan, cursor, limit);
+    let has_cell = e.builder().ins().band(region_matches, cursor_available);
     let fast = e.builder().create_block();
     let slow = crate::compile_common::cold_block(e.builder());
     let done = e.builder().create_block();
@@ -99,20 +110,20 @@ fn emit_jit_small_ptr_new<'a>(
         JitMemoryRegion::Gc,
         next_cursor,
         gc,
-        lane_offset(JitSmallAllocLaneField::Cursor),
+        region_offset(JitAllocationRegionField::Cursor),
     );
 
     let bitmap_word = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        lane_offset(JitSmallAllocLaneField::BitmapWord),
+        region_offset(JitAllocationRegionField::BitmapWord),
     );
     let next_bit = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        lane_offset(JitSmallAllocLaneField::NextBit),
+        region_offset(JitAllocationRegionField::NextBit),
     );
     let allocated = e
         .builder()
@@ -127,116 +138,7 @@ fn emit_jit_small_ptr_new<'a>(
         JitMemoryRegion::Gc,
         following_bit,
         gc,
-        lane_offset(JitSmallAllocLaneField::NextBit),
-    );
-
-    let logical_size_cursor = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I64,
-        gc,
-        lane_offset(JitSmallAllocLaneField::LogicalSizeCursor),
-    );
-    let logical_size = e.builder().ins().iconst(types::I16, total_size as i64);
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), logical_size, logical_size_cursor, 0);
-    let next_logical_size = e.builder().ins().iadd_imm_u(logical_size_cursor, 2);
-    e.store_trusted(
-        JitMemoryRegion::Gc,
-        next_logical_size,
-        gc,
-        lane_offset(JitSmallAllocLaneField::LogicalSizeCursor),
-    );
-
-    let live_cells_ptr = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I64,
-        gc,
-        lane_offset(JitSmallAllocLaneField::LiveCells),
-    );
-    let live_cells = e
-        .builder()
-        .ins()
-        .load(types::I16, MemFlags::trusted(), live_cells_ptr, 0);
-    let live_cells = e.builder().ins().iadd_imm_u(live_cells, 1);
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), live_cells, live_cells_ptr, 0);
-
-    increment_gc_usize(e, gc, JitGcPollField::AllocatedSpanBytes, class_size);
-    let logical_bytes_ptr = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I64,
-        gc,
-        lane_offset(JitSmallAllocLaneField::LogicalBytes),
-    );
-    let logical_bytes =
-        e.builder()
-            .ins()
-            .load(types::I64, MemFlags::trusted(), logical_bytes_ptr, 0);
-    let logical_bytes = e
-        .builder()
-        .ins()
-        .iadd_imm_u(logical_bytes, total_size as i64);
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), logical_bytes, logical_bytes_ptr, 0);
-
-    let current_white = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I8,
-        gc,
-        JitGcPollField::CurrentWhite.offset(),
-    );
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), current_white, cursor, 0);
-    let slots_value = e.builder().ins().iconst(types::I16, slots as i64);
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), slots_value, cursor, 2);
-    let meta_value = e.builder().ins().iconst(types::I32, i64::from(meta_raw));
-    e.builder()
-        .ins()
-        .store(MemFlags::trusted(), meta_value, cursor, 4);
-
-    increment_gc_usize(e, gc, JitGcPollField::TotalBytes, total_size);
-    increment_gc_usize(e, gc, JitGcPollField::LiveObjectCount, 1);
-    increment_gc_usize(e, gc, JitGcPollField::YoungLiveBytes, total_size);
-    increment_gc_u64(e, gc, JitGcPollField::AllocationBytesTotal, total_size);
-    let debt = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I64,
-        gc,
-        JitGcPollField::Debt.offset(),
-    );
-    let debt = e.builder().ins().iadd_imm_u(debt, total_size as i64);
-    e.store_trusted(JitMemoryRegion::Gc, debt, gc, JitGcPollField::Debt.offset());
-    let automatic = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I8,
-        gc,
-        JitGcPollField::AutomaticGc.offset(),
-    );
-    let automatic = e.builder().ins().icmp_imm_u(IntCC::NotEqual, automatic, 0);
-    let debt_due = e
-        .builder()
-        .ins()
-        .icmp_imm_s(IntCC::SignedGreaterThan, debt, 0);
-    let poll_due = e.builder().ins().band(automatic, debt_due);
-    let required = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I8,
-        gc,
-        JitGcPollField::Required.offset(),
-    );
-    let one = e.builder().ins().iconst(types::I8, 1);
-    let required = e.builder().ins().select(poll_due, one, required);
-    e.store_trusted(
-        JitMemoryRegion::Gc,
-        required,
-        gc,
-        JitGcPollField::Required.offset(),
+        region_offset(JitAllocationRegionField::NextBit),
     );
 
     let object = e
@@ -247,10 +149,12 @@ fn emit_jit_small_ptr_new<'a>(
 
     e.builder().switch_to_block(slow);
     e.builder().seal_block(slow);
+    emit_gc_safepoint_poll(e);
     let func = e.helper(HelperKind::gc_alloc);
     let meta_value = e.builder().ins().iconst(types::I32, i64::from(meta_raw));
     let slots_value = e.builder().ins().iconst(types::I32, slots as i64);
-    let call = emit_funcref_call_raw(e, func.func_ref(), &[gc, meta_value, slots_value]);
+    let ctx = e.ctx_param();
+    let call = emit_funcref_call_raw(e, func.func_ref(), &[ctx, meta_value, slots_value]);
     let object = e.builder().inst_results(call)[0];
     e.builder().ins().jump(done, &[object.into()]);
 
@@ -259,26 +163,6 @@ fn emit_jit_small_ptr_new<'a>(
     let object = e.builder().block_params(done)[0];
     emit_jit_error_if_zero(e, object);
     e.write_var(inst.a, object);
-}
-
-fn increment_gc_usize<'a>(
-    e: &mut impl RuntimeOpsEmitter<'a>,
-    gc: cranelift_codegen::ir::Value,
-    field: JitGcPollField,
-    amount: usize,
-) {
-    increment_gc_u64(e, gc, field, amount);
-}
-
-fn increment_gc_u64<'a>(
-    e: &mut impl RuntimeOpsEmitter<'a>,
-    gc: cranelift_codegen::ir::Value,
-    field: JitGcPollField,
-    amount: usize,
-) {
-    let value = e.load_trusted(JitMemoryRegion::Gc, types::I64, gc, field.offset());
-    let value = e.builder().ins().iadd_imm_u(value, amount as i64);
-    e.store_trusted(JitMemoryRegion::Gc, value, gc, field.offset());
 }
 
 pub(in crate::translate) fn str_new<'a>(
