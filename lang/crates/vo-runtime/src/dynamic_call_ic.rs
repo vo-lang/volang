@@ -13,6 +13,8 @@ pub struct DynCallIC {
     pub jit_func_ptr: u64,
     pub local_slots: u32,
     pub func_id: u32,
+    /// Generation of the dispatch entry that supplied `jit_func_ptr`.
+    pub dispatch_generation: u64,
     pub gc_scan_slots: u16,
     pub valid: u16,
     /// Whether the cached native target can reach a managed-heap safepoint.
@@ -33,12 +35,14 @@ impl DynCallIC {
     pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(Self, jit_func_ptr) as i32;
     pub const OFFSET_LOCAL_SLOTS: i32 = core::mem::offset_of!(Self, local_slots) as i32;
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(Self, func_id) as i32;
+    pub const OFFSET_DISPATCH_GENERATION: i32 =
+        core::mem::offset_of!(Self, dispatch_generation) as i32;
     pub const OFFSET_GC_SCAN_SLOTS: i32 = core::mem::offset_of!(Self, gc_scan_slots) as i32;
     pub const OFFSET_VALID: i32 = core::mem::offset_of!(Self, valid) as i32;
     pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(Self, jit_may_gc) as i32;
 }
 
-const _: () = assert!(DynCallIC::SIZE == 32);
+const _: () = assert!(DynCallIC::SIZE == 40);
 
 pub fn alloc_ic_table(len: usize) -> Vec<DynCallIC> {
     let mut table = Vec::with_capacity(len);

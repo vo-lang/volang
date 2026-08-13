@@ -440,18 +440,20 @@ mod tests {
         let best_effort_config = JitConfig {
             call_threshold: 11,
             loop_threshold: 12,
+            optimizing_threshold: 13,
             debug_ir: false,
-            code_memory_limit_bytes: 13,
-            analysis_memory_limit_bytes: 14,
-            metadata_memory_limit_bytes: 15,
+            code_memory_limit_bytes: 14,
+            analysis_memory_limit_bytes: 15,
+            metadata_memory_limit_bytes: 16,
         };
         let strict_config = JitConfig {
             call_threshold: 21,
             loop_threshold: 22,
+            optimizing_threshold: 23,
             debug_ir: false,
-            code_memory_limit_bytes: 23,
-            analysis_memory_limit_bytes: 24,
-            metadata_memory_limit_bytes: 25,
+            code_memory_limit_bytes: 24,
+            analysis_memory_limit_bytes: 25,
+            metadata_memory_limit_bytes: 26,
         };
         let child_modes = [
             VmJitState::Disabled.child_mode(),

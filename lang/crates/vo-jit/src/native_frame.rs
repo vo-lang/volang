@@ -22,6 +22,7 @@ pub(crate) fn instrument_function(
     func_id: u32,
     artifact_kind: u32,
     osr_pc: u32,
+    tier: u32,
 ) -> Result<(), JitError> {
     let instructions = func
         .layout
@@ -98,6 +99,10 @@ pub(crate) fn instrument_function(
             record,
             frame_offset_of!(artifact_kind),
         );
+        let tier = cursor.ins().iconst(types::I32, i64::from(tier));
+        cursor
+            .ins()
+            .stack_store(pointer_type, tier, record, frame_offset_of!(tier));
         let inactive = cursor
             .ins()
             .iconst(types::I32, i64::from(JitNativeFrame::INACTIVE_SAFEPOINT));
@@ -217,6 +222,7 @@ mod tests {
             7,
             JitNativeFrame::ARTIFACT_FUNCTION,
             u32::MAX,
+            vo_runtime::jit_api::JitTier::Baseline as u32,
         )
         .expect("instrument native frame");
 

@@ -52,6 +52,25 @@ fn lookup_jit_ptr(
 }
 
 #[inline]
+fn lookup_jit_generation(
+    table: *const vo_runtime::jit_api::JitDispatchEntry,
+    count: u32,
+    func_id: u32,
+    eligible: bool,
+) -> u64 {
+    if eligible && !table.is_null() && func_id < count {
+        let entry = unsafe { *table.add(func_id as usize) };
+        if entry.is_available() {
+            entry.generation
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+#[inline]
 unsafe fn write_trapped_prepared_call(out: *mut PreparedCall) {
     if !out.is_null() && (out as usize).is_multiple_of(core::mem::align_of::<PreparedCall>()) {
         *out = PreparedCall::default();
@@ -370,6 +389,16 @@ pub extern "C" fn jit_prepare_closure_call(
     } else {
         core::ptr::null()
     };
+    let dispatch_generation = if ic_jit_func_ptr.is_null() {
+        0
+    } else {
+        lookup_jit_generation(
+            ctx.jit_func_table,
+            ctx.jit_func_count,
+            func_id,
+            eligibility.prepared_shadow,
+        )
+    };
 
     // 3. push_frame: always allocate callee frame on fiber.stack.
     //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
@@ -414,6 +443,7 @@ pub extern "C" fn jit_prepare_closure_call(
             callee_local_slots: local_slots as u32,
             func_id,
             jit_may_gc: u32::from(eligibility.may_gc),
+            dispatch_generation,
         };
     }
     record_prepared_dynamic_call_if_available(
@@ -601,6 +631,16 @@ pub extern "C" fn jit_prepare_iface_call(
     } else {
         core::ptr::null()
     };
+    let dispatch_generation = if ic_jit_func_ptr.is_null() {
+        0
+    } else {
+        lookup_jit_generation(
+            ctx_ref.jit_func_table,
+            ctx_ref.jit_func_count,
+            func_id,
+            true,
+        )
+    };
 
     // 3. push_frame: always allocate callee frame on fiber.stack
     let Some(push_frame_fn) = ctx_ref.push_frame_fn else {
@@ -636,6 +676,7 @@ pub extern "C" fn jit_prepare_iface_call(
             callee_local_slots: local_slots as u32,
             func_id,
             jit_may_gc: u32::from(eligibility.may_gc),
+            dispatch_generation,
         };
     }
     record_prepared_dynamic_call_if_available(

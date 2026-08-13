@@ -109,6 +109,12 @@ pub struct JitExecutionStats {
     pub runtime_dominated_function_disables: u64,
     /// Successfully published full-function artifacts for this VM owner.
     pub function_compilations: u64,
+    /// Successfully published optimizing-tier artifacts.
+    pub optimizing_compilations: u64,
+    /// Optional optimizing compilations rejected while baseline remained live.
+    pub optimizing_failures: u64,
+    /// Assumption failures handled through versioned deoptimization metadata.
+    pub deopts: u64,
     /// Successfully published loop artifacts for this VM owner.
     pub loop_compilations: u64,
     /// Publications that reused code already compiled by the shared Island family.

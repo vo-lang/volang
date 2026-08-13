@@ -27,6 +27,7 @@ static JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks {
     select_recv_fn: Some(callbacks::jit_select_recv),
     select_exec_fn: Some(callbacks::jit_select_exec),
     gc_safepoint_fn: Some(callbacks::jit_gc_safepoint),
+    tier_up_fn: Some(callbacks::jit_tier_up),
 };
 
 /// JIT context wrapper.
@@ -77,11 +78,16 @@ impl JitContextWrapper {
 
 pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWrapper, String> {
     // Extract jit_mgr values first to avoid borrow conflicts
-    let (jit_func_table, jit_func_count) = {
+    let (jit_func_table, jit_func_count, jit_profile_table, optimizing_threshold) = {
         let jit_mgr = vm.jit.manager_mut().ok_or_else(|| {
             "JIT context requested without an initialized JIT manager".to_string()
         })?;
-        (jit_mgr.func_table_ptr(), jit_mgr.func_table_len() as u32)
+        (
+            jit_mgr.func_table_ptr(),
+            jit_mgr.func_table_len() as u32,
+            jit_mgr.profile_table_ptr(),
+            jit_mgr.config().optimizing_threshold,
+        )
     };
     let ic_table = vm.state.dynamic_call_ic.as_mut_ptr();
     let loaded_module = vm
@@ -117,6 +123,8 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         callbacks: &JIT_CONTEXT_CALLBACKS,
         jit_func_table,
         jit_func_count,
+        jit_profile_table,
+        optimizing_threshold,
         program_args: &vm.state.program_args as *const Vec<Vec<u8>>,
         sentinel_errors: &mut vm.state.sentinel_errors as *mut _,
         output: &*vm.state.output as *const dyn vo_runtime::output::OutputSink,
@@ -165,6 +173,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: vo_runtime::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
 
     debug_assert_eq!(ctx.validate_required_callbacks(), Ok(()));

@@ -204,6 +204,12 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             p.out_slot,
             PreparedCall::OFFSET_JIT_MAY_GC,
         );
+        let out_dispatch_generation = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I64,
+            p.out_slot,
+            PreparedCall::OFFSET_DISPATCH_GENERATION,
+        );
         let null_jit = emitter.builder().ins().iconst(types::I64, 0);
         let has_jit = emitter
             .builder()
@@ -238,6 +244,10 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
         for (value, offset) in [
             (update.receiver_slot0, DynCallIC::OFFSET_RECEIVER_SLOT0),
             (out_ic_jit_ptr, DynCallIC::OFFSET_JIT_FUNC_PTR),
+            (
+                out_dispatch_generation,
+                DynCallIC::OFFSET_DISPATCH_GENERATION,
+            ),
         ] {
             emitter
                 .builder()
@@ -259,6 +269,13 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             out_jit_may_gc,
             update.entry,
             DynCallIC::OFFSET_JIT_MAY_GC,
+        );
+        let valid = emitter.builder().ins().iconst(types::I16, 1);
+        emitter.builder().ins().store(
+            MemFlags::trusted(),
+            valid,
+            update.entry,
+            DynCallIC::OFFSET_VALID,
         );
         emitter.builder().ins().jump(ic_skip_block, &[]);
 
@@ -336,13 +353,48 @@ pub(super) fn branch_on_dynamic_ic_hit<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     key_match: Value,
     ic_jit_ptr: Value,
+    ic_entry: Value,
     zero: Value,
 ) -> (Block, Block, Block) {
     let ptr_ok = emitter
         .builder()
         .ins()
         .icmp(IntCC::NotEqual, ic_jit_ptr, zero);
-    let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
+    let cached_func_id = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ic_entry,
+        DynCallIC::OFFSET_FUNC_ID,
+    );
+    let cached_generation = emitter.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        ic_entry,
+        DynCallIC::OFFSET_DISPATCH_GENERATION,
+    );
+    let dispatch_table = emitter.load_context_field(types::I64, JitContextField::JitFuncTable);
+    let func_id = emitter.builder().ins().uextend(types::I64, cached_func_id);
+    let dispatch_offset = emitter
+        .builder()
+        .ins()
+        .imul_imm_u(func_id, vo_runtime::jit_api::JitDispatchEntry::SIZE as i64);
+    let dispatch_entry = emitter
+        .builder()
+        .ins()
+        .iadd(dispatch_table, dispatch_offset);
+    let current_generation = emitter.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        dispatch_entry,
+        vo_runtime::jit_api::JitDispatchEntry::OFFSET_GENERATION,
+    );
+    let generation_ok =
+        emitter
+            .builder()
+            .ins()
+            .icmp(IntCC::Equal, cached_generation, current_generation);
+    let keyed = emitter.builder().ins().band(key_match, ptr_ok);
+    let ic_hit = emitter.builder().ins().band(keyed, generation_ok);
 
     let ic_hit_block = emitter.builder().create_block();
     let ic_miss_block = crate::compile_common::cold_block(emitter.builder());

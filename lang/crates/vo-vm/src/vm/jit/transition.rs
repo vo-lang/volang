@@ -157,6 +157,7 @@ mod tests {
         ctx.ctx.deopt_resume_pc = 1;
         ctx.ctx.deopt_osr_pc = u32::MAX;
         ctx.ctx.deopt_reason = vo_runtime::jit_api::JitDeoptReason::GuardFailed as u8;
+        ctx.ctx.deopt_tier = vo_runtime::jit_api::JitTier::Baseline as u8;
         let before = vm
             .jit
             .manager()

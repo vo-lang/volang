@@ -30,6 +30,31 @@ fn jit_result_discriminants_match_context_abi_constants() {
 }
 
 #[test]
+fn tier_dispatch_and_profile_layouts_are_self_consistent() {
+    assert_eq!(JitTier::from_u8(1), Some(JitTier::Baseline));
+    assert_eq!(JitTier::from_u8(2), Some(JitTier::Optimizing));
+    assert_eq!(JitTier::from_u8(0), None);
+    assert_eq!(
+        JitDispatchEntry::SIZE,
+        core::mem::size_of::<JitDispatchEntry>()
+    );
+    assert_eq!(
+        JitProfileCounters::SIZE,
+        core::mem::size_of::<JitProfileCounters>()
+    );
+    let profile = JitProfileCounters::default();
+    let base = core::ptr::from_ref(&profile).addr();
+    assert_eq!(
+        core::ptr::from_ref(&profile.completed).addr() - base,
+        JitProfileCounters::OFFSET_COMPLETED as usize
+    );
+    assert_eq!(
+        core::ptr::from_ref(&profile.budget_consumed).addr() - base,
+        JitProfileCounters::OFFSET_BUDGET_CONSUMED as usize
+    );
+}
+
+#[test]
 fn runtime_symbols_include_jit_control_helpers() {
     let symbols = get_runtime_symbols();
     assert!(symbols
@@ -250,6 +275,8 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 1,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -293,6 +320,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
     let flags = vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
     let mut dst = [0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
@@ -369,6 +397,8 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 1,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -412,6 +442,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
     let flags = u16::from(vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG) | 0x0100;
     let mut dst = [0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
@@ -499,6 +530,8 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 1,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -542,6 +575,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
     let flags = vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
     let slot0 = crate::objects::interface::pack_slot0(0, 0, ValueKind::String);
@@ -716,6 +750,8 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 1,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -759,6 +795,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
     let key = [11_u64];
     let mut ret = [0xaaaa_u64, 0xbbbb_u64];
@@ -831,6 +868,8 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 1,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -874,6 +913,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
     let mut iter = unsafe { crate::objects::map::iter_init(core::ptr::null_mut()) };
     let mut key = [0xaaaa_u64];
@@ -1029,6 +1069,8 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -1072,6 +1114,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
 
     let result = vo_gc_typed_write_barrier_by_meta(
@@ -1126,6 +1169,8 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -1169,6 +1214,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1346,6 +1392,8 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         callbacks: &JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args: &program_args,
         sentinel_errors: &mut sentinel_errors,
         output: &*output as *const dyn crate::output::OutputSink,
@@ -1389,6 +1437,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: crate::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     };
 
     let result = vo_call_extern(&mut ctx, 7, core::ptr::null(), 0, core::ptr::null_mut(), 0);

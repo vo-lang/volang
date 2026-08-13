@@ -140,7 +140,7 @@ impl DynamicCallLowering {
     ) -> (Value, Block, Block, Block) {
         let ic_jit_ptr = load_jit_ptr(emitter, self.ic().entry);
         let (ic_hit_block, ic_miss_block, merge_block) =
-            branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, zero);
+            branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, self.ic().entry, zero);
         (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block)
     }
 

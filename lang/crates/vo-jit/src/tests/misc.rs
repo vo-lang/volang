@@ -93,6 +93,110 @@ fn function_bridge_and_native_entry_have_distinct_argument_authorities() {
 }
 
 #[test]
+fn tiered_entries_freeze_training_profiles_after_tier_up() {
+    let mut module = VoModule::new("jit-tier-profile".into());
+    module.functions.push(make_func(
+        vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified tier profile module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create tiered JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind tier profile module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Baseline,
+    )
+    .expect("compile baseline profile probe");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile optimizing profile probe");
+
+    let baseline = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Baseline)
+            .expect("baseline entry")
+    };
+    let optimizing = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing entry")
+    };
+    let mut frame = [0_u64; 1];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+    ctx.optimizing_threshold = 1;
+
+    assert_eq!(
+        baseline(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    let profile = unsafe { &mut *ctx.jit_profile_table };
+    assert_eq!((profile.entries, profile.completed), (1, 0));
+    assert_eq!(profile.tier_up_state, 1);
+
+    profile.tier_up_state = 2;
+    assert_eq!(
+        optimizing(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    let profile = unsafe { &*ctx.jit_profile_table };
+    assert_eq!((profile.entries, profile.completed), (1, 0));
+    assert_eq!(profile.tier_up_state, 2);
+}
+
+extern "C" fn reject_tier_up(_ctx: *mut JitContext, _func_id: u32) -> JitResult {
+    JitResult::JitError
+}
+
+#[test]
+fn tier_up_failure_returns_before_local_ssa_state_is_initialized() {
+    let mut module = VoModule::new("jit-tier-up-rejection".into());
+    module.functions.push(make_func(
+        vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified tier-up rejection module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create tiered JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind tier-up rejection module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Baseline,
+    )
+    .expect("compile baseline tier-up rejection probe");
+
+    let baseline = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Baseline)
+            .expect("baseline entry")
+    };
+    let mut frame = [0_u64; 1];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    parts.callbacks.tier_up_fn = Some(reject_tier_up);
+    let mut ctx = parts.context(&module, &mut frame);
+    ctx.optimizing_threshold = 1;
+
+    assert_eq!(
+        baseline(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::JitError
+    );
+    assert_eq!(unsafe { (*ctx.jit_profile_table).tier_up_state }, 1);
+}
+
+#[test]
 fn backend_allocation_failure_is_a_resource_rejection() {
     let error = JitError::Module(cranelift_module::ModuleError::Allocation {
         err: std::io::Error::other("exhausted"),

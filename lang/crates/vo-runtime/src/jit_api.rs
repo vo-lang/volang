@@ -126,18 +126,51 @@ pub type JitPushResumePointFn = extern "C" fn(
     ret_slots: u32,
 ) -> JitResult;
 
+/// Native compilation tier carried across the runtime/JIT boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum JitTier {
+    Baseline = 1,
+    Optimizing = 2,
+}
+
+impl JitTier {
+    pub const COUNT: usize = 2;
+
+    #[inline]
+    pub const fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Baseline),
+            2 => Some(Self::Optimizing),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn cache_index(self) -> usize {
+        self as usize - 1
+    }
+}
+
 /// Published entries have separate external and internal ABIs. The bridge is
 /// called by the VM; generated code and dynamic inline caches use `native`.
+/// `generation` changes on every publication or invalidation, allowing an IC
+/// to reject a retired raw code pointer without scanning the cache table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct JitDispatchEntry {
     pub bridge: *const u8,
     pub native: *const u8,
+    pub generation: u64,
+    pub tier: u8,
+    pub reserved: [u8; 7],
 }
 
 impl JitDispatchEntry {
     pub const OFFSET_BRIDGE: i32 = core::mem::offset_of!(Self, bridge) as i32;
     pub const OFFSET_NATIVE: i32 = core::mem::offset_of!(Self, native) as i32;
+    pub const OFFSET_GENERATION: i32 = core::mem::offset_of!(Self, generation) as i32;
+    pub const OFFSET_TIER: i32 = core::mem::offset_of!(Self, tier) as i32;
     pub const SIZE: usize = core::mem::size_of::<Self>();
 
     #[inline]
@@ -145,6 +178,20 @@ impl JitDispatchEntry {
         Self {
             bridge: core::ptr::null(),
             native: core::ptr::null(),
+            generation: 0,
+            tier: 0,
+            reserved: [0; 7],
+        }
+    }
+
+    #[inline]
+    pub const fn unavailable_at(generation: u64) -> Self {
+        Self {
+            bridge: core::ptr::null(),
+            native: core::ptr::null(),
+            generation,
+            tier: 0,
+            reserved: [0; 7],
         }
     }
 
@@ -152,10 +199,40 @@ impl JitDispatchEntry {
     pub const fn is_available(self) -> bool {
         !self.bridge.is_null() && !self.native.is_null()
     }
+
+    #[inline]
+    pub const fn published_tier(self) -> Option<JitTier> {
+        JitTier::from_u8(self.tier)
+    }
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(JitDispatchEntry::SIZE == 16);
+const _: () = assert!(JitDispatchEntry::SIZE == 32);
+
+/// Mutable per-function profile owned by one Island-local JIT manager.
+/// Baseline prologues update `entries` only during the tier-training window,
+/// including nested native calls. VM-boundary feedback owns the remaining
+/// aggregate counters. Optimizing code carries no profiling instructions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct JitProfileCounters {
+    pub entries: u64,
+    pub completed: u64,
+    pub budget_consumed: u64,
+    pub deopts: u64,
+    /// 0=eligible baseline, 1=requested, 2=optimizing, 3=rejected/disabled.
+    pub tier_up_state: u64,
+}
+
+impl JitProfileCounters {
+    pub const OFFSET_ENTRIES: i32 = core::mem::offset_of!(Self, entries) as i32;
+    pub const OFFSET_COMPLETED: i32 = core::mem::offset_of!(Self, completed) as i32;
+    pub const OFFSET_BUDGET_CONSUMED: i32 = core::mem::offset_of!(Self, budget_consumed) as i32;
+    pub const OFFSET_TIER_UP_STATE: i32 = core::mem::offset_of!(Self, tier_up_state) as i32;
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+const _: () = assert!(JitProfileCounters::SIZE == 40);
 
 /// Result of preparing a closure or interface call.
 /// Note: SIZE must match core::mem::size_of::<PreparedCall>() (checked below).
@@ -179,6 +256,8 @@ pub struct PreparedCall {
     pub func_id: u32,
     /// Non-zero when the selected native target may reach a GC safepoint.
     pub jit_may_gc: u32,
+    /// Dispatch generation paired with `ic_jit_func_ptr`.
+    pub dispatch_generation: u64,
 }
 
 impl PreparedCall {
@@ -191,6 +270,8 @@ impl PreparedCall {
         core::mem::offset_of!(PreparedCall, callee_local_slots) as i32;
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(PreparedCall, func_id) as i32;
     pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(PreparedCall, jit_may_gc) as i32;
+    pub const OFFSET_DISPATCH_GENERATION: i32 =
+        core::mem::offset_of!(PreparedCall, dispatch_generation) as i32;
     pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
 }
 
@@ -203,12 +284,13 @@ impl Default for PreparedCall {
             callee_local_slots: 0,
             func_id: 0,
             jit_may_gc: 0,
+            dispatch_generation: 0,
         }
     }
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(PreparedCall::SIZE == 40);
+const _: () = assert!(PreparedCall::SIZE == 48);
 
 /// Function pointer type for preparing a closure call.
 /// Writes result to `out` pointer instead of returning struct (avoids ABI mismatch
@@ -249,6 +331,7 @@ pub type JitCallExternFn = extern "C" fn(
 ) -> JitResult;
 
 pub type JitGcSafepointFn = extern "C" fn(ctx: *mut JitContext) -> JitResult;
+pub type JitTierUpFn = extern "C" fn(ctx: *mut JitContext, func_id: u32) -> JitResult;
 
 /// Immutable callback capabilities shared by every native invocation in one VM.
 ///
@@ -328,6 +411,7 @@ pub struct JitContextCallbacks {
     >,
     pub select_exec_fn: Option<extern "C" fn(ctx: *mut JitContext, result_reg: u32) -> JitResult>,
     pub gc_safepoint_fn: Option<JitGcSafepointFn>,
+    pub tier_up_fn: Option<JitTierUpFn>,
 }
 
 impl JitContextCallbacks {
@@ -348,6 +432,7 @@ impl JitContextCallbacks {
         select_recv_fn: None,
         select_exec_fn: None,
         gc_safepoint_fn: None,
+        tier_up_fn: None,
     };
 }
 
@@ -368,6 +453,8 @@ pub struct JitNativeFrame {
     pub func_id: u32,
     pub osr_pc: u32,
     pub artifact_kind: u32,
+    /// `JitTier` for function artifacts; zero for tier-independent OSR code.
+    pub tier: u32,
     /// Runtime-selected safepoint identifier. `u32::MAX` means inactive.
     pub safepoint_id: u32,
 }
@@ -479,6 +566,12 @@ pub struct JitContext {
 
     /// Number of functions (length of jit_func_table).
     pub jit_func_count: u32,
+
+    /// Island-local mutable execution profiles, indexed by function id.
+    pub jit_profile_table: *mut JitProfileCounters,
+
+    /// Baseline entry count that requests optimizing compilation.
+    pub optimizing_threshold: u64,
 
     /// Pointer to program arguments.
     pub program_args: *const Vec<Vec<u8>>,
@@ -633,6 +726,7 @@ pub struct JitContext {
     pub deopt_resume_pc: u32,
     pub deopt_osr_pc: u32,
     pub deopt_reason: u8,
+    pub deopt_tier: u8,
 }
 
 #[inline]
@@ -756,6 +850,8 @@ jit_context_raw_fields!(
     (RuntimeTrapPc, runtime_trap_pc),
     (CurrentFuncId, current_func_id),
     (JitFuncTable, jit_func_table),
+    (JitProfileTable, jit_profile_table),
+    (OptimizingThreshold, optimizing_threshold),
     (CallResumePc, call_resume_pc),
     (CallKind, call_kind),
     (LoopExitPc, loop_exit_pc),
@@ -787,6 +883,7 @@ jit_context_raw_fields!(
     (DeoptResumePc, deopt_resume_pc),
     (DeoptOsrPc, deopt_osr_pc),
     (DeoptReason, deopt_reason),
+    (DeoptTier, deopt_tier),
 );
 
 // =============================================================================
@@ -867,6 +964,7 @@ pub const JIT_CALLBACK_CALL_EXTERN: u64 = 14;
 pub const JIT_CALLBACK_QUEUE_LEN: u64 = 15;
 pub const JIT_CALLBACK_QUEUE_CAP: u64 = 16;
 pub const JIT_CALLBACK_GC_SAFEPOINT: u64 = 17;
+pub const JIT_CALLBACK_TIER_UP: u64 = 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitContextDependencyKind {
@@ -893,6 +991,7 @@ pub enum JitContextDependencyKind {
     PrepareIfaceCallFn,
     InlineCacheTable,
     GcSafepointFn,
+    TierUpFn,
 }
 
 impl JitContextDependencyKind {
@@ -921,6 +1020,7 @@ impl JitContextDependencyKind {
             Self::PrepareIfaceCallFn => ctx.prepare_iface_call_fn.is_none(),
             Self::InlineCacheTable => ctx.ic_table.is_null(),
             Self::GcSafepointFn => ctx.gc_safepoint_fn.is_none(),
+            Self::TierUpFn => ctx.tier_up_fn.is_none(),
         }
     }
 }
@@ -1343,6 +1443,17 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
             may_schedule: true,
             observes_frame: true,
         },
+        JitCallbackAbiField {
+            kind: Kind::TierUpFn,
+            name: "tier_up_fn",
+            params: &[T::Ptr, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_TIER_UP),
+            return_policy: Ret::JitResult,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
     ]
 }
 
@@ -1470,6 +1581,18 @@ pub extern "C" fn vo_jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
     };
     match ctx_ref.gc_safepoint_fn {
         Some(callback) => callback(ctx),
+        None => JitResult::Ok,
+    }
+}
+
+/// Compile and publish an optimizing version at a baseline-entry safe point.
+/// Standalone JIT harnesses omit the VM callback and continue in baseline.
+pub extern "C" fn vo_jit_tier_up(ctx: *mut JitContext, func_id: u32) -> JitResult {
+    let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
+        return JitResult::JitError;
+    };
+    match ctx_ref.tier_up_fn {
+        Some(callback) => callback(ctx, func_id),
         None => JitResult::Ok,
     }
 }
@@ -3910,6 +4033,7 @@ unsafe fn materialize_iface_assert_success(
 pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     &[
         ("vo_jit_gc_safepoint", vo_jit_gc_safepoint as *const u8),
+        ("vo_jit_tier_up", vo_jit_tier_up as *const u8),
         ("vo_gc_alloc", vo_gc_alloc as *const u8),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         (
@@ -3987,6 +4111,7 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
 pub fn runtime_symbol_names() -> &'static [&'static str] {
     &[
         "vo_jit_gc_safepoint",
+        "vo_jit_tier_up",
         "vo_gc_alloc",
         "vo_gc_write_barrier",
         "vo_gc_typed_write_barrier_by_meta",
@@ -4064,6 +4189,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             may_gc: false,
             may_schedule: false,
             observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_jit_tier_up",
+            params: &[T::Ptr, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_gc_alloc",

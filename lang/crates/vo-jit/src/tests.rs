@@ -95,6 +95,7 @@ struct JitContextParts {
     program_args: Vec<Vec<u8>>,
     sentinel_errors: vo_runtime::ffi::SentinelErrorCache,
     empty_func_table: [vo_runtime::jit_api::JitDispatchEntry; 1],
+    profiles: Vec<vo_runtime::jit_api::JitProfileCounters>,
     ic_table: Vec<DynCallIC>,
     callbacks: JitContextCallbacks,
     loaded_module: Option<Box<vo_runtime::bytecode::LoadedModule>>,
@@ -111,6 +112,7 @@ impl JitContextParts {
             program_args: Vec::new(),
             sentinel_errors: vo_runtime::ffi::SentinelErrorCache::new(),
             empty_func_table: [vo_runtime::jit_api::JitDispatchEntry::unavailable()],
+            profiles: Vec::new(),
             ic_table: Vec::new(),
             callbacks: JitContextCallbacks::EMPTY,
             loaded_module: None,
@@ -130,6 +132,8 @@ impl JitContextParts {
         if self.ic_table.len() != callsite_count {
             self.ic_table = alloc_ic_table(callsite_count);
         }
+        self.profiles
+            .resize(module.functions.len().max(1), Default::default());
         JitContext {
             gc: ptr::null_mut(),
             globals: ptr::null_mut(),
@@ -150,6 +154,8 @@ impl JitContextParts {
             callbacks: &self.callbacks,
             jit_func_table: self.empty_func_table.as_ptr(),
             jit_func_count: 0,
+            jit_profile_table: self.profiles.as_mut_ptr(),
+            optimizing_threshold: u64::MAX,
             program_args: &self.program_args,
             sentinel_errors: &mut self.sentinel_errors,
             output: &*self.output as *const dyn OutputSink,
@@ -193,6 +199,7 @@ impl JitContextParts {
             deopt_resume_pc: u32::MAX,
             deopt_osr_pc: u32::MAX,
             deopt_reason: vo_runtime::jit_api::JitDeoptReason::None as u8,
+            deopt_tier: 0,
         }
     }
 }

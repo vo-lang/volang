@@ -186,21 +186,12 @@ fn invoke_jit_and_handle(
     fiber.execution_budget = budget_after;
 
     if let (Some(func_id), Some(jit_mgr)) = (entry_func_id, vm.jit.manager_mut()) {
-        let disabled =
-            match jit_mgr.record_function_outcome(func_id, result, budget_before, budget_after) {
-                Ok(disabled) => disabled,
-                Err(err) => {
-                    return ExecResult::JitError(format!(
-                        "JIT execution feedback failed for function {func_id}: {err}"
-                    ));
-                }
-            };
-        if disabled {
-            for entry in &mut vm.state.dynamic_call_ic {
-                if entry.func_id == func_id {
-                    entry.jit_func_ptr = 0;
-                }
-            }
+        if let Err(err) =
+            jit_mgr.record_function_outcome(func_id, result, budget_before, budget_after)
+        {
+            return ExecResult::JitError(format!(
+                "JIT execution feedback failed for function {func_id}: {err}"
+            ));
         }
     }
 

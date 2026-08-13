@@ -92,6 +92,7 @@ fn add_named_receiver_method(
 fn shared_iface_ic_keeps_interpreter_and_jit_views_coherent() {
     let mut entry = vo_runtime::DynCallIC {
         jit_func_ptr: 0x1234,
+        dispatch_generation: 9,
         ..Default::default()
     };
     let first = CallIfaceTarget {
@@ -105,15 +106,18 @@ fn shared_iface_ic_keeps_interpreter_and_jit_views_coherent() {
         entry.jit_func_ptr, 0,
         "a different target retires stale native code"
     );
+    assert_eq!(entry.dispatch_generation, 0);
     assert_eq!(probe_call_iface_ic(&entry, 0xaaaa).unwrap().func_id, 7);
 
     entry.jit_func_ptr = 0x5678;
+    entry.dispatch_generation = 11;
     entry.valid = 0;
     fill_call_iface_ic(&mut entry, 0xaaaa, first);
     assert_eq!(
         entry.jit_func_ptr, 0x5678,
         "interpreter validation preserves JIT code for the same target"
     );
+    assert_eq!(entry.dispatch_generation, 11);
 
     let second = CallIfaceTarget {
         func_id: 8,
@@ -122,6 +126,7 @@ fn shared_iface_ic_keeps_interpreter_and_jit_views_coherent() {
     };
     fill_call_iface_ic(&mut entry, 0xbbbb, second);
     assert_eq!(entry.jit_func_ptr, 0);
+    assert_eq!(entry.dispatch_generation, 0);
     assert!(probe_call_iface_ic(&entry, 0xaaaa).is_none());
     let hit = probe_call_iface_ic(&entry, 0xbbbb).unwrap();
     assert_eq!((hit.func_id, hit.local_slots, hit.gc_scan_slots), (8, 9, 3));

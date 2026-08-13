@@ -34,6 +34,7 @@ pub struct FunctionCompiler<'a> {
     /// ctx.fiber_sp at function entry (i32). Reused by all call sites as old_fiber_sp.
     saved_fiber_sp: Value,
     pending_select_cases: Vec<SelectSyncCase>,
+    tier: vo_runtime::jit_api::JitTier,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -47,6 +48,7 @@ impl<'a> FunctionCompiler<'a> {
         entry_eligibility: &'a [crate::JitFrameEntryEligibility],
         mut helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
+        tier: vo_runtime::jit_api::JitTier,
     ) -> Self {
         let copy_frame_slots = helpers
             .resolve(HelperKind::copy_frame_slots, func)
@@ -81,6 +83,7 @@ impl<'a> FunctionCompiler<'a> {
             saved_caller_bp: Value::from_u32(0),
             saved_fiber_sp: Value::from_u32(0),
             pending_select_cases: Vec::new(),
+            tier,
         }
     }
 
@@ -286,6 +289,89 @@ impl<'a> FunctionCompiler<'a> {
         let params = self.builder.block_params(self.core.entry_block).to_vec();
         let args_ptr = params[1];
         let _ret = params[2];
+        if self.tier == vo_runtime::jit_api::JitTier::Baseline {
+            let profile_table = self.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                params[0],
+                JitContextField::JitProfileTable.offset(),
+            );
+            let profile_offset =
+                i64::from(self.core.func_id) * vo_runtime::jit_api::JitProfileCounters::SIZE as i64;
+            let profile = self.builder.ins().iadd_imm_u(profile_table, profile_offset);
+            let tier_up_state = self.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                profile,
+                vo_runtime::jit_api::JitProfileCounters::OFFSET_TIER_UP_STATE,
+            );
+            let eligible = self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::Equal, tier_up_state, 0);
+            let profile_block = self.builder.create_block();
+            let continue_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(eligible, profile_block, &[], continue_block, &[]);
+
+            self.builder.switch_to_block(profile_block);
+            self.builder.seal_block(profile_block);
+            let entries = self.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                profile,
+                vo_runtime::jit_api::JitProfileCounters::OFFSET_ENTRIES,
+            );
+            let entries = self.builder.ins().iadd_imm_u(entries, 1);
+            self.builder.ins().store(
+                MemFlags::trusted(),
+                entries,
+                profile,
+                vo_runtime::jit_api::JitProfileCounters::OFFSET_ENTRIES,
+            );
+            let threshold = self.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                params[0],
+                JitContextField::OptimizingThreshold.offset(),
+            );
+            let hot =
+                self.builder
+                    .ins()
+                    .icmp(IntCC::UnsignedGreaterThanOrEqual, entries, threshold);
+            let request_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(hot, request_block, &[], continue_block, &[]);
+            self.builder.switch_to_block(request_block);
+            self.builder.seal_block(request_block);
+            let func_id = self
+                .builder
+                .ins()
+                .iconst(types::I32, i64::from(self.core.func_id));
+            let requested = self.builder.ins().iconst(types::I64, 1);
+            self.builder.ins().store(
+                MemFlags::trusted(),
+                requested,
+                profile,
+                vo_runtime::jit_api::JitProfileCounters::OFFSET_TIER_UP_STATE,
+            );
+            let tier_up = self
+                .core
+                .helpers
+                .resolve(HelperKind::tier_up, self.builder.func);
+            // Tier-up runs before the function's local SSA state exists. A
+            // strict callback failure can therefore return directly without
+            // spilling locals; the VM frame remains the source of truth.
+            let call =
+                crate::translator::emit_runtime_helper_call(self, tier_up, &[params[0], func_id]);
+            let result = self.builder.inst_results(call)[0];
+            crate::call_helpers::check_call_result(self, result, false);
+            self.builder.ins().jump(continue_block, &[]);
+            self.builder.switch_to_block(continue_block);
+            self.builder.seal_block(continue_block);
+        }
         let current_func_id = self
             .builder
             .ins()

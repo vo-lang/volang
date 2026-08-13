@@ -23,6 +23,12 @@ pub(super) fn handle_deopt_transition(
     if reason == vo_runtime::jit_api::JitDeoptReason::None {
         return JitBridgeTransition::JitError("JIT deopt omitted its reason".to_string());
     }
+    let Some(tier) = vo_runtime::jit_api::JitTier::from_u8(ctx.ctx.deopt_tier) else {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt used unknown tier {}",
+            ctx.ctx.deopt_tier
+        ));
+    };
     let Some(state) = vm
         .jit
         .manager()
@@ -30,6 +36,7 @@ pub(super) fn handle_deopt_transition(
             manager.deopt_state(
                 ctx.ctx.deopt_func_id,
                 ctx.ctx.deopt_osr_pc,
+                tier,
                 ctx.ctx.deopt_state_id,
             )
         })
@@ -120,6 +127,13 @@ pub(super) fn handle_deopt_transition(
         }
     }
     side_exit::record(vm, JitSideExitReason::Deopt);
+    if let Some(manager) = vm.jit.manager_mut() {
+        if let Err(error) = manager.record_deopt(ctx.ctx.deopt_func_id, tier) {
+            return JitBridgeTransition::JitError(format!(
+                "JIT deopt version retirement failed: {error}"
+            ));
+        }
+    }
     JitBridgeTransition::FrameChanged
 }
 

@@ -227,6 +227,8 @@ fn test_context<'a>(
         callbacks: &vo_runtime::jit_api::JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args,
         sentinel_errors,
         output: output as *const dyn vo_runtime::output::OutputSink,
@@ -270,6 +272,7 @@ fn test_context<'a>(
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: vo_runtime::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     }
 }
 

@@ -600,7 +600,7 @@ fn compile_rejects_function_scope_change_instead_of_caching_foreign_function_044
             "JitCompiler must reject caller-supplied FunctionDef values that are not the module func_id owner"
         );
     assert!(
-        !jit.cache.contains(0),
+        !jit.cache.contains_for_tier(0, JitTier::Baseline),
         "rejected foreign FunctionDef must not poison the func_id cache"
     );
 }

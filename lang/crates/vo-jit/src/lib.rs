@@ -31,6 +31,7 @@ pub use native_stack_map::{
     DeoptFrameState, DeoptValue, DeoptValueKind, DeoptValueLocation, JitArtifactMetadata,
     NativeRootKind, NativeStackMap, NativeStackRoot,
 };
+pub use vo_runtime::jit_api::JitTier;
 
 use func_compiler::FunctionCompiler;
 use loop_compiler::{CompiledLoop, LoopCompiler};
@@ -342,14 +343,14 @@ impl JitCompileEnvScope {
 // =============================================================================
 
 struct JitCache {
-    functions: Vec<Option<CompiledFunction>>,
+    functions: Vec<[Option<CompiledFunction>; JitTier::COUNT]>,
     loops: HashMap<(u32, usize), CompiledLoop>,
     analyses: Vec<Option<Arc<analysis::FunctionAnalysis>>>,
     analysis_access_ticks: Vec<u64>,
     analysis_tick: u64,
     analysis_eviction_count: usize,
     rejected_analysis_count: usize,
-    rejected_functions: Vec<Option<CodeMemoryRejection>>,
+    rejected_functions: Vec<[Option<CodeMemoryRejection>; JitTier::COUNT]>,
     rejected_loops: HashMap<(u32, usize), (LoopInfo, CodeMemoryRejection)>,
     function_bytes: usize,
     loop_bytes: usize,
@@ -393,38 +394,50 @@ impl JitCache {
     }
     fn bind_function_count(&mut self, count: usize) {
         if self.functions.is_empty() {
-            self.functions.resize_with(count, || None);
+            self.functions
+                .resize_with(count, || std::array::from_fn(|_| None));
             self.analyses.resize_with(count, || None);
             self.analysis_access_ticks.resize(count, 0);
-            self.rejected_functions.resize_with(count, || None);
+            self.rejected_functions
+                .resize_with(count, || std::array::from_fn(|_| None));
         }
     }
-    fn insert(&mut self, func_id: u32, func: CompiledFunction) {
-        self.functions[func_id as usize] = Some(func);
+    fn insert(&mut self, func_id: u32, tier: JitTier, func: CompiledFunction) {
+        self.functions[func_id as usize][tier.cache_index()] = Some(func);
     }
-    fn contains(&self, func_id: u32) -> bool {
+    fn contains_for_tier(&self, func_id: u32, tier: JitTier) -> bool {
         self.functions
             .get(func_id as usize)
-            .is_some_and(Option::is_some)
+            .is_some_and(|versions| versions[tier.cache_index()].is_some())
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
     /// `self` must remain alive, unmoved through destruction, and not be dropped
     /// until every invocation has returned and every copy of the pointer has
     /// been permanently retired.
-    unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
+    unsafe fn get_func_ptr_for_tier(&self, func_id: u32, tier: JitTier) -> Option<JitFunc> {
         self.functions
             .get(func_id as usize)
-            .and_then(Option::as_ref)
+            .and_then(|versions| versions[tier.cache_index()].as_ref())
             .map(|f| std::mem::transmute(f.bridge_code_ptr))
+    }
+    unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
+        self.get_func_ptr_for_tier(func_id, JitTier::Baseline)
     }
     /// # Safety
     /// The returned function pointer must only be called with the native ABI.
-    unsafe fn get_native_func_ptr(&self, func_id: u32) -> Option<NativeJitFunc> {
+    unsafe fn get_native_func_ptr_for_tier(
+        &self,
+        func_id: u32,
+        tier: JitTier,
+    ) -> Option<NativeJitFunc> {
         self.functions
             .get(func_id as usize)
-            .and_then(Option::as_ref)
+            .and_then(|versions| versions[tier.cache_index()].as_ref())
             .map(|f| std::mem::transmute(f.native_code_ptr))
+    }
+    unsafe fn get_native_func_ptr(&self, func_id: u32) -> Option<NativeJitFunc> {
+        self.get_native_func_ptr_for_tier(func_id, JitTier::Baseline)
     }
     fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
         self.loops.get(&(func_id, begin_pc))
@@ -561,14 +574,19 @@ impl JitCache {
         self.loop_committed_bytes = self.loop_committed_bytes.saturating_add(committed_bytes);
         self.metadata_bytes = self.metadata_bytes.saturating_add(metadata_bytes);
     }
-    fn rejected_function(&self, func_id: u32) -> Option<JitError> {
+    fn rejected_function_for_tier(&self, func_id: u32, tier: JitTier) -> Option<JitError> {
         self.rejected_functions
             .get(func_id as usize)
-            .and_then(Option::as_ref)
+            .and_then(|versions| versions[tier.cache_index()].as_ref())
             .map(|rejection| rejection.to_error(self.code_memory_limit_bytes))
     }
-    fn reject_function(&mut self, func_id: u32, rejection: CodeMemoryRejection) {
-        let retained = &mut self.rejected_functions[func_id as usize];
+    fn reject_function_for_tier(
+        &mut self,
+        func_id: u32,
+        tier: JitTier,
+        rejection: CodeMemoryRejection,
+    ) {
+        let retained = &mut self.rejected_functions[func_id as usize][tier.cache_index()];
         if retained.is_none() {
             *retained = Some(rejection);
         }
@@ -595,7 +613,11 @@ impl JitCache {
     }
     fn code_memory_stats(&self) -> JitCodeMemoryStats {
         JitCodeMemoryStats {
-            function_count: self.functions.iter().flatten().count(),
+            function_count: self
+                .functions
+                .iter()
+                .map(|versions| versions.iter().flatten().count())
+                .sum(),
             loop_count: self.loops.len(),
             function_bytes: self.function_bytes,
             loop_bytes: self.loop_bytes,
@@ -606,8 +628,8 @@ impl JitCache {
             rejected_artifact_count: self
                 .rejected_functions
                 .iter()
-                .flatten()
-                .count()
+                .map(|versions| versions.iter().flatten().count())
+                .sum::<usize>()
                 .saturating_add(self.rejected_loops.len()),
         }
     }
@@ -634,11 +656,18 @@ impl JitCache {
             .get(&(func_id, begin_pc))
             .map(|l| std::mem::transmute(l.code_ptr))
     }
-    fn get_function_metadata(&self, func_id: u32) -> Option<&JitArtifactMetadata> {
+    fn get_function_metadata_for_tier(
+        &self,
+        func_id: u32,
+        tier: JitTier,
+    ) -> Option<&JitArtifactMetadata> {
         self.functions
             .get(func_id as usize)
-            .and_then(Option::as_ref)
+            .and_then(|versions| versions[tier.cache_index()].as_ref())
             .map(|function| function.metadata.as_ref())
+    }
+    fn get_function_metadata(&self, func_id: u32) -> Option<&JitArtifactMetadata> {
+        self.get_function_metadata_for_tier(func_id, JitTier::Baseline)
     }
     fn get_loop_metadata(&self, func_id: u32, begin_pc: usize) -> Option<&JitArtifactMetadata> {
         self.loops
@@ -1047,20 +1076,22 @@ impl JitCompiler {
         &mut self,
         native_func_id: cranelift_module::FuncId,
         func_id: u32,
+        tier: JitTier,
         param_slots: usize,
     ) -> Result<*const u8, JitError> {
         self.ctx.clear();
         let target_config = self.module.target_config();
         let pointer_type = target_config.pointer_type();
         let signature = abi::bridge_signature(target_config.default_call_conv, pointer_type);
-        let bridge_name = format!("vo_jit_bridge_{func_id}");
+        let bridge_name = format!("vo_jit_bridge_{}_{}", func_id, tier as u8);
         let bridge_id = self.module.declare_function(
             &bridge_name,
             cranelift_module::Linkage::Local,
             &signature,
         )?;
         self.ctx.func.signature = signature;
-        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(1, func_id);
+        self.ctx.func.name =
+            cranelift_codegen::ir::UserFuncName::user(0x100 + u32::from(tier as u8), func_id);
         let native_ref = self
             .module
             .declare_func_in_func(native_func_id, &mut self.ctx.func);
@@ -1189,6 +1220,16 @@ impl JitCompiler {
 
     /// Compile a function from the retained, commonly verified module image.
     pub fn compile_loaded(&mut self, func_id: u32, env: JitCompileEnv<'_>) -> Result<(), JitError> {
+        self.compile_loaded_tier(func_id, env, JitTier::Baseline)
+    }
+
+    /// Compile one function tier from the retained verified module image.
+    pub fn compile_loaded_tier(
+        &mut self,
+        func_id: u32,
+        env: JitCompileEnv<'_>,
+        tier: JitTier,
+    ) -> Result<(), JitError> {
         let loaded = Arc::clone(
             self.loaded_module
                 .as_ref()
@@ -1199,28 +1240,30 @@ impl JitCompiler {
             .functions
             .get(func_id as usize)
             .ok_or(JitError::FunctionNotFound(func_id))?;
-        self.compile_bound(func_id, func, vo_module, env)
+        self.compile_bound_tier(func_id, func, vo_module, env, tier)
     }
 
-    fn compile_bound(
+    fn compile_bound_tier(
         &mut self,
         func_id: u32,
         func: &FunctionDef,
         vo_module: &VoModule,
         env: JitCompileEnv<'_>,
+        tier: JitTier,
     ) -> Result<(), JitError> {
         self.verify_env_once(env)?;
         let entry_eligibility = self.entry_eligibility(vo_module, env);
 
-        if self.cache.contains(func_id) {
+        if self.cache.contains_for_tier(func_id, tier) {
             return Ok(());
         }
-        if let Some(error) = self.cache.rejected_function(func_id) {
+        if let Some(error) = self.cache.rejected_function_for_tier(func_id, tier) {
             return Err(error);
         }
         if let Err(error) = self.cache.ensure_artifact_slot() {
             if let Some(rejection) = CodeMemoryRejection::from_error(&error) {
-                self.cache.reject_function(func_id, rejection);
+                self.cache
+                    .reject_function_for_tier(func_id, tier, rejection);
             }
             return Err(error);
         }
@@ -1242,7 +1285,7 @@ impl JitCompiler {
         let sig = abi::native_signature(target_config.default_call_conv, ptr_type);
 
         self.ctx.func.signature = sig;
-        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0, func_id);
+        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(tier as u32, func_id);
 
         let helpers = HelperRefs::new(&mut self.module, self.helper_funcs);
         let compile_result = {
@@ -1256,6 +1299,7 @@ impl JitCompiler {
                 &entry_eligibility,
                 helpers,
                 &analysis,
+                tier,
             );
             compiler.compile(target_config)
         };
@@ -1267,13 +1311,14 @@ impl JitCompiler {
                 func_id,
                 vo_runtime::jit_api::JitNativeFrame::ARTIFACT_FUNCTION,
                 u32::MAX,
+                tier as u32,
             );
             self.finish_translation(native_frame_result)?;
         }
         let frame_budget_result = self.verify_native_frame_budget();
         self.finish_translation(frame_budget_result)?;
 
-        let func_name = format!("vo_jit_{}", func_id);
+        let func_name = format!("vo_jit_{}_{}", func_id, tier as u8);
         let func_id_cl = self.module.declare_function(
             &func_name,
             cranelift_module::Linkage::Local,
@@ -1287,25 +1332,26 @@ impl JitCompiler {
 
         let finalize_result = self.finalize_function(
             func_id_cl,
-            &format!("func_{} {}", func_id, func.name),
+            &format!("func_{}_tier{} {}", func_id, tier as u8, func.name),
             JitArtifactKind::Function,
             analysis.ir(),
             0..func.code.len(),
         );
         if let Err(error) = &finalize_result {
             if let Some(rejection) = CodeMemoryRejection::from_error(error) {
-                self.cache.reject_function(func_id, rejection);
+                self.cache
+                    .reject_function_for_tier(func_id, tier, rejection);
             }
         }
         let (native_code_ptr, metadata) = finalize_result?;
         let bridge_code_ptr =
-            self.finalize_function_bridge(func_id_cl, func_id, func.param_slots as usize)?;
+            self.finalize_function_bridge(func_id_cl, func_id, tier, func.param_slots as usize)?;
         let compiled = CompiledFunction {
             bridge_code_ptr,
             native_code_ptr,
             metadata,
         };
-        self.cache.insert(func_id, compiled);
+        self.cache.insert(func_id, tier, compiled);
         Ok(())
     }
 
@@ -1320,7 +1366,7 @@ impl JitCompiler {
     ) -> Result<(), JitError> {
         self.verify_module_once(vo_module)?;
         self.verify_function_scope(func_id, func, vo_module)?;
-        self.compile_bound(func_id, func, vo_module, env)
+        self.compile_bound_tier(func_id, func, vo_module, env, JitTier::Baseline)
     }
 
     /// Compile an OSR loop from the retained, commonly verified module image.
@@ -1446,6 +1492,7 @@ impl JitCompiler {
                 func_id,
                 vo_runtime::jit_api::JitNativeFrame::ARTIFACT_OSR_LOOP,
                 u32::try_from(begin_pc).unwrap_or(u32::MAX),
+                0,
             );
             self.finish_translation(native_frame_result)?;
         }
@@ -1513,7 +1560,18 @@ impl JitCompiler {
         self.cache
             .functions
             .get(func_id as usize)
-            .and_then(Option::as_ref)
+            .and_then(|versions| versions[JitTier::Baseline.cache_index()].as_ref())
+            .map(|function| Arc::clone(&function.metadata))
+    }
+    pub fn function_metadata_handle_for_tier(
+        &self,
+        func_id: u32,
+        tier: JitTier,
+    ) -> Option<Arc<JitArtifactMetadata>> {
+        self.cache
+            .functions
+            .get(func_id as usize)
+            .and_then(|versions| versions[tier.cache_index()].as_ref())
             .map(|function| Arc::clone(&function.metadata))
     }
     pub fn loop_metadata(&self, func_id: u32, begin_pc: usize) -> Option<&JitArtifactMetadata> {
@@ -1535,9 +1593,23 @@ impl JitCompiler {
         self.cache.get_func_ptr(func_id)
     }
     /// # Safety
+    /// The returned function pointer must only be called with the bridge ABI.
+    pub unsafe fn get_func_ptr_for_tier(&self, func_id: u32, tier: JitTier) -> Option<JitFunc> {
+        self.cache.get_func_ptr_for_tier(func_id, tier)
+    }
+    /// # Safety
     /// The returned function pointer must only be called with the native ABI.
     pub unsafe fn get_native_func_ptr(&self, func_id: u32) -> Option<NativeJitFunc> {
         self.cache.get_native_func_ptr(func_id)
+    }
+    /// # Safety
+    /// The returned function pointer must only be called with the native ABI.
+    pub unsafe fn get_native_func_ptr_for_tier(
+        &self,
+        func_id: u32,
+        tier: JitTier,
+    ) -> Option<NativeJitFunc> {
+        self.cache.get_native_func_ptr_for_tier(func_id, tier)
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.

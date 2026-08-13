@@ -139,6 +139,8 @@ fn test_context(
         callbacks: &vo_runtime::jit_api::JitContextCallbacks::EMPTY,
         jit_func_table: core::ptr::null(),
         jit_func_count: 0,
+        jit_profile_table: core::ptr::null_mut(),
+        optimizing_threshold: u64::MAX,
         program_args,
         sentinel_errors,
         output: output as *const dyn vo_runtime::output::OutputSink,
@@ -182,6 +184,7 @@ fn test_context(
         deopt_resume_pc: u32::MAX,
         deopt_osr_pc: u32::MAX,
         deopt_reason: vo_runtime::jit_api::JitDeoptReason::None as u8,
+        deopt_tier: 0,
     }
 }
 
@@ -194,6 +197,9 @@ fn vm_jit_table_lookup_requires_dispatch_eligibility() {
     let table = [vo_runtime::jit_api::JitDispatchEntry {
         bridge: entry,
         native: entry,
+        generation: 1,
+        tier: vo_runtime::jit_api::JitTier::Baseline as u8,
+        reserved: [0; 7],
     }];
     assert_eq!(lookup_jit_ptr(table.as_ptr(), 1, 0, true), entry);
     assert!(lookup_jit_ptr(table.as_ptr(), 1, 0, false).is_null());
@@ -861,6 +867,9 @@ fn vm_jit_closure_canon_002_prepared_frame_enters_compiled_closure_and_stores_ca
     let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
         bridge: entry,
         native: entry,
+        generation: 1,
+        tier: vo_runtime::jit_api::JitTier::Baseline as u8,
+        reserved: [0; 7],
     }];
     ctx.jit_func_table = jit_table.as_ptr();
     ctx.jit_func_count = jit_table.len() as u32;
@@ -939,6 +948,9 @@ fn vm_jit_closure_ic_061_frame_elided_closure_publishes_native_entry() {
     let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
         bridge: entry,
         native: entry,
+        generation: 1,
+        tier: vo_runtime::jit_api::JitTier::Baseline as u8,
+        reserved: [0; 7],
     }];
     ctx.jit_func_table = jit_table.as_ptr();
     ctx.jit_func_count = jit_table.len() as u32;
@@ -1015,6 +1027,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         callee_local_slots: 7,
         func_id: 7,
         jit_may_gc: 1,
+        dispatch_generation: 0,
     };
 
     let result = jit_prepare_closure_call(
@@ -1117,6 +1130,9 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
         vo_runtime::jit_api::JitDispatchEntry {
             bridge: entry,
             native: entry,
+            generation: 1,
+            tier: vo_runtime::jit_api::JitTier::Baseline as u8,
+            reserved: [0; 7],
         },
     ];
     ctx.jit_func_table = jit_table.as_ptr();
@@ -1150,6 +1166,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
         callee_local_slots: 7,
         func_id: 7,
         jit_may_gc: 1,
+        dispatch_generation: 0,
     };
 
     let result = jit_prepare_iface_call(
@@ -1273,6 +1290,9 @@ fn vm_jit_iface_pointer_receiver_prepared_shadow_publishes_ic_entry() {
         vo_runtime::jit_api::JitDispatchEntry {
             bridge: entry,
             native: entry,
+            generation: 1,
+            tier: vo_runtime::jit_api::JitTier::Baseline as u8,
+            reserved: [0; 7],
         },
     ];
     ctx.jit_func_table = jit_table.as_ptr();

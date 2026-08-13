@@ -44,6 +44,21 @@ fn jit_env_u32(name: &str, default: u32) -> Result<u32, RunError> {
 }
 
 #[cfg(feature = "jit")]
+fn jit_env_u64(name: &str, default: u64) -> Result<u64, RunError> {
+    match std::env::var(name) {
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            jit_config_error(format!(
+                "invalid {name} value {value:?}: expected an unsigned 64-bit integer"
+            ))
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(jit_config_error(format!(
+            "invalid {name}: value is not valid Unicode"
+        ))),
+    }
+}
+
+#[cfg(feature = "jit")]
 fn jit_env_bool(name: &str, default: bool) -> Result<bool, RunError> {
     match std::env::var(name) {
         Ok(value) => {
@@ -333,11 +348,13 @@ fn run_with_output_interruptible_observed_bytes(
 
             let call_threshold = jit_env_u32("VO_JIT_CALL_THRESHOLD", 100)?;
             let loop_threshold = jit_env_u32("VO_JIT_LOOP_THRESHOLD", 50)?;
+            let optimizing_threshold = jit_env_u64("VO_JIT_OPTIMIZING_THRESHOLD", 10_000)?;
             let debug_ir = jit_env_bool("VO_JIT_DEBUG", false)?;
 
             let config = JitConfig {
                 call_threshold,
                 loop_threshold,
+                optimizing_threshold,
                 debug_ir,
                 ..JitConfig::default()
             };

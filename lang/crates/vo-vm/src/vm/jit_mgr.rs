@@ -15,7 +15,9 @@ use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::bytecode::LoadedModule;
 #[cfg(test)]
 use vo_runtime::bytecode::Module as VoModule;
-use vo_runtime::jit_api::{JitContext, JitDispatchEntry, JitNativeFrame, JitResult};
+use vo_runtime::jit_api::{
+    JitContext, JitDispatchEntry, JitNativeFrame, JitProfileCounters, JitResult, JitTier,
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -86,6 +88,8 @@ pub struct JitConfig {
     pub call_threshold: u32,
     /// Backedge count threshold for loop OSR compilation.
     pub loop_threshold: u32,
+    /// Native baseline entry count for optimizing-tier compilation.
+    pub optimizing_threshold: u64,
     /// Print Cranelift IR for compiled functions.
     pub debug_ir: bool,
     /// Maximum page-granular native-code bytes retained by one Island family.
@@ -101,6 +105,7 @@ impl Default for JitConfig {
         Self {
             call_threshold: 100,
             loop_threshold: 50,
+            optimizing_threshold: 10_000,
             debug_ir: false,
             code_memory_limit_bytes: vo_jit::DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES,
             analysis_memory_limit_bytes: vo_jit::MAX_JIT_ANALYSIS_BYTES,
@@ -118,8 +123,10 @@ impl Default for JitConfig {
 enum CompileState {
     /// Not compiled, use VM interpreter.
     Interpreted,
-    /// Has full function JIT version.
-    FullyCompiled,
+    /// Has a published baseline version and may still tier up.
+    Baseline,
+    /// Has a published optimizing version.
+    Optimizing,
     /// Compilation was rejected and this artifact should stay interpreted.
     Failed(JitFailureKind),
 }
@@ -145,6 +152,15 @@ struct FunctionJitInfo {
     /// Call count (for triggering full compilation).
     call_count: u32,
 
+    /// Monotonic dispatch generation; zero is reserved for never-published.
+    generation: u64,
+
+    /// Failure of the optional optimizing tier does not retire baseline code.
+    optimizing_failure: Option<JitFailureKind>,
+
+    /// Retained code pointers for tier replacement and deopt fallback.
+    versions: [Option<JitDispatchEntry>; JitTier::COUNT],
+
     /// Hotness and execution feedback keyed by loop begin pc.
     loop_states: HashMap<usize, LoopJitState>,
 
@@ -155,7 +171,7 @@ struct FunctionJitInfo {
     full_low_progress_exit_streak: u8,
 
     /// Lock-free metadata handle used while native code is paused in a callback.
-    metadata: Option<Arc<JitArtifactMetadata>>,
+    metadata: [Option<Arc<JitArtifactMetadata>>; JitTier::COUNT],
 
     /// Exact module-wide transitive effect contract used by dynamic calls.
     entry_eligibility: Option<JitFrameEntryEligibility>,
@@ -183,10 +199,13 @@ impl FunctionJitInfo {
         Self {
             state: CompileState::Interpreted,
             call_count: 0,
+            generation: 0,
+            optimizing_failure: None,
+            versions: [None; JitTier::COUNT],
             loop_states: HashMap::new(),
             compile_error: None,
             full_low_progress_exit_streak: 0,
-            metadata: None,
+            metadata: std::array::from_fn(|_| None),
             entry_eligibility: None,
             count_low_work_ok: false,
             telemetry: FunctionJitTelemetry::default(),
@@ -337,6 +356,9 @@ pub struct JitManager {
     /// Island-local policy view over compiled bridge/native entry pairs.
     func_table: Vec<JitDispatchEntry>,
 
+    /// Stable Island-local profile storage updated by generated prologues.
+    profiles: Vec<JitProfileCounters>,
+
     /// Cranelift compiler and executable code shared by related Islands.
     shared_code: Arc<SharedJitCode>,
 
@@ -354,6 +376,32 @@ pub struct JitManager {
 unsafe impl Send for JitManager {}
 
 impl JitManager {
+    fn publish_function_version(
+        &mut self,
+        func_id: u32,
+        tier: JitTier,
+        bridge: *const u8,
+        native: *const u8,
+    ) -> Result<(), JitError> {
+        let idx = func_id as usize;
+        let info = self
+            .funcs
+            .get_mut(idx)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
+        let generation = info.generation.saturating_add(1).max(1);
+        info.generation = generation;
+        let entry = JitDispatchEntry {
+            bridge,
+            native,
+            generation,
+            tier: tier as u8,
+            reserved: [0; 7],
+        };
+        info.versions[tier.cache_index()] = Some(entry);
+        self.func_table[idx] = entry;
+        Ok(())
+    }
+
     /// Create a new JIT manager.
     pub fn new() -> Result<Self, JitError> {
         Self::with_config(JitConfig::default())
@@ -372,6 +420,7 @@ impl JitManager {
         Self {
             funcs: Vec::new(),
             func_table: Vec::new(),
+            profiles: Vec::new(),
             shared_code,
             config,
             execution_stats: JitExecutionStats::default(),
@@ -386,6 +435,7 @@ impl JitManager {
     pub fn init(&mut self, func_count: usize) {
         self.funcs = (0..func_count).map(|_| FunctionJitInfo::new()).collect();
         self.func_table = vec![JitDispatchEntry::unavailable(); func_count];
+        self.profiles = vec![JitProfileCounters::default(); func_count];
         self.execution_stats = JitExecutionStats::default();
     }
 
@@ -414,6 +464,11 @@ impl JitManager {
     #[inline]
     pub fn func_table_len(&self) -> usize {
         self.func_table.len()
+    }
+
+    #[inline]
+    pub fn profile_table_ptr(&mut self) -> *mut JitProfileCounters {
+        self.profiles.as_mut_ptr()
     }
 
     /// Get JIT configuration (for passing to island threads).
@@ -482,10 +537,17 @@ impl JitManager {
                 )));
             }
             let metadata = match record.artifact_kind {
-                JitNativeFrame::ARTIFACT_FUNCTION => self
-                    .funcs
-                    .get(record.func_id as usize)
-                    .and_then(|info| info.metadata.as_deref()),
+                JitNativeFrame::ARTIFACT_FUNCTION => {
+                    let tier = JitTier::from_u8(record.tier as u8).ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "native frame for function {} has invalid tier {}",
+                            record.func_id, record.tier
+                        ))
+                    })?;
+                    self.funcs
+                        .get(record.func_id as usize)
+                        .and_then(|info| info.metadata[tier.cache_index()].as_deref())
+                }
                 JitNativeFrame::ARTIFACT_OSR_LOOP => self
                     .funcs
                     .get(record.func_id as usize)
@@ -548,11 +610,12 @@ impl JitManager {
         &self,
         func_id: u32,
         osr_pc: u32,
+        tier: JitTier,
         state_id: u32,
     ) -> Option<&vo_jit::DeoptFrameState> {
         let function = self.funcs.get(func_id as usize)?;
         let metadata = if osr_pc == u32::MAX {
-            function.metadata.as_deref()
+            function.metadata[tier.cache_index()].as_deref()
         } else {
             function
                 .loop_states
@@ -580,7 +643,7 @@ impl JitManager {
     pub fn function_failure_kind(&self, func_id: u32) -> Option<JitFailureKind> {
         match self.funcs.get(func_id as usize)?.state {
             CompileState::Failed(kind) => Some(kind),
-            CompileState::Interpreted | CompileState::FullyCompiled => None,
+            CompileState::Interpreted | CompileState::Baseline | CompileState::Optimizing => None,
         }
     }
 
@@ -669,8 +732,10 @@ impl JitManager {
                 .funcs
                 .get_mut(idx)
                 .ok_or(JitError::FunctionNotFound(func_id))?;
-            if info.state != CompileState::FullyCompiled
-                || info.full_low_progress_exit_streak == DISABLED_LOW_PROGRESS_STREAK
+            if !matches!(
+                info.state,
+                CompileState::Baseline | CompileState::Optimizing
+            ) || info.full_low_progress_exit_streak == DISABLED_LOW_PROGRESS_STREAK
             {
                 return Ok(false);
             }
@@ -678,6 +743,9 @@ impl JitManager {
             let consumed = budget_before.saturating_sub(budget_after) as u64;
             info.telemetry.budget_consumed =
                 info.telemetry.budget_consumed.saturating_add(consumed);
+            let profile = &mut self.profiles[idx];
+            profile.completed = profile.completed.saturating_add(1);
+            profile.budget_consumed = profile.budget_consumed.saturating_add(consumed);
             if consumed <= u64::from(LOW_PROGRESS_BUDGET_DELTA) {
                 info.telemetry.low_work_outcomes =
                     info.telemetry.low_work_outcomes.saturating_add(1);
@@ -705,7 +773,9 @@ impl JitManager {
                 .runtime_dominated_function_disables
                 .saturating_add(1);
         }
-        self.func_table[idx] = JitDispatchEntry::unavailable();
+        let generation = self.funcs[idx].generation.saturating_add(1).max(1);
+        self.funcs[idx].generation = generation;
+        self.func_table[idx] = JitDispatchEntry::unavailable_at(generation);
         Ok(true)
     }
 
@@ -770,6 +840,19 @@ impl JitManager {
     #[cfg(test)]
     pub(crate) fn function_telemetry(&self, func_id: u32) -> Option<FunctionJitTelemetry> {
         Some(self.funcs.get(func_id as usize)?.telemetry)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_tier(&self, func_id: u32) -> Option<JitTier> {
+        self.func_table
+            .get(func_id as usize)
+            .copied()?
+            .published_tier()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispatch_generation(&self, func_id: u32) -> Option<u64> {
+        Some(self.func_table.get(func_id as usize)?.generation)
     }
 
     pub(crate) fn interpreter_reason(
@@ -890,7 +973,10 @@ impl JitManager {
         };
 
         // Already compiled
-        if current_state == CompileState::FullyCompiled {
+        if matches!(
+            current_state,
+            CompileState::Baseline | CompileState::Optimizing
+        ) {
             return Ok(());
         }
 
@@ -947,10 +1033,10 @@ impl JitManager {
 
         // Update state
         if let Some(info) = self.funcs.get_mut(idx) {
-            info.state = CompileState::FullyCompiled;
+            info.state = CompileState::Baseline;
             info.compile_error = None;
             info.full_low_progress_exit_streak = 0;
-            info.metadata = Some(metadata);
+            info.metadata[JitTier::Baseline.cache_index()] = Some(metadata);
             info.entry_eligibility = Some(entry_eligibility);
             info.count_low_work_ok = count_low_work_ok;
             info.telemetry.compile_time_ns = compile_time_ns;
@@ -972,11 +1058,139 @@ impl JitManager {
                 .compilation_cache_hits
                 .saturating_add(1);
         }
-        self.func_table[idx] = JitDispatchEntry {
-            bridge: bridge as *const u8,
-            native: native as *const u8,
+        self.publish_function_version(
+            func_id,
+            JitTier::Baseline,
+            bridge as *const u8,
+            native as *const u8,
+        )?;
+
+        Ok(())
+    }
+
+    /// Compile and atomically publish the optimizing tier. A rejected optional
+    /// tier leaves the already-published baseline version active.
+    pub fn compile_optimizing(
+        &mut self,
+        func_id: u32,
+        verified: VerifiedModule<'_>,
+        env: JitCompileEnv<'_>,
+    ) -> Result<bool, JitError> {
+        let idx = func_id as usize;
+        let Some(info) = self.funcs.get(idx) else {
+            return Err(JitError::FunctionNotFound(func_id));
+        };
+        if info.state != CompileState::Baseline
+            || info.full_low_progress_exit_streak == DISABLED_LOW_PROGRESS_STREAK
+            || info.optimizing_failure.is_some()
+        {
+            return Ok(false);
+        }
+
+        let compile_result = (|| {
+            let mut compiler = self.shared_code.lock_verified(verified)?;
+            let before = compiler.code_memory_stats().function_bytes;
+            let started = Instant::now();
+            compiler.compile_loaded_tier(func_id, env, JitTier::Optimizing)?;
+            let compile_time_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let code_bytes = compiler
+                .code_memory_stats()
+                .function_bytes
+                .saturating_sub(before) as u64;
+            let bridge = unsafe { compiler.get_func_ptr_for_tier(func_id, JitTier::Optimizing) }
+                .ok_or_else(|| JitError::Internal("optimized function has no bridge".into()))?;
+            let native =
+                unsafe { compiler.get_native_func_ptr_for_tier(func_id, JitTier::Optimizing) }
+                    .ok_or_else(|| {
+                        JitError::Internal("optimized function has no native entry".into())
+                    })?;
+            let metadata = compiler
+                .function_metadata_handle_for_tier(func_id, JitTier::Optimizing)
+                .ok_or_else(|| JitError::Internal("optimized function has no metadata".into()))?;
+            Ok::<_, JitError>((bridge, native, metadata, compile_time_ns, code_bytes))
+        })();
+        let (bridge, native, metadata, compile_time_ns, code_bytes) = match compile_result {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                let info = &mut self.funcs[idx];
+                info.optimizing_failure = Some(error.failure_kind());
+                self.profiles[idx].tier_up_state = 3;
+                self.execution_stats.optimizing_failures =
+                    self.execution_stats.optimizing_failures.saturating_add(1);
+                return Ok(false);
+            }
         };
 
+        {
+            let info = &mut self.funcs[idx];
+            info.state = CompileState::Optimizing;
+            info.metadata[JitTier::Optimizing.cache_index()] = Some(metadata);
+            info.telemetry.compile_time_ns = info
+                .telemetry
+                .compile_time_ns
+                .saturating_add(compile_time_ns);
+            info.telemetry.code_bytes = info.telemetry.code_bytes.saturating_add(code_bytes);
+        }
+        self.profiles[idx].tier_up_state = 2;
+        self.execution_stats.function_compilations =
+            self.execution_stats.function_compilations.saturating_add(1);
+        self.execution_stats.optimizing_compilations = self
+            .execution_stats
+            .optimizing_compilations
+            .saturating_add(1);
+        self.execution_stats.compilation_time_ns = self
+            .execution_stats
+            .compilation_time_ns
+            .saturating_add(compile_time_ns);
+        self.execution_stats.compiled_code_bytes = self
+            .execution_stats
+            .compiled_code_bytes
+            .saturating_add(code_bytes);
+        if code_bytes == 0 {
+            self.execution_stats.compilation_cache_hits = self
+                .execution_stats
+                .compilation_cache_hits
+                .saturating_add(1);
+        }
+        self.publish_function_version(
+            func_id,
+            JitTier::Optimizing,
+            bridge as *const u8,
+            native as *const u8,
+        )?;
+        Ok(true)
+    }
+
+    /// Retire a failed assumption and publish the next valid lower tier.
+    pub(crate) fn record_deopt(&mut self, func_id: u32, tier: JitTier) -> Result<(), JitError> {
+        let idx = func_id as usize;
+        let info = self
+            .funcs
+            .get_mut(idx)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
+        self.profiles[idx].deopts = self.profiles[idx].deopts.saturating_add(1);
+        self.execution_stats.deopts = self.execution_stats.deopts.saturating_add(1);
+
+        let fallback = match tier {
+            JitTier::Optimizing => {
+                info.state = CompileState::Baseline;
+                info.versions[JitTier::Baseline.cache_index()]
+            }
+            JitTier::Baseline => None,
+        };
+        self.profiles[idx].tier_up_state = match tier {
+            JitTier::Optimizing => 3,
+            JitTier::Baseline => 3,
+        };
+        let generation = info.generation.saturating_add(1).max(1);
+        info.generation = generation;
+        self.func_table[idx] = fallback.map_or_else(
+            || JitDispatchEntry::unavailable_at(generation),
+            |mut entry| {
+                entry.generation = generation;
+                entry
+            },
+        );
         Ok(())
     }
 
@@ -1143,13 +1357,105 @@ mod tests {
     fn manager_with_active_entry() -> JitManager {
         let mut manager = JitManager::new().expect("jit manager");
         manager.init(1);
-        manager.funcs[0].state = CompileState::FullyCompiled;
+        manager.funcs[0].state = CompileState::Baseline;
         let ptr = dormant_jit_entry as *const u8;
         manager.func_table[0] = JitDispatchEntry {
             bridge: ptr,
             native: ptr,
+            generation: 1,
+            tier: JitTier::Baseline as u8,
+            reserved: [0; 7],
         };
         manager
+    }
+
+    #[test]
+    fn optimizing_publication_advances_generation_and_deopt_restores_baseline() {
+        let func = valid_jit_func("tiered", vec![Instruction::new(Opcode::Return, 0, 0, 0)]);
+        let mut module = VoModule::new("jit-tier-state-machine".to_string());
+        module.functions.push(func);
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            call_threshold: 1,
+            optimizing_threshold: 1,
+            ..JitConfig::default()
+        })
+        .expect("tiered JIT VM");
+        vm.load(module).expect("load tier fixture");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let env = JitCompileEnv {
+            externs: &externs,
+            backend_caps: Default::default(),
+        };
+        let manager = vm.jit.manager_mut().expect("jit manager");
+
+        manager
+            .compile_full(0, loaded.verified_module(), env)
+            .expect("baseline compile");
+        let baseline_generation = manager.dispatch_generation(0).expect("baseline generation");
+        assert_eq!(manager.published_tier(0), Some(JitTier::Baseline));
+
+        assert!(manager
+            .compile_optimizing(0, loaded.verified_module(), env)
+            .expect("optimizing compile"));
+        let optimizing_generation = manager
+            .dispatch_generation(0)
+            .expect("optimizing generation");
+        assert!(optimizing_generation > baseline_generation);
+        assert_eq!(manager.published_tier(0), Some(JitTier::Optimizing));
+        assert_eq!(manager.execution_stats().optimizing_compilations, 1);
+
+        manager
+            .record_deopt(0, JitTier::Optimizing)
+            .expect("deopt fallback");
+        assert_eq!(manager.published_tier(0), Some(JitTier::Baseline));
+        assert!(manager.dispatch_generation(0).unwrap() > optimizing_generation);
+        assert_eq!(manager.execution_stats().deopts, 1);
+    }
+
+    #[test]
+    fn baseline_entry_safe_point_publishes_optimizing_code_immediately() {
+        let func = valid_jit_func(
+            "tier-up-safe-point",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        );
+        let mut module = VoModule::new("jit-tier-up-safe-point".to_string());
+        module.functions.push(func);
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            call_threshold: 1,
+            optimizing_threshold: 1,
+            ..JitConfig::default()
+        })
+        .expect("tier-up safe-point VM");
+        vm.load(module).expect("load tier-up safe-point fixture");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let env = JitCompileEnv {
+            externs: &externs,
+            backend_caps: Default::default(),
+        };
+        vm.jit
+            .manager_mut()
+            .expect("jit manager")
+            .compile_full(0, loaded.verified_module(), env)
+            .expect("baseline compile");
+        let entry = vm.jit.manager().unwrap().get_entry(0).unwrap();
+        let baseline_generation = vm.jit.manager().unwrap().dispatch_generation(0).unwrap();
+
+        let mut fiber = Fiber::new(16);
+        fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+        let mut frame = [0_u64; 1];
+        let mut ret = [0_u64; 1];
+        assert_eq!(
+            entry(ctx.as_ptr(), frame.as_mut_ptr(), ret.as_mut_ptr()),
+            JitResult::Ok
+        );
+
+        let manager = vm.jit.manager().unwrap();
+        assert_eq!(manager.published_tier(0), Some(JitTier::Optimizing));
+        assert!(manager.dispatch_generation(0).unwrap() > baseline_generation);
+        assert_eq!(manager.execution_stats().optimizing_compilations, 1);
     }
 
     fn empty_func() -> FunctionDef {
