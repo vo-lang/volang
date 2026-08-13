@@ -191,7 +191,10 @@ fn vm_jit_table_lookup_requires_dispatch_eligibility() {
     assert!(vo_jit::can_elide_frame_for_direct_jit(&leaf));
 
     let entry = 1_usize as *const u8;
-    let table = [entry];
+    let table = [vo_runtime::jit_api::JitDispatchEntry {
+        bridge: entry,
+        native: entry,
+    }];
     assert_eq!(lookup_jit_ptr(table.as_ptr(), 1, 0, true), entry);
     assert!(lookup_jit_ptr(table.as_ptr(), 1, 0, false).is_null());
     assert!(lookup_jit_ptr(table.as_ptr(), 1, 1, true).is_null());
@@ -855,7 +858,10 @@ fn vm_jit_closure_canon_002_prepared_frame_enters_compiled_closure_and_stores_ca
     let mut fiber = Fiber::new(0);
     attach_current_frame(&mut ctx, &mut fiber, 0);
     let entry = 1_usize as *const u8;
-    let jit_table = [entry];
+    let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
+        bridge: entry,
+        native: entry,
+    }];
     ctx.jit_func_table = jit_table.as_ptr();
     ctx.jit_func_count = jit_table.len() as u32;
     let mut out = PreparedCall::default();
@@ -930,7 +936,10 @@ fn vm_jit_closure_ic_061_frame_elided_closure_publishes_native_entry() {
     let mut fiber = Fiber::new(0);
     attach_current_frame(&mut ctx, &mut fiber, 0);
     let entry = 1_usize as *const u8;
-    let jit_table = [entry];
+    let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
+        bridge: entry,
+        native: entry,
+    }];
     ctx.jit_func_table = jit_table.as_ptr();
     ctx.jit_func_count = jit_table.len() as u32;
     let mut out = PreparedCall::default();
@@ -1103,7 +1112,13 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
     let mut fiber = Fiber::new(0);
     attach_current_frame(&mut ctx, &mut fiber, 0);
     let entry = 1_usize as *const u8;
-    let jit_table = [core::ptr::null(), entry];
+    let jit_table = [
+        vo_runtime::jit_api::JitDispatchEntry::unavailable(),
+        vo_runtime::jit_api::JitDispatchEntry {
+            bridge: entry,
+            native: entry,
+        },
+    ];
     ctx.jit_func_table = jit_table.as_ptr();
     ctx.jit_func_count = jit_table.len() as u32;
     let slot0 = interface::pack_slot0(0, 1, ValueKind::Int64);
@@ -1253,7 +1268,13 @@ fn vm_jit_iface_pointer_receiver_prepared_shadow_publishes_ic_entry() {
     let mut fiber = Fiber::new(0);
     attach_current_frame(&mut ctx, &mut fiber, 0);
     let entry = 1_usize as *const u8;
-    let jit_table = [core::ptr::null(), entry];
+    let jit_table = [
+        vo_runtime::jit_api::JitDispatchEntry::unavailable(),
+        vo_runtime::jit_api::JitDispatchEntry {
+            bridge: entry,
+            native: entry,
+        },
+    ];
     ctx.jit_func_table = jit_table.as_ptr();
     ctx.jit_func_count = jit_table.len() as u32;
     let slot0 = interface::pack_slot0(0, 2, ValueKind::Pointer);

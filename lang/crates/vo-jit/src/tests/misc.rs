@@ -1,5 +1,97 @@
 use super::*;
 
+#[cfg(target_arch = "aarch64")]
+fn call_native_lane0(
+    entry: NativeJitFunc,
+    ctx: *mut JitContext,
+    frame: *mut u64,
+    ret: *mut u64,
+    lane0: u64,
+) -> JitResult {
+    entry(ctx, frame, ret, lane0, 0, 0, 0, 0)
+}
+
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+fn call_native_lane0(
+    entry: NativeJitFunc,
+    ctx: *mut JitContext,
+    frame: *mut u64,
+    ret: *mut u64,
+    lane0: u64,
+) -> JitResult {
+    entry(ctx, frame, ret, lane0, 0, 0)
+}
+
+#[cfg(any(
+    all(target_arch = "x86_64", target_os = "windows"),
+    not(any(target_arch = "aarch64", target_arch = "x86_64"))
+))]
+fn call_native_lane0(
+    entry: NativeJitFunc,
+    ctx: *mut JitContext,
+    frame: *mut u64,
+    ret: *mut u64,
+    lane0: u64,
+) -> JitResult {
+    entry(ctx, frame, ret, lane0)
+}
+
+#[test]
+fn function_bridge_and_native_entry_have_distinct_argument_authorities() {
+    let mut func = make_func_with_slot_types_and_sig(
+        vec![Instruction::new(Opcode::Return, 0, 1, 0)],
+        vec![SlotType::Float],
+        1,
+        1,
+        1,
+    );
+    func.ret_slot_types = vec![SlotType::Float];
+    let mut module = VoModule::new("jit-dual-entry-abi".into());
+    module.functions.push(func);
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create JIT compiler");
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+    )
+    .expect("compile dual-entry probe");
+
+    let bridge = unsafe { jit.get_func_ptr(0).expect("compiled bridge") };
+    let native = unsafe { jit.get_native_func_ptr(0).expect("compiled native entry") };
+    assert_ne!(bridge as *const u8, native as *const u8);
+
+    let frame_value = 11.5f64.to_bits();
+    let lane_value = 7.25f64.to_bits();
+    let mut frame = [frame_value];
+    let mut ret = [0u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+
+    assert_eq!(
+        bridge(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], frame_value, "bridge must decode the VM frame");
+
+    ret[0] = 0;
+    assert_eq!(
+        call_native_lane0(
+            native,
+            &mut ctx,
+            frame.as_mut_ptr(),
+            ret.as_mut_ptr(),
+            lane_value,
+        ),
+        JitResult::Ok
+    );
+    assert_eq!(
+        ret[0], lane_value,
+        "native entry must consume the register lane even when frame memory disagrees"
+    );
+}
+
 #[test]
 fn backend_allocation_failure_is_a_resource_rejection() {
     let error = JitError::Module(cranelift_module::ModuleError::Allocation {

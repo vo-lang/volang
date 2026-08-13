@@ -33,9 +33,19 @@ use super::helpers::{
 /// complete shadow stack window, while interface IC entries must remain safe
 /// for frame-elided hits.
 #[inline]
-fn lookup_jit_ptr(table: *const *const u8, count: u32, func_id: u32, eligible: bool) -> *const u8 {
+fn lookup_jit_ptr(
+    table: *const vo_runtime::jit_api::JitDispatchEntry,
+    count: u32,
+    func_id: u32,
+    eligible: bool,
+) -> *const u8 {
     if eligible && !table.is_null() && func_id < count {
-        unsafe { *table.add(func_id as usize) }
+        let entry = unsafe { *table.add(func_id as usize) };
+        if entry.is_available() {
+            entry.native
+        } else {
+            core::ptr::null()
+        }
     } else {
         core::ptr::null()
     }

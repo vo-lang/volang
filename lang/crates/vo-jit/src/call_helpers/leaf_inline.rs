@@ -117,14 +117,16 @@ impl SmallPureLeafInline {
             types::I64,
             vo_runtime::jit_api::JitContextField::JitFuncTable,
         );
-        let entry_address = emitter
-            .builder()
-            .ins()
-            .iadd_imm_u(jit_func_table, i64::from(plan.func_id) * 8);
-        let entry = emitter
-            .builder()
-            .ins()
-            .load(types::I64, MemFlags::trusted(), entry_address, 0);
+        let entry_address = emitter.builder().ins().iadd_imm_u(
+            jit_func_table,
+            i64::from(plan.func_id) * vo_runtime::jit_api::JitDispatchEntry::SIZE as i64,
+        );
+        let entry = emitter.builder().ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            entry_address,
+            vo_runtime::jit_api::JitDispatchEntry::OFFSET_NATIVE,
+        );
         let available = emitter
             .builder()
             .ins()

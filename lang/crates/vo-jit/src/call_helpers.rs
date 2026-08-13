@@ -169,7 +169,9 @@ pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, old_depth: V
     emitter.store_context_field(old_depth, JitContextField::CallDepth);
 }
 
-/// Create signature for JIT function: (ctx, args_ptr, ret_ptr) -> JitResult
+/// Create the uniform internal native signature. Raw argument lanes keep this
+/// signature valid for every Vo function and allow static callers to pass SSA
+/// values without first serializing them to a frame window.
 pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
     let call_conv = current_call_conv(emitter);
     emitter.builder().func.import_signature({
@@ -180,6 +182,10 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // args_ptr
         sig.params
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
+        for _ in 0..crate::NATIVE_ARG_LANES {
+            sig.params
+                .push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        }
         sig.returns
             .push(cranelift_codegen::ir::AbiParam::new(types::I32)); // JitResult
         sig
@@ -202,15 +208,18 @@ pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
     ctx: Value,
     args_ptr: Value,
     ret_ptr: Value,
+    arg_lanes: &[Value; crate::NATIVE_ARG_LANES],
     mode: JitCallGcMode,
 ) -> Value {
     let emit_call = |emitter: &mut E, attach_roots: bool| {
         let native_roots = attach_roots.then(|| emitter.spill_native_roots()).flatten();
-        let call = emitter.builder().ins().call_indirect(
-            jit_func_sig,
-            jit_func_ptr,
-            &[ctx, args_ptr, ret_ptr],
-        );
+        let mut args = Vec::with_capacity(3 + crate::NATIVE_ARG_LANES);
+        args.extend_from_slice(&[ctx, args_ptr, ret_ptr]);
+        args.extend_from_slice(arg_lanes);
+        let call = emitter
+            .builder()
+            .ins()
+            .call_indirect(jit_func_sig, jit_func_ptr, &args);
         if attach_roots {
             emitter.attach_native_roots(call, native_roots);
         }
@@ -255,6 +264,75 @@ pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
             emitter.builder().block_params(merge_block)[0]
         }
     }
+}
+
+/// Load raw argument words from a validated frame window. Callers guarantee
+/// that `available_slots` words are addressable; unused lanes are zero-filled.
+pub(super) fn load_native_arg_lanes<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    frame_ptr: Value,
+    available_slots: usize,
+) -> [Value; crate::NATIVE_ARG_LANES] {
+    std::array::from_fn(|lane| {
+        if lane < available_slots {
+            emitter.builder().ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlagsData::trusted(),
+                frame_ptr,
+                (lane * 8) as i32,
+            )
+        } else {
+            emitter.builder().ins().iconst(types::I64, 0)
+        }
+    })
+}
+
+/// Dynamic counterpart used by prepared calls. Each load is control-dependent
+/// on the verified target frame width, so a narrow frame never incurs a
+/// speculative out-of-bounds read.
+pub(super) fn load_native_arg_lanes_dynamic<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    frame_ptr: Value,
+    available_slots: Value,
+) -> [Value; crate::NATIVE_ARG_LANES] {
+    std::array::from_fn(|lane| {
+        let load_block = emitter.builder().create_block();
+        let zero_block = emitter.builder().create_block();
+        let merge_block = emitter.builder().create_block();
+        emitter
+            .builder()
+            .append_block_param(merge_block, types::I64);
+        let in_bounds = emitter.builder().ins().icmp_imm_u(
+            IntCC::UnsignedGreaterThan,
+            available_slots,
+            lane as i64,
+        );
+        emitter
+            .builder()
+            .ins()
+            .brif(in_bounds, load_block, &[], zero_block, &[]);
+
+        emitter.builder().switch_to_block(load_block);
+        emitter.builder().seal_block(load_block);
+        let loaded = emitter.builder().ins().load(
+            types::I64,
+            cranelift_codegen::ir::MemFlagsData::trusted(),
+            frame_ptr,
+            (lane * 8) as i32,
+        );
+        let loaded_arg = [loaded.into()];
+        emitter.builder().ins().jump(merge_block, &loaded_arg);
+
+        emitter.builder().switch_to_block(zero_block);
+        emitter.builder().seal_block(zero_block);
+        let zero = emitter.builder().ins().iconst(types::I64, 0);
+        let zero_arg = [zero.into()];
+        emitter.builder().ins().jump(merge_block, &zero_arg);
+
+        emitter.builder().switch_to_block(merge_block);
+        emitter.builder().seal_block(merge_block);
+        emitter.builder().block_params(merge_block)[0]
+    })
 }
 
 #[cfg(test)]

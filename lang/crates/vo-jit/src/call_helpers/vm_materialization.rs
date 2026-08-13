@@ -171,13 +171,17 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .iconst(types::I64, plan.func_id as i64);
-    let offset = emitter.builder().ins().imul_imm_u(func_id_i64, 8);
+    let offset = emitter.builder().ins().imul_imm_u(
+        func_id_i64,
+        vo_runtime::jit_api::JitDispatchEntry::SIZE as i64,
+    );
     let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
-    let jit_func_ptr =
-        emitter
-            .builder()
-            .ins()
-            .load(types::I64, MemFlags::trusted(), func_ptr_addr, 0);
+    let jit_func_ptr = emitter.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        func_ptr_addr,
+        vo_runtime::jit_api::JitDispatchEntry::OFFSET_NATIVE,
+    );
 
     let zero = emitter.builder().ins().iconst(types::I64, 0);
     let is_null = emitter
@@ -203,8 +207,18 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     } else {
         JitCallGcMode::Never
     };
-    let jit_result_indirect =
-        emit_effect_aware_jit_call(emitter, sig, jit_func_ptr, ctx, args_ptr, ret_ptr, gc_mode);
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let arg_lanes = std::array::from_fn(|lane| arg_values.get(lane).copied().unwrap_or(zero));
+    let jit_result_indirect = emit_effect_aware_jit_call(
+        emitter,
+        sig,
+        jit_func_ptr,
+        ctx,
+        args_ptr,
+        ret_ptr,
+        &arg_lanes,
+        gc_mode,
+    );
     emit_call_depth_leave(emitter, old_call_depth);
 
     let ok_val = emitter

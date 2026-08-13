@@ -126,6 +126,37 @@ pub type JitPushResumePointFn = extern "C" fn(
     ret_slots: u32,
 ) -> JitResult;
 
+/// Published entries have separate external and internal ABIs. The bridge is
+/// called by the VM; generated code and dynamic inline caches use `native`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct JitDispatchEntry {
+    pub bridge: *const u8,
+    pub native: *const u8,
+}
+
+impl JitDispatchEntry {
+    pub const OFFSET_BRIDGE: i32 = core::mem::offset_of!(Self, bridge) as i32;
+    pub const OFFSET_NATIVE: i32 = core::mem::offset_of!(Self, native) as i32;
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+
+    #[inline]
+    pub const fn unavailable() -> Self {
+        Self {
+            bridge: core::ptr::null(),
+            native: core::ptr::null(),
+        }
+    }
+
+    #[inline]
+    pub const fn is_available(self) -> bool {
+        !self.bridge.is_null() && !self.native.is_null()
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(JitDispatchEntry::SIZE == 16);
+
 /// Result of preparing a closure or interface call.
 /// Note: SIZE must match core::mem::size_of::<PreparedCall>() (checked below).
 /// Contains information needed for JIT-to-JIT direct call or VM call materialization.
@@ -442,9 +473,9 @@ pub struct JitContext {
     /// Shared immutable callback capability table.
     pub callbacks: *const JitContextCallbacks,
 
-    /// JIT function pointer table: jit_func_table[func_id] = pointer to JIT function (or null if not compiled).
-    /// Used for direct JIT-to-JIT calls without going through VM trampoline.
-    pub jit_func_table: *const *const u8,
+    /// JIT dispatch table. Every published function owns a VM-facing bridge
+    /// and a JIT-facing native entry; an all-zero entry selects the VM.
+    pub jit_func_table: *const JitDispatchEntry,
 
     /// Number of functions (length of jit_func_table).
     pub jit_func_count: u32,

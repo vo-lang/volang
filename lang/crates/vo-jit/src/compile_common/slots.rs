@@ -154,25 +154,6 @@ impl<'a> CompilerStorage<'a> {
         spill_ssa_prefix_to_memory(builder, self.vars, dst_ptr, self.ssa_spill_count());
     }
 
-    pub(crate) fn spill_for_materialized_frame(
-        self,
-        builder: &mut FunctionBuilder<'_>,
-        current_base_ptr: Value,
-        frame_base_ptr: Value,
-        copy_frame_slots: FuncRef,
-    ) {
-        let mem_start = self.ssa_spill_count();
-        spill_ssa_prefix_to_memory(builder, self.vars, frame_base_ptr, mem_start);
-        copy_memory_slot_suffix_with_helper(
-            builder,
-            current_base_ptr,
-            frame_base_ptr,
-            mem_start,
-            self.local_count(),
-            copy_frame_slots,
-        );
-    }
-
     pub(crate) fn load_memory_slot_range(
         self,
         builder: &mut FunctionBuilder<'_>,

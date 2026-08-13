@@ -15,7 +15,7 @@ use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::bytecode::LoadedModule;
 #[cfg(test)]
 use vo_runtime::bytecode::Module as VoModule;
-use vo_runtime::jit_api::{JitContext, JitNativeFrame, JitResult};
+use vo_runtime::jit_api::{JitContext, JitDispatchEntry, JitNativeFrame, JitResult};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -334,9 +334,8 @@ pub struct JitManager {
     /// Per-function JIT info.
     funcs: Vec<FunctionJitInfo>,
 
-    /// Fast dispatch table: func_id -> full_entry pointer (null = use VM).
-    /// Used by JIT code for direct JIT-to-JIT calls.
-    func_table: Vec<*const u8>,
+    /// Island-local policy view over compiled bridge/native entry pairs.
+    func_table: Vec<JitDispatchEntry>,
 
     /// Cranelift compiler and executable code shared by related Islands.
     shared_code: Arc<SharedJitCode>,
@@ -386,7 +385,7 @@ impl JitManager {
     /// Initialize for a module (call after module load).
     pub fn init(&mut self, func_count: usize) {
         self.funcs = (0..func_count).map(|_| FunctionJitInfo::new()).collect();
-        self.func_table = vec![std::ptr::null(); func_count];
+        self.func_table = vec![JitDispatchEntry::unavailable(); func_count];
         self.execution_stats = JitExecutionStats::default();
     }
 
@@ -407,7 +406,7 @@ impl JitManager {
 
     /// Get function table pointer for JIT code.
     #[inline]
-    pub fn func_table_ptr(&self) -> *const *const u8 {
+    pub fn func_table_ptr(&self) -> *const JitDispatchEntry {
         self.func_table.as_ptr()
     }
 
@@ -706,7 +705,7 @@ impl JitManager {
                 .runtime_dominated_function_disables
                 .saturating_add(1);
         }
-        self.func_table[idx] = std::ptr::null();
+        self.func_table[idx] = JitDispatchEntry::unavailable();
         Ok(true)
     }
 
@@ -752,11 +751,11 @@ impl JitManager {
     /// Returns None if should use VM.
     #[inline]
     pub fn get_entry(&self, func_id: u32) -> Option<JitFunc> {
-        let ptr = self.func_table.get(func_id as usize)?;
-        if ptr.is_null() {
+        let entry = *self.func_table.get(func_id as usize)?;
+        if !entry.is_available() {
             None
         } else {
-            Some(unsafe { std::mem::transmute::<*const u8, JitFunc>(*ptr) })
+            Some(unsafe { std::mem::transmute::<*const u8, JitFunc>(entry.bridge) })
         }
     }
 
@@ -912,8 +911,10 @@ impl JitManager {
                 .code_memory_stats()
                 .function_bytes
                 .saturating_sub(before) as u64;
-            let ptr = unsafe { compiler.get_func_ptr(func_id) }
+            let bridge = unsafe { compiler.get_func_ptr(func_id) }
                 .ok_or_else(|| JitError::Internal("compiled but no pointer".into()))?;
+            let native = unsafe { compiler.get_native_func_ptr(func_id) }
+                .ok_or_else(|| JitError::Internal("compiled but no native pointer".into()))?;
             let metadata = compiler.function_metadata_handle(func_id).ok_or_else(|| {
                 JitError::Internal("compiled function has no native metadata".into())
             })?;
@@ -924,23 +925,25 @@ impl JitManager {
                         JitError::Internal("compiled function has no entry eligibility".into())
                     })?;
             Ok::<_, JitError>((
-                ptr,
+                bridge,
+                native,
                 metadata,
                 entry_eligibility,
                 compile_time_ns,
                 code_bytes,
             ))
         })();
-        let (ptr, metadata, entry_eligibility, compile_time_ns, code_bytes) = match compile_result {
-            Ok(compiled) => compiled,
-            Err(e) => {
-                if let Some(info) = self.funcs.get_mut(idx) {
-                    info.state = CompileState::Failed(e.failure_kind());
-                    info.compile_error = Some(e.to_string());
+        let (bridge, native, metadata, entry_eligibility, compile_time_ns, code_bytes) =
+            match compile_result {
+                Ok(compiled) => compiled,
+                Err(e) => {
+                    if let Some(info) = self.funcs.get_mut(idx) {
+                        info.state = CompileState::Failed(e.failure_kind());
+                        info.compile_error = Some(e.to_string());
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         // Update state
         if let Some(info) = self.funcs.get_mut(idx) {
@@ -969,7 +972,10 @@ impl JitManager {
                 .compilation_cache_hits
                 .saturating_add(1);
         }
-        self.func_table[idx] = ptr as *const u8;
+        self.func_table[idx] = JitDispatchEntry {
+            bridge: bridge as *const u8,
+            native: native as *const u8,
+        };
 
         Ok(())
     }
@@ -1139,7 +1145,10 @@ mod tests {
         manager.init(1);
         manager.funcs[0].state = CompileState::FullyCompiled;
         let ptr = dormant_jit_entry as *const u8;
-        manager.func_table[0] = ptr;
+        manager.func_table[0] = JitDispatchEntry {
+            bridge: ptr,
+            native: ptr,
+        };
         manager
     }
 
@@ -1299,7 +1308,7 @@ mod tests {
             Some(JitSideExitReason::InterpretedFeedbackDisabled)
         );
         assert!(manager.get_entry(0).is_none());
-        assert!(manager.func_table[0].is_null());
+        assert!(!manager.func_table[0].is_available());
         assert_eq!(manager.execution_stats().low_progress_function_disables, 1);
         assert!(!manager
             .record_function_outcome(0, JitResult::WaitQueue, 100, 100)

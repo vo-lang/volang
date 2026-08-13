@@ -8,8 +8,9 @@ use crate::translator::{HelperKind, IrEmitter};
 use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_checked_jit_result_indirect_callback_call,
     emit_effect_aware_jit_call, emit_raw_jit_context_callback_call, import_jit_func_sig,
-    load_current_func_id, restore_caller_execution_context, JitCallGcMode, JIT_RESULT_CALL,
-    JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    load_current_func_id, load_native_arg_lanes_dynamic, restore_caller_execution_context,
+    JitCallGcMode, JIT_RESULT_CALL, JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE,
+    PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
 
 /// Parameters for the common prepared-call dispatch.
@@ -17,6 +18,7 @@ pub(super) struct PreparedCallParams {
     pub(super) jit_func_ptr: Value,
     pub(super) callee_args_ptr: Value,
     pub(super) func_id: Value,
+    pub(super) callee_local_slots: Value,
     pub(super) jit_may_gc: Value,
     pub(super) ret_ptr: Value,
     /// Caller's bp, saved BEFORE the prepare callback (which changes ctx.jit_bp via push_frame).
@@ -137,6 +139,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
 
     let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     let jit_func_sig = import_jit_func_sig(emitter);
+    let arg_lanes = load_native_arg_lanes_dynamic(emitter, p.callee_args_ptr, p.callee_local_slots);
     let jit_result = emit_effect_aware_jit_call(
         emitter,
         jit_func_sig,
@@ -144,6 +147,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         ctx,
         p.callee_args_ptr,
         p.ret_ptr,
+        &arg_lanes,
         JitCallGcMode::Dynamic(p.jit_may_gc),
     );
     emit_call_depth_leave(emitter, old_call_depth);

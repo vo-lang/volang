@@ -111,17 +111,20 @@ impl<'a> FunctionCompiler<'a> {
     /// Note: args_ptr may be stale if fiber.stack was reallocated during nested calls,
     /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
-        let dst_ptr = self.fiber_stack_args_ptr();
         let args_ptr = self.current_memory_base_ptr();
+        let dst_ptr = self.fiber_stack_args_ptr();
         crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
         )
-        .spill_for_materialized_frame(
+        .spill_ssa_prefix_to_memory(&mut self.builder, dst_ptr);
+        crate::compile_common::copy_memory_slot_suffix_with_helper(
             &mut self.builder,
             args_ptr,
             dst_ptr,
+            self.core.vars.len(),
+            self.core.func_def.local_slots as usize,
             self.copy_frame_slots,
         );
     }
@@ -280,8 +283,8 @@ impl<'a> FunctionCompiler<'a> {
         // entry_block has no predecessors (it's the function entry point)
         self.builder.seal_block(self.core.entry_block);
 
-        let params = self.builder.block_params(self.core.entry_block);
-        let args_ptr = params[1]; // Points to fiber.stack[jit_bp]
+        let params = self.builder.block_params(self.core.entry_block).to_vec();
+        let args_ptr = params[1];
         let _ret = params[2];
         let current_func_id = self
             .builder
@@ -319,13 +322,20 @@ impl<'a> FunctionCompiler<'a> {
         let ssa_slots = self.core.vars.len();
         let num_slots = self.core.func_def.local_slots as usize;
 
-        // Load params from args_ptr into SSA vars (params already in args_ptr from caller)
+        // The internal native ABI carries the first raw argument words in
+        // machine lanes. Wide signatures continue in frame memory. Float
+        // locals receive an explicit raw-word bitcast at this boundary.
         for i in 0..param_slots.min(ssa_slots) {
             let slot = i as u16;
-            let val = if self.core.is_float_slot(slot) {
-                crate::compile_common::load_memory_slot_f64(&mut self.builder, args_ptr, slot)
+            let raw = if i < crate::NATIVE_ARG_LANES {
+                params[3 + i]
             } else {
                 crate::compile_common::load_memory_slot_i64(&mut self.builder, args_ptr, slot)
+            };
+            let val = if self.core.is_float_slot(slot) {
+                self.builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+            } else {
+                raw
             };
             self.builder.def_var(self.core.vars[i], val);
         }

@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 //! JIT compiler for Vo bytecode using Cranelift.
 
+mod abi;
 mod analysis;
 mod call_helpers;
 mod capability;
@@ -23,6 +24,7 @@ mod translate;
 mod translator;
 mod verifier;
 
+pub use abi::{JitFunc, NativeJitFunc, NATIVE_ARG_LANES};
 pub use loop_analysis::LoopInfo;
 pub use loop_compiler::LoopFunc;
 pub use native_stack_map::{
@@ -38,9 +40,9 @@ use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-use cranelift_codegen::ir::{types, AbiParam, Signature};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlagsData as MemFlags, Signature};
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::FunctionBuilderContext;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{Module, ModuleReloc};
 
@@ -48,6 +50,7 @@ use vo_runtime::bytecode::{
     DynamicCallsiteMap, FunctionDef, LoadedModule, Module as VoModule, ResolvedExternTable,
 };
 use vo_runtime::instruction::Opcode;
+#[cfg(test)]
 use vo_runtime::jit_api::{JitContext, JitResult};
 
 use helpers::{HelperFuncIds, HelperRefs};
@@ -287,14 +290,13 @@ impl From<loop_analysis::LoopAnalysisError> for JitError {
 // =============================================================================
 
 pub struct CompiledFunction {
-    code_ptr: *const u8,
+    bridge_code_ptr: *const u8,
+    native_code_ptr: *const u8,
     metadata: Arc<JitArtifactMetadata>,
 }
 
 unsafe impl Send for CompiledFunction {}
 unsafe impl Sync for CompiledFunction {}
-
-pub type JitFunc = extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64) -> JitResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitBackendCaps {
@@ -414,7 +416,15 @@ impl JitCache {
         self.functions
             .get(func_id as usize)
             .and_then(Option::as_ref)
-            .map(|f| std::mem::transmute(f.code_ptr))
+            .map(|f| std::mem::transmute(f.bridge_code_ptr))
+    }
+    /// # Safety
+    /// The returned function pointer must only be called with the native ABI.
+    unsafe fn get_native_func_ptr(&self, func_id: u32) -> Option<NativeJitFunc> {
+        self.functions
+            .get(func_id as usize)
+            .and_then(Option::as_ref)
+            .map(|f| std::mem::transmute(f.native_code_ptr))
     }
     fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
         self.loops.get(&(func_id, begin_pc))
@@ -950,7 +960,13 @@ impl JitCompiler {
                 })?;
                 let code_size = compiled.code_info().total_size as usize;
                 let committed_size = self.cache.committed_artifact_bytes(code_size);
-                self.cache.ensure_code_capacity(committed_size)?;
+                let required_capacity = match artifact_kind {
+                    JitArtifactKind::Function => {
+                        committed_size.saturating_add(self.cache.code_allocation_granularity_bytes)
+                    }
+                    JitArtifactKind::Loop => committed_size,
+                };
+                self.cache.ensure_code_capacity(required_capacity)?;
                 let stack_maps = compiled.buffer.user_stack_maps();
                 let source_locs = compiled.buffer.get_srclocs_sorted();
                 let mut source_index = 0usize;
@@ -1022,6 +1038,107 @@ impl JitCompiler {
         self.module.finalize_definitions()?;
 
         Ok((self.module.get_finalized_function(func_id_cl), metadata))
+    }
+
+    /// Generate the VM-facing thunk for one already-finalized native body.
+    /// The thunk owns no guest state: it decodes the first argument words from
+    /// the materialized frame and immediately tail-calls the internal ABI.
+    fn finalize_function_bridge(
+        &mut self,
+        native_func_id: cranelift_module::FuncId,
+        func_id: u32,
+        param_slots: usize,
+    ) -> Result<*const u8, JitError> {
+        self.ctx.clear();
+        let target_config = self.module.target_config();
+        let pointer_type = target_config.pointer_type();
+        let signature = abi::bridge_signature(target_config.default_call_conv, pointer_type);
+        let bridge_name = format!("vo_jit_bridge_{func_id}");
+        let bridge_id = self.module.declare_function(
+            &bridge_name,
+            cranelift_module::Linkage::Local,
+            &signature,
+        )?;
+        self.ctx.func.signature = signature;
+        self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(1, func_id);
+        let native_ref = self
+            .module
+            .declare_func_in_func(native_func_id, &mut self.ctx.func);
+
+        let mut bridge_builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+        let entry = bridge_builder.create_block();
+        bridge_builder.append_block_params_for_function_params(entry);
+        bridge_builder.switch_to_block(entry);
+        bridge_builder.seal_block(entry);
+        let params = bridge_builder.block_params(entry);
+        let ctx = params[0];
+        let frame_ptr = params[1];
+        let ret_ptr = params[2];
+        let mut native_args = Vec::with_capacity(3 + NATIVE_ARG_LANES);
+        native_args.extend_from_slice(&[ctx, frame_ptr, ret_ptr]);
+        for lane in 0..NATIVE_ARG_LANES {
+            let raw = if lane < param_slots {
+                bridge_builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    frame_ptr,
+                    (lane * 8) as i32,
+                )
+            } else {
+                bridge_builder.ins().iconst(types::I64, 0)
+            };
+            native_args.push(raw);
+        }
+        let call = bridge_builder.ins().call(native_ref, &native_args);
+        let result = bridge_builder.inst_results(call)[0];
+        bridge_builder.ins().return_(&[result]);
+        bridge_builder.finalize(target_config);
+
+        let compile_result = (|| {
+            cranelift_codegen::verifier::verify_function(&self.ctx.func, self.module.isa().flags())
+                .map_err(|errors| {
+                    JitError::Internal(format!(
+                        "Cranelift IR verification failed for {bridge_name}: {errors}"
+                    ))
+                })?;
+            if self.debug_ir {
+                eprintln!("=== JIT IR for bridge_{func_id} ===");
+                eprintln!("{}", self.ctx.func.display());
+            }
+            self.ctx
+                .compile(self.module.isa(), &mut Default::default())
+                .map_err(cranelift_module::ModuleError::from)?;
+            let compiled = self.ctx.compiled_code().ok_or_else(|| {
+                JitError::Internal(format!("missing compiled code for {bridge_name}"))
+            })?;
+            let code_size = compiled.code_info().total_size as usize;
+            let committed_size = self.cache.committed_artifact_bytes(code_size);
+            if committed_size > self.cache.code_allocation_granularity_bytes {
+                return Err(JitError::Internal(format!(
+                    "generated bridge {bridge_name} exceeds one code page"
+                )));
+            }
+            self.cache.ensure_code_capacity(committed_size)?;
+            let relocs = compiled
+                .buffer
+                .relocs()
+                .iter()
+                .map(|reloc| ModuleReloc::from_mach_reloc(reloc, &self.ctx.func, bridge_id))
+                .collect::<Vec<_>>();
+            self.module.define_function_bytes(
+                bridge_id,
+                u64::from(compiled.buffer.alignment),
+                compiled.code_buffer(),
+                &relocs,
+            )?;
+            Ok::<_, JitError>((code_size, committed_size))
+        })();
+        self.module.clear_context(&mut self.ctx);
+        let (code_size, committed_size) = compile_result?;
+        self.cache
+            .record_function_allocation(code_size, committed_size, 0);
+        self.module.finalize_definitions()?;
+        Ok(self.module.get_finalized_function(bridge_id))
     }
 
     fn finish_translation(&mut self, result: Result<(), JitError>) -> Result<(), JitError> {
@@ -1122,11 +1239,7 @@ impl JitCompiler {
         let module = &self.module;
         let target_config = module.target_config();
         let ptr_type = target_config.pointer_type();
-        let mut sig = Signature::new(target_config.default_call_conv);
-        sig.params.push(AbiParam::new(ptr_type)); // ctx
-        sig.params.push(AbiParam::new(ptr_type)); // args
-        sig.params.push(AbiParam::new(ptr_type)); // ret
-        sig.returns.push(AbiParam::new(types::I32));
+        let sig = abi::native_signature(target_config.default_call_conv, ptr_type);
 
         self.ctx.func.signature = sig;
         self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0, func_id);
@@ -1184,8 +1297,14 @@ impl JitCompiler {
                 self.cache.reject_function(func_id, rejection);
             }
         }
-        let (code_ptr, metadata) = finalize_result?;
-        let compiled = CompiledFunction { code_ptr, metadata };
+        let (native_code_ptr, metadata) = finalize_result?;
+        let bridge_code_ptr =
+            self.finalize_function_bridge(func_id_cl, func_id, func.param_slots as usize)?;
+        let compiled = CompiledFunction {
+            bridge_code_ptr,
+            native_code_ptr,
+            metadata,
+        };
         self.cache.insert(func_id, compiled);
         Ok(())
     }
@@ -1414,6 +1533,11 @@ impl JitCompiler {
     /// The returned function pointer must only be called with the correct ABI.
     pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.cache.get_func_ptr(func_id)
+    }
+    /// # Safety
+    /// The returned function pointer must only be called with the native ABI.
+    pub unsafe fn get_native_func_ptr(&self, func_id: u32) -> Option<NativeJitFunc> {
+        self.cache.get_native_func_ptr(func_id)
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.

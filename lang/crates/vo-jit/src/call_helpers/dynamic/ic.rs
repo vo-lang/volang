@@ -12,7 +12,8 @@ use super::super::prepared::{emit_prepared_call, PreparedCallParams};
 use super::super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
     emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_current_func_id,
-    restore_caller_execution_context, JitCallGcMode, NonOkSlowPathParams, JIT_RESULT_OK,
+    load_native_arg_lanes, restore_caller_execution_context, JitCallGcMode, NonOkSlowPathParams,
+    JIT_RESULT_OK,
 };
 
 /// Maximum callee local_slots for the IC native-stack optimization.
@@ -104,6 +105,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     emitter.store_context_field(new_sp, JitContextField::FiberSp);
 
     let jit_func_sig = import_jit_func_sig(emitter);
+    let arg_lanes = load_native_arg_lanes(emitter, p.ic_args_ptr, p.arg_slots + 1);
     let jit_result = emit_effect_aware_jit_call(
         emitter,
         jit_func_sig,
@@ -111,6 +113,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         p.ctx,
         p.ic_args_ptr,
         p.ret_ptr,
+        &arg_lanes,
         JitCallGcMode::Dynamic(p.ic_may_gc),
     );
     emit_call_depth_leave(emitter, old_call_depth);
@@ -281,6 +284,12 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
         p.out_slot,
         PreparedCall::OFFSET_FUNC_ID,
     );
+    let callee_local_slots = emitter.builder().ins().stack_load(
+        types::I64,
+        types::I32,
+        p.out_slot,
+        PreparedCall::OFFSET_CALLEE_LOCAL_SLOTS,
+    );
     let jit_may_gc = emitter.builder().ins().stack_load(
         types::I64,
         types::I32,
@@ -294,6 +303,7 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             jit_func_ptr,
             callee_args_ptr,
             func_id,
+            callee_local_slots,
             jit_may_gc,
             ret_ptr: p.ret_ptr,
             caller_bp: p.caller_bp,
