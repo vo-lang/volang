@@ -255,6 +255,72 @@ fn optimizing_self_recursion_executes_through_the_direct_native_symbol() {
 }
 
 #[test]
+fn optimizing_scalar_replacement_executes_without_a_managed_heap() {
+    let mut function = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 0, 0, 0),
+            Instruction::new(Opcode::PtrNew, 1, 0, 0),
+            Instruction::new(Opcode::LoadInt, 2, 42, 0),
+            Instruction::new(Opcode::PtrSet, 1, 0, 2),
+            Instruction::new(Opcode::PtrGet, 3, 1, 0),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        vec![
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ],
+        0,
+        0,
+        1,
+    );
+    for pc in [1, 3, 4] {
+        function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::Value],
+        };
+    }
+    let mut module = VoModule::new("jit-scalar-replacement".into());
+    module.constants.push(Constant::Int(
+        ValueMeta::new(0, ValueKind::Int64).to_raw() as i64
+    ));
+    module.functions.push(function);
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified scalar replacement module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind scalar replacement module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile scalar-replaced function");
+
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing scalar replacement entry")
+    };
+    let mut frame = [0_u64; 4];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+    assert!(
+        ctx.gc.is_null(),
+        "test intentionally supplies no managed heap"
+    );
+
+    assert_eq!(
+        entry(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], 42);
+}
+
+#[test]
 fn backend_allocation_failure_is_a_resource_rejection() {
     let error = JitError::Module(cranelift_module::ModuleError::Allocation {
         err: std::io::Error::other("exhausted"),

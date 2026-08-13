@@ -24,7 +24,7 @@ pub(crate) struct BlockId(u32);
 
 impl BlockId {
     #[inline]
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -225,6 +225,11 @@ impl TypedInstruction {
     #[inline]
     pub(crate) fn memory_sync(self) -> MemorySyncEffect {
         self.memory_sync
+    }
+
+    #[inline]
+    pub(crate) fn requires_frame_state(self) -> bool {
+        self.effects.requires_frame_state()
     }
 
     fn frame_state_id(self) -> Option<FrameStateId> {
@@ -573,6 +578,15 @@ impl FunctionIr {
 
     pub(crate) fn blocks(&self) -> &[BasicBlock] {
         &self.blocks
+    }
+
+    pub(crate) fn any_slot_live_out(&self, block: BlockId, slots: &BTreeSet<u16>) -> bool {
+        self.blocks[block.index()]
+            .successors
+            .slice(&self.edges)
+            .iter()
+            .flat_map(|edge| edge.arguments.slice(&self.edge_arguments))
+            .any(|argument| slots.contains(&argument.slot))
     }
 
     #[cfg(test)]

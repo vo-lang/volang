@@ -9,6 +9,7 @@ mod capability;
 mod compile_common;
 mod contract;
 mod effects;
+mod escape;
 mod func_compiler;
 mod helpers;
 mod intrinsics;

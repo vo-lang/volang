@@ -37,6 +37,8 @@ pub struct FunctionCompiler<'a> {
     tier: vo_runtime::jit_api::JitTier,
     optimization_plan: Option<&'a crate::optimizer::ModuleOptimizationPlan>,
     self_native_ref: Option<FuncRef>,
+    virtual_aliases: std::collections::HashMap<u16, usize>,
+    virtual_objects: Vec<Vec<Value>>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -90,6 +92,8 @@ impl<'a> FunctionCompiler<'a> {
             tier,
             optimization_plan,
             self_native_ref,
+            virtual_aliases: std::collections::HashMap::new(),
+            virtual_objects: Vec::new(),
         }
     }
 
@@ -453,8 +457,28 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
+        if self.tier == vo_runtime::jit_api::JitTier::Optimizing
+            && inst.opcode() == Opcode::PtrNew
+            && self.emit_virtual_allocation(inst)
+        {
+            return Ok(false);
+        }
+        if self.tier == vo_runtime::jit_api::JitTier::Optimizing {
+            match inst.opcode() {
+                Opcode::PtrGet | Opcode::PtrGetN if self.emit_virtual_ptr_get(inst) => {
+                    return Ok(false);
+                }
+                Opcode::PtrSet | Opcode::PtrSetN if self.emit_virtual_ptr_set(inst) => {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
         match translate_inst(self, inst)? {
-            TranslateResult::Completed => return Ok(false),
+            TranslateResult::Completed => {
+                self.update_virtual_aliases(inst);
+                return Ok(false);
+            }
             TranslateResult::Unhandled => {}
         }
 
@@ -503,6 +527,123 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(false)
             }
             other => Err(JitError::UnsupportedOpcode(other)),
+        }
+    }
+
+    fn emit_virtual_allocation(&mut self, inst: &Instruction) -> bool {
+        let Some(allocation) = self.core.analysis.stack_allocation(self.core.current_pc) else {
+            return false;
+        };
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let object_id = self.virtual_objects.len();
+        self.virtual_objects
+            .push(vec![zero; usize::from(allocation.slots)]);
+        self.virtual_aliases.insert(inst.a, object_id);
+        let virtual_identity = self
+            .builder
+            .ins()
+            .iconst(types::I64, i64::try_from(object_id + 1).unwrap_or(i64::MAX));
+        self.store_local(inst.a, virtual_identity);
+        self.core.checked_non_nil.insert(inst.a);
+        true
+    }
+
+    fn emit_virtual_ptr_get(&mut self, inst: &Instruction) -> bool {
+        let Some(&object_id) = self.virtual_aliases.get(&inst.b) else {
+            return false;
+        };
+        let count = match inst.opcode() {
+            Opcode::PtrGet => 1,
+            Opcode::PtrGetN => self
+                .core
+                .func_def
+                .instruction_metadata
+                .get(self.core.current_pc)
+                .and_then(vo_runtime::bytecode::InstructionMetadata::ptr_value_layout)
+                .map_or(0, <[vo_runtime::SlotType]>::len),
+            _ => unreachable!(),
+        };
+        let start = usize::from(inst.c);
+        let Some(values) = self.virtual_objects.get(object_id) else {
+            return false;
+        };
+        let Some(values) = values.get(start..start.saturating_add(count)) else {
+            return false;
+        };
+        let values = values.to_vec();
+        for (offset, value) in values.into_iter().enumerate() {
+            let destination = inst.a + offset as u16;
+            self.virtual_aliases.remove(&destination);
+            self.store_local(destination, value);
+        }
+        true
+    }
+
+    fn emit_virtual_ptr_set(&mut self, inst: &Instruction) -> bool {
+        let Some(&object_id) = self.virtual_aliases.get(&inst.a) else {
+            return false;
+        };
+        let count = match inst.opcode() {
+            Opcode::PtrSet => 1,
+            Opcode::PtrSetN => self
+                .core
+                .func_def
+                .instruction_metadata
+                .get(self.core.current_pc)
+                .and_then(vo_runtime::bytecode::InstructionMetadata::ptr_value_layout)
+                .map_or(0, <[vo_runtime::SlotType]>::len),
+            _ => unreachable!(),
+        };
+        let values = (0..count)
+            .map(|offset| self.load_local(inst.c + offset as u16))
+            .collect::<Vec<_>>();
+        let start = usize::from(inst.b);
+        let Some(fields) = self.virtual_objects.get_mut(object_id) else {
+            return false;
+        };
+        let Some(fields) = fields.get_mut(start..start.saturating_add(count)) else {
+            return false;
+        };
+        fields.copy_from_slice(&values);
+        true
+    }
+
+    fn update_virtual_aliases(&mut self, inst: &Instruction) {
+        match inst.opcode() {
+            Opcode::Copy => {
+                let source = self.virtual_aliases.get(&inst.b).copied();
+                self.virtual_aliases.remove(&inst.a);
+                if let Some(object) = source {
+                    self.virtual_aliases.insert(inst.a, object);
+                }
+            }
+            Opcode::CopyN => {
+                let copies = (0..inst.copy_n_count())
+                    .map(|offset| {
+                        (
+                            inst.a + offset,
+                            self.virtual_aliases.get(&(inst.b + offset)).copied(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (destination, _) in &copies {
+                    self.virtual_aliases.remove(destination);
+                }
+                for (destination, object) in copies {
+                    if let Some(object) = object {
+                        self.virtual_aliases.insert(destination, object);
+                    }
+                }
+            }
+            _ => {
+                if let Some(instruction) = self.core.analysis.ir().instruction(self.core.current_pc)
+                {
+                    for output in self.core.analysis.ir().outputs(*instruction) {
+                        self.virtual_aliases
+                            .remove(&self.core.analysis.ir().value(*output).slot);
+                    }
+                }
+            }
         }
     }
 
@@ -784,6 +925,9 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
             block_terminated,
         ) {
             self.core.clear_flow_facts();
+            // Escape candidates never cross a control-flow or scheduling
+            // region boundary, so no virtual identity may survive one.
+            self.virtual_aliases.clear();
             if let Some(cost) = self.core.execution_budget_regions.get(&pc).copied() {
                 self.emit_execution_budget_checkpoint(pc, cost);
             }
