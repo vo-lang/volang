@@ -6,10 +6,10 @@ use vo_runtime::jit_api::{JitContext, JitContextField};
 use crate::translator::{HelperKind, IrEmitter, NativeScratchKind};
 
 use super::{
-    emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
-    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_current_func_id,
-    restore_caller_execution_context, CallPlan, CallViaVmConfig, JitCallGcMode,
-    NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
+    emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_direct_jit_call,
+    emit_effect_aware_jit_call, emit_non_ok_slow_path, emit_stack_capacity_check,
+    import_jit_func_sig, load_current_func_id, restore_caller_execution_context, CallPlan,
+    CallViaVmConfig, JitCallGcMode, NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
 };
 
 /// Emit a call by materializing a VM-owned call request.
@@ -88,6 +88,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
 pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     plan: CallPlan,
+    direct_native: Option<cranelift_codegen::ir::FuncRef>,
 ) -> Result<(), crate::JitError> {
     let ctx = emitter.ctx_param();
 
@@ -166,42 +167,41 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     let merge_block = emitter.builder().create_block();
 
-    let jit_func_table = emitter.load_context_field(types::I64, JitContextField::JitFuncTable);
-    let func_id_i64 = emitter
-        .builder()
-        .ins()
-        .iconst(types::I64, plan.func_id as i64);
-    let offset = emitter.builder().ins().imul_imm_u(
-        func_id_i64,
-        vo_runtime::jit_api::JitDispatchEntry::SIZE as i64,
-    );
-    let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
-    let jit_func_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        func_ptr_addr,
-        vo_runtime::jit_api::JitDispatchEntry::OFFSET_NATIVE,
-    );
-
-    let zero = emitter.builder().ins().iconst(types::I64, 0);
-    let is_null = emitter
-        .builder()
-        .ins()
-        .icmp(IntCC::Equal, jit_func_ptr, zero);
-
     let jit_call_block = emitter.builder().create_block();
     let vm_call_block = crate::compile_common::cold_block(emitter.builder());
-
-    emitter
-        .builder()
-        .ins()
-        .brif(is_null, vm_call_block, &[], jit_call_block, &[]);
+    let jit_func_ptr = if direct_native.is_some() {
+        emitter.builder().ins().jump(jit_call_block, &[]);
+        None
+    } else {
+        let jit_func_table = emitter.load_context_field(types::I64, JitContextField::JitFuncTable);
+        let func_id_i64 = emitter
+            .builder()
+            .ins()
+            .iconst(types::I64, plan.func_id as i64);
+        let offset = emitter.builder().ins().imul_imm_u(
+            func_id_i64,
+            vo_runtime::jit_api::JitDispatchEntry::SIZE as i64,
+        );
+        let func_ptr_addr = emitter.builder().ins().iadd(jit_func_table, offset);
+        let func_ptr = emitter.builder().ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            func_ptr_addr,
+            vo_runtime::jit_api::JitDispatchEntry::OFFSET_NATIVE,
+        );
+        let zero = emitter.builder().ins().iconst(types::I64, 0);
+        let is_null = emitter.builder().ins().icmp(IntCC::Equal, func_ptr, zero);
+        emitter
+            .builder()
+            .ins()
+            .brif(is_null, vm_call_block, &[], jit_call_block, &[]);
+        Some(func_ptr)
+    };
 
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
 
     let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
-    let sig = import_jit_func_sig(emitter);
     let gc_mode = if plan.eligibility.may_gc {
         JitCallGcMode::MayGc
     } else {
@@ -209,16 +209,23 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     };
     let zero = emitter.builder().ins().iconst(types::I64, 0);
     let arg_lanes = std::array::from_fn(|lane| arg_values.get(lane).copied().unwrap_or(zero));
-    let jit_result_indirect = emit_effect_aware_jit_call(
-        emitter,
-        sig,
-        jit_func_ptr,
-        ctx,
-        args_ptr,
-        ret_ptr,
-        &arg_lanes,
-        gc_mode,
-    );
+    let jit_result_indirect = if let Some(func_ref) = direct_native {
+        emit_effect_aware_direct_jit_call(
+            emitter, func_ref, ctx, args_ptr, ret_ptr, &arg_lanes, gc_mode,
+        )
+    } else {
+        let sig = import_jit_func_sig(emitter);
+        emit_effect_aware_jit_call(
+            emitter,
+            sig,
+            jit_func_ptr.expect("dynamic JIT call pointer"),
+            ctx,
+            args_ptr,
+            ret_ptr,
+            &arg_lanes,
+            gc_mode,
+        )
+    };
     emit_call_depth_leave(emitter, old_call_depth);
 
     let ok_val = emitter

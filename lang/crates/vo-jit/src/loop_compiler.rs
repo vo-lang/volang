@@ -387,11 +387,11 @@ impl<'a> LoopCompiler<'a> {
 
         match call_plan.route_for_loop() {
             crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan, None)?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::PreparedJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan, None)?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::VmCallMaterialization => {

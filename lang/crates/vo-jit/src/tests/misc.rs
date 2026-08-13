@@ -197,6 +197,64 @@ fn tier_up_failure_returns_before_local_ssa_state_is_initialized() {
 }
 
 #[test]
+fn optimizing_self_recursion_executes_through_the_direct_native_symbol() {
+    let mut module = VoModule::new("jit-optimizing-direct-recursion".into());
+    module.functions.push(make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 1, 1, 0),
+            Instruction::new(Opcode::LeI, 2, 0, 1),
+            jump_if_not(2, 2),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+            Instruction::new(Opcode::SubI, 3, 0, 1),
+            Instruction::new(Opcode::Call, 0, 3, 0),
+            Instruction::new(Opcode::LoadInt, 5, 2, 0),
+            Instruction::new(Opcode::SubI, 5, 0, 5),
+            Instruction::new(Opcode::Call, 0, 5, 0),
+            Instruction::new(Opcode::AddI, 7, 4, 6),
+            Instruction::new(Opcode::Return, 7, 1, 0),
+        ],
+        1,
+        1,
+        8,
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified recursive module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind recursive module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile optimizing recursive function");
+
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing recursive entry")
+    };
+    let mut stack = vec![0_u64; 2048];
+    stack[0] = 10;
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut stack);
+    ctx.fiber_sp = module.functions[0].local_slots as u32;
+
+    assert_eq!(
+        entry(&mut ctx, stack.as_mut_ptr(), ret.as_mut_ptr()),
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], 55);
+    assert_eq!(ctx.call_depth, 0);
+    assert_eq!(ctx.jit_bp, 0);
+    assert_eq!(ctx.fiber_sp, module.functions[0].local_slots as u32);
+}
+
+#[test]
 fn backend_allocation_failure_is_a_resource_rejection() {
     let error = JitError::Module(cranelift_module::ModuleError::Allocation {
         err: std::io::Error::other("exhausted"),

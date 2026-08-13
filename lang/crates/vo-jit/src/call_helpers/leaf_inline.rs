@@ -153,7 +153,7 @@ impl SmallPureLeafInline {
         Ok(())
     }
 
-    fn emit<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, arg_start: usize) {
+    pub(crate) fn emit<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, arg_start: usize) {
         let zero_i64 = emitter.builder().ins().iconst(types::I64, 0);
         let zero_f64 = emitter.builder().ins().f64const(0.0);
         let mut locals = Vec::with_capacity(self.slot_types.len());

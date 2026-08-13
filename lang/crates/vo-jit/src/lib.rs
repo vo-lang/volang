@@ -3,6 +3,7 @@
 
 mod abi;
 mod analysis;
+mod call_graph;
 mod call_helpers;
 mod capability;
 mod compile_common;
@@ -17,6 +18,7 @@ mod loop_compiler;
 mod metadata;
 mod native_frame;
 mod native_stack_map;
+mod optimizer;
 mod semantics;
 #[cfg(test)]
 mod test_fixtures;
@@ -785,6 +787,7 @@ pub struct JitCompiler {
     verified_env: Option<JitCompileEnvScope>,
     dynamic_callsites: Option<Arc<DynamicCallsiteMap>>,
     entry_eligibility: Option<Arc<[JitFrameEntryEligibility]>>,
+    optimization_plan: Option<Arc<optimizer::ModuleOptimizationPlan>>,
     debug_ir: bool,
 }
 
@@ -868,6 +871,7 @@ impl JitCompiler {
             verified_env: None,
             dynamic_callsites: None,
             entry_eligibility: None,
+            optimization_plan: None,
             debug_ir,
         })
     }
@@ -1275,6 +1279,11 @@ impl JitCompiler {
         let analysis =
             self.cache
                 .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
+        let optimization_plan = (tier == JitTier::Optimizing).then(|| {
+            Arc::clone(self.optimization_plan.get_or_insert_with(|| {
+                Arc::new(optimizer::ModuleOptimizationPlan::build(vo_module))
+            }))
+        });
 
         // Clear any residual state from previous compilation
         self.ctx.clear();
@@ -1286,6 +1295,16 @@ impl JitCompiler {
 
         self.ctx.func.signature = sig;
         self.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(tier as u32, func_id);
+        let func_name = format!("vo_jit_{}_{}", func_id, tier as u8);
+        let func_id_cl = self.module.declare_function(
+            &func_name,
+            cranelift_module::Linkage::Local,
+            &self.ctx.func.signature,
+        )?;
+        let self_native_ref = (tier == JitTier::Optimizing).then(|| {
+            self.module
+                .declare_func_in_func(func_id_cl, &mut self.ctx.func)
+        });
 
         let helpers = HelperRefs::new(&mut self.module, self.helper_funcs);
         let compile_result = {
@@ -1300,6 +1319,8 @@ impl JitCompiler {
                 helpers,
                 &analysis,
                 tier,
+                optimization_plan.as_deref(),
+                self_native_ref,
             );
             compiler.compile(target_config)
         };
@@ -1317,13 +1338,6 @@ impl JitCompiler {
         }
         let frame_budget_result = self.verify_native_frame_budget();
         self.finish_translation(frame_budget_result)?;
-
-        let func_name = format!("vo_jit_{}_{}", func_id, tier as u8);
-        let func_id_cl = self.module.declare_function(
-            &func_name,
-            cranelift_module::Linkage::Local,
-            &self.ctx.func.signature,
-        )?;
 
         if self.debug_ir {
             eprintln!("=== JIT IR for func_{} {} ===", func_id, func.name);

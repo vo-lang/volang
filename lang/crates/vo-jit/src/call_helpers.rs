@@ -266,6 +266,37 @@ pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
     }
 }
 
+/// Direct-symbol counterpart used by stable self-recursive optimizing code.
+pub(super) fn emit_effect_aware_direct_jit_call<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    jit_func_ref: cranelift_codegen::ir::FuncRef,
+    ctx: Value,
+    args_ptr: Value,
+    ret_ptr: Value,
+    arg_lanes: &[Value; crate::NATIVE_ARG_LANES],
+    mode: JitCallGcMode,
+) -> Value {
+    let emit_call = |emitter: &mut E, attach_roots: bool| {
+        let native_roots = attach_roots.then(|| emitter.spill_native_roots()).flatten();
+        let mut args = Vec::with_capacity(3 + crate::NATIVE_ARG_LANES);
+        args.extend_from_slice(&[ctx, args_ptr, ret_ptr]);
+        args.extend_from_slice(arg_lanes);
+        let call = emitter.builder().ins().call(jit_func_ref, &args);
+        if attach_roots {
+            emitter.attach_native_roots(call, native_roots);
+        }
+        emitter.builder().inst_results(call)[0]
+    };
+
+    match mode {
+        JitCallGcMode::Never => emit_call(emitter, false),
+        JitCallGcMode::MayGc => emit_call(emitter, true),
+        JitCallGcMode::Dynamic(_) => {
+            unreachable!("direct static calls have a compile-time GC contract")
+        }
+    }
+}
+
 /// Load raw argument words from a validated frame window. Callers guarantee
 /// that `available_slots` words are addressable; unused lanes are zero-filled.
 pub(super) fn load_native_arg_lanes<'a, E: IrEmitter<'a>>(

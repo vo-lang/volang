@@ -222,23 +222,7 @@ pub(crate) fn module_frame_entry_eligibility(
     module: &Module,
     env: JitCompileEnv<'_>,
 ) -> Vec<crate::JitFrameEntryEligibility> {
-    let function_count = module.functions.len();
-    let mut callers = vec![Vec::<usize>::new(); function_count];
-    let mut callees = vec![Vec::<usize>::new(); function_count];
-
-    for (caller_id, func) in module.functions.iter().enumerate() {
-        for inst in &func.code {
-            if inst.opcode() != Opcode::Call {
-                continue;
-            }
-            let callee_id = inst.static_call_func_id() as usize;
-            if let Some(callee_callers) = callers.get_mut(callee_id) {
-                callee_callers.push(caller_id);
-                callees[caller_id].push(callee_id);
-            }
-        }
-    }
-    let (component_ids, recursive_components) = recursive_call_components(&callees, &callers);
+    let graph = crate::call_graph::ModuleCallGraph::build(module);
     let local_contracts = module
         .functions
         .iter()
@@ -250,10 +234,10 @@ pub(crate) fn module_frame_entry_eligibility(
         .enumerate()
         .map(|(func_id, func)| {
             let mut frame_contract = local_contracts[func_id];
-            let has_non_recursive_call = callees[func_id].iter().any(|&callee_id| {
-                component_ids[callee_id] != component_ids[func_id]
-                    || !recursive_components[component_ids[func_id]]
-            });
+            let has_non_recursive_call = graph
+                .callees(func_id)
+                .iter()
+                .any(|&callee_id| !graph.is_recursive_edge(func_id, callee_id));
             if has_non_recursive_call {
                 frame_contract = frame_contract.union(opcode_contract(Opcode::Call));
             }
@@ -267,7 +251,7 @@ pub(crate) fn module_frame_entry_eligibility(
         .collect::<Vec<_>>();
 
     propagate_ineligible_callers(
-        &callers,
+        &graph,
         &mut eligibility,
         |entry| entry.frame_elided,
         |entry| {
@@ -275,13 +259,13 @@ pub(crate) fn module_frame_entry_eligibility(
         },
     );
     propagate_ineligible_callers(
-        &callers,
+        &graph,
         &mut eligibility,
         |entry| entry.prepared_shadow,
         |entry| entry.prepared_shadow = false,
     );
     propagate_ineligible_callers(
-        &callers,
+        &graph,
         &mut eligibility,
         |entry| entry.static_prepared_shadow,
         |entry| entry.static_prepared_shadow = false,
@@ -292,7 +276,7 @@ pub(crate) fn module_frame_entry_eligibility(
         .filter_map(|(func_id, entry)| entry.may_gc.then_some(func_id))
         .collect::<VecDeque<_>>();
     while let Some(callee_id) = gc_worklist.pop_front() {
-        for &caller_id in &callers[callee_id] {
+        for &caller_id in graph.callers(callee_id) {
             if !eligibility[caller_id].may_gc {
                 eligibility[caller_id].may_gc = true;
                 gc_worklist.push_back(caller_id);
@@ -302,70 +286,8 @@ pub(crate) fn module_frame_entry_eligibility(
     eligibility
 }
 
-fn recursive_call_components(
-    callees: &[Vec<usize>],
-    callers: &[Vec<usize>],
-) -> (Vec<usize>, Vec<bool>) {
-    let function_count = callees.len();
-    let mut visited = vec![false; function_count];
-    let mut finish_order = Vec::with_capacity(function_count);
-
-    for start in 0..function_count {
-        if visited[start] {
-            continue;
-        }
-        visited[start] = true;
-        let mut stack = vec![(start, 0usize)];
-        while let Some((node, next_edge)) = stack.last_mut() {
-            if let Some(&callee) = callees[*node].get(*next_edge) {
-                *next_edge += 1;
-                if !visited[callee] {
-                    visited[callee] = true;
-                    stack.push((callee, 0));
-                }
-            } else {
-                finish_order.push(*node);
-                stack.pop();
-            }
-        }
-    }
-
-    let mut component_ids = vec![usize::MAX; function_count];
-    let mut component_sizes = Vec::new();
-    for &start in finish_order.iter().rev() {
-        if component_ids[start] != usize::MAX {
-            continue;
-        }
-        let component_id = component_sizes.len();
-        let mut size = 0usize;
-        let mut stack = vec![start];
-        component_ids[start] = component_id;
-        while let Some(node) = stack.pop() {
-            size += 1;
-            for &caller in &callers[node] {
-                if component_ids[caller] == usize::MAX {
-                    component_ids[caller] = component_id;
-                    stack.push(caller);
-                }
-            }
-        }
-        component_sizes.push(size);
-    }
-
-    let mut recursive_components = component_sizes
-        .iter()
-        .map(|size| *size > 1)
-        .collect::<Vec<_>>();
-    for (caller, targets) in callees.iter().enumerate() {
-        if targets.contains(&caller) {
-            recursive_components[component_ids[caller]] = true;
-        }
-    }
-    (component_ids, recursive_components)
-}
-
 fn propagate_ineligible_callers(
-    callers: &[Vec<usize>],
+    graph: &crate::call_graph::ModuleCallGraph,
     eligibility: &mut [crate::JitFrameEntryEligibility],
     is_eligible: impl Fn(crate::JitFrameEntryEligibility) -> bool,
     mark_ineligible: impl Fn(&mut crate::JitFrameEntryEligibility),
@@ -376,7 +298,7 @@ fn propagate_ineligible_callers(
         .filter_map(|(func_id, entry)| (!is_eligible(*entry)).then_some(func_id))
         .collect::<VecDeque<_>>();
     while let Some(callee_id) = queue.pop_front() {
-        for &caller_id in &callers[callee_id] {
+        for &caller_id in graph.callers(callee_id) {
             if is_eligible(eligibility[caller_id]) {
                 mark_ineligible(&mut eligibility[caller_id]);
                 queue.push_back(caller_id);

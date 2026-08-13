@@ -35,6 +35,8 @@ pub struct FunctionCompiler<'a> {
     saved_fiber_sp: Value,
     pending_select_cases: Vec<SelectSyncCase>,
     tier: vo_runtime::jit_api::JitTier,
+    optimization_plan: Option<&'a crate::optimizer::ModuleOptimizationPlan>,
+    self_native_ref: Option<FuncRef>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -49,6 +51,8 @@ impl<'a> FunctionCompiler<'a> {
         mut helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
         tier: vo_runtime::jit_api::JitTier,
+        optimization_plan: Option<&'a crate::optimizer::ModuleOptimizationPlan>,
+        self_native_ref: Option<FuncRef>,
     ) -> Self {
         let copy_frame_slots = helpers
             .resolve(HelperKind::copy_frame_slots, func)
@@ -84,6 +88,8 @@ impl<'a> FunctionCompiler<'a> {
             saved_fiber_sp: Value::from_u32(0),
             pending_select_cases: Vec::new(),
             tier,
+            optimization_plan,
+            self_native_ref,
         }
     }
 
@@ -708,23 +714,46 @@ impl<'a> FunctionCompiler<'a> {
             target_func,
             eligibility,
         );
-        if let Some(inline) = crate::call_helpers::SmallPureLeafInline::analyze(
-            target_func,
-            &self.core.vo_module.constants,
-        ) {
+        let optimizing_inline = self
+            .optimization_plan
+            .and_then(|plan| plan.pure_leaf_inline(self.core.func_id, target_func_id));
+        if let Some(inline) = optimizing_inline {
             if self.core.reserve_leaf_inline_instructions(inline.cost()) {
-                inline.emit_guarded(self, call_plan, self.core.current_pc + 1)?;
+                inline.emit(self, call_plan.arg_start);
                 return Ok(false);
+            }
+        } else if self.tier == vo_runtime::jit_api::JitTier::Baseline {
+            if let Some(inline) = crate::call_helpers::SmallPureLeafInline::analyze(
+                target_func,
+                &self.core.vo_module.constants,
+            ) {
+                if self.core.reserve_leaf_inline_instructions(inline.cost()) {
+                    inline.emit_guarded(self, call_plan, self.core.current_pc + 1)?;
+                    return Ok(false);
+                }
             }
         }
 
+        let direct_self = self
+            .optimization_plan
+            .is_some_and(|plan| plan.direct_self_call(self.core.func_id, target_func_id));
+        let direct_native = direct_self.then_some(self.self_native_ref).flatten();
+
         match call_plan.route_for_full_function(self.core.func_id) {
             crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(
+                    self,
+                    call_plan,
+                    direct_native,
+                )?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::PreparedJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan)?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(
+                    self,
+                    call_plan,
+                    direct_native,
+                )?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::VmCallMaterialization => {
