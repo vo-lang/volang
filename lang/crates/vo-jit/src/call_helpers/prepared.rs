@@ -9,8 +9,8 @@ use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_checked_jit_result_indirect_callback_call,
     emit_effect_aware_jit_call, emit_native_link, emit_raw_jit_context_callback_call,
     import_jit_func_sig, load_current_func_id, load_native_arg_lanes_dynamic,
-    restore_caller_execution_context, JitCallGcMode, JIT_RESULT_CALL, JIT_RESULT_OK,
-    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    restore_caller_execution_context, JitCallGcMode, JitCallOperands, JIT_RESULT_CALL,
+    JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
 
 /// Parameters for the common prepared-call dispatch.
@@ -189,10 +189,12 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         emitter,
         jit_func_sig,
         jit_func_ptr,
-        ctx,
-        p.callee_args_ptr,
-        p.ret_ptr,
-        &arg_lanes,
+        JitCallOperands {
+            ctx,
+            args_ptr: p.callee_args_ptr,
+            ret_ptr: p.ret_ptr,
+            arg_lanes: &arg_lanes,
+        },
         JitCallGcMode::Dynamic(p.jit_may_gc),
     );
     emit_call_depth_leave(emitter, old_call_depth);

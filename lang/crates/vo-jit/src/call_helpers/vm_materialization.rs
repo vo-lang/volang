@@ -9,7 +9,8 @@ use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_direct_jit_call,
     emit_effect_aware_jit_call, emit_non_ok_slow_path, emit_stack_capacity_check,
     import_jit_func_sig, load_current_func_id, restore_caller_execution_context, CallPlan,
-    CallViaVmConfig, JitCallGcMode, NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
+    CallViaVmConfig, JitCallGcMode, JitCallOperands, NonOkSlowPathParams, JIT_RESULT_CALL,
+    JIT_RESULT_OK,
 };
 
 /// Emit a call by materializing a VM-owned call request.
@@ -239,10 +240,12 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             emitter,
             sig,
             linked_func_ptr,
-            ctx,
-            args_ptr,
-            ret_ptr,
-            &arg_lanes,
+            JitCallOperands {
+                ctx,
+                args_ptr,
+                ret_ptr,
+                arg_lanes: &arg_lanes,
+            },
             gc_mode,
         )
     };

@@ -135,7 +135,7 @@ impl Span {
         }
     }
 
-    fn slice<'a, T>(self, storage: &'a [T]) -> &'a [T] {
+    fn slice<T>(self, storage: &[T]) -> &[T] {
         let start = self.start as usize;
         &storage[start..start + self.len as usize]
     }
@@ -871,15 +871,15 @@ fn build_cfg(raw: &[RawInstruction]) -> Result<(Vec<BlockFacts>, Vec<BlockId>), 
         });
     }
 
-    for index in 0..blocks.len() {
-        let last_pc = blocks[index].end - 1;
+    for block in &mut blocks {
+        let last_pc = block.end - 1;
         let mut successors = instruction_successors(last_pc, raw[last_pc].source, raw.len())?
             .into_iter()
             .map(|pc| pc_to_block[pc])
             .collect::<Vec<_>>();
         successors.sort_unstable();
         successors.dedup();
-        blocks[index].successors = successors;
+        block.successors = successors;
     }
     for index in 0..blocks.len() {
         let predecessor = BlockId(index as u32);

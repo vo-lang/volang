@@ -12,8 +12,8 @@ use super::super::prepared::{emit_prepared_call, PreparedCallParams};
 use super::super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
     emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_current_func_id,
-    load_native_arg_lanes, restore_caller_execution_context, JitCallGcMode, NonOkSlowPathParams,
-    JIT_RESULT_OK,
+    load_native_arg_lanes, restore_caller_execution_context, JitCallGcMode, JitCallOperands,
+    NonOkSlowPathParams, JIT_RESULT_OK,
 };
 
 /// Maximum callee local_slots for the IC native-stack optimization.
@@ -110,10 +110,12 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         emitter,
         jit_func_sig,
         p.ic_jit_ptr,
-        p.ctx,
-        p.ic_args_ptr,
-        p.ret_ptr,
-        &arg_lanes,
+        JitCallOperands {
+            ctx: p.ctx,
+            args_ptr: p.ic_args_ptr,
+            ret_ptr: p.ret_ptr,
+            arg_lanes: &arg_lanes,
+        },
         JitCallGcMode::Dynamic(p.ic_may_gc),
     );
     emit_call_depth_leave(emitter, old_call_depth);

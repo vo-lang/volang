@@ -232,23 +232,27 @@ pub(super) enum JitCallGcMode {
     Dynamic(Value),
 }
 
+pub(super) struct JitCallOperands<'a> {
+    pub(super) ctx: Value,
+    pub(super) args_ptr: Value,
+    pub(super) ret_ptr: Value,
+    pub(super) arg_lanes: &'a [Value; crate::NATIVE_ARG_LANES],
+}
+
 /// Emit one native JIT call and attach a precise root map only on paths whose
 /// selected target can enter a managed-heap safepoint.
 pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     jit_func_sig: SigRef,
     jit_func_ptr: Value,
-    ctx: Value,
-    args_ptr: Value,
-    ret_ptr: Value,
-    arg_lanes: &[Value; crate::NATIVE_ARG_LANES],
+    operands: JitCallOperands<'_>,
     mode: JitCallGcMode,
 ) -> Value {
     let emit_call = |emitter: &mut E, attach_roots: bool| {
         let native_roots = attach_roots.then(|| emitter.spill_native_roots()).flatten();
         let mut args = Vec::with_capacity(3 + crate::NATIVE_ARG_LANES);
-        args.extend_from_slice(&[ctx, args_ptr, ret_ptr]);
-        args.extend_from_slice(arg_lanes);
+        args.extend_from_slice(&[operands.ctx, operands.args_ptr, operands.ret_ptr]);
+        args.extend_from_slice(operands.arg_lanes);
         let call = emitter
             .builder()
             .ins()
