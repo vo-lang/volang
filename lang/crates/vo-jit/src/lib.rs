@@ -10,6 +10,7 @@ mod effects;
 mod func_compiler;
 mod helpers;
 mod intrinsics;
+mod ir;
 pub mod loop_analysis;
 mod loop_compiler;
 mod metadata;
@@ -24,7 +25,10 @@ mod verifier;
 
 pub use loop_analysis::LoopInfo;
 pub use loop_compiler::LoopFunc;
-pub use native_stack_map::{JitArtifactMetadata, NativeRootKind, NativeStackMap, NativeStackRoot};
+pub use native_stack_map::{
+    DeoptFrameState, DeoptValue, DeoptValueKind, DeoptValueLocation, JitArtifactMetadata,
+    NativeRootKind, NativeStackMap, NativeStackRoot,
+};
 
 use func_compiler::FunctionCompiler;
 use loop_compiler::{CompiledLoop, LoopCompiler};
@@ -920,6 +924,8 @@ impl JitCompiler {
         func_id_cl: cranelift_module::FuncId,
         name: &str,
         artifact_kind: JitArtifactKind,
+        ir: &ir::FunctionIr,
+        pc_range: std::ops::Range<usize>,
     ) -> Result<(*const u8, Arc<JitArtifactMetadata>), JitError> {
         let compile_result: Result<(usize, usize, Arc<JitArtifactMetadata>, usize), JitError> =
             (|| {
@@ -978,11 +984,10 @@ impl JitCompiler {
                         map.entries().collect::<Vec<_>>(),
                     ));
                 }
-                let metadata = Arc::new(JitArtifactMetadata::from_entries(
-                    code_size,
-                    native_stack_maps,
-                    name,
-                )?);
+                let metadata = Arc::new(
+                    JitArtifactMetadata::from_entries(code_size, native_stack_maps, name)?
+                        .with_deopt_states(ir.deopt_metadata(pc_range), name)?,
+                );
                 let metadata_bytes = metadata.retained_bytes();
                 self.cache.ensure_metadata_capacity(metadata_bytes)?;
                 let relocs = compiled
@@ -1171,6 +1176,8 @@ impl JitCompiler {
             func_id_cl,
             &format!("func_{} {}", func_id, func.name),
             JitArtifactKind::Function,
+            analysis.ir(),
+            0..func.code.len(),
         );
         if let Err(error) = &finalize_result {
             if let Some(rejection) = CodeMemoryRejection::from_error(error) {
@@ -1337,6 +1344,8 @@ impl JitCompiler {
             func_id_cl,
             &format!("loop_{}_{}", func_id, begin_pc),
             JitArtifactKind::Loop,
+            analysis.ir(),
+            begin_pc..loop_info.end_pc.saturating_add(1),
         );
         if let Err(error) = &finalize_result {
             if let Some(rejection) = CodeMemoryRejection::from_error(error) {

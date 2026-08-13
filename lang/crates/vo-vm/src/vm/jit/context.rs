@@ -160,6 +160,11 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         gc_poll_resume_func_id: gc_poll_resume.map_or(u32::MAX, |resume| resume.0),
         gc_poll_resume_pc: gc_poll_resume.map_or(u32::MAX, |resume| resume.1),
         gc_poll_resume_armed: u8::from(gc_poll_resume.is_some()),
+        deopt_state_id: u32::MAX,
+        deopt_func_id: u32::MAX,
+        deopt_resume_pc: u32::MAX,
+        deopt_osr_pc: u32::MAX,
+        deopt_reason: vo_runtime::jit_api::JitDeoptReason::None as u8,
     };
 
     debug_assert_eq!(ctx.validate_required_callbacks(), Ok(()));

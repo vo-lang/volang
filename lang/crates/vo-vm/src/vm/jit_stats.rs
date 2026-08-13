@@ -20,10 +20,11 @@ pub enum JitSideExitReason {
     InterpretedResourceRejected = 13,
     InterpretedCompilerFault = 14,
     GcSafepoint = 15,
+    Deopt = 16,
 }
 
 impl JitSideExitReason {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::InterpretedCold,
         Self::RegularCall,
         Self::PreparedDynamicCall,
@@ -40,6 +41,7 @@ impl JitSideExitReason {
         Self::InterpretedResourceRejected,
         Self::InterpretedCompilerFault,
         Self::GcSafepoint,
+        Self::Deopt,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -61,6 +63,7 @@ impl JitSideExitReason {
             Self::InterpretedResourceRejected => "interpreted_resource_rejected",
             Self::InterpretedCompilerFault => "interpreted_compiler_fault",
             Self::GcSafepoint => "gc_safepoint",
+            Self::Deopt => "deopt",
         }
     }
 

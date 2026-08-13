@@ -153,9 +153,18 @@ pub(crate) fn prepare_control_flow(
     builder: &mut FunctionBuilder<'_>,
     blocks: &mut HashMap<usize, Block>,
     code: &[Instruction],
+    ir: &crate::ir::FunctionIr,
     policy: ControlPolicy,
 ) -> Result<BTreeMap<usize, u32>, JitError> {
     let regions = execution_budget_regions(code, policy)?;
+    for block in ir.blocks() {
+        let start = block.start_pc as usize;
+        if policy.pc_range().contains(&start) {
+            blocks
+                .entry(start)
+                .or_insert_with(|| builder.create_block());
+        }
+    }
     for start in regions.keys().copied() {
         blocks
             .entry(start)

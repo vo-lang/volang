@@ -41,11 +41,49 @@ pub struct NativeStackMap {
     pub roots: Box<[NativeStackRoot]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DeoptValueKind {
+    Word = 0,
+    Float64 = 1,
+    GcRef = 2,
+    InterfaceHeader = 3,
+    InterfaceData = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeoptValueLocation {
+    /// The value has been materialized in the canonical fiber frame.
+    FiberSlot(u16),
+    /// Reserved for constant folding and virtual-object materialization.
+    Constant(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeoptValue {
+    pub slot: u16,
+    pub kind: DeoptValueKind,
+    pub location: DeoptValueLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeoptFrameState {
+    pub state_id: u32,
+    pub resume_pc: u32,
+    pub parent_state_id: u32,
+    pub values: Box<[DeoptValue]>,
+}
+
+impl DeoptFrameState {
+    pub const NO_PARENT: u32 = u32::MAX;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifactMetadata {
     pub code_size: u32,
     pub stack_maps: Box<[NativeStackMap]>,
     safepoint_index: Box<[u32]>,
+    pub deopt_states: Box<[DeoptFrameState]>,
 }
 
 impl JitArtifactMetadata {
@@ -167,7 +205,46 @@ impl JitArtifactMetadata {
             code_size,
             stack_maps: maps.into_boxed_slice(),
             safepoint_index: safepoint_index.into_boxed_slice(),
+            deopt_states: Box::new([]),
         })
+    }
+
+    pub(crate) fn with_deopt_states(
+        mut self,
+        mut states: Vec<DeoptFrameState>,
+        name: &str,
+    ) -> Result<Self, JitError> {
+        states.sort_unstable_by_key(|state| state.state_id);
+        for (index, state) in states.iter().enumerate() {
+            if index > 0 && states[index - 1].state_id == state.state_id {
+                return Err(JitError::Internal(format!(
+                    "deopt metadata for {name} contains duplicate state id {}",
+                    state.state_id
+                )));
+            }
+            if state.parent_state_id != DeoptFrameState::NO_PARENT
+                && states[..index]
+                    .binary_search_by_key(&state.parent_state_id, |candidate| candidate.state_id)
+                    .is_err()
+            {
+                return Err(JitError::Internal(format!(
+                    "deopt metadata for {name} references absent parent state {}",
+                    state.parent_state_id
+                )));
+            }
+            if state
+                .values
+                .windows(2)
+                .any(|pair| pair[0].slot >= pair[1].slot)
+            {
+                return Err(JitError::Internal(format!(
+                    "deopt metadata for {name} has unordered or duplicate slots in state {}",
+                    state.state_id
+                )));
+            }
+        }
+        self.deopt_states = states.into_boxed_slice();
+        Ok(self)
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -192,6 +269,22 @@ impl JitArtifactMetadata {
                     .len()
                     .saturating_mul(core::mem::size_of::<u32>()),
             )
+            .saturating_add(
+                self.deopt_states
+                    .len()
+                    .saturating_mul(core::mem::size_of::<DeoptFrameState>()),
+            )
+            .saturating_add(
+                self.deopt_states
+                    .iter()
+                    .map(|state| {
+                        state
+                            .values
+                            .len()
+                            .saturating_mul(core::mem::size_of::<DeoptValue>())
+                    })
+                    .sum::<usize>(),
+            )
     }
 
     pub fn map_for_return_address_offset(&self, offset: u32) -> Option<&NativeStackMap> {
@@ -204,6 +297,13 @@ impl JitArtifactMetadata {
     pub fn map_for_safepoint_id(&self, safepoint_id: u32) -> Option<&NativeStackMap> {
         let index = *self.safepoint_index.get(safepoint_id as usize)?;
         (index != u32::MAX).then(|| &self.stack_maps[index as usize])
+    }
+
+    pub fn deopt_state(&self, state_id: u32) -> Option<&DeoptFrameState> {
+        self.deopt_states
+            .binary_search_by_key(&state_id, |state| state.state_id)
+            .ok()
+            .map(|index| &self.deopt_states[index])
     }
 }
 
@@ -239,6 +339,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             safepoint_index: vec![0, 1].into_boxed_slice(),
+            deopt_states: Box::new([]),
         };
 
         assert_eq!(
@@ -274,6 +375,7 @@ mod tests {
             }]
             .into_boxed_slice(),
             safepoint_index: vec![0].into_boxed_slice(),
+            deopt_states: Box::new([]),
         };
 
         assert!(metadata.retained_bytes() >= core::mem::size_of::<JitArtifactMetadata>());
@@ -292,5 +394,51 @@ mod tests {
         let map = metadata.map_for_safepoint_id(0).expect("safepoint");
         assert!(map.requires_frame_materialization);
         assert!(map.roots.is_empty());
+    }
+
+    #[test]
+    fn deopt_states_are_indexed_and_charged_to_metadata_budget() {
+        let base = JitArtifactMetadata::from_entries(8, [], "deopt").expect("base metadata");
+        let base_bytes = base.retained_bytes();
+        let metadata = base
+            .with_deopt_states(
+                vec![DeoptFrameState {
+                    state_id: 7,
+                    resume_pc: 13,
+                    parent_state_id: DeoptFrameState::NO_PARENT,
+                    values: vec![DeoptValue {
+                        slot: 2,
+                        kind: DeoptValueKind::GcRef,
+                        location: DeoptValueLocation::FiberSlot(2),
+                    }]
+                    .into_boxed_slice(),
+                }],
+                "deopt",
+            )
+            .expect("deopt metadata");
+
+        assert_eq!(
+            metadata.deopt_state(7).map(|state| state.resume_pc),
+            Some(13)
+        );
+        assert!(metadata.deopt_state(6).is_none());
+        assert!(metadata.retained_bytes() > base_bytes);
+    }
+
+    #[test]
+    fn deopt_state_rejects_an_absent_parent() {
+        let error = JitArtifactMetadata::from_entries(8, [], "deopt-parent")
+            .unwrap()
+            .with_deopt_states(
+                vec![DeoptFrameState {
+                    state_id: 1,
+                    resume_pc: 0,
+                    parent_state_id: 0,
+                    values: Box::new([]),
+                }],
+                "deopt-parent",
+            )
+            .expect_err("absent parent must fail");
+        assert!(error.to_string().contains("absent parent state"));
     }
 }

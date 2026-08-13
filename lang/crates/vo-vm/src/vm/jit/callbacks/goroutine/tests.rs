@@ -265,6 +265,11 @@ fn test_context<'a>(
         gc_poll_resume_func_id: u32::MAX,
         gc_poll_resume_pc: u32::MAX,
         gc_poll_resume_armed: 0,
+        deopt_state_id: u32::MAX,
+        deopt_func_id: u32::MAX,
+        deopt_resume_pc: u32::MAX,
+        deopt_osr_pc: u32::MAX,
+        deopt_reason: vo_runtime::jit_api::JitDeoptReason::None as u8,
     }
 }
 

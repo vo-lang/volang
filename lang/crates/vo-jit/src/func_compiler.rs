@@ -92,6 +92,7 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.builder,
             &mut self.core.blocks,
             &self.core.func_def.code,
+            self.core.analysis.ir(),
             policy,
         )?;
 
@@ -671,10 +672,10 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
 
     fn instruction_for_pc(&self, pc: usize) -> Result<Instruction, JitError> {
         self.core
-            .func_def
-            .code
-            .get(pc)
-            .copied()
+            .analysis
+            .ir()
+            .instruction(pc)
+            .map(|instruction| instruction.source())
             .ok_or_else(|| JitError::Internal(format!("function compile pc {pc} is outside code")))
     }
 

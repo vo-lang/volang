@@ -341,6 +341,33 @@ pub struct JitNativeFrame {
     pub safepoint_id: u32,
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitDeoptReason {
+    None = 0,
+    GuardFailed = 1,
+    ShapeMismatch = 2,
+    CallTargetChanged = 3,
+    Overflow = 4,
+    OsrAssumptionChanged = 5,
+    DebugInvalidation = 6,
+}
+
+impl JitDeoptReason {
+    pub const fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::None),
+            1 => Some(Self::GuardFailed),
+            2 => Some(Self::ShapeMismatch),
+            3 => Some(Self::CallTargetChanged),
+            4 => Some(Self::Overflow),
+            5 => Some(Self::OsrAssumptionChanged),
+            6 => Some(Self::DebugInvalidation),
+            _ => None,
+        }
+    }
+}
+
 impl JitNativeFrame {
     pub const ARTIFACT_FUNCTION: u32 = 0;
     pub const ARTIFACT_OSR_LOOP: u32 = 1;
@@ -567,6 +594,14 @@ pub struct JitContext {
     pub gc_poll_resume_func_id: u32,
     pub gc_poll_resume_pc: u32,
     pub gc_poll_resume_armed: u8,
+
+    /// Optimized-code side exit. The artifact's immutable FrameState owns the
+    /// value recipe; these fields select it and classify the failed assumption.
+    pub deopt_state_id: u32,
+    pub deopt_func_id: u32,
+    pub deopt_resume_pc: u32,
+    pub deopt_osr_pc: u32,
+    pub deopt_reason: u8,
 }
 
 #[inline]
@@ -624,6 +659,7 @@ impl JitContext {
     pub const JIT_RESULT_EXTERN_SUSPEND: u32 = 7;
     pub const JIT_RESULT_RUNTIME_TRANSITION: u32 = 8;
     pub const JIT_RESULT_GC_SAFEPOINT: u32 = 9;
+    pub const JIT_RESULT_DEOPT: u32 = 10;
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
@@ -715,6 +751,11 @@ jit_context_raw_fields!(
     (GcPollResumeFuncId, gc_poll_resume_func_id),
     (GcPollResumePc, gc_poll_resume_pc),
     (GcPollResumeArmed, gc_poll_resume_armed),
+    (DeoptStateId, deopt_state_id),
+    (DeoptFuncId, deopt_func_id),
+    (DeoptResumePc, deopt_resume_pc),
+    (DeoptOsrPc, deopt_osr_pc),
+    (DeoptReason, deopt_reason),
 );
 
 // =============================================================================
@@ -758,6 +799,9 @@ pub enum JitResult {
     /// Materialize at `call_resume_pc`, yield to the scheduler, run a bounded
     /// GC slice, and replay the instruction in the VM.
     GcSafepoint = 9,
+    /// An optimized assumption failed. Live values have been materialized
+    /// according to the selected artifact FrameState.
+    Deopt = 10,
 }
 
 pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;

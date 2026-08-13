@@ -51,7 +51,8 @@ fn update_low_progress_streak(
         | JitResult::Replay
         | JitResult::ExternSuspend
         | JitResult::RuntimeTransition
-        | JitResult::GcSafepoint => match budget_before.checked_sub(budget_after) {
+        | JitResult::GcSafepoint
+        | JitResult::Deopt => match budget_before.checked_sub(budget_after) {
             Some(delta) if delta <= LOW_PROGRESS_BUDGET_DELTA => *streak = streak.saturating_add(1),
             _ => *streak = 0,
         },
@@ -542,6 +543,24 @@ impl JitManager {
             .iter()
             .filter(|info| info.state == CompileState::Failed(JitFailureKind::SemanticUnsupported))
             .count()
+    }
+
+    pub(crate) fn deopt_state(
+        &self,
+        func_id: u32,
+        osr_pc: u32,
+        state_id: u32,
+    ) -> Option<&vo_jit::DeoptFrameState> {
+        let function = self.funcs.get(func_id as usize)?;
+        let metadata = if osr_pc == u32::MAX {
+            function.metadata.as_deref()
+        } else {
+            function
+                .loop_states
+                .get(&(osr_pc as usize))
+                .and_then(|state| state.metadata.as_deref())
+        }?;
+        metadata.deopt_state(state_id)
     }
 
     pub fn resource_rejected_function_count(&self) -> usize {

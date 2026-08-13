@@ -8,6 +8,121 @@ use super::super::context::JitContextWrapper;
 use super::super::materialize::materialize_jit_frames;
 use super::super::side_exit;
 
+pub(super) fn handle_deopt_transition(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    ctx: &JitContextWrapper,
+) -> JitBridgeTransition {
+    let Some(reason) = vo_runtime::jit_api::JitDeoptReason::from_u8(ctx.ctx.deopt_reason) else {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt used unknown reason {}",
+            ctx.ctx.deopt_reason
+        ));
+    };
+    if reason == vo_runtime::jit_api::JitDeoptReason::None {
+        return JitBridgeTransition::JitError("JIT deopt omitted its reason".to_string());
+    }
+    let Some(state) = vm
+        .jit
+        .manager()
+        .and_then(|manager| {
+            manager.deopt_state(
+                ctx.ctx.deopt_func_id,
+                ctx.ctx.deopt_osr_pc,
+                ctx.ctx.deopt_state_id,
+            )
+        })
+        .cloned()
+    else {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt state {} is unavailable for function {} at OSR pc {}",
+            ctx.ctx.deopt_state_id, ctx.ctx.deopt_func_id, ctx.ctx.deopt_osr_pc
+        ));
+    };
+    if state.resume_pc != ctx.ctx.deopt_resume_pc {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt resume pc drift: context {} metadata {}",
+            ctx.ctx.deopt_resume_pc, state.resume_pc
+        ));
+    }
+    if state.parent_state_id != vo_jit::DeoptFrameState::NO_PARENT {
+        return JitBridgeTransition::JitError(
+            "JIT deopt contains an inlined parent before inline-frame reconstruction is active"
+                .to_string(),
+        );
+    }
+    let Some(func) = module.functions.get(ctx.ctx.deopt_func_id as usize) else {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt references missing function {}",
+            ctx.ctx.deopt_func_id
+        ));
+    };
+    if state.resume_pc as usize >= func.code.len() {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt resume pc {} is outside function {}",
+            state.resume_pc, ctx.ctx.deopt_func_id
+        ));
+    }
+    for value in &state.values {
+        let expected_kind = match func.slot_types.get(value.slot as usize) {
+            Some(vo_runtime::SlotType::Value) => vo_jit::DeoptValueKind::Word,
+            Some(vo_runtime::SlotType::Float) => vo_jit::DeoptValueKind::Float64,
+            Some(vo_runtime::SlotType::GcRef) => vo_jit::DeoptValueKind::GcRef,
+            Some(vo_runtime::SlotType::Interface0) => vo_jit::DeoptValueKind::InterfaceHeader,
+            Some(vo_runtime::SlotType::Interface1) => vo_jit::DeoptValueKind::InterfaceData,
+            None => {
+                return JitBridgeTransition::JitError(format!(
+                    "JIT deopt slot {} is outside function {}",
+                    value.slot, ctx.ctx.deopt_func_id
+                ))
+            }
+        };
+        if value.kind != expected_kind {
+            return JitBridgeTransition::JitError(format!(
+                "JIT deopt type mismatch in slot {} for function {}",
+                value.slot, ctx.ctx.deopt_func_id
+            ));
+        }
+        if let vo_jit::DeoptValueLocation::FiberSlot(source_slot) = value.location {
+            if source_slot != value.slot {
+                return JitBridgeTransition::JitError(format!(
+                    "JIT deopt canonical slot drift: value {} source {}",
+                    value.slot, source_slot
+                ));
+            }
+        }
+    }
+
+    if let Err(error) = materialize_jit_frames(fiber, module, state.resume_pc) {
+        return JitBridgeTransition::FrameMaterializeError(error);
+    }
+    let Some(frame) = fiber.frames.last() else {
+        return JitBridgeTransition::JitError("JIT deopt materialized no frame".to_string());
+    };
+    if frame.func_id != ctx.ctx.deopt_func_id {
+        return JitBridgeTransition::JitError(format!(
+            "JIT deopt materialized function {} while metadata names {}",
+            frame.func_id, ctx.ctx.deopt_func_id
+        ));
+    }
+    let bp = frame.bp;
+    for value in &state.values {
+        if let vo_jit::DeoptValueLocation::Constant(raw) = value.location {
+            let index = bp + value.slot as usize;
+            let Some(slot) = fiber.stack.get_mut(index) else {
+                return JitBridgeTransition::JitError(format!(
+                    "JIT deopt destination slot {} is outside the materialized stack",
+                    value.slot
+                ));
+            };
+            *slot = raw;
+        }
+    }
+    side_exit::record(vm, JitSideExitReason::Deopt);
+    JitBridgeTransition::FrameChanged
+}
+
 pub(super) fn handle_wait_io_transition(
     vm: &mut Vm,
     fiber: &mut Fiber,

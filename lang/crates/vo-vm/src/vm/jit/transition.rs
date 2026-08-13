@@ -95,6 +95,7 @@ pub(super) fn handle_jit_non_ok_transition(
         JitResult::ExternSuspend => wait::handle_extern_suspend_transition(mode, vm, fiber, module),
         JitResult::RuntimeTransition => wait::handle_runtime_transition(vm, fiber, module, ctx),
         JitResult::GcSafepoint => wait::handle_gc_safepoint_transition(vm, fiber, module, ctx),
+        JitResult::Deopt => wait::handle_deopt_transition(vm, fiber, module, ctx),
     }
 }
 
@@ -104,6 +105,86 @@ mod tests {
     use super::*;
     use crate::vm::jit::test_support::function;
     use crate::vm::{JitConfig, JitSideExitReason, Vm};
+    use vo_runtime::instruction::{Instruction, Opcode};
+    use vo_runtime::SlotType;
+
+    #[test]
+    fn vm_jit_deopt_validates_artifact_state_and_resumes_interpreter() {
+        let mut func = function(3, 0);
+        func.code = vec![
+            Instruction::new(Opcode::LoadInt, 1, 8, 0),
+            Instruction::new(Opcode::PtrNew, 0, 1, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        func.instruction_metadata = vec![
+            vo_runtime::bytecode::InstructionMetadata::None,
+            vo_runtime::bytecode::InstructionMetadata::PtrLayout {
+                value_layout: vec![SlotType::Value],
+            },
+            vo_runtime::bytecode::InstructionMetadata::None,
+        ];
+        func.slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+        func.gc_scan_slots =
+            vo_runtime::bytecode::FunctionDef::compute_gc_scan_slots(&func.slot_types);
+        func.borrowed_scan_slots_prefix =
+            vo_runtime::bytecode::FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        let mut module = Module::new("jit-deopt".to_string());
+        module.functions.push(func);
+
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        vm.load(module).expect("load deopt probe");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        vm.jit
+            .manager_mut()
+            .expect("jit manager")
+            .compile_full(
+                0,
+                loaded.verified_module(),
+                vo_jit::JitCompileEnv {
+                    externs: &externs,
+                    backend_caps: Default::default(),
+                },
+            )
+            .expect("compile deopt probe");
+
+        let mut fiber = Fiber::new(11);
+        fiber.push_frame(0, 3, 0, 0, 0);
+        fiber.stack[1] = 8;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
+        ctx.ctx.deopt_state_id = 0;
+        ctx.ctx.deopt_func_id = 0;
+        ctx.ctx.deopt_resume_pc = 1;
+        ctx.ctx.deopt_osr_pc = u32::MAX;
+        ctx.ctx.deopt_reason = vo_runtime::jit_api::JitDeoptReason::GuardFailed as u8;
+        let before = vm
+            .jit
+            .manager()
+            .unwrap()
+            .execution_stats()
+            .side_exit_count(JitSideExitReason::Deopt);
+
+        let transition = handle_jit_non_ok_transition(
+            JitBridgeMode::FullFunction,
+            &mut vm,
+            &mut fiber,
+            loaded.module(),
+            JitResult::Deopt,
+            &ctx,
+        );
+
+        assert!(matches!(transition, JitBridgeTransition::FrameChanged));
+        assert_eq!(fiber.frames.last().unwrap().pc, 1);
+        assert_eq!(fiber.stack[1], 8);
+        assert_eq!(
+            vm.jit
+                .manager()
+                .unwrap()
+                .execution_stats()
+                .side_exit_count(JitSideExitReason::Deopt),
+            before + 1
+        );
+    }
 
     #[test]
     fn vm_jit_runtime_transition_materializes_next_pc_and_yields() {
