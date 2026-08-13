@@ -200,9 +200,15 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
         );
         let out_jit_may_gc = emitter.builder().ins().stack_load(
             types::I64,
-            types::I32,
+            types::I16,
             p.out_slot,
             PreparedCall::OFFSET_JIT_MAY_GC,
+        );
+        let out_gc_scan_slots = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I16,
+            p.out_slot,
+            PreparedCall::OFFSET_CALLEE_GC_SCAN_SLOTS,
         );
         let out_dispatch_generation = emitter.builder().ins().stack_load(
             types::I64,
@@ -263,13 +269,15 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
                 .ins()
                 .store(MemFlags::trusted(), value, update.entry, offset);
         }
-        let out_jit_may_gc = emitter.builder().ins().ireduce(types::I16, out_jit_may_gc);
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            out_jit_may_gc,
-            update.entry,
-            DynCallIC::OFFSET_JIT_MAY_GC,
-        );
+        for (value, offset) in [
+            (out_gc_scan_slots, DynCallIC::OFFSET_GC_SCAN_SLOTS),
+            (out_jit_may_gc, DynCallIC::OFFSET_JIT_MAY_GC),
+        ] {
+            emitter
+                .builder()
+                .ins()
+                .store(MemFlags::trusted(), value, update.entry, offset);
+        }
         let valid = emitter.builder().ins().iconst(types::I16, 1);
         emitter.builder().ins().store(
             MemFlags::trusted(),
@@ -309,9 +317,16 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
     );
     let jit_may_gc = emitter.builder().ins().stack_load(
         types::I64,
-        types::I32,
+        types::I16,
         p.out_slot,
         PreparedCall::OFFSET_JIT_MAY_GC,
+    );
+    let jit_may_gc = emitter.builder().ins().uextend(types::I32, jit_may_gc);
+    let native_link_eligible = emitter.builder().ins().stack_load(
+        types::I64,
+        types::I16,
+        p.out_slot,
+        PreparedCall::OFFSET_NATIVE_LINK_ELIGIBLE,
     );
 
     emit_prepared_call(
@@ -322,6 +337,7 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             func_id,
             callee_local_slots,
             jit_may_gc,
+            native_link_eligible,
             ret_ptr: p.ret_ptr,
             caller_bp: p.caller_bp,
             old_fiber_sp: p.old_fiber_sp,

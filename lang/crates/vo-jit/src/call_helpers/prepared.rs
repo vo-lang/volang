@@ -7,10 +7,10 @@ use crate::translator::{HelperKind, IrEmitter};
 
 use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_checked_jit_result_indirect_callback_call,
-    emit_effect_aware_jit_call, emit_raw_jit_context_callback_call, import_jit_func_sig,
-    load_current_func_id, load_native_arg_lanes_dynamic, restore_caller_execution_context,
-    JitCallGcMode, JIT_RESULT_CALL, JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE,
-    PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    emit_effect_aware_jit_call, emit_native_link, emit_raw_jit_context_callback_call,
+    import_jit_func_sig, load_current_func_id, load_native_arg_lanes_dynamic,
+    restore_caller_execution_context, JitCallGcMode, JIT_RESULT_CALL, JIT_RESULT_OK,
+    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
 
 /// Parameters for the common prepared-call dispatch.
@@ -20,6 +20,7 @@ pub(super) struct PreparedCallParams {
     pub(super) func_id: Value,
     pub(super) callee_local_slots: Value,
     pub(super) jit_may_gc: Value,
+    pub(super) native_link_eligible: Value,
     pub(super) ret_ptr: Value,
     /// Caller's bp, saved BEFORE the prepare callback (which changes ctx.jit_bp via push_frame).
     pub(super) caller_bp: Value,
@@ -69,19 +70,62 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
             .builder()
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, depth, depth_limit);
-    let use_trampoline = emitter.builder().ins().bor(is_null, depth_exhausted);
-
+    let link_or_call_block = crate::compile_common::cold_block(emitter.builder());
+    let link_block = crate::compile_common::cold_block(emitter.builder());
     let trampoline_block = crate::compile_common::cold_block(emitter.builder());
     let jit_call_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .append_block_param(jit_call_block, types::I64);
     let merge_block = match p.merge_block {
         Some(block) => block,
         None => emitter.builder().create_block(),
     };
 
+    emitter.builder().ins().brif(
+        depth_exhausted,
+        trampoline_block,
+        &[],
+        link_or_call_block,
+        &[],
+    );
+
+    emitter.builder().switch_to_block(link_or_call_block);
+    emitter.builder().seal_block(link_or_call_block);
+    emitter.builder().ins().brif(
+        is_null,
+        link_block,
+        &[],
+        jit_call_block,
+        &[p.jit_func_ptr.into()],
+    );
+
+    emitter.builder().switch_to_block(link_block);
+    emitter.builder().seal_block(link_block);
+    let may_link = emitter
+        .builder()
+        .ins()
+        .icmp_imm_u(IntCC::NotEqual, p.native_link_eligible, 0);
+    let perform_link_block = crate::compile_common::cold_block(emitter.builder());
     emitter
         .builder()
         .ins()
-        .brif(use_trampoline, trampoline_block, &[], jit_call_block, &[]);
+        .brif(may_link, perform_link_block, &[], trampoline_block, &[]);
+
+    emitter.builder().switch_to_block(perform_link_block);
+    emitter.builder().seal_block(perform_link_block);
+    let linked_ptr = emit_native_link(emitter, p.func_id)?;
+    let linked = emitter
+        .builder()
+        .ins()
+        .icmp_imm_u(IntCC::NotEqual, linked_ptr, 0);
+    emitter.builder().ins().brif(
+        linked,
+        jit_call_block,
+        &[linked_ptr.into()],
+        trampoline_block,
+        &[],
+    );
 
     // === Trampoline path: return JitResult::Call with CALL_KIND_PREPARED ===
     // prepare callback already did push_frame + arg layout on fiber.stack,
@@ -136,6 +180,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     // === JIT call path (fast): direct call + result check ===
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
+    let jit_func_ptr = emitter.builder().block_params(jit_call_block)[0];
 
     let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     let jit_func_sig = import_jit_func_sig(emitter);
@@ -143,7 +188,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     let jit_result = emit_effect_aware_jit_call(
         emitter,
         jit_func_sig,
-        p.jit_func_ptr,
+        jit_func_ptr,
         ctx,
         p.callee_args_ptr,
         p.ret_ptr,

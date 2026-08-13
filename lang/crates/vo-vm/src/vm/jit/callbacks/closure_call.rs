@@ -442,7 +442,10 @@ pub extern "C" fn jit_prepare_closure_call(
             ic_jit_func_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
-            jit_may_gc: u32::from(eligibility.may_gc),
+            jit_may_gc: u16::from(eligibility.may_gc),
+            native_link_eligible: u16::from(eligibility.prepared_shadow),
+            callee_gc_scan_slots: func_def.gc_scan_slots,
+            reserved: 0,
             dispatch_generation,
         };
     }
@@ -675,7 +678,10 @@ pub extern "C" fn jit_prepare_iface_call(
             ic_jit_func_ptr,
             callee_local_slots: local_slots as u32,
             func_id,
-            jit_may_gc: u32::from(eligibility.may_gc),
+            jit_may_gc: u16::from(eligibility.may_gc),
+            native_link_eligible: u16::from(eligibility.prepared_shadow),
+            callee_gc_scan_slots: func_def.gc_scan_slots,
+            reserved: 0,
             dispatch_generation,
         };
     }

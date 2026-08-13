@@ -255,7 +255,14 @@ pub struct PreparedCall {
     /// Resolved func_id (for VM call materialization).
     pub func_id: u32,
     /// Non-zero when the selected native target may reach a GC safepoint.
-    pub jit_may_gc: u32,
+    pub jit_may_gc: u16,
+    /// Non-zero when a newly linked native target may enter through the
+    /// already-prepared shadow frame.
+    pub native_link_eligible: u16,
+    /// Exact managed prefix used by the interpreter/JIT shared dynamic-call
+    /// cache when this prepared result is published.
+    pub callee_gc_scan_slots: u16,
+    pub reserved: u16,
     /// Dispatch generation paired with `ic_jit_func_ptr`.
     pub dispatch_generation: u64,
 }
@@ -270,6 +277,10 @@ impl PreparedCall {
         core::mem::offset_of!(PreparedCall, callee_local_slots) as i32;
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(PreparedCall, func_id) as i32;
     pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(PreparedCall, jit_may_gc) as i32;
+    pub const OFFSET_NATIVE_LINK_ELIGIBLE: i32 =
+        core::mem::offset_of!(PreparedCall, native_link_eligible) as i32;
+    pub const OFFSET_CALLEE_GC_SCAN_SLOTS: i32 =
+        core::mem::offset_of!(PreparedCall, callee_gc_scan_slots) as i32;
     pub const OFFSET_DISPATCH_GENERATION: i32 =
         core::mem::offset_of!(PreparedCall, dispatch_generation) as i32;
     pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
@@ -284,6 +295,9 @@ impl Default for PreparedCall {
             callee_local_slots: 0,
             func_id: 0,
             jit_may_gc: 0,
+            native_link_eligible: 0,
+            callee_gc_scan_slots: 0,
+            reserved: 0,
             dispatch_generation: 0,
         }
     }
@@ -332,6 +346,9 @@ pub type JitCallExternFn = extern "C" fn(
 
 pub type JitGcSafepointFn = extern "C" fn(ctx: *mut JitContext) -> JitResult;
 pub type JitTierUpFn = extern "C" fn(ctx: *mut JitContext, func_id: u32) -> JitResult;
+/// Resolve a cold target into the native dispatch table while all active
+/// native caller frames remain linked for precise root scanning.
+pub type JitLinkFunctionFn = extern "C" fn(ctx: *mut JitContext, func_id: u32) -> JitResult;
 
 /// Immutable callback capabilities shared by every native invocation in one VM.
 ///
@@ -688,6 +705,10 @@ pub struct JitContext {
     /// Callback to prepare an interface method call for JIT-to-JIT dispatch.
     pub prepare_iface_call_fn: Option<PrepareIfaceCallFn>,
 
+    /// Resolve and publish a cold function while native caller frames remain
+    /// linked. Generated code reloads the dispatch entry after this callback.
+    pub link_function_fn: Option<JitLinkFunctionFn>,
+
     // =========================================================================
     // Monomorphic Inline Cache for dynamic calls
     // =========================================================================
@@ -872,6 +893,7 @@ jit_context_raw_fields!(
     (RetStart, ret_start),
     (PrepareClosureCallFn, prepare_closure_call_fn),
     (PrepareIfaceCallFn, prepare_iface_call_fn),
+    (LinkFunctionFn, link_function_fn),
     (InlineCacheTable, ic_table),
     (ExecutionBudget, execution_budget),
     (NativeFrame, native_frame),
@@ -992,6 +1014,7 @@ pub enum JitContextDependencyKind {
     InlineCacheTable,
     GcSafepointFn,
     TierUpFn,
+    LinkFunctionFn,
 }
 
 impl JitContextDependencyKind {
@@ -1021,6 +1044,7 @@ impl JitContextDependencyKind {
             Self::InlineCacheTable => ctx.ic_table.is_null(),
             Self::GcSafepointFn => ctx.gc_safepoint_fn.is_none(),
             Self::TierUpFn => ctx.tier_up_fn.is_none(),
+            Self::LinkFunctionFn => ctx.link_function_fn.is_none(),
         }
     }
 }
@@ -1449,6 +1473,17 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
             params: &[T::Ptr, T::U32],
             ret: T::JitResult,
             infra_error_id: Some(JIT_CALLBACK_TIER_UP),
+            return_policy: Ret::JitResult,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitCallbackAbiField {
+            kind: Kind::LinkFunctionFn,
+            name: "link_function_fn",
+            params: &[T::Ptr, T::U32],
+            ret: T::JitResult,
+            infra_error_id: None,
             return_policy: Ret::JitResult,
             may_gc: false,
             may_schedule: false,

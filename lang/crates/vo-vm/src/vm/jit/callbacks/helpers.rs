@@ -92,6 +92,29 @@ impl JitCallbackVm<'_> {
             outcome => outcome,
         }
     }
+
+    pub(super) fn link_function(&mut self, func_id: u32) -> Result<(), vo_jit::JitError> {
+        let loaded = self.vm.module.as_ref().cloned().ok_or_else(|| {
+            vo_jit::JitError::Internal("native link requested without a loaded module".into())
+        })?;
+        let env = vo_jit::JitCompileEnv {
+            externs: self.vm.state.extern_registry.resolved_externs(),
+            backend_caps: Default::default(),
+        };
+        let best_effort = self.vm.jit.is_best_effort();
+        let result = self
+            .vm
+            .jit
+            .manager_mut()
+            .ok_or_else(|| {
+                vo_jit::JitError::Internal("native link requested without a JIT manager".into())
+            })?
+            .compile_full(func_id, loaded.verified_module(), env);
+        match result {
+            Err(_) if best_effort => Ok(()),
+            outcome => outcome,
+        }
+    }
 }
 
 /// Read the module-wide transitive entry contract published alongside a JIT

@@ -24,9 +24,10 @@ mod vm_materialization;
 pub use callback_abi::{
     emit_checked_jit_result_indirect_callback_call, emit_raw_jit_context_callback_call,
     emit_returning_jit_result_indirect_callback_call, CALL_DEPTH_OVERFLOW_CALLSITE,
-    NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE, NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
-    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
-    PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE, STACK_LIMIT_OVERFLOW_CALLSITE,
+    LINK_FUNCTION_CALLSITE, NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
+    NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE, PREPARED_CALL_POP_FRAME_CALLSITE,
+    PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE, PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE,
+    STACK_LIMIT_OVERFLOW_CALLSITE,
 };
 pub use dynamic::{emit_call_closure, emit_call_iface};
 pub use externs::{emit_call_extern, CallExternConfig};
@@ -91,6 +92,38 @@ fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E) {
 
 fn load_current_func_id<'a, E: IrEmitter<'a>>(emitter: &mut E) -> Value {
     emitter.load_context_field(types::I32, JitContextField::CurrentFuncId)
+}
+
+/// Resolve a cold callee and reload its native dispatch pointer. The callback
+/// keeps the current native root chain linked and publishes through the same
+/// generation-tracked table used by inline caches.
+pub(super) fn emit_native_link<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    func_id: Value,
+) -> Result<Value, crate::JitError> {
+    let ctx = emitter.ctx_param();
+    let link_fn = emitter.load_context_field(types::I64, JitContextField::LinkFunctionFn);
+    emit_checked_jit_result_indirect_callback_call(
+        emitter,
+        LINK_FUNCTION_CALLSITE,
+        link_fn,
+        &[ctx, func_id],
+        true,
+    )?;
+
+    let table = emitter.load_context_field(types::I64, JitContextField::JitFuncTable);
+    let func_id_i64 = emitter.builder().ins().uextend(types::I64, func_id);
+    let offset = emitter.builder().ins().imul_imm_u(
+        func_id_i64,
+        vo_runtime::jit_api::JitDispatchEntry::SIZE as i64,
+    );
+    let entry = emitter.builder().ins().iadd(table, offset);
+    Ok(emitter.builder().ins().load(
+        types::I64,
+        cranelift_codegen::ir::MemFlagsData::trusted(),
+        entry,
+        vo_runtime::jit_api::JitDispatchEntry::OFFSET_NATIVE,
+    ))
 }
 
 fn restore_caller_execution_context<'a, E: IrEmitter<'a>>(

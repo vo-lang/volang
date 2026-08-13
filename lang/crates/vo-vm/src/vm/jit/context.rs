@@ -156,6 +156,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         ret_start: 0,
         prepare_closure_call_fn: Some(callbacks::jit_prepare_closure_call),
         prepare_iface_call_fn: Some(callbacks::jit_prepare_iface_call),
+        link_function_fn: Some(callbacks::jit_link_function),
         ic_table,
         execution_budget: fiber.execution_budget,
         host_services_v2: vm

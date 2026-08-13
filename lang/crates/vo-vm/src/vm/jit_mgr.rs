@@ -1752,6 +1752,59 @@ mod tests {
     }
 
     #[test]
+    fn compiled_caller_lazily_links_a_cold_callee_without_leaving_native_execution() {
+        let caller = valid_jit_func(
+            "caller",
+            vec![
+                Instruction::new(Opcode::Call, 1, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+        );
+        let callee = valid_jit_func("callee", vec![Instruction::new(Opcode::Return, 0, 0, 0)]);
+        let mut module = VoModule::new("jit-cold-callee-native-link".to_string());
+        module.functions = vec![caller, callee];
+
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit VM");
+        vm.load(module).expect("load valid call module");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let caller_entry = {
+            let manager = vm.jit.manager_mut().expect("jit manager");
+            manager
+                .compile_full(
+                    0,
+                    loaded.verified_module(),
+                    JitCompileEnv {
+                        externs: &externs,
+                        backend_caps: Default::default(),
+                    },
+                )
+                .expect("compile caller only");
+            assert!(manager.get_entry(1).is_none(), "callee must start cold");
+            manager.get_entry(0).expect("compiled caller entry")
+        };
+
+        let mut fiber = Fiber::new(1);
+        fiber.execution_budget = 100;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+        let mut args = [0_u64; 1];
+        let mut ret = [0xfeed_u64];
+
+        let result = caller_entry(ctx.as_ptr(), args.as_mut_ptr(), ret.as_mut_ptr());
+
+        assert_eq!(result, JitResult::Ok);
+        assert!(
+            vm.jit
+                .manager()
+                .expect("jit manager")
+                .get_entry(1)
+                .is_some(),
+            "native link callback must publish the cold callee"
+        );
+        assert_eq!(ret, [0xfeed]);
+    }
+
+    #[test]
     fn allocating_jit_helper_validates_native_roots_before_gc_side_exit() {
         let func = string_slice_func(
             "allocating",

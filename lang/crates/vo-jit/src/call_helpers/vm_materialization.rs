@@ -168,10 +168,17 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     let merge_block = emitter.builder().create_block();
 
     let jit_call_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .append_block_param(jit_call_block, types::I64);
+    let link_block = crate::compile_common::cold_block(emitter.builder());
     let vm_call_block = crate::compile_common::cold_block(emitter.builder());
-    let jit_func_ptr = if direct_native.is_some() {
-        emitter.builder().ins().jump(jit_call_block, &[]);
-        None
+    if direct_native.is_some() {
+        let unused = emitter.builder().ins().iconst(types::I64, 0);
+        emitter
+            .builder()
+            .ins()
+            .jump(jit_call_block, &[unused.into()]);
     } else {
         let jit_func_table = emitter.load_context_field(types::I64, JitContextField::JitFuncTable);
         let func_id_i64 = emitter
@@ -194,12 +201,25 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emitter
             .builder()
             .ins()
-            .brif(is_null, vm_call_block, &[], jit_call_block, &[]);
-        Some(func_ptr)
-    };
+            .brif(is_null, link_block, &[], jit_call_block, &[func_ptr.into()]);
+    }
+
+    emitter.builder().switch_to_block(link_block);
+    emitter.builder().seal_block(link_block);
+    let linked_ptr = super::emit_native_link(emitter, func_id_val)?;
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let unavailable = emitter.builder().ins().icmp(IntCC::Equal, linked_ptr, zero);
+    emitter.builder().ins().brif(
+        unavailable,
+        vm_call_block,
+        &[],
+        jit_call_block,
+        &[linked_ptr.into()],
+    );
 
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
+    let linked_func_ptr = emitter.builder().block_params(jit_call_block)[0];
 
     let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     let gc_mode = if plan.eligibility.may_gc {
@@ -218,7 +238,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emit_effect_aware_jit_call(
             emitter,
             sig,
-            jit_func_ptr.expect("dynamic JIT call pointer"),
+            linked_func_ptr,
             ctx,
             args_ptr,
             ret_ptr,

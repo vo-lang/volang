@@ -67,6 +67,13 @@ pub const PREPARE_IFACE_CALLSITE: JitContextCallbackCallsite = JitContextCallbac
     call_kind: JitContextCallbackCallKind::CheckedJitResult,
 };
 
+pub const LINK_FUNCTION_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
+    name: "link_function_fn",
+    lowering: "emit_native_link",
+    kind: JitContextDependencyKind::LinkFunctionFn,
+    call_kind: JitContextCallbackCallKind::CheckedJitResult,
+};
+
 pub const PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE: JitContextCallbackCallsite =
     JitContextCallbackCallsite {
         name: "prepared_call_push_resume_point_fn",
@@ -106,6 +113,7 @@ pub fn jit_context_callback_callsites() -> &'static [JitContextCallbackCallsite]
         CALL_DEPTH_OVERFLOW_CALLSITE,
         PREPARE_CLOSURE_CALLSITE,
         PREPARE_IFACE_CALLSITE,
+        LINK_FUNCTION_CALLSITE,
         PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
         PREPARED_CALL_POP_FRAME_CALLSITE,
         NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
@@ -123,11 +131,16 @@ pub fn emit_checked_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
     spill_vars: bool,
 ) -> Result<Value, JitError> {
     validate_callback_callsite(callsite, JitContextCallbackCallKind::CheckedJitResult)?;
-    emitter.spill_all_vars();
+    let needs_spill = callsite.try_requires_pre_call_spill()?;
+    if needs_spill {
+        emitter.spill_all_vars();
+    }
     let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
     let result = emitter.builder().inst_results(call)[0];
-    emitter.clear_reg_consts();
+    if needs_spill {
+        emitter.clear_reg_consts();
+    }
     super::check_call_result(emitter, result, spill_vars);
     Ok(result)
 }

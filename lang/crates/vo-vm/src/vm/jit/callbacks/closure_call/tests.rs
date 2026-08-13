@@ -171,6 +171,7 @@ fn test_context(
         ret_start: 0,
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
+        link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
         host_services_v2: core::ptr::null(),
@@ -889,6 +890,7 @@ fn vm_jit_closure_canon_002_prepared_frame_enters_compiled_closure_and_stores_ca
     assert_eq!(result, JitResult::Ok);
     assert_eq!(out.jit_func_ptr, entry);
     assert_eq!(out.ic_jit_func_ptr, entry);
+    assert_eq!(out.callee_gc_scan_slots, 1);
     assert_eq!(stack[0], closure_ref as u64);
 }
 
@@ -1027,6 +1029,9 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         callee_local_slots: 7,
         func_id: 7,
         jit_may_gc: 1,
+        native_link_eligible: 1,
+        callee_gc_scan_slots: 7,
+        reserved: 0,
         dispatch_generation: 0,
     };
 
@@ -1166,6 +1171,9 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
         callee_local_slots: 7,
         func_id: 7,
         jit_may_gc: 1,
+        native_link_eligible: 1,
+        callee_gc_scan_slots: 7,
+        reserved: 0,
         dispatch_generation: 0,
     };
 
@@ -1341,6 +1349,7 @@ fn vm_jit_iface_pointer_receiver_prepared_shadow_publishes_ic_entry() {
     );
     assert_eq!(out.jit_func_ptr, entry);
     assert_eq!(out.ic_jit_func_ptr, entry);
+    assert_eq!(out.callee_gc_scan_slots, module.functions[1].gc_scan_slots);
     assert_eq!(stack[0], 123);
 }
 

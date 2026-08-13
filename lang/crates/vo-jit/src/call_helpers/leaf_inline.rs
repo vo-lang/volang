@@ -132,12 +132,29 @@ impl SmallPureLeafInline {
             .ins()
             .icmp_imm_u(IntCC::NotEqual, entry, 0);
         let inline_block = emitter.builder().create_block();
+        let link_block = crate::compile_common::cold_block(emitter.builder());
         let vm_block = crate::compile_common::cold_block(emitter.builder());
         let merge_block = emitter.builder().create_block();
         emitter
             .builder()
             .ins()
-            .brif(available, inline_block, &[], vm_block, &[]);
+            .brif(available, inline_block, &[], link_block, &[]);
+
+        emitter.builder().switch_to_block(link_block);
+        emitter.builder().seal_block(link_block);
+        let func_id = emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, i64::from(plan.func_id));
+        let linked = super::emit_native_link(emitter, func_id)?;
+        let linked_available = emitter
+            .builder()
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, linked, 0);
+        emitter
+            .builder()
+            .ins()
+            .brif(linked_available, inline_block, &[], vm_block, &[]);
 
         emitter.builder().switch_to_block(vm_block);
         emitter.builder().seal_block(vm_block);
