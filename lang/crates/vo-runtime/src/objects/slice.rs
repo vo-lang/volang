@@ -20,7 +20,7 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::objects::alloc_error;
 use crate::objects::array;
 use crate::slot::{ptr_to_slot, slot_to_ptr, slot_to_usize, Slot, SLOT_BYTES};
@@ -61,6 +61,39 @@ pub const FIELD_STORAGE_MODE: usize = 9;
 pub const STORAGE_MODE_PACKED: Slot = 0;
 pub const STORAGE_MODE_FLAT_SLOTS: Slot = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceCreateError {
+    Invalid(i32),
+    Memory(MemoryError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceAppendError {
+    Memory(MemoryError),
+    Barrier(crate::gc_types::TypedWriteBarrierByMetaError),
+}
+
+impl core::fmt::Display for SliceAppendError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Memory(error) => error.fmt(f),
+            Self::Barrier(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<MemoryError> for SliceAppendError {
+    fn from(error: MemoryError) -> Self {
+        Self::Memory(error)
+    }
+}
+
+impl From<crate::gc_types::TypedWriteBarrierByMetaError> for SliceAppendError {
+    fn from(error: crate::gc_types::TypedWriteBarrierByMetaError) -> Self {
+        Self::Barrier(error)
+    }
+}
+
 impl_gc_object!(SliceData);
 
 fn elem_slots_for_bytes(elem_bytes: usize) -> usize {
@@ -76,18 +109,30 @@ pub fn create(
     length: usize,
     capacity: usize,
 ) -> GcRef {
+    match try_create(gc, elem_meta, elem_bytes, length, capacity) {
+        Ok(slice) => slice,
+        Err(SliceCreateError::Invalid(_)) => core::ptr::null_mut(),
+        Err(SliceCreateError::Memory(error)) => gc.sticky_allocation_failure(error),
+    }
+}
+
+pub fn try_create(
+    gc: &mut Gc,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    length: usize,
+    capacity: usize,
+) -> Result<GcRef, SliceCreateError> {
     if length > capacity {
-        return core::ptr::null_mut();
+        return Err(SliceCreateError::Invalid(alloc_error::LEN_GT_CAP));
     }
-    let arr = array::create(gc, elem_meta, elem_bytes, capacity);
-    if arr.is_null() {
-        return core::ptr::null_mut();
-    }
+    let arr =
+        array::try_create(gc, elem_meta, elem_bytes, capacity).map_err(SliceCreateError::Memory)?;
     let backing_ptr = unsafe { array::data_ptr_bytes(arr) };
     let Some(geometry) =
         validate_view_geometry(capacity, 0, length, capacity, backing_ptr, elem_bytes)
     else {
-        return core::ptr::null_mut();
+        return Err(SliceCreateError::Invalid(alloc_error::OVERFLOW));
     };
     // Safety: `arr` is the fresh canonical array allocated above, and its
     // allocation contains exactly the `capacity * elem_bytes` backing range
@@ -95,7 +140,7 @@ pub fn create(
     // collector range query here keeps this safe constructor usable through
     // the native-extension owner-dispatch facade.
     unsafe {
-        alloc_view_descriptor(
+        try_alloc_view_descriptor(
             gc,
             arr,
             backing_ptr,
@@ -108,6 +153,7 @@ pub fn create(
             STORAGE_MODE_PACKED,
             geometry,
         )
+        .map_err(SliceCreateError::Memory)
     }
 }
 
@@ -128,17 +174,32 @@ pub fn create_checked(
     len: i64,
     cap: i64,
 ) -> Result<GcRef, i32> {
-    let elem_meta = ValueMeta::try_from_raw(elem_meta).ok_or(alloc_error::OVERFLOW)?;
-    u32::try_from(elem_bytes).map_err(|_| alloc_error::OVERFLOW)?;
+    match try_create_checked(gc, elem_meta, elem_bytes, len, cap) {
+        Ok(slice) => Ok(slice),
+        Err(SliceCreateError::Invalid(code)) => Err(code),
+        Err(SliceCreateError::Memory(error)) => Ok(gc.sticky_allocation_failure(error)),
+    }
+}
+
+pub fn try_create_checked(
+    gc: &mut Gc,
+    elem_meta: u32,
+    elem_bytes: usize,
+    len: i64,
+    cap: i64,
+) -> Result<GcRef, SliceCreateError> {
+    let elem_meta = ValueMeta::try_from_raw(elem_meta)
+        .ok_or(SliceCreateError::Invalid(alloc_error::OVERFLOW))?;
+    u32::try_from(elem_bytes).map_err(|_| SliceCreateError::Invalid(alloc_error::OVERFLOW))?;
     // Unified validation logic
     if len < 0 {
-        return Err(alloc_error::NEGATIVE_LEN);
+        return Err(SliceCreateError::Invalid(alloc_error::NEGATIVE_LEN));
     }
     if cap < 0 {
-        return Err(alloc_error::NEGATIVE_CAP);
+        return Err(SliceCreateError::Invalid(alloc_error::NEGATIVE_CAP));
     }
     if len > cap {
-        return Err(alloc_error::LEN_GT_CAP);
+        return Err(SliceCreateError::Invalid(alloc_error::LEN_GT_CAP));
     }
 
     // `int` is fixed-width i64 in Volang, while the runtime address space can
@@ -146,17 +207,19 @@ pub fn create_checked(
     // cannot represent before converting; `as usize` would silently truncate
     // a large positive value and could turn an overflowing allocation into a
     // small, valid one.
-    let len_usize = usize::try_from(len).map_err(|_| alloc_error::OVERFLOW)?;
-    let cap_usize = usize::try_from(cap).map_err(|_| alloc_error::OVERFLOW)?;
+    let len_usize =
+        usize::try_from(len).map_err(|_| SliceCreateError::Invalid(alloc_error::OVERFLOW))?;
+    let cap_usize =
+        usize::try_from(cap).map_err(|_| SliceCreateError::Invalid(alloc_error::OVERFLOW))?;
 
     // Overflow check
     match cap_usize.checked_mul(elem_bytes) {
         Some(total) if total <= isize::MAX as usize => {}
-        _ => return Err(alloc_error::OVERFLOW),
+        _ => return Err(SliceCreateError::Invalid(alloc_error::OVERFLOW)),
     }
 
     // Allocation
-    Ok(create(gc, elem_meta, elem_bytes, len_usize, cap_usize))
+    try_create(gc, elem_meta, elem_bytes, len_usize, cap_usize)
 }
 
 pub unsafe fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize) -> GcRef {
@@ -201,6 +264,41 @@ unsafe fn try_from_array_range_with_cap(
     let backing_ptr = array::data_ptr_bytes(arr);
     unsafe {
         try_alloc_view(
+            gc,
+            arr,
+            backing_ptr,
+            arr_len,
+            start_off,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            elem_bytes,
+            STORAGE_MODE_PACKED,
+        )
+    }
+}
+
+unsafe fn try_from_array_range_with_cap_explicit(
+    gc: &mut Gc,
+    arr: GcRef,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let arr_len = unsafe { array::len(arr) };
+    if start_off > arr_len {
+        return Ok(None);
+    }
+    let backing_cap = arr_len - start_off;
+    if length > capacity || capacity > backing_cap {
+        return Ok(None);
+    }
+    let elem_meta = unsafe { array::elem_meta(arr) };
+    let elem_bytes = unsafe { array::elem_bytes(arr) };
+    let backing_ptr = unsafe { array::data_ptr_bytes(arr) };
+    unsafe {
+        try_alloc_view_explicit(
             gc,
             arr,
             backing_ptr,
@@ -291,6 +389,51 @@ unsafe fn try_alloc_view(
 }
 
 #[allow(clippy::too_many_arguments)]
+unsafe fn try_alloc_view_explicit(
+    gc: &mut Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    backing_len: usize,
+    start_off: usize,
+    length: usize,
+    capacity: usize,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    storage_stride: usize,
+    storage_mode: Slot,
+) -> Result<Option<GcRef>, MemoryError> {
+    let Some(geometry) = validate_owned_view_geometry(
+        gc,
+        owner,
+        backing_ptr,
+        backing_len,
+        start_off,
+        length,
+        capacity,
+        storage_stride,
+    ) else {
+        return Ok(None);
+    };
+
+    unsafe {
+        try_alloc_view_descriptor(
+            gc,
+            owner,
+            backing_ptr,
+            backing_len,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            storage_mode,
+            geometry,
+        )
+        .map(Some)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_owned_view_geometry(
     gc: &Gc,
     owner: GcRef,
@@ -373,10 +516,41 @@ unsafe fn alloc_view_descriptor(
     storage_mode: Slot,
     geometry: ViewGeometry,
 ) -> GcRef {
-    let s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    if s.is_null() {
-        return core::ptr::null_mut();
+    match unsafe {
+        try_alloc_view_descriptor(
+            gc,
+            owner,
+            backing_ptr,
+            backing_len,
+            length,
+            capacity,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            storage_mode,
+            geometry,
+        )
+    } {
+        Ok(slice) => slice,
+        Err(error) => gc.sticky_allocation_failure(error),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn try_alloc_view_descriptor(
+    gc: &mut Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    backing_len: usize,
+    length: usize,
+    capacity: usize,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    storage_stride: usize,
+    storage_mode: Slot,
+    geometry: ViewGeometry,
+) -> Result<GcRef, MemoryError> {
+    let s = gc.try_alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS)?;
     // Safety: `s` is freshly allocated and will be marked for scanning before collection.
     let data = unsafe { SliceData::as_mut(s) };
     data.owner = ptr_to_slot(owner);
@@ -394,7 +568,7 @@ unsafe fn alloc_view_descriptor(
     data.storage_stride = storage_stride as Slot;
     data.storage_mode = storage_mode;
     gc.mark_allocated_for_scan(s);
-    s
+    Ok(s)
 }
 
 /// Create a slice over an inline fixed-array subobject.
@@ -505,6 +679,38 @@ pub unsafe fn inline_array_slice(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn try_inline_array_slice(
+    gc: &mut Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    storage_stride: usize,
+    array_len: usize,
+    lo: usize,
+    hi: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    if lo > hi || hi > array_len {
+        return Ok(None);
+    }
+    unsafe {
+        try_alloc_view_explicit(
+            gc,
+            owner,
+            backing_ptr,
+            array_len,
+            lo,
+            hi - lo,
+            array_len - lo,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            STORAGE_MODE_FLAT_SLOTS,
+        )
+    }
+}
+
 /// Three-index slice over an inline fixed-array subobject.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn inline_array_slice_with_cap(
@@ -539,6 +745,39 @@ pub unsafe fn inline_array_slice_with_cap(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn try_inline_array_slice_with_cap(
+    gc: &mut Gc,
+    owner: GcRef,
+    backing_ptr: *mut u8,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    storage_stride: usize,
+    array_len: usize,
+    lo: usize,
+    hi: usize,
+    max: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    if lo > hi || hi > max || max > array_len {
+        return Ok(None);
+    }
+    unsafe {
+        try_alloc_view_explicit(
+            gc,
+            owner,
+            backing_ptr,
+            array_len,
+            lo,
+            hi - lo,
+            max - lo,
+            elem_meta,
+            elem_bytes,
+            storage_stride,
+            STORAGE_MODE_FLAT_SLOTS,
+        )
+    }
+}
+
 /// Two-index array slice: arr[lo:hi].
 /// Returns None on bounds error (lo > hi or hi > arr_len).
 pub unsafe fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
@@ -547,6 +786,19 @@ pub unsafe fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Opti
         return None;
     }
     unsafe { try_from_array_range_with_cap(gc, arr, lo, hi - lo, arr_len - lo) }
+}
+
+pub unsafe fn try_array_slice(
+    gc: &mut Gc,
+    arr: GcRef,
+    lo: usize,
+    hi: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let arr_len = unsafe { array::len(arr) };
+    if lo > hi || hi > arr_len {
+        return Ok(None);
+    }
+    unsafe { try_from_array_range_with_cap_explicit(gc, arr, lo, hi - lo, arr_len - lo) }
 }
 
 /// Three-index array slice: arr[lo:hi:max].
@@ -563,6 +815,20 @@ pub unsafe fn array_slice_with_cap(
         return None;
     }
     unsafe { try_from_array_range_with_cap(gc, arr, lo, hi - lo, max - lo) }
+}
+
+pub unsafe fn try_array_slice_with_cap(
+    gc: &mut Gc,
+    arr: GcRef,
+    lo: usize,
+    hi: usize,
+    max: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let arr_len = unsafe { array::len(arr) };
+    if lo > hi || hi > max || max > arr_len {
+        return Ok(None);
+    }
+    unsafe { try_from_array_range_with_cap_explicit(gc, arr, lo, hi - lo, max - lo) }
 }
 
 pub unsafe fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
@@ -1043,6 +1309,20 @@ pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<Gc
     unsafe { try_reslice(gc, data, lo, hi - lo, cap - lo) }
 }
 
+pub unsafe fn try_slice_of(
+    gc: &mut Gc,
+    s: GcRef,
+    lo: usize,
+    hi: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let data = unsafe { SliceData::as_ref(s) };
+    let cap = slot_to_usize(data.cap);
+    if lo > hi || hi > cap {
+        return Ok(None);
+    }
+    unsafe { try_reslice_explicit(gc, data, lo, hi - lo, cap - lo) }
+}
+
 /// Three-index slice: s[lo:hi:max] - capacity = max - lo.
 /// Returns None on bounds error (lo > hi or hi > max or max > cap).
 pub unsafe fn slice_of_with_cap(
@@ -1058,6 +1338,21 @@ pub unsafe fn slice_of_with_cap(
         return None;
     }
     unsafe { try_reslice(gc, data, lo, hi - lo, max - lo) }
+}
+
+pub unsafe fn try_slice_of_with_cap(
+    gc: &mut Gc,
+    s: GcRef,
+    lo: usize,
+    hi: usize,
+    max: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let data = unsafe { SliceData::as_ref(s) };
+    let cap = slot_to_usize(data.cap);
+    if lo > hi || hi > max || max > cap {
+        return Ok(None);
+    }
+    unsafe { try_reslice_explicit(gc, data, lo, hi - lo, max - lo) }
 }
 
 unsafe fn try_reslice(
@@ -1110,18 +1405,83 @@ unsafe fn try_reslice(
     })
 }
 
+unsafe fn try_reslice_explicit(
+    gc: &mut Gc,
+    source: &SliceData,
+    lo: usize,
+    length: usize,
+    capacity: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let backing_ptr = slot_to_ptr::<u8>(source.backing_ptr);
+    let data_ptr = slot_to_ptr::<u8>(source.data_ptr);
+    let storage_stride = slot_to_usize(source.storage_stride);
+    let Some(current_byte_offset) = (data_ptr as usize).checked_sub(backing_ptr as usize) else {
+        return Ok(None);
+    };
+    let current_start = if storage_stride == 0 {
+        if current_byte_offset != 0 {
+            return Ok(None);
+        }
+        0
+    } else {
+        if !current_byte_offset.is_multiple_of(storage_stride) {
+            return Ok(None);
+        }
+        current_byte_offset / storage_stride
+    };
+    let Some(start_off) = current_start.checked_add(lo) else {
+        return Ok(None);
+    };
+    let backing_len = slot_to_usize(source.backing_len);
+    let Some(geometry) = validate_view_geometry(
+        backing_len,
+        start_off,
+        length,
+        capacity,
+        backing_ptr,
+        storage_stride,
+    ) else {
+        return Ok(None);
+    };
+
+    unsafe {
+        try_alloc_view_descriptor(
+            gc,
+            slot_to_ptr::<Slot>(source.owner),
+            backing_ptr,
+            backing_len,
+            length,
+            capacity,
+            ValueMeta::from_raw(source.elem_meta as u32),
+            slot_to_usize(source.elem_bytes),
+            storage_stride,
+            source.storage_mode,
+            geometry,
+        )
+        .map(Some)
+    }
+}
+
 /// Create new slice header with updated length (same backing array, same start).
 /// Used by append when capacity is sufficient.
 pub unsafe fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
+    match unsafe { try_with_new_len(gc, s, new_len) } {
+        Ok(slice) => slice,
+        Err(error) => gc.sticky_allocation_failure(error),
+    }
+}
+
+pub unsafe fn try_with_new_len(
+    gc: &mut Gc,
+    s: GcRef,
+    new_len: usize,
+) -> Result<GcRef, MemoryError> {
     let data = unsafe { SliceData::as_ref(s) };
     assert!(
         new_len <= slot_to_usize(data.cap),
         "slice length exceeds capacity"
     );
-    let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    if new_s.is_null() {
-        return new_s;
-    }
+    let new_s = gc.try_alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS)?;
     // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
     let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.owner = data.owner;
@@ -1135,7 +1495,7 @@ pub unsafe fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
     new_data.storage_stride = data.storage_stride;
     new_data.storage_mode = data.storage_mode;
     gc.mark_allocated_for_scan(new_s);
-    new_s
+    Ok(new_s)
 }
 
 /// Append single element to slice.
@@ -1158,19 +1518,19 @@ pub unsafe fn try_append(
     s: GcRef,
     val: &[u64],
     module: Option<vo_common_core::bytecode::ModuleRuntimeMetadata<'_>>,
-) -> Result<GcRef, crate::gc_types::TypedWriteBarrierByMetaError> {
+) -> Result<GcRef, SliceAppendError> {
     if s.is_null() {
-        let new_arr = array::create(gc, em, elem_bytes, 4);
-        if new_arr.is_null() {
-            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
-        }
+        let new_arr = array::try_create(gc, em, elem_bytes, 4)?;
         if em.value_kind().may_contain_gc_refs() {
             crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, em, module)?;
         }
-        let result = from_array_range_with_cap(gc, new_arr, 0, 1, 4);
-        if result.is_null() {
-            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
-        }
+        let Some(result) =
+            (unsafe { try_from_array_range_with_cap_explicit(gc, new_arr, 0, 1, 4) })?
+        else {
+            return gc
+                .allocation_failure(MemoryError::AllocationSizeOverflow)
+                .map_err(SliceAppendError::Memory);
+        };
         unsafe { write_logical_slots(result, 0, val) };
         if em.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
@@ -1183,12 +1543,12 @@ pub unsafe fn try_append(
     let actual_em = elem_meta(s);
     let actual_elem_bytes = self::elem_bytes(s);
     if actual_elem_bytes != elem_bytes {
-        return Err(
+        return Err(SliceAppendError::Barrier(
             crate::gc_types::TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
                 expected: elem_slots_for_bytes(actual_elem_bytes),
                 actual: elem_slots_for_bytes(elem_bytes),
             },
-        );
+        ));
     }
     if cur_len < cur_cap {
         if actual_em.value_kind().may_contain_gc_refs() {
@@ -1200,10 +1560,7 @@ pub unsafe fn try_append(
             }
         }
         // Go semantics: append never modifies original slice header
-        let result = with_new_len(gc, s, cur_len + 1);
-        if result.is_null() {
-            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
-        }
+        let result = unsafe { try_with_new_len(gc, s, cur_len + 1) }?;
         unsafe { write_logical_slots(s, cur_len, val) };
         Ok(result)
     } else {
@@ -1212,21 +1569,27 @@ pub unsafe fn try_append(
         } else {
             cur_cap
                 .checked_mul(2)
-                .ok_or(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)?
+                .ok_or(MemoryError::AllocationSizeOverflow)
+                .or_else(|error| gc.allocation_failure(error))?
         };
-        let new_arr = array::create(gc, actual_em, actual_elem_bytes, new_cap);
-        if new_arr.is_null() {
-            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
-        }
+        let new_arr = array::try_create(gc, actual_em, actual_elem_bytes, new_cap)?;
         if actual_em.value_kind().may_contain_gc_refs() {
             crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, actual_em, module)?;
         }
-        let result = from_array_range_with_cap(gc, new_arr, 0, cur_len + 1, new_cap);
-        if result.is_null() {
-            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
-        }
+        let Some(result) = (unsafe {
+            try_from_array_range_with_cap_explicit(gc, new_arr, 0, cur_len + 1, new_cap)
+        })?
+        else {
+            return gc
+                .allocation_failure(MemoryError::AllocationSizeOverflow)
+                .map_err(SliceAppendError::Memory);
+        };
         let elem_slots = elem_slots_for_bytes(actual_elem_bytes);
-        let mut elem = vec![0u64; elem_slots];
+        let mut elem = Vec::new();
+        elem.try_reserve_exact(elem_slots)
+            .map_err(|_| MemoryError::SystemAllocationFailed)
+            .or_else(|error| gc.allocation_failure(error))?;
+        elem.resize(elem_slots, 0);
         for index in 0..cur_len {
             unsafe { read_logical_slots(s, index, &mut elem) };
             unsafe { write_logical_slots(result, index, &elem) };
@@ -1583,9 +1946,9 @@ mod tests {
 
         assert_eq!(
             result,
-            Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)
+            Err(SliceAppendError::Memory(MemoryError::MetadataExhausted))
         );
-        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+        assert_eq!(gc.last_memory_error(), None);
     }
 
     #[test]
@@ -1600,11 +1963,11 @@ mod tests {
 
         assert_eq!(
             result,
-            Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)
+            Err(SliceAppendError::Memory(MemoryError::MetadataExhausted))
         );
         assert_eq!(array::get(backing, 1, SLOT_BYTES), 42);
         assert_eq!(unsafe { len(source) }, 1);
-        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+        assert_eq!(gc.last_memory_error(), None);
     }
 
     #[test]
@@ -1618,11 +1981,11 @@ mod tests {
 
         assert_eq!(
             result,
-            Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)
+            Err(SliceAppendError::Memory(MemoryError::MetadataExhausted))
         );
         assert_eq!(unsafe { get(source, 0, SLOT_BYTES) }, 11);
         assert_eq!(unsafe { len(source) }, 1);
-        assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
+        assert_eq!(gc.last_memory_error(), None);
     }
 
     #[cfg(target_pointer_width = "32")]
@@ -1655,7 +2018,9 @@ mod tests {
 
         assert_eq!(
             err,
-            crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+            SliceAppendError::Barrier(
+                crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+            )
         );
         assert_eq!(array::get(arr, 1, 8), 42);
     }
@@ -1695,7 +2060,9 @@ mod tests {
 
         assert_eq!(
             err,
-            crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+            SliceAppendError::Barrier(
+                crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+            )
         );
         assert_eq!(array::get(arr, 1, 8), 42);
     }

@@ -1080,6 +1080,10 @@ impl Vm {
                 });
                 ExecResult::Transition(transition)
             }
+            ExecResult::MemoryError(error) => {
+                self.discard_pending_runtime_transitions();
+                ExecResult::MemoryError(error)
+            }
             ExecResult::Panic => {
                 let mut transition = RuntimeTransition::continue_with_gc_roots(GcRootEffect::None);
                 let committed_any =
@@ -1436,6 +1440,9 @@ impl Vm {
             ExecResult::TimesliceExpired | ExecResult::Interrupted => RuntimeBoundary::Yield,
             ExecResult::Block(reason) => RuntimeBoundary::Block(reason.clone()),
             ExecResult::Panic => RuntimeBoundary::Panic("fiber panic".to_string()),
+            ExecResult::MemoryError(error) => {
+                RuntimeBoundary::FatalInfra(format!("Island managed-memory failure: {error}"))
+            }
             ExecResult::JitError(message) => RuntimeBoundary::FatalInfra(message.clone()),
             ExecResult::Done | ExecResult::Exit(_) => RuntimeBoundary::Done,
             ExecResult::FrameChanged | ExecResult::CallClosure { .. } => RuntimeBoundary::Continue,

@@ -7,7 +7,7 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::objects::slice::SliceData;
 use crate::objects::{array, slice};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
@@ -27,6 +27,18 @@ pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, bytes.len());
     }
     alloc_string(gc, arr, arr_data_ptr, bytes.len())
+}
+
+pub fn try_create(gc: &mut Gc, bytes: &[u8]) -> Result<GcRef, MemoryError> {
+    if bytes.is_empty() {
+        return Ok(core::ptr::null_mut());
+    }
+    let arr = array::try_create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len())?;
+    let arr_data_ptr = unsafe { array::data_ptr_bytes(arr) };
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, bytes.len());
+    }
+    try_alloc_string(gc, arr, arr_data_ptr, bytes.len())
 }
 
 #[inline]
@@ -52,8 +64,36 @@ fn alloc_string(gc: &mut Gc, arr: GcRef, data_ptr: *mut u8, len: usize) -> GcRef
 }
 
 #[inline]
+fn try_alloc_string(
+    gc: &mut Gc,
+    arr: GcRef,
+    data_ptr: *mut u8,
+    len: usize,
+) -> Result<GcRef, MemoryError> {
+    let s = gc.try_alloc(ValueMeta::new(0, ValueKind::String), slice::DATA_SLOTS)?;
+    let data = unsafe { SliceData::as_mut(s) };
+    data.owner = ptr_to_slot(arr);
+    data.data_ptr = ptr_to_slot(data_ptr);
+    data.len = len as Slot;
+    data.cap = len as Slot;
+    data.elem_meta = ValueMeta::new(0, ValueKind::Uint8).to_raw() as Slot;
+    data.elem_bytes = 1;
+    data.backing_ptr = ptr_to_slot(unsafe { array::data_ptr_bytes(arr) });
+    data.backing_len = unsafe { array::len(arr) } as Slot;
+    data.storage_stride = 1;
+    data.storage_mode = slice::STORAGE_MODE_PACKED;
+    gc.mark_allocated_for_scan(s);
+    Ok(s)
+}
+
+#[inline]
 pub fn from_rust_str(gc: &mut Gc, s: &str) -> GcRef {
     create(gc, s.as_bytes())
+}
+
+#[inline]
+pub fn try_from_rust_str(gc: &mut Gc, s: &str) -> Result<GcRef, MemoryError> {
+    try_create(gc, s.as_bytes())
 }
 
 #[inline]
@@ -201,6 +241,32 @@ pub unsafe fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
     alloc_string(gc, arr, arr_ptr, total)
 }
 
+/// Concatenate two live VM strings with explicit allocation failure propagation.
+///
+/// # Safety
+/// Each non-null input must point to a live string object owned by `gc`.
+pub unsafe fn try_concat(gc: &mut Gc, a: GcRef, b: GcRef) -> Result<GcRef, MemoryError> {
+    if a.is_null() {
+        return Ok(b);
+    }
+    if b.is_null() {
+        return Ok(a);
+    }
+    let a_len = unsafe { slice::len(a) };
+    let b_len = unsafe { slice::len(b) };
+    let total = a_len
+        .checked_add(b_len)
+        .ok_or(MemoryError::AllocationSizeOverflow)
+        .or_else(|error| gc.allocation_failure(error))?;
+    let arr = array::try_create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, total)?;
+    let arr_ptr = unsafe { array::data_ptr_bytes(arr) };
+    unsafe {
+        core::ptr::copy_nonoverlapping(slice::data_ptr(a), arr_ptr, a_len);
+        core::ptr::copy_nonoverlapping(slice::data_ptr(b), arr_ptr.add(a_len), b_len);
+    }
+    try_alloc_string(gc, arr, arr_ptr, total)
+}
+
 /// Create an immutable view over part of a live VM string.
 ///
 /// # Safety
@@ -223,6 +289,29 @@ pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> Optio
         unsafe { data_ptr.add(start) },
         end - start,
     ))
+}
+
+/// Create an immutable string view with explicit allocation failure propagation.
+///
+/// # Safety
+/// `s` must point to a live string object owned by `gc` when non-null.
+pub unsafe fn try_slice_of(
+    gc: &mut Gc,
+    s: GcRef,
+    start: usize,
+    end: usize,
+) -> Result<Option<GcRef>, MemoryError> {
+    let len = unsafe { len(s) };
+    if start > end || end > len {
+        return Ok(None);
+    }
+    if start == end {
+        return Ok(Some(core::ptr::null_mut()));
+    }
+    let src = unsafe { SliceData::as_ref(s) };
+    let arr = slot_to_ptr(src.owner);
+    let data_ptr = slot_to_ptr::<u8>(src.data_ptr);
+    try_alloc_string(gc, arr, unsafe { data_ptr.add(start) }, end - start).map(Some)
 }
 
 /// Compare two live VM strings by bytes.

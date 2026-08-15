@@ -10,7 +10,7 @@
 //! Unsafe accessors require a canonical live array allocation and in-bounds
 //! indices or byte ranges matching its recorded element layout.
 
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::slot::{byte_offset_for_slots, slot_to_usize, slots_for_bytes, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
@@ -30,17 +30,12 @@ impl_gc_object!(ArrayHeader);
 /// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)
 /// Returns null on overflow or allocation failure.
 pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usize) -> GcRef {
-    let Ok(elem_bytes_u32) = u32::try_from(elem_bytes) else {
-        return core::ptr::null_mut();
-    };
-    let data_bytes = match length.checked_mul(elem_bytes) {
-        Some(b) => b,
-        None => return core::ptr::null_mut(), // overflow
-    };
-    let data_slots = slots_for_bytes(data_bytes); // round up to slot boundary
-    let total_slots = match HEADER_SLOTS.checked_add(data_slots) {
-        Some(s) => s,
-        None => return core::ptr::null_mut(), // overflow
+    let (elem_bytes_u32, total_slots) = match allocation_geometry(elem_bytes, length) {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            gc.record_allocation_failure(error);
+            return core::ptr::null_mut();
+        }
     };
     let array_meta = ValueMeta::new(0, ValueKind::Array);
     let arr = gc.alloc_array(array_meta, total_slots);
@@ -53,6 +48,36 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usiz
     header.elem_meta = elem_meta;
     header.elem_bytes = elem_bytes_u32;
     arr
+}
+
+pub fn try_create(
+    gc: &mut Gc,
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    length: usize,
+) -> Result<GcRef, MemoryError> {
+    let (elem_bytes_u32, total_slots) =
+        allocation_geometry(elem_bytes, length).or_else(|error| gc.allocation_failure(error))?;
+    let array_meta = ValueMeta::new(0, ValueKind::Array);
+    let arr = gc.try_alloc_array(array_meta, total_slots)?;
+    let header = unsafe { ArrayHeader::as_mut(arr) };
+    header.len = length as Slot;
+    header.elem_meta = elem_meta;
+    header.elem_bytes = elem_bytes_u32;
+    Ok(arr)
+}
+
+fn allocation_geometry(elem_bytes: usize, length: usize) -> Result<(u32, usize), MemoryError> {
+    let elem_bytes_u32 =
+        u32::try_from(elem_bytes).map_err(|_| MemoryError::AllocationSizeOverflow)?;
+    let data_bytes = length
+        .checked_mul(elem_bytes)
+        .ok_or(MemoryError::AllocationSizeOverflow)?;
+    let data_slots = slots_for_bytes(data_bytes);
+    let total_slots = HEADER_SLOTS
+        .checked_add(data_slots)
+        .ok_or(MemoryError::AllocationSizeOverflow)?;
+    Ok((elem_bytes_u32, total_slots))
 }
 
 #[inline]

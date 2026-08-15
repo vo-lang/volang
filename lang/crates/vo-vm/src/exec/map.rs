@@ -12,6 +12,7 @@ use vo_runtime::objects::map;
 use vo_runtime::slot::Slot;
 use vo_runtime::{SlotType, ValueKind, ValueMeta};
 
+use crate::exec::InstructionError;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
@@ -32,14 +33,16 @@ impl MapScratch {
         &mut self,
         key_slots: usize,
         val_slots: usize,
-    ) -> Result<(&mut [u64], &mut [u64]), String> {
-        let total = key_slots
-            .checked_add(val_slots)
-            .ok_or_else(|| "map operand scratch size overflow".to_string())?;
+    ) -> Result<(&mut [u64], &mut [u64]), InstructionError> {
+        let total = key_slots.checked_add(val_slots).ok_or_else(|| {
+            InstructionError::Memory(vo_runtime::gc::MemoryError::AllocationSizeOverflow)
+        })?;
         if total > self.slots.len() {
             self.slots
                 .try_reserve_exact(total - self.slots.len())
-                .map_err(|_| "map operand scratch allocation failed".to_string())?;
+                .map_err(|_| {
+                    InstructionError::Memory(vo_runtime::gc::MemoryError::SystemAllocationFailed)
+                })?;
         }
         self.slots.resize(total, 0);
         self.slots[..total].fill(0);
@@ -47,11 +50,13 @@ impl MapScratch {
     }
 
     #[inline]
-    fn key(&mut self, key_slots: usize) -> Result<&mut [u64], String> {
+    fn key(&mut self, key_slots: usize) -> Result<&mut [u64], InstructionError> {
         if key_slots > self.slots.len() {
             self.slots
                 .try_reserve_exact(key_slots - self.slots.len())
-                .map_err(|_| "map key scratch allocation failed".to_string())?;
+                .map_err(|_| {
+                    InstructionError::Memory(vo_runtime::gc::MemoryError::SystemAllocationFailed)
+                })?;
         }
         self.slots.resize(key_slots, 0);
         Ok(&mut self.slots[..key_slots])
@@ -80,7 +85,7 @@ pub fn exec_map_new(
     gc: &mut Gc,
     key_layout: &[SlotType],
     val_layout: &[SlotType],
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     // `b` names the semantic key/value type pair; `b + 1` names key RTTI.
     // Map key/value slot layouts come exclusively from instruction metadata.
     let type_pair = stack_get(stack, bp + inst.b as usize);
@@ -99,7 +104,7 @@ pub fn exec_map_new(
             val_layout.len()
         )
     })?;
-    let m = map::create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid);
+    let m = map::try_create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid)?;
     stack_set(stack, bp + inst.a as usize, m as u64);
     Ok(())
 }
@@ -176,7 +181,7 @@ pub fn exec_map_get_with_layout_using_scratch(
     module: Option<ModuleRuntimeMetadata<'_>>,
     layout: (&[SlotType], &[SlotType], bool),
     scratch: &mut MapScratch,
-) -> Result<bool, String> {
+) -> Result<bool, InstructionError> {
     let mut m = stack_get(stack, bp + inst.b as usize) as GcRef;
     let (key_layout, val_layout, has_ok) = layout;
     let key_slots = key_layout.len();
@@ -208,13 +213,17 @@ pub fn exec_map_get_with_layout_using_scratch(
         Ok(result) => result,
         Err(map::MapKeyError::UnhashableInterfaceKey) => return Ok(false),
         Err(map::MapKeyError::SlotCountMismatch) => {
-            return Err("MapGet key slot count does not match map layout".to_string())
+            return Err("MapGet key slot count does not match map layout"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::MissingModule) => {
-            return Err("MapGet requires loaded module metadata for this key type".to_string())
+            return Err("MapGet requires loaded module metadata for this key type"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::AllocationFailed(error)) => {
-            return Err(format!("MapGet backing error: {error}"))
+            return Err(InstructionError::Memory(error))
         }
     };
     for (i, &value) in val.iter().enumerate() {
@@ -239,7 +248,7 @@ pub fn exec_map_set_with_layout_using_scratch(
     module: Option<ModuleRuntimeMetadata<'_>>,
     layout: (&[SlotType], &[SlotType]),
     scratch: &mut MapScratch,
-) -> Result<bool, String> {
+) -> Result<bool, InstructionError> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let (key_layout, val_layout) = layout;
     let key_slots = key_layout.len();
@@ -282,13 +291,17 @@ pub fn exec_map_set_with_layout_using_scratch(
         Ok(()) => {}
         Err(map::MapKeyError::UnhashableInterfaceKey) => return Ok(false),
         Err(map::MapKeyError::SlotCountMismatch) => {
-            return Err("MapSet key/value slot count does not match map layout".to_string())
+            return Err("MapSet key/value slot count does not match map layout"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::MissingModule) => {
-            return Err("MapSet requires loaded module metadata for this key type".to_string())
+            return Err("MapSet requires loaded module metadata for this key type"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::AllocationFailed(error)) => {
-            return Err(format!("MapSet allocation failed: {error}"))
+            return Err(InstructionError::Memory(error))
         }
     }
     Ok(true)
@@ -304,7 +317,7 @@ pub fn exec_map_delete_with_layout_using_scratch(
     module: Option<ModuleRuntimeMetadata<'_>>,
     key_layout: &[SlotType],
     scratch: &mut MapScratch,
-) -> Result<bool, String> {
+) -> Result<bool, InstructionError> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let key_slots = key_layout.len();
 
@@ -322,7 +335,8 @@ pub fn exec_map_delete_with_layout_using_scratch(
         if !key_matches {
             return Err(format!(
                 "MapDelete key layout {key_layout:?} does not match map key metadata"
-            ));
+            )
+            .into());
         }
     }
 
@@ -341,14 +355,16 @@ pub fn exec_map_delete_with_layout_using_scratch(
         Ok(()) => Ok(true),
         Err(map::MapKeyError::UnhashableInterfaceKey) => Ok(false),
         Err(map::MapKeyError::SlotCountMismatch) => {
-            Err("MapDelete key slot count does not match map layout".to_string())
+            Err("MapDelete key slot count does not match map layout"
+                .to_string()
+                .into())
         }
-        Err(map::MapKeyError::MissingModule) => {
-            Err("MapDelete requires loaded module metadata for this key type".to_string())
-        }
-        Err(map::MapKeyError::AllocationFailed(error)) => {
-            Err(format!("MapDelete backing error: {error}"))
-        }
+        Err(map::MapKeyError::MissingModule) => Err(
+            "MapDelete requires loaded module metadata for this key type"
+                .to_string()
+                .into(),
+        ),
+        Err(map::MapKeyError::AllocationFailed(error)) => Err(InstructionError::Memory(error)),
     }
 }
 
@@ -358,7 +374,7 @@ pub fn exec_map_len(
     bp: usize,
     inst: &Instruction,
     gc: &Gc,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let mut m = stack_get(stack, bp + inst.b as usize) as GcRef;
     if !m.is_null() {
         m = validate_map_handle(gc, m, "MapLen")?;
@@ -381,7 +397,7 @@ pub fn exec_map_iter_init(
     bp: usize,
     inst: &Instruction,
     gc: &Gc,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let mut m = stack_get(stack, bp + inst.b as usize) as GcRef;
     if !m.is_null() {
         m = validate_map_handle(gc, m, "MapIterInit")?;
@@ -412,7 +428,7 @@ pub fn exec_map_iter_next_with_layout(
     gc: Option<&Gc>,
     module: Option<ModuleRuntimeMetadata<'_>>,
     layout: (&[SlotType], &[SlotType]),
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let iter_slot = bp + inst.b as usize;
     let ok_slot = bp + inst.c as usize;
     let (key_layout, val_layout) = layout;
@@ -451,16 +467,22 @@ pub fn exec_map_iter_next_with_layout(
             stack_set(stack, ok_slot, 0);
         }
         Err(map::MapKeyError::SlotCountMismatch) => {
-            return Err("MapIterNext output slots do not match map layout".to_string())
+            return Err("MapIterNext output slots do not match map layout"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::UnhashableInterfaceKey) => {
-            return Err("MapIterNext encountered invalid interface-key state".to_string())
+            return Err("MapIterNext encountered invalid interface-key state"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::MissingModule) => {
-            return Err("MapIterNext requires loaded module metadata".to_string())
+            return Err("MapIterNext requires loaded module metadata"
+                .to_string()
+                .into())
         }
         Err(map::MapKeyError::AllocationFailed(error)) => {
-            return Err(format!("MapIterNext backing error: {error}"))
+            return Err(InstructionError::Memory(error))
         }
     }
     Ok(())
@@ -537,6 +559,7 @@ mod tests {
             &mut scratch,
         )
         .expect_err("MapGet must reject value width drift");
+        let err = err.to_string();
 
         assert!(err.contains("MapGet value slots 1"), "{err}");
         assert!(err.contains("map value slots 2"), "{err}");
@@ -562,6 +585,7 @@ mod tests {
             &mut scratch,
         )
         .expect_err("MapSet must reject value width drift");
+        let err = err.to_string();
 
         assert!(err.contains("MapSet value slots 1"), "{err}");
         assert!(err.contains("map value slots 2"), "{err}");
@@ -590,6 +614,7 @@ mod tests {
             &mut scratch,
         )
         .expect_err("MapGet must reject value layout drift");
+        let err = err.to_string();
 
         assert!(err.contains("MapGet value layout [Value]"), "{err}");
         assert!(err.contains("does not match map value metadata"), "{err}");
@@ -616,6 +641,7 @@ mod tests {
             &mut scratch,
         )
         .expect_err("MapSet must reject value layout drift");
+        let err = err.to_string();
 
         assert!(err.contains("MapSet value layout [Value]"), "{err}");
         assert!(err.contains("does not match map value metadata"), "{err}");
@@ -633,6 +659,7 @@ mod tests {
 
         let err = exec_map_len(stack.as_mut_ptr(), 0, &inst, &gc)
             .expect_err("MapLen must reject non-map GcRef");
+        let err = err.to_string();
 
         assert!(err.contains("MapLen: expected map handle"), "{err}");
         assert_eq!(stack[0], 99, "MapLen must fail before writing dst");
@@ -653,6 +680,7 @@ mod tests {
 
         let err = exec_map_iter_init(stack.as_mut_ptr(), 0, &inst, &gc)
             .expect_err("MapIterInit must reject non-map GcRef");
+        let err = err.to_string();
 
         assert!(err.contains("MapIterInit: expected map handle"), "{err}");
         assert_eq!(
@@ -699,6 +727,7 @@ mod tests {
             (&[SlotType::Value], &[SlotType::Value]),
         )
         .expect_err("MapIterNext must reject non-map iterator refs");
+        let err = err.to_string();
 
         assert!(err.contains("MapIterNext: expected map handle"), "{err}");
         assert_eq!(stack[map::MAP_ITER_SLOTS], 99);

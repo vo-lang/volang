@@ -350,7 +350,7 @@ pub const TIME_SLICE: u32 = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
 /// VM execution result - drives scheduler state transitions.
 ///
 /// Variants visible to the scheduling loop include TimesliceExpired, Block,
-/// Panic, Exit, Interrupted, JitError, Transition, and Done.
+/// Panic, Exit, Interrupted, MemoryError, JitError, Transition, and Done.
 /// Internal variants (FrameChanged, CallClosure): consumed inside run_fiber,
 /// never reach the scheduling loop.
 #[derive(Debug)]
@@ -366,6 +366,8 @@ pub enum ExecResult {
     Block(crate::fiber::BlockReason),
     /// Panic, unwind or kill.
     Panic,
+    /// Managed-memory admission or allocation failed.
+    MemoryError(MemoryError),
     /// Fatal JIT infrastructure error. This is not recoverable by user code.
     JitError(String),
     /// Entire VM process requested immediate termination through `os.Exit`.

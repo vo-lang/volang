@@ -9,7 +9,7 @@
 //! Unsafe accessors require a canonical live closure allocation whose capture
 //! count fits its allocation and whose captures remain rooted during access.
 
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::slot::{Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta};
 
@@ -39,6 +39,7 @@ pub enum ClosureCreateError {
     },
     AllocationFailed {
         total_slots: u16,
+        error: MemoryError,
     },
 }
 
@@ -160,10 +161,9 @@ pub fn try_create(
     }
     let total_slots = u16::try_from(HEADER_SLOTS + capture_count)
         .expect("bounded closure allocation width must fit u16");
-    let c = gc.alloc(ValueMeta::new(0, ValueKind::Closure), total_slots);
-    if c.is_null() {
-        return Err(ClosureCreateError::AllocationFailed { total_slots });
-    }
+    let c = gc
+        .try_alloc(ValueMeta::new(0, ValueKind::Closure), total_slots)
+        .map_err(|error| ClosureCreateError::AllocationFailed { total_slots, error })?;
     // Safety: `c` is freshly allocated and not visible to the collector yet.
     let header = unsafe { ClosureHeader::as_mut(c) };
     header.func_id = func_id;
@@ -177,7 +177,7 @@ pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
             capture_count,
             max_capture_slots,
         } => panic!("closure capture count {capture_count} exceeds maximum {max_capture_slots}"),
-        ClosureCreateError::AllocationFailed { .. } => core::ptr::null_mut(),
+        ClosureCreateError::AllocationFailed { error, .. } => gc.sticky_allocation_failure(error),
     })
 }
 

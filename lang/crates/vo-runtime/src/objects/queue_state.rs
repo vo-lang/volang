@@ -219,12 +219,7 @@ impl QueueMessage {
                 len: 0,
             });
         }
-        let backing = gc.alloc_runtime_backing(slots.len());
-        if backing.is_null() {
-            return Err(gc
-                .last_memory_error()
-                .unwrap_or(MemoryError::SystemAllocationFailed));
-        }
+        let backing = gc.try_alloc_runtime_backing(slots.len())?;
         unsafe {
             core::ptr::copy_nonoverlapping(slots.as_ptr(), backing, slots.len());
         }

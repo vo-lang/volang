@@ -579,7 +579,7 @@ pub fn exec_queue_new(
     gc: &mut Gc,
     module: &Module,
     elem_layout: &[SlotType],
-) -> Result<(), String> {
+) -> Result<(), super::InstructionError> {
     let kind = queue_new_kind_from_flags(inst.flags);
     let packed_type = stack_get(stack, bp + inst.b as usize);
     let elem_meta = ValueMeta::from_raw(packed_type as u32);
@@ -588,16 +588,18 @@ pub fn exec_queue_new(
     let elem_slots = u16::try_from(elem_layout.len())
         .map_err(|_| "QueueNew QueueLayout element slot count exceeds u16::MAX".to_string())?;
 
-    match queue::create_checked_with_module(
+    match queue::try_create_checked_with_module(
         gc, kind, elem_meta, elem_rttid, elem_slots, cap, module,
     ) {
         Ok(ch) => {
             stack_set(stack, bp + inst.a as usize, ch as u64);
             Ok(())
         }
-        Err(_) => Err(String::from(crate::vm::helpers::make_queue_error_message(
-            queue_new_trap_kind(inst.flags),
-        ))),
+        Err(queue::QueueCreateError::Invalid(_)) => Err(String::from(
+            crate::vm::helpers::make_queue_error_message(queue_new_trap_kind(inst.flags)),
+        )
+        .into()),
+        Err(queue::QueueCreateError::Memory(error)) => Err(error.into()),
     }
 }
 

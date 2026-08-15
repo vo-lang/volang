@@ -81,7 +81,7 @@ pub(crate) mod slice {
         value: GcRef,
         slots: &[u64],
         module: Option<crate::bytecode::ModuleRuntimeMetadata<'_>>,
-    ) -> Result<GcRef, crate::gc_types::TypedWriteBarrierByMetaError> {
+    ) -> Result<GcRef, raw::SliceAppendError> {
         unsafe { raw::try_append(gc, meta, width, value, slots, module) }
     }
     pub fn with_new_len(gc: &mut Gc, value: GcRef, len: usize) -> GcRef {

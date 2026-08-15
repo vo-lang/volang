@@ -48,7 +48,7 @@ fn managed_allocation_failure_terminates_only_the_vm_island_and_is_sticky() {
 }
 
 #[test]
-fn checked_allocations_prioritize_managed_oom_over_constructor_panics() {
+fn checked_allocations_propagate_managed_oom_without_sticky_constructor_state() {
     fn oom_vm() -> Vm {
         Vm::with_memory_config(vo_runtime::gc::VmMemoryConfig {
             max_objects: Some(0),
@@ -58,12 +58,12 @@ fn checked_allocations_prioritize_managed_oom_over_constructor_panics() {
     }
 
     fn assert_oom(mut vm: Vm) {
-        assert_eq!(
-            vm.state.gc.last_memory_error(),
-            Some(MemoryError::MetadataExhausted)
-        );
+        assert_eq!(vm.state.gc.last_memory_error(), None);
         assert!(matches!(
-            vm.handle_exec_result(ExecResult::TimesliceExpired, false),
+            vm.handle_exec_result(
+                ExecResult::MemoryError(MemoryError::MetadataExhausted),
+                false
+            ),
             Some(Err(VmError::IslandMemory(MemoryError::MetadataExhausted)))
         ));
     }
@@ -75,9 +75,11 @@ fn checked_allocations_prioritize_managed_oom_over_constructor_panics() {
     let inst = Instruction::new(Opcode::ArrayNew, 0, 1, 2);
     assert_eq!(
         exec::exec_array_new(stack.as_mut_ptr(), 0, &inst, &mut vm.state.gc, 8),
-        Ok(())
+        Err(exec::InstructionError::Memory(
+            MemoryError::MetadataExhausted
+        ))
     );
-    assert_eq!(stack[0], 0);
+    assert_eq!(stack[0], u64::MAX);
     assert_oom(vm);
 
     let mut vm = oom_vm();
@@ -85,9 +87,11 @@ fn checked_allocations_prioritize_managed_oom_over_constructor_panics() {
     let inst = Instruction::new(Opcode::SliceNew, 0, 1, 2);
     assert_eq!(
         exec::exec_slice_new(stack.as_mut_ptr(), 0, &inst, &mut vm.state.gc, 8),
-        Ok(())
+        Err(exec::InstructionError::Memory(
+            MemoryError::MetadataExhausted
+        ))
     );
-    assert_eq!(stack[0], 0);
+    assert_eq!(stack[0], u64::MAX);
     assert_oom(vm);
 
     let elem_rttid = vo_runtime::ValueRttid::new(0, ValueKind::Int64);
@@ -108,9 +112,11 @@ fn checked_allocations_prioritize_managed_oom_over_constructor_panics() {
             &module,
             &[SlotType::Value],
         ),
-        Ok(())
+        Err(exec::InstructionError::Memory(
+            MemoryError::MetadataExhausted
+        ))
     );
-    assert_eq!(stack[0], 0);
+    assert_eq!(stack[0], u64::MAX);
     assert_oom(vm);
 }
 

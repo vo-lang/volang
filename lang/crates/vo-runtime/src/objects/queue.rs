@@ -21,7 +21,7 @@ use std::{alloc as heap_alloc, boxed::Box, vec::Vec};
 
 use core::alloc::Layout;
 
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
 use crate::Module;
 use vo_common_core::types::{ValueMeta, ValueRttid};
@@ -49,6 +49,12 @@ pub enum QueueEndpointError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueCreateError {
+    Invalid(i32),
+    Memory(MemoryError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HomeInfoUndo {
     remove_home_info: bool,
     peer_island: u32,
@@ -72,6 +78,12 @@ fn try_box<T>(value: T) -> Result<Box<T>, ()> {
     }
 }
 
+fn validate_local_queue_capacity(cap: usize) -> Result<(), i32> {
+    Layout::array::<QueueMessage>(cap)
+        .map(|_| ())
+        .map_err(|_| super::alloc_error::OVERFLOW)
+}
+
 impl LocalQueueState {
     pub fn iter_buffer(&self) -> impl Iterator<Item = &[u64]> {
         self.buffer.iter().map(|b| b.as_ref())
@@ -90,18 +102,30 @@ pub fn create(
     elem_slots: u16,
     cap: usize,
 ) -> GcRef {
-    let Ok(state) = LocalQueueState::try_new(cap) else {
-        gc.record_system_allocation_failure();
-        return core::ptr::null_mut();
-    };
-    let Ok(state) = try_box(state) else {
-        gc.record_system_allocation_failure();
-        return core::ptr::null_mut();
-    };
-    create_with_state(gc, kind, elem_meta, elem_rttid, elem_slots, cap, state)
+    match try_create(gc, kind, elem_meta, elem_rttid, elem_slots, cap) {
+        Ok(queue) => queue,
+        Err(error) => gc.sticky_allocation_failure(error),
+    }
 }
 
-fn create_with_state(
+pub fn try_create(
+    gc: &mut Gc,
+    kind: QueueKind,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+    cap: usize,
+) -> Result<GcRef, MemoryError> {
+    let state = LocalQueueState::try_new(cap)
+        .map_err(|_| MemoryError::SystemAllocationFailed)
+        .or_else(|error| gc.allocation_failure(error))?;
+    let state = try_box(state)
+        .map_err(|_| MemoryError::SystemAllocationFailed)
+        .or_else(|error| gc.allocation_failure(error))?;
+    try_create_with_state(gc, kind, elem_meta, elem_rttid, elem_slots, cap, state)
+}
+
+fn try_create_with_state(
     gc: &mut Gc,
     kind: QueueKind,
     elem_meta: ValueMeta,
@@ -109,11 +133,8 @@ fn create_with_state(
     elem_slots: u16,
     cap: usize,
     state: Box<LocalQueueState>,
-) -> GcRef {
-    let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
-    if chan.is_null() {
-        return chan;
-    }
+) -> Result<GcRef, MemoryError> {
+    let chan = gc.try_alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS)?;
     // Safety: `chan` is freshly allocated and not visible to the collector yet.
     let data = unsafe { QueueData::as_mut(chan) };
     data.state = ptr_to_slot(Box::into_raw(state));
@@ -125,25 +146,7 @@ fn create_with_state(
     data.elem_rttid = elem_rttid.to_raw();
     data.backing = QueueBacking::Local as u16;
     data.endpoint_ptr = 0;
-    chan
-}
-
-fn create_fallible(
-    gc: &mut Gc,
-    kind: QueueKind,
-    elem_meta: ValueMeta,
-    elem_rttid: ValueRttid,
-    elem_slots: u16,
-    cap: usize,
-) -> Result<GcRef, i32> {
-    let state = LocalQueueState::try_new(cap).map_err(|_| super::alloc_error::OVERFLOW)?;
-    let state = try_box(state).map_err(|_| {
-        gc.record_system_allocation_failure();
-        super::alloc_error::OVERFLOW
-    })?;
-    Ok(create_with_state(
-        gc, kind, elem_meta, elem_rttid, elem_slots, cap, state,
-    ))
+    Ok(chan)
 }
 
 /// Create a REMOTE proxy channel (no ChannelState, operations go through messages).
@@ -221,15 +224,28 @@ pub fn create_checked(
     elem_slots: u16,
     cap: i64,
 ) -> Result<GcRef, i32> {
+    match try_create_checked(gc, kind, elem_meta, elem_rttid, elem_slots, cap) {
+        Ok(queue) => Ok(queue),
+        Err(QueueCreateError::Invalid(code)) => Err(code),
+        Err(QueueCreateError::Memory(error)) => Ok(gc.sticky_allocation_failure(error)),
+    }
+}
+
+pub fn try_create_checked(
+    gc: &mut Gc,
+    kind: QueueKind,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+    cap: i64,
+) -> Result<GcRef, QueueCreateError> {
     use super::alloc_error;
-    if cap < 0 {
-        return Err(alloc_error::NEGATIVE_CAP);
+    if cap < 0 || (kind == QueueKind::Port && cap == 0) {
+        return Err(QueueCreateError::Invalid(alloc_error::NEGATIVE_CAP));
     }
-    if kind == QueueKind::Port && cap == 0 {
-        return Err(alloc_error::NEGATIVE_CAP);
-    }
-    let cap = usize::try_from(cap).map_err(|_| alloc_error::OVERFLOW)?;
-    create_fallible(gc, kind, elem_meta, elem_rttid, elem_slots, cap)
+    let cap = usize::try_from(cap).map_err(|_| QueueCreateError::Invalid(alloc_error::OVERFLOW))?;
+    validate_local_queue_capacity(cap).map_err(QueueCreateError::Invalid)?;
+    try_create(gc, kind, elem_meta, elem_rttid, elem_slots, cap).map_err(QueueCreateError::Memory)
 }
 
 /// Create a new channel with module-backed element metadata validation.
@@ -242,17 +258,31 @@ pub fn create_checked_with_module(
     cap: i64,
     module: &Module,
 ) -> Result<GcRef, i32> {
-    use super::alloc_error;
-    if cap < 0 {
-        return Err(alloc_error::NEGATIVE_CAP);
+    match try_create_checked_with_module(gc, kind, elem_meta, elem_rttid, elem_slots, cap, module) {
+        Ok(queue) => Ok(queue),
+        Err(QueueCreateError::Invalid(code)) => Err(code),
+        Err(QueueCreateError::Memory(error)) => Ok(gc.sticky_allocation_failure(error)),
     }
-    if kind == QueueKind::Port && cap == 0 {
-        return Err(alloc_error::NEGATIVE_CAP);
+}
+
+pub fn try_create_checked_with_module(
+    gc: &mut Gc,
+    kind: QueueKind,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+    cap: i64,
+    module: &Module,
+) -> Result<GcRef, QueueCreateError> {
+    use super::alloc_error;
+    if cap < 0 || (kind == QueueKind::Port && cap == 0) {
+        return Err(QueueCreateError::Invalid(alloc_error::NEGATIVE_CAP));
     }
     validate_element_layout(module, elem_meta, elem_rttid, elem_slots)
-        .map_err(|_| alloc_error::OVERFLOW)?;
-    let cap = usize::try_from(cap).map_err(|_| alloc_error::OVERFLOW)?;
-    create_fallible(gc, kind, elem_meta, elem_rttid, elem_slots, cap)
+        .map_err(|_| QueueCreateError::Invalid(alloc_error::OVERFLOW))?;
+    let cap = usize::try_from(cap).map_err(|_| QueueCreateError::Invalid(alloc_error::OVERFLOW))?;
+    validate_local_queue_capacity(cap).map_err(QueueCreateError::Invalid)?;
+    try_create(gc, kind, elem_meta, elem_rttid, elem_slots, cap).map_err(QueueCreateError::Memory)
 }
 
 pub fn validate_element_layout(
@@ -735,6 +765,23 @@ mod tests {
     use vo_common_core::{RuntimeType, SlotType, StructMeta, ValueKind};
 
     #[test]
+    fn explicit_queue_creation_reports_oom_without_publishing_abi_state() {
+        let mut gc = Gc::with_memory_config(crate::gc::VmMemoryConfig {
+            max_objects: Some(0),
+            ..crate::gc::VmMemoryConfig::default()
+        })
+        .expect("bounded GC");
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+        let rttid = ValueRttid::new(0, ValueKind::Int64);
+
+        assert_eq!(
+            try_create(&mut gc, QueueKind::Chan, meta, rttid, 1, 0),
+            Err(MemoryError::MetadataExhausted)
+        );
+        assert_eq!(gc.last_memory_error(), None);
+    }
+
+    #[test]
     fn remote_proxy_is_always_a_port() {
         let mut gc = Gc::new();
         let port = create_remote_proxy_with_closed(
@@ -766,6 +813,22 @@ mod tests {
             0,
         );
         assert_eq!(result, Err(crate::objects::alloc_error::NEGATIVE_CAP));
+    }
+
+    #[test]
+    fn checked_queue_capacity_rejects_host_layout_overflow_before_allocation() {
+        let mut gc = Gc::new();
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+        let rttid = ValueRttid::new(0, ValueKind::Int64);
+        let cap = i64::MAX / 2 + 1;
+
+        assert_eq!(
+            try_create_checked(&mut gc, QueueKind::Chan, meta, rttid, 1, cap),
+            Err(QueueCreateError::Invalid(
+                crate::objects::alloc_error::OVERFLOW
+            ))
+        );
+        assert_eq!(gc.last_memory_error(), None);
     }
 
     #[test]

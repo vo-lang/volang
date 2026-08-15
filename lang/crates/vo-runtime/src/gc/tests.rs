@@ -409,6 +409,34 @@ fn disabled_allocation_takes_precedence_over_object_metadata_exhaustion() {
 }
 
 #[test]
+fn explicit_allocation_failure_does_not_publish_sticky_abi_state() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        allocation_allowed: false,
+        ..VmMemoryConfig::default()
+    })
+    .expect("allocation-disabled collector");
+
+    assert_eq!(
+        gc.try_alloc(ValueMeta::new(0, ValueKind::Struct), 0),
+        Err(MemoryError::AllocationForbidden)
+    );
+    assert_eq!(gc.last_memory_error(), None);
+    assert_eq!(gc.memory_stats().allocation_failures, 1);
+}
+
+#[test]
+fn explicit_array_allocation_reports_address_space_overflow() {
+    let mut gc = Gc::new();
+
+    assert_eq!(
+        gc.try_alloc_array(ValueMeta::new(0, ValueKind::Array), usize::MAX),
+        Err(MemoryError::AllocationSizeOverflow)
+    );
+    assert_eq!(gc.last_memory_error(), None);
+    assert_eq!(gc.memory_stats().allocation_failures, 1);
+}
+
+#[test]
 fn ptr_clone_stops_before_copy_when_destination_allocation_fails() {
     let mut gc = Gc::new();
     let source = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);

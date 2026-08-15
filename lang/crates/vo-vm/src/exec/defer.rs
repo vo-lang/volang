@@ -7,13 +7,14 @@ use alloc::{
     vec::Vec,
 };
 #[cfg(feature = "std")]
-use std::string::{String, ToString};
+use std::string::ToString;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
 use vo_runtime::{SlotType, ValueKind, ValueMeta};
 
 use crate::bytecode::{FunctionDef, Module};
+use crate::exec::InstructionError;
 use crate::fiber::{CallFrame, DeferArgLayout, DeferEntry};
 use crate::frame_call::validate_closure_target;
 use crate::instruction::Instruction;
@@ -37,7 +38,7 @@ pub fn exec_defer_push(
     callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
     panic_generation: u64,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     push_defer_entry(
         stack,
         bp,
@@ -66,7 +67,7 @@ pub fn exec_err_defer_push(
     callsite_arg_layout: &[SlotType],
     gc: &mut Gc,
     panic_generation: u64,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     push_defer_entry(
         stack,
         bp,
@@ -95,13 +96,13 @@ fn push_defer_entry(
     gc: &mut Gc,
     is_errdefer: bool,
     panic_generation: u64,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let is_closure = inst.call_shape_is_closure();
     let arg_start = inst.b;
     let arg_slots = u16::try_from(callsite_arg_layout.len())
         .map_err(|_| "DeferPush argument layout exceeds u16 slots".to_string())?;
     let Some(caller_frame) = frames.last() else {
-        return Err("DeferPush missing caller frame".to_string());
+        return Err("DeferPush missing caller frame".to_string().into());
     };
     let arg_layout = DeferArgLayout::try_from_caller_slot_types(
         &caller_func.slot_types,
@@ -114,7 +115,8 @@ fn push_defer_entry(
         return Err(format!(
             "DeferPush argument layout {:?} does not match caller storage {:?}",
             callsite_arg_layout, arg_layout.slot_types
-        ));
+        )
+        .into());
     }
     let frame_depth = frames.len();
 
@@ -132,11 +134,12 @@ fn push_defer_entry(
         (func_id, core::ptr::null_mut())
     };
 
+    defer_stack
+        .try_reserve(1)
+        .map_err(|_| vo_runtime::gc::MemoryError::SystemAllocationFailed)?;
+
     let args = if arg_slots > 0 {
-        let args_ref = gc.alloc(ValueMeta::new(0, ValueKind::Void), arg_slots);
-        if args_ref.is_null() {
-            return Err("DeferPush Island allocation failed".to_string());
-        }
+        let args_ref = gc.try_alloc(ValueMeta::new(0, ValueKind::Void), arg_slots)?;
         for i in 0..arg_slots {
             let val = stack_get(stack, bp + arg_start as usize + i as usize);
             unsafe { Gc::write_slot(args_ref, i as usize, val) };
@@ -259,7 +262,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.contains("object kind String is not Closure"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("object kind String is not Closure"),
+            "{err}"
+        );
         assert!(defer_stack.is_empty());
     }
 

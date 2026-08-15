@@ -21,6 +21,7 @@ use vo_runtime::RuntimeType;
 use vo_runtime::ValueKind;
 
 use crate::bytecode::{Constant, Module, IFACE_ASSIGN_NO_ITAB};
+use crate::exec::InstructionError;
 use crate::instruction::{Instruction, IFACE_ASSERT_HAS_OK_FLAG};
 use crate::vm::helpers::{stack_get, stack_set};
 use crate::vm::ExecResult;
@@ -37,7 +38,7 @@ pub fn exec_iface_assign(
     gc: &mut Gc,
     itab_cache: &mut ItabCache,
     module: &Module,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let vk = ValueKind::try_from(inst.flags)
         .map_err(|_| format!("IfaceAssign invalid ValueKind tag {}", inst.flags))?;
     let src = stack_get(stack, bp + inst.b as usize);
@@ -53,10 +54,9 @@ pub fn exec_iface_assign(
     let packed = match constant.clone() {
         Constant::Int(v) => v,
         _ => {
-            return Err(format!(
-                "IfaceAssign constant index {} must be Int metadata",
-                inst.c
-            ));
+            return Err(
+                format!("IfaceAssign constant index {} must be Int metadata", inst.c).into(),
+            );
         }
     };
     let rttid = (packed >> 32) as u32;
@@ -106,7 +106,8 @@ pub fn exec_iface_assign(
             } else {
                 return Err(format!(
                     "IfaceAssign interface conversion missing named receiver: target_iface_meta_id={iface_meta_id} src_rttid={src_rttid} src_vk={src_vk:?}"
-                ));
+                )
+                .into());
             }
         };
         (src_rttid, src_vk, itab_id)
@@ -121,7 +122,7 @@ pub fn exec_iface_assign(
     let slot1 = match vk {
         ValueKind::Struct | ValueKind::Array => {
             if src != 0 {
-                unsafe { gc.ptr_clone(src as GcRef) as u64 }
+                unsafe { gc.try_ptr_clone(src as GcRef)? as u64 }
             } else {
                 0
             }
@@ -132,7 +133,7 @@ pub fn exec_iface_assign(
             let src_vk = interface::unpack_value_kind(src_slot0);
             if src_vk == ValueKind::Struct || src_vk == ValueKind::Array {
                 if src_slot1 != 0 {
-                    unsafe { gc.ptr_clone(src_slot1 as GcRef) as u64 }
+                    unsafe { gc.try_ptr_clone(src_slot1 as GcRef)? as u64 }
                 } else {
                     0
                 }

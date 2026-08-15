@@ -161,6 +161,7 @@ struct GcLeaseEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryError {
     AllocationForbidden,
+    AllocationSizeOverflow,
     GrowthDisabled,
     HardLimitExceeded,
     MetadataExhausted,
@@ -173,6 +174,7 @@ impl core::fmt::Display for MemoryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let message = match self {
             Self::AllocationForbidden => "managed allocation is disabled",
+            Self::AllocationSizeOverflow => "managed allocation size exceeds the address space",
             Self::GrowthDisabled => "Island heap growth is disabled",
             Self::HardLimitExceeded => "Island memory hard limit exceeded",
             Self::MetadataExhausted => "reserved Island heap metadata exhausted",
@@ -1460,7 +1462,15 @@ impl Gc {
 
     /// Allocate a new GC object.
     pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
-        self.alloc_inner(value_meta, GC_OWNER_ALLOC_OBJECT, slots, slots as usize)
+        match self.try_alloc(value_meta, slots) {
+            Ok(object) => object,
+            Err(error) => self.sticky_allocation_failure(error),
+        }
+    }
+
+    /// Allocate a new GC object with explicit failure propagation.
+    pub fn try_alloc(&mut self, value_meta: ValueMeta, slots: u16) -> Result<GcRef, MemoryError> {
+        self.try_alloc_inner(value_meta, GC_OWNER_ALLOC_OBJECT, slots, usize::from(slots))
     }
 
     /// Allocate a heap object whose payload is a bare value-slot sequence.
@@ -1468,8 +1478,20 @@ impl Gc {
     /// The header `ValueMeta` describes the payload slots directly, not a
     /// runtime object layout such as ArrayHeader or MapData.
     pub fn alloc_value_slots(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
+        match self.try_alloc_value_slots(value_meta, slots) {
+            Ok(object) => object,
+            Err(error) => self.sticky_allocation_failure(error),
+        }
+    }
+
+    /// Allocate a bare value-slot sequence with explicit failure propagation.
+    pub fn try_alloc_value_slots(
+        &mut self,
+        value_meta: ValueMeta,
+        slots: u16,
+    ) -> Result<GcRef, MemoryError> {
         if let Some(dispatch) = self.owner_dispatch {
-            return unsafe {
+            let object = unsafe {
                 (dispatch.alloc)(
                     dispatch.state,
                     value_meta.to_raw(),
@@ -1478,23 +1500,34 @@ impl Gc {
                     usize::from(slots),
                 )
             };
+            return self.owner_allocation_result(object);
         }
-        let obj = self.alloc(value_meta, slots);
-        if !obj.is_null() {
-            unsafe { Self::header_mut(obj) }.set_value_slots_object();
-        }
-        obj
+        let object = self.try_alloc(value_meta, slots)?;
+        unsafe { Self::header_mut(object) }.set_value_slots_object();
+        Ok(object)
     }
 
     /// Allocate a large array. For arrays with total_slots > u16::MAX,
     /// GcHeader.slots is set to 0, and the actual size is read from ArrayHeader.
     pub fn alloc_array(&mut self, value_meta: ValueMeta, total_slots: usize) -> GcRef {
+        match self.try_alloc_array(value_meta, total_slots) {
+            Ok(object) => object,
+            Err(error) => self.sticky_allocation_failure(error),
+        }
+    }
+
+    /// Allocate an array with explicit failure propagation.
+    pub fn try_alloc_array(
+        &mut self,
+        value_meta: ValueMeta,
+        total_slots: usize,
+    ) -> Result<GcRef, MemoryError> {
         let header_slots = if total_slots > u16::MAX as usize {
             0
         } else {
             total_slots as u16
         };
-        self.alloc_inner(value_meta, GC_OWNER_ALLOC_ARRAY, header_slots, total_slots)
+        self.try_alloc_inner(value_meta, GC_OWNER_ALLOC_ARRAY, header_slots, total_slots)
     }
 
     /// Allocate scalar runtime-container backing inside the Island heap.
@@ -1504,28 +1537,38 @@ impl Gc {
     /// retain it explicitly and trace any logical child references using the
     /// container's element metadata.
     pub fn alloc_runtime_backing(&mut self, total_slots: usize) -> GcRef {
-        let backing = self.alloc_array(ValueMeta::new(0, ValueKind::Uint64), total_slots);
-        if !backing.is_null() {
-            unsafe { Self::header_mut(backing) }.set_runtime_backing_object();
-            if self.owner_dispatch.is_none() {
-                let logical_bytes =
-                    GcHeader::SIZE.saturating_add(total_slots.saturating_mul(SLOT_BYTES));
-                self.runtime_backing_bytes =
-                    self.runtime_backing_bytes.saturating_add(logical_bytes);
-                let raw = unsafe { (backing as *mut u8).sub(GcHeader::SIZE) };
-                self.heap.record_runtime_backing(raw, logical_bytes);
-            }
+        match self.try_alloc_runtime_backing(total_slots) {
+            Ok(object) => object,
+            Err(error) => self.sticky_allocation_failure(error),
         }
-        backing
     }
 
-    fn alloc_inner(
+    /// Allocate scalar runtime backing with explicit failure propagation.
+    pub fn try_alloc_runtime_backing(&mut self, total_slots: usize) -> Result<GcRef, MemoryError> {
+        let backing = self.try_alloc_array(ValueMeta::new(0, ValueKind::Uint64), total_slots)?;
+        unsafe { Self::header_mut(backing) }.set_runtime_backing_object();
+        if self.owner_dispatch.is_none() {
+            let logical_bytes = GcHeader::SIZE
+                .checked_add(
+                    total_slots
+                        .checked_mul(SLOT_BYTES)
+                        .ok_or(MemoryError::AllocationSizeOverflow)?,
+                )
+                .ok_or(MemoryError::AllocationSizeOverflow)?;
+            self.runtime_backing_bytes = self.runtime_backing_bytes.saturating_add(logical_bytes);
+            let raw = unsafe { (backing as *mut u8).sub(GcHeader::SIZE) };
+            self.heap.record_runtime_backing(raw, logical_bytes);
+        }
+        Ok(backing)
+    }
+
+    fn try_alloc_inner(
         &mut self,
         value_meta: ValueMeta,
         allocation_kind: u8,
         header_slots: u16,
         slots: usize,
-    ) -> GcRef {
+    ) -> Result<GcRef, MemoryError> {
         if let Some(dispatch) = self.owner_dispatch {
             // These object kinds install allocator-owning Rust payloads outside
             // the GC allocation itself (for example MapInner and queue state).
@@ -1540,7 +1583,7 @@ impl Gc {
                 }
                 _ => {}
             }
-            return unsafe {
+            let object = unsafe {
                 (dispatch.alloc)(
                     dispatch.state,
                     value_meta.to_raw(),
@@ -1549,6 +1592,7 @@ impl Gc {
                     slots,
                 )
             };
+            return self.owner_allocation_result(object);
         }
 
         // A runtime allocation can occur between two generated allocations
@@ -1560,57 +1604,44 @@ impl Gc {
         let data_size = match slots.checked_mul(SLOT_BYTES) {
             Some(s) => s,
             None => {
-                // Overflow - allocation too large
-                #[cfg(feature = "std")]
-                eprintln!("GC allocation overflow: slots={}", slots);
-                return core::ptr::null_mut();
+                return self.allocation_failure(MemoryError::AllocationSizeOverflow);
             }
         };
         let total_size = match header_size.checked_add(data_size) {
             Some(s) => s,
             None => {
-                #[cfg(feature = "std")]
-                eprintln!(
-                    "GC allocation overflow: header_size={}, data_size={}",
-                    header_size, data_size
-                );
-                return core::ptr::null_mut();
+                return self.allocation_failure(MemoryError::AllocationSizeOverflow);
             }
         };
 
         if !self.heap.allocation_allowed() {
-            self.record_allocation_failure(MemoryError::AllocationForbidden);
-            return core::ptr::null_mut();
+            return self.allocation_failure(MemoryError::AllocationForbidden);
         }
 
         if self
             .max_objects
             .is_some_and(|max_objects| self.live_object_count >= max_objects)
         {
-            self.record_allocation_failure(MemoryError::MetadataExhausted);
-            return core::ptr::null_mut();
+            return self.allocation_failure(MemoryError::MetadataExhausted);
         }
         let required_work_capacity = self.live_object_count.saturating_add(1);
         if self.gray.capacity() < required_work_capacity {
             if !self.heap.growth_allowed() {
-                self.record_allocation_failure(MemoryError::MetadataExhausted);
-                return core::ptr::null_mut();
+                return self.allocation_failure(MemoryError::MetadataExhausted);
             }
             if self
                 .gray
                 .try_reserve(required_work_capacity.saturating_sub(self.gray.len()))
                 .is_err()
             {
-                self.record_allocation_failure(MemoryError::SystemAllocationFailed);
-                return core::ptr::null_mut();
+                return self.allocation_failure(MemoryError::SystemAllocationFailed);
             }
         }
 
         let allocation = match self.heap.allocate(total_size) {
             Ok(allocation) => allocation,
             Err(error) => {
-                self.record_allocation_failure(error.into());
-                return core::ptr::null_mut();
+                return self.allocation_failure(error.into());
             }
         };
         debug_assert!(allocation.capacity >= total_size);
@@ -1658,11 +1689,32 @@ impl Gc {
         #[cfg(feature = "gc-debug")]
         crate::gc_debug::on_alloc(data_ptr);
 
-        data_ptr
+        Ok(data_ptr)
     }
 
     #[inline]
-    fn record_allocation_failure(&mut self, error: MemoryError) {
+    fn owner_allocation_result(&mut self, object: GcRef) -> Result<GcRef, MemoryError> {
+        if object.is_null() {
+            self.allocation_failure(MemoryError::SystemAllocationFailed)
+        } else {
+            Ok(object)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn allocation_failure<T>(&mut self, error: MemoryError) -> Result<T, MemoryError> {
+        self.allocation_failures = self.allocation_failures.saturating_add(1);
+        Err(error)
+    }
+
+    #[inline]
+    pub(crate) fn sticky_allocation_failure(&mut self, error: MemoryError) -> GcRef {
+        self.last_memory_error = Some(error);
+        core::ptr::null_mut()
+    }
+
+    #[inline]
+    pub(crate) fn record_allocation_failure(&mut self, error: MemoryError) {
         self.allocation_failures = self.allocation_failures.saturating_add(1);
         self.last_memory_error = Some(error);
     }
@@ -2885,10 +2937,21 @@ impl Gc {
     /// # Safety
     /// src must be a valid GcRef or null.
     pub unsafe fn ptr_clone(&mut self, src: GcRef) -> GcRef {
+        match unsafe { self.try_ptr_clone(src) } {
+            Ok(object) => object,
+            Err(error) => self.sticky_allocation_failure(error),
+        }
+    }
+
+    /// Deep copy a heap object with explicit allocation failure propagation.
+    ///
+    /// # Safety
+    /// `src` must be a valid `GcRef` or null.
+    pub unsafe fn try_ptr_clone(&mut self, src: GcRef) -> Result<GcRef, MemoryError> {
         use crate::objects::array;
 
         if src.is_null() {
-            return src;
+            return Ok(src);
         }
         let header = unsafe { Self::header(src) };
         let value_meta = header.value_meta;
@@ -2914,11 +2977,8 @@ impl Gc {
             GC_OWNER_ALLOC_OBJECT
         };
         let owner_dispatched = self.owner_dispatch.is_some();
-        let dst = self.alloc_inner(value_meta, allocation_kind, header.slots, actual_slots);
-        if dst.is_null() {
-            return dst;
-        }
-        if header.is_value_slots_object() && !owner_dispatched && !dst.is_null() {
+        let dst = self.try_alloc_inner(value_meta, allocation_kind, header.slots, actual_slots)?;
+        if header.is_value_slots_object() && !owner_dispatched {
             unsafe { Self::header_mut(dst) }.set_value_slots_object();
         }
 
@@ -2928,7 +2988,7 @@ impl Gc {
         }
 
         self.mark_allocated_for_scan(dst);
-        dst
+        Ok(dst)
     }
 }
 

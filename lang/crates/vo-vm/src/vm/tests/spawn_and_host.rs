@@ -567,10 +567,7 @@ fn create_island_allocation_failure_publishes_no_transport_or_worker() {
         error,
         VmError::IslandMemory(MemoryError::AllocationForbidden)
     ));
-    assert_eq!(
-        vm.state.gc.last_memory_error(),
-        Some(MemoryError::AllocationForbidden)
-    );
+    assert_eq!(vm.state.gc.last_memory_error(), None);
     assert!(vm.state.island_registry.is_none());
     assert!(vm.state.main_transport.is_none());
     assert!(vm.state.island_senders.is_empty());

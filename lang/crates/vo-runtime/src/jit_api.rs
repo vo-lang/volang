@@ -2569,7 +2569,8 @@ pub extern "C" fn vo_map_get(
         Err(map::MapKeyError::MissingModule) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
         }
-        Err(map::MapKeyError::AllocationFailed(_)) => {
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            unsafe { (&mut *(*ctx).gc).sticky_allocation_failure(error) };
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
         }
     };
@@ -2696,7 +2697,8 @@ pub extern "C" fn vo_map_set(
         Err(map::MapKeyError::MissingModule) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
         }
-        Err(map::MapKeyError::AllocationFailed(_)) => {
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            gc.sticky_allocation_failure(error);
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
         }
     }
@@ -2752,7 +2754,11 @@ pub extern "C" fn vo_map_set_scalar(
         Ok(map::MapSetOutcome::NeedsAllocation) => JIT_HELPER_MAP_SET_NEEDS_ALLOCATION,
         Err(map::MapKeyError::SlotCountMismatch) => JIT_HELPER_MAP_SCALAR_FALLBACK,
         Err(map::MapKeyError::UnhashableInterfaceKey) => 1,
-        Err(map::MapKeyError::MissingModule | map::MapKeyError::AllocationFailed(_)) => {
+        Err(map::MapKeyError::MissingModule) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT)
+        }
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            gc.sticky_allocation_failure(error);
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT)
         }
     }
@@ -2812,7 +2818,8 @@ pub extern "C" fn vo_map_delete(
         Err(map::MapKeyError::MissingModule) => {
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
         }
-        Err(map::MapKeyError::AllocationFailed(_)) => {
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            unsafe { (&mut *(*ctx).gc).sticky_allocation_failure(error) };
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
         }
     }
@@ -2954,7 +2961,8 @@ pub extern "C" fn vo_map_iter_next(
         Err(map::MapKeyError::MissingModule) => {
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
-        Err(map::MapKeyError::AllocationFailed(_)) => {
+        Err(map::MapKeyError::AllocationFailed(error)) => {
+            unsafe { (&mut *(*ctx).gc).sticky_allocation_failure(error) };
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
     }
@@ -3276,7 +3284,13 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
     }
     unsafe {
         let gc = &mut *gc;
-        closure::try_create(gc, func_id, capture_count as usize).map_or(0, |closure| closure as u64)
+        match closure::try_create(gc, func_id, capture_count as usize) {
+            Ok(closure) => closure as u64,
+            Err(closure::ClosureCreateError::AllocationFailed { error, .. }) => {
+                gc.sticky_allocation_failure(error) as u64
+            }
+            Err(closure::ClosureCreateError::CaptureCountTooLarge { .. }) => 0,
+        }
     }
 }
 
@@ -3609,7 +3623,13 @@ pub extern "C" fn vo_slice_append(
         };
         match slice::try_append(gc, elem_meta, elem_bytes as usize, s_ref, val, module) {
             Ok(result) => result as u64,
-            Err(_) => set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT),
+            Err(slice::SliceAppendError::Memory(error)) => {
+                gc.sticky_allocation_failure(error);
+                set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT)
+            }
+            Err(slice::SliceAppendError::Barrier(_)) => {
+                set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT)
+            }
         }
     }
 }

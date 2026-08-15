@@ -1,14 +1,15 @@
 //! Pointer instructions: PtrNew, PtrGet, PtrSet, PtrGetN, PtrSetN
 
 #[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 #[cfg(feature = "std")]
-use std::string::{String, ToString};
+use std::string::ToString;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
 use vo_runtime::{SlotType, ValueMeta};
 
+use crate::exec::InstructionError;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
@@ -19,12 +20,12 @@ pub fn exec_ptr_new(
     inst: &Instruction,
     gc: &mut Gc,
     value_layout: &[SlotType],
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let value_meta = ValueMeta::from_raw(meta_raw);
     let slots = u16::try_from(value_layout.len())
         .map_err(|_| "PtrNew value layout exceeds u16 slots".to_string())?;
-    let ptr = gc.alloc(value_meta, slots);
+    let ptr = gc.try_alloc(value_meta, slots)?;
     stack_set(stack, bp + inst.a as usize, ptr as u64);
     Ok(())
 }

@@ -122,10 +122,21 @@ pub fn create(
     val_slots: u16,
     key_rttid: u32,
 ) -> GcRef {
-    let m = gc.alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS);
-    if m.is_null() {
-        return m;
+    match try_create(gc, key_meta, val_meta, key_slots, val_slots, key_rttid) {
+        Ok(map) => map,
+        Err(error) => gc.sticky_allocation_failure(error),
     }
+}
+
+pub fn try_create(
+    gc: &mut Gc,
+    key_meta: ValueMeta,
+    val_meta: ValueMeta,
+    key_slots: u16,
+    val_slots: u16,
+    key_rttid: u32,
+) -> Result<GcRef, MemoryError> {
+    let m = gc.try_alloc(ValueMeta::new(0, ValueKind::Map), DATA_SLOTS)?;
     // Safety: `m` is freshly allocated and not visible to the collector yet.
     let data = unsafe { MapData::as_mut(m) };
     data.inner = 0;
@@ -134,7 +145,7 @@ pub fn create(
     data.key_slots = key_slots;
     data.val_slots = val_slots;
     data.key_rttid = key_rttid;
-    m
+    Ok(m)
 }
 
 #[inline]
@@ -493,16 +504,12 @@ unsafe fn allocate_backing(
     let total_slots = capacity
         .checked_mul(bucket_stride(m))
         .and_then(|slots| slots.checked_add(BACKING_HEADER_SLOTS))
-        .ok_or(MapKeyError::AllocationFailed(
-            MemoryError::HardLimitExceeded,
-        ))?;
-    let backing = gc.alloc_runtime_backing(total_slots);
-    if backing.is_null() {
-        return Err(MapKeyError::AllocationFailed(
-            gc.last_memory_error()
-                .unwrap_or(MemoryError::SystemAllocationFailed),
-        ));
-    }
+        .ok_or(MemoryError::AllocationSizeOverflow)
+        .or_else(|error| gc.allocation_failure(error))
+        .map_err(MapKeyError::AllocationFailed)?;
+    let backing = gc
+        .try_alloc_runtime_backing(total_slots)
+        .map_err(MapKeyError::AllocationFailed)?;
     for index in 0..total_slots {
         unsafe { set_backing_slot(backing, index, 0) };
     }
@@ -1035,6 +1042,22 @@ pub unsafe fn drop_inner(m: GcRef) {
 mod tests {
     use super::*;
     use crate::{gc::Gc, objects::string, RuntimeType, ValueKind, ValueMeta, ValueRttid};
+
+    #[test]
+    fn explicit_map_creation_reports_oom_without_publishing_abi_state() {
+        let mut gc = Gc::with_memory_config(crate::gc::VmMemoryConfig {
+            max_objects: Some(0),
+            ..crate::gc::VmMemoryConfig::default()
+        })
+        .expect("bounded GC");
+        let meta = ValueMeta::new(0, ValueKind::Int64);
+
+        assert_eq!(
+            try_create(&mut gc, meta, meta, 1, 1, 0),
+            Err(MemoryError::MetadataExhausted)
+        );
+        assert_eq!(gc.last_memory_error(), None);
+    }
 
     #[test]
     fn empty_map_has_valid_lazy_managed_backing_layout() {

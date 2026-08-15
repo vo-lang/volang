@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use core::num::NonZeroU64;
 
-use crate::gc::{Gc, GcRef};
+use crate::gc::{Gc, GcRef, MemoryError};
 use crate::objects::impl_gc_object;
 use crate::pack::PackedValue;
 use crate::slot::SLOT_BYTES;
@@ -183,16 +183,20 @@ impl EndpointResponseKind {
 
 /// Create a new island handle.
 /// Note: Command channels are managed by VM, not stored here.
-pub fn create(gc: &mut Gc, island_id: u32) -> GcRef {
-    let handle = gc.alloc(ValueMeta::new(0, ValueKind::Island), DATA_SLOTS);
-    if handle.is_null() {
-        return handle;
-    }
+pub fn try_create(gc: &mut Gc, island_id: u32) -> Result<GcRef, MemoryError> {
+    let handle = gc.try_alloc(ValueMeta::new(0, ValueKind::Island), DATA_SLOTS)?;
     // Safety: `handle` is freshly allocated and not visible to the collector yet.
     let data = unsafe { IslandData::as_mut(handle) };
     data.id = island_id;
     data._pad = 0;
-    handle
+    Ok(handle)
+}
+
+pub fn create(gc: &mut Gc, island_id: u32) -> GcRef {
+    match try_create(gc, island_id) {
+        Ok(handle) => handle,
+        Err(error) => gc.sticky_allocation_failure(error),
+    }
 }
 
 /// Create an island handle for the main island (island 0).

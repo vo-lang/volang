@@ -9,11 +9,12 @@ use vo_runtime::objects::slice;
 use vo_runtime::slot::Slot;
 use vo_runtime::{ValueKind, ValueMeta};
 
+use crate::exec::InstructionError;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{makeslice_error_message, stack_get, stack_set};
 
 /// Result of exec_slice_new: Ok(()) on success, Err(msg) on invalid parameters
-pub type SliceNewResult = Result<(), String>;
+pub type SliceNewResult = Result<(), InstructionError>;
 
 #[inline]
 pub fn exec_slice_new(
@@ -28,12 +29,15 @@ pub fn exec_slice_new(
     let cap = stack_get(stack, bp + inst.c as usize + 1) as i64;
 
     // Use unified validation logic from slice::create_checked
-    match slice::create_checked(gc, meta_raw, elem_bytes, len, cap) {
+    match slice::try_create_checked(gc, meta_raw, elem_bytes, len, cap) {
         Ok(s) => {
             stack_set(stack, bp + inst.a as usize, s as u64);
             Ok(())
         }
-        Err(code) => Err(makeslice_error_message(code).to_string()),
+        Err(slice::SliceCreateError::Invalid(code)) => {
+            Err(makeslice_error_message(code).to_string().into())
+        }
+        Err(slice::SliceCreateError::Memory(error)) => Err(error.into()),
     }
 }
 
@@ -42,13 +46,18 @@ pub fn exec_slice_new(
 /// bit2 = `b` is `[owner, data_ptr, elem_meta, elem_bytes, storage_stride, array_len]`.
 /// Returns false on bounds error.
 #[inline]
-pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> bool {
+pub fn exec_slice_slice(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+) -> Result<bool, InstructionError> {
     let source = stack_get(stack, bp + inst.b as usize) as GcRef;
     let Ok(lo) = usize::try_from(stack_get(stack, bp + inst.c as usize)) else {
-        return false;
+        return Ok(false);
     };
     let Ok(hi) = usize::try_from(stack_get(stack, bp + inst.c as usize + 1)) else {
-        return false;
+        return Ok(false);
     };
 
     let is_array = (inst.flags & crate::instruction::SLICE_SLICE_FLAG_ARRAY) != 0;
@@ -59,17 +68,17 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
     if source.is_null() && !is_array {
         if has_max {
             let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
-                return false;
+                return Ok(false);
             };
             if lo == 0 && hi == 0 && max == 0 {
                 stack_set(stack, bp + inst.a as usize, 0);
-                return true;
+                return Ok(true);
             }
         } else if lo == 0 && hi == 0 {
             stack_set(stack, bp + inst.a as usize, 0);
-            return true;
+            return Ok(true);
         }
-        return false;
+        return Ok(false);
     }
 
     // Safety: module verification fixes the operand kind and GC roots keep the
@@ -78,20 +87,20 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
         let data_ptr = stack_get(stack, bp + inst.b as usize + 1) as *mut u8;
         let elem_meta = ValueMeta::from_raw(stack_get(stack, bp + inst.b as usize + 2) as u32);
         let Ok(elem_bytes) = usize::try_from(stack_get(stack, bp + inst.b as usize + 3)) else {
-            return false;
+            return Ok(false);
         };
         let Ok(storage_stride) = usize::try_from(stack_get(stack, bp + inst.b as usize + 4)) else {
-            return false;
+            return Ok(false);
         };
         let Ok(array_len) = usize::try_from(stack_get(stack, bp + inst.b as usize + 5)) else {
-            return false;
+            return Ok(false);
         };
         if has_max {
             let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
-                return false;
+                return Ok(false);
             };
             unsafe {
-                slice::inline_array_slice_with_cap(
+                slice::try_inline_array_slice_with_cap(
                     gc,
                     source,
                     data_ptr,
@@ -106,7 +115,7 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
             }
         } else {
             unsafe {
-                slice::inline_array_slice(
+                slice::try_inline_array_slice(
                     gc,
                     source,
                     data_ptr,
@@ -122,29 +131,29 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
     } else if is_array {
         if has_max {
             let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
-                return false;
+                return Ok(false);
             };
-            unsafe { slice::array_slice_with_cap(gc, source, lo, hi, max) }
+            unsafe { slice::try_array_slice_with_cap(gc, source, lo, hi, max) }
         } else {
-            unsafe { slice::array_slice(gc, source, lo, hi) }
+            unsafe { slice::try_array_slice(gc, source, lo, hi) }
         }
     } else {
         if has_max {
             let Ok(max) = usize::try_from(stack_get(stack, bp + inst.c as usize + 2)) else {
-                return false;
+                return Ok(false);
             };
-            unsafe { slice::slice_of_with_cap(gc, source, lo, hi, max) }
+            unsafe { slice::try_slice_of_with_cap(gc, source, lo, hi, max) }
         } else {
-            unsafe { slice::slice_of(gc, source, lo, hi) }
+            unsafe { slice::try_slice_of(gc, source, lo, hi) }
         }
     };
 
-    match result {
+    match result? {
         Some(r) => {
             stack_set(stack, bp + inst.a as usize, r as u64);
-            true
+            Ok(true)
         }
-        None => false,
+        None => Ok(false),
     }
 }
 
@@ -156,7 +165,7 @@ pub fn exec_slice_append(
     gc: &mut Gc,
     module: Option<vo_runtime::bytecode::ModuleRuntimeMetadata<'_>>,
     elem_bytes: usize,
-) -> Result<(), String> {
+) -> Result<(), InstructionError> {
     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
     let elem_slots = elem_bytes.div_ceil(8);
 
@@ -172,15 +181,21 @@ pub fn exec_slice_append(
         s
     } else {
         let Some(s) = gc.canonicalize_ref(s) else {
-            return Err("SliceAppend: invalid slice handle".to_string());
+            return Err("SliceAppend: invalid slice handle".to_string().into());
         };
         if unsafe { Gc::header(s) }.kind() != ValueKind::Slice {
-            return Err("SliceAppend: expected slice handle".to_string());
+            return Err("SliceAppend: expected slice handle".to_string().into());
         }
         s
     };
-    let result = unsafe { slice::try_append(gc, elem_meta, elem_bytes, s, val, module) }
-        .map_err(|err| err.to_string())?;
+    let result = unsafe { slice::try_append(gc, elem_meta, elem_bytes, s, val, module) }.map_err(
+        |error| match error {
+            slice::SliceAppendError::Memory(error) => InstructionError::Memory(error),
+            slice::SliceAppendError::Barrier(error) => {
+                InstructionError::Malformed(error.to_string())
+            }
+        },
+    )?;
     stack_set(stack, bp + inst.a as usize, result as u64);
     Ok(())
 }

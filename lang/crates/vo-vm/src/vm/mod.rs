@@ -2034,16 +2034,8 @@ impl Vm {
             .state
             .allocate_island_id()
             .map_err(|error| VmError::Jit(error.to_string()))?;
-        let handle = vo_runtime::island::create(&mut self.state.gc, next_id);
-        if handle.is_null() {
-            return Err(match self.state.gc.last_memory_error() {
-                Some(error) => VmError::IslandMemory(error),
-                None => VmError::Jit(
-                    "create_island allocator returned a null handle without a memory error"
-                        .to_string(),
-                ),
-            });
-        }
+        let handle = vo_runtime::island::try_create(&mut self.state.gc, next_id)
+            .map_err(VmError::IslandMemory)?;
         if self.state.external_island_transport {
             return Ok(handle);
         }
@@ -3058,6 +3050,9 @@ impl Vm {
                     return Some(Ok(SchedulingOutcome::Panicked));
                 }
             }
+            ExecResult::MemoryError(error) => {
+                return Some(Err(self.terminate_island_for_memory_error(error)));
+            }
             ExecResult::JitError(msg) => {
                 return Some(
                     self.apply_runtime_transition(
@@ -3262,16 +3257,23 @@ impl Vm {
             }};
         }
 
-        // Managed allocators retain the precise `MemoryError` for the
-        // scheduler. Check only at allocation sites so ordinary bytecode does
-        // not pay for a global error poll on every dispatch.
-        macro_rules! check_managed_allocation {
-            () => {{
-                if self.state.gc.last_memory_error().is_some() {
-                    sync_frame_pc!();
-                    return ExecResult::JitError(
-                        "Island managed-memory allocation failed".to_string(),
-                    );
+        macro_rules! return_memory_error {
+            ($error:expr) => {{
+                sync_frame_pc!();
+                return ExecResult::MemoryError($error);
+            }};
+        }
+
+        macro_rules! instruction_result {
+            ($result:expr) => {{
+                match $result {
+                    Ok(value) => value,
+                    Err(exec::InstructionError::Malformed(message)) => {
+                        return ExecResult::JitError(message);
+                    }
+                    Err(exec::InstructionError::Memory(error)) => {
+                        return_memory_error!(error);
+                    }
                 }
             }};
         }
@@ -3558,12 +3560,13 @@ impl Vm {
                             "PtrNew at pc {fetched_pc} is missing PtrLayout metadata"
                         ));
                     };
-                    if let Err(msg) =
-                        exec::exec_ptr_new(stack, bp, &inst, &mut self.state.gc, layout)
-                    {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    instruction_result!(exec::exec_ptr_new(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc,
+                        layout
+                    ));
                 }
                 Opcode::PtrGet => {
                     if !exec::exec_ptr_get(stack, bp, &inst) {
@@ -4314,12 +4317,13 @@ impl Vm {
 
                 // String operations
                 Opcode::StrNew => {
-                    if let Err(msg) =
-                        exec::exec_str_new(stack, bp, &inst, &module.constants, &mut self.state.gc)
-                    {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    instruction_result!(exec::exec_str_new(
+                        stack,
+                        bp,
+                        &inst,
+                        &module.constants,
+                        &mut self.state.gc
+                    ));
                 }
                 Opcode::StrLen => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4348,12 +4352,20 @@ impl Vm {
                     stack_set(stack, bp + inst.a as usize, byte as u64);
                 }
                 Opcode::StrConcat => {
-                    exec::exec_str_concat(stack, bp, &inst, &mut self.state.gc);
-                    check_managed_allocation!();
+                    instruction_result!(exec::exec_str_concat(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc
+                    ));
                 }
                 Opcode::StrSlice => {
-                    let succeeded = exec::exec_str_slice(stack, bp, &inst, &mut self.state.gc);
-                    check_managed_allocation!();
+                    let succeeded = instruction_result!(exec::exec_str_slice(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc
+                    ));
                     if !succeeded {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
@@ -4425,20 +4437,22 @@ impl Vm {
                             "ArrayNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
-                    if let Err(msg) =
-                        exec::exec_array_new(stack, bp, &inst, &mut self.state.gc, elem_bytes)
-                    {
-                        check_managed_allocation!();
-                        handle_panic_result!(runtime_panic(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::MakeSlice,
-                            msg.to_string()
-                        ));
+                    match exec::exec_array_new(stack, bp, &inst, &mut self.state.gc, elem_bytes) {
+                        Ok(()) => {}
+                        Err(exec::InstructionError::Malformed(message)) => {
+                            handle_panic_result!(runtime_panic(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::MakeSlice,
+                                message
+                            ));
+                        }
+                        Err(exec::InstructionError::Memory(error)) => {
+                            return_memory_error!(error);
+                        }
                     }
-                    check_managed_allocation!();
                 }
                 Opcode::ArrayGet => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4610,20 +4624,22 @@ impl Vm {
                             "SliceNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
-                    if let Err(msg) =
-                        exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc, elem_bytes)
-                    {
-                        check_managed_allocation!();
-                        handle_panic_result!(runtime_panic(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::MakeSlice,
-                            msg
-                        ));
+                    match exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc, elem_bytes) {
+                        Ok(()) => {}
+                        Err(exec::InstructionError::Malformed(message)) => {
+                            handle_panic_result!(runtime_panic(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::MakeSlice,
+                                message
+                            ));
+                        }
+                        Err(exec::InstructionError::Memory(error)) => {
+                            return_memory_error!(error);
+                        }
                     }
-                    check_managed_allocation!();
                 }
                 Opcode::SliceGet => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4807,8 +4823,12 @@ impl Vm {
                     stack_set(stack, bp + inst.a as usize, cap as u64);
                 }
                 Opcode::SliceSlice => {
-                    let succeeded = exec::exec_slice_slice(stack, bp, &inst, &mut self.state.gc);
-                    check_managed_allocation!();
+                    let succeeded = instruction_result!(exec::exec_slice_slice(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc
+                    ));
                     if !succeeded {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
@@ -4828,17 +4848,14 @@ impl Vm {
                             "SliceAppend at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
-                    if let Err(msg) = exec::exec_slice_append(
+                    instruction_result!(exec::exec_slice_append(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
                         Some(runtime_metadata),
                         elem_bytes,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    ));
                 }
                 Opcode::SliceAddr => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4883,17 +4900,14 @@ impl Vm {
                             "MapNew at pc {fetched_pc} is missing MapNew metadata"
                         ));
                     };
-                    if let Err(msg) = exec::exec_map_new(
+                    instruction_result!(exec::exec_map_new(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
                         key_layout,
                         val_layout,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    ));
                 }
                 Opcode::MapGet => {
                     let Some(layout) = map_get_layout_for_pc(func, fetched_pc) else {
@@ -4901,7 +4915,7 @@ impl Vm {
                             "MapGet at pc {fetched_pc} is missing MapGet metadata"
                         ));
                     };
-                    match exec::exec_map_get_with_layout_using_scratch(
+                    if !instruction_result!(exec::exec_map_get_with_layout_using_scratch(
                         stack,
                         bp,
                         &inst,
@@ -4909,18 +4923,14 @@ impl Vm {
                         Some(runtime_metadata),
                         layout,
                         &mut fiber.map_scratch,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            handle_panic_result!(runtime_trap(
-                                &mut self.state.gc,
-                                fiber,
-                                stack,
-                                module,
-                                RuntimeTrapKind::UnhashableType
-                            ));
-                        }
-                        Err(msg) => return ExecResult::JitError(msg),
+                    )) {
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::UnhashableType
+                        ));
                     }
                 }
                 Opcode::MapSet => {
@@ -4939,7 +4949,7 @@ impl Vm {
                             "MapSet at pc {fetched_pc} is missing MapSet metadata"
                         ));
                     };
-                    match exec::exec_map_set_with_layout_using_scratch(
+                    if !instruction_result!(exec::exec_map_set_with_layout_using_scratch(
                         stack,
                         bp,
                         &inst,
@@ -4947,20 +4957,15 @@ impl Vm {
                         Some(runtime_metadata),
                         layout,
                         &mut fiber.map_scratch,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            handle_panic_result!(runtime_trap(
-                                &mut self.state.gc,
-                                fiber,
-                                stack,
-                                module,
-                                RuntimeTrapKind::UnhashableType
-                            ));
-                        }
-                        Err(msg) => return ExecResult::JitError(msg),
+                    )) {
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::UnhashableType
+                        ));
                     }
-                    check_managed_allocation!();
                 }
                 Opcode::MapDelete => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
@@ -4970,7 +4975,7 @@ impl Vm {
                                 "MapDelete at pc {fetched_pc} is missing MapDelete metadata"
                             ));
                         };
-                        match exec::exec_map_delete_with_layout_using_scratch(
+                        if !instruction_result!(exec::exec_map_delete_with_layout_using_scratch(
                             stack,
                             bp,
                             &inst,
@@ -4978,30 +4983,22 @@ impl Vm {
                             Some(runtime_metadata),
                             key_layout,
                             &mut fiber.map_scratch,
-                        ) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                handle_panic_result!(runtime_trap(
-                                    &mut self.state.gc,
-                                    fiber,
-                                    stack,
-                                    module,
-                                    RuntimeTrapKind::UnhashableType
-                                ));
-                            }
-                            Err(msg) => return ExecResult::JitError(msg),
+                        )) {
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::UnhashableType
+                            ));
                         }
                     }
                 }
                 Opcode::MapLen => {
-                    if let Err(msg) = exec::exec_map_len(stack, bp, &inst, &self.state.gc) {
-                        return ExecResult::JitError(msg);
-                    }
+                    instruction_result!(exec::exec_map_len(stack, bp, &inst, &self.state.gc));
                 }
                 Opcode::MapIterInit => {
-                    if let Err(msg) = exec::exec_map_iter_init(stack, bp, &inst, &self.state.gc) {
-                        return ExecResult::JitError(msg);
-                    }
+                    instruction_result!(exec::exec_map_iter_init(stack, bp, &inst, &self.state.gc));
                 }
                 Opcode::MapIterNext => {
                     let Some(layout) = map_key_value_layout_for_pc(func, fetched_pc) else {
@@ -5009,16 +5006,14 @@ impl Vm {
                             "MapIterNext at pc {fetched_pc} is missing MapIterNext metadata"
                         ));
                     };
-                    if let Err(msg) = exec::exec_map_iter_next_with_layout(
+                    instruction_result!(exec::exec_map_iter_next_with_layout(
                         stack,
                         bp,
                         &inst,
                         Some(&self.state.gc),
                         Some(runtime_metadata),
                         layout,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
+                    ));
                 }
 
                 // Channel operations
@@ -5028,7 +5023,7 @@ impl Vm {
                             "QueueNew missing QueueLayout metadata at pc {fetched_pc}"
                         ));
                     };
-                    if let Err(msg) = exec::exec_queue_new(
+                    match exec::exec_queue_new(
                         stack,
                         bp,
                         &inst,
@@ -5036,17 +5031,21 @@ impl Vm {
                         module,
                         elem_layout,
                     ) {
-                        check_managed_allocation!();
-                        handle_panic_result!(runtime_panic(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            exec::queue_new_trap_kind(inst.flags),
-                            msg
-                        ));
+                        Ok(()) => {}
+                        Err(exec::InstructionError::Malformed(message)) => {
+                            handle_panic_result!(runtime_panic(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                exec::queue_new_trap_kind(inst.flags),
+                                message
+                            ));
+                        }
+                        Err(exec::InstructionError::Memory(error)) => {
+                            return_memory_error!(error);
+                        }
                     }
-                    check_managed_allocation!();
                 }
                 Opcode::QueueSend => {
                     if fiber.consume_remote_send_closed() {
@@ -5297,8 +5296,12 @@ impl Vm {
 
                 // Closure operations
                 Opcode::ClosureNew => {
-                    exec::exec_closure_new(stack, bp, &inst, &mut self.state.gc);
-                    check_managed_allocation!();
+                    instruction_result!(exec::exec_closure_new(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc
+                    ));
                 }
                 Opcode::ClosureGet => {
                     if let Err(err) = exec::exec_closure_get(&self.state.gc, stack, bp, &inst) {
@@ -5376,7 +5379,7 @@ impl Vm {
                         Ok(layout) => layout,
                         Err(err) => return ExecResult::JitError(err),
                     };
-                    if let Err(msg) = exec::exec_defer_push(
+                    instruction_result!(exec::exec_defer_push(
                         stack,
                         bp,
                         &fiber.frames,
@@ -5387,10 +5390,7 @@ impl Vm {
                         arg_layout,
                         &mut self.state.gc,
                         generation,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    ));
                 }
                 Opcode::ErrDeferPush => {
                     sync_frame_pc!();
@@ -5405,7 +5405,7 @@ impl Vm {
                         Ok(layout) => layout,
                         Err(err) => return ExecResult::JitError(err),
                     };
-                    if let Err(msg) = exec::exec_err_defer_push(
+                    instruction_result!(exec::exec_err_defer_push(
                         stack,
                         bp,
                         &fiber.frames,
@@ -5416,10 +5416,7 @@ impl Vm {
                         arg_layout,
                         &mut self.state.gc,
                         generation,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    ));
                 }
                 Opcode::Panic => {
                     sync_frame_pc!();
@@ -5437,17 +5434,14 @@ impl Vm {
 
                 // Interface operations
                 Opcode::IfaceAssign => {
-                    if let Err(msg) = exec::exec_iface_assign(
+                    instruction_result!(exec::exec_iface_assign(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
                         &mut self.state.itab_cache,
                         module,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    check_managed_allocation!();
+                    ));
                 }
                 Opcode::IfaceAssert => {
                     let Some(InstructionMetadata::IfaceAssertLayout {
@@ -5558,11 +5552,11 @@ impl Vm {
                     let handle = match self.create_island() {
                         Ok(handle) => handle,
                         Err(VmError::Jit(msg)) => return ExecResult::JitError(msg),
+                        Err(VmError::IslandMemory(error)) => return_memory_error!(error),
                         Err(err) => {
                             return ExecResult::JitError(format!("IslandNew failed: {err:?}"));
                         }
                     };
-                    check_managed_allocation!();
                     stack_set(stack, bp + inst.a as usize, handle as u64);
                 }
                 #[cfg(not(feature = "std"))]
@@ -5572,8 +5566,10 @@ impl Vm {
                         Ok(island_id) => island_id,
                         Err(error) => return ExecResult::JitError(error.to_string()),
                     };
-                    let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id);
-                    check_managed_allocation!();
+                    match exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id) {
+                        Ok(_) => {}
+                        Err(error) => return_memory_error!(error),
+                    }
                 }
                 Opcode::GoIsland => {
                     sync_frame_pc!();

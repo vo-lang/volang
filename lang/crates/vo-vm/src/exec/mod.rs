@@ -1,6 +1,39 @@
 //! Instruction execution modules.
 #![allow(dead_code)]
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(feature = "std")]
+use std::string::String;
+use vo_runtime::gc::MemoryError;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstructionError {
+    Malformed(String),
+    Memory(MemoryError),
+}
+
+impl core::fmt::Display for InstructionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Malformed(message) => f.write_str(message),
+            Self::Memory(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<String> for InstructionError {
+    fn from(message: String) -> Self {
+        Self::Malformed(message)
+    }
+}
+
+impl From<MemoryError> for InstructionError {
+    fn from(error: MemoryError) -> Self {
+        Self::Memory(error)
+    }
+}
+
 mod array;
 mod call;
 mod closure;

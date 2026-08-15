@@ -7,6 +7,7 @@ use vo_runtime::objects::closure;
 use vo_runtime::slot::Slot;
 use vo_runtime::ValueKind;
 
+use crate::exec::InstructionError;
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
@@ -36,11 +37,27 @@ impl fmt::Display for ClosureGetError {
 }
 
 #[inline]
-pub fn exec_closure_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_closure_new(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+) -> Result<(), InstructionError> {
     let func_id = inst.closure_new_func_id();
     let capture_count = inst.c as usize;
-    let c = closure::create(gc, func_id, capture_count);
+    let c = match closure::try_create(gc, func_id, capture_count) {
+        Ok(closure) => closure,
+        Err(closure::ClosureCreateError::CaptureCountTooLarge { .. }) => {
+            return Err(InstructionError::Malformed(
+                "ClosureNew capture count exceeds runtime limit".into(),
+            ));
+        }
+        Err(closure::ClosureCreateError::AllocationFailed { error, .. }) => {
+            return Err(InstructionError::Memory(error));
+        }
+    };
     stack_set(stack, bp + inst.a as usize, c as u64);
+    Ok(())
 }
 
 #[inline]

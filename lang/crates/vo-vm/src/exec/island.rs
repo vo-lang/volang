@@ -231,10 +231,10 @@ pub fn exec_island_new(
     inst: &Instruction,
     gc: &mut Gc,
     next_island_id: u32,
-) -> GcRef {
-    let handle = island::create(gc, next_island_id);
+) -> Result<GcRef, vo_runtime::gc::MemoryError> {
+    let handle = island::try_create(gc, next_island_id)?;
     stack_set(stack, bp + inst.a as usize, handle as u64);
-    handle
+    Ok(handle)
 }
 
 /// Start a goroutine on a specific island.
