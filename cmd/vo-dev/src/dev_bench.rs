@@ -479,29 +479,40 @@ impl BenchRunner<'_> {
             println!("\nNo valid results to analyze.");
             return Ok(());
         }
+        let pairwise_comparisons = target_pairwise_comparisons(&scores);
+        if !pairwise_comparisons.is_empty() {
+            println!("\nTarget pairwise comparisons (left / right, lower is faster):");
+            for comparison in &pairwise_comparisons {
+                println!(
+                    "  {:<28} / {:<12}: {:.2}x  ({} paired: {})",
+                    comparison.left,
+                    comparison.right,
+                    comparison.geometric_mean_ratio,
+                    comparison.benchmarks.len(),
+                    comparison.benchmarks.join(", ")
+                );
+            }
+        }
+
         let common_scope = common_benchmark_scope(&scores);
         if common_scope.is_empty() {
             println!("\nNo benchmark is shared by every measured implementation.");
-            return Ok(());
+        } else {
+            println!(
+                "\nGlobal common comparison scope: {} benchmark(s): {}",
+                common_scope.len(),
+                common_scope.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
         }
-        println!(
-            "\nCommon comparison scope: {} benchmark(s): {}",
-            common_scope.len(),
-            common_scope.iter().cloned().collect::<Vec<_>>().join(", ")
-        );
         let mut aggregates: Vec<_> = scores
             .iter()
-            .map(|(name, values)| {
+            .filter_map(|(name, values)| {
                 let paired = common_scope
                     .iter()
                     .map(|benchmark| values[benchmark])
                     .collect::<Vec<_>>();
-                (
-                    name.clone(),
-                    geometric_mean(&paired).expect("benchmark ratios are finite and positive"),
-                    common_scope.len(),
-                    values.len(),
-                )
+                geometric_mean(&paired)
+                    .map(|score| (name.clone(), score, common_scope.len(), values.len()))
             })
             .collect();
         aggregates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -529,7 +540,13 @@ impl BenchRunner<'_> {
             }
         }
         if !run_info.is_empty() {
-            self.write_summary(only, run_info, &common_scope, &aggregates)?;
+            self.write_summary(
+                only,
+                run_info,
+                &common_scope,
+                &aggregates,
+                &pairwise_comparisons,
+            )?;
         }
         Ok(())
     }
@@ -540,11 +557,12 @@ impl BenchRunner<'_> {
         run_info: &[BenchmarkRunInfo],
         common_scope: &BTreeSet<String>,
         ranking: &[(String, f64, usize, usize)],
+        pairwise_comparisons: &[BenchmarkPairwiseComparison],
     ) -> Result<()> {
         let results_dir = self.bench_results_dir();
         fs::create_dir_all(&results_dir)?;
         let summary = BenchmarkSummary {
-            schema: "volang.benchmark.summary.v2",
+            schema: "volang.benchmark.summary.v3",
             run_id: self.run_id.clone(),
             generated_at_unix_sec: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -566,7 +584,8 @@ impl BenchRunner<'_> {
                 artifacts_dir: path_display(self.root, &self.bench_artifacts_dir()),
                 go_cache_dir: path_display(self.root, &self.bench_go_cache_dir()),
                 vo_binary: path_display(self.root, &self.vo_bench_bin()),
-                score_mode: "common_scope_paired_geomean_ratio_vs_vo_vm".to_string(),
+                score_mode: "global_common_scope_ranking_with_target_pairwise_geomean_ratios"
+                    .to_string(),
             },
             tools: collect_tool_versions(),
             runs: run_info.to_vec(),
@@ -583,6 +602,7 @@ impl BenchRunner<'_> {
                     },
                 )
                 .collect(),
+            pairwise_comparisons: pairwise_comparisons.to_vec(),
         };
         let path = results_dir.join("summary.json");
         fs::write(&path, serde_json::to_string_pretty(&summary)?)?;
@@ -683,6 +703,7 @@ struct BenchmarkSummary {
     tools: Vec<ToolVersion>,
     runs: Vec<BenchmarkRunInfo>,
     ranking: Vec<BenchmarkRankingEntry>,
+    pairwise_comparisons: Vec<BenchmarkPairwiseComparison>,
 }
 
 #[derive(Debug, Serialize)]
@@ -716,6 +737,15 @@ struct BenchmarkRankingEntry {
     score: f64,
     paired_benchmarks: usize,
     available_benchmarks: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkPairwiseComparison {
+    left: String,
+    right: String,
+    geometric_mean_ratio: f64,
+    benchmarks: Vec<String>,
+    ratios: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -966,6 +996,56 @@ fn common_benchmark_scope(scores: &BTreeMap<String, BTreeMap<String, f64>>) -> B
     common
 }
 
+fn target_pairwise_comparisons(
+    scores: &BTreeMap<String, BTreeMap<String, f64>>,
+) -> Vec<BenchmarkPairwiseComparison> {
+    let mut pairs = Vec::new();
+    if let Some(comparison) = pairwise_comparison(scores, "Vo-VM", "Lua") {
+        pairs.push(comparison);
+    }
+    if scores.contains_key("Java") {
+        for name in scores.keys().filter(|name| is_vo_jit_series(name)) {
+            if let Some(comparison) = pairwise_comparison(scores, name, "Java") {
+                pairs.push(comparison);
+            }
+        }
+    }
+    pairs
+}
+
+fn pairwise_comparison(
+    scores: &BTreeMap<String, BTreeMap<String, f64>>,
+    left: &str,
+    right: &str,
+) -> Option<BenchmarkPairwiseComparison> {
+    let left_scores = scores.get(left)?;
+    let right_scores = scores.get(right)?;
+    let ratios = left_scores
+        .iter()
+        .filter_map(|(benchmark, left_score)| {
+            right_scores
+                .get(benchmark)
+                .map(|right_score| (benchmark.clone(), left_score / right_score))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let geometric_mean_ratio = geometric_mean(&ratios.values().copied().collect::<Vec<_>>())?;
+    Some(BenchmarkPairwiseComparison {
+        left: left.to_string(),
+        right: right.to_string(),
+        geometric_mean_ratio,
+        benchmarks: ratios.keys().cloned().collect(),
+        ratios,
+    })
+}
+
+fn is_vo_jit_series(name: &str) -> bool {
+    name == "Vo-JIT"
+        || name == "Vo-JIT-Hot"
+        || name
+            .strip_prefix("Vo-JIT(")
+            .is_some_and(|suffix| suffix.ends_with(')'))
+}
+
 fn parse_positive_u64_arg(name: &str, value: Option<&String>) -> Result<u64> {
     parse_positive_u64_value(
         name,
@@ -1102,6 +1182,58 @@ mod tests {
             common_benchmark_scope(&scores),
             BTreeSet::from(["b".to_string()])
         );
+    }
+
+    #[test]
+    fn target_pairwise_scores_keep_benchmarks_missing_from_unrelated_languages() {
+        let scores = BTreeMap::from([
+            (
+                "Vo-VM".to_string(),
+                BTreeMap::from([
+                    ("call-dispatch".to_string(), 1.0),
+                    ("numeric".to_string(), 1.0),
+                ]),
+            ),
+            (
+                "Vo-JIT(call=1,loop=1)".to_string(),
+                BTreeMap::from([
+                    ("call-dispatch".to_string(), 0.5),
+                    ("numeric".to_string(), 0.25),
+                ]),
+            ),
+            (
+                "Lua".to_string(),
+                BTreeMap::from([
+                    ("call-dispatch".to_string(), 2.0),
+                    ("numeric".to_string(), 1.0),
+                ]),
+            ),
+            (
+                "Java".to_string(),
+                BTreeMap::from([
+                    ("call-dispatch".to_string(), 0.25),
+                    ("numeric".to_string(), 0.25),
+                ]),
+            ),
+            (
+                "Python".to_string(),
+                BTreeMap::from([("numeric".to_string(), 4.0)]),
+            ),
+        ]);
+
+        assert_eq!(
+            common_benchmark_scope(&scores),
+            BTreeSet::from(["numeric".to_string()])
+        );
+        let pairwise = target_pairwise_comparisons(&scores);
+        assert_eq!(pairwise.len(), 2);
+        assert_eq!(
+            pairwise[0].benchmarks,
+            vec!["call-dispatch".to_string(), "numeric".to_string()]
+        );
+        assert!((pairwise[0].geometric_mean_ratio - 0.5_f64.sqrt()).abs() < f64::EPSILON);
+        assert_eq!(pairwise[1].ratios["call-dispatch"], 2.0);
+        assert_eq!(pairwise[1].ratios["numeric"], 1.0);
     }
 
     #[test]
