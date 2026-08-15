@@ -1961,6 +1961,10 @@ mod tests {
         assert_eq!(stats.native_root_frames_scanned, 2);
         assert!(stats.native_roots_scanned >= 2);
         assert_eq!(stats.native_root_scan_budget_exhaustions, 0);
+        assert!(
+            !vm.state.gc.should_step(),
+            "one exact native-root lease should finish this sub-limit cycle"
+        );
     }
 
     #[test]

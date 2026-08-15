@@ -4,6 +4,8 @@
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use vo_runtime::ffi::SentinelErrorCache;
+#[cfg(feature = "jit")]
+use vo_runtime::gc::MAX_INCREMENTAL_SLICE_BYTES;
 use vo_runtime::gc::{
     GcMode, GcRef, GcRootScanChunk, GcRootScanKind, GcRootState, GcState, MemoryError, MemoryStats,
 };
@@ -1062,7 +1064,6 @@ impl Vm {
                 "native root map exceeds the GC safepoint scan budget".to_string(),
             ));
         }
-
         let manager_ptr = manager as *const JitManager;
         let active_frame_limit = active_fiber.frames.len().saturating_sub(1);
         self.state.mark_gc_all_roots_dirty();
@@ -1070,6 +1071,7 @@ impl Vm {
         let mut cursor_kind = None;
         let mut cursor = NativeRootScanCursor::new(native_frame, ctx);
         let mut scan_error = None;
+        let mut native_work_bytes = 0usize;
         loop {
             self.gc_step_with_root_source(
                 None,
@@ -1127,7 +1129,19 @@ impl Vm {
             if let Some(error) = scan_error.take() {
                 return Err(error);
             }
-            if !self.state.gc.root_scan_pending() && self.state.gc_root_scan.is_none() {
+            native_work_bytes =
+                native_work_bytes.saturating_add(self.state.last_gc_step_stats.gc.total_work_bytes);
+            let root_scan_pending =
+                self.state.gc.root_scan_pending() || self.state.gc_root_scan.is_some();
+            if root_scan_pending {
+                continue;
+            }
+            // A completed pass releases its cursor. A later pass can have the
+            // same kind (successive sweep chunks) and must start from the first
+            // native frame again.
+            cursor_kind = None;
+            cursor = NativeRootScanCursor::new(native_frame, ctx);
+            if native_work_bytes >= MAX_INCREMENTAL_SLICE_BYTES || !self.state.gc.should_step() {
                 break;
             }
         }
@@ -1157,12 +1171,8 @@ impl Vm {
                                 Some("native root does not reference a live GC object".to_string());
                             return;
                         };
-                        let dangling_white = verify_root_colors
-                            && match self.state.gc.state() {
-                                GcState::Pause | GcState::Reclaim => false,
-                                GcState::Sweep => self.state.gc.is_dead_white(root),
-                                _ => self.state.gc.is_white(root),
-                            };
+                        let dangling_white =
+                            verify_root_colors && self.state.gc.is_collectible_white(root);
                         if dangling_white {
                             root_error = Some(format!(
                                 "native root references an unreachable white object during {:?}",
@@ -1435,12 +1445,8 @@ impl Vm {
                         ));
                         return;
                     };
-                    let dangling_white = verify_root_colors
-                        && match self.state.gc.state() {
-                            GcState::Pause | GcState::Reclaim => false,
-                            GcState::Sweep => self.state.gc.is_dead_white(canonical_root),
-                            _ => self.state.gc.is_white(canonical_root),
-                        };
+                    let dangling_white =
+                        verify_root_colors && self.state.gc.is_collectible_white(canonical_root);
                     if dangling_white {
                         root_error = Some(format!(
                             "root {root:?} from {source} references unreachable white object {canonical_root:?} during {:?}",
@@ -1511,11 +1517,7 @@ impl Vm {
                             ));
                             return;
                         };
-                        let dangling_white = if self.state.gc.state() == GcState::Sweep {
-                            self.state.gc.is_dead_white(child)
-                        } else {
-                            self.state.gc.is_white(child)
-                        };
+                        let dangling_white = self.state.gc.is_collectible_white(child);
                         if dangling_white {
                             violation = Some(format!(
                             "black object {:?} references unreachable white child {:?} during {:?}",

@@ -153,6 +153,111 @@ fn generational_minor_uses_remembered_parents_and_major_reclaims_old() {
 }
 
 #[test]
+fn minor_root_stops_at_the_old_generation_boundary() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    let root = gc.alloc(meta, 1);
+    let old_child = gc.alloc(meta, 0);
+    test_header_mut(root).set_age(G_OLD);
+    test_header_mut(old_child).set_age(G_OLD);
+    unsafe { Gc::write_slot(root, 0, old_child as u64) };
+
+    let mut scanned = Vec::new();
+    gc.gc_request_cycle();
+    for _ in 0..1024 {
+        gc_step(
+            &mut gc,
+            |gc| gc.mark_gray(root),
+            |gc, obj| {
+                scanned.push(obj);
+                let child = unsafe { Gc::read_slot(obj, 0) } as GcRef;
+                if !child.is_null() {
+                    gc.mark_gray(child);
+                }
+            },
+            |_| {},
+        );
+        if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > 0 {
+            break;
+        }
+    }
+
+    assert_eq!(gc.state(), GcState::Pause);
+    assert!(scanned.is_empty(), "minor roots must not trace old objects");
+    assert_eq!(gc.canonicalize_ref(root), Some(root));
+    assert_eq!(gc.canonicalize_ref(old_child), Some(old_child));
+}
+
+#[test]
+fn collectible_white_matches_the_active_generation_boundary() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    let young = gc.alloc(meta, 0);
+    let old = gc.alloc(meta, 0);
+    test_header_mut(old).set_age(G_OLD);
+    gc.state = GcState::Propagate;
+
+    gc.cycle_kind = GcCycleKind::Minor;
+    assert!(gc.is_collectible_white(young));
+    assert!(!gc.is_collectible_white(old));
+
+    gc.cycle_kind = GcCycleKind::Major;
+    assert!(gc.is_collectible_white(young));
+    assert!(gc.is_collectible_white(old));
+
+    gc.state = GcState::Pause;
+    assert!(!gc.is_collectible_white(young));
+    assert!(!gc.is_collectible_white(old));
+}
+
+#[test]
+fn minor_remembered_parent_marks_young_children_without_tracing_old_children() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    let parent = gc.alloc(meta, 2);
+    let old_child = gc.alloc(meta, 0);
+    let young_child = gc.alloc(meta, 0);
+    test_header_mut(parent).set_age(G_OLD);
+    test_header_mut(old_child).set_age(G_OLD);
+    unsafe {
+        Gc::write_slot(parent, 0, old_child as u64);
+        Gc::write_slot(parent, 1, young_child as u64);
+    }
+    gc.write_barrier(parent, old_child);
+    gc.write_barrier(parent, young_child);
+
+    let mut scanned = Vec::new();
+    gc.gc_request_cycle();
+    for _ in 0..1024 {
+        gc_step(
+            &mut gc,
+            |gc| gc.mark_gray(parent),
+            |gc, obj| {
+                scanned.push(obj);
+                let slots = unsafe { Gc::header(obj) }.slots as usize;
+                for slot in 0..slots {
+                    let child = unsafe { Gc::read_slot(obj, slot) } as GcRef;
+                    if !child.is_null() {
+                        gc.mark_gray(child);
+                    }
+                }
+            },
+            |_| {},
+        );
+        if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > 0 {
+            break;
+        }
+    }
+
+    assert_eq!(gc.state(), GcState::Pause);
+    assert!(scanned.contains(&parent));
+    assert!(scanned.contains(&young_child));
+    assert!(!scanned.contains(&old_child));
+    assert_eq!(gc.canonicalize_ref(old_child), Some(old_child));
+    assert_eq!(gc.canonicalize_ref(young_child), Some(young_child));
+}
+
+#[test]
 fn minor_remembered_scan_frontier_does_not_chase_new_allocations() {
     let mut gc = Gc::new();
     let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);

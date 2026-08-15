@@ -86,6 +86,11 @@ pub(crate) const RUNTIME_BACKING_OBJECT_BIT: u8 = 1 << 1;
 pub const G_YOUNG: u8 = 0;
 pub const G_SURVIVAL: u8 = 1;
 pub const G_OLD: u8 = 2;
+
+/// Maximum heap work performed under one incremental collector lease.
+/// Hosts may aggregate smaller phase steps up to this shared bound when their
+/// root set remains stable for the whole lease.
+pub const MAX_INCREMENTAL_SLICE_BYTES: usize = 1024 * 1024;
 pub const G_TOUCHED: u8 = 3;
 
 /// Collector scheduling policy. Both modes use the same heap, object layout,
@@ -1908,8 +1913,21 @@ impl Gc {
         let Some(obj) = self.canonicalize_ref_for_mark(obj) else {
             return Err(MemoryError::InvalidPointer);
         };
-        if self.pending_remembered_parent.is_some() && unsafe { Self::header(obj) }.age() < G_OLD {
+        let age = unsafe { Self::header(obj) }.age();
+        if self.pending_remembered_parent.is_some() && age < G_OLD {
             self.pending_remembered_has_young = true;
+        }
+        // A minor cycle retains the old generation as a whole. Traversing an
+        // old object reached from a root, a young object, or another old object
+        // would turn the minor trace back into a whole-heap trace. Old parents
+        // that may reference young objects enter the gray queue explicitly
+        // through the remembered set, and the write barrier shades young
+        // children added after that set's snapshot frontier.
+        if self.gc_mode == GcMode::Generational
+            && self.cycle_kind == GcCycleKind::Minor
+            && age >= G_OLD
+        {
+            return Ok(());
         }
         if self.state == GcState::Sweep {
             self.shade_dead_white_gray(obj);
@@ -2113,6 +2131,31 @@ impl Gc {
         self.canonicalize_ref(obj)
             .map(|base| !base.is_null() && unsafe { Self::header(base) }.is_white())
             .unwrap_or(false)
+    }
+
+    /// Whether `obj` is white in the sense that the active cycle may reclaim it.
+    ///
+    /// Minor cycles deliberately leave old-generation objects white because
+    /// they retain that generation as a whole. Keeping this policy here lets
+    /// precise-root verifiers share the collector's actual reclaim boundary
+    /// instead of reconstructing it from colors alone.
+    #[inline]
+    pub fn is_collectible_white(&self, obj: GcRef) -> bool {
+        if obj.is_null() || matches!(self.state, GcState::Pause | GcState::Reclaim) {
+            return false;
+        }
+        let Some(base) = self.canonicalize_ref(obj) else {
+            return false;
+        };
+        let header = unsafe { Self::header(base) };
+        if self.cycle_kind == GcCycleKind::Minor && header.age() >= G_OLD {
+            return false;
+        }
+        if self.state == GcState::Sweep {
+            (header.marked & WHITE_BITS) == self.other_white()
+        } else {
+            header.is_white()
+        }
     }
 
     /// Enable or disable GC stress mode.
@@ -2356,12 +2399,10 @@ impl Gc {
         // limited collection to roughly 160 KiB/s at a 20 Hz game tick, allowing
         // ordinary presentation allocations to outrun the collector indefinitely.
         const TARGET_PHASE_FRAMES: usize = 128;
-        const MAX_PHASE_STEP_BYTES: usize = 1024 * 1024;
-
         loop {
             let phase_limit = (self.total_bytes / TARGET_PHASE_FRAMES)
                 .max(base)
-                .min(MAX_PHASE_STEP_BYTES)
+                .min(MAX_INCREMENTAL_SLICE_BYTES)
                 .min(requested_limit);
             // Scanner work is accounted in whole slots. A heap-derived phase
             // budget can have a 1..SLOT_BYTES-1 remainder; returning that
@@ -2524,7 +2565,7 @@ impl Gc {
                     // would need ~130 steps instead of 32).
                     self.sweep_budget = (self.total_bytes / TARGET_PHASE_FRAMES)
                         .max(base)
-                        .min(MAX_PHASE_STEP_BYTES);
+                        .min(MAX_INCREMENTAL_SLICE_BYTES);
                     break;
                 }
 
