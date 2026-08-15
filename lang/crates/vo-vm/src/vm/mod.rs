@@ -3223,6 +3223,19 @@ impl Vm {
             }};
         }
 
+        // Managed allocators retain the precise `MemoryError` for the
+        // scheduler. Check only at allocation sites so ordinary bytecode does
+        // not pay for a global error poll on every dispatch.
+        macro_rules! check_managed_allocation {
+            () => {{
+                if self.state.gc.last_memory_error().is_some() {
+                    return ExecResult::JitError(
+                        "Island managed-memory allocation failed".to_string(),
+                    );
+                }
+            }};
+        }
+
         // Macro to handle loop OSR result - used by both Jump and ForLoop
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
@@ -3350,10 +3363,6 @@ impl Vm {
         }
 
         while fiber.execution_budget > 0 {
-            if self.state.gc.last_memory_error().is_some() {
-                return ExecResult::JitError("Island managed-memory allocation failed".to_string());
-            }
-
             #[cfg(feature = "jit")]
             {
                 let frame = unsafe { &mut *frame_ptr };
@@ -3509,6 +3518,7 @@ impl Vm {
                     {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::PtrGet => {
                     if !exec::exec_ptr_get(stack, bp, &inst) {
@@ -4103,6 +4113,11 @@ impl Vm {
                     apply_extern_replay_scope_effect(fiber, transition.replay_scope);
                     match transition.boundary {
                         ExternBoundary::Continue => {
+                            if self.state.gc.last_memory_error().is_some() {
+                                return ExecResult::JitError(
+                                    "Island managed-memory allocation failed".to_string(),
+                                );
+                            }
                             refetch!();
                         }
                         ExternBoundary::Exit(code) => {
@@ -4263,6 +4278,7 @@ impl Vm {
                     {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::StrLen => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4292,9 +4308,12 @@ impl Vm {
                 }
                 Opcode::StrConcat => {
                     exec::exec_str_concat(stack, bp, &inst, &mut self.state.gc);
+                    check_managed_allocation!();
                 }
                 Opcode::StrSlice => {
-                    if !exec::exec_str_slice(stack, bp, &inst, &mut self.state.gc) {
+                    let succeeded = exec::exec_str_slice(stack, bp, &inst, &mut self.state.gc);
+                    check_managed_allocation!();
+                    if !succeeded {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
                         handle_panic_result!(runtime_panic(
@@ -4368,6 +4387,7 @@ impl Vm {
                     if let Err(msg) =
                         exec::exec_array_new(stack, bp, &inst, &mut self.state.gc, elem_bytes)
                     {
+                        check_managed_allocation!();
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -4377,6 +4397,7 @@ impl Vm {
                             msg.to_string()
                         ));
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::ArrayGet => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4550,6 +4571,7 @@ impl Vm {
                     if let Err(msg) =
                         exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc, elem_bytes)
                     {
+                        check_managed_allocation!();
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -4559,6 +4581,7 @@ impl Vm {
                             msg
                         ));
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::SliceGet => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4741,7 +4764,9 @@ impl Vm {
                     stack_set(stack, bp + inst.a as usize, cap as u64);
                 }
                 Opcode::SliceSlice => {
-                    if !exec::exec_slice_slice(stack, bp, &inst, &mut self.state.gc) {
+                    let succeeded = exec::exec_slice_slice(stack, bp, &inst, &mut self.state.gc);
+                    check_managed_allocation!();
+                    if !succeeded {
                         let lo = stack_get(stack, bp + inst.c as usize);
                         let hi = stack_get(stack, bp + inst.c as usize + 1);
                         handle_panic_result!(runtime_panic(
@@ -4770,6 +4795,7 @@ impl Vm {
                     ) {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::SliceAddr => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -4822,6 +4848,7 @@ impl Vm {
                     ) {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::MapGet => {
                     let Some(layout) = map_get_layout_for_pc(func, pc) else {
@@ -4888,6 +4915,7 @@ impl Vm {
                         }
                         Err(msg) => return ExecResult::JitError(msg),
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::MapDelete => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
@@ -4963,6 +4991,7 @@ impl Vm {
                         module,
                         elem_layout,
                     ) {
+                        check_managed_allocation!();
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
                             fiber,
@@ -4972,6 +5001,7 @@ impl Vm {
                             msg
                         ));
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::QueueSend => {
                     if fiber.consume_remote_send_closed() {
@@ -5221,6 +5251,7 @@ impl Vm {
                 // Closure operations
                 Opcode::ClosureNew => {
                     exec::exec_closure_new(stack, bp, &inst, &mut self.state.gc);
+                    check_managed_allocation!();
                 }
                 Opcode::ClosureGet => {
                     if let Err(err) = exec::exec_closure_get(&self.state.gc, stack, bp, &inst) {
@@ -5310,6 +5341,7 @@ impl Vm {
                     ) {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::ErrDeferPush => {
                     let generation = fiber.effective_defer_generation();
@@ -5337,6 +5369,7 @@ impl Vm {
                     ) {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::Panic => {
                     let result = user_panic(&mut self.state.gc, fiber, stack, bp, inst.a, module);
@@ -5362,6 +5395,7 @@ impl Vm {
                     ) {
                         return ExecResult::JitError(msg);
                     }
+                    check_managed_allocation!();
                 }
                 Opcode::IfaceAssert => {
                     let Some(InstructionMetadata::IfaceAssertLayout {
@@ -5475,6 +5509,7 @@ impl Vm {
                             return ExecResult::JitError(format!("IslandNew failed: {err:?}"));
                         }
                     };
+                    check_managed_allocation!();
                     stack_set(stack, bp + inst.a as usize, handle as u64);
                 }
                 #[cfg(not(feature = "std"))]
@@ -5484,6 +5519,7 @@ impl Vm {
                         Err(error) => return ExecResult::JitError(error.to_string()),
                     };
                     let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id);
+                    check_managed_allocation!();
                 }
                 Opcode::GoIsland => {
                     let island_ref =

@@ -68,6 +68,7 @@ pub use vo_common_core::types::{
 
 // Re-export modules for downstream crates
 pub use vo_common_core::bytecode;
+pub use vo_common_core::execution_effects;
 pub use vo_common_core::instruction;
 pub use vo_common_core::symbol;
 pub use vo_common_core::types as core_types;

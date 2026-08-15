@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod bytecode;
 pub mod debug_info;
+pub mod execution_effects;
 pub mod extern_key;
 pub mod identifier;
 pub mod instruction;

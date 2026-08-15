@@ -13,84 +13,10 @@ use vo_runtime::jit_api::{JitContextField, JitResult, JitRuntimeTrapKind};
 use crate::translator::{emit_runtime_helper_call, HelperKind, SlotAccess, TrapEmitter};
 use crate::JitCompileEnv;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EffectContract {
-    pub may_gc: bool,
-    pub may_alloc: bool,
-    pub may_panic: bool,
-    pub may_unwind: bool,
-    pub may_call: bool,
-    pub may_schedule: bool,
-    pub may_observe_frame: bool,
-    pub needs_frame: bool,
-    pub needs_slot_metadata: bool,
-    pub needs_type_metadata: bool,
-    pub needs_write_barrier: bool,
-    pub touches_interface: bool,
-    pub materializes_closure: bool,
-}
-
-impl EffectContract {
-    pub const PURE: Self = Self {
-        may_gc: false,
-        may_alloc: false,
-        may_panic: false,
-        may_unwind: false,
-        may_call: false,
-        may_schedule: false,
-        may_observe_frame: false,
-        needs_frame: false,
-        needs_slot_metadata: false,
-        needs_type_metadata: false,
-        needs_write_barrier: false,
-        touches_interface: false,
-        materializes_closure: false,
-    };
-
-    pub fn union(self, other: Self) -> Self {
-        Self {
-            may_gc: self.may_gc || other.may_gc,
-            may_alloc: self.may_alloc || other.may_alloc,
-            may_panic: self.may_panic || other.may_panic,
-            may_unwind: self.may_unwind || other.may_unwind,
-            may_call: self.may_call || other.may_call,
-            may_schedule: self.may_schedule || other.may_schedule,
-            may_observe_frame: self.may_observe_frame || other.may_observe_frame,
-            needs_frame: self.needs_frame || other.needs_frame,
-            needs_slot_metadata: self.needs_slot_metadata || other.needs_slot_metadata,
-            needs_type_metadata: self.needs_type_metadata || other.needs_type_metadata,
-            needs_write_barrier: self.needs_write_barrier || other.needs_write_barrier,
-            touches_interface: self.touches_interface || other.touches_interface,
-            materializes_closure: self.materializes_closure || other.materializes_closure,
-        }
-    }
-
-    pub fn permits_frame_elision(self) -> bool {
-        !(self.may_panic
-            || self.may_unwind
-            || self.may_call
-            || self.may_schedule
-            || self.may_observe_frame
-            || self.needs_frame
-            || self.needs_write_barrier
-            || self.touches_interface
-            || self.materializes_closure)
-    }
-
-    /// A prepared call has precise shadow-stack slots, but no registered VM
-    /// call frame until a non-OK result is materialized.
-    pub fn permits_prepared_shadow_frame(self) -> bool {
-        !(self.may_unwind
-            || self.may_call
-            || self.may_schedule
-            || self.may_observe_frame
-            || self.needs_frame
-            || self.materializes_closure)
-    }
-}
+pub use vo_common_core::execution_effects::EffectContract;
 
 pub fn opcode_contract(opcode: Opcode) -> EffectContract {
-    crate::semantics::opcode_effect_contract(opcode)
+    vo_common_core::execution_effects::opcode_effect_contract(opcode)
 }
 
 pub fn function_contract(func: &FunctionDef) -> EffectContract {
