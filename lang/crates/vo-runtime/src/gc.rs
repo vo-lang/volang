@@ -2915,6 +2915,9 @@ impl Gc {
         };
         let owner_dispatched = self.owner_dispatch.is_some();
         let dst = self.alloc_inner(value_meta, allocation_kind, header.slots, actual_slots);
+        if dst.is_null() {
+            return dst;
+        }
         if header.is_value_slots_object() && !owner_dispatched && !dst.is_null() {
             unsafe { Self::header_mut(dst) }.set_value_slots_object();
         }

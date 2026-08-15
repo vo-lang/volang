@@ -409,6 +409,24 @@ fn disabled_allocation_takes_precedence_over_object_metadata_exhaustion() {
 }
 
 #[test]
+fn ptr_clone_stops_before_copy_when_destination_allocation_fails() {
+    let mut gc = Gc::new();
+    let source = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+    assert!(!source.is_null());
+    unsafe { Gc::write_slot(source, 0, 42) };
+    gc.memory_set_allocation_allowed(false);
+
+    let clone = unsafe { gc.ptr_clone(source) };
+
+    assert!(clone.is_null());
+    assert_eq!(
+        gc.last_memory_error(),
+        Some(MemoryError::AllocationForbidden)
+    );
+    assert_eq!(unsafe { Gc::read_slot(source, 0) }, 42);
+}
+
+#[test]
 fn disabling_growth_preallocates_all_collector_object_worklists() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
