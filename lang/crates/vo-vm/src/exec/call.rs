@@ -301,6 +301,51 @@ pub fn exec_call(
     ExecResult::FrameChanged
 }
 
+/// Execute a static call whose callee/frame/return-window contracts were
+/// established by the common verifier for this immutable module image.
+/// Capacity admission remains dynamic; structural validation stays on the
+/// hardening entry point above for unverified test and host inputs.
+pub(crate) fn exec_verified_call(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    module: &Module,
+    caller_func: &crate::bytecode::FunctionDef,
+) -> ExecResult {
+    let func_id = inst.static_call_func_id();
+    let Some(func) = module.functions.get(func_id as usize) else {
+        return ExecResult::JitError(format!(
+            "verified Call references missing target function id {func_id}"
+        ));
+    };
+    debug_assert!(validate_call_frame_shape(func).is_ok());
+    let ret_reg = inst
+        .b
+        .checked_add(func.param_slots)
+        .expect("common verifier proved the static Call return offset");
+    debug_assert!(validate_call_return_window(caller_func, ret_reg, func.ret_slots).is_ok());
+
+    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(inst.b);
+    let new_bp = match fiber.try_push_borrowed_call_frame(
+        func_id,
+        inst.b,
+        ret_reg,
+        func.ret_slots,
+        caller_scan_slots,
+        func.local_slots,
+        func.gc_scan_slots,
+    ) {
+        Ok(bp) => bp,
+        Err(err) => return stack_overflow_panic(gc, fiber, module, err),
+    };
+    fiber.zero_slots_tail_at(
+        new_bp,
+        func.gc_scan_slots as usize,
+        func.param_slots as usize,
+    );
+    ExecResult::FrameChanged
+}
+
 pub fn exec_call_closure(
     gc: &mut Gc,
     fiber: &mut Fiber,
@@ -339,15 +384,11 @@ pub(crate) fn exec_call_closure_cached(
     let caller_bp = caller_frame.bp;
     let stack = fiber.stack_ptr();
     let closure_value = stack_get(stack, caller_bp + inst.a as usize);
-    // Safety: this entry point is reached only from LoadedModule execution;
-    // verification establishes the typed, rooted canonical closure operand.
-    unsafe {
-        FrameCallBuilder::new(gc, fiber, module).call_closure_borrowed_cached(
-            closure_value,
-            inst.b as usize,
-            ic_entry,
-        )
-    }
+    FrameCallBuilder::new(gc, fiber, module).call_closure_borrowed_cached(
+        closure_value,
+        inst.b as usize,
+        ic_entry,
+    )
 }
 
 pub fn exec_call_iface(

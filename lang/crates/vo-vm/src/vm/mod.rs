@@ -3917,7 +3917,13 @@ impl Vm {
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
                 Opcode::Call => {
-                    handle_panic_result!(exec::exec_call(&mut self.state.gc, fiber, &inst, module));
+                    handle_panic_result!(exec::exec_verified_call(
+                        &mut self.state.gc,
+                        fiber,
+                        &inst,
+                        module,
+                        func,
+                    ));
                 }
                 Opcode::CallExtern => {
                     use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld};
@@ -4164,8 +4170,9 @@ impl Vm {
                     }
                 }
                 Opcode::CallClosure => {
-                    let Some(callsite_index) =
-                        loaded_module.dynamic_callsite_map().index(func_id, pc)
+                    let Some(callsite_index) = loaded_module
+                        .dynamic_callsite_map()
+                        .index(func_id, inst.dynamic_callsite_ordinal())
                     else {
                         return ExecResult::JitError(format!(
                             "CallClosure at func_id={func_id} pc={pc} has no verified callsite index"
@@ -4187,8 +4194,9 @@ impl Vm {
                     ));
                 }
                 Opcode::CallIface => {
-                    let Some(callsite_index) =
-                        loaded_module.dynamic_callsite_map().index(func_id, pc)
+                    let Some(callsite_index) = loaded_module
+                        .dynamic_callsite_map()
+                        .index(func_id, inst.dynamic_callsite_ordinal())
                     else {
                         return ExecResult::JitError(format!(
                             "CallIface at func_id={func_id} pc={pc} has no verified callsite index"

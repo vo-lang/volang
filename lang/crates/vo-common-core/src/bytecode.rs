@@ -2140,53 +2140,87 @@ pub struct LoadedModule {
 
 #[derive(Debug, Clone, Default)]
 pub struct DynamicCallsiteMap {
-    /// Dense PC-to-callsite tables per function. `u32::MAX` marks ordinary
-    /// instructions. The table is built once for a verified immutable module,
-    /// so both the interpreter and JIT can resolve hot callsites with one
-    /// bounds check and one indexed load.
-    indices_by_pc: Vec<Vec<u32>>,
-    len: usize,
+    /// Prefix sum of dynamic callsite counts. Function `f` owns the half-open
+    /// range `boundaries[f]..boundaries[f + 1]`. Instructions already carry a
+    /// verifier-proven function-local ordinal, keeping this loaded-module fact
+    /// proportional to function count rather than bytecode size.
+    boundaries: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicCallsiteRange {
+    base: u32,
+    len: u32,
+}
+
+impl DynamicCallsiteRange {
+    #[inline]
+    pub fn index(self, ordinal: u16) -> Option<u32> {
+        (u32::from(ordinal) < self.len).then(|| self.base + u32::from(ordinal))
+    }
+
+    #[inline]
+    pub const fn len(self) -> u32 {
+        self.len
+    }
+
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
 }
 
 impl DynamicCallsiteMap {
     pub fn for_module(module: &Module) -> Self {
         let mut next = 0u32;
-        let mut indices_by_pc = Vec::with_capacity(module.functions.len());
+        let mut boundaries = Vec::with_capacity(module.functions.len().saturating_add(1));
+        boundaries.push(0);
         for func in &module.functions {
-            let mut indices = vec![u32::MAX; func.code.len()];
-            for (pc, inst) in func.code.iter().enumerate() {
-                if matches!(
-                    inst.opcode(),
-                    crate::instruction::Opcode::CallClosure | crate::instruction::Opcode::CallIface
-                ) {
-                    indices[pc] = next;
-                    next = next
-                        .checked_add(1)
-                        .expect("verified module dynamic callsite count must fit u32");
-                }
-            }
-            indices_by_pc.push(indices);
+            let count = u32::try_from(
+                func.code
+                    .iter()
+                    .filter(|inst| {
+                        matches!(
+                            inst.opcode(),
+                            crate::instruction::Opcode::CallClosure
+                                | crate::instruction::Opcode::CallIface
+                        )
+                    })
+                    .count(),
+            )
+            .expect("verified function dynamic callsite count must fit u32");
+            next = next
+                .checked_add(count)
+                .expect("verified module dynamic callsite count must fit u32");
+            boundaries.push(next);
         }
-        Self {
-            indices_by_pc,
-            len: next as usize,
-        }
+        Self { boundaries }
     }
 
     #[inline]
-    pub fn index(&self, func_id: u32, pc: usize) -> Option<u32> {
-        let index = *self.indices_by_pc.get(func_id as usize)?.get(pc)?;
-        (index != u32::MAX).then_some(index)
+    pub fn range(&self, func_id: u32) -> Option<DynamicCallsiteRange> {
+        let func = func_id as usize;
+        let base = *self.boundaries.get(func)?;
+        let end = *self.boundaries.get(func.checked_add(1)?)?;
+        Some(DynamicCallsiteRange {
+            base,
+            len: end - base,
+        })
+    }
+
+    #[inline]
+    pub fn index(&self, func_id: u32, ordinal: u16) -> Option<u32> {
+        self.range(func_id)?.index(ordinal)
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.len
+        self.boundaries.last().copied().unwrap_or(0) as usize
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 }
 
@@ -2950,8 +2984,8 @@ mod tests {
         let mut first = function_with_slot_types(Vec::new());
         first.code = vec![
             crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 0),
-            crate::instruction::Instruction::new(crate::instruction::Opcode::CallClosure, 0, 0, 0),
-            crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 0),
+            crate::instruction::Instruction::new(crate::instruction::Opcode::CallClosure, 0, 0, 1),
+            crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 2),
         ];
         let mut second = function_with_slot_types(Vec::new());
         second.code = vec![crate::instruction::Instruction::new(
@@ -2969,6 +3003,7 @@ mod tests {
         assert_eq!(map.index(0, 2), Some(2));
         assert_eq!(map.index(0, 3), None);
         assert_eq!(map.index(1, 0), Some(3));
+        assert_eq!(map.range(0).map(DynamicCallsiteRange::len), Some(3));
         assert_eq!(map.index(2, 0), None);
     }
 

@@ -2800,6 +2800,18 @@ fn verify_function_invariants(
             func.has_call_extern, has_call_extern
         )));
     }
+    let mut expected_dynamic_callsite_ordinal = 0u32;
+    for (pc, inst) in func.code.iter().enumerate() {
+        if matches!(inst.opcode(), Opcode::CallClosure | Opcode::CallIface) {
+            let ordinal = u32::from(inst.dynamic_callsite_ordinal());
+            if ordinal != expected_dynamic_callsite_ordinal {
+                return Err(invariant(format!(
+                    "dynamic callsite at pc {pc} has ordinal {ordinal}, expected {expected_dynamic_callsite_ordinal}"
+                )));
+            }
+            expected_dynamic_callsite_ordinal += 1;
+        }
+    }
     if func.heap_ret_slots.len() != func.heap_ret_gcref_count as usize {
         return Err(invariant(format!(
             "heap_ret_slots.len()={} but heap_ret_gcref_count={}",
@@ -6858,7 +6870,6 @@ fn verify_dynamic_call_contract(
     is_closure: bool,
 ) -> Result<(), ModuleVerificationError> {
     verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
-    verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
     let (arg_layout, ret_layout) = if is_closure {
         verify_layout(
             func,

@@ -169,7 +169,7 @@ mod tests {
         match result {
             Ok(Err(GoStartError::Malformed(msg))) => {
                 assert!(
-                    msg.contains("closure layout has 0 allocation slots"),
+                    msg.contains("allocation has 0 slots, expected at least 1"),
                     "{msg}"
                 );
             }

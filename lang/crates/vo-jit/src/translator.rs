@@ -334,8 +334,8 @@ pub trait MetadataAccess {
         false
     }
 
-    /// Dense verified index of the dynamic callsite at `pc`.
-    fn dynamic_callsite_index(&self, pc: usize) -> Option<u32>;
+    /// Dense module-wide index derived from a verified function-local ordinal.
+    fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32>;
 
     /// Direct scalar roots live at the current allocation/call safepoint.
     fn native_root_slots_for_current_pc(&self) -> Vec<u16>;
@@ -526,8 +526,8 @@ macro_rules! impl_shared_compiler_traits {
                 self.core.current_bounds_check_elided
             }
 
-            fn dynamic_callsite_index(&self, pc: usize) -> Option<u32> {
-                self.core.analysis.dynamic_callsite_index(pc)
+            fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32> {
+                self.core.analysis.dynamic_callsite_index(ordinal)
             }
 
             fn native_root_slots_for_current_pc(&self) -> Vec<u16> {

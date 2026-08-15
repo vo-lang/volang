@@ -1658,7 +1658,7 @@ fn instruction_constant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::{DynamicCallsiteMap, InstructionMetadata, Module};
+    use vo_runtime::bytecode::{InstructionMetadata, Module};
 
     fn branch(opcode: Opcode, a: u16, offset: i32) -> Instruction {
         Instruction::with_flags(
@@ -1684,10 +1684,7 @@ mod tests {
         assert!(pure.can_eliminate());
     }
 
-    fn module_with(
-        code: Vec<Instruction>,
-        slot_types: Vec<SlotType>,
-    ) -> (Module, std::sync::Arc<DynamicCallsiteMap>) {
+    fn module_with(code: Vec<Instruction>, slot_types: Vec<SlotType>) -> Module {
         let mut func = crate::test_fixtures::function(code, slot_types.len() as u16);
         func.slot_types = slot_types;
         func.local_slots = func.slot_types.len() as u16;
@@ -1697,8 +1694,7 @@ mod tests {
         func.instruction_metadata = vec![InstructionMetadata::None; func.code.len()];
         let mut module = Module::new("ssa".into());
         module.functions.push(func);
-        let calls = std::sync::Arc::new(DynamicCallsiteMap::for_module(&module));
-        (module, calls)
+        module
     }
 
     #[test]
@@ -1710,7 +1706,7 @@ mod tests {
             Instruction::new(Opcode::LoadInt, 1, 20, 0),
             Instruction::new(Opcode::Return, 1, 1, 0),
         ];
-        let (module, _) = module_with(code, vec![SlotType::Value; 2]);
+        let module = module_with(code, vec![SlotType::Value; 2]);
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         let merge = ir.instruction(4).unwrap().block();
         let parameters = ir.block_parameters(merge);
@@ -1726,7 +1722,7 @@ mod tests {
             Instruction::new(Opcode::ForLoop, 0, 1, (-1_i16) as u16),
             Instruction::new(Opcode::Return, 0, 1, 0),
         ];
-        let (module, _) = module_with(code, vec![SlotType::Value; 2]);
+        let module = module_with(code, vec![SlotType::Value; 2]);
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         let loop_block = ir.instruction(2).unwrap().block();
         let back_edge = ir
@@ -1750,7 +1746,7 @@ mod tests {
             Instruction::new(Opcode::LoadInt, 1, 42, 0),
             Instruction::new(Opcode::Return, 1, 1, 0),
         ];
-        let (module, _) = module_with(code, vec![SlotType::Value; 2]);
+        let module = module_with(code, vec![SlotType::Value; 2]);
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         assert_eq!(ir.input_constants(4).collect::<Vec<_>>(), vec![(1, 42)]);
     }
@@ -1764,7 +1760,7 @@ mod tests {
             Instruction::new(Opcode::LoadInt, 1, 42, 0),
             Instruction::new(Opcode::Return, 1, 1, 0),
         ];
-        let (module, _) = module_with(code, vec![SlotType::Value; 2]);
+        let module = module_with(code, vec![SlotType::Value; 2]);
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         assert!(ir.input_constants(4).next().is_none());
     }
@@ -1776,7 +1772,7 @@ mod tests {
             Instruction::new(Opcode::StrSlice, 1, 0, 2),
             Instruction::new(Opcode::Return, 1, 1, 0),
         ];
-        let (module, _) = module_with(
+        let module = module_with(
             code,
             vec![
                 SlotType::GcRef,
@@ -1836,7 +1832,7 @@ mod tests {
             Instruction::new(Opcode::PtrAdd, 2, 1, 1),
             Instruction::new(Opcode::Return, 2, 1, 0),
         ];
-        let (module, _) = module_with(
+        let module = module_with(
             code,
             vec![SlotType::GcRef, SlotType::GcRef, SlotType::GcRef],
         );

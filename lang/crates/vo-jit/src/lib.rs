@@ -53,7 +53,8 @@ use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{Module, ModuleReloc};
 
 use vo_runtime::bytecode::{
-    DynamicCallsiteMap, FunctionDef, LoadedModule, Module as VoModule, ResolvedExternTable,
+    DynamicCallsiteMap, DynamicCallsiteRange, FunctionDef, LoadedModule, Module as VoModule,
+    ResolvedExternTable,
 };
 use vo_runtime::instruction::Opcode;
 #[cfg(test)]
@@ -602,7 +603,7 @@ impl JitCache {
         func_id: u32,
         func: &FunctionDef,
         vo_module: &VoModule,
-        dynamic_callsites: Arc<DynamicCallsiteMap>,
+        dynamic_callsites: DynamicCallsiteRange,
     ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
         self.analysis_tick = self.analysis_tick.saturating_add(1);
         if let Some(entry) = self
@@ -614,7 +615,6 @@ impl JitCache {
             return Ok(Arc::clone(&entry.base));
         }
         let analysis = match analysis::FunctionAnalysis::for_function(
-            func_id,
             func,
             vo_module,
             dynamic_callsites,
@@ -1052,6 +1052,18 @@ pub struct JitCompiler {
 }
 
 impl JitCompiler {
+    fn dynamic_callsite_range(&self, func_id: u32) -> Result<DynamicCallsiteRange, JitError> {
+        self.dynamic_callsites
+            .as_ref()
+            .expect("verified module must carry dynamic callsite facts")
+            .range(func_id)
+            .ok_or_else(|| {
+                JitError::Internal(format!(
+                    "function {func_id} has no verified dynamic callsite range"
+                ))
+            })
+    }
+
     pub fn new() -> Result<Self, JitError> {
         Self::with_debug(false)
     }
@@ -1523,13 +1535,10 @@ impl JitCompiler {
         } else {
             None
         };
-        let dynamic_callsites = self
-            .dynamic_callsites
-            .as_ref()
-            .expect("verified module must carry dynamic callsite facts");
-        let analysis =
-            self.cache
-                .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
+        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
+        let analysis = self
+            .cache
+            .get_or_analyze(func_id, func, vo_module, dynamic_callsites)?;
         let instruction_optimization = match optimization_plan.as_deref() {
             Some(module_plan) => {
                 Some(
@@ -1682,13 +1691,10 @@ impl JitCompiler {
             .get(func_id as usize)
             .ok_or(JitError::FunctionNotFound(func_id))?;
         Self::verify_compile_work_budget(func)?;
-        let dynamic_callsites = self
-            .dynamic_callsites
-            .as_ref()
-            .expect("verified module must carry dynamic callsite facts");
-        let analysis =
-            self.cache
-                .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
+        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
+        let analysis = self
+            .cache
+            .get_or_analyze(func_id, func, vo_module, dynamic_callsites)?;
         Ok(analysis.shared_loops())
     }
 
@@ -1723,13 +1729,10 @@ impl JitCompiler {
         Self::verify_compile_work_budget(func)?;
         let module_analysis = self.module_analysis(vo_module, env)?;
         let entry_eligibility = Arc::clone(&module_analysis.entry_eligibility);
-        let dynamic_callsites = self
-            .dynamic_callsites
-            .as_ref()
-            .expect("verified module must carry dynamic callsite facts");
-        let analysis =
-            self.cache
-                .get_or_analyze(func_id, func, vo_module, Arc::clone(dynamic_callsites))?;
+        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
+        let analysis = self
+            .cache
+            .get_or_analyze(func_id, func, vo_module, dynamic_callsites)?;
         let optimization_plan = self.optimization_plan(vo_module)?;
         let canonical_optimization =
             self.cache

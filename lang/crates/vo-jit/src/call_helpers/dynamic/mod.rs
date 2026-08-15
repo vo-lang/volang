@@ -106,7 +106,7 @@ impl DynamicCallLowering {
             DynamicIcState {
                 args_slot,
                 args_ptr,
-                entry: dynamic_ic_entry(emitter, callsite_pc),
+                entry: dynamic_ic_entry(emitter, inst.dynamic_callsite_ordinal()),
             }
         });
 

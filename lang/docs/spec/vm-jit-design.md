@@ -107,7 +107,9 @@ execution path accepts a module.
   runtime ABI manifest; helper names, `FuncId` fields, and per-function refs are
   no longer maintained as separate lists.
 - `analysis.rs` caches one `FunctionAnalysis` shared by full JIT and every OSR
-  loop. Its dynamic callsite indices refer to the `LoadedModule`-owned table.
+  loop. Dynamic calls carry verifier-proven function-local ordinals; a compact
+  `LoadedModule` prefix table maps each function's range into the shared inline
+  cache table without retaining bytecode-PC-sized metadata.
 - `compile_common/` owns common full-function/OSR compile facts and driver
   mechanics: `ControlPolicy`, jump-target discovery, basic-block transition,
   per-PC flow fact application, and the `CompileDriver` loop. Full-function and

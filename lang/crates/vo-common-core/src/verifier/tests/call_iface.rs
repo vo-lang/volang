@@ -23,6 +23,38 @@ fn dynamic_call_metadata_accepts_full_width_shapes() {
 }
 
 #[test]
+fn dynamic_callsite_ordinals_must_be_consecutive_across_call_kinds() {
+    let mut module = Module::new("dynamic-callsite-ordinal".to_string());
+    let mut caller = function_with_slot_types(vec![
+        SlotType::GcRef,
+        SlotType::Interface0,
+        SlotType::Interface1,
+    ]);
+    caller.code = vec![
+        Instruction::new(Opcode::CallClosure, 0, 3, 0),
+        Instruction::new(Opcode::CallIface, 1, 3, 0),
+        Instruction::new(Opcode::Return, 0, 0, 0),
+    ];
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        },
+        InstructionMetadata::CallIfaceLayout {
+            iface_meta_id: 0,
+            method_idx: 0,
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        },
+        InstructionMetadata::None,
+    ];
+    module.functions.push(finish_test_function(caller));
+
+    let err = verify_module(&module).expect_err("duplicate callsite ordinals must be rejected");
+    assert!(err.to_string().contains("ordinal 0, expected 1"), "{err}");
+}
+
+#[test]
 fn call_iface_metadata_accepts_full_width_method_index() {
     let mut module = Module::new("wide-call-iface-method-index".to_string());
     module.runtime_types.push(RuntimeType::Func {

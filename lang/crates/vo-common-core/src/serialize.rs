@@ -37,7 +37,7 @@ use core::fmt;
 use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 15;
+const VERSION: u32 = 16;
 const MIN_SUPPORTED_VERSION: u32 = VERSION;
 /// Canonical maximum size of an encoded VOB module, for both input and output.
 pub const MAX_VOB_BYTES: usize = 128 * 1024 * 1024;

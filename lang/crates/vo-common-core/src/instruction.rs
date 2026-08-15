@@ -167,6 +167,17 @@ impl Instruction {
         (self.b as u32) | ((self.flags as u32) << 16)
     }
 
+    /// Function-local ordinal for `CallClosure` and `CallIface`.
+    ///
+    /// The code generator assigns consecutive ordinals and the module
+    /// verifier proves that encoding before execution. A loaded module can
+    /// therefore derive the process-wide inline-cache index from a compact
+    /// per-function base instead of retaining a PC-sized side table.
+    #[inline]
+    pub const fn dynamic_callsite_ordinal(&self) -> u16 {
+        self.c
+    }
+
     /// Whether the opcode's shared call/defer/go shape targets a closure value.
     ///
     /// Used by `GoStart`, `DeferPush`, and `ErrDeferPush`.

@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use vo_runtime::bytecode::{DynamicCallsiteMap, FunctionDef, Module as VoModule};
+use vo_runtime::bytecode::{DynamicCallsiteRange, FunctionDef, Module as VoModule};
+
+#[cfg(test)]
+use vo_runtime::bytecode::DynamicCallsiteMap;
 
 use crate::effects::{self, MemorySyncEffect};
 use crate::{ir::FunctionIr, loop_analysis::LoopInfo, JitError, MAX_JIT_COMPILE_WORK_BYTES};
@@ -17,8 +20,7 @@ pub struct FunctionAnalysis {
     pub memory_only_start: u16,
     loops: Arc<[LoopInfo]>,
     loop_memory_only_starts: Vec<u16>,
-    func_id: u32,
-    dynamic_callsites: Arc<DynamicCallsiteMap>,
+    dynamic_callsites: DynamicCallsiteRange,
     ir: FunctionIr,
     retained_bytes: usize,
 }
@@ -31,10 +33,9 @@ pub(crate) struct NativeRootLiveness<'a> {
 
 impl FunctionAnalysis {
     pub fn for_function(
-        func_id: u32,
         func_def: &FunctionDef,
         vo_module: &VoModule,
-        dynamic_callsites: Arc<DynamicCallsiteMap>,
+        dynamic_callsites: DynamicCallsiteRange,
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
         let ir = FunctionIr::build_with_limit(func_def, vo_module, retained_limit_bytes)?;
@@ -134,7 +135,6 @@ impl FunctionAnalysis {
             memory_only_start,
             loops: loops.into(),
             loop_memory_only_starts,
-            func_id,
             dynamic_callsites,
             ir,
             retained_bytes,
@@ -147,8 +147,8 @@ impl FunctionAnalysis {
     }
 
     #[inline]
-    pub fn dynamic_callsite_index(&self, pc: usize) -> Option<u32> {
-        self.dynamic_callsites.index(self.func_id, pc)
+    pub fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32> {
+        self.dynamic_callsites.index(ordinal)
     }
 
     pub(crate) fn native_root_liveness(&self, pc: usize) -> Option<NativeRootLiveness<'_>> {
@@ -297,9 +297,8 @@ mod tests {
         });
         module.functions.push(make_func(code, metadata));
 
-        let calls = Arc::new(DynamicCallsiteMap::for_module(&module));
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
         let analysis = FunctionAnalysis::for_function(
-            0,
             &module.functions[0],
             &module,
             calls,
@@ -342,9 +341,8 @@ mod tests {
         let mut module = VoModule::new("queue-recv-analysis".to_string());
         module.functions.push(make_func(code, metadata));
 
-        let calls = Arc::new(DynamicCallsiteMap::for_module(&module));
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
         let analysis = FunctionAnalysis::for_function(
-            0,
             &module.functions[0],
             &module,
             calls,
@@ -387,9 +385,8 @@ mod tests {
         let mut module = VoModule::new("nested-loop-analysis".to_string());
         module.functions.push(make_func(code, metadata));
 
-        let calls = Arc::new(DynamicCallsiteMap::for_module(&module));
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
         let analysis = FunctionAnalysis::for_function(
-            0,
             &module.functions[0],
             &module,
             calls,
@@ -419,9 +416,8 @@ mod tests {
         let mut module = VoModule::new("sparse-wide-analysis".to_string());
         module.functions.push(func);
 
-        let calls = Arc::new(DynamicCallsiteMap::for_module(&module));
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
         let analysis = FunctionAnalysis::for_function(
-            0,
             &module.functions[0],
             &module,
             calls,
@@ -468,9 +464,8 @@ mod tests {
         let mut module = VoModule::new("root-liveness-cfg".to_string());
         module.functions.push(func);
 
-        let calls = Arc::new(DynamicCallsiteMap::for_module(&module));
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
         let analysis = FunctionAnalysis::for_function(
-            0,
             &module.functions[0],
             &module,
             calls,

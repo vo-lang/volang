@@ -330,10 +330,7 @@ fn spawn_closure_call_rejects_invalid_closure_ref_047() {
 
     match result {
         Ok(Err(VmError::Jit(msg))) => {
-            assert!(
-                msg.contains("spawn_closure_call requested invalid closure reference"),
-                "{msg}"
-            );
+            assert!(msg.contains("invalid managed reference"), "{msg}");
         }
         Ok(other) => panic!("invalid closure ref should be a VM error, got {other:?}"),
         Err(_) => panic!("invalid closure ref must not panic"),

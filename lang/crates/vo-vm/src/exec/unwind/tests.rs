@@ -729,10 +729,7 @@ fn vm_defer_closure_kind_002_rejects_non_closure_gcref_before_header_read() {
 
     match result {
         Ok(ExecResult::JitError(msg)) => {
-            assert!(
-                msg.contains("defer closure requested non-closure object kind"),
-                "{msg}"
-            );
+            assert!(msg.contains("object kind String is not Closure"), "{msg}");
         }
         Ok(other) => panic!("non-closure defer target should be JitError, got {other:?}"),
         Err(_) => panic!("non-closure defer target must not decode a closure header"),

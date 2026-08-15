@@ -381,7 +381,7 @@ fn vm_closure_call_signature_002_extern_replay_closure_rejects_non_closure_befor
 
     match result {
         ExecResult::JitError(msg) => {
-            assert!(msg.contains("non-closure object kind"), "{msg}");
+            assert!(msg.contains("object kind String is not Closure"), "{msg}");
         }
         other => panic!("non-closure replay target should be fatal infra, got {other:?}"),
     }
@@ -478,7 +478,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_closure_allocation_drift_
 
     match result {
         ExecResult::JitError(msg) => {
-            assert!(msg.contains("closure layout slot count mismatch"), "{msg}");
+            assert!(msg.contains("slot count mismatch"), "{msg}");
             assert!(msg.contains("allocation 1"), "{msg}");
         }
         other => panic!("closure allocation drift should be rejected, got {other:?}"),

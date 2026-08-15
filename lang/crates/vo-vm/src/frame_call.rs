@@ -167,10 +167,10 @@ impl<'a> FrameCallBuilder<'a> {
         self.call_closure_borrowed_impl(closure_value, arg_start, None)
     }
 
-    /// Execute a verified bytecode closure call with the shared dynamic-call
-    /// proof cache. The caller must guarantee that `closure_value` came from a
-    /// verifier-typed CallClosure operand and is a rooted canonical reference.
-    pub(crate) unsafe fn call_closure_borrowed_cached(
+    /// Execute a closure call with the shared dynamic-call proof cache.
+    /// Object identity and closure layout are validated before the cache is
+    /// consulted, so the cache only elides immutable module-target proofs.
+    pub(crate) fn call_closure_borrowed_cached(
         &mut self,
         closure_value: u64,
         arg_start: usize,

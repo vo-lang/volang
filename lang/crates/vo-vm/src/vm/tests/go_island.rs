@@ -289,10 +289,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_closure_gcref_before_clos
 
     match result {
         Ok(Err(VmError::Jit(msg))) => {
-            assert!(
-                msg.contains("GoIsland requested non-closure object kind"),
-                "{msg}"
-            );
+            assert!(msg.contains("object kind String is not Closure"), "{msg}");
         }
         Ok(other) => panic!("non-closure GoIsland should be a VM error, got {other:?}"),
         Err(_) => panic!("non-closure GoIsland operand must not decode a closure header"),

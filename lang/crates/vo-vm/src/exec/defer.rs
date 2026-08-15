@@ -259,7 +259,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.contains("non-closure object kind"), "{err}");
+        assert!(err.contains("object kind String is not Closure"), "{err}");
         assert!(defer_stack.is_empty());
     }
 
