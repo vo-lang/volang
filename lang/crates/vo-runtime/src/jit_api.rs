@@ -30,7 +30,7 @@ use crate::objects::interface::InterfaceSlot;
 
 use crate::slot::slots_for_bytes;
 pub use crate::EXECUTION_TIMESLICE_INSTRUCTIONS;
-pub use crate::{alloc_ic_table, DynCallIC};
+pub use crate::{alloc_ic_table, DynCallIC, DynamicCallTarget};
 use crate::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 use vo_common_core::bytecode::{InstructionMetadata, LoadedModule, Module, ModuleRuntimeMetadata};
 use vo_common_core::instruction::IFACE_ASSERT_HAS_OK_FLAG;
@@ -977,6 +977,7 @@ pub const JIT_HELPER_MAP_LEN_LAYOUT: u64 = 105;
 pub const JIT_HELPER_MAP_ITER_INIT_LAYOUT: u64 = 106;
 pub const JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT: u64 = 107;
 pub const JIT_HELPER_IFACE_TO_IFACE_LAYOUT: u64 = 108;
+pub const JIT_HELPER_CLOSURE_OBJECT_LAYOUT: u64 = 109;
 pub const JIT_CALLBACK_DEFER_PUSH: u64 = 1;
 pub const JIT_CALLBACK_RECOVER: u64 = 2;
 pub const JIT_CALLBACK_GO_START: u64 = 3;
@@ -3279,6 +3280,35 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
     }
 }
 
+/// Return the canonical reference for a structurally valid closure allocation.
+/// This helper does not inspect VM frame slots, allocate, collect, or schedule;
+/// native dynamic-call hits can therefore validate their object identity
+/// without materializing an interpreter frame.
+pub extern "C" fn vo_jit_validate_closure(ctx: *mut JitContext, raw: u64) -> u64 {
+    let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
+        return 0;
+    };
+    let Some(gc) = (unsafe { ctx_ref.gc.as_ref() }) else {
+        let _ = set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_HELPER_CLOSURE_OBJECT_LAYOUT,
+        );
+        return 0;
+    };
+    match crate::objects::closure::validate_object(gc, raw as GcRef) {
+        Ok(object) => object.reference as u64,
+        Err(_) => {
+            let _ = set_jit_infra_error(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_METADATA,
+                JIT_HELPER_CLOSURE_OBJECT_LAYOUT,
+            );
+            0
+        }
+    }
+}
+
 // =============================================================================
 // Channel Helpers
 // =============================================================================
@@ -4147,6 +4177,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_str_cmp", vo_str_cmp as *const u8),
         ("vo_str_decode_rune", vo_str_decode_rune as *const u8),
         ("vo_closure_new", vo_closure_new as *const u8),
+        (
+            "vo_jit_validate_closure",
+            vo_jit_validate_closure as *const u8,
+        ),
         ("vo_queue_new_checked", vo_queue_new_checked as *const u8),
         ("vo_chan_len", vo_chan_len as *const u8),
         ("vo_chan_cap", vo_chan_cap as *const u8),
@@ -4223,6 +4257,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_str_cmp",
         "vo_str_decode_rune",
         "vo_closure_new",
+        "vo_jit_validate_closure",
         "vo_queue_new_checked",
         "vo_chan_len",
         "vo_chan_cap",
@@ -4453,6 +4488,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             return_policy: Ret::RawU64,
             panic_policy: Panic::MustNotPanicAcrossAbi,
             may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_jit_validate_closure",
+            params: &[T::Ptr, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
             may_schedule: false,
             observes_frame: false,
         },

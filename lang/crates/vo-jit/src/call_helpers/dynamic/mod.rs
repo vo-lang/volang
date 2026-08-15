@@ -20,7 +20,7 @@ mod slot0;
 pub use closure::emit_call_closure;
 use ic::{
     branch_on_dynamic_ic_hit, dynamic_ic_entry, emit_dynamic_miss_dispatch,
-    emit_ic_hit_call_and_result, load_cached_receiver_slot0, load_hit_fields, load_jit_ptr,
+    emit_ic_hit_call_and_result, load_cached_dispatch_key, load_hit_fields, load_jit_ptr,
     DynamicIcHitFields, DynamicMissParams, IcHitParams, IcUpdateParams,
 };
 pub use iface::emit_call_iface;
@@ -32,12 +32,12 @@ use scratch::{
 
 fn dynamic_ic_match(
     builder: &mut FunctionBuilder<'_>,
-    receiver_slot0: Value,
-    cached_receiver_slot0: Value,
+    dispatch_key: Value,
+    cached_dispatch_key: Value,
 ) -> Value {
     builder
         .ins()
-        .icmp(IntCC::Equal, receiver_slot0, cached_receiver_slot0)
+        .icmp(IntCC::Equal, dispatch_key, cached_dispatch_key)
 }
 
 struct DynamicCallLowering {
@@ -147,11 +147,11 @@ impl DynamicCallLowering {
     fn branch_on_ic_key_hit<'a, E: IrEmitter<'a>>(
         &self,
         emitter: &mut E,
-        receiver_slot0: Value,
+        dispatch_key: Value,
         zero: Value,
     ) -> (Value, Block, Block, Block) {
-        let cached_receiver_slot0 = load_cached_receiver_slot0(emitter, self.ic().entry);
-        let key_match = dynamic_ic_match(emitter.builder(), receiver_slot0, cached_receiver_slot0);
+        let cached_dispatch_key = load_cached_dispatch_key(emitter, self.ic().entry);
+        let key_match = dynamic_ic_match(emitter.builder(), dispatch_key, cached_dispatch_key);
         self.branch_on_ic_hit(emitter, key_match, zero)
     }
 
@@ -250,14 +250,14 @@ impl DynamicCallLowering {
         emitter: &mut E,
         miss: DynamicCallMiss,
         merge_block: Block,
-        receiver_slot0: Option<Value>,
+        dispatch_key: Option<Value>,
     ) -> Result<(), crate::JitError> {
         emit_dynamic_miss_dispatch(
             emitter,
             DynamicMissParams {
-                ic_update: receiver_slot0.map(|receiver_slot0| IcUpdateParams {
+                ic_update: dispatch_key.map(|dispatch_key| IcUpdateParams {
                     entry: self.ic().entry,
-                    receiver_slot0,
+                    dispatch_key,
                 }),
                 ret_ptr: self.ret_ptr,
                 out_slot: miss.out_slot,
@@ -292,7 +292,7 @@ mod tests {
     use cranelift_frontend::FunctionBuilder;
 
     #[test]
-    fn vm_jit_dynamic_ic_061_generated_hit_condition_compares_exact_receiver() {
+    fn vm_jit_dynamic_ic_061_generated_hit_condition_compares_exact_dispatch_key() {
         let mut sig = Signature::new(cranelift_codegen::isa::CallConv::SystemV);
         for _ in 0..2 {
             sig.params.push(AbiParam::new(types::I64));

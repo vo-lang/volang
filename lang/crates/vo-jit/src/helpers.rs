@@ -220,6 +220,7 @@ runtime_helper_table! {
     str_cmp => "vo_str_cmp",
     str_decode_rune => "vo_str_decode_rune",
     closure_new => "vo_closure_new",
+    validate_closure => "vo_jit_validate_closure",
     queue_new_checked => "vo_queue_new_checked",
     queue_len => "vo_chan_len",
     queue_cap => "vo_chan_cap",

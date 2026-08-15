@@ -42,6 +42,111 @@ pub enum ClosureCreateError {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosureObjectError {
+    InvalidReference,
+    WrongKind(ValueKind),
+    MisalignedAllocation {
+        data_bytes: usize,
+    },
+    ShortAllocation {
+        allocated_slots: usize,
+    },
+    SlotCountOverflow,
+    LayoutMismatch {
+        expected_slots: usize,
+        header_slots: usize,
+        allocated_slots: usize,
+    },
+}
+
+impl core::fmt::Display for ClosureObjectError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidReference => formatter.write_str("invalid managed reference"),
+            Self::WrongKind(kind) => write!(formatter, "object kind {kind:?} is not Closure"),
+            Self::MisalignedAllocation { data_bytes } => write!(
+                formatter,
+                "allocation data size {data_bytes} is not slot-aligned"
+            ),
+            Self::ShortAllocation { allocated_slots } => write!(
+                formatter,
+                "allocation has {allocated_slots} slots, expected at least {HEADER_SLOTS}"
+            ),
+            Self::SlotCountOverflow => formatter.write_str("closure slot count overflow"),
+            Self::LayoutMismatch {
+                expected_slots,
+                header_slots,
+                allocated_slots,
+            } => write!(
+                formatter,
+                "slot count mismatch: expected {expected_slots}, header {header_slots}, allocation {allocated_slots}"
+            ),
+        }
+    }
+}
+
+/// Canonical closure allocation facts established by the collector, which is
+/// the sole authority able to distinguish object bases from interior pointers
+/// and unrelated managed objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedClosureObject {
+    pub reference: GcRef,
+    pub func_id: u32,
+    pub capture_count: usize,
+}
+
+impl ValidatedClosureObject {
+    /// A cache identity covering every closure-header field that affects call
+    /// layout. Stable-address GC lets distinct closure instances with the same
+    /// target and capture shape share one dynamic-call proof.
+    #[inline]
+    pub fn dispatch_key(self) -> u64 {
+        ((self.capture_count as u64) << 32) | u64::from(self.func_id)
+    }
+}
+
+/// Canonicalize and validate the allocation-level closure contract without
+/// consulting a language module. Module-specific function and capture-layout
+/// checks remain at the call boundary that owns that module.
+pub fn validate_object(gc: &Gc, raw: GcRef) -> Result<ValidatedClosureObject, ClosureObjectError> {
+    let canonical = gc
+        .canonicalize_ref(raw)
+        .ok_or(ClosureObjectError::InvalidReference)?;
+    let header = unsafe { Gc::header(canonical) };
+    if header.kind() != ValueKind::Closure {
+        return Err(ClosureObjectError::WrongKind(header.kind()));
+    }
+    let data_bytes = gc
+        .allocated_data_size_bytes(canonical)
+        .ok_or(ClosureObjectError::InvalidReference)?;
+    if data_bytes % SLOT_BYTES != 0 {
+        return Err(ClosureObjectError::MisalignedAllocation { data_bytes });
+    }
+    let allocated_slots = data_bytes / SLOT_BYTES;
+    if allocated_slots < HEADER_SLOTS {
+        return Err(ClosureObjectError::ShortAllocation { allocated_slots });
+    }
+    let func_id = unsafe { func_id(canonical) };
+    let capture_count = unsafe { capture_count(canonical) };
+    let expected_slots = HEADER_SLOTS
+        .checked_add(capture_count)
+        .ok_or(ClosureObjectError::SlotCountOverflow)?;
+    let header_slots = usize::from(header.slots);
+    if header_slots != expected_slots || allocated_slots != expected_slots {
+        return Err(ClosureObjectError::LayoutMismatch {
+            expected_slots,
+            header_slots,
+            allocated_slots,
+        });
+    }
+    Ok(ValidatedClosureObject {
+        reference: canonical,
+        func_id,
+        capture_count,
+    })
+}
+
 pub fn try_create(
     gc: &mut Gc,
     func_id: u32,
@@ -130,6 +235,25 @@ mod tests {
                 capture_count: 65_535,
                 max_capture_slots: 65_534,
             }
+        );
+    }
+
+    #[test]
+    fn closure_object_validation_canonicalizes_interiors_and_rejects_kind_forgery() {
+        let mut gc = Gc::new();
+        let closure = create(&mut gc, 7, 1);
+        let interior = unsafe { closure.add(1) };
+        let validated = validate_object(&gc, interior).expect("live closure interior must resolve");
+        assert_eq!(validated.reference, closure);
+        assert_eq!(validated.func_id, 7);
+        assert_eq!(validated.capture_count, 1);
+        assert_eq!(validated.dispatch_key(), (1u64 << 32) | 7);
+
+        let unrelated = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        unsafe { *unrelated = 7 };
+        assert_eq!(
+            validate_object(&gc, unrelated),
+            Err(ClosureObjectError::WrongKind(ValueKind::Struct))
         );
     }
 }

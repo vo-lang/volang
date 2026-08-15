@@ -164,6 +164,27 @@ impl<'a> FrameCallBuilder<'a> {
         closure_value: u64,
         arg_start: usize,
     ) -> ExecResult {
+        self.call_closure_borrowed_impl(closure_value, arg_start, None)
+    }
+
+    /// Execute a verified bytecode closure call with the shared dynamic-call
+    /// proof cache. The caller must guarantee that `closure_value` came from a
+    /// verifier-typed CallClosure operand and is a rooted canonical reference.
+    pub(crate) unsafe fn call_closure_borrowed_cached(
+        &mut self,
+        closure_value: u64,
+        arg_start: usize,
+        ic_entry: &mut vo_runtime::DynCallIC,
+    ) -> ExecResult {
+        self.call_closure_borrowed_impl(closure_value, arg_start, Some(ic_entry))
+    }
+
+    fn call_closure_borrowed_impl(
+        &mut self,
+        closure_value: u64,
+        arg_start: usize,
+        mut ic_entry: Option<&mut vo_runtime::DynCallIC>,
+    ) -> ExecResult {
         let stack = self.fiber.stack_ptr();
         if closure_value == 0 {
             return runtime_trap(
@@ -175,9 +196,40 @@ impl<'a> FrameCallBuilder<'a> {
             );
         }
 
-        let target = match self.validate_closure_target(closure_value, "CallClosure") {
-            Ok(target) => target,
-            Err(result) => return result,
+        let closure_object = match closure::validate_object(self.gc, closure_value as GcRef) {
+            Ok(object) => object,
+            Err(error) => {
+                return ExecResult::JitError(format!(
+                    "CallClosure requested invalid closure object at {:p}: {error}",
+                    closure_value as GcRef
+                ));
+            }
+        };
+        let dispatch_key = closure_object.dispatch_key();
+        let cached = ic_entry
+            .as_deref()
+            .and_then(|entry| entry.probe(dispatch_key))
+            .filter(|target| target.func_id == closure_object.func_id);
+        let (target, proof_cache_hit, fill_ic_after_validation) = match cached {
+            Some(cached) => {
+                let target =
+                    match trusted_cached_closure_target(self.module, closure_object, cached) {
+                        Ok(target) => target,
+                        Err(err) => return ExecResult::JitError(err),
+                    };
+                (target, true, false)
+            }
+            None => {
+                let target = match validate_closure_target_object(
+                    self.module,
+                    closure_object,
+                    "CallClosure",
+                ) {
+                    Ok(target) => target,
+                    Err(error) => return ExecResult::JitError(error),
+                };
+                (target, false, ic_entry.is_some())
+            }
         };
         if arg_start < target.layout.arg_offset {
             return ExecResult::JitError(format!(
@@ -209,33 +261,35 @@ impl<'a> FrameCallBuilder<'a> {
                 );
             }
         };
-        let (callsite_arg_layout, callsite_ret_layout) =
-            match call_layout_for_callsite(caller_func, callsite_pc, "CallClosure") {
-                Ok(layout) => layout,
+        if !proof_cache_hit {
+            let (callsite_arg_layout, callsite_ret_layout) =
+                match call_layout_for_callsite(caller_func, callsite_pc, "CallClosure") {
+                    Ok(layout) => layout,
+                    Err(err) => return ExecResult::JitError(err),
+                };
+            let expected_user_arg_slots = match target.user_arg_slots("CallClosure") {
+                Ok(slots) => slots,
                 Err(err) => return ExecResult::JitError(err),
             };
-        let expected_user_arg_slots = match target.user_arg_slots("CallClosure") {
-            Ok(slots) => slots,
-            Err(err) => return ExecResult::JitError(err),
-        };
-        if let Err(result) = validate_dynamic_call_shape(
-            "CallClosure",
-            callsite_arg_layout.len(),
-            callsite_ret_layout.len(),
-            expected_user_arg_slots,
-            target.func.ret_slots,
-            target.func_id,
-            &target.func.name,
-        ) {
-            return result;
-        }
-        if let Err(err) = validate_closure_callsite_layout(
-            "CallClosure",
-            &target,
-            callsite_arg_layout,
-            callsite_ret_layout,
-        ) {
-            return ExecResult::JitError(err);
+            if let Err(result) = validate_dynamic_call_shape(
+                "CallClosure",
+                callsite_arg_layout.len(),
+                callsite_ret_layout.len(),
+                expected_user_arg_slots,
+                target.func.ret_slots,
+                target.func_id,
+                &target.func.name,
+            ) {
+                return result;
+            }
+            if let Err(err) = validate_closure_callsite_layout(
+                "CallClosure",
+                &target,
+                callsite_arg_layout,
+                callsite_ret_layout,
+            ) {
+                return ExecResult::JitError(err);
+            }
         }
         let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(borrowed_start);
         let ret_reg = match checked_borrowed_return_reg(
@@ -248,11 +302,28 @@ impl<'a> FrameCallBuilder<'a> {
             Ok(ret_reg) => ret_reg,
             Err(result) => return result,
         };
-        if let Err(err) = validate_call_frame_shape(target.func) {
-            return ExecResult::JitError(err.message("CallClosure callee frame shape"));
-        }
-        if let Err(err) = validate_call_return_window(caller_func, ret_reg, target.func.ret_slots) {
-            return ExecResult::JitError(err.message("CallClosure caller return window"));
+        if !proof_cache_hit {
+            if let Err(err) = validate_call_frame_shape(target.func) {
+                return ExecResult::JitError(err.message("CallClosure callee frame shape"));
+            }
+            if let Err(err) =
+                validate_call_return_window(caller_func, ret_reg, target.func.ret_slots)
+            {
+                return ExecResult::JitError(err.message("CallClosure caller return window"));
+            }
+            if fill_ic_after_validation {
+                let entry = ic_entry
+                    .as_deref_mut()
+                    .expect("closure cache miss must retain its destination entry");
+                entry.publish_interpreter_target(
+                    dispatch_key,
+                    vo_runtime::DynamicCallTarget {
+                        func_id: target.func_id,
+                        local_slots: target.func.local_slots,
+                        gc_scan_slots: target.func.gc_scan_slots,
+                    },
+                );
+            }
         }
 
         let new_bp = match self.fiber.try_push_borrowed_call_frame(
@@ -868,49 +939,23 @@ pub(crate) fn validate_closure_target<'a>(
     raw_ref: u64,
     context: &str,
 ) -> Result<ValidClosureTarget<'a>, String> {
-    let Some(canonical_ref) = gc.canonicalize_ref(raw_ref as GcRef) else {
-        return Err(format!(
-            "{context} requested invalid closure reference {:p}",
+    let object = closure::validate_object(gc, raw_ref as GcRef).map_err(|error| {
+        format!(
+            "{context} requested invalid closure object at {:p}: {error}",
             raw_ref as GcRef
-        ));
-    };
-    let kind = unsafe { Gc::header(canonical_ref) }.kind();
-    if kind != ValueKind::Closure {
-        return Err(format!(
-            "{context} requested non-closure object kind {:?} at {:p}",
-            kind, canonical_ref
-        ));
-    }
-    let Some(data_bytes) = gc.allocated_data_size_bytes(canonical_ref) else {
-        return Err(format!(
-            "{context} closure layout is missing allocation size at {:p}",
-            canonical_ref
-        ));
-    };
-    if data_bytes % vo_runtime::slot::SLOT_BYTES != 0 {
-        return Err(format!(
-            "{context} closure layout data size {data_bytes} is not slot-aligned"
-        ));
-    }
-    let allocated_slots = data_bytes / vo_runtime::slot::SLOT_BYTES;
-    if allocated_slots < closure::HEADER_SLOTS {
-        return Err(format!(
-            "{context} closure layout has {allocated_slots} allocation slots, expected at least {}",
-            closure::HEADER_SLOTS
-        ));
-    }
-    // Safety: the object was canonicalized and checked as a closure above.
-    let func_id = unsafe { closure::func_id(canonical_ref) };
-    let capture_count = unsafe { closure::capture_count(canonical_ref) };
-    let expected_slots = closure::HEADER_SLOTS
-        .checked_add(capture_count)
-        .ok_or_else(|| format!("{context} closure layout slot count overflow"))?;
-    let header_slots = unsafe { Gc::header(canonical_ref) }.slots as usize;
-    if header_slots != expected_slots || allocated_slots != expected_slots {
-        return Err(format!(
-            "{context} closure layout slot count mismatch for func_id={func_id}: expected {expected_slots}, header {header_slots}, allocation {allocated_slots}"
-        ));
-    }
+        )
+    })?;
+    validate_closure_target_object(module, object, context)
+}
+
+fn validate_closure_target_object<'a>(
+    module: &'a Module,
+    object: closure::ValidatedClosureObject,
+    context: &str,
+) -> Result<ValidClosureTarget<'a>, String> {
+    let canonical_ref = object.reference;
+    let func_id = object.func_id;
+    let capture_count = object.capture_count;
     let Some(func) = module.functions.get(func_id as usize) else {
         return Err(format!("{context} missing function id {func_id}"));
     };
@@ -944,6 +989,50 @@ pub(crate) fn validate_closure_target<'a>(
     Ok(ValidClosureTarget {
         func_id,
         closure_gcref: canonical_ref,
+        func,
+        layout,
+    })
+}
+
+/// Reconstruct a closure call target from an allocation proof and a
+/// module-specific call proof published for the same dispatch identity.
+fn trusted_cached_closure_target<'a>(
+    module: &'a Module,
+    object: closure::ValidatedClosureObject,
+    cached: vo_runtime::DynamicCallTarget,
+) -> Result<ValidClosureTarget<'a>, String> {
+    if cached.func_id != object.func_id {
+        return Err(format!(
+            "CallClosure cached function id {} does not match closure function id {}",
+            cached.func_id, object.func_id
+        ));
+    }
+    let closure_gcref = object.reference;
+    let Some(func) = module.functions.get(cached.func_id as usize) else {
+        return Err(format!(
+            "CallClosure cached function id {} is out of bounds",
+            cached.func_id
+        ));
+    };
+    let layout = unsafe {
+        closure_call_layout(
+            closure_gcref as u64,
+            closure_gcref,
+            func.recv_slots as usize,
+            func.is_closure,
+        )
+    }
+    .map_err(|err| {
+        format!(
+            "CallClosure cached layout is invalid for func_id={} name={}: {}",
+            cached.func_id,
+            func.name,
+            err.message()
+        )
+    })?;
+    Ok(ValidClosureTarget {
+        func_id: cached.func_id,
+        closure_gcref,
         func,
         layout,
     })

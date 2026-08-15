@@ -89,50 +89,6 @@ fn add_named_receiver_method(
 }
 
 #[test]
-fn shared_iface_ic_keeps_interpreter_and_jit_views_coherent() {
-    let mut entry = vo_runtime::DynCallIC {
-        jit_func_ptr: 0x1234,
-        dispatch_generation: 9,
-        ..Default::default()
-    };
-    let first = CallIfaceTarget {
-        func_id: 7,
-        local_slots: 12,
-        gc_scan_slots: 5,
-    };
-
-    fill_call_iface_ic(&mut entry, 0xaaaa, first);
-    assert_eq!(
-        entry.jit_func_ptr, 0,
-        "a different target retires stale native code"
-    );
-    assert_eq!(entry.dispatch_generation, 0);
-    assert_eq!(probe_call_iface_ic(&entry, 0xaaaa).unwrap().func_id, 7);
-
-    entry.jit_func_ptr = 0x5678;
-    entry.dispatch_generation = 11;
-    entry.valid = 0;
-    fill_call_iface_ic(&mut entry, 0xaaaa, first);
-    assert_eq!(
-        entry.jit_func_ptr, 0x5678,
-        "interpreter validation preserves JIT code for the same target"
-    );
-    assert_eq!(entry.dispatch_generation, 11);
-
-    let second = CallIfaceTarget {
-        func_id: 8,
-        local_slots: 9,
-        gc_scan_slots: 3,
-    };
-    fill_call_iface_ic(&mut entry, 0xbbbb, second);
-    assert_eq!(entry.jit_func_ptr, 0);
-    assert_eq!(entry.dispatch_generation, 0);
-    assert!(probe_call_iface_ic(&entry, 0xaaaa).is_none());
-    let hit = probe_call_iface_ic(&entry, 0xbbbb).unwrap();
-    assert_eq!((hit.func_id, hit.local_slots, hit.gc_scan_slots), (8, 9, 3));
-}
-
-#[test]
 fn jit_iface_prepared_ic_admission_is_limited_to_direct_pointer_receivers() {
     let mut module = Module::new("jit-iface-pointer-ic-admission".to_string());
     module
@@ -262,6 +218,83 @@ fn call_closure_without_active_frame_rejects_before_stack_read_056() {
         }
         Ok(other) => panic!("missing caller frame should be a JitError, got {other:?}"),
         Err(_) => panic!("missing caller frame must not panic in CallClosure"),
+    }
+}
+
+#[test]
+fn verified_call_closure_publishes_and_reuses_shared_target_proof() {
+    let mut module = Module::new("cached-closure-target-test".to_string());
+    let mut caller = function(1);
+    caller.instruction_metadata = vec![vo_runtime::bytecode::InstructionMetadata::CallLayout {
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    }];
+    module.functions.push(caller);
+    module.functions.push(function(1));
+
+    let mut gc = Gc::new();
+    let closure_ref = closure::create(&mut gc, 1, 0);
+    let inst = Instruction::new(Opcode::CallClosure, 0, 0, 0);
+    let mut entry = vo_runtime::DynCallIC::default();
+
+    for _ in 0..2 {
+        let mut fiber = Fiber::new(0);
+        let bp = fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.stack[bp] = closure_ref as u64;
+        fiber.current_frame_mut().unwrap().pc = 1;
+        assert!(matches!(
+            exec_call_closure_cached(&mut gc, &mut fiber, &inst, &module, &mut entry),
+            ExecResult::FrameChanged
+        ));
+    }
+
+    assert_eq!(
+        entry.probe(1),
+        Some(vo_runtime::DynamicCallTarget {
+            func_id: 1,
+            local_slots: 1,
+            gc_scan_slots: 0,
+        })
+    );
+}
+
+#[test]
+fn cached_closure_proof_never_authorizes_an_unrelated_gc_object() {
+    let mut module = Module::new("cached-closure-object-kind-test".to_string());
+    let mut caller = function(1);
+    caller.instruction_metadata = vec![vo_runtime::bytecode::InstructionMetadata::CallLayout {
+        arg_layout: Vec::new(),
+        ret_layout: Vec::new(),
+    }];
+    module.functions.push(caller);
+    module.functions.push(function(1));
+
+    let mut gc = Gc::new();
+    let unrelated = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+    assert!(!unrelated.is_null());
+    unsafe { *unrelated = 1 };
+    let mut entry = vo_runtime::DynCallIC::default();
+    entry.publish_interpreter_target(
+        1,
+        vo_runtime::DynamicCallTarget {
+            func_id: 1,
+            local_slots: 1,
+            gc_scan_slots: 0,
+        },
+    );
+
+    let mut fiber = Fiber::new(0);
+    let bp = fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.stack[bp] = unrelated as u64;
+    fiber.current_frame_mut().unwrap().pc = 1;
+    let inst = Instruction::new(Opcode::CallClosure, 0, 0, 0);
+    let result = exec_call_closure_cached(&mut gc, &mut fiber, &inst, &module, &mut entry);
+
+    match result {
+        ExecResult::JitError(message) => {
+            assert!(message.contains("object kind Struct"), "{message}")
+        }
+        other => panic!("unrelated managed object reached cached closure target: {other:?}"),
     }
 }
 

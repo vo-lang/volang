@@ -2140,53 +2140,43 @@ pub struct LoadedModule {
 
 #[derive(Debug, Clone, Default)]
 pub struct DynamicCallsiteMap {
-    /// Sorted closure/interface call PCs per function. The global callsite id
-    /// is the function base plus the position in this sparse list.
-    callsite_pcs: Vec<Vec<u32>>,
-    function_bases: Vec<u32>,
+    /// Dense PC-to-callsite tables per function. `u32::MAX` marks ordinary
+    /// instructions. The table is built once for a verified immutable module,
+    /// so both the interpreter and JIT can resolve hot callsites with one
+    /// bounds check and one indexed load.
+    indices_by_pc: Vec<Vec<u32>>,
     len: usize,
 }
 
 impl DynamicCallsiteMap {
     pub fn for_module(module: &Module) -> Self {
         let mut next = 0u32;
-        let mut callsite_pcs = Vec::with_capacity(module.functions.len());
-        let mut function_bases = Vec::with_capacity(module.functions.len());
+        let mut indices_by_pc = Vec::with_capacity(module.functions.len());
         for func in &module.functions {
-            function_bases.push(next);
-            let pcs = func
-                .code
-                .iter()
-                .enumerate()
-                .filter(|(_, inst)| {
-                    matches!(
-                        inst.opcode(),
-                        crate::instruction::Opcode::CallClosure
-                            | crate::instruction::Opcode::CallIface
-                    )
-                })
-                .map(|(pc, _)| {
+            let mut indices = vec![u32::MAX; func.code.len()];
+            for (pc, inst) in func.code.iter().enumerate() {
+                if matches!(
+                    inst.opcode(),
+                    crate::instruction::Opcode::CallClosure | crate::instruction::Opcode::CallIface
+                ) {
+                    indices[pc] = next;
                     next = next
                         .checked_add(1)
                         .expect("verified module dynamic callsite count must fit u32");
-                    u32::try_from(pc).expect("verified function PC must fit u32")
-                })
-                .collect();
-            callsite_pcs.push(pcs);
+                }
+            }
+            indices_by_pc.push(indices);
         }
         Self {
-            callsite_pcs,
-            function_bases,
+            indices_by_pc,
             len: next as usize,
         }
     }
 
     #[inline]
     pub fn index(&self, func_id: u32, pc: usize) -> Option<u32> {
-        let pc = u32::try_from(pc).ok()?;
-        let func_id = func_id as usize;
-        let ordinal = self.callsite_pcs.get(func_id)?.binary_search(&pc).ok()?;
-        self.function_bases[func_id].checked_add(ordinal as u32)
+        let index = *self.indices_by_pc.get(func_id as usize)?.get(pc)?;
+        (index != u32::MAX).then_some(index)
     }
 
     #[inline]
@@ -2977,6 +2967,7 @@ mod tests {
         assert_eq!(map.index(0, 0), Some(0));
         assert_eq!(map.index(0, 1), Some(1));
         assert_eq!(map.index(0, 2), Some(2));
+        assert_eq!(map.index(0, 3), None);
         assert_eq!(map.index(1, 0), Some(3));
         assert_eq!(map.index(2, 0), None);
     }

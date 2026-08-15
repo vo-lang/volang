@@ -23,13 +23,6 @@ use crate::vm::{ExecResult, RuntimeTrapKind};
 use vo_runtime::gc::Gc;
 use vo_runtime::itab::ItabCache;
 
-#[derive(Clone, Copy)]
-pub(crate) struct CallIfaceTarget {
-    pub(crate) func_id: u32,
-    pub(crate) local_slots: u16,
-    pub(crate) gc_scan_slots: u16,
-}
-
 #[inline]
 fn iface_method_info_for_target(
     module: &Module,
@@ -113,46 +106,12 @@ pub(crate) fn validate_iface_receiver_layout(
     Ok(())
 }
 
-#[inline]
-fn probe_call_iface_ic(
-    entry: &vo_runtime::DynCallIC,
-    receiver_slot0: u64,
-) -> Option<CallIfaceTarget> {
-    if entry.valid != 0 && entry.receiver_slot0 == receiver_slot0 {
-        Some(CallIfaceTarget {
-            func_id: entry.func_id,
-            local_slots: u16::try_from(entry.local_slots).ok()?,
-            gc_scan_slots: entry.gc_scan_slots,
-        })
-    } else {
-        None
-    }
-}
-
-#[inline]
-fn fill_call_iface_ic(
-    entry: &mut vo_runtime::DynCallIC,
-    receiver_slot0: u64,
-    target: CallIfaceTarget,
-) {
-    if entry.receiver_slot0 != receiver_slot0 || entry.func_id != target.func_id {
-        entry.jit_func_ptr = 0;
-        entry.dispatch_generation = 0;
-        entry.jit_may_gc = 0;
-    }
-    entry.receiver_slot0 = receiver_slot0;
-    entry.local_slots = u32::from(target.local_slots);
-    entry.gc_scan_slots = target.gc_scan_slots;
-    entry.func_id = target.func_id;
-    entry.valid = 1;
-}
-
 pub(crate) fn resolve_iface_call_target(
     module: &Module,
     itab_cache: &ItabCache,
     itab_id: u32,
     method_idx: usize,
-) -> Result<CallIfaceTarget, String> {
+) -> Result<vo_runtime::DynamicCallTarget, String> {
     let Some(itab) = itab_cache.get_itab(itab_id) else {
         return Err(format!(
             "CallIface: missing itab_id={itab_id} method_idx={method_idx}"
@@ -180,7 +139,7 @@ pub(crate) fn resolve_iface_call_target(
         ));
     }
 
-    Ok(CallIfaceTarget {
+    Ok(vo_runtime::DynamicCallTarget {
         func_id,
         local_slots: func.local_slots,
         gc_scan_slots: func.gc_scan_slots,
@@ -193,7 +152,7 @@ fn resolve_call_iface_target(
     itab_cache: &ItabCache,
     itab_id: u32,
     method_idx: usize,
-) -> Result<CallIfaceTarget, ExecResult> {
+) -> Result<vo_runtime::DynamicCallTarget, ExecResult> {
     resolve_iface_call_target(module, itab_cache, itab_id, method_idx).map_err(|msg| {
         let caller = fiber.frames.last().copied();
         let (caller_func_id, caller_pc, caller_name) = caller
@@ -361,6 +320,36 @@ pub fn exec_call_closure(
     FrameCallBuilder::new(gc, fiber, module).call_closure_borrowed(closure_value, inst.b as usize)
 }
 
+/// Execute a closure call from a verified immutable module using the shared
+/// VM/JIT dynamic-call proof cache.
+pub(crate) fn exec_call_closure_cached(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    module: &Module,
+    ic_entry: &mut vo_runtime::DynCallIC,
+) -> ExecResult {
+    let caller_frame = fiber.frames.last().copied().ok_or_else(|| {
+        ExecResult::JitError("CallClosure requested without an active caller frame".to_string())
+    });
+    let caller_frame = match caller_frame {
+        Ok(frame) => frame,
+        Err(result) => return result,
+    };
+    let caller_bp = caller_frame.bp;
+    let stack = fiber.stack_ptr();
+    let closure_value = stack_get(stack, caller_bp + inst.a as usize);
+    // Safety: this entry point is reached only from LoadedModule execution;
+    // verification establishes the typed, rooted canonical closure operand.
+    unsafe {
+        FrameCallBuilder::new(gc, fiber, module).call_closure_borrowed_cached(
+            closure_value,
+            inst.b as usize,
+            ic_entry,
+        )
+    }
+}
+
 pub fn exec_call_iface(
     gc: &mut Gc,
     fiber: &mut Fiber,
@@ -440,78 +429,81 @@ fn exec_call_iface_impl(
     }
 
     let itab_id = (slot0 >> 32) as u32;
-    let callsite_context = format!(
-        "CallIface caller_func_id={} caller_name={} callsite_pc={} callsite_interface={}",
-        caller_func_id,
-        caller_func.name,
-        callsite_pc,
-        interface_meta_label(module, expected_iface_meta_id)
-    );
-    if let Err(err) = validate_call_iface_itab_for_callsite(
-        itab_cache,
-        itab_id,
-        method_idx,
-        expected_iface_meta_id,
-        &callsite_context,
-    ) {
-        return ExecResult::JitError(err);
-    }
-    let (target, fill_ic_after_validation) = match ic_entry
-        .as_deref()
-        .and_then(|entry| probe_call_iface_ic(entry, slot0))
-    {
-        Some(target) => (target, false),
-        None => {
-            let target =
-                match resolve_call_iface_target(fiber, module, itab_cache, itab_id, method_idx) {
-                    Ok(target) => target,
-                    Err(result) => return result,
-                };
-            (target, true)
-        }
-    };
+    let (target, fill_ic_after_validation) =
+        match ic_entry.as_deref().and_then(|entry| entry.probe(slot0)) {
+            Some(target) => (target, false),
+            None => {
+                if let Err(err) = validate_call_iface_itab_for_callsite(
+                    itab_cache,
+                    itab_id,
+                    method_idx,
+                    expected_iface_meta_id,
+                    "CallIface",
+                ) {
+                    return ExecResult::JitError(format!(
+                    "{err} caller_func_id={} caller_name={} callsite_pc={} callsite_interface={}",
+                    caller_func_id,
+                    caller_func.name,
+                    callsite_pc,
+                    interface_meta_label(module, expected_iface_meta_id)
+                ));
+                }
+                let target =
+                    match resolve_call_iface_target(fiber, module, itab_cache, itab_id, method_idx)
+                    {
+                        Ok(target) => target,
+                        Err(result) => return result,
+                    };
+                (target, true)
+            }
+        };
     let Some(target_func) = module.functions.get(target.func_id as usize) else {
         return ExecResult::JitError(format!(
             "CallIface cached target function id {} out of bounds",
             target.func_id
         ));
     };
-    if let Err(err) =
-        validate_iface_receiver_layout(module, slot0, target_func, target.func_id, "CallIface")
-    {
-        return ExecResult::JitError(err);
-    }
     let arg_slots = target_func.param_slots as usize;
-    let expected_user_arg_slots = match arg_slots.checked_sub(target_func.recv_slots as usize) {
-        Some(slots) => slots,
-        None => {
-            return ExecResult::JitError(format!(
-                "CallIface target recv_slots {} exceed param_slots {} for func_id={} name={}",
-                target_func.recv_slots, target_func.param_slots, target.func_id, target_func.name
-            ));
+    if fill_ic_after_validation {
+        if let Err(err) =
+            validate_iface_receiver_layout(module, slot0, target_func, target.func_id, "CallIface")
+        {
+            return ExecResult::JitError(err);
         }
-    };
-    if let Err(result) = validate_dynamic_call_shape(
-        "CallIface",
-        callsite_arg_layout.len(),
-        callsite_ret_layout.len(),
-        expected_user_arg_slots,
-        target_func.ret_slots,
-        target.func_id,
-        &target_func.name,
-    ) {
-        return result;
-    }
-    if let Err(err) = validate_function_callsite_layout(
-        "CallIface",
-        target.func_id,
-        target_func,
-        target_func.recv_slots as usize,
-        expected_user_arg_slots,
-        callsite_arg_layout,
-        callsite_ret_layout,
-    ) {
-        return ExecResult::JitError(err);
+        let expected_user_arg_slots = match arg_slots.checked_sub(target_func.recv_slots as usize) {
+            Some(slots) => slots,
+            None => {
+                return ExecResult::JitError(format!(
+                    "CallIface target recv_slots {} exceed param_slots {} for func_id={} name={}",
+                    target_func.recv_slots,
+                    target_func.param_slots,
+                    target.func_id,
+                    target_func.name
+                ));
+            }
+        };
+        if let Err(result) = validate_dynamic_call_shape(
+            "CallIface",
+            callsite_arg_layout.len(),
+            callsite_ret_layout.len(),
+            expected_user_arg_slots,
+            target_func.ret_slots,
+            target.func_id,
+            &target_func.name,
+        ) {
+            return result;
+        }
+        if let Err(err) = validate_function_callsite_layout(
+            "CallIface",
+            target.func_id,
+            target_func,
+            target_func.recv_slots as usize,
+            expected_user_arg_slots,
+            callsite_arg_layout,
+            callsite_ret_layout,
+        ) {
+            return ExecResult::JitError(err);
+        }
     }
     let ret_slots = target_func.ret_slots;
     let ret_reg = match checked_borrowed_return_reg(
@@ -545,7 +537,7 @@ fn exec_call_iface_impl(
     };
     if fill_ic_after_validation {
         if let Some(entry) = ic_entry {
-            fill_call_iface_ic(entry, slot0, target);
+            entry.publish_interpreter_target(slot0, target);
         }
     }
     fiber.zero_slots_tail_at(new_bp, target.gc_scan_slots as usize, arg_slots);

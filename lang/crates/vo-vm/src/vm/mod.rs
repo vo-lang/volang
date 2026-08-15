@@ -4164,22 +4164,26 @@ impl Vm {
                     }
                 }
                 Opcode::CallClosure => {
-                    let closure_ref =
-                        stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
-                    if closure_ref.is_null() {
-                        handle_panic_result!(runtime_trap(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::NilFuncCall
+                    let Some(callsite_index) =
+                        loaded_module.dynamic_callsite_map().index(func_id, pc)
+                    else {
+                        return ExecResult::JitError(format!(
+                            "CallClosure at func_id={func_id} pc={pc} has no verified callsite index"
                         ));
-                    }
-                    handle_panic_result!(exec::exec_call_closure(
+                    };
+                    let Some(ic_entry) =
+                        self.state.dynamic_call_ic.get_mut(callsite_index as usize)
+                    else {
+                        return ExecResult::JitError(format!(
+                            "CallClosure cache index {callsite_index} is out of bounds"
+                        ));
+                    };
+                    handle_panic_result!(exec::exec_call_closure_cached(
                         &mut self.state.gc,
                         fiber,
                         &inst,
-                        module
+                        module,
+                        ic_entry,
                     ));
                 }
                 Opcode::CallIface => {

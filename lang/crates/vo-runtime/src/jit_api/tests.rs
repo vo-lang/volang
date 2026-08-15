@@ -1376,7 +1376,7 @@ fn dyn_call_ic_061_allocates_exact_zeroed_dense_table() {
     assert_eq!(table.len(), 3);
     assert!(table
         .iter()
-        .all(|entry| entry.valid == 0 && entry.jit_func_ptr == 0 && entry.receiver_slot0 == 0));
+        .all(|entry| entry.valid == 0 && entry.jit_func_ptr == 0 && entry.dispatch_key == 0));
 }
 
 #[test]

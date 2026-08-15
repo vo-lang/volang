@@ -44,7 +44,7 @@ pub(super) struct IcHitParams {
 
 pub(super) struct IcUpdateParams {
     pub(super) entry: Value,
-    pub(super) receiver_slot0: Value,
+    pub(super) dispatch_key: Value,
 }
 
 pub(super) struct DynamicMissParams {
@@ -250,7 +250,7 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             DynCallIC::OFFSET_VALID,
         );
         for (value, offset) in [
-            (update.receiver_slot0, DynCallIC::OFFSET_RECEIVER_SLOT0),
+            (update.dispatch_key, DynCallIC::OFFSET_DISPATCH_KEY),
             (out_ic_jit_ptr, DynCallIC::OFFSET_JIT_FUNC_PTR),
             (
                 out_dispatch_generation,
@@ -435,7 +435,7 @@ pub(super) fn load_jit_ptr<'a, E: IrEmitter<'a>>(emitter: &mut E, ic_entry: Valu
     )
 }
 
-pub(super) fn load_cached_receiver_slot0<'a, E: IrEmitter<'a>>(
+pub(super) fn load_cached_dispatch_key<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     ic_entry: Value,
 ) -> Value {
@@ -443,7 +443,7 @@ pub(super) fn load_cached_receiver_slot0<'a, E: IrEmitter<'a>>(
         types::I64,
         MemFlags::trusted(),
         ic_entry,
-        DynCallIC::OFFSET_RECEIVER_SLOT0,
+        DynCallIC::OFFSET_DISPATCH_KEY,
     )
 }
 
