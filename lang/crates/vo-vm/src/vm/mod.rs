@@ -2034,8 +2034,18 @@ impl Vm {
             .state
             .allocate_island_id()
             .map_err(|error| VmError::Jit(error.to_string()))?;
+        let handle = vo_runtime::island::create(&mut self.state.gc, next_id);
+        if handle.is_null() {
+            return Err(match self.state.gc.last_memory_error() {
+                Some(error) => VmError::IslandMemory(error),
+                None => VmError::Jit(
+                    "create_island allocator returned a null handle without a memory error"
+                        .to_string(),
+                ),
+            });
+        }
         if self.state.external_island_transport {
-            return Ok(vo_runtime::island::create(&mut self.state.gc, next_id));
+            return Ok(handle);
         }
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
@@ -2045,7 +2055,6 @@ impl Vm {
         // Create transport pair for the new island
         let (island_sender, island_transport) = InThreadTransport::new();
         let island_sender: std::sync::Arc<dyn IslandSender> = std::sync::Arc::new(island_sender);
-        let handle = vo_runtime::island::create(&mut self.state.gc, next_id);
 
         // Initialize registry and main transport if first island
         if self.state.island_registry.is_none() {
@@ -3150,7 +3159,11 @@ impl Vm {
     ) -> ExecResult {
         let module = loaded_module.module();
         let runtime_metadata = loaded_module.runtime_metadata();
-        fiber.execution_budget = TIME_SLICE;
+        // The interpreter owns its remaining budget while it is running.  Keep
+        // that state in a register and publish it only when native execution
+        // needs to take over the same scheduling lease.
+        let mut execution_budget = TIME_SLICE;
+        fiber.execution_budget = execution_budget;
         #[cfg(feature = "jit")]
         let jit_enabled = self.jit.is_enabled();
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
@@ -3241,9 +3254,11 @@ impl Vm {
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
                 if jit_enabled {
-                    if let Some(osr_result) =
-                        jit::try_loop_osr(self, fiber, loaded_module, func_id, $target_pc, bp)
-                    {
+                    fiber.execution_budget = execution_budget;
+                    let osr_result =
+                        jit::try_loop_osr(self, fiber, loaded_module, func_id, $target_pc, bp);
+                    execution_budget = fiber.execution_budget;
+                    if let Some(osr_result) = osr_result {
                         match osr_result {
                             jit::OsrResult::Exit(code) => {
                                 return ExecResult::Exit(code);
@@ -3362,7 +3377,7 @@ impl Vm {
             return ExecResult::Interrupted;
         }
 
-        while fiber.execution_budget > 0 {
+        while execution_budget > 0 {
             #[cfg(feature = "jit")]
             {
                 let frame = unsafe { &mut *frame_ptr };
@@ -3400,7 +3415,9 @@ impl Vm {
                         None
                     };
                     if let Some(jit_func) = jit_func {
+                        fiber.execution_budget = execution_budget;
                         let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
+                        execution_budget = fiber.execution_budget;
                         stack = fiber.stack_ptr();
                         if self.state.gc.last_memory_error().is_some() {
                             return ExecResult::JitError(
@@ -3421,7 +3438,7 @@ impl Vm {
                 }
             }
 
-            fiber.execution_budget -= 1;
+            execution_budget -= 1;
 
             let frame = unsafe { &mut *frame_ptr };
             let pc = frame.pc;
@@ -5725,6 +5742,7 @@ impl Vm {
             }
         }
 
+        fiber.execution_budget = execution_budget;
         ExecResult::TimesliceExpired
     }
 

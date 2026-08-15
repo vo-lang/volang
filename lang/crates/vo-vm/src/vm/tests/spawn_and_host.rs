@@ -549,6 +549,34 @@ fn create_island_without_module_returns_error_instead_of_expect_panic() {
     }
 }
 
+#[cfg(feature = "std")]
+#[test]
+fn create_island_allocation_failure_publishes_no_transport_or_worker() {
+    let mut vm = Vm::with_memory_config(vo_runtime::gc::VmMemoryConfig {
+        allocation_allowed: false,
+        oom_policy: OomPolicy::TerminateIsland,
+        ..vo_runtime::gc::VmMemoryConfig::default()
+    });
+    vm.enable_external_island_transport();
+
+    let error = vm
+        .create_island()
+        .expect_err("forbidden allocation must reject island creation");
+
+    assert!(matches!(
+        error,
+        VmError::IslandMemory(MemoryError::AllocationForbidden)
+    ));
+    assert_eq!(
+        vm.state.gc.last_memory_error(),
+        Some(MemoryError::AllocationForbidden)
+    );
+    assert!(vm.state.island_registry.is_none());
+    assert!(vm.state.main_transport.is_none());
+    assert!(vm.state.island_senders.is_empty());
+    assert!(vm.state.island_threads.is_empty());
+}
+
 #[test]
 fn targeted_command_rejects_max_island_adoption_without_partial_state_change() {
     let mut vm = Vm::new();
