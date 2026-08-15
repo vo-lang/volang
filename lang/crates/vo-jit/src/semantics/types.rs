@@ -64,6 +64,9 @@ pub enum DynamicRegisterReadEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySyncSpec {
     None,
+    /// The addressed frame suffix can be observed through a dynamic index.
+    AliasedFromOperand(RegisterOperand),
+    /// A bounded value beginning at the operand must be memory-backed.
     FromOperand(RegisterOperand),
     SliceAppendValueStart,
     All,

@@ -134,8 +134,24 @@ impl NativeScratchKind {
 #[derive(Debug, Clone, Copy)]
 pub struct NativeRootSpill {
     slot: StackSlot,
-    root_count: u32,
-    has_conditional_roots: bool,
+    direct_root_count: u32,
+    conditional_root_count: u32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ExactNativeRoots {
+    direct: Vec<u16>,
+    conditional: Vec<u16>,
+}
+
+impl ExactNativeRoots {
+    pub(crate) fn new(direct: &[u16], conditional: &[u16]) -> Self {
+        Self {
+            direct: direct.to_vec(),
+            conditional: conditional.to_vec(),
+        }
+    }
 }
 
 /// Explicit, type-precise shadow roots for calls that can actually reach a GC
@@ -143,24 +159,47 @@ pub struct NativeRootSpill {
 /// forcing Cranelift to spill GcRefs at every non-GC runtime helper call.
 pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + MetadataAccess {
     fn spill_native_roots(&mut self) -> Option<NativeRootSpill> {
-        let root_slots = self.native_root_slots_for_current_pc();
-        let has_conditional_roots = self.has_conditional_roots_at_current_pc();
-        if root_slots.is_empty() && !has_conditional_roots && !self.has_native_root_frame() {
+        let roots = self.exact_native_roots_for_current_pc();
+        let direct_roots = &roots.direct;
+        let conditional_roots = &roots.conditional;
+        if direct_roots.is_empty() && conditional_roots.is_empty() && !self.has_native_root_frame()
+        {
             return None;
         }
 
-        let bytes = root_slots.len().saturating_mul(core::mem::size_of::<u64>());
+        let direct_bytes = direct_roots
+            .len()
+            .saturating_mul(core::mem::size_of::<u64>());
+        let bytes = direct_bytes.saturating_add(
+            conditional_roots
+                .len()
+                .saturating_mul(2 * core::mem::size_of::<u64>()),
+        );
         let shadow = self.native_scratch_slot(NativeScratchKind::GcRoots, bytes.max(4));
-        for (index, source_slot) in root_slots.iter().copied().enumerate() {
+        for (index, source_slot) in direct_roots.iter().copied().enumerate() {
             let value = self.read_var(source_slot);
             self.builder()
                 .ins()
                 .stack_store(types::I64, value, shadow, (index * 8) as i32);
         }
+        for (index, header_slot) in conditional_roots.iter().copied().enumerate() {
+            let offset = direct_bytes + index * 16;
+            let header = self.read_var(header_slot);
+            let payload = self.read_var(header_slot + 1);
+            self.builder()
+                .ins()
+                .stack_store(types::I64, header, shadow, offset as i32);
+            self.builder().ins().stack_store(
+                types::I64,
+                payload,
+                shadow,
+                (offset + core::mem::size_of::<u64>()) as i32,
+            );
+        }
         Some(NativeRootSpill {
             slot: shadow,
-            root_count: root_slots.len() as u32,
-            has_conditional_roots,
+            direct_root_count: direct_roots.len() as u32,
+            conditional_root_count: conditional_roots.len() as u32,
         })
     }
 
@@ -178,17 +217,7 @@ pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + Metadata
                 offset: 0,
             },
         );
-        if spill.has_conditional_roots {
-            self.builder().func.dfg.append_user_stack_map_entry(
-                inst,
-                UserStackMapEntry {
-                    ty: types::I16,
-                    slot: spill.slot,
-                    offset: 0,
-                },
-            );
-        }
-        for root in 0..spill.root_count {
+        for root in 0..spill.direct_root_count {
             self.builder().func.dfg.append_user_stack_map_entry(
                 inst,
                 UserStackMapEntry {
@@ -197,6 +226,52 @@ pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + Metadata
                     offset: root * 8,
                 },
             );
+        }
+        let conditional_base = spill.direct_root_count * 8;
+        for root in 0..spill.conditional_root_count {
+            self.builder().func.dfg.append_user_stack_map_entry(
+                inst,
+                UserStackMapEntry {
+                    // I128 is metadata for one atomic interface pair. Its two
+                    // machine words were stored separately above.
+                    ty: types::I128,
+                    slot: spill.slot,
+                    offset: conditional_base + root * 16,
+                },
+            );
+        }
+    }
+
+    /// Re-establish the VM frame invariant after a collector may have run.
+    ///
+    /// Exact stack maps intentionally omit dead managed values, so collection
+    /// is allowed to reclaim them while native code is paused. Clear those
+    /// values before a later side exit can publish the whole mixed frame back
+    /// to the VM's type-directed root scanner.
+    fn clear_dead_native_roots(&mut self) {
+        let roots = self.exact_native_roots_for_current_pc();
+        let mut dead_slots = Vec::new();
+        for (slot, ty) in self.function_def().slot_types.iter().copied().enumerate() {
+            let slot = slot as u16;
+            match ty {
+                vo_runtime::SlotType::GcRef if roots.direct.binary_search(&slot).is_err() => {
+                    dead_slots.push(slot);
+                }
+                vo_runtime::SlotType::Interface0
+                    if roots.conditional.binary_search(&slot).is_err() =>
+                {
+                    dead_slots.push(slot);
+                    dead_slots.push(slot + 1);
+                }
+                _ => {}
+            }
+        }
+        if dead_slots.is_empty() {
+            return;
+        }
+        let zero = self.builder().ins().iconst(types::I64, 0);
+        for slot in dead_slots {
+            self.write_var(slot, zero);
         }
     }
 }
@@ -337,12 +412,13 @@ pub trait MetadataAccess {
     /// Dense module-wide index derived from a verified function-local ordinal.
     fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32>;
 
-    /// Direct scalar roots live at the current allocation/call safepoint.
-    fn native_root_slots_for_current_pc(&self) -> Vec<u16>;
-
-    /// Interface/tagged roots live at the current safepoint require typed VM
-    /// frame materialization until native pair maps are available.
-    fn has_conditional_roots_at_current_pc(&self) -> bool;
+    /// Exact managed roots live at the current allocation/call safepoint.
+    ///
+    /// A native safepoint is valid only when the verified IR owns a frame
+    /// state for its bytecode PC. There is deliberately no conservative
+    /// whole-frame fallback: values omitted by an exact map may already have
+    /// been reclaimed before native code resumes.
+    fn exact_native_roots_for_current_pc(&self) -> ExactNativeRoots;
 
     /// The artifact owns a native frame anchor even when this particular
     /// safepoint has no live roots. Rootless safepoints still need the marker
@@ -530,35 +606,16 @@ macro_rules! impl_shared_compiler_traits {
                 self.core.analysis.dynamic_callsite_index(ordinal)
             }
 
-            fn native_root_slots_for_current_pc(&self) -> Vec<u16> {
-                self.core
+            fn exact_native_roots_for_current_pc(&self) -> $crate::translator::ExactNativeRoots {
+                let liveness = self
+                    .core
                     .analysis
                     .native_root_liveness(self.core.current_pc)
-                    .map(|liveness| liveness.direct_roots.to_vec())
-                    .unwrap_or_else(|| {
-                        self.core
-                            .func_def
-                            .slot_types
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(slot, ty)| {
-                                (*ty == vo_runtime::SlotType::GcRef).then_some(slot as u16)
-                            })
-                            .collect()
-                    })
-            }
-
-            fn has_conditional_roots_at_current_pc(&self) -> bool {
-                self.core
-                    .analysis
-                    .native_root_liveness(self.core.current_pc)
-                    .map(|liveness| liveness.has_conditional_roots)
-                    .unwrap_or_else(|| {
-                        self.core
-                            .func_def
-                            .slot_types
-                            .contains(&vo_runtime::SlotType::Interface0)
-                    })
+                    .expect("native safepoint must have verified frame-state liveness");
+                $crate::translator::ExactNativeRoots::new(
+                    liveness.direct_roots,
+                    liveness.conditional_roots,
+                )
             }
 
             fn has_native_root_frame(&self) -> bool {

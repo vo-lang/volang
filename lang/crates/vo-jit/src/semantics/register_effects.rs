@@ -162,25 +162,25 @@ pub(super) const REG_PTR_SET_N: OpcodeRegisterEffects = reg_effects(
 pub(super) const REG_SLOT_GET: OpcodeRegisterEffects = reg_effects(
     &[reg_slot(RegisterOperand::C)],
     DynamicRegisterReadEffect::None,
-    MemorySyncSpec::FromOperand(RegisterOperand::B),
+    MemorySyncSpec::AliasedFromOperand(RegisterOperand::B),
     false,
 );
 pub(super) const REG_SLOT_SET: OpcodeRegisterEffects = reg_effects(
     &[reg_slot(RegisterOperand::B), reg_slot(RegisterOperand::C)],
     DynamicRegisterReadEffect::None,
-    MemorySyncSpec::FromOperand(RegisterOperand::A),
+    MemorySyncSpec::AliasedFromOperand(RegisterOperand::A),
     false,
 );
 pub(super) const REG_SLOT_GET_N: OpcodeRegisterEffects = reg_effects(
     &[reg_slot(RegisterOperand::C)],
     DynamicRegisterReadEffect::None,
-    MemorySyncSpec::FromOperand(RegisterOperand::B),
+    MemorySyncSpec::AliasedFromOperand(RegisterOperand::B),
     false,
 );
 pub(super) const REG_SLOT_SET_N: OpcodeRegisterEffects = reg_effects(
     R_NONE,
     DynamicRegisterReadEffect::SlotSetLayout,
-    MemorySyncSpec::FromOperand(RegisterOperand::A),
+    MemorySyncSpec::AliasedFromOperand(RegisterOperand::A),
     false,
 );
 pub(super) const REG_INDEXED_GET: OpcodeRegisterEffects = reg_effects(

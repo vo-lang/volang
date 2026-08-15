@@ -741,13 +741,6 @@ pub struct JitContext {
     /// Intrusive chain of active native JIT frames for precise root scanning.
     pub native_frame: *mut JitNativeFrame,
 
-    /// One-shot permission to retry the allocation at an exact bytecode site
-    /// after the VM completed the GC slice requested by that site. This keeps
-    /// stress mode from repeatedly yielding before the allocation can run.
-    pub gc_poll_resume_func_id: u32,
-    pub gc_poll_resume_pc: u32,
-    pub gc_poll_resume_armed: u8,
-
     /// Optimized-code side exit. The artifact's immutable FrameState owns the
     /// value recipe; these fields select it and classify the failed assumption.
     pub deopt_state_id: u32,
@@ -812,8 +805,7 @@ impl JitContext {
     pub const JIT_RESULT_JIT_ERROR: u32 = 6;
     pub const JIT_RESULT_EXTERN_SUSPEND: u32 = 7;
     pub const JIT_RESULT_RUNTIME_TRANSITION: u32 = 8;
-    pub const JIT_RESULT_GC_SAFEPOINT: u32 = 9;
-    pub const JIT_RESULT_DEOPT: u32 = 10;
+    pub const JIT_RESULT_DEOPT: u32 = 9;
 
     // call_kind constants
     pub const CALL_KIND_REGULAR: u8 = 0;
@@ -905,9 +897,6 @@ jit_context_raw_fields!(
     (InlineCacheTable, ic_table),
     (ExecutionBudget, execution_budget),
     (NativeFrame, native_frame),
-    (GcPollResumeFuncId, gc_poll_resume_func_id),
-    (GcPollResumePc, gc_poll_resume_pc),
-    (GcPollResumeArmed, gc_poll_resume_armed),
     (DeoptStateId, deopt_state_id),
     (DeoptFuncId, deopt_func_id),
     (DeoptResumePc, deopt_resume_pc),
@@ -953,13 +942,9 @@ pub enum JitResult {
     /// VM-owned runtime-transition effects. Materialize at `call_resume_pc`
     /// and yield to the VM before executing another instruction.
     RuntimeTransition = 8,
-    /// Collection work is pending before the current bytecode instruction.
-    /// Materialize at `call_resume_pc`, yield to the scheduler, run a bounded
-    /// GC slice, and replay the instruction in the VM.
-    GcSafepoint = 9,
     /// An optimized assumption failed. Live values have been materialized
     /// according to the selected artifact FrameState.
-    Deopt = 10,
+    Deopt = 9,
 }
 
 pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;

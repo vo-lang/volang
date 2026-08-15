@@ -60,30 +60,14 @@ impl JitCallbackVm<'_> {
         vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS.max(required_budget)
     }
 
-    /// Validate and visit the exact roots in all paused native callers.
-    /// Collection itself runs after the JIT side exit, where the VM's existing
-    /// resumable root scanner owns the bounded GC work.
-    pub(super) unsafe fn visit_native_roots<F>(
+    /// Run a collector slice directly against one paused native frame chain.
+    pub(super) unsafe fn gc_step_while_native(
         &mut self,
+        active_fiber: &Fiber,
         frame: *mut JitNativeFrame,
         ctx: *mut JitContext,
-        max_frames: usize,
-        max_roots: usize,
-        visit: F,
-    ) -> Result<crate::vm::jit_mgr::NativeRootScanStats, vo_jit::JitError>
-    where
-        F: FnMut(*mut u64),
-    {
-        let manager = self.vm.jit.manager().ok_or_else(|| {
-            vo_jit::JitError::Internal("GC safepoint reached without a JIT manager".to_string())
-        })?;
-        let scan = unsafe { manager.visit_native_roots(frame, ctx, max_frames, max_roots, visit) }?;
-        self.vm
-            .jit
-            .manager_mut()
-            .expect("validated JIT callback must retain its manager")
-            .record_native_root_scan(scan);
-        Ok(scan)
+    ) -> Result<(), vo_jit::JitError> {
+        unsafe { self.vm.gc_step_while_native(active_fiber, ctx, frame) }
     }
 
     #[inline]

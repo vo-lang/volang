@@ -660,6 +660,14 @@ fn test_canonicalize_ref_base_uses_base_index() {
 }
 
 #[test]
+fn try_mark_gray_reports_invalid_root_without_panicking() {
+    let mut gc = Gc::new();
+    let invalid = 0x1000usize as GcRef;
+
+    assert_eq!(gc.try_mark_gray(invalid), Err(MemoryError::InvalidPointer));
+}
+
+#[test]
 fn vm_jit_typed_barrier_001_no_ref_struct_scalar_is_not_barriered() {
     let mut module = vo_common_core::bytecode::Module::new("test".to_string());
     module

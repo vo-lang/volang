@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use vo_jit::{
     JitArtifactMetadata, JitCompileEnv, JitCompiler, JitError, JitFailureKind,
-    JitFrameEntryEligibility, JitFunc, LoopFunc, LoopInfo,
+    JitFrameEntryEligibility, JitFunc, LoopFunc, LoopInfo, NativeRootKind,
 };
 
 use super::{JitExecutionStats, JitSideExitReason};
@@ -43,7 +43,6 @@ fn update_low_progress_streak(streak: &mut u8, result: JitResult, work_consumed:
         | JitResult::Replay
         | JitResult::ExternSuspend
         | JitResult::RuntimeTransition
-        | JitResult::GcSafepoint
         | JitResult::Deopt => {
             if work_consumed <= u64::from(LOW_PROGRESS_BUDGET_DELTA) {
                 *streak = streak.saturating_add(1);
@@ -179,6 +178,38 @@ pub(crate) struct NativeRootScanStats {
     pub roots: usize,
     pub conditional_frames: usize,
     pub complete: bool,
+}
+
+/// Resumable cursor over one paused native frame chain. It is intentionally
+/// stack-owned by the GC callback, so native addresses can never outlive the
+/// safepoint that made them stable.
+pub(crate) struct NativeRootScanCursor {
+    frame: *mut JitNativeFrame,
+    root_index: usize,
+    frame_started: bool,
+    expected_ctx: *mut JitContext,
+    stats: NativeRootScanStats,
+}
+
+impl NativeRootScanCursor {
+    pub(crate) fn new(frame: *mut JitNativeFrame, expected_ctx: *mut JitContext) -> Self {
+        Self {
+            frame,
+            root_index: 0,
+            frame_started: false,
+            expected_ctx,
+            stats: NativeRootScanStats::default(),
+        }
+    }
+
+    pub(crate) fn stats(&self) -> NativeRootScanStats {
+        self.stats
+    }
+}
+
+pub(crate) struct NativeRootScanChunk {
+    pub work_slots: usize,
+    pub done: bool,
 }
 
 // =============================================================================
@@ -468,7 +499,7 @@ impl JitManager {
     /// visitor must not retain root-slot pointers after returning.
     pub(crate) unsafe fn visit_native_roots<F>(
         &self,
-        mut frame: *mut JitNativeFrame,
+        frame: *mut JitNativeFrame,
         expected_ctx: *mut JitContext,
         max_frames: usize,
         max_roots: usize,
@@ -477,13 +508,43 @@ impl JitManager {
     where
         F: FnMut(*mut u64),
     {
-        let mut stats = NativeRootScanStats::default();
-        while !frame.is_null() {
-            if stats.frames >= max_frames {
-                return Ok(stats);
+        let mut cursor = NativeRootScanCursor::new(frame, expected_ctx);
+        let chunk = unsafe {
+            self.visit_native_roots_chunk(
+                &mut cursor,
+                max_frames,
+                max_roots,
+                usize::MAX,
+                &mut visit,
+            )
+        }?;
+        debug_assert!(chunk.done);
+        Ok(cursor.stats())
+    }
+
+    /// Visit a bounded prefix of exact native roots without retaining any
+    /// machine-stack pointer outside `cursor`'s callback-owned lifetime.
+    pub(crate) unsafe fn visit_native_roots_chunk<F>(
+        &self,
+        cursor: &mut NativeRootScanCursor,
+        max_frames: usize,
+        max_roots: usize,
+        work_slot_limit: usize,
+        mut visit: F,
+    ) -> Result<NativeRootScanChunk, JitError>
+    where
+        F: FnMut(*mut u64),
+    {
+        let mut work_slots = 0usize;
+        while !cursor.frame.is_null() {
+            if cursor.stats.frames >= max_frames || cursor.stats.roots >= max_roots {
+                return Ok(NativeRootScanChunk {
+                    work_slots,
+                    done: false,
+                });
             }
-            let record = unsafe { &*frame };
-            if record.ctx != expected_ctx {
+            let record = unsafe { &*cursor.frame };
+            if record.ctx != cursor.expected_ctx {
                 return Err(JitError::Internal(
                     "native frame belongs to a different JIT context".to_string(),
                 ));
@@ -494,67 +555,108 @@ impl JitManager {
                     record.func_id
                 )));
             }
-            let metadata = match record.artifact_kind {
-                JitNativeFrame::ARTIFACT_FUNCTION => {
-                    let tier = JitTier::from_u8(record.tier as u8).ok_or_else(|| {
-                        JitError::Internal(format!(
-                            "native frame for function {} has invalid tier {}",
-                            record.func_id, record.tier
-                        ))
-                    })?;
-                    self.funcs
-                        .get(record.func_id as usize)
-                        .and_then(|info| info.metadata[tier.cache_index()].as_deref())
+            let map = self.native_stack_map(record)?;
+            if !cursor.frame_started {
+                if work_slots >= work_slot_limit {
+                    return Ok(NativeRootScanChunk {
+                        work_slots,
+                        done: false,
+                    });
                 }
-                JitNativeFrame::ARTIFACT_OSR_LOOP => self
-                    .funcs
-                    .get(record.func_id as usize)
-                    .and_then(|info| info.loop_states.get(&(record.osr_pc as usize)))
-                    .and_then(|state| state.metadata.as_deref()),
-                kind => {
-                    return Err(JitError::Internal(format!(
-                        "unknown native JIT artifact kind {kind}"
-                    )))
+                cursor.frame_started = true;
+                work_slots += 1;
+                if map
+                    .roots
+                    .iter()
+                    .any(|root| root.kind == NativeRootKind::InterfacePair)
+                {
+                    cursor.stats.conditional_frames =
+                        cursor.stats.conditional_frames.saturating_add(1);
                 }
             }
-            .ok_or_else(|| {
-                JitError::Internal(format!(
-                    "native metadata is unavailable for function {} at OSR pc {}",
-                    record.func_id, record.osr_pc
-                ))
-            })?;
-            let map = metadata
-                .map_for_safepoint_id(record.safepoint_id)
-                .ok_or_else(|| {
-                    JitError::Internal(format!(
-                        "native safepoint {} is unavailable for function {}",
-                        record.safepoint_id, record.func_id
-                    ))
-                })?;
-            if map.requires_frame_materialization {
-                stats.conditional_frames = stats.conditional_frames.saturating_add(1);
-            }
-            if map.roots.len() > max_roots.saturating_sub(stats.roots) {
-                return Ok(stats);
-            }
-            let anchor = frame as usize;
+            let anchor = cursor.frame as usize;
             let stack_pointer = anchor
                 .checked_sub(map.anchor_sp_offset as usize)
                 .ok_or_else(|| JitError::Internal("native frame anchor underflow".to_string()))?;
-            for root in &map.roots {
+            while let Some(root) = map.roots.get(cursor.root_index) {
+                if work_slots >= work_slot_limit || cursor.stats.roots >= max_roots {
+                    return Ok(NativeRootScanChunk {
+                        work_slots,
+                        done: false,
+                    });
+                }
                 let root_address = stack_pointer
                     .checked_add(root.sp_offset as usize)
                     .ok_or_else(|| {
                         JitError::Internal("native root address overflow".to_string())
                     })?;
-                visit(root_address as *mut u64);
-                stats.roots += 1;
+                let root_address = root_address as *mut u64;
+                match root.kind {
+                    NativeRootKind::GcRef => visit(root_address),
+                    NativeRootKind::InterfacePair => {
+                        let header = unsafe { root_address.read() };
+                        if vo_runtime::objects::interface::data_is_gc_ref(header) {
+                            visit(unsafe { root_address.add(1) });
+                        }
+                    }
+                }
+                cursor.root_index += 1;
+                cursor.stats.roots += 1;
+                work_slots += 1;
             }
-            stats.frames += 1;
-            frame = record.prev;
+            cursor.stats.frames += 1;
+            cursor.frame = record.prev;
+            cursor.root_index = 0;
+            cursor.frame_started = false;
         }
-        stats.complete = true;
-        Ok(stats)
+        cursor.stats.complete = true;
+        Ok(NativeRootScanChunk {
+            work_slots,
+            done: true,
+        })
+    }
+
+    fn native_stack_map<'a>(
+        &'a self,
+        record: &JitNativeFrame,
+    ) -> Result<&'a vo_jit::NativeStackMap, JitError> {
+        let metadata = match record.artifact_kind {
+            JitNativeFrame::ARTIFACT_FUNCTION => {
+                let tier = JitTier::from_u8(record.tier as u8).ok_or_else(|| {
+                    JitError::Internal(format!(
+                        "native frame for function {} has invalid tier {}",
+                        record.func_id, record.tier
+                    ))
+                })?;
+                self.funcs
+                    .get(record.func_id as usize)
+                    .and_then(|info| info.metadata[tier.cache_index()].as_deref())
+            }
+            JitNativeFrame::ARTIFACT_OSR_LOOP => self
+                .funcs
+                .get(record.func_id as usize)
+                .and_then(|info| info.loop_states.get(&(record.osr_pc as usize)))
+                .and_then(|state| state.metadata.as_deref()),
+            kind => {
+                return Err(JitError::Internal(format!(
+                    "unknown native JIT artifact kind {kind}"
+                )))
+            }
+        }
+        .ok_or_else(|| {
+            JitError::Internal(format!(
+                "native metadata is unavailable for function {} at OSR pc {}",
+                record.func_id, record.osr_pc
+            ))
+        })?;
+        metadata
+            .map_for_safepoint_id(record.safepoint_id)
+            .ok_or_else(|| {
+                JitError::Internal(format!(
+                    "native safepoint {} is unavailable for function {}",
+                    record.safepoint_id, record.func_id
+                ))
+            })
     }
 
     pub fn unsupported_function_count(&self) -> usize {
@@ -654,7 +756,7 @@ impl JitManager {
         }
     }
 
-    pub(super) fn record_native_root_scan(&mut self, scan: NativeRootScanStats) {
+    pub(crate) fn record_native_root_scan(&mut self, scan: NativeRootScanStats) {
         let stats = &mut self.execution_stats;
         stats.gc_safepoint_callbacks = stats.gc_safepoint_callbacks.saturating_add(1);
         stats.native_root_frames_scanned = stats
@@ -1741,7 +1843,7 @@ mod tests {
     }
 
     #[test]
-    fn allocating_jit_helper_validates_native_roots_before_gc_side_exit() {
+    fn allocating_jit_helper_collects_from_native_roots_without_a_side_exit() {
         let func = string_slice_func(
             "allocating",
             vec![
@@ -1787,48 +1889,14 @@ mod tests {
             vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 3)
         };
 
-        assert_eq!(result, JitResult::GcSafepoint);
-        assert_eq!(ctx.call_resume_pc(), 0);
+        assert_eq!(result, JitResult::Ok);
         assert!(ctx.ctx.native_frame.is_null());
-        assert_eq!(ret, [0]);
+        assert_eq!(ret, [source as u64]);
         let stats = vm.jit.manager().expect("jit manager").execution_stats();
         assert_eq!(stats.gc_safepoint_callbacks, 1);
         assert_eq!(stats.native_root_frames_scanned, 1);
         assert!(stats.native_roots_scanned >= 1);
         assert_eq!(stats.native_root_scan_budget_exhaustions, 0);
-
-        ret[0] = 0;
-        let fast_result = unsafe {
-            vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 3)
-        };
-        assert_eq!(fast_result, JitResult::Ok);
-        assert_eq!(ret, [source as u64]);
-        assert_eq!(ctx.ctx.gc_poll_resume_armed, 0);
-        assert_eq!(
-            vm.jit
-                .manager()
-                .expect("jit manager")
-                .execution_stats()
-                .gc_safepoint_callbacks,
-            1,
-            "the exact resumed allocation must consume its credential even while GC debt remains"
-        );
-
-        ret[0] = 0;
-        let next_result = unsafe {
-            vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 3)
-        };
-        assert_eq!(next_result, JitResult::GcSafepoint);
-        assert_eq!(ret, [0]);
-        assert_eq!(
-            vm.jit
-                .manager()
-                .expect("jit manager")
-                .execution_stats()
-                .gc_safepoint_callbacks,
-            2,
-            "the credential must permit exactly one allocation retry before polling debt again"
-        );
     }
 
     #[test]
@@ -1885,13 +1953,169 @@ mod tests {
             vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 3)
         };
 
-        assert_eq!(result, JitResult::GcSafepoint);
+        assert_eq!(result, JitResult::Ok);
+        assert_eq!(ret, [source as u64]);
         assert!(ctx.ctx.native_frame.is_null());
         let stats = vm.jit.manager().expect("jit manager").execution_stats();
         assert_eq!(stats.gc_safepoint_callbacks, 1);
         assert_eq!(stats.native_root_frames_scanned, 2);
         assert!(stats.native_roots_scanned >= 2);
         assert_eq!(stats.native_root_scan_budget_exhaustions, 0);
+    }
+
+    #[test]
+    fn native_gc_clears_dead_managed_slots_before_frame_materialization() {
+        let mut caller = string_slice_func(
+            "caller",
+            vec![
+                Instruction::new(Opcode::StrSlice, 3, 0, 1),
+                Instruction::new(Opcode::Copy, 4, 3, 0),
+                Instruction::new(Opcode::StrSlice, 4, 0, 1),
+                Instruction::new(Opcode::Call, 1, 0, 0),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+        );
+        caller.local_slots = 5;
+        caller.gc_scan_slots = 5;
+        caller.slot_types.push(vo_runtime::SlotType::GcRef);
+        caller.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
+
+        let mut interpreted_callee = string_slice_func(
+            "interpreted",
+            vec![Instruction::new(Opcode::Return, 0, 1, 0)],
+        );
+        const LARGE_FRAME_SLOTS: usize = 513;
+        interpreted_callee.local_slots = LARGE_FRAME_SLOTS as u16;
+        interpreted_callee.gc_scan_slots = 4;
+        interpreted_callee
+            .slot_types
+            .resize(LARGE_FRAME_SLOTS, vo_runtime::SlotType::Value);
+        interpreted_callee.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&interpreted_callee.slot_types);
+
+        let mut module = VoModule::new("jit-dead-native-root-publication".to_string());
+        module.functions = vec![caller, interpreted_callee];
+
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit VM");
+        vm.load(module).expect("load dead-root publication probe");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let entry = {
+            let manager = vm.jit.manager_mut().expect("jit manager");
+            manager
+                .compile_full(
+                    0,
+                    loaded.verified_module(),
+                    JitCompileEnv {
+                        externs: &externs,
+                        backend_caps: Default::default(),
+                    },
+                )
+                .expect("compile caller");
+            manager.get_entry(0).expect("compiled caller")
+        };
+
+        vm.set_gc_stress_every_step(true);
+        vm.set_gc_verify_after_step(true);
+        let source = vo_runtime::objects::string::create(&mut vm.state.gc, b"root");
+        let mut fiber = Fiber::new(1);
+        fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
+        let bp = fiber.push_frame(0, 5, 5, 0, 1);
+        fiber.stack[bp] = source as u64;
+        fiber.stack[bp + 1] = 0;
+        fiber.stack[bp + 2] = 4;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+        let args = unsafe { fiber.stack.as_mut_ptr().add(bp) };
+        let mut ret = [0_u64; 1];
+
+        let result = unsafe {
+            vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 3)
+        };
+
+        assert_eq!(result, JitResult::Call);
+        assert_eq!(fiber.stack[bp + 3], 0, "dead slice slot was republished");
+        assert_ne!(fiber.stack[bp + 4], 0, "live replacement was cleared");
+        assert!(ctx.ctx.native_frame.is_null());
+    }
+
+    #[test]
+    fn native_interface_pair_keeps_its_conditional_payload_live_during_collection() {
+        let mut func = valid_jit_func(
+            "interface-root",
+            vec![
+                Instruction::new(Opcode::StrSlice, 5, 2, 3),
+                Instruction::new(Opcode::Return, 0, 2, 0),
+            ],
+        );
+        func.param_count = 4;
+        func.param_slots = 5;
+        func.local_slots = 6;
+        func.gc_scan_slots = 6;
+        func.ret_slots = 2;
+        func.ret_slot_types = vec![
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+        ];
+        func.slot_types = vec![
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::Value,
+            vo_runtime::SlotType::Value,
+            vo_runtime::SlotType::GcRef,
+        ];
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        let mut module = VoModule::new("jit-native-interface-root".to_string());
+        module.functions.push(func);
+
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit VM");
+        vm.load(module).expect("load interface root probe");
+        let loaded = vm.module.as_ref().expect("loaded module").clone();
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let entry = {
+            let manager = vm.jit.manager_mut().expect("jit manager");
+            manager
+                .compile_full(
+                    0,
+                    loaded.verified_module(),
+                    JitCompileEnv {
+                        externs: &externs,
+                        backend_caps: Default::default(),
+                    },
+                )
+                .expect("compile interface root probe");
+            manager.get_entry(0).expect("compiled entry")
+        };
+
+        let interface_payload = vo_runtime::objects::string::create(&mut vm.state.gc, b"kept");
+        let slice_source = vo_runtime::objects::string::create(&mut vm.state.gc, b"source");
+        vm.set_gc_verify_after_step(true);
+        vm.state.gc.gc_request_cycle();
+        let mut fiber = Fiber::new(1);
+        fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
+        let bp = fiber.push_frame(0, 6, 6, 0, 2);
+        fiber.stack[bp] =
+            u64::from(vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::String).to_raw());
+        fiber.stack[bp + 1] = interface_payload as u64;
+        fiber.stack[bp + 2] = slice_source as u64;
+        fiber.stack[bp + 3] = 0;
+        fiber.stack[bp + 4] = 6;
+        let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
+        let args = unsafe { fiber.stack.as_mut_ptr().add(bp) };
+        let mut ret = [0_u64; 2];
+
+        let result = unsafe {
+            vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 5)
+        };
+
+        assert_eq!(result, JitResult::Ok);
+        assert_eq!(ret[1], interface_payload as u64);
+        assert!(vm.state.gc.canonicalize_ref(interface_payload).is_some());
+        let stats = vm.jit.manager().expect("jit manager").execution_stats();
+        assert_eq!(stats.gc_safepoint_callbacks, 1);
+        assert_eq!(stats.native_root_conditional_frames, 1);
     }
 
     #[test]

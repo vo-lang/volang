@@ -8,6 +8,7 @@ use super::SlotRangeError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySyncEffect {
     None,
+    AliasedFrom(u16),
     From(u16),
     All,
 }
@@ -16,6 +17,9 @@ pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, Sl
     match opcode_register_effects(inst.opcode()).memory_sync {
         MemorySyncSpec::None => Ok(MemorySyncEffect::None),
         MemorySyncSpec::All => Ok(MemorySyncEffect::All),
+        MemorySyncSpec::AliasedFromOperand(operand) => {
+            Ok(MemorySyncEffect::AliasedFrom(operand_slot(inst, operand)))
+        }
         MemorySyncSpec::FromOperand(operand) => {
             Ok(MemorySyncEffect::From(operand_slot(inst, operand)))
         }

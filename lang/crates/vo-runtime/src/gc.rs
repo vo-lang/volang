@@ -1888,22 +1888,32 @@ impl Gc {
     #[inline]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn mark_gray(&mut self, obj: GcRef) {
+        if self.try_mark_gray(obj).is_err() {
+            self.mark_gray_fail(obj);
+        }
+    }
+
+    /// Mark an object while allowing a root enumerator to attach provenance to
+    /// an invalid reference instead of panicking across an FFI/JIT boundary.
+    #[inline]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn try_mark_gray(&mut self, obj: GcRef) -> Result<(), MemoryError> {
         if let Some(dispatch) = self.owner_dispatch {
             unsafe { (dispatch.mark_gray)(dispatch.state, obj) };
-            return;
+            return Ok(());
         }
         if obj.is_null() {
-            return;
+            return Ok(());
         }
         let Some(obj) = self.canonicalize_ref_for_mark(obj) else {
-            self.mark_gray_fail(obj);
+            return Err(MemoryError::InvalidPointer);
         };
         if self.pending_remembered_parent.is_some() && unsafe { Self::header(obj) }.age() < G_OLD {
             self.pending_remembered_has_young = true;
         }
         if self.state == GcState::Sweep {
             self.shade_dead_white_gray(obj);
-            return;
+            return Ok(());
         }
         let header = unsafe { Self::header_mut(obj) };
         if header.is_white() {
@@ -1911,6 +1921,7 @@ impl Gc {
             debug_assert!(self.gray.len() < self.gray.capacity());
             self.gray.push(obj);
         }
+        Ok(())
     }
 
     #[inline]
@@ -2130,6 +2141,14 @@ impl Gc {
         self.reject_owner_proxy_api("should_step");
         self.stress_every_step
             || (self.automatic_gc && (self.debt > 0 || self.state != GcState::Pause))
+    }
+
+    /// Whether the collector is waiting for the owner to finish an exact root
+    /// snapshot. Native safepoints use this to keep machine-stack addresses
+    /// paused until the resumable scan has consumed them.
+    #[inline]
+    pub fn root_scan_pending(&self) -> bool {
+        self.pending_root_scan.is_some()
     }
 
     #[inline]

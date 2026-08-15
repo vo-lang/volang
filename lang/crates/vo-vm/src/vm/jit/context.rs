@@ -102,7 +102,6 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
     fiber.jit_is_user_panic = false;
     fiber.jit_panic_msg = InterfaceSlot::default();
     fiber.jit_infra_error_message.clear();
-    let gc_poll_resume = fiber.jit_gc_poll_resume.take();
 
     let ctx = JitContext {
         gc: &mut vm.state.gc as *mut _,
@@ -168,9 +167,6 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
             .map_or(core::ptr::null(), |binding| binding as *const _),
         loaded_module,
         native_frame: core::ptr::null_mut(),
-        gc_poll_resume_func_id: gc_poll_resume.map_or(u32::MAX, |resume| resume.0),
-        gc_poll_resume_pc: gc_poll_resume.map_or(u32::MAX, |resume| resume.1),
-        gc_poll_resume_armed: u8::from(gc_poll_resume.is_some()),
         deopt_state_id: u32::MAX,
         deopt_func_id: u32::MAX,
         deopt_resume_pc: u32::MAX,

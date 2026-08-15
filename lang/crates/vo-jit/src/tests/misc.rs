@@ -977,14 +977,10 @@ fn native_stack_maps_exclude_dead_gcref_slots_per_safepoint() {
     let metadata = jit.function_metadata(0).expect("artifact metadata");
     assert_eq!(metadata.stack_maps.len(), 2);
     assert!(metadata.stack_maps.iter().all(|map| map.roots.len() == 1));
-    assert!(metadata
-        .stack_maps
-        .iter()
-        .all(|map| !map.requires_frame_materialization));
 }
 
 #[test]
-fn interface_materialization_marker_is_live_per_safepoint() {
+fn interface_pair_map_is_live_per_safepoint() {
     let load_meta = |slot, meta: ValueMeta| {
         let raw = meta.to_raw();
         Instruction::new(Opcode::LoadInt, slot, raw as u16, (raw >> 16) as u16)
@@ -1044,10 +1040,20 @@ fn interface_materialization_marker_is_live_per_safepoint() {
 
     let metadata = jit.function_metadata(0).expect("artifact metadata");
     assert_eq!(metadata.stack_maps.len(), 2);
-    assert!(metadata.stack_maps[0].requires_frame_materialization);
-    assert_eq!(metadata.stack_maps[0].roots.len(), 2);
-    assert!(!metadata.stack_maps[1].requires_frame_materialization);
+    assert_eq!(metadata.stack_maps[0].roots.len(), 3);
+    assert_eq!(
+        metadata.stack_maps[0]
+            .roots
+            .iter()
+            .filter(|root| root.kind == crate::NativeRootKind::InterfacePair)
+            .count(),
+        1
+    );
     assert_eq!(metadata.stack_maps[1].roots.len(), 2);
+    assert!(metadata.stack_maps[1]
+        .roots
+        .iter()
+        .all(|root| root.kind == crate::NativeRootKind::GcRef));
 }
 
 #[test]

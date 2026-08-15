@@ -10,12 +10,21 @@ use crate::JitError;
 
 /// Root representation understood by the Volang collector.
 ///
-/// Interface pairs are added through a separate, conditional root-area map in
-/// the native-frame phase.  Cranelift's scalar stack maps currently carry the
-/// direct `GcRef` roots described here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRootKind {
     GcRef,
+    /// Two adjacent words: a runtime type header followed by a payload. The
+    /// payload is a root exactly when the header describes a managed value.
+    InterfacePair,
+}
+
+impl NativeRootKind {
+    const fn width(self) -> u32 {
+        match self {
+            Self::GcRef => 8,
+            Self::InterfacePair => 16,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,9 +44,6 @@ pub struct NativeStackMap {
     pub frame_size: u32,
     /// SP-relative location of the active `JitNativeFrame` record.
     pub anchor_sp_offset: u32,
-    /// Conditional roots such as interface payloads require typed VM-frame
-    /// materialization before collection.
-    pub requires_frame_materialization: bool,
     pub roots: Box<[NativeStackRoot]>,
 }
 
@@ -116,7 +122,6 @@ impl JitArtifactMetadata {
 
             let mut roots = Vec::new();
             let mut anchor_sp_offset = None;
-            let mut requires_frame_materialization = false;
             for (ty, sp_offset) in entries {
                 if ty == types::I32 {
                     continue;
@@ -127,15 +132,6 @@ impl JitArtifactMetadata {
                             "native stack map for {name} contains multiple frame anchors"
                         )));
                     }
-                    continue;
-                }
-                if ty == types::I16 {
-                    if requires_frame_materialization {
-                        return Err(JitError::Internal(format!(
-                            "native stack map for {name} contains multiple materialization markers"
-                        )));
-                    }
-                    requires_frame_materialization = true;
                     continue;
                 }
                 let kind = root_kind_for_type(ty).ok_or_else(|| {
@@ -156,12 +152,11 @@ impl JitArtifactMetadata {
                 roots.push(NativeStackRoot { sp_offset, kind });
             }
             roots.sort_unstable_by_key(|root| root.sp_offset);
-            if roots
-                .windows(2)
-                .any(|pair| pair[0].sp_offset == pair[1].sp_offset)
-            {
+            if roots.windows(2).any(|pair| {
+                pair[0].sp_offset.saturating_add(pair[0].kind.width()) > pair[1].sp_offset
+            }) {
                 return Err(JitError::Internal(format!(
-                    "native stack map for {name} contains duplicate root offsets"
+                    "native stack map for {name} contains overlapping root ranges"
                 )));
             }
             let anchor_sp_offset = anchor_sp_offset.ok_or_else(|| {
@@ -178,7 +173,6 @@ impl JitArtifactMetadata {
                 return_address_offset,
                 frame_size,
                 anchor_sp_offset,
-                requires_frame_materialization,
                 roots: roots.into_boxed_slice(),
             });
         }
@@ -308,7 +302,11 @@ impl JitArtifactMetadata {
 }
 
 fn root_kind_for_type(ty: Type) -> Option<NativeRootKind> {
-    (ty == types::I64).then_some(NativeRootKind::GcRef)
+    match ty {
+        types::I64 => Some(NativeRootKind::GcRef),
+        types::I128 => Some(NativeRootKind::InterfacePair),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -325,7 +323,6 @@ mod tests {
                     return_address_offset: 12,
                     frame_size: 32,
                     anchor_sp_offset: 8,
-                    requires_frame_materialization: false,
                     roots: Box::new([]),
                 },
                 NativeStackMap {
@@ -333,7 +330,6 @@ mod tests {
                     return_address_offset: 40,
                     frame_size: 48,
                     anchor_sp_offset: 16,
-                    requires_frame_materialization: false,
                     roots: Box::new([]),
                 },
             ]
@@ -366,7 +362,6 @@ mod tests {
                 return_address_offset: 1,
                 frame_size: 8,
                 anchor_sp_offset: 0,
-                requires_frame_materialization: false,
                 roots: vec![NativeStackRoot {
                     sp_offset: 0,
                     kind: NativeRootKind::GcRef,
@@ -383,17 +378,22 @@ mod tests {
     }
 
     #[test]
-    fn conditional_root_marker_requires_vm_frame_materialization() {
+    fn interface_pair_is_retained_as_a_typed_native_root() {
         let metadata = JitArtifactMetadata::from_entries(
             16,
-            [(0, 8, 32, vec![(types::I8, 4), (types::I16, 4)])],
+            [(0, 8, 32, vec![(types::I8, 4), (types::I128, 8)])],
             "conditional",
         )
         .expect("conditional stack map");
 
         let map = metadata.map_for_safepoint_id(0).expect("safepoint");
-        assert!(map.requires_frame_materialization);
-        assert!(map.roots.is_empty());
+        assert_eq!(
+            map.roots.as_ref(),
+            &[NativeStackRoot {
+                sp_offset: 8,
+                kind: NativeRootKind::InterfacePair,
+            }]
+        );
     }
 
     #[test]

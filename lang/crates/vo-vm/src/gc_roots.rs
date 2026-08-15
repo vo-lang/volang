@@ -9,6 +9,12 @@ use vo_runtime::gc::{
 };
 use vo_runtime::slot::SLOT_BYTES;
 
+#[cfg(feature = "jit")]
+use vo_runtime::jit_api::{JitContext, JitNativeFrame};
+
+#[cfg(feature = "jit")]
+use crate::vm::{JitManager, NativeRootScanCursor, NativeRootScanStats};
+
 use crate::bytecode::{FunctionDef, GlobalDef, LoadedModule};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
 use crate::scheduler::FiberId;
@@ -72,15 +78,25 @@ fn selected_fiber_index(
     snapshot: &VmRootScanSnapshot,
     dirty_fibers: &[u32],
     fibers_len: usize,
+    active_fiber_id: Option<u32>,
 ) -> Option<usize> {
     match snapshot.mode {
         VmRootScanMode::Full => {
-            (snapshot.fiber_source_cursor < fibers_len).then_some(snapshot.fiber_source_cursor)
+            let source_count = fibers_len + usize::from(active_fiber_id.is_some());
+            (snapshot.fiber_source_cursor < source_count).then_some(snapshot.fiber_source_cursor)
         }
-        VmRootScanMode::DirtyFibers => dirty_fibers
-            .get(snapshot.fiber_source_cursor)
-            .copied()
-            .map(|raw| raw as usize),
+        VmRootScanMode::DirtyFibers => {
+            dirty_fibers
+                .get(snapshot.fiber_source_cursor)
+                .copied()
+                .map(|raw| {
+                    if active_fiber_id == Some(raw) {
+                        fibers_len
+                    } else {
+                        raw as usize
+                    }
+                })
+        }
     }
 }
 
@@ -88,6 +104,64 @@ enum AuxRootScanStep {
     Consumed(Option<GcRef>),
     BudgetExhausted,
     Done,
+}
+
+#[derive(Clone, Copy)]
+enum VmRootSource {
+    Global {
+        definition: usize,
+        slot: usize,
+    },
+    FiberFrame {
+        fiber: u32,
+        frame: usize,
+        func_id: u32,
+        pc: usize,
+        slot: usize,
+    },
+    FiberAux {
+        fiber: u32,
+        stage: VmFiberRootScanStage,
+        outer: usize,
+        inner: usize,
+        slot: usize,
+    },
+    IoStaging(usize),
+    Sentinel(usize),
+    Endpoint(usize),
+}
+
+impl core::fmt::Display for VmRootSource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Global { definition, slot } => {
+                write!(formatter, "global definition {definition} slot {slot}")
+            }
+            Self::FiberFrame {
+                fiber,
+                frame,
+                func_id,
+                pc,
+                slot,
+            } => write!(
+                formatter,
+                "fiber {fiber} frame {frame} function {func_id} pc {pc} slot {slot}"
+            ),
+            Self::FiberAux {
+                fiber,
+                stage,
+                outer,
+                inner,
+                slot,
+            } => write!(
+                formatter,
+                "fiber {fiber} auxiliary {stage:?} indices {outer}/{inner}/{slot}"
+            ),
+            Self::IoStaging(slot) => write!(formatter, "I/O staging slot {slot}"),
+            Self::Sentinel(slot) => write!(formatter, "sentinel slot {slot}"),
+            Self::Endpoint(slot) => write!(formatter, "endpoint slot {slot}"),
+        }
+    }
 }
 
 fn interface_value_root(value: vo_runtime::InterfaceSlot) -> Option<GcRef> {
@@ -435,6 +509,7 @@ fn scan_vm_root_snapshot_chunk<F>(
     globals: &[u64],
     global_defs: &[GlobalDef],
     fibers: &[Box<Fiber>],
+    active_fiber: Option<(&Fiber, usize)>,
     functions: &[FunctionDef],
     io_staging_roots: &[Option<GcRef>],
     sentinel_errors: &SentinelErrorCache,
@@ -443,7 +518,7 @@ fn scan_vm_root_snapshot_chunk<F>(
     mut visit_root: F,
 ) -> GcRootScanChunk
 where
-    F: FnMut(GcRef),
+    F: FnMut(GcRef, VmRootSource),
 {
     let limit_bytes = limit_bytes.max(SLOT_BYTES);
     let mut work = 0usize;
@@ -513,19 +588,38 @@ where
                         return GcRootScanChunk::pending(work);
                     }
                     if let Some(root) = typed_slot_root(global_slots, &def.slot_types, idx) {
-                        visit_root(root);
+                        visit_root(
+                            root,
+                            VmRootSource::Global {
+                                definition: snapshot.global_def_cursor,
+                                slot: idx,
+                            },
+                        );
                     }
                     snapshot.global_slot_cursor += 1;
                     work += SLOT_BYTES;
                 }
                 VmRootScanStage::Fibers => {
+                    let active_fiber_id = active_fiber.map(|(fiber, _)| fiber.id);
                     let Some(fiber_idx) =
-                        selected_fiber_index(snapshot, dirty_fibers, fibers.len())
+                        selected_fiber_index(snapshot, dirty_fibers, fibers.len(), active_fiber_id)
                     else {
                         snapshot.stage = VmRootScanStage::IoStaging;
                         continue;
                     };
-                    if fiber_idx >= fibers.len() {
+                    let (fiber, frame_limit) = if let Some(fiber) = fibers.get(fiber_idx) {
+                        (fiber.as_ref(), fiber.frames.len())
+                    } else if fiber_idx == fibers.len() {
+                        let Some((fiber, frame_limit)) = active_fiber else {
+                            if work >= limit_bytes {
+                                return GcRootScanChunk::pending(work);
+                            }
+                            snapshot.fiber_source_cursor += 1;
+                            work += SLOT_BYTES;
+                            continue;
+                        };
+                        (fiber, frame_limit.min(fiber.frames.len()))
+                    } else {
                         if work >= limit_bytes {
                             return GcRootScanChunk::pending(work);
                         }
@@ -535,8 +629,7 @@ where
                         reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Defers);
                         work += SLOT_BYTES;
                         continue;
-                    }
-                    let fiber = &fibers[fiber_idx];
+                    };
                     if fiber.state.is_dead() {
                         if work >= limit_bytes {
                             return GcRootScanChunk::pending(work);
@@ -548,7 +641,11 @@ where
                         work += SLOT_BYTES;
                         continue;
                     }
-                    if let Some(frame) = fiber.frames.get(snapshot.fiber_frame_cursor) {
+                    if snapshot.fiber_frame_cursor < frame_limit {
+                        let frame = fiber
+                            .frames
+                            .get(snapshot.fiber_frame_cursor)
+                            .expect("active fiber frame limit was clamped to frame storage");
                         let func = functions.get(frame.func_id as usize).unwrap_or_else(|| {
                             panic!(
                                 "fiber root frame references missing function: fiber={} frame={} func_id={} functions={}",
@@ -586,7 +683,16 @@ where
                             let stack_slots = &fiber.stack[frame.bp..frame.bp + scan_slots];
                             if let Some(root) = typed_slot_root(stack_slots, &func.slot_types, idx)
                             {
-                                visit_root(root);
+                                visit_root(
+                                    root,
+                                    VmRootSource::FiberFrame {
+                                        fiber: fiber.id,
+                                        frame: snapshot.fiber_frame_cursor,
+                                        func_id: frame.func_id,
+                                        pc: frame.pc,
+                                        slot: idx,
+                                    },
+                                );
                             }
                             snapshot.fiber_slot_cursor += 1;
                             work += SLOT_BYTES;
@@ -603,10 +709,17 @@ where
                         continue;
                     }
 
+                    let aux_source = VmRootSource::FiberAux {
+                        fiber: fiber.id,
+                        stage: snapshot.fiber_aux_stage,
+                        outer: snapshot.fiber_aux_outer_cursor,
+                        inner: snapshot.fiber_aux_inner_cursor,
+                        slot: snapshot.fiber_aux_slot_cursor,
+                    };
                     match scan_fiber_aux_root(snapshot, fiber, work < limit_bytes) {
                         AuxRootScanStep::Consumed(root) => {
                             if let Some(root) = root {
-                                visit_root(root);
+                                visit_root(root, aux_source);
                             }
                             work += SLOT_BYTES;
                         }
@@ -635,7 +748,7 @@ where
                     }
                     if let Some(root) = *root {
                         if !root.is_null() {
-                            visit_root(root);
+                            visit_root(root, VmRootSource::IoStaging(snapshot.io_staging_cursor));
                         }
                     }
                     snapshot.io_staging_cursor += 1;
@@ -649,7 +762,7 @@ where
                     if work >= limit_bytes {
                         return GcRootScanChunk::pending(work);
                     }
-                    visit_root(root);
+                    visit_root(root, VmRootSource::Sentinel(snapshot.sentinel_cursor));
                     snapshot.sentinel_cursor += 1;
                     work += SLOT_BYTES;
                 }
@@ -663,7 +776,7 @@ where
                         return GcRootScanChunk::pending(work);
                     }
                     if !root.is_null() {
-                        visit_root(root);
+                        visit_root(root, VmRootSource::Endpoint(snapshot.endpoint_cursor));
                     }
                     snapshot.endpoint_cursor += 1;
                     work += SLOT_BYTES;
@@ -905,16 +1018,205 @@ impl Vm {
         work_unit_limit: Option<usize>,
         explicit: bool,
     ) {
+        if let Err(error) = self.gc_step_with_root_source(
+            mutated_fiber,
+            work_unit_limit,
+            explicit,
+            None,
+            |_gc, _kind, _limit| GcRootScanChunk::complete(0),
+        ) {
+            panic!("invalid VM GC root: {error}");
+        }
+    }
+
+    /// Run an incremental collector slice while the active JIT frame chain is
+    /// paused at an exact stack map. Any root pass started by the collector is
+    /// completed before native execution resumes, so callback-local machine
+    /// addresses never escape their safepoint lifetime.
+    #[cfg(feature = "jit")]
+    pub(crate) unsafe fn gc_step_while_native(
+        &mut self,
+        active_fiber: &Fiber,
+        ctx: *mut JitContext,
+        native_frame: *mut JitNativeFrame,
+    ) -> Result<(), vo_jit::JitError> {
+        const MAX_NATIVE_FRAMES_PER_POLL: usize = 256;
+        const MAX_NATIVE_ROOTS_PER_POLL: usize = 16 * 1024;
+
+        let manager = self.jit_manager().ok_or_else(|| {
+            vo_jit::JitError::Internal("GC safepoint reached without a JIT manager".to_string())
+        })?;
+        let validation = unsafe {
+            manager.visit_native_roots(
+                native_frame,
+                ctx,
+                MAX_NATIVE_FRAMES_PER_POLL,
+                MAX_NATIVE_ROOTS_PER_POLL,
+                |root: *mut u64| {
+                    core::hint::black_box(root.read());
+                },
+            )
+        }?;
+        if !validation.complete {
+            return Err(vo_jit::JitError::Internal(
+                "native root map exceeds the GC safepoint scan budget".to_string(),
+            ));
+        }
+
+        let manager_ptr = manager as *const JitManager;
+        let active_frame_limit = active_fiber.frames.len().saturating_sub(1);
+        self.state.mark_gc_all_roots_dirty();
+
+        let mut cursor_kind = None;
+        let mut cursor = NativeRootScanCursor::new(native_frame, ctx);
+        let mut scan_error = None;
+        loop {
+            self.gc_step_with_root_source(
+                None,
+                None,
+                true,
+                Some((active_fiber, active_frame_limit)),
+                |gc, kind, limit| {
+                    if cursor_kind != Some(kind) {
+                        cursor_kind = Some(kind);
+                        cursor = NativeRootScanCursor::new(native_frame, ctx);
+                    }
+                    if scan_error.is_some() {
+                        return GcRootScanChunk::pending(SLOT_BYTES.min(limit));
+                    }
+                    let manager = unsafe { &*manager_ptr };
+                    let mut invalid_root = None;
+                    match unsafe {
+                        manager.visit_native_roots_chunk(
+                            &mut cursor,
+                            MAX_NATIVE_FRAMES_PER_POLL,
+                            MAX_NATIVE_ROOTS_PER_POLL,
+                            limit / SLOT_BYTES,
+                            |root: *mut u64| {
+                                let raw = root.read();
+                                if raw == 0 || invalid_root.is_some() {
+                                    return;
+                                }
+                                if gc.try_mark_gray(raw as GcRef).is_err() {
+                                    invalid_root = Some(vo_jit::JitError::Internal(format!(
+                                        "native stack map exposed invalid GC root {raw:#x}"
+                                    )));
+                                }
+                            },
+                        )
+                    } {
+                        Ok(chunk) => {
+                            if let Some(error) = invalid_root {
+                                scan_error = Some(error);
+                                GcRootScanChunk::pending(SLOT_BYTES.min(limit))
+                            } else {
+                                GcRootScanChunk {
+                                    done: chunk.done,
+                                    work_bytes: chunk.work_slots.saturating_mul(SLOT_BYTES),
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            scan_error = Some(error);
+                            GcRootScanChunk::pending(SLOT_BYTES.min(limit))
+                        }
+                    }
+                },
+            )
+            .map_err(vo_jit::JitError::Internal)?;
+            if let Some(error) = scan_error.take() {
+                return Err(error);
+            }
+            if !self.state.gc.root_scan_pending() && self.state.gc_root_scan.is_none() {
+                break;
+            }
+        }
+
+        if self.state.gc_verify_after_step {
+            let verify_root_colors = self.state.gc_root_colors_are_verifiable();
+            let mut root_error = None;
+            let manager = self
+                .jit_manager()
+                .expect("validated JIT callback must retain its manager");
+            unsafe {
+                manager.visit_native_roots(
+                    native_frame,
+                    ctx,
+                    MAX_NATIVE_FRAMES_PER_POLL,
+                    MAX_NATIVE_ROOTS_PER_POLL,
+                    |slot: *mut u64| {
+                        if root_error.is_some() {
+                            return;
+                        }
+                        let root = slot.read() as GcRef;
+                        if root.is_null() {
+                            return;
+                        }
+                        let Some(root) = self.state.gc.canonicalize_ref(root) else {
+                            root_error =
+                                Some("native root does not reference a live GC object".to_string());
+                            return;
+                        };
+                        let dangling_white = verify_root_colors
+                            && match self.state.gc.state() {
+                                GcState::Pause | GcState::Reclaim => false,
+                                GcState::Sweep => self.state.gc.is_dead_white(root),
+                                _ => self.state.gc.is_white(root),
+                            };
+                        if dangling_white {
+                            root_error = Some(format!(
+                                "native root references an unreachable white object during {:?}",
+                                self.state.gc.state()
+                            ));
+                        }
+                    },
+                )
+            }?;
+            if let Some(error) = root_error {
+                panic!("GC verification failed: {error}");
+            }
+            let loaded_module = self
+                .module
+                .as_deref()
+                .expect("native GC safepoint requires a loaded module");
+            if let Err(error) = self.verify_precise_gc_after_step(
+                loaded_module,
+                Some((active_fiber, active_frame_limit)),
+            ) {
+                panic!("GC verification failed: {error}");
+            }
+        }
+
+        self.jit_manager_mut()
+            .expect("validated JIT callback must retain its manager")
+            .record_native_root_scan(NativeRootScanStats {
+                complete: true,
+                ..validation
+            });
+        Ok(())
+    }
+
+    fn gc_step_with_root_source<F>(
+        &mut self,
+        mutated_fiber: Option<FiberId>,
+        work_unit_limit: Option<usize>,
+        explicit: bool,
+        active_fiber: Option<(&Fiber, usize)>,
+        mut scan_extra_roots: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&mut vo_runtime::gc::Gc, GcRootScanKind, usize) -> GcRootScanChunk,
+    {
         self.assert_no_pending_runtime_transitions_for_gc();
         if !explicit && !self.state.gc.should_step() {
-            return;
+            return Ok(());
         }
         if let Some(fiber_id) = mutated_fiber {
             self.mark_gc_fiber_roots_dirty(fiber_id);
         }
         let module = match &self.module {
             Some(module) => module.as_ref() as *const LoadedModule,
-            None => return,
+            None => return Ok(()),
         };
         // SAFETY: Split borrow via raw pointer. gc is exclusively accessed by step(),
         // while scan_roots/scan_object/finalize read other fields (globals, fibers, etc).
@@ -937,15 +1239,19 @@ impl Vm {
         let dirty_epoch = self.state.gc_dirty_epoch;
         let dirty_fiber_count = self.state.gc_dirty_fibers.len();
         let dirty_fibers_ptr = &self.state.gc_dirty_fibers as *const Vec<u32>;
-        let root_state =
-            if gc_state_before == GcState::Sweep && !dirty_all && dirty_fiber_count == 0 {
-                GcRootState::StableSinceLastScan
-            } else {
-                GcRootState::MayHaveChanged
-            };
+        let root_state = if active_fiber.is_none()
+            && gc_state_before == GcState::Sweep
+            && !dirty_all
+            && dirty_fiber_count == 0
+        {
+            GcRootState::StableSinceLastScan
+        } else {
+            GcRootState::MayHaveChanged
+        };
         let mut full_roots_scanned = false;
         let mut dirty_roots_scanned = false;
         let mut completed_root_scan: Option<VmRootScanCompletion> = None;
+        let mut invalid_vm_root = None;
         let func_closure_scan_layout =
             |func_id: u32| -> vo_runtime::gc_types::ClosureScanLayout<'_> {
                 let func = module_ref
@@ -985,23 +1291,45 @@ impl Vm {
                 root_state,
                 work_unit_limit.unwrap_or(usize::MAX / SLOT_BYTES),
                 |gc, kind, limit| {
-                    scan_vm_root_snapshot_chunk(
+                    let extra = scan_extra_roots(gc, kind, limit);
+                    if !extra.done {
+                        return extra;
+                    }
+                    if extra.work_bytes >= limit {
+                        return GcRootScanChunk::pending(extra.work_bytes);
+                    }
+                    let roots = scan_vm_root_snapshot_chunk(
                         &mut *root_scan_ptr,
                         kind,
-                        limit,
+                        limit.saturating_sub(extra.work_bytes),
                         dirty_epoch,
                         dirty_all,
                         &*dirty_fibers_ptr,
                         globals,
                         &module_ref.globals,
                         fibers,
+                        active_fiber,
                         &module_ref.functions,
                         io_staging_roots,
                         sentinel_errors,
                         endpoint_registry,
                         &mut completed_root_scan,
-                        |root| gc.mark_gray(root),
-                    )
+                        |root, source| {
+                            if invalid_vm_root.is_some() {
+                                return;
+                            }
+                            if gc.try_mark_gray(root).is_err() {
+                                invalid_vm_root = Some(format!(
+                                    "{source} exposed invalid GC root {:#x}",
+                                    root as usize
+                                ));
+                            }
+                        },
+                    );
+                    GcRootScanChunk {
+                        done: roots.done,
+                        work_bytes: extra.work_bytes.saturating_add(roots.work_bytes),
+                    }
                 },
                 |gc, obj, cursor, limit| {
                     vo_runtime::gc_types::scan_object_chunk_with_context(
@@ -1018,6 +1346,11 @@ impl Vm {
                 },
             )
         };
+
+        if let Some(error) = invalid_vm_root {
+            self.state.gc_root_scan = None;
+            return Err(error);
+        }
 
         if let Some(completion) = &completed_root_scan {
             match completion.mode {
@@ -1053,14 +1386,19 @@ impl Vm {
             }
         }
 
-        if self.state.gc_verify_after_step {
-            if let Err(err) = self.verify_precise_gc_after_step(loaded_module) {
+        if self.state.gc_verify_after_step && active_fiber.is_none() {
+            if let Err(err) = self.verify_precise_gc_after_step(loaded_module, None) {
                 panic!("GC verification failed: {err}");
             }
         }
+        Ok(())
     }
 
-    fn verify_precise_gc_after_step(&self, loaded_module: &LoadedModule) -> Result<(), String> {
+    fn verify_precise_gc_after_step(
+        &self,
+        loaded_module: &LoadedModule,
+        active_fiber: Option<(&Fiber, usize)>,
+    ) -> Result<(), String> {
         let module = loaded_module.module();
         #[cfg(feature = "std")]
         let io_staging_roots = self.state.io.staged_gc_root_slots();
@@ -1081,19 +1419,19 @@ impl Vm {
                 &self.state.globals,
                 &module.globals,
                 &self.scheduler.fibers,
+                active_fiber,
                 &module.functions,
                 io_staging_roots,
                 &self.state.sentinel_errors,
                 &self.state.endpoint_registry,
                 &mut completion,
-                |root| {
+                |root, source| {
                     if root_error.is_some() || root.is_null() {
                         return;
                     }
                     let Some(canonical_root) = self.state.gc.canonicalize_ref(root) else {
                         root_error = Some(format!(
-                            "root {:?} does not reference a live GC object",
-                            root
+                            "root {root:?} from {source} does not reference a live GC object"
                         ));
                         return;
                     };
@@ -1105,10 +1443,8 @@ impl Vm {
                         };
                     if dangling_white {
                         root_error = Some(format!(
-                            "root {:?} references unreachable white object {:?} during {:?}",
-                            root,
-                            canonical_root,
-                            self.state.gc.state()
+                            "root {root:?} from {source} references unreachable white object {canonical_root:?} during {:?}",
+                            self.state.gc.state(),
                         ));
                     }
                 },

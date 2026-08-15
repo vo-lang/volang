@@ -562,11 +562,13 @@ use vo_runtime::itab::{validate_interface_itab, ItabCache};
 
 #[cfg(feature = "jit")]
 mod jit_mgr;
+#[cfg(feature = "jit")]
+pub(crate) use jit_mgr::{JitManager, NativeRootScanCursor, NativeRootScanStats};
 
 #[cfg(feature = "jit")]
 pub use jit_mgr::JitConfig;
 #[cfg(feature = "jit")]
-use jit_mgr::{JitManager, SharedJitCode};
+use jit_mgr::SharedJitCode;
 
 #[cfg(feature = "jit")]
 #[derive(Default)]
@@ -673,6 +675,17 @@ impl VmJitState {
             Self::Strict(manager) => manager.init_verified(module),
             Self::BestEffort(manager) => manager.init_best_effort(module),
         }
+    }
+}
+
+#[cfg(feature = "jit")]
+impl Vm {
+    pub(crate) fn jit_manager(&self) -> Option<&JitManager> {
+        self.jit.manager()
+    }
+
+    pub(crate) fn jit_manager_mut(&mut self) -> Option<&mut JitManager> {
+        self.jit.manager_mut()
     }
 }
 

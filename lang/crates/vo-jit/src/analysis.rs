@@ -28,7 +28,9 @@ pub struct FunctionAnalysis {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NativeRootLiveness<'a> {
     pub direct_roots: &'a [u16],
-    pub has_conditional_roots: bool,
+    /// Header slots of live two-word interface values. The payload immediately
+    /// follows each header and is a managed root only when the header says so.
+    pub conditional_roots: &'a [u16],
 }
 
 impl FunctionAnalysis {
@@ -95,7 +97,7 @@ impl FunctionAnalysis {
                 .memory_sync()
             {
                 MemorySyncEffect::None => u16::MAX,
-                MemorySyncEffect::From(base) => base,
+                MemorySyncEffect::AliasedFrom(base) | MemorySyncEffect::From(base) => base,
                 MemorySyncEffect::All => 0,
             };
             memory_only_start = memory_only_start.min(start);
@@ -155,7 +157,7 @@ impl FunctionAnalysis {
         let state = *self.ir.frame_state(pc)?;
         Some(NativeRootLiveness {
             direct_roots: self.ir.direct_roots(state),
-            has_conditional_roots: state.has_conditional_roots,
+            conditional_roots: self.ir.conditional_roots(state),
         })
     }
 
@@ -223,7 +225,7 @@ fn instruction_memory_start(
             )
         })? {
             MemorySyncEffect::None => u16::MAX,
-            MemorySyncEffect::From(base) => base,
+            MemorySyncEffect::AliasedFrom(base) | MemorySyncEffect::From(base) => base,
             MemorySyncEffect::All => 0,
         },
     )

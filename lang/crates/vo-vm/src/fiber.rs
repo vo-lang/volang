@@ -1018,10 +1018,6 @@ pub struct Fiber {
     /// Reused wide argument/result frame for JIT-to-extern callbacks.
     #[cfg(feature = "jit")]
     pub(crate) jit_extern_scratch: Vec<u64>,
-    /// Exact allocation site allowed to retry once after a GC safepoint side
-    /// exit. The next JIT context takes ownership of this credential.
-    #[cfg(feature = "jit")]
-    pub(crate) jit_gc_poll_resume: Option<(u32, u32)>,
     /// Pending remote recv response data from home island.
     /// Set by handle_chan_response_command before waking fiber.
     /// Consumed by ChanRecv handler on retry.
@@ -1159,8 +1155,6 @@ impl Fiber {
             jit_return_scratch: Vec::new(),
             #[cfg(feature = "jit")]
             jit_extern_scratch: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_gc_poll_resume: None,
             remote_recv_response: None,
             remote_send_closed: false,
             remote_endpoint_wait: None,
@@ -1382,7 +1376,6 @@ impl Fiber {
             self.jit_is_user_panic = false;
             self.jit_panic_msg = InterfaceSlot::default();
             self.jit_infra_error_message.clear();
-            self.jit_gc_poll_resume = None;
         }
         self.remote_recv_response = None;
         self.remote_send_closed = false;

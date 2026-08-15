@@ -533,6 +533,26 @@ mod tests {
     }
 
     #[test]
+    fn memory_effect_distinguishes_dynamic_aliases_from_bounded_values() {
+        let slot_get = Instruction::with_flags(Opcode::SlotGetN, 0, 20, 2, 7);
+        let queue_send = Instruction::new(Opcode::QueueSend, 1, 9, 0);
+        let append = Instruction::new(Opcode::SliceAppend, 0, 1, 4);
+
+        assert_eq!(
+            try_memory_sync_effect(&slot_get).unwrap(),
+            MemorySyncEffect::AliasedFrom(2)
+        );
+        assert_eq!(
+            try_memory_sync_effect(&queue_send).unwrap(),
+            MemorySyncEffect::From(9)
+        );
+        assert_eq!(
+            try_memory_sync_effect(&append).unwrap(),
+            MemorySyncEffect::From(5)
+        );
+    }
+
+    #[test]
     fn slice_append_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::SliceAppend, 0, 1, 2, 10);
         let meta = InstructionMetadata::ElemLayout {

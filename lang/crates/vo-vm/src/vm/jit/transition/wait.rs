@@ -199,29 +199,6 @@ pub(super) fn handle_runtime_transition(
     )
 }
 
-pub(super) fn handle_gc_safepoint_transition(
-    vm: &mut Vm,
-    fiber: &mut Fiber,
-    module: &Module,
-    ctx: &JitContextWrapper,
-) -> JitBridgeTransition {
-    let transition = materialize_at_pc_and_record(
-        vm,
-        fiber,
-        module,
-        ctx.call_resume_pc(),
-        JitSideExitReason::GcSafepoint,
-        JitBridgeTransition::TimesliceExpired,
-    );
-    if matches!(transition, JitBridgeTransition::TimesliceExpired)
-        && ctx.ctx.gc_poll_resume_armed != 0
-    {
-        fiber.jit_gc_poll_resume =
-            Some((ctx.ctx.gc_poll_resume_func_id, ctx.ctx.gc_poll_resume_pc));
-    }
-    transition
-}
-
 pub(super) fn handle_extern_suspend_transition(
     mode: JitBridgeMode,
     vm: &mut Vm,

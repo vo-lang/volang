@@ -259,6 +259,7 @@ pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
             .call_indirect(jit_func_sig, jit_func_ptr, &args);
         if attach_roots {
             emitter.attach_native_roots(call, native_roots);
+            emitter.clear_dead_native_roots();
         }
         emitter.builder().inst_results(call)[0]
     };
@@ -321,6 +322,7 @@ pub(super) fn emit_effect_aware_direct_jit_call<'a, E: IrEmitter<'a>>(
         let call = emitter.builder().ins().call(jit_func_ref, &args);
         if attach_roots {
             emitter.attach_native_roots(call, native_roots);
+            emitter.clear_dead_native_roots();
         }
         emitter.builder().inst_results(call)[0]
     };
