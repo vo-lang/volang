@@ -108,11 +108,13 @@ pub(crate) trait CompileDriver {
     fn finish_fallthrough(&mut self, block_terminated: bool) -> Result<(), JitError>;
 }
 
-/// Maximum bytecode span charged by one native scheduling checkpoint.
+/// Maximum straight-line bytecode span between native scheduling checkpoints.
 ///
-/// Artificial region boundaries keep long straight-line native code
-/// preemptible while avoiding a budget load/branch/store on every instruction.
-pub(crate) const EXECUTION_BUDGET_REGION_INSTRUCTIONS: usize = 64;
+/// Natural loops poll at their backedge target. A wider artificial interval is
+/// enough for acyclic code because the VM scheduling quantum is itself much
+/// larger, while keeping poll and deoptimization state out of ordinary basic
+/// blocks.
+pub(crate) const EXECUTION_BUDGET_REGION_INSTRUCTIONS: usize = 256;
 
 #[inline]
 fn instruction_is_executable(
@@ -165,63 +167,94 @@ pub(crate) fn execution_budget_regions(
                     inst.imm32(),
                     inst.opcode(),
                 )?;
-                if policy.compiled_target(target)
+                if target <= pc
+                    && policy.compiled_target(target)
                     && (!executable_only || instruction_is_executable(ir, optimized, target))
                 {
                     starts.insert(target);
-                }
-                if pc + 1 < range.end
-                    && (!executable_only || instruction_is_executable(ir, optimized, pc + 1))
-                {
-                    starts.insert(pc + 1);
                 }
             }
             Opcode::ForLoop => {
                 let target = super::checked_forloop_target(policy.code_len(), pc, &inst)?;
-                if policy.compiled_target(target)
+                if target <= pc
+                    && policy.compiled_target(target)
                     && (!executable_only || instruction_is_executable(ir, optimized, target))
                 {
                     starts.insert(target);
-                }
-                if pc + 1 < range.end
-                    && (!executable_only || instruction_is_executable(ir, optimized, pc + 1))
-                {
-                    starts.insert(pc + 1);
-                }
-            }
-            Opcode::Return => {
-                if pc + 1 < range.end
-                    && (!executable_only || instruction_is_executable(ir, optimized, pc + 1))
-                {
-                    starts.insert(pc + 1);
                 }
             }
             _ => {}
         }
     }
 
-    let mut regions = BTreeMap::new();
-    let mut starts = starts.into_iter().peekable();
-    while let Some(start) = starts.next() {
-        let end = starts.peek().copied().unwrap_or(range.end);
-        let base_cost = if executable_only {
-            (start..end)
-                .filter(|&pc| instruction_is_executable(ir, optimized, pc))
-                .count()
-                .try_into()
-                .unwrap_or(u32::MAX)
-        } else {
-            end.saturating_sub(start).try_into().unwrap_or(u32::MAX)
-        };
-        let inline_cost = (start..end)
-            .map(|pc| optimized.map_or(0, |graph| graph.inline_expansion_cost(pc)))
-            .fold(0_u32, u32::saturating_add);
-        let cost = base_cost.saturating_add(inline_cost);
-        if cost > 0 {
-            regions.insert(start, cost);
+    // Once every backward-edge target is a checkpoint, all paths inside one
+    // region move forward in bytecode order. A reverse pass therefore computes
+    // the longest charge to the next checkpoint without recursion or a second
+    // graph representation.
+    let mut cost_to_checkpoint = vec![0_u32; ir.instruction_count()];
+    for pc in range.clone().rev() {
+        if starts.contains(&pc)
+            || (executable_only && !instruction_is_executable(ir, optimized, pc))
+        {
+            continue;
         }
+        let mut tail = 0;
+        for successor in instruction_budget_successors(ir, policy, executable_only, optimized, pc)?
+        {
+            if successor <= pc && !starts.contains(&successor) {
+                return Err(JitError::Internal(format!(
+                    "native execution-budget region contains an uncut backedge {pc} -> {successor}"
+                )));
+            }
+            if !starts.contains(&successor) {
+                tail = tail.max(cost_to_checkpoint[successor]);
+            }
+        }
+        cost_to_checkpoint[pc] = instruction_budget_cost(optimized, pc).saturating_add(tail);
+    }
+
+    let mut regions = BTreeMap::new();
+    for &start in &starts {
+        let mut tail = 0;
+        for successor in
+            instruction_budget_successors(ir, policy, executable_only, optimized, start)?
+        {
+            if !starts.contains(&successor) {
+                tail = tail.max(cost_to_checkpoint[successor]);
+            }
+        }
+        let cost = instruction_budget_cost(optimized, start).saturating_add(tail);
+        regions.insert(start, cost.max(1));
     }
     Ok(regions)
+}
+
+fn instruction_budget_cost(
+    optimized: Option<&crate::optimizer::OptimizedFunction>,
+    pc: usize,
+) -> u32 {
+    1_u32.saturating_add(optimized.map_or(0, |graph| graph.inline_expansion_cost(pc)))
+}
+
+fn instruction_budget_successors(
+    ir: &FunctionIr,
+    policy: ControlPolicy,
+    executable_only: bool,
+    optimized: Option<&crate::optimizer::OptimizedFunction>,
+    pc: usize,
+) -> Result<Vec<usize>, JitError> {
+    let instruction = ir
+        .instruction(pc)
+        .ok_or(JitError::InvalidOsrTarget(pc))?
+        .source();
+    let mut successors = crate::ir::instruction_successors(pc, instruction, policy.code_len())?;
+    successors.retain(|&successor| {
+        policy.compiled_target(successor)
+            && (!executable_only || instruction_is_executable(ir, optimized, successor))
+    });
+    successors.sort_unstable();
+    successors.dedup();
+    Ok(successors)
 }
 
 pub(crate) fn prepare_control_flow(
@@ -408,18 +441,20 @@ mod tests {
 
     #[test]
     fn execution_budget_regions_split_long_straight_line_code() {
-        let code = vec![Instruction::new(Opcode::LoadInt, 0, 0, 0); 130];
+        let region = EXECUTION_BUDGET_REGION_INSTRUCTIONS;
+        let len = region * 2 + 2;
+        let code = vec![Instruction::new(Opcode::LoadInt, 0, 0, 0); len];
         let ir = test_ir(code);
-        let regions = execution_budget_regions(&ir, ControlPolicy::full_function(130), false, None)
+        let regions = execution_budget_regions(&ir, ControlPolicy::full_function(len), false, None)
             .expect("budget regions");
 
-        assert_eq!(regions.get(&0), Some(&64));
-        assert_eq!(regions.get(&64), Some(&64));
-        assert_eq!(regions.get(&128), Some(&2));
+        assert_eq!(regions.get(&0), Some(&(region as u32)));
+        assert_eq!(regions.get(&region), Some(&(region as u32)));
+        assert_eq!(regions.get(&(region * 2)), Some(&2));
     }
 
     #[test]
-    fn execution_budget_regions_start_at_branch_targets_and_fallthroughs() {
+    fn execution_budget_regions_charge_the_longest_acyclic_branch_path() {
         let code = vec![
             Instruction::new(Opcode::LoadInt, 0, 0, 0),
             Instruction::new(Opcode::JumpIf, 0, 2, 0),
@@ -431,9 +466,23 @@ mod tests {
         let regions = execution_budget_regions(&ir, ControlPolicy::full_function(len), false, None)
             .expect("budget regions");
 
-        assert_eq!(regions.get(&0), Some(&2));
-        assert_eq!(regions.get(&2), Some(&1));
-        assert_eq!(regions.get(&3), Some(&1));
+        assert_eq!(regions, BTreeMap::from([(0, 4)]));
+    }
+
+    #[test]
+    fn execution_budget_regions_poll_once_per_natural_loop_iteration() {
+        let code = vec![
+            Instruction::new(Opcode::LoadInt, 0, 0, 0),
+            Instruction::new(Opcode::AddI, 0, 0, 0),
+            Instruction::new(Opcode::JumpIf, 0, u16::MAX, u16::MAX),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        let len = code.len();
+        let ir = test_ir(code);
+        let regions = execution_budget_regions(&ir, ControlPolicy::full_function(len), false, None)
+            .expect("budget regions");
+
+        assert_eq!(regions, BTreeMap::from([(0, 1), (1, 3)]));
     }
 
     #[test]

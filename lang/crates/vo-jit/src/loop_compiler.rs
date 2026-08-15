@@ -698,13 +698,17 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
         .load_i64(&mut self.builder, locals_ptr, slot)
     }
     fn write_var(&mut self, slot: u16, val: Value) {
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        let ir_value = crate::compile_common::CompilerStorage::for_function(
+        let storage = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
-        )
-        .store_i64(&mut self.builder, locals_ptr, slot, val);
+        );
+        let ir_value = if slot < self.core.memory_only_start {
+            storage.store_ssa_i64(&mut self.builder, slot, val)
+        } else {
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+            storage.store_memory_i64(&mut self.builder, locals_ptr, slot, val)
+        };
         self.core.record_output_value(slot, ir_value);
         self.core.checked_non_nil.remove(&slot);
     }
@@ -737,13 +741,17 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
         .load_f64(&mut self.builder, locals_ptr, slot)
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        let ir_value = crate::compile_common::CompilerStorage::for_function(
+        let storage = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
-        )
-        .store_f64(&mut self.builder, locals_ptr, slot, val);
+        );
+        let ir_value = if slot < self.core.memory_only_start {
+            storage.store_ssa_f64(&mut self.builder, slot, val)
+        } else {
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+            storage.store_memory_f64(&mut self.builder, locals_ptr, slot, val)
+        };
         self.core.record_output_value(slot, ir_value);
         self.core.checked_non_nil.remove(&slot);
     }

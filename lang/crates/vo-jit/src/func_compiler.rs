@@ -916,13 +916,22 @@ impl<'a> FunctionCompiler<'a> {
     /// SSA-prefix slots update their variable and reach memory at frame-sync
     /// boundaries. Memory-suffix slots write their authoritative frame cell.
     fn store_local(&mut self, slot: u16, val: Value) {
-        let args_ptr = self.current_memory_base_ptr();
-        let ir_value = crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .store_i64(&mut self.builder, args_ptr, slot, val);
+        let ir_value = if slot < self.core.memory_only_start {
+            let storage = crate::compile_common::CompilerStorage::for_function(
+                self.core.func_def,
+                &self.core.vars,
+                self.core.memory_only_start,
+            );
+            storage.store_ssa_i64(&mut self.builder, slot, val)
+        } else {
+            let args_ptr = self.current_memory_base_ptr();
+            let storage = crate::compile_common::CompilerStorage::for_function(
+                self.core.func_def,
+                &self.core.vars,
+                self.core.memory_only_start,
+            );
+            storage.store_memory_i64(&mut self.builder, args_ptr, slot, val)
+        };
         self.core.record_output_value(slot, ir_value);
         // Writes invalidate local compile-time facts for the slot.
         self.core.checked_non_nil.remove(&slot);
@@ -1293,13 +1302,22 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
         .load_f64(&mut self.builder, args_ptr, slot)
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        let args_ptr = self.current_memory_base_ptr();
-        let ir_value = crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .store_f64(&mut self.builder, args_ptr, slot, val);
+        let ir_value = if slot < self.core.memory_only_start {
+            let storage = crate::compile_common::CompilerStorage::for_function(
+                self.core.func_def,
+                &self.core.vars,
+                self.core.memory_only_start,
+            );
+            storage.store_ssa_f64(&mut self.builder, slot, val)
+        } else {
+            let args_ptr = self.current_memory_base_ptr();
+            let storage = crate::compile_common::CompilerStorage::for_function(
+                self.core.func_def,
+                &self.core.vars,
+                self.core.memory_only_start,
+            );
+            storage.store_memory_f64(&mut self.builder, args_ptr, slot, val)
+        };
         self.core.record_output_value(slot, ir_value);
         self.core.checked_non_nil.remove(&slot);
     }

@@ -603,13 +603,14 @@ fn optimizing_scalar_replacement_flows_through_a_cfg_merge() {
 
 #[test]
 fn scalar_replacement_materializes_before_a_scheduler_exit() {
+    let region = crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS;
     let mut code = vec![
         Instruction::new(Opcode::LoadConst, 0, 0, 0),
         Instruction::new(Opcode::PtrNew, 1, 0, 0),
         Instruction::new(Opcode::LoadInt, 2, 42, 0),
         Instruction::new(Opcode::PtrSet, 1, 0, 2),
     ];
-    code.resize(129, Instruction::new(Opcode::Hint, 0, 0, 0));
+    code.resize(region + 1, Instruction::new(Opcode::Hint, 0, 0, 0));
     code.push(Instruction::new(Opcode::Return, 0, 0, 0));
     let mut function = make_func_with_slot_types_and_sig(
         code,
@@ -653,12 +654,12 @@ fn scalar_replacement_materializes_before_a_scheduler_exit() {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut frame);
     ctx.gc = &mut gc;
-    ctx.execution_budget = 64;
+    ctx.execution_budget = region as u32;
     let result = unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
-    assert_eq!(ctx.call_resume_pc, 64);
+    assert_eq!(ctx.call_resume_pc, region as u32);
     let object = frame[1] as vo_runtime::gc::GcRef;
     assert!(!object.is_null());
     assert_eq!(unsafe { vo_runtime::gc::Gc::read_slot(object, 0) }, 42);
@@ -1756,7 +1757,8 @@ fn native_backedge_exhausts_budget_through_scheduler_yield_contract() {
 
 #[test]
 fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
-    let mut code = vec![Instruction::new(Opcode::LoadInt, 0, 7, 0); 129];
+    let region = crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS;
+    let mut code = vec![Instruction::new(Opcode::LoadInt, 0, 7, 0); region * 2 + 1];
     code.push(Instruction::new(Opcode::Return, 0, 0, 0));
     let func = make_func_with_sig(code, 0, 0, 1, 0);
     let mut module = VoModule::new("native-straight-line-timeslice".into());
@@ -1777,13 +1779,13 @@ fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
-    ctx.execution_budget = 64;
+    ctx.execution_budget = region as u32;
 
     let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
-    assert_eq!(ctx.call_resume_pc, 64);
+    assert_eq!(ctx.call_resume_pc, region as u32);
     assert_eq!(ctx.execution_budget, 0);
 
     extern "C" fn renew_idle_lease(_ctx: *mut JitContext, required_budget: u32) -> u32 {
@@ -1792,7 +1794,7 @@ fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
 
     parts.callbacks.execution_budget_refill_fn = Some(renew_idle_lease);
     let mut ctx = parts.context(&module, &mut args);
-    ctx.execution_budget = 64;
+    ctx.execution_budget = region as u32;
     let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Ok);
@@ -2077,6 +2079,7 @@ fn callback_reload_crosses_the_ssa_memory_boundary() {
 
 #[test]
 fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
+    let region = crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS;
     let high_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS + 43;
     let local_slots = high_slot + 1;
     let mut code = vec![
@@ -2085,7 +2088,7 @@ fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
     ];
     code.extend(std::iter::repeat_n(
         Instruction::new(Opcode::LoadInt, 1, 0, 0),
-        62,
+        region - 2,
     ));
     code.push(Instruction::new(Opcode::Return, 0, 0, 0));
     let func = make_func_with_sig(code, 0, 0, local_slots, 0);
@@ -2108,13 +2111,13 @@ fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut materialized_frame);
-    ctx.execution_budget = 64;
+    ctx.execution_budget = region as u32;
 
     let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut entry_args, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
-    assert_eq!(ctx.call_resume_pc, 64);
+    assert_eq!(ctx.call_resume_pc, region as u32);
     assert_eq!(entry_args[0], 0, "SSA prefix must remain register-backed");
     assert_eq!(materialized_frame[0], 11, "SSA prefix must be spilled");
     assert_eq!(entry_args[usize::from(high_slot)], 22);

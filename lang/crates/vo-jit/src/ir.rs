@@ -1007,7 +1007,7 @@ fn validate_slots(
     Ok(())
 }
 
-fn instruction_successors(
+pub(crate) fn instruction_successors(
     pc: usize,
     instruction: Instruction,
     code_len: usize,

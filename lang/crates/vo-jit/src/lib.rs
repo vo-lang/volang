@@ -1612,6 +1612,29 @@ impl JitCompiler {
         self.finish_translation(frame_budget_result)?;
 
         if self.debug_ir {
+            if tier == JitTier::Optimizing {
+                let optimized = instruction_optimization
+                    .as_deref()
+                    .expect("optimizing tier must carry instruction decisions");
+                let bounds = (0..func.code.len())
+                    .filter(|&pc| {
+                        optimized
+                            .instruction(pc)
+                            .is_some_and(|node| node.bounds_check_elided)
+                    })
+                    .collect::<Vec<_>>();
+                let nil = (0..func.code.len())
+                    .filter(|&pc| {
+                        optimized
+                            .instruction(pc)
+                            .is_some_and(|node| node.nil_check_elided)
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "=== JIT optimization for func_{} {}: bounds={bounds:?} nil={nil:?} ===",
+                    func_id, func.name
+                );
+            }
             eprintln!("=== JIT IR for func_{} {} ===", func_id, func.name);
             eprintln!("{}", self.ctx.func.display());
         }

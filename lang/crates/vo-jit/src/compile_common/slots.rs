@@ -90,22 +90,30 @@ impl<'a> CompilerStorage<'a> {
         )
     }
 
-    pub(crate) fn store_i64(
+    pub(crate) fn store_ssa_i64(
+        self,
+        builder: &mut FunctionBuilder<'_>,
+        slot: u16,
+        val: Value,
+    ) -> Value {
+        debug_assert!(slot < self.memory_only_start);
+        write_ssa_slot_i64(builder, self.vars, self.slot_types, slot, val);
+        if self.is_float_slot(slot) {
+            builder.ins().bitcast(types::F64, MemFlags::new(), val)
+        } else {
+            val
+        }
+    }
+
+    pub(crate) fn store_memory_i64(
         self,
         builder: &mut FunctionBuilder<'_>,
         base_ptr: Value,
         slot: u16,
         val: Value,
     ) -> Value {
-        store_slot_i64_with_storage_policy(
-            builder,
-            self.vars,
-            self.slot_types,
-            base_ptr,
-            slot,
-            val,
-            self.memory_only_start,
-        );
+        debug_assert!(slot >= self.memory_only_start);
+        store_memory_slot(builder, base_ptr, slot, val);
         if self.is_float_slot(slot) {
             builder.ins().bitcast(types::F64, MemFlags::new(), val)
         } else {
@@ -129,22 +137,30 @@ impl<'a> CompilerStorage<'a> {
         )
     }
 
-    pub(crate) fn store_f64(
+    pub(crate) fn store_ssa_f64(
+        self,
+        builder: &mut FunctionBuilder<'_>,
+        slot: u16,
+        val: Value,
+    ) -> Value {
+        debug_assert!(slot < self.memory_only_start);
+        write_ssa_slot_f64(builder, self.vars, self.slot_types, slot, val);
+        if self.is_float_slot(slot) {
+            val
+        } else {
+            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+        }
+    }
+
+    pub(crate) fn store_memory_f64(
         self,
         builder: &mut FunctionBuilder<'_>,
         base_ptr: Value,
         slot: u16,
         val: Value,
     ) -> Value {
-        store_slot_f64_with_storage_policy(
-            builder,
-            self.vars,
-            self.slot_types,
-            base_ptr,
-            slot,
-            val,
-            self.memory_only_start,
-        );
+        debug_assert!(slot >= self.memory_only_start);
+        store_memory_slot(builder, base_ptr, slot, val);
         if self.is_float_slot(slot) {
             val
         } else {
@@ -327,22 +343,6 @@ pub(crate) fn load_slot_i64_with_storage_policy(
     }
 }
 
-pub(crate) fn store_slot_i64_with_storage_policy(
-    builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
-    slot_types: &[SlotType],
-    base_ptr: Value,
-    slot: u16,
-    val: Value,
-    memory_only_start: u16,
-) {
-    if slot < memory_only_start {
-        write_ssa_slot_i64(builder, vars, slot_types, slot, val);
-    } else {
-        store_memory_slot(builder, base_ptr, slot, val);
-    }
-}
-
 pub(crate) fn load_slot_f64_with_storage_policy(
     builder: &mut FunctionBuilder<'_>,
     vars: &[Variable],
@@ -355,22 +355,6 @@ pub(crate) fn load_slot_f64_with_storage_policy(
         read_ssa_slot_f64(builder, vars, slot_types, slot)
     } else {
         load_memory_slot_f64(builder, base_ptr, slot)
-    }
-}
-
-pub(crate) fn store_slot_f64_with_storage_policy(
-    builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
-    slot_types: &[SlotType],
-    base_ptr: Value,
-    slot: u16,
-    val: Value,
-    memory_only_start: u16,
-) {
-    if slot < memory_only_start {
-        write_ssa_slot_f64(builder, vars, slot_types, slot, val);
-    } else {
-        store_memory_slot(builder, base_ptr, slot, val);
     }
 }
 
@@ -445,10 +429,6 @@ mod tests {
 
     #[test]
     fn ssa_prefix_budget_preserves_stricter_alias_boundaries_and_caps_wide_frames() {
-        assert_eq!(
-            usize::from(MAX_SSA_LOCAL_SLOTS),
-            crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS * 4
-        );
         assert_eq!(bounded_memory_only_start(0), 0);
         assert_eq!(bounded_memory_only_start(73), 73);
         assert_eq!(
@@ -515,10 +495,10 @@ mod tests {
         let storage = CompilerStorage::new(&vars, &slot_types, 2);
         let base = builder.ins().iconst(types::I64, 0);
         let raw_float = builder.ins().iconst(types::I64, 0x3ff0_0000_0000_0000);
-        let canonical_float = storage.store_i64(&mut builder, base, 0, raw_float);
+        let canonical_float = storage.store_ssa_i64(&mut builder, 0, raw_float);
         let float_bits = storage.load_i64(&mut builder, base, 0);
         let float_value = builder.ins().f64const(2.0);
-        let canonical_word = storage.store_f64(&mut builder, base, 1, float_value);
+        let canonical_word = storage.store_ssa_f64(&mut builder, 1, float_value);
         let word_as_float = storage.load_f64(&mut builder, base, 1);
 
         assert_eq!(builder.func.dfg.value_type(canonical_float), types::F64);
