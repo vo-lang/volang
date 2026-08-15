@@ -1,5 +1,5 @@
-use vo_runtime::bytecode::FunctionDef;
-use vo_runtime::SlotType;
+use vo_runtime::bytecode::{FunctionDef, InstructionMetadata};
+use vo_runtime::{Instruction, Opcode, SlotType};
 
 pub(super) fn function(local_slots: u16, gc_scan_slots: u16) -> FunctionDef {
     FunctionDef {
@@ -19,8 +19,8 @@ pub(super) fn function(local_slots: u16, gc_scan_slots: u16) -> FunctionDef {
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        code: Vec::new(),
-        instruction_metadata: Vec::new(),
+        code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+        instruction_metadata: vec![InstructionMetadata::None],
         slot_types: vec![SlotType::Value; local_slots as usize],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
             SlotType::Value;
