@@ -19,18 +19,20 @@ pub(in crate::translate) fn str_index<'a>(e: &mut impl CollectionEmitter<'a>, in
     let str_index_func = e.helper(HelperKind::str_index);
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
-    let out_of_bounds = e
-        .builder()
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_runtime_trap_if(
-        e,
-        out_of_bounds,
-        JitRuntimeTrapKind::IndexOutOfBounds,
-        Some(idx),
-        Some(len),
-    );
+    if !e.current_bounds_check_elided() {
+        let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
+        let out_of_bounds = e
+            .builder()
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
+        emit_runtime_trap_if(
+            e,
+            out_of_bounds,
+            JitRuntimeTrapKind::IndexOutOfBounds,
+            Some(idx),
+            Some(len),
+        );
+    }
     let call = emit_runtime_helper_call(e, str_index_func, &[s, idx]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);

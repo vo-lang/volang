@@ -11,6 +11,7 @@ pub mod helpers;
 pub mod island;
 pub mod link;
 pub mod queue;
+pub mod scheduler_poll;
 pub mod select;
 pub mod tier_up;
 
@@ -22,5 +23,6 @@ pub use helpers::jit_stack_overflow;
 pub use island::jit_create_island;
 pub use link::jit_link_function;
 pub use queue::{jit_queue_cap, jit_queue_close, jit_queue_len, jit_queue_recv, jit_queue_send};
+pub use scheduler_poll::jit_refill_execution_budget;
 pub use select::{jit_select_begin, jit_select_exec, jit_select_recv, jit_select_send};
 pub use tier_up::jit_tier_up;

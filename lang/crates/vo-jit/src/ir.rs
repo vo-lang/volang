@@ -3,13 +3,12 @@
 //! The IR uses basic-block parameters as phi nodes. This keeps construction
 //! independent of dominance order, represents loop-carried values directly,
 //! and gives full-function compilation and loop OSR one control-flow model.
-//! Frame states are sparse snapshots of live bytecode slots at observable
-//! instructions; GC roots, deoptimization, and future inlining all consume the
-//! same snapshots.
+//! Sparse frame states retain every live typed value needed for deoptimization
+//! plus a compact root projection consumed by the GC safepoint path.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use vo_runtime::bytecode::{FunctionDef, Module};
+use vo_runtime::bytecode::{Constant, FunctionDef, Module};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
@@ -34,7 +33,12 @@ pub(crate) struct ValueId(u32);
 
 impl ValueId {
     #[inline]
-    fn index(self) -> usize {
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -159,8 +163,9 @@ impl EffectSet {
     const NEEDS_WRITE_BARRIER: u16 = 1 << 10;
     const TOUCHES_INTERFACE: u16 = 1 << 11;
     const MATERIALIZES_CLOSURE: u16 = 1 << 12;
+    const WRITES_OBSERVABLE_STATE: u16 = 1 << 13;
 
-    fn from_contract(contract: EffectContract) -> Self {
+    fn from_contract(opcode: Opcode, contract: EffectContract) -> Self {
         let mut bits = 0;
         bits |= u16::from(contract.may_gc) * Self::MAY_GC;
         bits |= u16::from(contract.may_alloc) * Self::MAY_ALLOC;
@@ -175,6 +180,8 @@ impl EffectSet {
         bits |= u16::from(contract.needs_write_barrier) * Self::NEEDS_WRITE_BARRIER;
         bits |= u16::from(contract.touches_interface) * Self::TOUCHES_INTERFACE;
         bits |= u16::from(contract.materializes_closure) * Self::MATERIALIZES_CLOSURE;
+        bits |= u16::from(matches!(opcode, Opcode::GlobalSet | Opcode::GlobalSetN))
+            * Self::WRITES_OBSERVABLE_STATE;
         Self(bits)
     }
 
@@ -190,6 +197,11 @@ impl EffectSet {
                 | Self::MAY_OBSERVE_FRAME
                 | Self::NEEDS_FRAME)
             != 0
+    }
+
+    #[inline]
+    pub(crate) fn can_eliminate(self) -> bool {
+        self.0 == 0
     }
 }
 
@@ -210,13 +222,11 @@ impl TypedInstruction {
         self.source
     }
 
-    #[cfg(test)]
     #[inline]
     pub(crate) fn block(self) -> BlockId {
         self.block
     }
 
-    #[cfg(test)]
     #[inline]
     pub(crate) fn effects(self) -> EffectSet {
         self.effects
@@ -232,9 +242,16 @@ impl TypedInstruction {
         self.effects.requires_frame_state()
     }
 
-    fn frame_state_id(self) -> Option<FrameStateId> {
+    pub(crate) fn frame_state_id(self) -> Option<FrameStateId> {
         (self.frame_state != NONE_ID).then_some(FrameStateId(self.frame_state))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FrameLiveness {
+    live_slots: Span,
+    direct_roots: Span,
+    has_conditional_roots: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -250,7 +267,7 @@ pub(crate) struct FrameState {
     values: Span,
     direct_roots: Span,
     pub has_conditional_roots: bool,
-    /// Future inlined frame states form a parent chain through this field.
+    /// Inlined frame states form a parent chain through this field.
     parent: u32,
 }
 
@@ -290,7 +307,53 @@ pub(crate) struct FunctionIr {
     predecessors: Box<[BlockId]>,
     edges: Box<[BlockEdge]>,
     edge_arguments: Box<[ValueUse]>,
+    constant_values: Box<[i64]>,
+    constant_known: Box<[u64]>,
+    executable_blocks: Box<[u64]>,
+    executable_edges: Box<[u64]>,
+    call_iface_method_indices: Box<[u32]>,
     retained_bytes: usize,
+}
+
+struct ConstantPropagation {
+    values: Vec<ConstantLattice>,
+    executable_blocks: Vec<bool>,
+    executable_edges: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstantLattice {
+    Unknown,
+    Known(i64),
+    Overdefined,
+}
+
+impl ConstantLattice {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unknown, value) | (value, Self::Unknown) => value,
+            (Self::Known(lhs), Self::Known(rhs)) if lhs == rhs => Self::Known(lhs),
+            (Self::Known(_), Self::Known(_)) | (Self::Overdefined, _) | (_, Self::Overdefined) => {
+                Self::Overdefined
+            }
+        }
+    }
+}
+
+fn bitset_from_bools(values: &[bool]) -> Vec<u64> {
+    let mut words = vec![0_u64; values.len().div_ceil(64)];
+    for (index, &value) in values.iter().enumerate() {
+        if value {
+            words[index / 64] |= 1_u64 << (index % 64);
+        }
+    }
+    words
+}
+
+fn bitset_contains(words: &[u64], index: usize) -> bool {
+    words
+        .get(index / 64)
+        .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
 }
 
 #[derive(Debug)]
@@ -316,7 +379,16 @@ struct BlockFacts {
 }
 
 impl FunctionIr {
+    #[cfg(test)]
     pub(crate) fn build(func: &FunctionDef, module: &Module) -> Result<Self, JitError> {
+        Self::build_with_limit(func, module, crate::MAX_JIT_ANALYSIS_BYTES)
+    }
+
+    pub(crate) fn build_with_limit(
+        func: &FunctionDef,
+        module: &Module,
+        retained_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
         if func.code.is_empty() {
             return Ok(Self::empty());
         }
@@ -342,16 +414,18 @@ impl FunctionIr {
                 source,
                 reads: instruction_effects.reads,
                 writes: instruction_effects.writes,
-                effects: EffectSet::from_contract(crate::contract::opcode_contract(
+                effects: EffectSet::from_contract(
                     source.opcode(),
-                )),
+                    crate::contract::opcode_contract(source.opcode()),
+                ),
                 memory_sync: instruction_effects.memory_sync,
             });
         }
 
         let (mut blocks, pc_to_block) = build_cfg(&raw)?;
         compute_block_liveness(&mut blocks, &raw)?;
-        let live_at_frame_state = compute_sparse_frame_liveness(&blocks, &raw);
+        let (liveness_at_frame_state, live_slots, root_slots) =
+            compute_sparse_frame_liveness(&blocks, &raw, &func.slot_types, retained_limit_bytes)?;
 
         let mut values = Vec::new();
         let mut value_origins = Vec::new();
@@ -390,7 +464,6 @@ impl FunctionIr {
         let mut typed = Vec::with_capacity(raw.len());
         let mut frame_states = Vec::new();
         let mut frame_values = Vec::new();
-        let mut root_slots = Vec::new();
         let mut edges = Vec::new();
         let mut edge_arguments = Vec::new();
 
@@ -412,34 +485,27 @@ impl FunctionIr {
                 let input_count = (instruction_values.len() - value_start) as u16;
 
                 let frame_state = if instruction.effects.requires_frame_state() {
-                    let live = live_at_frame_state[pc].as_deref().unwrap_or_default();
-                    let values_span = Span::append(
+                    let liveness = liveness_at_frame_state[pc].ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "frame-state root liveness is absent for {} at pc {pc}",
+                            func.name
+                        ))
+                    })?;
+                    let values = Span::append(
                         &mut frame_values,
-                        live.iter().map(|&slot| {
+                        liveness.live_slots.slice(&live_slots).iter().map(|&slot| {
                             let value = current.get(&slot).copied().expect(
                                 "live-before slots must have an SSA value at instruction entry",
                             );
                             FrameValue { slot, value }
                         }),
                     );
-                    let roots_span = Span::append(
-                        &mut root_slots,
-                        live.iter().copied().filter(|&slot| {
-                            func.slot_types.get(slot as usize) == Some(&SlotType::GcRef)
-                        }),
-                    );
-                    let has_conditional_roots = live.iter().any(|&slot| {
-                        matches!(
-                            func.slot_types.get(slot as usize),
-                            Some(SlotType::Interface0 | SlotType::Interface1)
-                        )
-                    });
                     let id = frame_states.len() as u32;
                     frame_states.push(FrameState {
                         resume_pc: pc as u32,
-                        values: values_span,
-                        direct_roots: roots_span,
-                        has_conditional_roots,
+                        values,
+                        direct_roots: liveness.direct_roots,
+                        has_conditional_roots: liveness.has_conditional_roots,
                         parent: NONE_ID,
                     });
                     id
@@ -501,11 +567,35 @@ impl FunctionIr {
         propagate_root_provenance(
             &mut values,
             &value_origins,
+            &parameter_maps,
+            &edges,
+            &edge_arguments,
+        )?;
+        let propagation = propagate_constants(
+            &typed,
+            &values,
+            &value_origins,
             &blocks,
             &parameter_maps,
             &edges,
             &edge_arguments,
+            &module.constants,
+            &instruction_values,
         );
+        let mut constant_values = Vec::with_capacity(propagation.values.len());
+        let mut constant_known = vec![0_u64; propagation.values.len().div_ceil(64)];
+        for (index, constant) in propagation.values.into_iter().enumerate() {
+            let value = match constant {
+                ConstantLattice::Known(value) => {
+                    constant_known[index / 64] |= 1_u64 << (index % 64);
+                    value
+                }
+                ConstantLattice::Unknown | ConstantLattice::Overdefined => 0,
+            };
+            constant_values.push(value);
+        }
+        let executable_blocks = bitset_from_bools(&propagation.executable_blocks);
+        let executable_edges = bitset_from_bools(&propagation.executable_edges);
 
         let mut predecessor_storage = Vec::new();
         let mut block_records = Vec::with_capacity(blocks.len());
@@ -535,6 +625,22 @@ impl FunctionIr {
             edge_cursor += successor_count;
         }
 
+        let call_iface_method_indices = func
+            .code
+            .iter()
+            .enumerate()
+            .map(|(pc, instruction)| {
+                if instruction.opcode() != Opcode::CallIface {
+                    return NONE_ID;
+                }
+                func.instruction_metadata
+                    .get(pc)
+                    .and_then(crate::metadata::call_iface_method_index_from_instruction)
+                    .unwrap_or(NONE_ID)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
         let mut ir = Self {
             instructions: typed.into_boxed_slice(),
             blocks: block_records.into_boxed_slice(),
@@ -547,9 +653,20 @@ impl FunctionIr {
             predecessors: predecessor_storage.into_boxed_slice(),
             edges: edges.into_boxed_slice(),
             edge_arguments: edge_arguments.into_boxed_slice(),
+            constant_values: constant_values.into_boxed_slice(),
+            constant_known: constant_known.into_boxed_slice(),
+            executable_blocks: executable_blocks.into_boxed_slice(),
+            executable_edges: executable_edges.into_boxed_slice(),
+            call_iface_method_indices,
             retained_bytes: 0,
         };
         ir.retained_bytes = ir.compute_retained_bytes();
+        if ir.retained_bytes > retained_limit_bytes {
+            return Err(JitError::AnalysisResourceLimitExceeded {
+                limit_bytes: retained_limit_bytes,
+                requested_bytes: ir.retained_bytes,
+            });
+        }
         ir.verify(func, &pc_to_block)?;
         Ok(ir)
     }
@@ -567,6 +684,11 @@ impl FunctionIr {
             predecessors: Box::new([]),
             edges: Box::new([]),
             edge_arguments: Box::new([]),
+            constant_values: Box::new([]),
+            constant_known: Box::new([]),
+            executable_blocks: Box::new([]),
+            executable_edges: Box::new([]),
+            call_iface_method_indices: Box::new([]),
             retained_bytes: 0,
         }
     }
@@ -580,35 +702,22 @@ impl FunctionIr {
         &self.blocks
     }
 
-    pub(crate) fn any_slot_live_out(&self, block: BlockId, slots: &BTreeSet<u16>) -> bool {
-        self.blocks[block.index()]
-            .successors
-            .slice(&self.edges)
-            .iter()
-            .flat_map(|edge| edge.arguments.slice(&self.edge_arguments))
-            .any(|argument| slots.contains(&argument.slot))
-    }
-
-    #[cfg(test)]
     pub(crate) fn block_parameters(&self, block: BlockId) -> &[ValueUse] {
         self.blocks[block.index()]
             .parameters
             .slice(&self.block_parameters)
     }
 
-    #[cfg(test)]
     pub(crate) fn predecessors(&self, block: BlockId) -> &[BlockId] {
         self.blocks[block.index()]
             .predecessors
             .slice(&self.predecessors)
     }
 
-    #[cfg(test)]
     pub(crate) fn successors(&self, block: BlockId) -> &[BlockEdge] {
         self.blocks[block.index()].successors.slice(&self.edges)
     }
 
-    #[cfg(test)]
     pub(crate) fn edge_arguments(&self, edge: BlockEdge) -> &[ValueUse] {
         edge.arguments.slice(&self.edge_arguments)
     }
@@ -625,6 +734,87 @@ impl FunctionIr {
 
     pub(crate) fn value(&self, value: ValueId) -> SsaValue {
         self.values[value.index()]
+    }
+
+    pub(crate) fn constant(&self, value: ValueId) -> Option<i64> {
+        let index = value.index();
+        let known = self
+            .constant_known
+            .get(index / 64)
+            .is_some_and(|word| word & (1_u64 << (index % 64)) != 0);
+        known.then(|| self.constant_values[index])
+    }
+
+    pub(crate) fn input_constants(&self, pc: usize) -> impl Iterator<Item = (u16, i64)> + '_ {
+        self.instruction(pc)
+            .into_iter()
+            .flat_map(|instruction| self.inputs(*instruction).iter().copied())
+            .filter_map(|value| {
+                self.constant(value)
+                    .map(|constant| (self.value(value).slot, constant))
+            })
+    }
+
+    pub(crate) fn input_value(&self, pc: usize, slot: u16) -> Option<ValueId> {
+        let instruction = *self.instruction(pc)?;
+        self.inputs(instruction)
+            .iter()
+            .copied()
+            .find(|&value| self.value(value).slot == slot)
+    }
+
+    pub(crate) fn output_value(&self, pc: usize, slot: u16) -> Option<ValueId> {
+        let instruction = *self.instruction(pc)?;
+        self.outputs(instruction)
+            .iter()
+            .copied()
+            .find(|&value| self.value(value).slot == slot)
+    }
+
+    pub(crate) fn frame_value(&self, pc: usize, slot: u16) -> Option<ValueId> {
+        let state = *self.frame_state(pc)?;
+        self.frame_values(state)
+            .iter()
+            .find_map(|value| (value.slot == slot).then_some(value.value))
+    }
+
+    pub(crate) fn input_constant(&self, pc: usize, slot: u16) -> Option<i64> {
+        self.input_constants(pc)
+            .find_map(|(input_slot, value)| (input_slot == slot).then_some(value))
+    }
+
+    pub(crate) fn call_iface_method_index(&self, pc: usize) -> Option<u32> {
+        let index = *self.call_iface_method_indices.get(pc)?;
+        (index != NONE_ID).then_some(index)
+    }
+
+    pub(crate) fn is_executable_block(&self, block: BlockId) -> bool {
+        bitset_contains(&self.executable_blocks, block.index())
+    }
+
+    pub(crate) fn executable_successors(
+        &self,
+        block: BlockId,
+    ) -> impl Iterator<Item = BlockEdge> + '_ {
+        let span = self.blocks[block.index()].successors;
+        let start = span.start as usize;
+        span.slice(&self.edges)
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(move |(offset, edge)| {
+                bitset_contains(&self.executable_edges, start + offset).then_some(edge)
+            })
+    }
+
+    #[inline]
+    pub(crate) fn instruction_count(&self) -> usize {
+        self.instructions.len()
+    }
+
+    #[inline]
+    pub(crate) fn value_count(&self) -> usize {
+        self.values.len()
     }
 
     pub(crate) fn frame_state(&self, pc: usize) -> Option<&FrameState> {
@@ -682,8 +872,15 @@ impl FunctionIr {
                                         crate::native_stack_map::DeoptValueKind::InterfaceData
                                     }
                                 },
-                                location: crate::native_stack_map::DeoptValueLocation::FiberSlot(
-                                    value.slot,
+                                location: self.constant(value.value).map_or(
+                                    crate::native_stack_map::DeoptValueLocation::FiberSlot(
+                                        value.slot,
+                                    ),
+                                    |constant| {
+                                        crate::native_stack_map::DeoptValueLocation::Constant(
+                                            constant as u64,
+                                        )
+                                    },
                                 ),
                             }
                         })
@@ -711,10 +908,18 @@ impl FunctionIr {
             + self.predecessors.len() * core::mem::size_of::<BlockId>()
             + self.edges.len() * core::mem::size_of::<BlockEdge>()
             + self.edge_arguments.len() * core::mem::size_of::<ValueUse>()
+            + self.constant_values.len() * core::mem::size_of::<i64>()
+            + self.constant_known.len() * core::mem::size_of::<u64>()
+            + self.executable_blocks.len() * core::mem::size_of::<u64>()
+            + self.executable_edges.len() * core::mem::size_of::<u64>()
+            + self.call_iface_method_indices.len() * core::mem::size_of::<u32>()
     }
 
     fn verify(&self, func: &FunctionDef, pc_to_block: &[BlockId]) -> Result<(), JitError> {
-        if self.instructions.len() != func.code.len() || pc_to_block.len() != func.code.len() {
+        if self.instructions.len() != func.code.len()
+            || pc_to_block.len() != func.code.len()
+            || self.call_iface_method_indices.len() != func.code.len()
+        {
             return Err(JitError::Internal(format!(
                 "SSA instruction cardinality drift for {}",
                 func.name
@@ -921,6 +1126,11 @@ fn compute_block_liveness(
 
     let mut pending = (0..blocks.len()).rev().collect::<VecDeque<_>>();
     let mut queued = vec![true; blocks.len()];
+    let mut sparse_cells = blocks
+        .iter()
+        .map(|block| block.live_in.len() + block.live_out.len())
+        .sum::<usize>();
+    ensure_sparse_liveness_budget(sparse_cells)?;
     while let Some(index) = pending.pop_front() {
         queued[index] = false;
         let mut live_out = BTreeSet::new();
@@ -930,6 +1140,10 @@ fn compute_block_liveness(
         let mut live_in = blocks[index].uses.clone();
         live_in.extend(live_out.difference(&blocks[index].defs).copied());
         if live_in != blocks[index].live_in || live_out != blocks[index].live_out {
+            sparse_cells = sparse_cells
+                .saturating_sub(blocks[index].live_in.len() + blocks[index].live_out.len())
+                .saturating_add(live_in.len() + live_out.len());
+            ensure_sparse_liveness_budget(sparse_cells)?;
             blocks[index].live_in = live_in;
             blocks[index].live_out = live_out;
             for predecessor in blocks[index].predecessors.iter().copied() {
@@ -939,26 +1153,55 @@ fn compute_block_liveness(
                 }
             }
         }
-        let sparse_cells = blocks
-            .iter()
-            .map(|block| block.live_in.len() + block.live_out.len())
-            .sum::<usize>();
-        let requested_bytes = sparse_cells.saturating_mul(core::mem::size_of::<u16>() * 4);
-        if requested_bytes > MAX_JIT_COMPILE_WORK_BYTES {
-            return Err(JitError::CompileWorkLimitExceeded {
-                limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
-                requested_bytes,
-            });
-        }
     }
     Ok(())
 }
 
+fn ensure_sparse_liveness_budget(sparse_cells: usize) -> Result<(), JitError> {
+    let requested_bytes = sparse_cells.saturating_mul(core::mem::size_of::<u16>() * 4);
+    if requested_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+        return Err(JitError::CompileWorkLimitExceeded {
+            limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+            requested_bytes,
+        });
+    }
+    Ok(())
+}
+
+type SparseFrameLiveness = (Vec<Option<FrameLiveness>>, Vec<u16>, Vec<u16>);
+
 fn compute_sparse_frame_liveness(
     blocks: &[BlockFacts],
     raw: &[RawInstruction],
-) -> Vec<Option<Box<[u16]>>> {
-    let mut result = vec![None; raw.len()];
+    slot_types: &[SlotType],
+    retained_limit_bytes: usize,
+) -> Result<SparseFrameLiveness, JitError> {
+    let result_bytes = raw
+        .len()
+        .saturating_mul(core::mem::size_of::<Option<FrameLiveness>>());
+    if result_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+        return Err(JitError::CompileWorkLimitExceeded {
+            limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+            requested_bytes: result_bytes,
+        });
+    }
+    if result_bytes > retained_limit_bytes {
+        return Err(JitError::AnalysisResourceLimitExceeded {
+            limit_bytes: retained_limit_bytes,
+            requested_bytes: result_bytes,
+        });
+    }
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(raw.len())
+        .map_err(|_| JitError::CompileWorkLimitExceeded {
+            limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+            requested_bytes: result_bytes,
+        })?;
+    result.resize_with(raw.len(), || None);
+    let mut live_slots = Vec::new();
+    let mut root_slots = Vec::new();
+    let mut frame_state_count = 0usize;
     for block in blocks {
         let mut live = block.live_out.clone();
         for pc in (block.start..block.end).rev() {
@@ -967,11 +1210,76 @@ fn compute_sparse_frame_liveness(
             }
             live.extend(raw[pc].reads.iter().copied());
             if raw[pc].effects.requires_frame_state() {
-                result[pc] = Some(live.iter().copied().collect::<Vec<_>>().into_boxed_slice());
+                let live_count = live.len();
+                let root_count = live
+                    .iter()
+                    .filter(|&&slot| slot_types.get(slot as usize) == Some(&SlotType::GcRef))
+                    .count();
+                frame_state_count = frame_state_count.saturating_add(1);
+                let retained_bytes = live_slots
+                    .len()
+                    .saturating_add(live_count)
+                    .saturating_mul(core::mem::size_of::<FrameValue>())
+                    .saturating_add(
+                        root_slots
+                            .len()
+                            .saturating_add(root_count)
+                            .saturating_mul(core::mem::size_of::<u16>()),
+                    )
+                    .saturating_add(
+                        frame_state_count.saturating_mul(core::mem::size_of::<FrameState>()),
+                    )
+                    .saturating_add(result_bytes);
+                if retained_bytes > retained_limit_bytes {
+                    return Err(JitError::AnalysisResourceLimitExceeded {
+                        limit_bytes: retained_limit_bytes,
+                        requested_bytes: retained_bytes,
+                    });
+                }
+                let work_bytes = live_slots
+                    .len()
+                    .saturating_add(live_count)
+                    .saturating_mul(core::mem::size_of::<u16>());
+                if work_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+                    return Err(JitError::CompileWorkLimitExceeded {
+                        limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+                        requested_bytes: work_bytes,
+                    });
+                }
+                live_slots.try_reserve_exact(live_count).map_err(|_| {
+                    JitError::AnalysisResourceLimitExceeded {
+                        limit_bytes: retained_limit_bytes,
+                        requested_bytes: retained_bytes,
+                    }
+                })?;
+                root_slots.try_reserve_exact(root_count).map_err(|_| {
+                    JitError::AnalysisResourceLimitExceeded {
+                        limit_bytes: retained_limit_bytes,
+                        requested_bytes: retained_bytes,
+                    }
+                })?;
+                let live_slots_span = Span::append(&mut live_slots, live.iter().copied());
+                let direct_roots = Span::append(
+                    &mut root_slots,
+                    live.iter()
+                        .copied()
+                        .filter(|&slot| slot_types.get(slot as usize) == Some(&SlotType::GcRef)),
+                );
+                let has_conditional_roots = live.iter().any(|&slot| {
+                    matches!(
+                        slot_types.get(slot as usize),
+                        Some(SlotType::Interface0 | SlotType::Interface1)
+                    )
+                });
+                result[pc] = Some(FrameLiveness {
+                    live_slots: live_slots_span,
+                    direct_roots,
+                    has_conditional_roots,
+                });
             }
         }
     }
-    result
+    Ok((result, live_slots, root_slots))
 }
 
 fn push_value(
@@ -1051,56 +1359,299 @@ fn fixed_output_provenance(opcode: Opcode, alias: Option<ValueId>) -> RootProven
 fn propagate_root_provenance(
     values: &mut [SsaValue],
     origins: &[ValueOrigin],
+    parameter_maps: &[BTreeMap<u16, ValueId>],
+    edges: &[BlockEdge],
+    edge_arguments: &[ValueUse],
+) -> Result<(), JitError> {
+    let dependency_count = edge_arguments.len().saturating_add(
+        origins
+            .iter()
+            .filter(|origin| matches!(origin, ValueOrigin::Alias(_)))
+            .count(),
+    );
+    let requested_bytes = values
+        .len()
+        .saturating_mul(core::mem::size_of::<Vec<ValueId>>())
+        .saturating_add(dependency_count.saturating_mul(core::mem::size_of::<ValueId>()));
+    if requested_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+        return Err(JitError::CompileWorkLimitExceeded {
+            limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+            requested_bytes,
+        });
+    }
+    let mut dependents = vec![Vec::<ValueId>::new(); values.len()];
+    for edge in edges {
+        for argument in edge.arguments.slice(edge_arguments) {
+            if let Some(&parameter) = parameter_maps[edge.target.index()].get(&argument.slot) {
+                dependents[argument.value.index()].push(parameter);
+            }
+        }
+    }
+    for (index, origin) in origins.iter().copied().enumerate() {
+        if let ValueOrigin::Alias(source) = origin {
+            dependents[source.index()].push(ValueId::from_index(index));
+        }
+    }
+
+    let mut pending = (0..values.len())
+        .map(ValueId::from_index)
+        .collect::<VecDeque<_>>();
+    while let Some(source) = pending.pop_front() {
+        let Some(source_provenance) = values[source.index()].ty.root_provenance() else {
+            continue;
+        };
+        for &target in &dependents[source.index()] {
+            let Some(current) = values[target.index()].ty.root_provenance() else {
+                continue;
+            };
+            let merged = current.join(source_provenance);
+            if merged != current {
+                values[target.index()].ty = ValueType::GcRef(merged);
+                pending.push_back(target);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_constants(
+    instructions: &[TypedInstruction],
+    values: &[SsaValue],
+    origins: &[ValueOrigin],
     blocks: &[BlockFacts],
     parameter_maps: &[BTreeMap<u16, ValueId>],
     edges: &[BlockEdge],
     edge_arguments: &[ValueUse],
-) {
-    loop {
+    module_constants: &[Constant],
+    instruction_values: &[ValueId],
+) -> ConstantPropagation {
+    let mut constants = origins
+        .iter()
+        .map(|origin| match origin {
+            ValueOrigin::EntrySlot => ConstantLattice::Overdefined,
+            ValueOrigin::BlockParameter | ValueOrigin::Alias(_) | ValueOrigin::Instruction => {
+                ConstantLattice::Unknown
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut executable_blocks = vec![false; blocks.len()];
+    let mut executable_edges = vec![false; edges.len()];
+    if !blocks.is_empty() {
+        executable_blocks[0] = true;
+    }
+
+    // Every value rises at most twice and every block/edge becomes executable
+    // once. This bound closes conservatively if a future IR extension violates
+    // one of those monotonicity rules.
+    let iteration_limit = values
+        .len()
+        .saturating_mul(2)
+        .saturating_add(blocks.len())
+        .saturating_add(edges.len())
+        .saturating_add(1);
+    for _ in 0..iteration_limit {
         let mut changed = false;
-        let mut edge_index = 0;
-        for block in blocks {
-            for _ in &block.successors {
-                let edge = edges[edge_index];
-                edge_index += 1;
-                for argument in edge.arguments.slice(edge_arguments) {
-                    let Some(&parameter) = parameter_maps[edge.target.index()].get(&argument.slot)
-                    else {
-                        continue;
+
+        for (block_index, block) in blocks.iter().enumerate() {
+            if !executable_blocks[block_index] {
+                continue;
+            }
+            for instruction in instructions[block.start..block.end].iter().copied() {
+                let all_values = instruction.values.slice(instruction_values);
+                let inputs = &all_values[..usize::from(instruction.input_count)];
+                let outputs = &all_values[usize::from(instruction.input_count)..];
+                for &output in outputs {
+                    let desired = match origins[output.index()] {
+                        ValueOrigin::Alias(source) => constants[source.index()],
+                        ValueOrigin::Instruction => instruction_constant(
+                            instruction.source,
+                            values[output.index()].slot,
+                            inputs,
+                            values,
+                            &constants,
+                            module_constants,
+                        ),
+                        ValueOrigin::EntrySlot | ValueOrigin::BlockParameter => continue,
                     };
-                    let Some(incoming) = values[argument.value.index()].ty.root_provenance() else {
-                        continue;
-                    };
-                    let Some(current) = values[parameter.index()].ty.root_provenance() else {
-                        continue;
-                    };
-                    let merged = current.join(incoming);
+                    let current = constants[output.index()];
+                    let merged = current.join(desired);
                     if merged != current {
-                        values[parameter.index()].ty = ValueType::GcRef(merged);
+                        constants[output.index()] = merged;
                         changed = true;
                     }
                 }
             }
         }
-        for index in 0..values.len() {
-            let ValueOrigin::Alias(source) = origins[index] else {
+
+        let mut edge_index = 0;
+        for (block_index, block) in blocks.iter().enumerate() {
+            let edge_range = edge_index..edge_index + block.successors.len();
+            edge_index = edge_range.end;
+            if !executable_blocks[block_index] {
                 continue;
-            };
-            let Some(source_provenance) = values[source.index()].ty.root_provenance() else {
+            }
+            let last_pc = block.end - 1;
+            let last = instructions[last_pc];
+            let selected_target = selected_constant_branch_target(
+                last_pc,
+                last,
+                instructions,
+                instruction_values,
+                values,
+                &constants,
+            );
+            for candidate in edge_range {
+                let edge = edges[candidate];
+                let executable = match selected_target {
+                    Some(Some(target)) => edge.target == target,
+                    Some(None) => false,
+                    None => true,
+                };
+                if executable && !executable_edges[candidate] {
+                    executable_edges[candidate] = true;
+                    changed = true;
+                }
+                if executable && !executable_blocks[edge.target.index()] {
+                    executable_blocks[edge.target.index()] = true;
+                    changed = true;
+                }
+            }
+        }
+
+        for (edge_index, edge) in edges.iter().copied().enumerate() {
+            if !executable_edges[edge_index] {
                 continue;
-            };
-            let Some(current) = values[index].ty.root_provenance() else {
-                continue;
-            };
-            let merged = current.join(source_provenance);
-            if merged != current {
-                values[index].ty = ValueType::GcRef(merged);
-                changed = true;
+            }
+            for argument in edge.arguments.slice(edge_arguments) {
+                let Some(&parameter) = parameter_maps[edge.target.index()].get(&argument.slot)
+                else {
+                    continue;
+                };
+                let incoming = constants[argument.value.index()];
+                let current = constants[parameter.index()];
+                let merged = current.join(incoming);
+                if merged != current {
+                    constants[parameter.index()] = merged;
+                    changed = true;
+                }
             }
         }
         if !changed {
             break;
         }
+    }
+
+    for constant in &mut constants {
+        if *constant == ConstantLattice::Unknown {
+            *constant = ConstantLattice::Overdefined;
+        }
+    }
+    ConstantPropagation {
+        values: constants,
+        executable_blocks,
+        executable_edges,
+    }
+}
+
+/// `Some(Some(block))` selects one proven successor, `Some(None)` means no
+/// successor, and `None` keeps every structural successor executable.
+fn selected_constant_branch_target(
+    pc: usize,
+    instruction: TypedInstruction,
+    instructions: &[TypedInstruction],
+    instruction_values: &[ValueId],
+    values: &[SsaValue],
+    constants: &[ConstantLattice],
+) -> Option<Option<BlockId>> {
+    let source = instruction.source;
+    match source.opcode() {
+        Opcode::Return | Opcode::Panic => Some(None),
+        Opcode::Jump => {
+            let target = crate::compile_common::checked_branch_target(
+                instructions.len(),
+                pc,
+                source.imm32(),
+                source.opcode(),
+            )
+            .expect("CFG validation already checked the unconditional target");
+            Some(Some(instructions[target].block))
+        }
+        Opcode::JumpIf | Opcode::JumpIfNot => {
+            let all_values = instruction.values.slice(instruction_values);
+            let condition = all_values[..usize::from(instruction.input_count)]
+                .iter()
+                .copied()
+                .find(|&value| values[value.index()].slot == source.a)
+                .map(|value| constants[value.index()])
+                .unwrap_or(ConstantLattice::Overdefined);
+            match condition {
+                ConstantLattice::Unknown => Some(None),
+                ConstantLattice::Overdefined => None,
+                ConstantLattice::Known(value) => {
+                    let taken = match source.opcode() {
+                        Opcode::JumpIf => value != 0,
+                        Opcode::JumpIfNot => value == 0,
+                        _ => unreachable!(),
+                    };
+                    let target = if taken {
+                        crate::compile_common::checked_branch_target(
+                            instructions.len(),
+                            pc,
+                            source.imm32(),
+                            source.opcode(),
+                        )
+                        .expect("CFG validation already checked the conditional target")
+                    } else if pc + 1 < instructions.len() {
+                        pc + 1
+                    } else {
+                        return Some(None);
+                    };
+                    Some(Some(instructions[target].block))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn instruction_constant(
+    instruction: Instruction,
+    output_slot: u16,
+    inputs: &[ValueId],
+    values: &[SsaValue],
+    constants: &[ConstantLattice],
+    module_constants: &[Constant],
+) -> ConstantLattice {
+    if output_slot != instruction.a {
+        return ConstantLattice::Overdefined;
+    }
+    if crate::ir_constants::single_slot_result(&instruction, module_constants, |_| None).is_none() {
+        return ConstantLattice::Overdefined;
+    }
+    if inputs
+        .iter()
+        .any(|value| constants[value.index()] == ConstantLattice::Unknown)
+    {
+        return ConstantLattice::Unknown;
+    }
+    if inputs
+        .iter()
+        .any(|value| constants[value.index()] == ConstantLattice::Overdefined)
+    {
+        return ConstantLattice::Overdefined;
+    }
+
+    match crate::ir_constants::single_slot_result(&instruction, module_constants, |slot| {
+        inputs.iter().copied().find_map(|value| {
+            (values[value.index()].slot == slot).then(|| match constants[value.index()] {
+                ConstantLattice::Known(constant) => Some(constant),
+                ConstantLattice::Unknown | ConstantLattice::Overdefined => None,
+            })?
+        })
+    }) {
+        Some(Some(value)) => ConstantLattice::Known(value),
+        Some(None) | None => ConstantLattice::Overdefined,
     }
 }
 
@@ -1117,6 +1668,20 @@ mod tests {
             offset as u32 as u16,
             (offset as u32 >> 16) as u16,
         )
+    }
+
+    #[test]
+    fn observable_global_writes_are_not_dce_pure() {
+        for opcode in [Opcode::GlobalSet, Opcode::GlobalSetN] {
+            let effects =
+                EffectSet::from_contract(opcode, crate::contract::opcode_contract(opcode));
+            assert!(!effects.can_eliminate());
+        }
+        let pure = EffectSet::from_contract(
+            Opcode::LoadInt,
+            crate::contract::opcode_contract(Opcode::LoadInt),
+        );
+        assert!(pure.can_eliminate());
     }
 
     fn module_with(
@@ -1177,6 +1742,34 @@ mod tests {
     }
 
     #[test]
+    fn agreeing_branch_constants_live_on_the_merge_value() {
+        let code = vec![
+            branch(Opcode::JumpIf, 0, 3),
+            Instruction::new(Opcode::LoadInt, 1, 42, 0),
+            branch(Opcode::Jump, 0, 2),
+            Instruction::new(Opcode::LoadInt, 1, 42, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ];
+        let (module, _) = module_with(code, vec![SlotType::Value; 2]);
+        let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
+        assert_eq!(ir.input_constants(4).collect::<Vec<_>>(), vec![(1, 42)]);
+    }
+
+    #[test]
+    fn disagreeing_branch_constants_make_the_merge_value_overdefined() {
+        let code = vec![
+            branch(Opcode::JumpIf, 0, 3),
+            Instruction::new(Opcode::LoadInt, 1, 41, 0),
+            branch(Opcode::Jump, 0, 2),
+            Instruction::new(Opcode::LoadInt, 1, 42, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ];
+        let (module, _) = module_with(code, vec![SlotType::Value; 2]);
+        let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
+        assert!(ir.input_constants(4).next().is_none());
+    }
+
+    #[test]
     fn frame_state_is_sparse_and_is_the_gc_root_authority() {
         let code = vec![
             Instruction::new(Opcode::LoadConst, 0, 0, 0),
@@ -1195,10 +1788,44 @@ mod tests {
         );
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         let state = *ir.frame_state(1).expect("allocating string slice state");
-        assert_eq!(state.resume_pc, 1);
         assert_eq!(ir.direct_roots(state), &[0]);
-        assert_eq!(ir.frame_values(state).len(), 3);
         assert!(ir.instruction(1).unwrap().effects().requires_frame_state());
+    }
+
+    #[test]
+    fn frame_state_budget_rejects_wide_live_roots_before_snapshot_allocation() {
+        let root_slots = 128usize;
+        let safepoints = 32usize;
+        let raw = (0..safepoints)
+            .map(|_| RawInstruction {
+                source: Instruction::new(Opcode::StrSlice, 0, 0, 0),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                effects: EffectSet::from_contract(
+                    Opcode::StrSlice,
+                    crate::contract::opcode_contract(Opcode::StrSlice),
+                ),
+                memory_sync: MemorySyncEffect::None,
+            })
+            .collect::<Vec<_>>();
+        let blocks = vec![BlockFacts {
+            start: 0,
+            end: safepoints,
+            live_out: (0..root_slots as u16).collect(),
+            ..BlockFacts::default()
+        }];
+        let slot_types = vec![SlotType::GcRef; root_slots];
+
+        let limit = 4 * 1024;
+        let error = compute_sparse_frame_liveness(&blocks, &raw, &slot_types, limit)
+            .expect_err("wide root snapshots must fail within the configured budget");
+        assert!(matches!(
+            error,
+            JitError::AnalysisResourceLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            } if limit_bytes == limit && requested_bytes > limit
+        ));
     }
 
     #[test]

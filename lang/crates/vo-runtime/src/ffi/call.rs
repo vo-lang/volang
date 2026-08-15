@@ -59,6 +59,11 @@ pub struct RuntimeMemRequests {
 
 impl RuntimeMemRequests {
     #[inline]
+    pub fn has_pending(&self) -> bool {
+        self.collect || self.work_units != 0
+    }
+
+    #[inline]
     pub(super) fn request_step(&mut self, work_units: usize) {
         self.work_units = self.work_units.max(work_units);
     }

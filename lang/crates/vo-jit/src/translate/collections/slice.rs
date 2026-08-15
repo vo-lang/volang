@@ -21,6 +21,11 @@ use vo_runtime::objects::slice::{
 pub(in crate::translate) const SLICE_FIELD_DATA_PTR: i32 = (SLICE_FIELD_DATA_PTR_SLOT * 8) as i32;
 pub(in crate::translate) const SLICE_FIELD_LEN: i32 = (SLICE_FIELD_LEN_SLOT * 8) as i32;
 
+#[inline]
+pub(in crate::translate) fn immutable_descriptor_flags() -> MemFlags {
+    MemFlags::trusted().with_readonly()
+}
+
 fn emit_slice_storage_layout<'a>(
     e: &mut impl CollectionEmitter<'a>,
     s: Value,
@@ -28,14 +33,14 @@ fn emit_slice_storage_layout<'a>(
 ) -> (Value, Value) {
     let mode = e.builder().ins().load(
         types::I64,
-        MemFlags::trusted(),
+        immutable_descriptor_flags(),
         s,
         (vo_runtime::objects::slice::FIELD_STORAGE_MODE * 8) as i32,
     );
     let is_flat = e.builder().ins().icmp_imm_u(IntCC::NotEqual, mode, 0);
     let flat_stride = e.builder().ins().load(
         types::I64,
-        MemFlags::trusted(),
+        immutable_descriptor_flags(),
         s,
         (vo_runtime::objects::slice::FIELD_STORAGE_STRIDE * 8) as i32,
     );
@@ -57,25 +62,30 @@ pub(in crate::translate) fn emit_slice_bounds_check<'a>(
     s: Value,
     idx: Value,
 ) -> Value {
-    // len = 0 if nil, otherwise load from slice
-    let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
+    if !e.current_bounds_check_elided() {
+        // len = 0 if nil, otherwise load from slice
+        let len = emit_nil_guarded_load(e, s, SLICE_FIELD_LEN);
 
-    // Check idx >= len (nil slice has len=0, so any idx will be out of bounds)
-    let out_of_bounds = e
-        .builder()
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_runtime_trap_if(
-        e,
-        out_of_bounds,
-        JitRuntimeTrapKind::IndexOutOfBounds,
-        Some(idx),
-        Some(len),
-    );
+        // Check idx >= len (nil slice has len=0, so any idx will be out of bounds)
+        let out_of_bounds = e
+            .builder()
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
+        emit_runtime_trap_if(
+            e,
+            out_of_bounds,
+            JitRuntimeTrapKind::IndexOutOfBounds,
+            Some(idx),
+            Some(len),
+        );
+    }
 
-    e.builder()
-        .ins()
-        .load(types::I64, MemFlags::trusted(), s, SLICE_FIELD_DATA_PTR)
+    e.builder().ins().load(
+        types::I64,
+        immutable_descriptor_flags(),
+        s,
+        SLICE_FIELD_DATA_PTR,
+    )
 }
 
 pub(in crate::translate) fn slice_new<'a>(
@@ -231,10 +241,10 @@ pub(in crate::translate) fn slice_set<'a>(
             let owner = e
                 .builder()
                 .ins()
-                .load(types::I64, MemFlags::trusted(), s, 0);
+                .load(types::I64, immutable_descriptor_flags(), s, 0);
             let elem_meta_raw = e.builder().ins().load(
                 types::I32,
-                MemFlags::trusted(),
+                immutable_descriptor_flags(),
                 s,
                 (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
             );
@@ -248,10 +258,10 @@ pub(in crate::translate) fn slice_set<'a>(
             let owner = e
                 .builder()
                 .ins()
-                .load(types::I64, MemFlags::trusted(), s, 0);
+                .load(types::I64, immutable_descriptor_flags(), s, 0);
             let elem_meta_raw = e.builder().ins().load(
                 types::I32,
-                MemFlags::trusted(),
+                immutable_descriptor_flags(),
                 s,
                 (vo_runtime::objects::slice::FIELD_ELEM_META * 8) as i32,
             );
@@ -294,7 +304,7 @@ pub(in crate::translate) fn emit_nil_guarded_load<'a>(
     let val = e
         .builder()
         .ins()
-        .load(types::I64, MemFlags::trusted(), ptr, offset);
+        .load(types::I64, immutable_descriptor_flags(), ptr, offset);
     e.builder().ins().jump(merge_block, &[val.into()]);
 
     e.builder().switch_to_block(merge_block);
@@ -468,5 +478,9 @@ pub(in crate::translate) fn slice_addr<'a>(
     let off = e.builder().ins().imul(idx, stride);
     let addr = e.builder().ins().iadd(data_ptr, off);
     e.write_var(inst.a, addr);
+    // Passing the bounds check proves the slice has a live element at `idx`;
+    // its interior address is consequently non-null. Preserve that fact for
+    // the common SliceAddr -> Copy -> PtrGet/PtrSet lowering sequence.
+    e.mark_checked_non_nil(inst.a);
     Ok(())
 }

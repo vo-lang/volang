@@ -96,7 +96,7 @@ impl<'a> CompilerStorage<'a> {
         base_ptr: Value,
         slot: u16,
         val: Value,
-    ) {
+    ) -> Value {
         store_slot_i64_with_storage_policy(
             builder,
             self.vars,
@@ -106,6 +106,11 @@ impl<'a> CompilerStorage<'a> {
             val,
             self.memory_only_start,
         );
+        if self.is_float_slot(slot) {
+            builder.ins().bitcast(types::F64, MemFlags::new(), val)
+        } else {
+            val
+        }
     }
 
     pub(crate) fn load_f64(
@@ -130,7 +135,7 @@ impl<'a> CompilerStorage<'a> {
         base_ptr: Value,
         slot: u16,
         val: Value,
-    ) {
+    ) -> Value {
         store_slot_f64_with_storage_policy(
             builder,
             self.vars,
@@ -140,6 +145,11 @@ impl<'a> CompilerStorage<'a> {
             val,
             self.memory_only_start,
         );
+        if self.is_float_slot(slot) {
+            val
+        } else {
+            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+        }
     }
 
     pub(crate) fn reload_all_from_memory(self, builder: &mut FunctionBuilder<'_>, base_ptr: Value) {
@@ -486,5 +496,37 @@ mod tests {
             matches!(err, JitError::Internal(ref message) if message.contains("test sync slot range overflow")),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn storage_keeps_ssa_values_in_slot_canonical_types_across_raw_bit_copies() {
+        let mut func = cranelift_codegen::ir::Function::new();
+        let mut func_ctx = cranelift_frontend::FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+        let block = builder.create_block();
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let vars = [
+            builder.declare_var(types::F64),
+            builder.declare_var(types::I64),
+        ];
+        let slot_types = [SlotType::Float, SlotType::Value];
+        let storage = CompilerStorage::new(&vars, &slot_types, 2);
+        let base = builder.ins().iconst(types::I64, 0);
+        let raw_float = builder.ins().iconst(types::I64, 0x3ff0_0000_0000_0000);
+        let canonical_float = storage.store_i64(&mut builder, base, 0, raw_float);
+        let float_bits = storage.load_i64(&mut builder, base, 0);
+        let float_value = builder.ins().f64const(2.0);
+        let canonical_word = storage.store_f64(&mut builder, base, 1, float_value);
+        let word_as_float = storage.load_f64(&mut builder, base, 1);
+
+        assert_eq!(builder.func.dfg.value_type(canonical_float), types::F64);
+        assert_eq!(builder.func.dfg.value_type(float_bits), types::I64);
+        assert_eq!(builder.func.dfg.value_type(canonical_word), types::I64);
+        assert_eq!(builder.func.dfg.value_type(word_as_float), types::F64);
+
+        builder.ins().return_(&[]);
+        builder.finalize(crate::test_frontend_config());
     }
 }

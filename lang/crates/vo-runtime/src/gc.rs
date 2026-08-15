@@ -1578,6 +1578,11 @@ impl Gc {
             }
         };
 
+        if !self.heap.allocation_allowed() {
+            self.record_allocation_failure(MemoryError::AllocationForbidden);
+            return core::ptr::null_mut();
+        }
+
         if self
             .max_objects
             .is_some_and(|max_objects| self.live_object_count >= max_objects)

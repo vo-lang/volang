@@ -311,6 +311,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -434,6 +435,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -568,6 +570,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -789,6 +792,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -908,6 +912,7 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -1110,6 +1115,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -1211,6 +1217,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),
@@ -1350,6 +1357,7 @@ fn jit_callback_abi_manifest_is_sorted_unique_and_machine_readable() {
         }
         match field.return_policy {
             JitCallbackReturnPolicy::RawVoid => assert_eq!(field.ret, JitAbiType::Void),
+            JitCallbackReturnPolicy::RawU32 => assert_eq!(field.ret, JitAbiType::U32),
             JitCallbackReturnPolicy::RawPointer | JitCallbackReturnPolicy::TablePointer => {
                 assert_eq!(field.ret, JitAbiType::Ptr)
             }
@@ -1435,6 +1443,7 @@ fn jit_missing_callbacks_and_invalid_call_requests_fail_without_publishing() {
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module: core::ptr::null(),
         native_frame: core::ptr::null_mut(),

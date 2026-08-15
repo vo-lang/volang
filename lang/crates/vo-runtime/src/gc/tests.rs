@@ -390,6 +390,25 @@ fn memory_config_snapshot_preserves_child_island_admission_policy() {
 }
 
 #[test]
+fn disabled_allocation_takes_precedence_over_object_metadata_exhaustion() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        max_objects: Some(0),
+        ..VmMemoryConfig::default()
+    })
+    .expect("bounded collector");
+    gc.memory_set_allocation_allowed(false);
+
+    let object = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+
+    assert!(object.is_null());
+    assert_eq!(
+        gc.last_memory_error(),
+        Some(MemoryError::AllocationForbidden)
+    );
+}
+
+#[test]
 fn disabling_growth_preallocates_all_collector_object_worklists() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,

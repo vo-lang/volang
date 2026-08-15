@@ -12,14 +12,11 @@ use vo_runtime::jit_api::JitContextField;
 use crate::{JitCompileEnv, JitError};
 
 mod helper_calls;
-mod reg_const_facts;
 
 pub(crate) use crate::helpers::HelperRefs;
 pub use crate::helpers::{HelperKind, RuntimeHelper};
 pub(crate) use helper_calls::emit_gc_safepoint_poll;
 pub use helper_calls::{emit_funcref_call_raw, emit_runtime_helper_call};
-pub(crate) use reg_const_facts::try_compute_reg_const_facts_with_context;
-pub use reg_const_facts::RegConstFacts;
 
 /// Translation result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +328,12 @@ pub trait MetadataAccess {
     /// Get current PC
     fn current_pc(&self) -> usize;
 
+    /// Whether a dominating access already established the exact collection
+    /// and index bounds fact used by the current instruction.
+    fn current_bounds_check_elided(&self) -> bool {
+        false
+    }
+
     /// Dense verified index of the dynamic callsite at `pc`.
     fn dynamic_callsite_index(&self, pc: usize) -> Option<u32>;
 
@@ -448,17 +451,10 @@ pub trait HelperAccess {
     fn helper(&mut self, kind: HelperKind) -> RuntimeHelper;
 }
 
-/// Compile-time constant facts tracked while emitting a block.
+/// Compile-time constants resolved from the semantic SSA graph.
 pub trait RegConstAccess {
-    /// Set register constant (for optimization)
-    fn set_reg_const(&mut self, reg: u16, val: i64);
-
     /// Get register constant
     fn get_reg_const(&self, reg: u16) -> Option<i64>;
-
-    /// Clear all compile-time constant state at control-flow and helper-call
-    /// boundaries where a single linear fact map is no longer sound.
-    fn clear_reg_consts(&mut self);
 }
 
 /// Slow-path frame publication and JitResult return semantics.
@@ -495,6 +491,11 @@ pub trait SelectSync<'a>: SlotAccess<'a> {
 
 /// Basic-block-local control-flow facts.
 pub trait FlowFacts {
+    /// Whether the optimizing graph proved the current pointer input non-null.
+    fn current_nil_check_elided(&self) -> bool {
+        false
+    }
+
     /// Check if a slot has been verified non-nil in the current basic block.
     fn is_checked_non_nil(&self, slot: u16) -> bool;
 
@@ -519,6 +520,10 @@ macro_rules! impl_shared_compiler_traits {
 
             fn current_pc(&self) -> usize {
                 self.core.current_pc
+            }
+
+            fn current_bounds_check_elided(&self) -> bool {
+                self.core.current_bounds_check_elided
             }
 
             fn dynamic_callsite_index(&self, pc: usize) -> Option<u32> {
@@ -571,20 +576,19 @@ macro_rules! impl_shared_compiler_traits {
         }
 
         impl $crate::translator::RegConstAccess for $compiler {
-            fn set_reg_const(&mut self, reg: u16, val: i64) {
-                self.core.reg_consts.insert(reg, val);
-            }
-
             fn get_reg_const(&self, reg: u16) -> Option<i64> {
-                self.core.reg_consts.get(&reg).copied()
-            }
-
-            fn clear_reg_consts(&mut self) {
-                self.core.reg_consts.clear();
+                self.core
+                    .analysis
+                    .ir()
+                    .input_constant(self.core.current_pc, reg)
             }
         }
 
         impl $crate::translator::FlowFacts for $compiler {
+            fn current_nil_check_elided(&self) -> bool {
+                self.core.current_nil_check_elided
+            }
+
             fn is_checked_non_nil(&self, slot: u16) -> bool {
                 self.core.checked_non_nil.contains(&slot)
             }
@@ -689,9 +693,12 @@ impl<'a, T> TrapEmitter<'a> for T where
 }
 
 /// Scalar and conversion lowering.
-pub trait ScalarEmitter<'a>: TrapEmitter<'a> + SlotAccess<'a> + RegConstAccess {}
+pub trait ScalarEmitter<'a>: TrapEmitter<'a> + SlotAccess<'a> + RegConstAccess + FlowFacts {}
 
-impl<'a, T> ScalarEmitter<'a> for T where T: TrapEmitter<'a> + SlotAccess<'a> + RegConstAccess {}
+impl<'a, T> ScalarEmitter<'a> for T where
+    T: TrapEmitter<'a> + SlotAccess<'a> + RegConstAccess + FlowFacts
+{
+}
 
 /// Global, pointer, and stack-slot memory lowering.
 pub trait MemoryEmitter<'a>:
@@ -706,12 +713,12 @@ impl<'a, T> MemoryEmitter<'a> for T where
 
 /// Collection lowering needs metadata layouts plus runtime helpers.
 pub trait CollectionEmitter<'a>:
-    TrapEmitter<'a> + SlotAccess<'a> + RuntimeContext<'a> + MetadataAccess
+    TrapEmitter<'a> + SlotAccess<'a> + RuntimeContext<'a> + MetadataAccess + FlowFacts
 {
 }
 
 impl<'a, T> CollectionEmitter<'a> for T where
-    T: TrapEmitter<'a> + SlotAccess<'a> + RuntimeContext<'a> + MetadataAccess
+    T: TrapEmitter<'a> + SlotAccess<'a> + RuntimeContext<'a> + MetadataAccess + FlowFacts
 {
 }
 

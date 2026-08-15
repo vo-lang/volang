@@ -3,6 +3,8 @@
 use vo_runtime::bytecode::Module;
 use vo_runtime::instruction::Opcode;
 
+use crate::{JitError, MAX_JIT_COMPILE_WORK_BYTES};
+
 #[derive(Debug)]
 pub(crate) struct ModuleCallGraph {
     callers: Box<[Box<[usize]>]>,
@@ -12,9 +14,40 @@ pub(crate) struct ModuleCallGraph {
 }
 
 impl ModuleCallGraph {
+    #[cfg(test)]
     pub(crate) fn build(module: &Module) -> Self {
+        Self::build_with_limit(module, crate::MAX_JIT_ANALYSIS_BYTES)
+            .expect("test call graph must fit the standard analysis budget")
+    }
+
+    pub(crate) fn build_with_limit(module: &Module, limit_bytes: usize) -> Result<Self, JitError> {
         let function_count = module.functions.len();
-        let mut callers = vec![Vec::<usize>::new(); function_count];
+        let fixed_bytes =
+            core::mem::size_of::<Self>().saturating_add(function_count.saturating_mul(
+                core::mem::size_of::<Box<[usize]>>() * 2
+                    + core::mem::size_of::<usize>()
+                    + core::mem::size_of::<bool>(),
+            ));
+        if fixed_bytes > limit_bytes {
+            return Err(JitError::AnalysisResourceLimitExceeded {
+                limit_bytes,
+                requested_bytes: fixed_bytes,
+            });
+        }
+        let raw_edge_count = module
+            .functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|instruction| instruction.opcode() == Opcode::Call)
+            .count();
+        let requested_work_bytes = fixed_bytes
+            .saturating_add(raw_edge_count.saturating_mul(core::mem::size_of::<usize>() * 2));
+        if requested_work_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+            return Err(JitError::CompileWorkLimitExceeded {
+                limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+                requested_bytes: requested_work_bytes,
+            });
+        }
         let mut callees = vec![Vec::<usize>::new(); function_count];
         for (caller_id, function) in module.functions.iter().enumerate() {
             for instruction in &function.code {
@@ -23,18 +56,32 @@ impl ModuleCallGraph {
                 }
                 let callee_id = instruction.static_call_func_id() as usize;
                 if callee_id < function_count {
-                    callers[callee_id].push(caller_id);
                     callees[caller_id].push(callee_id);
                 }
             }
         }
-        for edges in callers.iter_mut().chain(callees.iter_mut()) {
+        for edges in &mut callees {
             edges.sort_unstable();
             edges.dedup();
         }
+        let edge_count = callees.iter().map(Vec::len).sum::<usize>();
+        let requested_bytes = fixed_bytes
+            .saturating_add(edge_count.saturating_mul(core::mem::size_of::<usize>() * 2));
+        if requested_bytes > limit_bytes {
+            return Err(JitError::AnalysisResourceLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            });
+        }
+        let mut callers = vec![Vec::<usize>::new(); function_count];
+        for (caller_id, edges) in callees.iter().enumerate() {
+            for &callee_id in edges {
+                callers[callee_id].push(caller_id);
+            }
+        }
 
         let (component_ids, recursive_components) = components(&callees, &callers);
-        Self {
+        let graph = Self {
             callers: callers
                 .into_iter()
                 .map(Vec::into_boxed_slice)
@@ -47,7 +94,51 @@ impl ModuleCallGraph {
                 .into_boxed_slice(),
             component_ids: component_ids.into_boxed_slice(),
             recursive_components: recursive_components.into_boxed_slice(),
+        };
+        let requested_bytes = graph.retained_bytes();
+        if requested_bytes > limit_bytes {
+            return Err(JitError::AnalysisResourceLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            });
         }
+        Ok(graph)
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            .saturating_add(
+                self.callers
+                    .len()
+                    .saturating_mul(core::mem::size_of::<Box<[usize]>>()),
+            )
+            .saturating_add(
+                self.callers
+                    .iter()
+                    .map(|edges| edges.len().saturating_mul(core::mem::size_of::<usize>()))
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.callees
+                    .len()
+                    .saturating_mul(core::mem::size_of::<Box<[usize]>>()),
+            )
+            .saturating_add(
+                self.callees
+                    .iter()
+                    .map(|edges| edges.len().saturating_mul(core::mem::size_of::<usize>()))
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.component_ids
+                    .len()
+                    .saturating_mul(core::mem::size_of::<usize>()),
+            )
+            .saturating_add(
+                self.recursive_components
+                    .len()
+                    .saturating_mul(core::mem::size_of::<bool>()),
+            )
     }
 
     #[inline]
@@ -162,5 +253,32 @@ mod tests {
         assert!(!graph.same_component(0, 1));
         assert_eq!(graph.callers(1), &[2]);
         assert_eq!(graph.callees(1), &[2]);
+    }
+
+    #[test]
+    fn graph_budget_rejects_retained_edges() {
+        let mut module = Module::new("bounded-call-graph".into());
+        module.functions = vec![
+            function_with_sig(vec![Instruction::new(Opcode::Call, 1, 0, 0)], 0, 0, 1, 0),
+            function_with_sig(vec![Instruction::new(Opcode::Return, 0, 0, 0)], 0, 0, 1, 0),
+        ];
+        let mut empty_module = module.clone();
+        for function in &mut empty_module.functions {
+            function.code.clear();
+        }
+        let empty_graph =
+            ModuleCallGraph::build_with_limit(&empty_module, crate::MAX_JIT_ANALYSIS_BYTES)
+                .expect("empty graph");
+        let limit = empty_graph.retained_bytes();
+
+        let error = ModuleCallGraph::build_with_limit(&module, limit)
+            .expect_err("one retained edge must exceed an empty graph budget");
+        assert!(matches!(
+            error,
+            JitError::AnalysisResourceLimitExceeded {
+                limit_bytes,
+                requested_bytes,
+            } if limit_bytes == limit && requested_bytes > limit
+        ));
     }
 }

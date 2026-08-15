@@ -100,7 +100,6 @@ pub fn render_run_observation_json(
         "side_exits": side_exits,
         "low_progress_function_disables": observation.low_progress_function_disables,
         "low_progress_loop_disables": observation.low_progress_loop_disables,
-        "runtime_dominated_function_disables": observation.runtime_dominated_function_disables,
         "function_compilations": observation.function_compilations,
         "loop_compilations": observation.loop_compilations,
         "compilation_cache_hits": observation.compilation_cache_hits,
@@ -531,7 +530,6 @@ mod terminal_outcome_tests {
         assert_eq!(value["loop_entries"], 5);
         assert_eq!(value["low_progress_function_disables"], 1);
         assert_eq!(value["low_progress_loop_disables"], 2);
-        assert_eq!(value["runtime_dominated_function_disables"], 0);
         assert_eq!(value["function_compilations"], 0);
         assert_eq!(value["loop_compilations"], 0);
         assert_eq!(value["compilation_cache_hits"], 0);

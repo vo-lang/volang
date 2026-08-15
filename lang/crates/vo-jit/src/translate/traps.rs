@@ -67,7 +67,8 @@ pub(in crate::translate) fn emit_nil_ptr_check_for_slot<'a, E>(e: &mut E, ptr_sl
 where
     E: TrapEmitter<'a> + FlowFacts,
 {
-    if e.is_checked_non_nil(ptr_slot) {
+    if e.current_nil_check_elided() || e.is_checked_non_nil(ptr_slot) {
+        e.mark_checked_non_nil(ptr_slot);
         return; // Already verified non-nil in this basic block
     }
     emit_nil_ptr_check(e, ptr);

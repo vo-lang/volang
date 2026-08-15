@@ -289,7 +289,7 @@ fn jit_queue_runtime_transition_stops_before_following_recv() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.callback_state = (&mut calls as *mut QueueTransitionCalls).cast();
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::RuntimeTransition);
     assert_eq!(calls.sends, 1);
@@ -330,7 +330,7 @@ fn jit_queue_recv_transition_preserves_callback_output() {
     parts.callbacks.queue_recv_fn = Some(queue_recv_write_then_transition);
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::RuntimeTransition);
     assert_eq!(ctx.runtime_trap_pc, 0);
@@ -636,7 +636,7 @@ fn jit_shift_precheck_ignores_stale_branch_constant_fact() {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(
         result,
@@ -672,7 +672,7 @@ fn run_jit_shift(opcode: Opcode, flags: u8, lhs: u64, rhs: u64) -> (JitResult, u
     let mut ret = [0];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
     (result, ret[0], parts.panic_flag)
 }
 
@@ -728,7 +728,7 @@ fn run_const_float_to_int(value: f64, flags: u8) -> u64 {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
     assert_eq!(result, JitResult::Ok);
     ret[0]
 }
@@ -763,7 +763,7 @@ fn run_const_int_to_float(value: u64, flags: u8) -> u64 {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
     assert_eq!(
-        jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) },
         JitResult::Ok
     );
     ret[0]

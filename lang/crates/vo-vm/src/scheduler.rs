@@ -770,6 +770,18 @@ impl Scheduler {
         false
     }
 
+    /// Whether another runnable fiber is waiting for the current execution
+    /// lease. Stale queue entries are ignored so they cannot force a needless
+    /// native side exit.
+    #[cfg(feature = "jit")]
+    pub(crate) fn has_runnable_waiter(&self) -> bool {
+        self.ready_queue.iter().any(|id| {
+            self.fibers.get(id.0 as usize).is_some_and(|fiber| {
+                fiber.id != DETACHED_FIBER_SENTINEL && fiber.state.is_runnable()
+            })
+        })
+    }
+
     /// Check if there are blocked fibers (potential deadlock detection). O(1).
     pub(crate) fn has_blocked(&self) -> bool {
         self.blocked_count > 0

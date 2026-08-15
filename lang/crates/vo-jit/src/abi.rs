@@ -18,15 +18,8 @@ pub const NATIVE_ARG_LANES: usize = 1;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub const NATIVE_ARG_LANES: usize = 1;
 
-/// VM-facing entry. It preserves the compact stable boundary used by the
-/// interpreter and callbacks; the generated bridge thunk loads argument lanes
-/// and enters the native body.
-pub type JitFunc =
-    extern "C" fn(ctx: *mut JitContext, frame_ptr: *mut u64, ret_ptr: *mut u64) -> JitResult;
-
-/// JIT-facing entry. Static compiled calls pass their SSA arguments directly
-/// through the raw-word lanes and retain `frame_ptr` for wide or materialized
-/// frames.
+/// Unified VM/JIT native entry. Static calls pass SSA arguments in lanes; VM
+/// dispatch loads the same lanes directly from the verified frame window.
 #[cfg(target_arch = "aarch64")]
 pub type NativeJitFunc = extern "C" fn(
     ctx: *mut JitContext,
@@ -60,7 +53,9 @@ pub type NativeJitFunc = extern "C" fn(
     lane0: u64,
 ) -> JitResult;
 
-pub(crate) fn bridge_signature(
+pub type JitFunc = NativeJitFunc;
+
+pub(crate) fn native_signature(
     call_conv: CallConv,
     pointer_type: cranelift_codegen::ir::Type,
 ) -> Signature {
@@ -68,17 +63,62 @@ pub(crate) fn bridge_signature(
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
     signature.params.push(AbiParam::new(pointer_type));
+    for _ in 0..NATIVE_ARG_LANES {
+        signature.params.push(AbiParam::new(types::I64));
+    }
     signature.returns.push(AbiParam::new(types::I32));
     signature
 }
 
-pub(crate) fn native_signature(
-    call_conv: CallConv,
-    pointer_type: cranelift_codegen::ir::Type,
-) -> Signature {
-    let mut signature = bridge_signature(call_conv, pointer_type);
-    for _ in 0..NATIVE_ARG_LANES {
-        signature.params.push(AbiParam::new(types::I64));
+/// Invoke the unified native ABI from a verified VM frame window.
+///
+/// # Safety
+/// `frame_ptr` must address at least `param_slots` initialized words and
+/// `entry` must carry [`NativeJitFunc`]'s ABI.
+#[inline]
+pub unsafe fn invoke_native_from_frame(
+    entry: NativeJitFunc,
+    ctx: *mut JitContext,
+    frame_ptr: *mut u64,
+    ret_ptr: *mut u64,
+    param_slots: usize,
+) -> JitResult {
+    #[inline]
+    unsafe fn lane(frame_ptr: *mut u64, param_slots: usize, index: usize) -> u64 {
+        if index < param_slots {
+            unsafe { *frame_ptr.add(index) }
+        } else {
+            0
+        }
     }
-    signature
+
+    #[cfg(target_arch = "aarch64")]
+    return entry(
+        ctx,
+        frame_ptr,
+        ret_ptr,
+        unsafe { lane(frame_ptr, param_slots, 0) },
+        unsafe { lane(frame_ptr, param_slots, 1) },
+        unsafe { lane(frame_ptr, param_slots, 2) },
+        unsafe { lane(frame_ptr, param_slots, 3) },
+        unsafe { lane(frame_ptr, param_slots, 4) },
+    );
+
+    #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+    return entry(
+        ctx,
+        frame_ptr,
+        ret_ptr,
+        unsafe { lane(frame_ptr, param_slots, 0) },
+        unsafe { lane(frame_ptr, param_slots, 1) },
+        unsafe { lane(frame_ptr, param_slots, 2) },
+    );
+
+    #[cfg(any(
+        all(target_arch = "x86_64", target_os = "windows"),
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
+    return entry(ctx, frame_ptr, ret_ptr, unsafe {
+        lane(frame_ptr, param_slots, 0)
+    });
 }

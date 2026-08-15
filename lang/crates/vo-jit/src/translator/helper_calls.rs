@@ -17,11 +17,7 @@ pub fn emit_runtime_helper_call<'a>(
     if helper.requires_frame_sync() {
         emitter.spill_all_vars();
     }
-    let call = emit_funcref_call_raw(emitter, helper.func_ref(), args);
-    if helper.requires_frame_sync() {
-        emitter.clear_reg_consts();
-    }
-    call
+    emit_funcref_call_raw(emitter, helper.func_ref(), args)
 }
 
 /// Emit the allocation fast poll directly from the runtime-owned `Gc` layout.

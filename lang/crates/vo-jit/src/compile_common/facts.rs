@@ -1,24 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::JitError;
-
-pub(crate) fn clear_flow_facts(
-    checked_non_nil: &mut HashSet<u16>,
-    reg_consts: &mut HashMap<u16, i64>,
-) {
+pub(crate) fn clear_flow_facts(checked_non_nil: &mut HashSet<u16>) {
     checked_non_nil.clear();
-    reg_consts.clear();
-}
-
-pub(crate) fn apply_reg_const_facts(
-    reg_consts: &mut HashMap<u16, i64>,
-    reg_const_facts: &[Box<[(u16, i64)]>],
-    pc: usize,
-) -> Result<(), JitError> {
-    let facts = reg_const_facts.get(pc).ok_or_else(|| {
-        JitError::Internal(format!("missing per-PC register-constant facts at pc {pc}"))
-    })?;
-    reg_consts.clear();
-    reg_consts.extend(facts.iter().copied());
-    Ok(())
 }

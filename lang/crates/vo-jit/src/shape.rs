@@ -134,11 +134,6 @@ impl ShapePlan {
             .map(|index| self.fresh_accesses[index].1)
     }
 
-    #[inline]
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.fresh_accesses.len() * core::mem::size_of::<(u32, FreshShapeAccess)>()
-    }
-
     #[cfg(test)]
     fn accesses(&self) -> &[(u32, FreshShapeAccess)] {
         &self.fresh_accesses

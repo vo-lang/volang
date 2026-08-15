@@ -2,15 +2,15 @@
 //! Loop compiler for OSR (On-Stack Replacement).
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block, Function, InstBuilder, Value};
+use cranelift_codegen::ir::{types, Block, Function, InstBuilder, MemFlagsData as MemFlags, Value};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
-use crate::translator::{HelperRefs, RuntimeContext as _, SlotAccess, TranslateResult};
+use crate::translator::{HelperKind, HelperRefs, RuntimeContext as _, SlotAccess, TranslateResult};
 use crate::{analysis::FunctionAnalysis, JitCompileEnv, JitError};
-use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::{JitContext, JitContextField, JitResult};
 
@@ -34,6 +34,8 @@ pub struct LoopCompiler<'a> {
     exit_block: Block,
     locals_ptr_var: Variable,
     ctx_ptr: Value,
+    instruction_optimization: &'a crate::optimizer::OptimizedFunction,
+    optimization_plan: &'a crate::optimizer::ModuleOptimizationPlan,
 }
 
 impl<'a> LoopCompiler<'a> {
@@ -48,6 +50,8 @@ impl<'a> LoopCompiler<'a> {
         loop_info: &'a LoopInfo,
         helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
+        instruction_optimization: &'a crate::optimizer::OptimizedFunction,
+        optimization_plan: &'a crate::optimizer::ModuleOptimizationPlan,
     ) -> Result<Self, JitError> {
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
@@ -76,6 +80,8 @@ impl<'a> LoopCompiler<'a> {
             exit_block,
             locals_ptr_var,
             ctx_ptr: Value::from_u32(0),
+            instruction_optimization,
+            optimization_plan,
         })
     }
 
@@ -90,9 +96,11 @@ impl<'a> LoopCompiler<'a> {
         self.core.execution_budget_regions = crate::compile_common::prepare_control_flow(
             &mut self.builder,
             &mut self.core.blocks,
-            &self.core.func_def.code,
             self.core.analysis.ir(),
             policy,
+            self.core.memory_only_start,
+            true,
+            Some(self.instruction_optimization),
         )?;
 
         // Exactly like func_compiler: entry_block -> prologue -> sequential compile
@@ -151,10 +159,16 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn emit_execution_budget_checkpoint(&mut self, resume_pc: usize, cost: u32) {
+        let refill = self
+            .core
+            .helpers
+            .resolve(HelperKind::refill_execution_budget, self.builder.func)
+            .func_ref();
         let poll = crate::compile_common::branch_on_execution_budget(
             &mut self.builder,
             self.ctx_ptr,
             cost,
+            refill,
         );
 
         self.builder.switch_to_block(poll.exhausted);
@@ -168,8 +182,46 @@ impl<'a> LoopCompiler<'a> {
         );
     }
 
-    fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
-        match translate_inst(self, inst)? {
+    fn translate_instruction(
+        &mut self,
+        instruction: crate::ir::TypedInstruction,
+        optimized: crate::optimizer::OptimizedInstruction,
+    ) -> Result<bool, JitError> {
+        let source = instruction.source();
+        let inst = &source;
+        if optimized.action == crate::optimizer::LoweringAction::AlwaysJump {
+            debug_assert!(matches!(inst.opcode(), Opcode::JumpIf | Opcode::JumpIfNot));
+            self.jump(inst)?;
+            return Ok(true);
+        }
+        if let crate::optimizer::LoweringAction::Replace(replacement) = optimized.action {
+            let value = self.core.lowered_value(replacement).ok_or_else(|| {
+                JitError::Internal(format!(
+                    "OSR GVN replacement value {} is unavailable at pc {}",
+                    replacement.index(),
+                    self.core.current_pc
+                ))
+            })?;
+            let output = *self
+                .core
+                .analysis
+                .ir()
+                .outputs(instruction)
+                .first()
+                .ok_or_else(|| {
+                    JitError::Internal(format!(
+                        "OSR GVN replacement at pc {} has no output",
+                        self.core.current_pc
+                    ))
+                })?;
+            let output = self.core.analysis.ir().value(output);
+            match output.ty {
+                crate::ir::ValueType::Float64 => self.write_var_f64(output.slot, value),
+                _ => self.write_var(output.slot, value),
+            }
+            return Ok(false);
+        }
+        match translate_inst(self, instruction)? {
             TranslateResult::Completed => return Ok(false),
             TranslateResult::Unhandled => {}
         }
@@ -196,7 +248,7 @@ impl<'a> LoopCompiler<'a> {
                 self.panic(inst);
                 Ok(true)
             }
-            Opcode::Call => self.call(inst),
+            Opcode::Call => self.call(inst, optimized.inline_target()),
             Opcode::CallExtern => {
                 let terminated = crate::call_helpers::emit_call_extern(
                     self,
@@ -208,15 +260,74 @@ impl<'a> LoopCompiler<'a> {
                 Ok(terminated)
             }
             Opcode::CallClosure => {
+                if self.try_inline_dynamic_call(inst, optimized.inline_target())? {
+                    return Ok(false);
+                }
                 crate::call_helpers::emit_call_closure(self, inst)?;
                 Ok(false)
             }
             Opcode::CallIface => {
+                if self.try_inline_dynamic_call(inst, optimized.inline_target())? {
+                    return Ok(false);
+                }
                 crate::call_helpers::emit_call_iface(self, inst)?;
                 Ok(false)
             }
             other => Err(JitError::UnsupportedOpcode(other)),
         }
+    }
+
+    fn try_inline_dynamic_call(
+        &mut self,
+        inst: &Instruction,
+        inline_target: Option<u32>,
+    ) -> Result<bool, JitError> {
+        let Some(target) = inline_target else {
+            return Ok(false);
+        };
+        let Some(inline) = self
+            .optimization_plan
+            .pure_leaf_inline(self.core.func_id, target)
+        else {
+            return Ok(false);
+        };
+        let Some(metadata) = self
+            .core
+            .func_def
+            .instruction_metadata
+            .get(self.core.current_pc)
+        else {
+            return Ok(false);
+        };
+        let (arg_slots, ret_slots) = match (inst.opcode(), metadata) {
+            (
+                Opcode::CallClosure,
+                InstructionMetadata::CallLayout {
+                    arg_layout,
+                    ret_layout,
+                },
+            )
+            | (
+                Opcode::CallIface,
+                InstructionMetadata::CallIfaceLayout {
+                    arg_layout,
+                    ret_layout,
+                    ..
+                },
+            ) => (arg_layout.len(), ret_layout.len()),
+            _ => return Ok(false),
+        };
+        if !inline.supports_dynamic_layout(arg_slots, ret_slots) {
+            return Ok(false);
+        }
+        let slot0 = match inst.opcode() {
+            Opcode::CallClosure => self.read_var(inst.a),
+            Opcode::CallIface => self.read_var(inst.a + 1),
+            _ => unreachable!("dynamic inline was filtered by opcode"),
+        };
+        let arg_start = usize::from(inst.b);
+        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots);
+        Ok(true)
     }
 
     fn jump(&mut self, inst: &Instruction) -> Result<(), JitError> {
@@ -230,7 +341,14 @@ impl<'a> LoopCompiler<'a> {
             let loop_header = self
                 .core
                 .block_for_pc(self.loop_info.begin_pc, "loop header")?;
-            self.builder.ins().jump(loop_header, &[]);
+            let arguments = crate::compile_common::block_arguments(
+                &mut self.builder,
+                self.core.analysis.ir(),
+                &self.core.vars,
+                self.core.memory_only_start,
+                self.loop_info.begin_pc,
+            );
+            self.builder.ins().jump(loop_header, &arguments);
         } else if raw_target < self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
             self.store_vars_to_memory();
@@ -238,7 +356,14 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Jump within loop body
             let block = self.core.block_for_pc(raw_target, "jump")?;
-            self.builder.ins().jump(block, &[]);
+            let arguments = crate::compile_common::block_arguments(
+                &mut self.builder,
+                self.core.analysis.ir(),
+                &self.core.vars,
+                self.core.memory_only_start,
+                raw_target,
+            );
+            self.builder.ins().jump(block, &arguments);
         }
         Ok(())
     }
@@ -274,9 +399,16 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Target within loop - stay in JIT
             let target_block = self.core.block_for_pc(target, "conditional jump")?;
+            let target_arguments = crate::compile_common::block_arguments(
+                &mut self.builder,
+                self.core.analysis.ir(),
+                &self.core.vars,
+                self.core.memory_only_start,
+                target,
+            );
             self.builder
                 .ins()
-                .brif(cmp, target_block, &[], fall_through, &[]);
+                .brif(cmp, target_block, &target_arguments, fall_through, &[]);
         }
 
         self.builder.switch_to_block(fall_through);
@@ -305,15 +437,26 @@ impl<'a> LoopCompiler<'a> {
             .core
             .checked_forloop_target(self.core.current_pc, inst)?;
         let target_block = self.core.block_for_pc(target, "forloop")?;
+        let target_arguments = crate::compile_common::block_arguments(
+            &mut self.builder,
+            self.core.analysis.ir(),
+            &self.core.vars,
+            self.core.memory_only_start,
+            target,
+        );
         let exit_pc = self.core.current_pc + 1;
 
         // Check if exit_pc is within JIT compilation range
         if exit_pc >= self.loop_info.begin_pc && exit_pc <= self.loop_info.end_pc {
             // Exit within loop - continue in JIT
             let fall_through = self.builder.create_block();
-            self.builder
-                .ins()
-                .brif(continue_loop, target_block, &[], fall_through, &[]);
+            self.builder.ins().brif(
+                continue_loop,
+                target_block,
+                &target_arguments,
+                fall_through,
+                &[],
+            );
             self.builder.switch_to_block(fall_through);
             self.builder.seal_block(fall_through);
             self.core.clear_flow_facts();
@@ -321,9 +464,13 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Exit outside loop - return to VM
             let exit_block = crate::compile_common::cold_block(&mut self.builder);
-            self.builder
-                .ins()
-                .brif(continue_loop, target_block, &[], exit_block, &[]);
+            self.builder.ins().brif(
+                continue_loop,
+                target_block,
+                &target_arguments,
+                exit_block,
+                &[],
+            );
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
@@ -353,7 +500,7 @@ impl<'a> LoopCompiler<'a> {
 
     /// Returns true if block is terminated.
     /// JIT-to-JIT direct calls with VM call materialization when needed.
-    fn call(&mut self, inst: &Instruction) -> Result<bool, JitError> {
+    fn call(&mut self, inst: &Instruction, inline_target: Option<u32>) -> Result<bool, JitError> {
         let func_id = inst.static_call_func_id();
         let arg_start = inst.b as usize;
 
@@ -375,14 +522,15 @@ impl<'a> LoopCompiler<'a> {
             target_func,
             eligibility,
         );
-        if let Some(inline) = crate::call_helpers::SmallPureLeafInline::analyze(
-            target_func,
-            &self.core.vo_module.constants,
-        ) {
-            if self.core.reserve_leaf_inline_instructions(inline.cost()) {
-                inline.emit_guarded(self, call_plan, self.core.current_pc + 1)?;
-                return Ok(false);
-            }
+        let planned_inline = inline_target
+            .filter(|target| *target == func_id)
+            .and_then(|_| {
+                self.optimization_plan
+                    .pure_leaf_inline(self.core.func_id, func_id)
+            });
+        if let Some(inline) = planned_inline {
+            inline.emit(self, call_plan.arg_start);
+            return Ok(false);
         }
 
         match call_plan.route_for_loop() {
@@ -421,17 +569,40 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
         )
     }
 
+    fn is_pc_executable(&self, pc: usize) -> bool {
+        self.instruction_optimization.is_executable(pc)
+    }
+
     fn set_current_pc(&mut self, pc: usize) {
         self.core.current_pc = pc;
+        self.core.current_bounds_check_elided = self
+            .instruction_optimization
+            .instruction(pc)
+            .is_some_and(|node| node.bounds_check_elided);
+        self.core.current_nil_check_elided = self
+            .instruction_optimization
+            .instruction(pc)
+            .is_some_and(|node| node.nil_check_elided);
     }
 
     fn enter_pc_block(&mut self, pc: usize, block_terminated: &mut bool) -> Result<(), JitError> {
         if crate::compile_common::enter_compile_pc(
             &mut self.builder,
-            &self.core.blocks,
+            crate::compile_common::CompileBlockView {
+                blocks: &self.core.blocks,
+                ir: self.core.analysis.ir(),
+                vars: &self.core.vars,
+                memory_only_start: self.core.memory_only_start,
+                executable_only: true,
+                optimized: Some(self.instruction_optimization),
+            },
             pc,
             block_terminated,
         ) {
+            if let Some(&block) = self.core.blocks.get(&pc) {
+                self.core
+                    .bind_ir_block_parameters(&mut self.builder, pc, block);
+            }
             self.core.clear_flow_facts();
             if let Some(cost) = self.core.execution_budget_regions.get(&pc).copied() {
                 self.emit_execution_budget_checkpoint(pc, cost);
@@ -441,24 +612,34 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
     }
 
     fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.core.apply_reg_const_facts(pc)
+        self.core.apply_ir_facts(pc)
     }
 
-    fn instruction_for_pc(&self, pc: usize) -> Result<Instruction, JitError> {
-        self.core
-            .analysis
-            .ir()
+    fn instruction_for_pc(
+        &self,
+        pc: usize,
+    ) -> Result<crate::compile_common::LoweringInstruction, JitError> {
+        self.instruction_optimization
             .instruction(pc)
-            .map(|instruction| instruction.source())
+            .map(crate::compile_common::LoweringInstruction::Optimized)
             .ok_or(JitError::InvalidOsrTarget(pc))
     }
 
-    fn should_skip_instruction(&self, inst: &Instruction) -> bool {
-        inst.opcode() == Opcode::Hint
+    fn should_skip_instruction(&self, inst: crate::compile_common::LoweringInstruction) -> bool {
+        inst.typed().source().opcode() == Opcode::Hint
+            || inst
+                .optimized()
+                .is_some_and(|node| node.action == crate::optimizer::LoweringAction::Eliminate)
     }
 
-    fn translate_pc_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
-        self.translate_instruction(inst)
+    fn translate_pc_instruction(
+        &mut self,
+        inst: crate::compile_common::LoweringInstruction,
+    ) -> Result<bool, JitError> {
+        let optimized = inst.optimized().ok_or_else(|| {
+            JitError::Internal("OSR lowering received a baseline instruction".to_string())
+        })?;
+        self.translate_instruction(inst.typed(), optimized)
     }
 
     fn finish_fallthrough(&mut self, block_terminated: bool) -> Result<(), JitError> {
@@ -497,6 +678,17 @@ impl<'a> crate::translator::ScratchAccess<'a> for LoopCompiler<'a> {
 
 impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
     fn read_var(&mut self, slot: u16) -> Value {
+        if slot < self.core.memory_only_start {
+            if let Some(value) = self.core.lowered_value_for_slot(slot) {
+                return if self.core.is_float_slot(slot) {
+                    self.builder
+                        .ins()
+                        .bitcast(types::I64, MemFlags::new(), value)
+                } else {
+                    value
+                };
+            }
+        }
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
@@ -507,14 +699,14 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
     }
     fn write_var(&mut self, slot: u16, val: Value) {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        crate::compile_common::CompilerStorage::for_function(
+        let ir_value = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
         )
         .store_i64(&mut self.builder, locals_ptr, slot, val);
+        self.core.record_output_value(slot, ir_value);
         self.core.checked_non_nil.remove(&slot);
-        self.core.reg_consts.remove(&slot);
     }
     fn var_addr(&mut self, slot: u16) -> Value {
         let offset = (slot as i64) * 8;
@@ -525,6 +717,17 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
         self.core.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
+        if slot < self.core.memory_only_start {
+            if let Some(value) = self.core.lowered_value_for_slot(slot) {
+                return if self.core.is_float_slot(slot) {
+                    value
+                } else {
+                    self.builder
+                        .ins()
+                        .bitcast(types::F64, MemFlags::new(), value)
+                };
+            }
+        }
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
@@ -535,14 +738,14 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        crate::compile_common::CompilerStorage::for_function(
+        let ir_value = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
         )
         .store_f64(&mut self.builder, locals_ptr, slot, val);
+        self.core.record_output_value(slot, ir_value);
         self.core.checked_non_nil.remove(&slot);
-        self.core.reg_consts.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);

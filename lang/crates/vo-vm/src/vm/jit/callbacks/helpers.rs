@@ -34,6 +34,32 @@ impl JitCallbackVm<'_> {
         self.vm.state.gc.should_step()
     }
 
+    /// Renew the active native execution lease only while the VM has no work
+    /// that requires a scheduler boundary. The returned budget always covers
+    /// the region waiting to execute, which guarantees forward progress for a
+    /// verified atomic region larger than the ordinary scheduling quantum.
+    pub(super) fn refill_execution_budget(&self, required_budget: u32) -> u32 {
+        let vm = &self.vm;
+        if required_budget == 0
+            || vm.interrupt_requested()
+            || vm.pending_exit_code.is_some()
+            || vm.terminal_memory_error.is_some()
+            || vm.scheduler.has_runnable_waiter()
+            || vm.scheduler.has_blocked()
+            || vm.state.gc.should_step()
+            || vm.state.runtime_mem_requests.has_pending()
+            || !vm.state.command_queue.is_empty()
+            || !vm.pending_runtime_transitions.is_empty()
+        {
+            return 0;
+        }
+        #[cfg(feature = "std")]
+        if vm.state.main_transport.is_some() || !vm.state.entry_island_events.is_empty() {
+            return 0;
+        }
+        vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS.max(required_budget)
+    }
+
     /// Validate and visit the exact roots in all paused native callers.
     /// Collection itself runs after the JIT side exit, where the VM's existing
     /// resumable root scanner owns the bounded GC work.
@@ -415,4 +441,36 @@ pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {
         RuntimeTrapKind::StackOverflow,
         "runtime error: stack overflow",
     )
+}
+
+#[cfg(test)]
+mod scheduler_poll_tests {
+    use super::*;
+    use crate::fiber::PendingSpawn;
+
+    #[test]
+    fn idle_vm_renews_native_execution_lease_for_the_whole_region() {
+        let mut vm = Vm::new();
+        let callback_vm = JitCallbackVm { vm: &mut vm };
+
+        assert_eq!(
+            callback_vm.refill_execution_budget(
+                vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS.saturating_add(1)
+            ),
+            vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS.saturating_add(1)
+        );
+    }
+
+    #[test]
+    fn scheduler_or_gc_work_prevents_native_execution_lease_renewal() {
+        let mut vm = Vm::new();
+        vm.scheduler
+            .try_spawn_pending(PendingSpawn::for_test(0))
+            .expect("test runnable fiber");
+        assert_eq!(JitCallbackVm { vm: &mut vm }.refill_execution_budget(1), 0);
+
+        let mut vm = Vm::new();
+        vm.state.gc.gc_request_cycle();
+        assert_eq!(JitCallbackVm { vm: &mut vm }.refill_execution_budget(1), 0);
+    }
 }

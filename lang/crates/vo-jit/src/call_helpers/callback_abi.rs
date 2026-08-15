@@ -138,9 +138,6 @@ pub fn emit_checked_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
     let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
     let result = emitter.builder().inst_results(call)[0];
-    if needs_spill {
-        emitter.clear_reg_consts();
-    }
     super::check_call_result(emitter, result, spill_vars);
     Ok(result)
 }
@@ -178,9 +175,6 @@ pub fn emit_raw_jit_context_callback_call<'a, E: IrEmitter<'a>>(
     }
     let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
-    if needs_spill {
-        emitter.clear_reg_consts();
-    }
     Ok(emitter.builder().inst_results(call).first().copied())
 }
 

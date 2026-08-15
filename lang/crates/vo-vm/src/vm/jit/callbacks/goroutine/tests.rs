@@ -262,6 +262,7 @@ fn test_context<'a>(
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module,
         native_frame: core::ptr::null_mut(),

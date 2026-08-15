@@ -1,6 +1,7 @@
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::instruction::Opcode;
 
+use crate::ir::TypedInstruction;
 use crate::translator::{IrEmitter, TranslateResult};
 use crate::JitError;
 
@@ -29,11 +30,13 @@ use super::scalar::{
 /// Translate a single instruction.
 pub fn translate_inst<'a>(
     e: &mut impl IrEmitter<'a>,
-    inst: &Instruction,
+    instruction: TypedInstruction,
 ) -> Result<TranslateResult, JitError> {
     use Opcode::*;
     use TranslateResult::*;
 
+    let source = instruction.source();
+    let inst = &source;
     match inst.opcode() {
         Hint => Ok(Completed),
         LoadInt => {

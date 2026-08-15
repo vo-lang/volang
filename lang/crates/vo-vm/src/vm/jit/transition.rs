@@ -109,7 +109,7 @@ mod tests {
     use vo_runtime::SlotType;
 
     #[test]
-    fn vm_jit_deopt_validates_artifact_state_and_resumes_interpreter() {
+    fn vm_jit_deopt_rejects_absent_artifact_state() {
         let mut func = function(3, 0);
         func.code = vec![
             Instruction::new(Opcode::LoadInt, 1, 8, 0),
@@ -152,7 +152,7 @@ mod tests {
         fiber.push_frame(0, 3, 0, 0, 0);
         fiber.stack[1] = 8;
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
-        ctx.ctx.deopt_state_id = 0;
+        ctx.ctx.deopt_state_id = u32::MAX;
         ctx.ctx.deopt_func_id = 0;
         ctx.ctx.deopt_resume_pc = 1;
         ctx.ctx.deopt_osr_pc = u32::MAX;
@@ -174,8 +174,12 @@ mod tests {
             &ctx,
         );
 
-        assert!(matches!(transition, JitBridgeTransition::FrameChanged));
-        assert_eq!(fiber.frames.last().unwrap().pc, 1);
+        assert!(matches!(
+            transition,
+            JitBridgeTransition::JitError(message)
+                if message.contains("deopt state 4294967295 is unavailable")
+        ));
+        assert_eq!(fiber.frames.last().unwrap().pc, 0);
         assert_eq!(fiber.stack[1], 8);
         assert_eq!(
             vm.jit
@@ -183,7 +187,7 @@ mod tests {
                 .unwrap()
                 .execution_stats()
                 .side_exit_count(JitSideExitReason::Deopt),
-            before + 1
+            before
         );
     }
 

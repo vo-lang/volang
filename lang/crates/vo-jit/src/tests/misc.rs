@@ -37,7 +37,7 @@ fn call_native_lane0(
 }
 
 #[test]
-fn function_bridge_and_native_entry_have_distinct_argument_authorities() {
+fn function_entry_uses_one_native_abi_for_vm_frames_and_direct_lanes() {
     let mut func = make_func_with_slot_types_and_sig(
         vec![Instruction::new(Opcode::Return, 0, 1, 0)],
         vec![SlotType::Float],
@@ -58,9 +58,9 @@ fn function_bridge_and_native_entry_have_distinct_argument_authorities() {
     )
     .expect("compile dual-entry probe");
 
-    let bridge = unsafe { jit.get_func_ptr(0).expect("compiled bridge") };
+    let entry = unsafe { jit.get_func_ptr(0).expect("compiled native entry") };
     let native = unsafe { jit.get_native_func_ptr(0).expect("compiled native entry") };
-    assert_ne!(bridge as *const u8, native as *const u8);
+    assert_eq!(entry as *const u8, native as *const u8);
 
     let frame_value = 11.5f64.to_bits();
     let lane_value = 7.25f64.to_bits();
@@ -70,10 +70,10 @@ fn function_bridge_and_native_entry_have_distinct_argument_authorities() {
     let mut ctx = parts.context(&module, &mut frame);
 
     assert_eq!(
-        bridge(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
         JitResult::Ok
     );
-    assert_eq!(ret[0], frame_value, "bridge must decode the VM frame");
+    assert_eq!(ret[0], frame_value, "VM dispatch must load the native lane");
 
     ret[0] = 0;
     assert_eq!(
@@ -135,7 +135,7 @@ fn tiered_entries_freeze_training_profiles_after_tier_up() {
     ctx.optimizing_threshold = 1;
 
     assert_eq!(
-        baseline(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(baseline, &mut ctx, &mut frame, &mut ret) },
         JitResult::Ok
     );
     let profile = unsafe { &mut *ctx.jit_profile_table };
@@ -144,12 +144,204 @@ fn tiered_entries_freeze_training_profiles_after_tier_up() {
 
     profile.tier_up_state = 2;
     assert_eq!(
-        optimizing(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(optimizing, &mut ctx, &mut frame, &mut ret) },
         JitResult::Ok
     );
     let profile = unsafe { &*ctx.jit_profile_table };
     assert_eq!((profile.entries, profile.completed), (1, 0));
     assert_eq!(profile.tier_up_state, 2);
+}
+
+#[test]
+fn optimizing_sccp_executes_only_the_proven_constant_arm() {
+    let mut module = VoModule::new("jit-sccp-branch".into());
+    module.functions.push(make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 1, 0),
+            Instruction::with_flags(Opcode::JumpIf, 0, 0, 3, 0),
+            Instruction::new(Opcode::LoadInt, 1, 7, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+            Instruction::new(Opcode::LoadInt, 1, 9, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ],
+        0,
+        0,
+        2,
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified SCCP branch module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind SCCP branch module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile SCCP branch probe");
+
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing SCCP entry")
+    };
+    let mut frame = [0_u64; 2];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret, [9]);
+}
+
+#[test]
+fn optimizing_sccp_does_not_materialize_a_dead_trailing_block() {
+    let mut module = VoModule::new("jit-sccp-dead-tail".into());
+    module.functions.push(make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 0, 0),
+            Instruction::with_flags(Opcode::JumpIf, 0, 0, 3, 0),
+            Instruction::new(Opcode::LoadInt, 1, 7, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+            Instruction::new(Opcode::LoadInt, 1, 9, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ],
+        0,
+        0,
+        2,
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified SCCP dead-tail module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind SCCP dead-tail module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile SCCP dead-tail probe");
+
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing SCCP dead-tail entry")
+    };
+    let mut frame = [0_u64; 2];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret, [7]);
+}
+
+#[test]
+fn baseline_keeps_structural_branch_targets_when_sccp_prunes_an_edge() {
+    let mut module = VoModule::new("jit-baseline-structural-cfg".into());
+    module.functions.push(make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 0, 0),
+            Instruction::with_flags(Opcode::JumpIf, 0, 0, 3, 0),
+            Instruction::new(Opcode::LoadInt, 1, 7, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+            Instruction::new(Opcode::LoadInt, 1, 9, 0),
+            Instruction::new(Opcode::Return, 1, 1, 0),
+        ],
+        0,
+        0,
+        2,
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified baseline structural CFG module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create baseline JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind baseline structural CFG module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Baseline,
+    )
+    .expect("compile baseline structural CFG probe");
+
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Baseline)
+            .expect("baseline structural CFG entry")
+    };
+    let mut frame = [0_u64; 2];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret, [7]);
+}
+
+#[test]
+fn optimizing_gvn_reuses_a_historical_ssa_value_after_slot_overwrite() {
+    let mut module = VoModule::new("jit-local-gvn".into());
+    module.functions.push(make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 4, 0),
+            Instruction::new(Opcode::LoadInt, 1, 5, 0),
+            Instruction::new(Opcode::AddI, 2, 0, 1),
+            Instruction::new(Opcode::LoadInt, 2, 99, 0),
+            Instruction::new(Opcode::AddI, 3, 0, 1),
+            Instruction::new(Opcode::Return, 3, 1, 0),
+        ],
+        0,
+        0,
+        4,
+        1,
+    ));
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified GVN module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind GVN module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile GVN probe");
+
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing GVN entry")
+    };
+    let mut frame = [0_u64; 4];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret, [9]);
 }
 
 extern "C" fn reject_tier_up(_ctx: *mut JitContext, _func_id: u32) -> JitResult {
@@ -190,7 +382,7 @@ fn tier_up_failure_returns_before_local_ssa_state_is_initialized() {
     ctx.optimizing_threshold = 1;
 
     assert_eq!(
-        baseline(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(baseline, &mut ctx, &mut frame, &mut ret) },
         JitResult::JitError
     );
     assert_eq!(unsafe { (*ctx.jit_profile_table).tier_up_state }, 1);
@@ -245,7 +437,7 @@ fn optimizing_self_recursion_executes_through_the_direct_native_symbol() {
     ctx.fiber_sp = module.functions[0].local_slots as u32;
 
     assert_eq!(
-        entry(&mut ctx, stack.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut stack, &mut ret) },
         JitResult::Ok
     );
     assert_eq!(ret[0], 55);
@@ -255,7 +447,7 @@ fn optimizing_self_recursion_executes_through_the_direct_native_symbol() {
 }
 
 #[test]
-fn optimizing_scalar_replacement_executes_without_a_managed_heap() {
+fn optimizing_scalar_replacement_preserves_allocation_admission() {
     let mut function = make_func_with_slot_types_and_sig(
         vec![
             Instruction::new(Opcode::LoadConst, 0, 0, 0),
@@ -304,20 +496,172 @@ fn optimizing_scalar_replacement_executes_without_a_managed_heap() {
         jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
             .expect("optimizing scalar replacement entry")
     };
+    let mut gc = bounded_gc(1);
     let mut frame = [0_u64; 4];
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut frame);
-    assert!(
-        ctx.gc.is_null(),
-        "test intentionally supplies no managed heap"
-    );
+    ctx.gc = &mut gc;
 
     assert_eq!(
-        entry(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
         JitResult::Ok
     );
     assert_eq!(ret[0], 42);
+    gc.close_jit_allocation_region_for_boundary();
+    assert_eq!(
+        gc.object_count(),
+        1,
+        "scalarized fields retain the PtrNew allocation effect"
+    );
+
+    gc.memory_set_allocation_allowed(false);
+    ret[0] = 0;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::JitError
+    );
+    assert_eq!(
+        gc.last_memory_error(),
+        Some(vo_runtime::gc::MemoryError::AllocationForbidden)
+    );
+}
+
+#[test]
+fn optimizing_scalar_replacement_flows_through_a_cfg_merge() {
+    let mut function = make_func_with_slot_types_and_sig(
+        vec![
+            Instruction::new(Opcode::LoadConst, 1, 0, 0),
+            Instruction::new(Opcode::PtrNew, 2, 1, 0),
+            Instruction::with_flags(Opcode::JumpIf, 0, 0, 3, 0),
+            Instruction::new(Opcode::LoadInt, 3, 41, 0),
+            Instruction::with_flags(Opcode::Jump, 0, 0, 2, 0),
+            Instruction::new(Opcode::LoadInt, 3, 42, 0),
+            Instruction::new(Opcode::PtrSet, 2, 0, 3),
+            Instruction::new(Opcode::PtrGet, 4, 2, 0),
+            Instruction::new(Opcode::Return, 4, 1, 0),
+        ],
+        vec![
+            SlotType::Value,
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ],
+        1,
+        1,
+        1,
+    );
+    for pc in [1, 6, 7] {
+        function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::Value],
+        };
+    }
+    let mut module = VoModule::new("jit-cross-block-scalar-replacement".into());
+    module.constants.push(Constant::Int(
+        ValueMeta::new(0, ValueKind::Int64).to_raw() as i64
+    ));
+    module.functions.push(function);
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified cross-block scalar replacement module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind cross-block scalar replacement module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile cross-block scalar replacement function");
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing cross-block scalar replacement entry")
+    };
+
+    let mut gc = bounded_gc(2);
+    let mut frame = [0_u64; 5];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+    ctx.gc = &mut gc;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], 41);
+
+    frame[0] = 1;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], 42);
+}
+
+#[test]
+fn scalar_replacement_materializes_before_a_scheduler_exit() {
+    let mut code = vec![
+        Instruction::new(Opcode::LoadConst, 0, 0, 0),
+        Instruction::new(Opcode::PtrNew, 1, 0, 0),
+        Instruction::new(Opcode::LoadInt, 2, 42, 0),
+        Instruction::new(Opcode::PtrSet, 1, 0, 2),
+    ];
+    code.resize(129, Instruction::new(Opcode::Hint, 0, 0, 0));
+    code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+    let mut function = make_func_with_slot_types_and_sig(
+        code,
+        vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+        0,
+        0,
+        0,
+    );
+    for pc in [1, 3] {
+        function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::Value],
+        };
+    }
+    let mut module = VoModule::new("jit-scalar-replacement-materialization".into());
+    module.constants.push(Constant::Int(
+        ValueMeta::new(0, ValueKind::Int64).to_raw() as i64
+    ));
+    module.functions.push(function);
+    let loaded = Arc::new(
+        vo_common_core::verifier::verify_loaded_module(module.clone())
+            .expect("verified scalar replacement materialization module"),
+    );
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create optimizing JIT compiler");
+    jit.bind_loaded_module_scope(loaded)
+        .expect("bind scalar replacement materialization module");
+    jit.compile_loaded_tier(
+        0,
+        default_compile_env(&externs),
+        vo_runtime::jit_api::JitTier::Optimizing,
+    )
+    .expect("compile scalar replacement materialization function");
+    let entry = unsafe {
+        jit.get_func_ptr_for_tier(0, vo_runtime::jit_api::JitTier::Optimizing)
+            .expect("optimizing scalar replacement materialization entry")
+    };
+
+    let mut gc = bounded_gc(1);
+    let mut frame = [0_u64; 3];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+    ctx.gc = &mut gc;
+    ctx.execution_budget = 64;
+    let result = unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) };
+
+    assert_eq!(result, JitResult::Call);
+    assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
+    assert_eq!(ctx.call_resume_pc, 64);
+    let object = frame[1] as vo_runtime::gc::GcRef;
+    assert!(!object.is_null());
+    assert_eq!(unsafe { vo_runtime::gc::Gc::read_slot(object, 0) }, 42);
 }
 
 #[test]
@@ -383,7 +727,7 @@ fn optimizing_fresh_shape_construction_preserves_managed_children() {
     let mut ctx = parts.context(&module, &mut frame);
     ctx.gc = &mut gc;
     assert_eq!(
-        entry(&mut ctx, frame.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
         JitResult::Ok
     );
     gc.close_jit_allocation_region_for_boundary();
@@ -452,11 +796,7 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
     let mut exact_ctx = parts.context(&module, &mut exact_frame);
     exact_ctx.gc = &mut exact_gc;
     assert_eq!(
-        entry(
-            &mut exact_ctx,
-            exact_frame.as_mut_ptr(),
-            exact_ret.as_mut_ptr()
-        ),
+        unsafe { crate::invoke_test_jit(entry, &mut exact_ctx, &mut exact_frame, &mut exact_ret) },
         JitResult::Ok
     );
     exact_gc.close_jit_allocation_region_for_boundary();
@@ -472,11 +812,14 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
     let mut limited_ctx = parts.context(&module, &mut limited_frame);
     limited_ctx.gc = &mut limited_gc;
     assert_eq!(
-        entry(
-            &mut limited_ctx,
-            limited_frame.as_mut_ptr(),
-            limited_ret.as_mut_ptr()
-        ),
+        unsafe {
+            crate::invoke_test_jit(
+                entry,
+                &mut limited_ctx,
+                &mut limited_frame,
+                &mut limited_ret,
+            )
+        },
         JitResult::JitError
     );
     limited_gc.close_jit_allocation_region_for_boundary();
@@ -553,6 +896,16 @@ fn compiled_artifact_retains_precise_live_gcref_stack_maps() {
 
     let metadata = jit.function_metadata(0).expect("artifact metadata");
     assert!(metadata.code_size > 0);
+    let deopt = metadata
+        .deopt_states
+        .iter()
+        .find(|state| state.resume_pc == 0)
+        .expect("allocating instruction must retain its materializable frame state");
+    assert!(deopt.values.iter().any(|value| {
+        value.slot == 0
+            && value.kind == DeoptValueKind::GcRef
+            && value.location == DeoptValueLocation::FiberSlot(0)
+    }));
     assert!(
         metadata.stack_maps.iter().any(|map| {
             map.roots
@@ -581,7 +934,7 @@ fn compiled_artifact_retains_precise_live_gcref_stack_maps() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.gc = &mut gc;
     assert_eq!(
-        entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut args, &mut ret) },
         JitResult::Ok
     );
     assert_eq!(ret[0], source as u64);
@@ -771,6 +1124,10 @@ fn osr_artifact_retains_precise_live_gcref_stack_maps() {
     .expect("compile OSR stack-map probe");
 
     let metadata = jit.loop_metadata(0, 0).expect("OSR metadata");
+    assert!(metadata
+        .deopt_states
+        .iter()
+        .any(|state| state.resume_pc == 0));
     assert!(metadata.stack_maps.iter().any(|map| {
         map.roots
             .iter()
@@ -899,7 +1256,7 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.gc = &mut string_gc;
     assert_eq!(
-        str_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(str_entry, &mut ctx, &mut args, &mut ret) },
         JitResult::JitError
     );
     assert_eq!(
@@ -913,7 +1270,7 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.gc = &mut slice_gc;
     assert_eq!(
-        slice_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(slice_entry, &mut ctx, &mut args, &mut ret) },
         JitResult::JitError
     );
     assert_eq!(
@@ -927,7 +1284,7 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.gc = &mut array_gc;
     assert_eq!(
-        array_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(array_entry, &mut ctx, &mut args, &mut ret) },
         JitResult::JitError
     );
     assert_eq!(
@@ -951,7 +1308,7 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.gc = &mut inline_gc;
     assert_eq!(
-        inline_entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+        unsafe { crate::invoke_test_jit(inline_entry, &mut ctx, &mut args, &mut ret) },
         JitResult::JitError
     );
     assert_eq!(
@@ -966,7 +1323,7 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
         let mut ctx = parts.context(&module, &mut args);
         ctx.gc = &mut nil_gc;
         assert_eq!(
-            entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+            unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut args, &mut ret) },
             JitResult::Ok
         );
         assert_eq!(ret[0], 0);
@@ -1080,7 +1437,7 @@ fn jit_checked_allocations_prioritize_managed_oom_over_runtime_traps() {
         ctx.gc = &mut gc;
 
         assert_eq!(
-            entry(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr()),
+            unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut args, &mut ret) },
             JitResult::JitError
         );
         assert_eq!(gc.last_memory_error(), Some(MemoryError::MetadataExhausted));
@@ -1124,7 +1481,7 @@ fn jit_copy_n_overlap_matches_memmove_semantics() {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(
@@ -1292,7 +1649,7 @@ fn jit_analysis_budget_rejection_is_retryable_without_retained_poison_state() {
 }
 
 #[test]
-fn full_jit_and_all_osr_loops_share_one_function_analysis() {
+fn full_jit_and_all_osr_loops_share_one_function_analysis_and_optimization_graph() {
     let func = make_func(
         vec![
             Instruction::new(Opcode::LoadInt, 0, 1, 0),
@@ -1306,6 +1663,7 @@ fn full_jit_and_all_osr_loops_share_one_function_analysis() {
     let externs = ResolvedExternTable::empty();
     let mut jit = JitCompiler::new().expect("create JIT compiler");
 
+    let mut optimization_graph = None;
     for loop_info in [
         LoopInfo {
             begin_pc: 0,
@@ -1326,6 +1684,17 @@ fn full_jit_and_all_osr_loops_share_one_function_analysis() {
             &loop_info,
         )
         .expect("compile OSR loop");
+        let current = Arc::as_ptr(
+            jit.cache.analyses[0]
+                .as_ref()
+                .and_then(|entry| entry.optimized.as_ref())
+                .expect("OSR retains the canonical optimization graph"),
+        );
+        if let Some(expected) = optimization_graph {
+            assert_eq!(current, expected);
+        } else {
+            optimization_graph = Some(current);
+        }
     }
     jit.compile(
         0,
@@ -1337,6 +1706,9 @@ fn full_jit_and_all_osr_loops_share_one_function_analysis() {
 
     let analysis_stats = jit.analysis_memory_stats();
     assert_eq!(analysis_stats.analysis_count, 1);
+    assert!(jit.cache.analyses[0]
+        .as_ref()
+        .is_some_and(|entry| entry.optimized.is_some()));
     assert!(analysis_stats.retained_bytes > 0);
     assert_eq!(
         analysis_stats.remaining_bytes(),
@@ -1368,7 +1740,7 @@ fn native_backedge_exhausts_budget_through_scheduler_yield_contract() {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
     ctx.execution_budget = 1;
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
@@ -1401,11 +1773,155 @@ fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
     let mut ctx = parts.context(&module, &mut args);
     ctx.execution_budget = 64;
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
     assert_eq!(ctx.call_resume_pc, 64);
+    assert_eq!(ctx.execution_budget, 0);
+
+    extern "C" fn renew_idle_lease(_ctx: *mut JitContext, required_budget: u32) -> u32 {
+        vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS.max(required_budget)
+    }
+
+    parts.callbacks.execution_budget_refill_fn = Some(renew_idle_lease);
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.execution_budget = 64;
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
+
+    assert_eq!(result, JitResult::Ok);
+    assert!(ctx.execution_budget < vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS);
+    assert_eq!(
+        ctx.execution_budget_refilled,
+        u64::from(vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS)
+    );
+}
+
+#[test]
+fn optimizing_leaf_inline_charges_expanded_execution_budget() {
+    let mut callee = make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 1, 0),
+            Instruction::with_flags(Opcode::JumpIf, 0, 0, 3, 0),
+            Instruction::new(Opcode::LoadInt, 1, 0, 0),
+            Instruction::with_flags(Opcode::Jump, 0, 0, 2, 0),
+            Instruction::new(Opcode::LoadInt, 1, 40, 0),
+            Instruction::new(Opcode::LoadInt, 2, 2, 0),
+            Instruction::new(Opcode::AddI, 0, 1, 2),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+        ],
+        0,
+        0,
+        3,
+        1,
+    );
+    callee.ret_slot_types = vec![SlotType::Value];
+    let mut caller = make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::Call, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+        ],
+        0,
+        0,
+        1,
+        1,
+    );
+    caller.ret_slot_types = vec![SlotType::Value];
+    let mut module = VoModule::new("optimizing-inline-timeslice".into());
+    module.functions = vec![caller, callee];
+    vo_common_core::verifier::verify_loaded_module(module.clone())
+        .expect("verified inline budget module");
+    let externs = ResolvedExternTable::empty();
+    let mut jit = JitCompiler::new().expect("create inline budget JIT compiler");
+    jit.verify_module_once(&module)
+        .expect("verify inline budget module");
+    jit.verify_env_once(default_compile_env(&externs))
+        .expect("verify inline budget environment");
+    let module_analysis = jit
+        .module_analysis(&module, default_compile_env(&externs))
+        .expect("module analysis");
+    let optimization_plan = jit.optimization_plan(&module).expect("optimization plan");
+    let dynamic_callsites = jit
+        .dynamic_callsites
+        .as_ref()
+        .expect("dynamic callsite facts");
+    let analysis = jit
+        .cache
+        .get_or_analyze(
+            0,
+            &module.functions[0],
+            &module,
+            Arc::clone(dynamic_callsites),
+        )
+        .expect("caller analysis");
+    let target_config = jit.module.target_config();
+    let ptr_type = target_config.pointer_type();
+    jit.ctx.func.signature =
+        crate::abi::native_signature(target_config.default_call_conv, ptr_type);
+    jit.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0xfeed, 0);
+    let helpers = HelperRefs::new(&mut jit.module, jit.helper_funcs);
+    let instruction_optimization = crate::optimizer::OptimizedFunction::analyze(analysis.ir());
+    let compiler = FunctionCompiler::new(
+        &mut jit.ctx.func,
+        &mut jit.func_ctx,
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+        &module_analysis.entry_eligibility,
+        helpers,
+        &analysis,
+        vo_runtime::jit_api::JitTier::Optimizing,
+        &module_analysis.inline_plan,
+        Some(&optimization_plan),
+        Some(&instruction_optimization),
+        None,
+    );
+    let inline = optimization_plan
+        .pure_leaf_inline(0, 1)
+        .expect("inline plan");
+    compiler
+        .compile_inline_probe(target_config, inline)
+        .expect("compile inline budget probe");
+    let func_id_cl = jit
+        .module
+        .declare_function(
+            "vo_jit_inline_budget_probe",
+            cranelift_module::Linkage::Local,
+            &jit.ctx.func.signature,
+        )
+        .expect("declare inline budget probe");
+    let staged = jit
+        .stage_function(func_id_cl, "inline budget probe", Vec::new())
+        .expect("stage inline budget probe");
+    let (code_ptr, _) = jit
+        .publish_loop_artifact(staged)
+        .expect("publish inline budget probe");
+    let entry: JitFunc = unsafe { std::mem::transmute(code_ptr) };
+
+    let mut frame = [0_u64; 2];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut frame);
+    ctx.execution_budget = 2;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Call
+    );
+    assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
+    assert_eq!(ctx.call_resume_pc, 0);
+    assert_eq!(
+        ctx.execution_budget, 2,
+        "a rejected inline region leaves the next scheduler turn untouched"
+    );
+
+    ctx.call_kind = 0;
+    ctx.execution_budget = 10;
+    assert_eq!(
+        unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+        JitResult::Ok
+    );
+    assert_eq!(ret[0], 42);
     assert_eq!(ctx.execution_budget, 0);
 }
 
@@ -1445,7 +1961,7 @@ fn wide_function_reads_high_parameter_and_writes_high_integer_slot() {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(ret[0], 42);
@@ -1490,7 +2006,7 @@ fn wide_function_round_trips_high_float_slot() {
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(f64::from_bits(ret[0]), 7.0);
@@ -1548,7 +2064,7 @@ fn callback_reload_crosses_the_ssa_memory_boundary() {
     parts.callbacks.recover_fn = Some(write_recover_slots);
     let mut ctx = parts.context(&module, &mut args);
 
-    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(args[usize::from(first_result_slot)], 40);
@@ -1591,7 +2107,7 @@ fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
     let mut ctx = parts.context(&module, &mut materialized_frame);
     ctx.execution_budget = 64;
 
-    let result = jit_func(&mut ctx, entry_args.as_mut_ptr(), ret.as_mut_ptr());
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut entry_args, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);

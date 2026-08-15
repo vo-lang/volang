@@ -136,17 +136,7 @@ pub(crate) fn function_contract_in_env(
     module: &Module,
     env: JitCompileEnv<'_>,
 ) -> EffectContract {
-    let reg_const_facts = crate::translator::try_compute_reg_const_facts_with_context(
-        &func.code,
-        &func.instruction_metadata,
-        &module.constants,
-        &module.functions,
-        &module.externs,
-        0,
-        func.code.len(),
-        crate::MAX_JIT_ANALYSIS_BYTES,
-    )
-    .ok();
+    let refined_ir = contract_refinement_ir(func, module);
 
     let mut contract = EffectContract::PURE;
     if func.has_defer {
@@ -193,13 +183,11 @@ pub(crate) fn function_contract_in_env(
         let divisor_is_known_nonzero = matches!(
             inst.opcode(),
             Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
-        ) && reg_const_facts
+        ) && refined_ir
             .as_ref()
-            .and_then(|(facts, _)| facts.get(pc))
-            .and_then(|facts| {
-                facts
-                    .iter()
-                    .find_map(|(reg, value)| (*reg == inst.c).then_some(*value))
+            .and_then(|ir| {
+                ir.input_constants(pc)
+                    .find_map(|(slot, value)| (slot == inst.c).then_some(value))
             })
             .is_some_and(|value| value != 0);
         if divisor_is_known_nonzero {
@@ -218,11 +206,20 @@ pub(crate) fn function_contract_in_env(
 /// limited to calls inside a genuinely recursive SCC. Prepared shadow entry
 /// starts from local effects and remains available through a call chain only
 /// when every reachable callee can preserve the shadow-frame contract.
+#[cfg(test)]
 pub(crate) fn module_frame_entry_eligibility(
     module: &Module,
     env: JitCompileEnv<'_>,
 ) -> Vec<crate::JitFrameEntryEligibility> {
     let graph = crate::call_graph::ModuleCallGraph::build(module);
+    module_frame_entry_eligibility_with_graph(module, env, &graph)
+}
+
+pub(crate) fn module_frame_entry_eligibility_with_graph(
+    module: &Module,
+    env: JitCompileEnv<'_>,
+    graph: &crate::call_graph::ModuleCallGraph,
+) -> Vec<crate::JitFrameEntryEligibility> {
     let local_contracts = module
         .functions
         .iter()
@@ -251,7 +248,7 @@ pub(crate) fn module_frame_entry_eligibility(
         .collect::<Vec<_>>();
 
     propagate_ineligible_callers(
-        &graph,
+        graph,
         &mut eligibility,
         |entry| entry.frame_elided,
         |entry| {
@@ -259,13 +256,13 @@ pub(crate) fn module_frame_entry_eligibility(
         },
     );
     propagate_ineligible_callers(
-        &graph,
+        graph,
         &mut eligibility,
         |entry| entry.prepared_shadow,
         |entry| entry.prepared_shadow = false,
     );
     propagate_ineligible_callers(
-        &graph,
+        graph,
         &mut eligibility,
         |entry| entry.static_prepared_shadow,
         |entry| entry.static_prepared_shadow = false,
@@ -312,17 +309,7 @@ fn local_function_contract_in_env(
     module: &Module,
     env: JitCompileEnv<'_>,
 ) -> EffectContract {
-    let reg_const_facts = crate::translator::try_compute_reg_const_facts_with_context(
-        &func.code,
-        &func.instruction_metadata,
-        &module.constants,
-        &module.functions,
-        &module.externs,
-        0,
-        func.code.len(),
-        crate::MAX_JIT_ANALYSIS_BYTES,
-    )
-    .ok();
+    let refined_ir = contract_refinement_ir(func, module);
 
     let mut contract = EffectContract::PURE;
     if func.has_defer {
@@ -350,13 +337,11 @@ fn local_function_contract_in_env(
         let divisor_is_known_nonzero = matches!(
             inst.opcode(),
             Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
-        ) && reg_const_facts
+        ) && refined_ir
             .as_ref()
-            .and_then(|(facts, _)| facts.get(pc))
-            .and_then(|facts| {
-                facts
-                    .iter()
-                    .find_map(|(reg, value)| (*reg == inst.c).then_some(*value))
+            .and_then(|ir| {
+                ir.input_constants(pc)
+                    .find_map(|(slot, value)| (slot == inst.c).then_some(value))
             })
             .is_some_and(|value| value != 0);
         if divisor_is_known_nonzero {
@@ -366,6 +351,22 @@ fn local_function_contract_in_env(
         contract = contract.union(opcode_contract(inst.opcode()));
     }
     contract
+}
+
+fn contract_refinement_ir(func: &FunctionDef, module: &Module) -> Option<crate::ir::FunctionIr> {
+    func.code
+        .iter()
+        .any(|instruction| {
+            matches!(
+                instruction.opcode(),
+                Opcode::DivI | Opcode::DivU | Opcode::ModI | Opcode::ModU
+            )
+        })
+        .then(|| {
+            crate::ir::FunctionIr::build_with_limit(func, module, crate::MAX_JIT_ANALYSIS_BYTES)
+                .ok()
+        })
+        .flatten()
 }
 
 pub fn emit_runtime_trap_return<'a>(

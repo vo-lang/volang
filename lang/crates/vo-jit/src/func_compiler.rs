@@ -13,9 +13,15 @@ use crate::translator::{
     HelperKind, HelperRefs, RuntimeContext as _, SelectSyncCase, SlotAccess, TranslateResult,
 };
 use crate::{analysis::FunctionAnalysis, JitCompileEnv, JitError};
-use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::JitContextField;
+
+struct VirtualObject {
+    active: Variable,
+    pointer: Variable,
+    fields: Vec<Variable>,
+}
 
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
@@ -35,10 +41,11 @@ pub struct FunctionCompiler<'a> {
     saved_fiber_sp: Value,
     pending_select_cases: Vec<SelectSyncCase>,
     tier: vo_runtime::jit_api::JitTier,
+    inline_plan: &'a crate::optimizer::ModuleInlinePlan,
     optimization_plan: Option<&'a crate::optimizer::ModuleOptimizationPlan>,
+    instruction_optimization: Option<&'a crate::optimizer::OptimizedFunction>,
     self_native_ref: Option<FuncRef>,
-    virtual_aliases: std::collections::HashMap<u16, usize>,
-    virtual_objects: Vec<Vec<Value>>,
+    virtual_objects: Vec<VirtualObject>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -53,7 +60,9 @@ impl<'a> FunctionCompiler<'a> {
         mut helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
         tier: vo_runtime::jit_api::JitTier,
+        inline_plan: &'a crate::optimizer::ModuleInlinePlan,
         optimization_plan: Option<&'a crate::optimizer::ModuleOptimizationPlan>,
+        instruction_optimization: Option<&'a crate::optimizer::OptimizedFunction>,
         self_native_ref: Option<FuncRef>,
     ) -> Self {
         let copy_frame_slots = helpers
@@ -67,6 +76,18 @@ impl<'a> FunctionCompiler<'a> {
         let args_ptr_var = builder.declare_var(types::I64);
         let args_ptr_is_stack_var = builder.declare_var(types::I8);
         let jit_memory_flags = crate::translator::JitMemoryFlags::new(&mut builder);
+        let virtual_objects = instruction_optimization
+            .map(crate::optimizer::OptimizedFunction::scalar_object_slots)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|slots| VirtualObject {
+                active: builder.declare_var(types::I8),
+                pointer: builder.declare_var(types::I64),
+                fields: (0..slots)
+                    .map(|_| builder.declare_var(types::I64))
+                    .collect(),
+            })
+            .collect();
 
         Self {
             builder,
@@ -90,10 +111,11 @@ impl<'a> FunctionCompiler<'a> {
             saved_fiber_sp: Value::from_u32(0),
             pending_select_cases: Vec::new(),
             tier,
+            inline_plan,
             optimization_plan,
+            instruction_optimization,
             self_native_ref,
-            virtual_aliases: std::collections::HashMap::new(),
-            virtual_objects: Vec::new(),
+            virtual_objects,
         }
     }
 
@@ -104,13 +126,16 @@ impl<'a> FunctionCompiler<'a> {
         self.core.execution_budget_regions = crate::compile_common::prepare_control_flow(
             &mut self.builder,
             &mut self.core.blocks,
-            &self.core.func_def.code,
             self.core.analysis.ir(),
             policy,
+            self.core.memory_only_start,
+            self.instruction_optimization.is_some(),
+            self.instruction_optimization,
         )?;
 
         self.builder.switch_to_block(self.core.entry_block);
         self.emit_prologue();
+        self.initialize_virtual_objects();
         crate::compile_common::drive_compile(&mut self)?;
 
         self.builder.seal_all_blocks();
@@ -119,11 +144,52 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn compile_inline_probe(
+        mut self,
+        frontend_config: TargetFrontendConfig,
+        inline: &crate::call_helpers::SmallPureLeafInline,
+    ) -> Result<(), JitError> {
+        self.core.declare_variables(&mut self.builder);
+        let policy =
+            crate::compile_common::ControlPolicy::full_function(self.core.func_def.code.len());
+        let optimized = crate::optimizer::OptimizedFunction::inline_cost_probe(
+            self.core.analysis.ir(),
+            inline.cost().try_into().unwrap_or(u32::MAX),
+        );
+        self.core.execution_budget_regions = crate::compile_common::prepare_control_flow(
+            &mut self.builder,
+            &mut self.core.blocks,
+            self.core.analysis.ir(),
+            policy,
+            self.core.memory_only_start,
+            false,
+            Some(&optimized),
+        )?;
+        self.builder.switch_to_block(self.core.entry_block);
+        self.emit_prologue();
+        if let Some(cost) = self.core.execution_budget_regions.get(&0).copied() {
+            self.emit_execution_budget_checkpoint(0, cost);
+        }
+        inline.emit_into_for_test(&mut self, 0);
+        let value = self.load_local(0);
+        let ret_ptr = self.builder.block_params(self.core.entry_block)[2];
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), value, ret_ptr, 0);
+        let ok = self.builder.ins().iconst(types::I32, 0);
+        self.builder.ins().return_(&[ok]);
+        self.builder.seal_all_blocks();
+        self.builder.finalize(frontend_config);
+        Ok(())
+    }
+
     /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
     /// Called on slow path (Call/WaitIo) so VM can see the current state.
     /// Note: args_ptr may be stale if fiber.stack was reallocated during nested calls,
     /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
     fn emit_variable_spill(&mut self) {
+        self.materialize_virtual_objects();
         let args_ptr = self.current_memory_base_ptr();
         let dst_ptr = self.fiber_stack_args_ptr();
         crate::compile_common::CompilerStorage::for_function(
@@ -142,6 +208,50 @@ impl<'a> FunctionCompiler<'a> {
         );
     }
 
+    fn initialize_virtual_objects(&mut self) {
+        if self.virtual_objects.is_empty() {
+            return;
+        }
+        let inactive = self.builder.ins().iconst(types::I8, 0);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        for object in &self.virtual_objects {
+            self.builder.def_var(object.active, inactive);
+            self.builder.def_var(object.pointer, zero);
+            for field in &object.fields {
+                self.builder.def_var(*field, zero);
+            }
+        }
+    }
+
+    fn materialize_virtual_objects(&mut self) {
+        for object_id in 0..self.virtual_objects.len() {
+            let active = self.builder.use_var(self.virtual_objects[object_id].active);
+            let materialize = crate::compile_common::cold_block(&mut self.builder);
+            let done = self.builder.create_block();
+            let is_active = self.builder.ins().icmp_imm_u(IntCC::NotEqual, active, 0);
+            self.builder
+                .ins()
+                .brif(is_active, materialize, &[], done, &[]);
+
+            self.builder.switch_to_block(materialize);
+            self.builder.seal_block(materialize);
+            let pointer = self
+                .builder
+                .use_var(self.virtual_objects[object_id].pointer);
+            let fields = self.virtual_objects[object_id].fields.clone();
+            for (offset, field) in fields.into_iter().enumerate() {
+                let value = self.builder.use_var(field);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), value, pointer, (offset * 8) as i32);
+            }
+            self.builder.ins().jump(done, &[]);
+
+            self.builder.switch_to_block(done);
+            self.builder.seal_block(done);
+        }
+    }
+
     fn emit_cooperative_yield(&mut self, resume_pc: usize) {
         self.emit_variable_spill();
         let ctx = self.builder.block_params(self.core.entry_block)[0];
@@ -150,7 +260,13 @@ impl<'a> FunctionCompiler<'a> {
 
     fn emit_execution_budget_checkpoint(&mut self, resume_pc: usize, cost: u32) {
         let ctx = self.builder.block_params(self.core.entry_block)[0];
-        let poll = crate::compile_common::branch_on_execution_budget(&mut self.builder, ctx, cost);
+        let refill = self
+            .core
+            .helpers
+            .resolve(HelperKind::refill_execution_budget, self.builder.func)
+            .func_ref();
+        let poll =
+            crate::compile_common::branch_on_execution_budget(&mut self.builder, ctx, cost, refill);
 
         self.builder.switch_to_block(poll.exhausted);
         self.builder.seal_block(poll.exhausted);
@@ -456,47 +572,91 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
+    fn translate_instruction(
+        &mut self,
+        instruction: crate::ir::TypedInstruction,
+        optimized: Option<crate::optimizer::OptimizedInstruction>,
+    ) -> Result<bool, JitError> {
+        let source = instruction.source();
+        let inst = &source;
+        if optimized.is_some_and(|node| node.action == crate::optimizer::LoweringAction::AlwaysJump)
+        {
+            debug_assert!(matches!(inst.opcode(), Opcode::JumpIf | Opcode::JumpIfNot));
+            self.jump(inst)?;
+            return Ok(true);
+        }
+        if let Some(crate::optimizer::LoweringAction::Replace(replacement)) =
+            optimized.map(|node| node.action)
+        {
+            let value = self.core.lowered_value(replacement).ok_or_else(|| {
+                JitError::Internal(format!(
+                    "GVN replacement value {} is unavailable at pc {}",
+                    replacement.index(),
+                    self.core.current_pc
+                ))
+            })?;
+            let output = *self
+                .core
+                .analysis
+                .ir()
+                .outputs(instruction)
+                .first()
+                .ok_or_else(|| {
+                    JitError::Internal(format!(
+                        "GVN replacement at pc {} has no output",
+                        self.core.current_pc
+                    ))
+                })?;
+            let output = self.core.analysis.ir().value(output);
+            match output.ty {
+                crate::ir::ValueType::Float64 => self.write_var_f64(output.slot, value),
+                _ => self.store_local(output.slot, value),
+            }
+            return Ok(false);
+        }
         if self.tier == vo_runtime::jit_api::JitTier::Optimizing
             && inst.opcode() == Opcode::PtrNew
-            && self.emit_virtual_allocation(inst)
+            && self
+                .emit_virtual_allocation(inst, optimized.and_then(|node| node.scalar_replacement))?
         {
             return Ok(false);
         }
         if self.tier == vo_runtime::jit_api::JitTier::Optimizing {
             match inst.opcode() {
-                Opcode::PtrGet | Opcode::PtrGetN if self.emit_virtual_ptr_get(inst) => {
+                Opcode::PtrGet | Opcode::PtrGetN
+                    if self.emit_virtual_ptr_get(
+                        inst,
+                        optimized.and_then(|node| node.virtual_object),
+                    ) =>
+                {
                     return Ok(false);
                 }
-                Opcode::PtrSet | Opcode::PtrSetN if self.emit_virtual_ptr_set(inst) => {
+                Opcode::PtrSet | Opcode::PtrSetN
+                    if self.emit_virtual_ptr_set(
+                        inst,
+                        optimized.and_then(|node| node.virtual_object),
+                    ) =>
+                {
                     return Ok(false);
                 }
                 _ => {}
             }
-            if self
-                .core
-                .analysis
-                .fresh_shape_access(self.core.current_pc)
-                .is_some()
-            {
+            if optimized.and_then(|node| node.fresh_shape).is_some() {
                 match inst.opcode() {
                     Opcode::PtrGet | Opcode::PtrGetN => {
                         crate::translate::fresh_ptr_get(self, inst)?;
-                        self.update_virtual_aliases(inst);
                         return Ok(false);
                     }
                     Opcode::PtrSet | Opcode::PtrSetN => {
                         crate::translate::fresh_ptr_set(self, inst)?;
-                        self.update_virtual_aliases(inst);
                         return Ok(false);
                     }
                     _ => {}
                 }
             }
         }
-        match translate_inst(self, inst)? {
+        match translate_inst(self, instruction)? {
             TranslateResult::Completed => {
-                self.update_virtual_aliases(inst);
                 return Ok(false);
             }
             TranslateResult::Unhandled => {}
@@ -523,7 +683,7 @@ impl<'a> FunctionCompiler<'a> {
                 self.panic(inst);
                 Ok(true)
             }
-            Opcode::Call => self.call(inst),
+            Opcode::Call => self.call(inst, optimized.and_then(|node| node.inline_target())),
             Opcode::CallExtern => {
                 let terminated = crate::call_helpers::emit_call_extern(
                     self,
@@ -535,10 +695,22 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(terminated)
             }
             Opcode::CallClosure => {
+                if self.try_inline_dynamic_call(
+                    inst,
+                    optimized.and_then(|node| node.inline_target()),
+                )? {
+                    return Ok(false);
+                }
                 crate::call_helpers::emit_call_closure(self, inst)?;
                 Ok(false)
             }
             Opcode::CallIface => {
+                if self.try_inline_dynamic_call(
+                    inst,
+                    optimized.and_then(|node| node.inline_target()),
+                )? {
+                    return Ok(false);
+                }
                 crate::call_helpers::emit_call_iface(self, inst)?;
                 Ok(false)
             }
@@ -550,26 +722,90 @@ impl<'a> FunctionCompiler<'a> {
         }
     }
 
-    fn emit_virtual_allocation(&mut self, inst: &Instruction) -> bool {
-        let Some(allocation) = self.core.analysis.stack_allocation(self.core.current_pc) else {
-            return false;
+    fn try_inline_dynamic_call(
+        &mut self,
+        inst: &Instruction,
+        inline_target: Option<u32>,
+    ) -> Result<bool, JitError> {
+        let Some(target) = inline_target else {
+            return Ok(false);
         };
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        let object_id = self.virtual_objects.len();
-        self.virtual_objects
-            .push(vec![zero; usize::from(allocation.slots)]);
-        self.virtual_aliases.insert(inst.a, object_id);
-        let virtual_identity = self
-            .builder
-            .ins()
-            .iconst(types::I64, i64::try_from(object_id + 1).unwrap_or(i64::MAX));
-        self.store_local(inst.a, virtual_identity);
-        self.core.checked_non_nil.insert(inst.a);
-        true
+        let Some(inline) = self
+            .optimization_plan
+            .and_then(|plan| plan.pure_leaf_inline(self.core.func_id, target))
+        else {
+            return Ok(false);
+        };
+        let Some(metadata) = self
+            .core
+            .func_def
+            .instruction_metadata
+            .get(self.core.current_pc)
+        else {
+            return Ok(false);
+        };
+        let (arg_slots, ret_slots) = match (inst.opcode(), metadata) {
+            (
+                Opcode::CallClosure,
+                InstructionMetadata::CallLayout {
+                    arg_layout,
+                    ret_layout,
+                },
+            )
+            | (
+                Opcode::CallIface,
+                InstructionMetadata::CallIfaceLayout {
+                    arg_layout,
+                    ret_layout,
+                    ..
+                },
+            ) => (arg_layout.len(), ret_layout.len()),
+            _ => return Ok(false),
+        };
+        if !inline.supports_dynamic_layout(arg_slots, ret_slots) {
+            return Ok(false);
+        }
+
+        let slot0 = match inst.opcode() {
+            Opcode::CallClosure => self.load_local(inst.a),
+            Opcode::CallIface => self.load_local(inst.a + 1),
+            _ => unreachable!("dynamic inline was filtered by opcode"),
+        };
+        let arg_start = usize::from(inst.b);
+        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots);
+        Ok(true)
     }
 
-    fn emit_virtual_ptr_get(&mut self, inst: &Instruction) -> bool {
-        let Some(&object_id) = self.virtual_aliases.get(&inst.b) else {
+    fn emit_virtual_allocation(
+        &mut self,
+        inst: &Instruction,
+        replacement: Option<crate::escape::ScalarReplacement>,
+    ) -> Result<bool, JitError> {
+        let Some(replacement) = replacement else {
+            return Ok(false);
+        };
+        crate::translate::materialize_scalar_replaced_ptr_new(self, inst)?;
+        let pointer = self.load_local(inst.a);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let active = self.builder.ins().iconst(types::I8, 1);
+        let Some(object) = self.virtual_objects.get(replacement.object as usize) else {
+            return Err(JitError::Internal(format!(
+                "scalar replacement object {} is absent at pc {}",
+                replacement.object, self.core.current_pc
+            )));
+        };
+        debug_assert_eq!(object.fields.len(), usize::from(replacement.slots));
+        self.builder.def_var(object.pointer, pointer);
+        self.builder.def_var(object.active, active);
+        for field in &object.fields {
+            self.builder.def_var(*field, zero);
+        }
+        self.core.checked_non_nil.insert(inst.a);
+        Ok(true)
+    }
+
+    fn emit_virtual_ptr_get(&mut self, inst: &Instruction, object_id: Option<u32>) -> bool {
+        let Some(object_id) = object_id else {
             return false;
         };
         let count = match inst.opcode() {
@@ -584,23 +820,23 @@ impl<'a> FunctionCompiler<'a> {
             _ => unreachable!(),
         };
         let start = usize::from(inst.c);
-        let Some(values) = self.virtual_objects.get(object_id) else {
+        let Some(object) = self.virtual_objects.get(object_id as usize) else {
             return false;
         };
-        let Some(values) = values.get(start..start.saturating_add(count)) else {
+        let Some(fields) = object.fields.get(start..start.saturating_add(count)) else {
             return false;
         };
-        let values = values.to_vec();
-        for (offset, value) in values.into_iter().enumerate() {
+        let fields = fields.to_vec();
+        for (offset, field) in fields.into_iter().enumerate() {
+            let value = self.builder.use_var(field);
             let destination = inst.a + offset as u16;
-            self.virtual_aliases.remove(&destination);
             self.store_local(destination, value);
         }
         true
     }
 
-    fn emit_virtual_ptr_set(&mut self, inst: &Instruction) -> bool {
-        let Some(&object_id) = self.virtual_aliases.get(&inst.a) else {
+    fn emit_virtual_ptr_set(&mut self, inst: &Instruction, object_id: Option<u32>) -> bool {
+        let Some(object_id) = object_id else {
             return false;
         };
         let count = match inst.opcode() {
@@ -618,53 +854,16 @@ impl<'a> FunctionCompiler<'a> {
             .map(|offset| self.load_local(inst.c + offset as u16))
             .collect::<Vec<_>>();
         let start = usize::from(inst.b);
-        let Some(fields) = self.virtual_objects.get_mut(object_id) else {
+        let Some(object) = self.virtual_objects.get(object_id as usize) else {
             return false;
         };
-        let Some(fields) = fields.get_mut(start..start.saturating_add(count)) else {
+        let Some(fields) = object.fields.get(start..start.saturating_add(count)) else {
             return false;
         };
-        fields.copy_from_slice(&values);
-        true
-    }
-
-    fn update_virtual_aliases(&mut self, inst: &Instruction) {
-        match inst.opcode() {
-            Opcode::Copy => {
-                let source = self.virtual_aliases.get(&inst.b).copied();
-                self.virtual_aliases.remove(&inst.a);
-                if let Some(object) = source {
-                    self.virtual_aliases.insert(inst.a, object);
-                }
-            }
-            Opcode::CopyN => {
-                let copies = (0..inst.copy_n_count())
-                    .map(|offset| {
-                        (
-                            inst.a + offset,
-                            self.virtual_aliases.get(&(inst.b + offset)).copied(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                for (destination, _) in &copies {
-                    self.virtual_aliases.remove(destination);
-                }
-                for (destination, object) in copies {
-                    if let Some(object) = object {
-                        self.virtual_aliases.insert(destination, object);
-                    }
-                }
-            }
-            _ => {
-                if let Some(instruction) = self.core.analysis.ir().instruction(self.core.current_pc)
-                {
-                    for output in self.core.analysis.ir().outputs(*instruction) {
-                        self.virtual_aliases
-                            .remove(&self.core.analysis.ir().value(*output).slot);
-                    }
-                }
-            }
+        for (&field, value) in fields.iter().zip(values) {
+            self.builder.def_var(field, value);
         }
+        true
     }
 
     fn jump(&mut self, inst: &Instruction) -> Result<(), JitError> {
@@ -672,8 +871,14 @@ impl<'a> FunctionCompiler<'a> {
             self.core
                 .checked_branch_target(self.core.current_pc, inst.imm32(), inst.opcode())?;
         let block = self.core.block_for_pc(target, "jump")?;
-
-        self.builder.ins().jump(block, &[]);
+        let arguments = crate::compile_common::block_arguments(
+            &mut self.builder,
+            self.core.analysis.ir(),
+            &self.core.vars,
+            self.core.memory_only_start,
+            target,
+        );
+        self.builder.ins().jump(block, &arguments);
         Ok(())
     }
 
@@ -687,6 +892,17 @@ impl<'a> FunctionCompiler<'a> {
 
     /// Read variable as I64: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
     fn load_local(&mut self, slot: u16) -> Value {
+        if slot < self.core.memory_only_start {
+            if let Some(value) = self.core.lowered_value_for_slot(slot) {
+                return if self.core.is_float_slot(slot) {
+                    self.builder
+                        .ins()
+                        .bitcast(types::I64, MemFlags::new(), value)
+                } else {
+                    value
+                };
+            }
+        }
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
@@ -701,15 +917,15 @@ impl<'a> FunctionCompiler<'a> {
     /// boundaries. Memory-suffix slots write their authoritative frame cell.
     fn store_local(&mut self, slot: u16, val: Value) {
         let args_ptr = self.current_memory_base_ptr();
-        crate::compile_common::CompilerStorage::for_function(
+        let ir_value = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
         )
         .store_i64(&mut self.builder, args_ptr, slot, val);
+        self.core.record_output_value(slot, ir_value);
         // Writes invalidate local compile-time facts for the slot.
         self.core.checked_non_nil.remove(&slot);
-        self.core.reg_consts.remove(&slot);
     }
 
     fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) -> Result<(), JitError> {
@@ -719,12 +935,19 @@ impl<'a> FunctionCompiler<'a> {
                 .checked_branch_target(self.core.current_pc, inst.imm32(), inst.opcode())?;
         let target_block = self.core.block_for_pc(target, "conditional jump")?;
         let fall_through = self.builder.create_block();
+        let target_arguments = crate::compile_common::block_arguments(
+            &mut self.builder,
+            self.core.analysis.ir(),
+            &self.core.vars,
+            self.core.memory_only_start,
+            target,
+        );
 
         let zero = self.builder.ins().iconst(types::I64, 0);
         let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
         self.builder
             .ins()
-            .brif(cmp, target_block, &[], fall_through, &[]);
+            .brif(cmp, target_block, &target_arguments, fall_through, &[]);
 
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
@@ -752,10 +975,21 @@ impl<'a> FunctionCompiler<'a> {
             .checked_forloop_target(self.core.current_pc, inst)?;
         let target_block = self.core.block_for_pc(target, "forloop")?;
         let fall_through = self.builder.create_block();
+        let target_arguments = crate::compile_common::block_arguments(
+            &mut self.builder,
+            self.core.analysis.ir(),
+            &self.core.vars,
+            self.core.memory_only_start,
+            target,
+        );
 
-        self.builder
-            .ins()
-            .brif(continue_loop, target_block, &[], fall_through, &[]);
+        self.builder.ins().brif(
+            continue_loop,
+            target_block,
+            &target_arguments,
+            fall_through,
+            &[],
+        );
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
         self.core.clear_flow_facts();
@@ -853,7 +1087,7 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     /// Returns true if the block was terminated
-    fn call(&mut self, inst: &Instruction) -> Result<bool, JitError> {
+    fn call(&mut self, inst: &Instruction, inline_target: Option<u32>) -> Result<bool, JitError> {
         let target_func_id = inst.static_call_func_id();
         let arg_start = inst.b as usize;
 
@@ -875,31 +1109,21 @@ impl<'a> FunctionCompiler<'a> {
             target_func,
             eligibility,
         );
-        let optimizing_inline = self
-            .optimization_plan
-            .and_then(|plan| plan.pure_leaf_inline(self.core.func_id, target_func_id));
-        if let Some(inline) = optimizing_inline {
-            if self.core.reserve_leaf_inline_instructions(inline.cost()) {
-                inline.emit(self, call_plan.arg_start);
-                return Ok(false);
-            }
-        } else if self.tier == vo_runtime::jit_api::JitTier::Baseline {
-            if let Some(inline) = crate::call_helpers::SmallPureLeafInline::analyze(
-                target_func,
-                &self.core.vo_module.constants,
-            ) {
-                if self.core.reserve_leaf_inline_instructions(inline.cost()) {
-                    inline.emit_guarded(self, call_plan, self.core.current_pc + 1)?;
-                    return Ok(false);
-                }
-            }
+        let selected_inline = inline_target
+            .filter(|target| *target == target_func_id)
+            .and_then(|_| {
+                self.inline_plan
+                    .pure_leaf_inline(self.core.func_id, target_func_id)
+            });
+        if let Some(inline) = selected_inline {
+            inline.emit(self, call_plan.arg_start);
+            return Ok(false);
         }
 
         let direct_self = self
             .optimization_plan
             .is_some_and(|plan| plan.direct_self_call(self.core.func_id, target_func_id));
         let direct_native = direct_self.then_some(self.self_native_ref).flatten();
-
         match call_plan.route_for_full_function(self.core.func_id) {
             crate::call_helpers::CallRoute::DynamicJitTable => {
                 crate::call_helpers::emit_jit_call_with_vm_materialization(
@@ -933,21 +1157,42 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
         crate::compile_common::ControlPolicy::full_function(self.core.func_def.code.len())
     }
 
+    fn is_pc_executable(&self, pc: usize) -> bool {
+        self.instruction_optimization
+            .is_none_or(|graph| graph.is_executable(pc))
+    }
+
     fn set_current_pc(&mut self, pc: usize) {
         self.core.current_pc = pc;
+        self.core.current_bounds_check_elided = self
+            .instruction_optimization
+            .and_then(|graph| graph.instruction(pc))
+            .is_some_and(|node| node.bounds_check_elided);
+        self.core.current_nil_check_elided = self
+            .instruction_optimization
+            .and_then(|graph| graph.instruction(pc))
+            .is_some_and(|node| node.nil_check_elided);
     }
 
     fn enter_pc_block(&mut self, pc: usize, block_terminated: &mut bool) -> Result<(), JitError> {
         if crate::compile_common::enter_compile_pc(
             &mut self.builder,
-            &self.core.blocks,
+            crate::compile_common::CompileBlockView {
+                blocks: &self.core.blocks,
+                ir: self.core.analysis.ir(),
+                vars: &self.core.vars,
+                memory_only_start: self.core.memory_only_start,
+                executable_only: self.instruction_optimization.is_some(),
+                optimized: self.instruction_optimization,
+            },
             pc,
             block_terminated,
         ) {
+            if let Some(&block) = self.core.blocks.get(&pc) {
+                self.core
+                    .bind_ir_block_parameters(&mut self.builder, pc, block);
+            }
             self.core.clear_flow_facts();
-            // Escape candidates never cross a control-flow or scheduling
-            // region boundary, so no virtual identity may survive one.
-            self.virtual_aliases.clear();
             if let Some(cost) = self.core.execution_budget_regions.get(&pc).copied() {
                 self.emit_execution_budget_checkpoint(pc, cost);
             }
@@ -956,20 +1201,40 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
     }
 
     fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.core.apply_reg_const_facts(pc)
+        self.core.apply_ir_facts(pc)
     }
 
-    fn instruction_for_pc(&self, pc: usize) -> Result<Instruction, JitError> {
+    fn should_skip_instruction(&self, inst: crate::compile_common::LoweringInstruction) -> bool {
+        inst.optimized()
+            .is_some_and(|node| node.action == crate::optimizer::LoweringAction::Eliminate)
+    }
+
+    fn instruction_for_pc(
+        &self,
+        pc: usize,
+    ) -> Result<crate::compile_common::LoweringInstruction, JitError> {
+        if let Some(graph) = self.instruction_optimization {
+            return graph
+                .instruction(pc)
+                .map(crate::compile_common::LoweringInstruction::Optimized)
+                .ok_or_else(|| {
+                    JitError::Internal(format!("optimized function pc {pc} is outside graph"))
+                });
+        }
         self.core
             .analysis
             .ir()
             .instruction(pc)
-            .map(|instruction| instruction.source())
+            .copied()
+            .map(crate::compile_common::LoweringInstruction::Baseline)
             .ok_or_else(|| JitError::Internal(format!("function compile pc {pc} is outside code")))
     }
 
-    fn translate_pc_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
-        self.translate_instruction(inst)
+    fn translate_pc_instruction(
+        &mut self,
+        inst: crate::compile_common::LoweringInstruction,
+    ) -> Result<bool, JitError> {
+        self.translate_instruction(inst.typed(), inst.optimized())
     }
 
     fn finish_fallthrough(&mut self, _block_terminated: bool) -> Result<(), JitError> {
@@ -1008,6 +1273,17 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
         self.core.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
+        if slot < self.core.memory_only_start {
+            if let Some(value) = self.core.lowered_value_for_slot(slot) {
+                return if self.core.is_float_slot(slot) {
+                    value
+                } else {
+                    self.builder
+                        .ins()
+                        .bitcast(types::F64, MemFlags::new(), value)
+                };
+            }
+        }
         let args_ptr = self.current_memory_base_ptr();
         crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
@@ -1018,14 +1294,14 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
         let args_ptr = self.current_memory_base_ptr();
-        crate::compile_common::CompilerStorage::for_function(
+        let ir_value = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
             self.core.memory_only_start,
         )
         .store_f64(&mut self.builder, args_ptr, slot, val);
+        self.core.record_output_value(slot, ir_value);
         self.core.checked_non_nil.remove(&slot);
-        self.core.reg_consts.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
         let args_ptr = self.current_memory_base_ptr();

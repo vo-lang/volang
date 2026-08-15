@@ -189,6 +189,7 @@ impl JitContextParts {
             link_function_fn: None,
             ic_table: self.ic_table.as_mut_ptr(),
             execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
+            execution_budget_refilled: 0,
             host_services_v2: core::ptr::null(),
             loaded_module,
             native_frame: ptr::null_mut(),

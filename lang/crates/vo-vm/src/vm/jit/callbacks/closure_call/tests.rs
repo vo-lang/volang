@@ -174,6 +174,7 @@ fn test_context(
         link_function_fn: None,
         ic_table: core::ptr::null_mut(),
         execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
+        execution_budget_refilled: 0,
         host_services_v2: core::ptr::null(),
         loaded_module,
         native_frame: core::ptr::null_mut(),
@@ -196,7 +197,6 @@ fn vm_jit_table_lookup_requires_dispatch_eligibility() {
 
     let entry = 1_usize as *const u8;
     let table = [vo_runtime::jit_api::JitDispatchEntry {
-        bridge: entry,
         native: entry,
         generation: 1,
         tier: vo_runtime::jit_api::JitTier::Baseline as u8,
@@ -866,7 +866,6 @@ fn vm_jit_closure_canon_002_prepared_frame_enters_compiled_closure_and_stores_ca
     attach_current_frame(&mut ctx, &mut fiber, 0);
     let entry = 1_usize as *const u8;
     let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
-        bridge: entry,
         native: entry,
         generation: 1,
         tier: vo_runtime::jit_api::JitTier::Baseline as u8,
@@ -948,7 +947,6 @@ fn vm_jit_closure_ic_061_frame_elided_closure_publishes_native_entry() {
     attach_current_frame(&mut ctx, &mut fiber, 0);
     let entry = 1_usize as *const u8;
     let jit_table = [vo_runtime::jit_api::JitDispatchEntry {
-        bridge: entry,
         native: entry,
         generation: 1,
         tier: vo_runtime::jit_api::JitTier::Baseline as u8,
@@ -1133,7 +1131,6 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
     let jit_table = [
         vo_runtime::jit_api::JitDispatchEntry::unavailable(),
         vo_runtime::jit_api::JitDispatchEntry {
-            bridge: entry,
             native: entry,
             generation: 1,
             tier: vo_runtime::jit_api::JitTier::Baseline as u8,
@@ -1296,7 +1293,6 @@ fn vm_jit_iface_pointer_receiver_prepared_shadow_publishes_ic_entry() {
     let jit_table = [
         vo_runtime::jit_api::JitDispatchEntry::unavailable(),
         vo_runtime::jit_api::JitDispatchEntry {
-            bridge: entry,
             native: entry,
             generation: 1,
             tier: vo_runtime::jit_api::JitTier::Baseline as u8,

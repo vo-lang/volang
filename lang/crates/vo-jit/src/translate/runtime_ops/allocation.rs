@@ -13,6 +13,16 @@ use crate::translator::{
 };
 use crate::JitError;
 
+/// Preserve the complete allocation effect of a scalar-replaced `PtrNew`.
+/// Field accesses use SSA values, while the otherwise-unreferenced object keeps
+/// GC debt, telemetry, hard-limit and sticky OOM behavior identical to the VM.
+pub(crate) fn materialize_scalar_replaced_ptr_new<'a>(
+    e: &mut impl RuntimeOpsEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    ptr_new(e, inst)
+}
+
 pub(in crate::translate) fn ptr_new<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,

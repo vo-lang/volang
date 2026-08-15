@@ -753,7 +753,6 @@ fn resolve_index_field_lvalue(
 /// identity instead of being flattened into a temporary value copy.
 fn emit_address_of_array_lvalue(
     lv: &LValue,
-    ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
 ) -> Result<Option<u16>, CodegenError> {
     match lv {
@@ -781,7 +780,7 @@ fn emit_address_of_array_lvalue(
             }
             Some(FlattenedBase::Stack { .. }) | Some(FlattenedBase::Global { .. }) => Ok(None),
             None => {
-                let Some(base_ptr) = emit_address_of_array_lvalue(base, ctx, func)? else {
+                let Some(base_ptr) = emit_address_of_array_lvalue(base, func)? else {
                     return Ok(None);
                 };
                 Ok(Some(emit_gcref_with_slot_offset(base_ptr, *offset, func)))
@@ -841,7 +840,7 @@ pub(crate) fn compile_inline_array_view_ptr(
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
     let lv = resolve_lvalue_for_read(expr, ctx, func, info)?;
-    emit_address_of_array_lvalue(&lv, ctx, func)?.ok_or_else(|| {
+    emit_address_of_array_lvalue(&lv, func)?.ok_or_else(|| {
         CodegenError::Internal(
             "addressable inline array has no stable heap-backed view".to_string(),
         )
@@ -866,7 +865,7 @@ fn resolve_array_place_index(
         // Canonical packed arrays (int8/int16/int32/bool/float32 and nested
         // packed aggregates) must be decoded through ArrayGet/SliceGet first.
         if info.array_elem_bytes(array_type) == flat_elem_bytes {
-            if let Some(array_ptr) = emit_address_of_array_lvalue(&array, ctx, func)? {
+            if let Some(array_ptr) = emit_address_of_array_lvalue(&array, func)? {
                 let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
                 let index_reg = snapshot_value_slot(index_value, func);
                 let elem_ptr = emit_flat_array_index_addr(
@@ -1712,7 +1711,7 @@ pub fn compile_index_addr(
             func,
             info,
         )?;
-        let addr = emit_address_of_array_lvalue(&lv, ctx, func)?.ok_or_else(|| {
+        let addr = emit_address_of_array_lvalue(&lv, func)?.ok_or_else(|| {
             CodegenError::Internal(
                 "addressable array element did not resolve to stable storage".to_string(),
             )

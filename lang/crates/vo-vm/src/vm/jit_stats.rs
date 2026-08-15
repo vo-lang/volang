@@ -105,8 +105,6 @@ pub struct JitExecutionStats {
     pub side_exit_reasons: JitSideExitReasonStats,
     pub low_progress_function_disables: u64,
     pub low_progress_loop_disables: u64,
-    /// Runtime-dominated short functions disabled after repeated low-work OK returns.
-    pub runtime_dominated_function_disables: u64,
     /// Successfully published full-function artifacts for this VM owner.
     pub function_compilations: u64,
     /// Successfully published optimizing-tier artifacts.

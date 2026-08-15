@@ -20,16 +20,16 @@ pub(crate) struct CompilerCore<'a> {
     pub(crate) blocks: HashMap<usize, Block>,
     pub(crate) entry_block: Block,
     pub(crate) current_pc: usize,
+    pub(crate) current_bounds_check_elided: bool,
+    pub(crate) current_nil_check_elided: bool,
     pub(crate) helpers: HelperRefs<'a>,
-    pub(crate) reg_consts: HashMap<u16, i64>,
-    reg_const_facts: &'a [Box<[(u16, i64)]>],
     pub(crate) execution_budget_regions: BTreeMap<usize, u32>,
     pub(crate) checked_non_nil: HashSet<u16>,
     pub(crate) memory_only_start: u16,
     pub(crate) native_scratch_slots: NativeScratchSlots,
     pub(crate) jit_memory_flags: JitMemoryFlags,
     pub(crate) analysis: &'a FunctionAnalysis,
-    leaf_inline_instructions_remaining: usize,
+    lowered_values: Vec<Option<cranelift_codegen::ir::Value>>,
 }
 
 impl<'a> CompilerCore<'a> {
@@ -56,25 +56,17 @@ impl<'a> CompilerCore<'a> {
             blocks: HashMap::new(),
             entry_block,
             current_pc: 0,
+            current_bounds_check_elided: false,
+            current_nil_check_elided: false,
             helpers,
-            reg_consts: HashMap::new(),
-            reg_const_facts: &analysis.reg_const_facts,
             execution_budget_regions: BTreeMap::new(),
             checked_non_nil: HashSet::new(),
             memory_only_start: super::bounded_memory_only_start(memory_only_start),
             native_scratch_slots: NativeScratchSlots::default(),
             jit_memory_flags,
             analysis,
-            leaf_inline_instructions_remaining: crate::call_helpers::SMALL_LEAF_INLINE_BUDGET,
+            lowered_values: vec![None; analysis.ir().value_count()],
         }
-    }
-
-    pub(crate) fn reserve_leaf_inline_instructions(&mut self, cost: usize) -> bool {
-        let Some(remaining) = self.leaf_inline_instructions_remaining.checked_sub(cost) else {
-            return false;
-        };
-        self.leaf_inline_instructions_remaining = remaining;
-        true
     }
 
     pub(crate) fn declare_variables(&mut self, builder: &mut FunctionBuilder<'_>) {
@@ -112,10 +104,63 @@ impl<'a> CompilerCore<'a> {
     }
 
     pub(crate) fn clear_flow_facts(&mut self) {
-        super::clear_flow_facts(&mut self.checked_non_nil, &mut self.reg_consts);
+        super::clear_flow_facts(&mut self.checked_non_nil);
     }
 
-    pub(crate) fn apply_reg_const_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        super::apply_reg_const_facts(&mut self.reg_consts, self.reg_const_facts, pc)
+    pub(crate) fn apply_ir_facts(&mut self, pc: usize) -> Result<(), JitError> {
+        if self.analysis.ir().instruction(pc).is_none() {
+            return Err(JitError::Internal(format!(
+                "missing SSA instruction facts at pc {pc}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn lowered_value_for_slot(&self, slot: u16) -> Option<cranelift_codegen::ir::Value> {
+        let ir = self.analysis.ir();
+        ir.input_value(self.current_pc, slot)
+            .or_else(|| ir.frame_value(self.current_pc, slot))
+            .and_then(|value| self.lowered_values[value.index()])
+    }
+
+    pub(crate) fn lowered_value(
+        &self,
+        value: crate::ir::ValueId,
+    ) -> Option<cranelift_codegen::ir::Value> {
+        self.lowered_values[value.index()]
+    }
+
+    pub(crate) fn record_output_value(&mut self, slot: u16, value: cranelift_codegen::ir::Value) {
+        if let Some(output) = self.analysis.ir().output_value(self.current_pc, slot) {
+            self.lowered_values[output.index()] = Some(value);
+        }
+    }
+
+    pub(crate) fn bind_ir_block_parameters(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        pc: usize,
+        block: Block,
+    ) {
+        let Some(instruction) = self.analysis.ir().instruction(pc).copied() else {
+            return;
+        };
+        let ir_block = &self.analysis.ir().blocks()[instruction.block().index()];
+        if ir_block.start_pc as usize != pc {
+            return;
+        }
+        let parameters = self
+            .analysis
+            .ir()
+            .block_parameters(ir_block.id)
+            .iter()
+            .filter(|parameter| parameter.slot < self.memory_only_start)
+            .copied()
+            .collect::<Vec<_>>();
+        let values = builder.block_params(block).to_vec();
+        for (parameter, value) in parameters.into_iter().zip(values) {
+            builder.def_var(self.vars[parameter.slot as usize], value);
+            self.lowered_values[parameter.value.index()] = Some(value);
+        }
     }
 }

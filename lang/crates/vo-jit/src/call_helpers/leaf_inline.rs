@@ -1,16 +1,16 @@
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags};
-use vo_runtime::bytecode::{Constant, FunctionDef};
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData as MemFlags, Value};
+use cranelift_frontend::Variable;
+use vo_runtime::bytecode::{Constant, FunctionDef, Module};
 use vo_runtime::instruction::{Instruction, Opcode, CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED};
 use vo_runtime::SlotType;
 
 use crate::translator::IrEmitter;
 
-use super::CallPlan;
-
-const MAX_SMALL_LEAF_INSTRUCTIONS: usize = 24;
+const MAX_SMALL_LEAF_INSTRUCTIONS: usize = 48;
 const MAX_SMALL_LEAF_LOCAL_SLOTS: usize = 32;
 const MAX_SMALL_LEAF_RETURN_SLOTS: usize = 2;
+const MAX_SMALL_LEAF_BLOCKS: usize = 8;
 
 /// Total bytecode instructions that one compiled artifact may duplicate through
 /// leaf inlining. This keeps the optimization within the compiler's existing
@@ -21,24 +21,31 @@ pub(crate) const SMALL_LEAF_INLINE_BUDGET: usize = 256;
 /// emission so an unsupported candidate cannot leave partially emitted IR.
 pub(crate) struct SmallPureLeafInline {
     code: Box<[Instruction]>,
+    blocks: Box<[InlineBlock]>,
+    pc_to_block: Box<[u16]>,
     slot_types: Box<[SlotType]>,
+    ret_types: Box<[SlotType]>,
     constant_loads: Box<[Option<Constant>]>,
     param_slots: usize,
+    hidden_param_slots: usize,
     ret_slots: usize,
-    return_start: usize,
     cost: usize,
 }
 
+#[derive(Clone, Copy)]
+struct InlineBlock {
+    start: u16,
+    end: u16,
+}
+
 impl SmallPureLeafInline {
-    pub(crate) fn analyze(func: &FunctionDef, constants: &[Constant]) -> Option<Self> {
+    pub(crate) fn analyze(func: &FunctionDef, module: &Module) -> Option<Self> {
         let local_slots = func.local_slots as usize;
         let param_slots = func.param_slots as usize;
         let ret_slots = func.ret_slots as usize;
         if func.has_calls
             || func.has_call_extern
             || func.has_defer
-            || func.is_closure
-            || func.recv_slots != 0
             || func.heap_ret_gcref_count != 0
             || local_slots > MAX_SMALL_LEAF_LOCAL_SLOTS
             || ret_slots > MAX_SMALL_LEAF_RETURN_SLOTS
@@ -48,54 +55,81 @@ impl SmallPureLeafInline {
             || func
                 .slot_types
                 .iter()
-                .any(|ty| !matches!(ty, SlotType::Value | SlotType::Float))
+                .any(|ty| !matches!(ty, SlotType::Value | SlotType::Float | SlotType::GcRef))
         {
             return None;
         }
-
-        let first_return = func
-            .code
-            .iter()
-            .position(|inst| inst.opcode() == Opcode::Return)?;
-        let cost = first_return.checked_add(1)?;
-        if cost > MAX_SMALL_LEAF_INSTRUCTIONS {
-            return None;
-        }
-        let return_start = func.code[first_return].a as usize;
-        if return_start.checked_add(ret_slots)? > local_slots
-            || func.code[first_return..]
-                .iter()
-                .any(|inst| inst.opcode() != Opcode::Return || inst.a as usize != return_start)
-        {
-            return None;
-        }
-        for (index, ret_ty) in func.ret_slot_types.iter().enumerate() {
-            if func.slot_types[return_start + index] != *ret_ty {
+        let hidden_param_slots = if func.is_closure {
+            if func.recv_slots != 0 {
                 return None;
             }
+            1
+        } else {
+            usize::from(func.recv_slots)
+        };
+        if hidden_param_slots > 1 || hidden_param_slots > param_slots {
+            return None;
         }
 
-        let mut integer_constants = vec![None; local_slots];
-        let mut constant_loads = vec![None; cost];
-        for (pc, inst) in func.code[..first_return].iter().enumerate() {
-            if !validate_instruction(
-                inst,
-                &func.slot_types,
-                constants,
-                &mut integer_constants,
-                &mut constant_loads[pc],
-            ) {
-                return None;
+        let (blocks, pc_to_block, cost) = inline_cfg(&func.code)?;
+        if cost > MAX_SMALL_LEAF_INSTRUCTIONS || blocks.len() > MAX_SMALL_LEAF_BLOCKS {
+            return None;
+        }
+
+        let mut constant_loads = vec![None; func.code.len()];
+        let mut saw_return = false;
+        for block in &blocks {
+            let mut integer_constants = vec![None; local_slots];
+            for (pc, constant_load) in constant_loads
+                .iter_mut()
+                .enumerate()
+                .take(usize::from(block.end))
+                .skip(usize::from(block.start))
+            {
+                let inst = &func.code[pc];
+                match inst.opcode() {
+                    Opcode::Jump => {}
+                    Opcode::JumpIf | Opcode::JumpIfNot
+                        if usize::from(inst.a) < local_slots
+                            && func.slot_types[inst.a as usize] != SlotType::Float => {}
+                    Opcode::Return => {
+                        let return_start = usize::from(inst.a);
+                        if return_start.checked_add(ret_slots)? > local_slots {
+                            return None;
+                        }
+                        for (index, ret_ty) in func.ret_slot_types.iter().enumerate() {
+                            if func.slot_types[return_start + index] != *ret_ty {
+                                return None;
+                            }
+                        }
+                        saw_return = true;
+                    }
+                    _ if validate_instruction(
+                        inst,
+                        &func.slot_types,
+                        &module.constants,
+                        &mut integer_constants,
+                        constant_load,
+                        func.is_closure,
+                    ) => {}
+                    _ => return None,
+                }
             }
+        }
+        if !saw_return {
+            return None;
         }
 
         Some(Self {
-            code: func.code[..cost].into(),
+            code: func.code.clone().into(),
+            blocks: blocks.into_boxed_slice(),
+            pc_to_block: pc_to_block.into_boxed_slice(),
             slot_types: func.slot_types.clone().into(),
+            ret_types: func.ret_slot_types.clone().into(),
             constant_loads: constant_loads.into(),
             param_slots,
+            hidden_param_slots,
             ret_slots,
-            return_start,
             cost,
         })
     }
@@ -104,192 +138,516 @@ impl SmallPureLeafInline {
         self.cost
     }
 
-    /// Inline only while the callee remains published in the runtime JIT
-    /// table. The manager may retire an entry after poor side-exit feedback;
-    /// a null entry must keep the original VM dispatch semantics.
-    pub(crate) fn emit_guarded<'a, E: IrEmitter<'a>>(
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.code
+            .len()
+            .saturating_mul(core::mem::size_of::<Instruction>())
+            .saturating_add(
+                self.blocks
+                    .len()
+                    .saturating_mul(core::mem::size_of::<InlineBlock>()),
+            )
+            .saturating_add(
+                self.pc_to_block
+                    .len()
+                    .saturating_mul(core::mem::size_of::<u16>()),
+            )
+            .saturating_add(
+                self.slot_types
+                    .len()
+                    .saturating_mul(core::mem::size_of::<SlotType>()),
+            )
+            .saturating_add(
+                self.ret_types
+                    .len()
+                    .saturating_mul(core::mem::size_of::<SlotType>()),
+            )
+            .saturating_add(
+                self.constant_loads
+                    .len()
+                    .saturating_mul(core::mem::size_of::<Option<Constant>>()),
+            )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn emit_into_for_test<'a, E: IrEmitter<'a>>(
         &self,
         emitter: &mut E,
-        plan: CallPlan,
-        resume_pc: usize,
-    ) -> Result<(), crate::JitError> {
-        let jit_func_table = emitter.load_context_field(
-            types::I64,
-            vo_runtime::jit_api::JitContextField::JitFuncTable,
-        );
-        let entry_address = emitter.builder().ins().iadd_imm_u(
-            jit_func_table,
-            i64::from(plan.func_id) * vo_runtime::jit_api::JitDispatchEntry::SIZE as i64,
-        );
-        let entry = emitter.builder().ins().load(
-            types::I64,
-            MemFlags::trusted(),
-            entry_address,
-            vo_runtime::jit_api::JitDispatchEntry::OFFSET_NATIVE,
-        );
-        let available = emitter
-            .builder()
-            .ins()
-            .icmp_imm_u(IntCC::NotEqual, entry, 0);
-        let inline_block = emitter.builder().create_block();
-        let link_block = crate::compile_common::cold_block(emitter.builder());
-        let vm_block = crate::compile_common::cold_block(emitter.builder());
-        let merge_block = emitter.builder().create_block();
-        emitter
-            .builder()
-            .ins()
-            .brif(available, inline_block, &[], link_block, &[]);
-
-        emitter.builder().switch_to_block(link_block);
-        emitter.builder().seal_block(link_block);
-        let func_id = emitter
-            .builder()
-            .ins()
-            .iconst(types::I32, i64::from(plan.func_id));
-        let linked = super::emit_native_link(emitter, func_id)?;
-        let linked_available = emitter
-            .builder()
-            .ins()
-            .icmp_imm_u(IntCC::NotEqual, linked, 0);
-        emitter
-            .builder()
-            .ins()
-            .brif(linked_available, inline_block, &[], vm_block, &[]);
-
-        emitter.builder().switch_to_block(vm_block);
-        emitter.builder().seal_block(vm_block);
-        super::emit_call_via_vm(emitter, plan.vm_config(resume_pc))?;
-
-        emitter.builder().switch_to_block(inline_block);
-        emitter.builder().seal_block(inline_block);
-        self.emit(emitter, plan.arg_start);
-        emitter.builder().ins().jump(merge_block, &[]);
-
-        emitter.builder().switch_to_block(merge_block);
-        emitter.builder().seal_block(merge_block);
-        Ok(())
+        arg_start: usize,
+    ) {
+        self.emit(emitter, arg_start);
     }
 
     pub(crate) fn emit<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, arg_start: usize) {
+        self.emit_with_layout(emitter, None, arg_start, arg_start + self.param_slots);
+    }
+
+    pub(crate) fn supports_dynamic_layout(&self, arg_slots: usize, ret_slots: usize) -> bool {
+        self.hidden_param_slots == 1
+            && self.param_slots == arg_slots.saturating_add(1)
+            && self.ret_slots == ret_slots
+    }
+
+    pub(crate) fn emit_dynamic<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        slot0: Value,
+        arg_start: usize,
+        ret_start: usize,
+    ) {
+        debug_assert_eq!(self.hidden_param_slots, 1);
+        self.emit_with_layout(emitter, Some(slot0), arg_start, ret_start);
+    }
+
+    fn emit_with_layout<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        slot0: Option<Value>,
+        arg_start: usize,
+        ret_start: usize,
+    ) {
         let zero_i64 = emitter.builder().ins().iconst(types::I64, 0);
         let zero_f64 = emitter.builder().ins().f64const(0.0);
-        let mut locals = Vec::with_capacity(self.slot_types.len());
+        let locals = self
+            .slot_types
+            .iter()
+            .map(|slot_type| {
+                emitter
+                    .builder()
+                    .declare_var(if *slot_type == SlotType::Float {
+                        types::F64
+                    } else {
+                        types::I64
+                    })
+            })
+            .collect::<Vec<Variable>>();
         for (slot, slot_type) in self.slot_types.iter().copied().enumerate() {
-            let value = if slot < self.param_slots {
+            let value = if let (0, Some(value)) = (slot, slot0) {
+                value
+            } else if slot < self.param_slots {
+                let caller_slot = arg_start + slot - usize::from(slot0.is_some());
                 if slot_type == SlotType::Float {
-                    emitter.read_var_f64((arg_start + slot) as u16)
+                    emitter.read_var_f64(caller_slot as u16)
                 } else {
-                    emitter.read_var((arg_start + slot) as u16)
+                    emitter.read_var(caller_slot as u16)
                 }
             } else if slot_type == SlotType::Float {
                 zero_f64
             } else {
                 zero_i64
             };
-            locals.push(value);
+            emitter.builder().def_var(locals[slot], value);
         }
 
-        for (pc, inst) in self.code.iter().enumerate() {
-            match inst.opcode() {
-                Opcode::LoadInt => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .iconst(types::I64, inst.imm32() as i64);
-                }
-                Opcode::LoadConst => {
-                    locals[inst.a as usize] = match self.constant_loads[pc]
-                        .as_ref()
-                        .expect("validated inline constant load")
-                    {
-                        Constant::Nil => zero_i64,
-                        Constant::Bool(value) => emitter
+        let blocks = self
+            .blocks
+            .iter()
+            .map(|_| emitter.builder().create_block())
+            .collect::<Vec<_>>();
+        let return_block = emitter.builder().create_block();
+        for slot_type in self.ret_types.iter() {
+            let ty = if *slot_type == SlotType::Float {
+                types::F64
+            } else {
+                types::I64
+            };
+            emitter.builder().append_block_param(return_block, ty);
+        }
+        let entry = usize::from(self.pc_to_block[0]);
+        emitter.builder().ins().jump(blocks[entry], &[]);
+
+        for (block_index, block) in self.blocks.iter().copied().enumerate() {
+            emitter.builder().switch_to_block(blocks[block_index]);
+            for pc in usize::from(block.start)..usize::from(block.end) {
+                let inst = self.code[pc];
+                let read = |emitter: &mut E, slot: u16| {
+                    emitter.builder().use_var(locals[usize::from(slot)])
+                };
+                match inst.opcode() {
+                    Opcode::LoadInt => {
+                        let value = emitter
                             .builder()
                             .ins()
-                            .iconst(types::I64, i64::from(*value)),
-                        Constant::Int(value) => emitter.builder().ins().iconst(types::I64, *value),
-                        Constant::Float(value) => emitter.builder().ins().f64const(*value),
-                        Constant::String(_) => unreachable!("string leaf constant was rejected"),
-                    };
+                            .iconst(types::I64, inst.imm32() as i64);
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::LoadConst => {
+                        let value = match self.constant_loads[pc]
+                            .as_ref()
+                            .expect("validated inline constant load")
+                        {
+                            Constant::Nil => zero_i64,
+                            Constant::Bool(value) => emitter
+                                .builder()
+                                .ins()
+                                .iconst(types::I64, i64::from(*value)),
+                            Constant::Int(value) => {
+                                emitter.builder().ins().iconst(types::I64, *value)
+                            }
+                            Constant::Float(value) => emitter.builder().ins().f64const(*value),
+                            Constant::String(_) => {
+                                unreachable!("string leaf constant was rejected")
+                            }
+                        };
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::Copy => {
+                        let value = read(emitter, inst.b);
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::ClosureGet => {
+                        let offset =
+                            ((vo_runtime::objects::closure::HEADER_SLOTS + usize::from(inst.b))
+                                * vo_runtime::slot::SLOT_BYTES) as i32;
+                        let closure = read(emitter, 0);
+                        let value = emitter.builder().ins().load(
+                            types::I64,
+                            MemFlags::trusted(),
+                            closure,
+                            offset,
+                        );
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::PtrGet => {
+                        let ptr = read(emitter, inst.b);
+                        let is_nil = emitter.builder().ins().icmp_imm_u(IntCC::Equal, ptr, 0);
+                        crate::contract::emit_runtime_trap_if(
+                            emitter,
+                            is_nil,
+                            vo_runtime::jit_api::JitRuntimeTrapKind::NilPointerDereference,
+                            None,
+                            None,
+                        );
+                        let value = emitter.builder().ins().load(
+                            types::I64,
+                            MemFlags::trusted(),
+                            ptr,
+                            i32::from(inst.c) * vo_runtime::slot::SLOT_BYTES as i32,
+                        );
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::AddI | Opcode::SubI | Opcode::MulI | Opcode::DivI => {
+                        let lhs = read(emitter, inst.b);
+                        let rhs = read(emitter, inst.c);
+                        let value = match inst.opcode() {
+                            Opcode::AddI => emitter.builder().ins().iadd(lhs, rhs),
+                            Opcode::SubI => emitter.builder().ins().isub(lhs, rhs),
+                            Opcode::MulI => emitter.builder().ins().imul(lhs, rhs),
+                            Opcode::DivI => emitter.builder().ins().sdiv(lhs, rhs),
+                            _ => unreachable!(),
+                        };
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::NegI => {
+                        let input = read(emitter, inst.b);
+                        let value = emitter.builder().ins().ineg(input);
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF => {
+                        let lhs = read(emitter, inst.b);
+                        let rhs = read(emitter, inst.c);
+                        let value = match inst.opcode() {
+                            Opcode::AddF => emitter.builder().ins().fadd(lhs, rhs),
+                            Opcode::SubF => emitter.builder().ins().fsub(lhs, rhs),
+                            Opcode::MulF => emitter.builder().ins().fmul(lhs, rhs),
+                            Opcode::DivF => emitter.builder().ins().fdiv(lhs, rhs),
+                            _ => unreachable!(),
+                        };
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::NegF => {
+                        let input = read(emitter, inst.b);
+                        let value = emitter.builder().ins().fneg(input);
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::ConvI2F => {
+                        let source = read(emitter, inst.b);
+                        let value = if inst.flags & CONV_FLAG_UNSIGNED != 0 {
+                            emitter.builder().ins().fcvt_from_uint(types::F64, source)
+                        } else {
+                            emitter.builder().ins().fcvt_from_sint(types::F64, source)
+                        };
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::EqI
+                    | Opcode::NeI
+                    | Opcode::LtI
+                    | Opcode::LtU
+                    | Opcode::LeI
+                    | Opcode::LeU
+                    | Opcode::GtI
+                    | Opcode::GtU
+                    | Opcode::GeI
+                    | Opcode::GeU => {
+                        let lhs = read(emitter, inst.b);
+                        let rhs = read(emitter, inst.c);
+                        let cc = match inst.opcode() {
+                            Opcode::EqI => IntCC::Equal,
+                            Opcode::NeI => IntCC::NotEqual,
+                            Opcode::LtI => IntCC::SignedLessThan,
+                            Opcode::LtU => IntCC::UnsignedLessThan,
+                            Opcode::LeI => IntCC::SignedLessThanOrEqual,
+                            Opcode::LeU => IntCC::UnsignedLessThanOrEqual,
+                            Opcode::GtI => IntCC::SignedGreaterThan,
+                            Opcode::GtU => IntCC::UnsignedGreaterThan,
+                            Opcode::GeI => IntCC::SignedGreaterThanOrEqual,
+                            Opcode::GeU => IntCC::UnsignedGreaterThanOrEqual,
+                            _ => unreachable!(),
+                        };
+                        let compared = emitter.builder().ins().icmp(cc, lhs, rhs);
+                        let value = emitter.builder().ins().uextend(types::I64, compared);
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::EqF
+                    | Opcode::NeF
+                    | Opcode::LtF
+                    | Opcode::LeF
+                    | Opcode::GtF
+                    | Opcode::GeF => {
+                        let lhs = read(emitter, inst.b);
+                        let rhs = read(emitter, inst.c);
+                        let cc = match inst.opcode() {
+                            Opcode::EqF => FloatCC::Equal,
+                            Opcode::NeF => FloatCC::NotEqual,
+                            Opcode::LtF => FloatCC::LessThan,
+                            Opcode::LeF => FloatCC::LessThanOrEqual,
+                            Opcode::GtF => FloatCC::GreaterThan,
+                            Opcode::GeF => FloatCC::GreaterThanOrEqual,
+                            _ => unreachable!(),
+                        };
+                        let compared = emitter.builder().ins().fcmp(cc, lhs, rhs);
+                        let value = emitter.builder().ins().uextend(types::I64, compared);
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::And | Opcode::Or | Opcode::Xor | Opcode::AndNot => {
+                        let lhs = read(emitter, inst.b);
+                        let rhs = read(emitter, inst.c);
+                        let value = match inst.opcode() {
+                            Opcode::And => emitter.builder().ins().band(lhs, rhs),
+                            Opcode::Or => emitter.builder().ins().bor(lhs, rhs),
+                            Opcode::Xor => emitter.builder().ins().bxor(lhs, rhs),
+                            Opcode::AndNot => {
+                                let inverted = emitter.builder().ins().bnot(rhs);
+                                emitter.builder().ins().band(lhs, inverted)
+                            }
+                            _ => unreachable!(),
+                        };
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::Not | Opcode::BoolNot => {
+                        let input = read(emitter, inst.b);
+                        let value = if inst.opcode() == Opcode::Not {
+                            emitter.builder().ins().bnot(input)
+                        } else {
+                            let compared =
+                                emitter.builder().ins().icmp_imm_u(IntCC::Equal, input, 0);
+                            emitter.builder().ins().uextend(types::I64, compared)
+                        };
+                        emitter.builder().def_var(locals[inst.a as usize], value);
+                    }
+                    Opcode::Jump => {
+                        let target = inline_branch_target(self.code.len(), pc, inst);
+                        emitter
+                            .builder()
+                            .ins()
+                            .jump(blocks[usize::from(self.pc_to_block[target])], &[]);
+                    }
+                    Opcode::JumpIf | Opcode::JumpIfNot => {
+                        let condition = read(emitter, inst.a);
+                        let condition = emitter.builder().ins().icmp_imm_u(
+                            if inst.opcode() == Opcode::JumpIf {
+                                IntCC::NotEqual
+                            } else {
+                                IntCC::Equal
+                            },
+                            condition,
+                            0,
+                        );
+                        let target = inline_branch_target(self.code.len(), pc, inst);
+                        let fallthrough = pc + 1;
+                        emitter.builder().ins().brif(
+                            condition,
+                            blocks[usize::from(self.pc_to_block[target])],
+                            &[],
+                            blocks[usize::from(self.pc_to_block[fallthrough])],
+                            &[],
+                        );
+                    }
+                    Opcode::Return => {
+                        let values = (0..self.ret_slots)
+                            .map(|offset| read(emitter, inst.a + offset as u16).into())
+                            .collect::<Vec<BlockArg>>();
+                        emitter.builder().ins().jump(return_block, &values);
+                    }
+                    _ => unreachable!("unsupported opcode entered validated leaf inline plan"),
                 }
-                Opcode::Copy => locals[inst.a as usize] = locals[inst.b as usize],
-                Opcode::AddI => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .iadd(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::SubI => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .isub(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::MulI => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .imul(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::DivI => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .sdiv(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::NegI => {
-                    locals[inst.a as usize] = emitter.builder().ins().ineg(locals[inst.b as usize]);
-                }
-                Opcode::AddF => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .fadd(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::SubF => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .fsub(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::MulF => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .fmul(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::DivF => {
-                    locals[inst.a as usize] = emitter
-                        .builder()
-                        .ins()
-                        .fdiv(locals[inst.b as usize], locals[inst.c as usize]);
-                }
-                Opcode::NegF => {
-                    locals[inst.a as usize] = emitter.builder().ins().fneg(locals[inst.b as usize]);
-                }
-                Opcode::ConvI2F => {
-                    let source = locals[inst.b as usize];
-                    locals[inst.a as usize] = if inst.flags & CONV_FLAG_UNSIGNED != 0 {
-                        emitter.builder().ins().fcvt_from_uint(types::F64, source)
-                    } else {
-                        emitter.builder().ins().fcvt_from_sint(types::F64, source)
-                    };
-                }
-                Opcode::Return => break,
-                _ => unreachable!("unsupported opcode entered validated leaf inline plan"),
+            }
+            let terminal = self.code[usize::from(block.end) - 1].opcode();
+            if !matches!(
+                terminal,
+                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot | Opcode::Return
+            ) {
+                let fallthrough = usize::from(block.end);
+                emitter
+                    .builder()
+                    .ins()
+                    .jump(blocks[usize::from(self.pc_to_block[fallthrough])], &[]);
             }
         }
 
-        let ret_reg = arg_start + self.param_slots;
+        emitter.builder().switch_to_block(return_block);
+        emitter.builder().seal_block(return_block);
         for index in 0..self.ret_slots {
-            let value = locals[self.return_start + index];
-            if self.slot_types[self.return_start + index] == SlotType::Float {
-                emitter.write_var_f64((ret_reg + index) as u16, value);
+            let value = emitter.builder().block_params(return_block)[index];
+            if self.ret_types[index] == SlotType::Float {
+                emitter.write_var_f64((ret_start + index) as u16, value);
             } else {
-                emitter.write_var((ret_reg + index) as u16, value);
+                emitter.write_var((ret_start + index) as u16, value);
             }
         }
     }
+}
+
+fn inline_branch_target(code_len: usize, pc: usize, inst: Instruction) -> usize {
+    crate::compile_common::checked_branch_target(code_len, pc, inst.imm32(), inst.opcode())
+        .expect("validated inline branch target")
+}
+
+fn inline_cfg(code: &[Instruction]) -> Option<(Vec<InlineBlock>, Vec<u16>, usize)> {
+    if code.is_empty() || code.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    let mut leaders = std::collections::BTreeSet::from([0_usize]);
+    for (pc, inst) in code.iter().copied().enumerate() {
+        match inst.opcode() {
+            Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
+                leaders.insert(
+                    crate::compile_common::checked_branch_target(
+                        code.len(),
+                        pc,
+                        inst.imm32(),
+                        inst.opcode(),
+                    )
+                    .ok()?,
+                );
+                if pc + 1 < code.len() {
+                    leaders.insert(pc + 1);
+                }
+            }
+            Opcode::Return if pc + 1 < code.len() => {
+                leaders.insert(pc + 1);
+            }
+            _ => {}
+        }
+    }
+
+    let leaders = leaders.into_iter().collect::<Vec<_>>();
+    let mut source_blocks = Vec::with_capacity(leaders.len());
+    let mut pc_to_source = vec![u16::MAX; code.len()];
+    for (index, &start) in leaders.iter().enumerate() {
+        let end = leaders.get(index + 1).copied().unwrap_or(code.len());
+        if start >= end {
+            return None;
+        }
+        let block_index = u16::try_from(index).ok()?;
+        for owner in &mut pc_to_source[start..end] {
+            *owner = block_index;
+        }
+        source_blocks.push(InlineBlock {
+            start: u16::try_from(start).ok()?,
+            end: u16::try_from(end).ok()?,
+        });
+    }
+
+    let mut successors = vec![Vec::<usize>::new(); source_blocks.len()];
+    for (index, block) in source_blocks.iter().copied().enumerate() {
+        let last_pc = usize::from(block.end) - 1;
+        let terminal = code[last_pc];
+        let mut add_target = |pc: usize| -> Option<()> {
+            let block = usize::from(*pc_to_source.get(pc)?);
+            if block >= source_blocks.len() {
+                return None;
+            }
+            if !successors[index].contains(&block) {
+                successors[index].push(block);
+            }
+            Some(())
+        };
+        match terminal.opcode() {
+            Opcode::Jump => add_target(inline_branch_target(code.len(), last_pc, terminal))?,
+            Opcode::JumpIf | Opcode::JumpIfNot => {
+                add_target(inline_branch_target(code.len(), last_pc, terminal))?;
+                add_target(last_pc + 1)?;
+            }
+            Opcode::Return => {}
+            _ if last_pc + 1 < code.len() => add_target(last_pc + 1)?,
+            _ => return None,
+        }
+    }
+
+    let mut reachable = vec![false; source_blocks.len()];
+    let mut pending = vec![0_usize];
+    while let Some(block) = pending.pop() {
+        if reachable[block] {
+            continue;
+        }
+        reachable[block] = true;
+        pending.extend(successors[block].iter().copied());
+    }
+    let mut indegree = vec![0_usize; source_blocks.len()];
+    for (source, edges) in successors.iter().enumerate() {
+        if !reachable[source] {
+            continue;
+        }
+        for &target in edges {
+            if reachable[target] {
+                indegree[target] = indegree[target].checked_add(1)?;
+            }
+        }
+    }
+    let mut ready = std::collections::BTreeSet::new();
+    for (block, &degree) in indegree.iter().enumerate() {
+        if reachable[block] && degree == 0 {
+            ready.insert(block);
+        }
+    }
+    let mut order = Vec::new();
+    while let Some(block) = ready.pop_first() {
+        order.push(block);
+        for &target in &successors[block] {
+            if !reachable[target] {
+                continue;
+            }
+            indegree[target] = indegree[target].checked_sub(1)?;
+            if indegree[target] == 0 {
+                ready.insert(target);
+            }
+        }
+    }
+    if order.len() != reachable.iter().filter(|&&value| value).count() {
+        return None;
+    }
+
+    let mut source_to_order = vec![u16::MAX; source_blocks.len()];
+    let blocks = order
+        .iter()
+        .enumerate()
+        .map(|(ordered, &source)| {
+            source_to_order[source] = u16::try_from(ordered).ok()?;
+            Some(source_blocks[source])
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut pc_to_block = vec![u16::MAX; code.len()];
+    for (pc, &source) in pc_to_source.iter().enumerate() {
+        if source != u16::MAX {
+            pc_to_block[pc] = source_to_order[usize::from(source)];
+        }
+    }
+    let cost = blocks
+        .iter()
+        .map(|block| usize::from(block.end - block.start))
+        .sum();
+    Some((blocks, pc_to_block, cost))
 }
 
 fn validate_instruction(
@@ -298,6 +656,7 @@ fn validate_instruction(
     constants: &[Constant],
     integer_constants: &mut [Option<i64>],
     constant_load: &mut Option<Constant>,
+    is_closure: bool,
 ) -> bool {
     let in_range = |slot: u16| usize::from(slot) < slot_types.len();
     let is_float = |slot: u16| {
@@ -333,6 +692,22 @@ fn validate_instruction(
         {
             integer_constants[inst.a as usize] = integer_constants[inst.b as usize];
         }
+        Opcode::ClosureGet
+            if is_closure
+                && in_range(inst.a)
+                && slot_types[inst.a as usize] == SlotType::GcRef
+                && slot_types.first() == Some(&SlotType::GcRef) =>
+        {
+            integer_constants[inst.a as usize] = None;
+        }
+        Opcode::PtrGet
+            if in_range(inst.a)
+                && in_range(inst.b)
+                && !is_float(inst.a)
+                && slot_types[inst.b as usize] == SlotType::GcRef =>
+        {
+            integer_constants[inst.a as usize] = None;
+        }
         Opcode::AddI | Opcode::SubI | Opcode::MulI if all_integer(&[inst.a, inst.b, inst.c]) => {
             let lhs = integer_constants[inst.b as usize];
             let rhs = integer_constants[inst.c as usize];
@@ -365,6 +740,33 @@ fn validate_instruction(
         Opcode::NegF if all_float(&[inst.a, inst.b]) => {
             integer_constants[inst.a as usize] = None;
         }
+        Opcode::EqI
+        | Opcode::NeI
+        | Opcode::LtI
+        | Opcode::LtU
+        | Opcode::LeI
+        | Opcode::LeU
+        | Opcode::GtI
+        | Opcode::GtU
+        | Opcode::GeI
+        | Opcode::GeU
+            if all_integer(&[inst.a, inst.b, inst.c]) =>
+        {
+            integer_constants[inst.a as usize] = None;
+        }
+        Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF
+            if all_integer(&[inst.a]) && all_float(&[inst.b, inst.c]) =>
+        {
+            integer_constants[inst.a as usize] = None;
+        }
+        Opcode::And | Opcode::Or | Opcode::Xor | Opcode::AndNot
+            if all_integer(&[inst.a, inst.b, inst.c]) =>
+        {
+            integer_constants[inst.a as usize] = None;
+        }
+        Opcode::Not | Opcode::BoolNot if all_integer(&[inst.a, inst.b]) => {
+            integer_constants[inst.a as usize] = None;
+        }
         Opcode::ConvI2F
             if inst.flags & CONV_FLAG_FLOAT32 == 0
                 && all_float(&[inst.a])
@@ -381,6 +783,16 @@ fn validate_instruction(
 mod tests {
     use super::*;
     use crate::test_fixtures::function_with_slot_types_and_sig;
+
+    fn branch(opcode: Opcode, condition: u16, offset: i32) -> Instruction {
+        Instruction::with_flags(
+            opcode,
+            0,
+            condition,
+            offset as u32 as u16,
+            (offset as u32 >> 16) as u16,
+        )
+    }
 
     fn spectral_leaf(divisor: u16) -> FunctionDef {
         let mut func = function_with_slot_types_and_sig(
@@ -419,12 +831,60 @@ mod tests {
     #[test]
     fn accepts_small_straight_line_float_leaf_with_safe_integer_divisor() {
         let func = spectral_leaf(2);
-        assert!(SmallPureLeafInline::analyze(&func, &[Constant::Float(1.0)]).is_some());
+        let mut module = Module::new("inline-test".into());
+        module.constants.push(Constant::Float(1.0));
+        assert!(SmallPureLeafInline::analyze(&func, &module).is_some());
     }
 
     #[test]
     fn rejects_leaf_with_trapping_integer_divisor() {
         let func = spectral_leaf(0);
-        assert!(SmallPureLeafInline::analyze(&func, &[Constant::Float(1.0)]).is_none());
+        let mut module = Module::new("inline-test".into());
+        module.constants.push(Constant::Float(1.0));
+        assert!(SmallPureLeafInline::analyze(&func, &module).is_none());
+    }
+
+    #[test]
+    fn accepts_small_acyclic_control_flow_graph() {
+        let mut func = function_with_slot_types_and_sig(
+            vec![
+                Instruction::new(Opcode::LtI, 2, 0, 1),
+                branch(Opcode::JumpIf, 2, 3),
+                Instruction::new(Opcode::Copy, 3, 1, 0),
+                branch(Opcode::Jump, 0, 2),
+                Instruction::new(Opcode::Copy, 3, 0, 0),
+                Instruction::new(Opcode::Return, 3, 0, 0),
+            ],
+            vec![
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ],
+            2,
+            2,
+            1,
+        );
+        func.ret_slot_types = vec![SlotType::Value];
+        let module = Module::new("graph-inline-test".into());
+        let inline = SmallPureLeafInline::analyze(&func, &module).expect("acyclic inline graph");
+        assert_eq!(inline.blocks.len(), 4);
+        assert_eq!(inline.cost(), 6);
+    }
+
+    #[test]
+    fn rejects_cyclic_inline_graph() {
+        let func = function_with_slot_types_and_sig(
+            vec![
+                branch(Opcode::Jump, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            vec![],
+            0,
+            0,
+            0,
+        );
+        let module = Module::new("cyclic-inline-test".into());
+        assert!(SmallPureLeafInline::analyze(&func, &module).is_none());
     }
 }

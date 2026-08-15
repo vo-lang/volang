@@ -11,7 +11,7 @@ use crate::translator::{emit_runtime_helper_call, CollectionEmitter, HelperKind}
 use crate::JitError;
 
 use super::element::{emit_elem_bytes_i32, load_element, resolve_elem_bytes, store_element};
-use super::slice::emit_nil_guarded_load;
+use super::slice::{emit_nil_guarded_load, immutable_descriptor_flags};
 
 pub(in crate::translate) const ARRAY_HEADER_BYTES: i64 = 16; // 2 slots
 
@@ -22,6 +22,9 @@ pub(in crate::translate) fn emit_array_bounds_check<'a>(
     arr: Value,
     idx: Value,
 ) {
+    if e.current_bounds_check_elided() {
+        return;
+    }
     let len = emit_nil_guarded_load(e, arr, 0);
     let out_of_bounds = e
         .builder()
@@ -160,7 +163,7 @@ pub(in crate::translate) fn emit_array_typed_write_barrier_single<'a>(
     let elem_meta_raw = e
         .builder()
         .ins()
-        .load(types::I32, MemFlags::trusted(), arr, 8);
+        .load(types::I32, immutable_descriptor_flags(), arr, 8);
     emit_typed_write_barrier_single_by_meta(e, arr, val, elem_meta_raw)
 }
 
@@ -217,7 +220,7 @@ pub(in crate::translate) fn emit_array_write_barrier_multi<'a>(
     let elem_meta_raw = e
         .builder()
         .ins()
-        .load(types::I32, MemFlags::trusted(), arr, 8);
+        .load(types::I32, immutable_descriptor_flags(), arr, 8);
     emit_write_barrier_multi_by_meta(e, arr, elem_meta_raw, src_start, elem_slots)
 }
 
@@ -263,5 +266,8 @@ pub(in crate::translate) fn array_addr<'a>(
     let off = e.builder().ins().iadd_imm_s(off, ARRAY_HEADER_BYTES);
     let addr = e.builder().ins().iadd(arr, off);
     e.write_var(inst.a, addr);
+    // A successful element bounds check proves both the array object and its
+    // interior element address are non-null.
+    e.mark_checked_non_nil(inst.a);
     Ok(())
 }

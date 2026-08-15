@@ -1,5 +1,5 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlagsData as MemFlags, Value};
+use cranelift_codegen::ir::{types, Block, FuncRef, InstBuilder, MemFlagsData as MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use vo_runtime::jit_api::{JitContext, JitContextField};
 
@@ -19,6 +19,7 @@ pub(crate) fn branch_on_execution_budget(
     builder: &mut FunctionBuilder<'_>,
     ctx: Value,
     bytecode_cost: u32,
+    refill_execution_budget: FuncRef,
 ) -> ExecutionBudgetPollBlocks {
     let cost = bytecode_cost.max(1);
     let remaining = builder.ins().load(
@@ -30,11 +31,37 @@ pub(crate) fn branch_on_execution_budget(
     let exhausted = builder
         .ins()
         .icmp_imm_u(IntCC::UnsignedLessThan, remaining, i64::from(cost));
+    let refill_block = super::cold_block(builder);
     let exhausted_block = super::cold_block(builder);
     let ready_block = builder.create_block();
-    builder
+    builder.append_block_param(ready_block, types::I32);
+    builder.ins().brif(
+        exhausted,
+        refill_block,
+        &[],
+        ready_block,
+        &[remaining.into()],
+    );
+
+    builder.switch_to_block(refill_block);
+    builder.seal_block(refill_block);
+    let required = builder.ins().iconst(types::I32, i64::from(cost));
+    let call = builder
         .ins()
-        .brif(exhausted, exhausted_block, &[], ready_block, &[]);
+        .call(refill_execution_budget, &[ctx, required]);
+    let refilled = builder.func.dfg.inst_results(call)[0];
+    let must_yield = builder
+        .ins()
+        .icmp_imm_u(IntCC::UnsignedLessThan, refilled, i64::from(cost));
+    builder.ins().brif(
+        must_yield,
+        exhausted_block,
+        &[],
+        ready_block,
+        &[refilled.into()],
+    );
+
+    let remaining = builder.block_params(ready_block)[0];
 
     ExecutionBudgetPollBlocks {
         exhausted: exhausted_block,

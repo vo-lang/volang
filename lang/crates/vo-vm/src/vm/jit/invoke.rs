@@ -178,20 +178,34 @@ fn invoke_jit_and_handle(
         &mut ret_heap_buf[..ret_slots]
     };
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
-    if let (Some(func_id), Some(jit_mgr)) = (entry_func_id, vm.jit.manager_mut()) {
-        jit_mgr.record_function_entry(func_id);
+    let param_slots = entry_func_id
+        .and_then(|func_id| module.functions.get(func_id as usize))
+        .map_or(0, |function| function.param_slots as usize);
+    if entry_func_id.is_some() {
+        if let Some(jit_mgr) = vm.jit.manager_mut() {
+            jit_mgr.record_function_entry();
+        }
     }
-    let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
+    let result = unsafe {
+        vo_jit::invoke_native_from_frame(
+            jit_func,
+            ctx.as_ptr(),
+            args_ptr,
+            ret.as_mut_ptr(),
+            param_slots,
+        )
+    };
     // Native allocation regions pre-admit a bounded run of cells. Close the
     // run before the VM observes telemetry, object limits, or a side exit.
     vm.state.gc.close_jit_allocation_region_for_boundary();
     let budget_after = ctx.ctx.execution_budget;
+    let work_consumed = u64::from(budget_before)
+        .saturating_add(ctx.ctx.execution_budget_refilled)
+        .saturating_sub(u64::from(budget_after));
     fiber.execution_budget = budget_after;
 
     if let (Some(func_id), Some(jit_mgr)) = (entry_func_id, vm.jit.manager_mut()) {
-        if let Err(err) =
-            jit_mgr.record_function_outcome(func_id, result, budget_before, budget_after)
-        {
+        if let Err(err) = jit_mgr.record_function_outcome(func_id, result, work_consumed) {
             return ExecResult::JitError(format!(
                 "JIT execution feedback failed for function {func_id}: {err}"
             ));
@@ -356,10 +370,41 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
     extern "C" fn unreachable_jit_call(
         _ctx: *mut vo_runtime::jit_api::JitContext,
         _args: *mut u64,
         _ret: *mut u64,
+        _lane0: u64,
+        _lane1: u64,
+        _lane2: u64,
+        _lane3: u64,
+        _lane4: u64,
+    ) -> JitResult {
+        panic!("frame-shape validation must reject before invoking JIT code")
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+    extern "C" fn unreachable_jit_call(
+        _ctx: *mut vo_runtime::jit_api::JitContext,
+        _args: *mut u64,
+        _ret: *mut u64,
+        _lane0: u64,
+        _lane1: u64,
+        _lane2: u64,
+    ) -> JitResult {
+        panic!("frame-shape validation must reject before invoking JIT code")
+    }
+
+    #[cfg(any(
+        all(target_arch = "x86_64", target_os = "windows"),
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
+    extern "C" fn unreachable_jit_call(
+        _ctx: *mut vo_runtime::jit_api::JitContext,
+        _args: *mut u64,
+        _ret: *mut u64,
+        _lane0: u64,
     ) -> JitResult {
         panic!("frame-shape validation must reject before invoking JIT code")
     }

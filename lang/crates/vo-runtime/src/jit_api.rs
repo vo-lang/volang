@@ -152,14 +152,13 @@ impl JitTier {
     }
 }
 
-/// Published entries have separate external and internal ABIs. The bridge is
-/// called by the VM; generated code and dynamic inline caches use `native`.
-/// `generation` changes on every publication or invalidation, allowing an IC
-/// to reject a retired raw code pointer without scanning the cache table.
+/// Published native entry shared by VM dispatch, generated calls, and dynamic
+/// inline caches. `generation` changes on every publication or invalidation,
+/// allowing an IC to reject a retired raw code pointer without scanning the
+/// cache table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct JitDispatchEntry {
-    pub bridge: *const u8,
     pub native: *const u8,
     pub generation: u64,
     pub tier: u8,
@@ -167,7 +166,6 @@ pub struct JitDispatchEntry {
 }
 
 impl JitDispatchEntry {
-    pub const OFFSET_BRIDGE: i32 = core::mem::offset_of!(Self, bridge) as i32;
     pub const OFFSET_NATIVE: i32 = core::mem::offset_of!(Self, native) as i32;
     pub const OFFSET_GENERATION: i32 = core::mem::offset_of!(Self, generation) as i32;
     pub const OFFSET_TIER: i32 = core::mem::offset_of!(Self, tier) as i32;
@@ -176,7 +174,6 @@ impl JitDispatchEntry {
     #[inline]
     pub const fn unavailable() -> Self {
         Self {
-            bridge: core::ptr::null(),
             native: core::ptr::null(),
             generation: 0,
             tier: 0,
@@ -187,7 +184,6 @@ impl JitDispatchEntry {
     #[inline]
     pub const fn unavailable_at(generation: u64) -> Self {
         Self {
-            bridge: core::ptr::null(),
             native: core::ptr::null(),
             generation,
             tier: 0,
@@ -197,7 +193,7 @@ impl JitDispatchEntry {
 
     #[inline]
     pub const fn is_available(self) -> bool {
-        !self.bridge.is_null() && !self.native.is_null()
+        !self.native.is_null()
     }
 
     #[inline]
@@ -207,7 +203,7 @@ impl JitDispatchEntry {
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(JitDispatchEntry::SIZE == 32);
+const _: () = assert!(JitDispatchEntry::SIZE == 24);
 
 /// Mutable per-function profile owned by one Island-local JIT manager.
 /// Baseline prologues update `entries` only during the tier-training window,
@@ -346,6 +342,11 @@ pub type JitCallExternFn = extern "C" fn(
 
 pub type JitGcSafepointFn = extern "C" fn(ctx: *mut JitContext) -> JitResult;
 pub type JitTierUpFn = extern "C" fn(ctx: *mut JitContext, func_id: u32) -> JitResult;
+/// Refill a spent cooperative-execution budget while the current fiber still
+/// owns its native activation. A zero result requests a scheduler boundary;
+/// a non-zero result is the new budget available to generated code.
+pub type JitExecutionBudgetRefillFn =
+    extern "C" fn(ctx: *mut JitContext, required_budget: u32) -> u32;
 /// Resolve a cold target into the native dispatch table while all active
 /// native caller frames remain linked for precise root scanning.
 pub type JitLinkFunctionFn = extern "C" fn(ctx: *mut JitContext, func_id: u32) -> JitResult;
@@ -429,6 +430,7 @@ pub struct JitContextCallbacks {
     pub select_exec_fn: Option<extern "C" fn(ctx: *mut JitContext, result_reg: u32) -> JitResult>,
     pub gc_safepoint_fn: Option<JitGcSafepointFn>,
     pub tier_up_fn: Option<JitTierUpFn>,
+    pub execution_budget_refill_fn: Option<JitExecutionBudgetRefillFn>,
 }
 
 impl JitContextCallbacks {
@@ -450,6 +452,7 @@ impl JitContextCallbacks {
         select_exec_fn: None,
         gc_safepoint_fn: None,
         tier_up_fn: None,
+        execution_budget_refill_fn: None,
     };
 }
 
@@ -577,8 +580,8 @@ pub struct JitContext {
     /// Shared immutable callback capability table.
     pub callbacks: *const JitContextCallbacks,
 
-    /// JIT dispatch table. Every published function owns a VM-facing bridge
-    /// and a JIT-facing native entry; an all-zero entry selects the VM.
+    /// JIT dispatch table. VM dispatch and generated calls share each native
+    /// entry; an all-zero entry selects the interpreter.
     pub jit_func_table: *const JitDispatchEntry,
 
     /// Number of functions (length of jit_func_table).
@@ -718,10 +721,15 @@ pub struct JitContext {
     /// Scheduler-turn instruction budget shared by every nested native call.
     ///
     /// Generated code charges bounded bytecode regions before entering them.
-    /// The VM copies this value to and from the active fiber at each JIT bridge,
+    /// The VM copies this value to and from the active fiber at each JIT entry,
     /// so interpreter work, loop OSR, and full-function JIT execution consume a
     /// single cooperative scheduling budget.
     pub execution_budget: u32,
+
+    /// Total budget granted by in-place native lease renewals during this JIT
+    /// invocation. VM feedback uses it to recover exact executed work even
+    /// when several scheduling quanta complete without a native side exit.
+    pub execution_budget_refilled: u64,
 
     /// Optional validated host-services binding used by direct extern helpers.
     pub host_services_v2: *const crate::host_services_v2::HostServicesV2Binding,
@@ -987,6 +995,7 @@ pub const JIT_CALLBACK_QUEUE_LEN: u64 = 15;
 pub const JIT_CALLBACK_QUEUE_CAP: u64 = 16;
 pub const JIT_CALLBACK_GC_SAFEPOINT: u64 = 17;
 pub const JIT_CALLBACK_TIER_UP: u64 = 18;
+pub const JIT_CALLBACK_EXECUTION_BUDGET_REFILL: u64 = 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitContextDependencyKind {
@@ -1014,6 +1023,7 @@ pub enum JitContextDependencyKind {
     InlineCacheTable,
     GcSafepointFn,
     TierUpFn,
+    ExecutionBudgetRefillFn,
     LinkFunctionFn,
 }
 
@@ -1044,6 +1054,7 @@ impl JitContextDependencyKind {
             Self::InlineCacheTable => ctx.ic_table.is_null(),
             Self::GcSafepointFn => ctx.gc_safepoint_fn.is_none(),
             Self::TierUpFn => ctx.tier_up_fn.is_none(),
+            Self::ExecutionBudgetRefillFn => ctx.execution_budget_refill_fn.is_none(),
             Self::LinkFunctionFn => ctx.link_function_fn.is_none(),
         }
     }
@@ -1052,6 +1063,7 @@ impl JitContextDependencyKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitCallbackReturnPolicy {
     RawPointer,
+    RawU32,
     RawVoid,
     JitResult,
     JitResultWithOutPointer,
@@ -1076,6 +1088,7 @@ pub enum JitAbiType {
 pub enum JitRuntimeHelperReturnPolicy {
     Void,
     RawI32,
+    RawU32,
     RawU64,
     JitResult,
     I32StatusOutPointer,
@@ -1479,6 +1492,17 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
             observes_frame: false,
         },
         JitCallbackAbiField {
+            kind: Kind::ExecutionBudgetRefillFn,
+            name: "execution_budget_refill_fn",
+            params: &[T::Ptr, T::U32],
+            ret: T::U32,
+            infra_error_id: Some(JIT_CALLBACK_EXECUTION_BUDGET_REFILL),
+            return_policy: Ret::RawU32,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitCallbackAbiField {
             kind: Kind::LinkFunctionFn,
             name: "link_function_fn",
             params: &[T::Ptr, T::U32],
@@ -1637,6 +1661,31 @@ pub extern "C" fn vo_jit_tier_up(ctx: *mut JitContext, func_id: u32) -> JitResul
         Some(callback) => callback(ctx, func_id),
         None => JitResult::Ok,
     }
+}
+
+/// Ask the owning VM whether a spent native execution lease can be renewed
+/// without returning through the scheduler. Standalone JIT harnesses omit the
+/// callback and therefore keep the conservative scheduler-boundary behavior.
+pub extern "C" fn vo_jit_refill_execution_budget(
+    ctx: *mut JitContext,
+    required_budget: u32,
+) -> u32 {
+    let Some(callback) = (unsafe { ctx.as_ref() }).and_then(|ctx| ctx.execution_budget_refill_fn)
+    else {
+        return 0;
+    };
+    // Do not retain a Rust reference to JitContext across the callback: the
+    // callback receives the same raw pointer and may legitimately update other
+    // context fields.
+    let granted = callback(ctx, required_budget.max(1));
+    if granted != 0 {
+        if let Some(ctx_ref) = unsafe { ctx.as_mut() } {
+            ctx_ref.execution_budget_refilled = ctx_ref
+                .execution_budget_refilled
+                .saturating_add(u64::from(granted));
+        }
+    }
+    granted
 }
 
 /// Write barrier for GC.
@@ -4076,6 +4125,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     &[
         ("vo_jit_gc_safepoint", vo_jit_gc_safepoint as *const u8),
         ("vo_jit_tier_up", vo_jit_tier_up as *const u8),
+        (
+            "vo_jit_refill_execution_budget",
+            vo_jit_refill_execution_budget as *const u8,
+        ),
         ("vo_jit_gc_alloc", vo_jit_gc_alloc as *const u8),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         (
@@ -4154,6 +4207,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
     &[
         "vo_jit_gc_safepoint",
         "vo_jit_tier_up",
+        "vo_jit_refill_execution_budget",
         "vo_jit_gc_alloc",
         "vo_gc_write_barrier",
         "vo_gc_typed_write_barrier_by_meta",
@@ -4238,6 +4292,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             ret: T::JitResult,
             return_policy: Ret::JitResult,
             panic_policy: Panic::ReturnsJitResult,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_jit_refill_execution_budget",
+            params: &[T::Ptr, T::U32],
+            ret: T::U32,
+            return_policy: Ret::RawU32,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
             may_gc: false,
             may_schedule: false,
             observes_frame: false,

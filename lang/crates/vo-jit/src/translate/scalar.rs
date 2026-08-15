@@ -12,7 +12,6 @@ use super::emit_runtime_trap_if;
 pub(super) fn load_int<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let val = e.builder().ins().iconst(types::I64, inst.imm32() as i64);
     e.write_var(inst.a, val);
-    e.set_reg_const(inst.a, inst.imm32() as i64);
 }
 
 pub(super) fn load_const<'a>(
@@ -36,7 +35,6 @@ pub(super) fn load_const<'a>(
             // Float constant: load as F64 directly, no bitcast needed
             let v = e.builder().ins().f64const(f);
             e.write_var_f64(inst.a, v);
-            e.set_reg_const(inst.a, f.to_bits() as i64);
         }
         Constant::String(_) => {
             return Err(JitError::Internal(format!(
@@ -47,43 +45,43 @@ pub(super) fn load_const<'a>(
         Constant::Nil => {
             let v = e.builder().ins().iconst(types::I64, 0);
             e.write_var(inst.a, v);
-            e.set_reg_const(inst.a, 0);
         }
         Constant::Bool(b) => {
             let val = b as i64;
             let v = e.builder().ins().iconst(types::I64, val);
             e.write_var(inst.a, v);
-            e.set_reg_const(inst.a, val);
         }
         Constant::Int(i) => {
             let val = i;
             let v = e.builder().ins().iconst(types::I64, val);
             e.write_var(inst.a, v);
-            e.set_reg_const(inst.a, val);
         }
     }
     Ok(())
 }
 
 pub(super) fn copy<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
-    let const_val = e.get_reg_const(inst.b);
+    let source_non_nil = e.is_checked_non_nil(inst.b);
     let v = e.read_var(inst.b);
     e.write_var(inst.a, v);
-    if let Some(c) = const_val {
-        e.set_reg_const(inst.a, c);
+    if source_non_nil {
+        e.mark_checked_non_nil(inst.a);
     }
 }
 
 pub(super) fn copy_n<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let count = inst.copy_n_count();
     let mut values = Vec::with_capacity(count as usize);
+    let mut non_nil = Vec::with_capacity(count as usize);
     for i in 0..count {
-        values.push((e.read_var(inst.b + i), e.get_reg_const(inst.b + i)));
+        values.push(e.read_var(inst.b + i));
+        non_nil.push(e.is_checked_non_nil(inst.b + i));
     }
-    for (i, (v, const_val)) in values.into_iter().enumerate() {
-        e.write_var(inst.a + i as u16, v);
-        if let Some(c) = const_val {
-            e.set_reg_const(inst.a + i as u16, c);
+    for (i, v) in values.into_iter().enumerate() {
+        let destination = inst.a + i as u16;
+        e.write_var(destination, v);
+        if non_nil[i] {
+            e.mark_checked_non_nil(destination);
         }
     }
 }

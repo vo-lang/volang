@@ -503,6 +503,7 @@ mod tests {
             Instruction::new(vo_runtime::instruction::Opcode::DivI, 0, 1, 2),
             Instruction::new(vo_runtime::instruction::Opcode::Return, 0, 0, 0),
         ];
+        callee.slot_types = vec![vo_runtime::SlotType::Value; 3];
         let mut module = Module::new("known-divisor-route".to_string());
         module.functions.push(callee.clone());
         let externs = ResolvedExternTable::empty();

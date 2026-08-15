@@ -52,7 +52,7 @@ pub struct NonOkSlowPathParams {
     pub ret_reg_val: Value,
     pub ret_slots_val: Value,
     pub caller_resume_pc_val: Value,
-    /// Optional: (args_slot, arg_count) to copy args from native stack to fiber.stack after push_frame.
+    /// Optional arguments to copy from native stack to fiber.stack after push_frame.
     pub copy_args: Option<(StackSlot, usize)>,
 }
 
@@ -93,8 +93,6 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
     })?;
     emit_return_jit_error_if_null_callee_args(emitter, callee_fiber_args_ptr);
 
-    // Dynamic calls may pass args via native stack scratch. Static direct calls
-    // already placed callee state in the fiber shadow window.
     if let Some((args_slot, arg_count)) = p.copy_args {
         for i in 0..arg_count {
             let val = emitter.builder().ins().stack_load(

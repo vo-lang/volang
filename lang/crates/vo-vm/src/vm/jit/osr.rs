@@ -67,7 +67,7 @@ pub fn dispatch_loop_osr(
         Err(error) => return OsrResult::JitError(error),
     };
     let budget_before = fiber.execution_budget;
-    let (result, ctx, budget_after) = {
+    let (result, ctx, work_consumed) = {
         // Sync fiber.sp to the correct value for this frame.
         // After a WaitIo cycle, fiber.sp may be stale (left at a higher value
         // by push_frame in the non-OK path). The correct sp is bp + local_slots.
@@ -95,15 +95,16 @@ pub fn dispatch_loop_osr(
         }
         let result = loop_func(ctx.as_ptr(), locals_ptr);
         let budget_after = ctx.ctx.execution_budget;
+        let work_consumed = u64::from(budget_before)
+            .saturating_add(ctx.ctx.execution_budget_refilled)
+            .saturating_sub(u64::from(budget_after));
         fiber.execution_budget = budget_after;
-        (result, ctx, budget_after)
+        (result, ctx, work_consumed)
     };
     drop(lease_guard);
 
     if let Some(jit_mgr) = vm.jit.manager_mut() {
-        if let Err(err) =
-            jit_mgr.record_loop_outcome(func_id, loop_pc, result, budget_before, budget_after)
-        {
+        if let Err(err) = jit_mgr.record_loop_outcome(func_id, loop_pc, result, work_consumed) {
             return OsrResult::JitError(format!(
                 "JIT execution feedback failed for loop pc {loop_pc} in function {func_id}: {err}"
             ));
@@ -366,7 +367,7 @@ mod tests {
             vm.jit
                 .manager_mut()
                 .expect("jit manager")
-                .record_loop_outcome(0, loop_pc, JitResult::WaitQueue, 100, 100)
+                .record_loop_outcome(0, loop_pc, JitResult::WaitQueue, 0)
                 .expect("record loop feedback");
         }
 

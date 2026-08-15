@@ -28,6 +28,7 @@ static JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks {
     select_exec_fn: Some(callbacks::jit_select_exec),
     gc_safepoint_fn: Some(callbacks::jit_gc_safepoint),
     tier_up_fn: Some(callbacks::jit_tier_up),
+    execution_budget_refill_fn: Some(callbacks::jit_refill_execution_budget),
 };
 
 /// JIT context wrapper.
@@ -159,6 +160,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         link_function_fn: Some(callbacks::jit_link_function),
         ic_table,
         execution_budget: fiber.execution_budget,
+        execution_budget_refilled: 0,
         host_services_v2: vm
             .state
             .host_services_v2
