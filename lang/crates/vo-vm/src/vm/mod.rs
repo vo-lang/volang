@@ -1327,7 +1327,9 @@ impl Vm {
         self.state
             .interrupt_flag
             .as_ref()
-            .map(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            // The flag carries no associated data; execution only needs to
+            // observe the cancellation bit at a bounded scheduler poll.
+            .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(false)
     }
 
@@ -3149,6 +3151,8 @@ impl Vm {
         let module = loaded_module.module();
         let runtime_metadata = loaded_module.runtime_metadata();
         fiber.execution_budget = TIME_SLICE;
+        #[cfg(feature = "jit")]
+        let jit_enabled = self.jit.is_enabled();
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
         // Get raw pointer to stack for fast access - fiber.ensure_capacity may invalidate this
         let mut stack = fiber.stack_ptr();
@@ -3223,49 +3227,51 @@ impl Vm {
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
-                if let Some(osr_result) =
-                    jit::try_loop_osr(self, fiber, loaded_module, func_id, $target_pc, bp)
-                {
-                    match osr_result {
-                        jit::OsrResult::Exit(code) => {
-                            return ExecResult::Exit(code);
-                        }
-                        jit::OsrResult::FrameChanged => {
-                            if !self.pending_runtime_transitions.is_empty() {
-                                return ExecResult::FrameChanged;
+                if jit_enabled {
+                    if let Some(osr_result) =
+                        jit::try_loop_osr(self, fiber, loaded_module, func_id, $target_pc, bp)
+                    {
+                        match osr_result {
+                            jit::OsrResult::Exit(code) => {
+                                return ExecResult::Exit(code);
                             }
-                            stack = fiber.stack_ptr();
-                            refetch_after_frame_change!();
-                            continue;
-                        }
-                        jit::OsrResult::Transition(transition) => {
-                            return ExecResult::Transition(transition);
-                        }
-                        jit::OsrResult::ExitPc(exit_pc) => {
-                            let Some(frame) = fiber.current_frame_mut() else {
-                                return ExecResult::JitError(
-                                    "OsrResult::ExitPc without active frame".to_string(),
-                                );
-                            };
-                            frame.pc = exit_pc;
-                            if !self.pending_runtime_transitions.is_empty() {
-                                return ExecResult::FrameChanged;
+                            jit::OsrResult::FrameChanged => {
+                                if !self.pending_runtime_transitions.is_empty() {
+                                    return ExecResult::FrameChanged;
+                                }
+                                stack = fiber.stack_ptr();
+                                refetch_after_frame_change!();
+                                continue;
                             }
-                            stack = fiber.stack_ptr();
-                            refetch_after_frame_change!();
-                            continue;
-                        }
-                        jit::OsrResult::Panic => {
-                            stack = fiber.stack_ptr();
-                            handle_panic_result!(helpers::panic_unwind(
-                                &mut self.state.gc,
-                                fiber,
-                                stack,
-                                module
-                            ));
-                        }
-                        jit::OsrResult::JitError(msg) => {
-                            return ExecResult::JitError(msg);
+                            jit::OsrResult::Transition(transition) => {
+                                return ExecResult::Transition(transition);
+                            }
+                            jit::OsrResult::ExitPc(exit_pc) => {
+                                let Some(frame) = fiber.current_frame_mut() else {
+                                    return ExecResult::JitError(
+                                        "OsrResult::ExitPc without active frame".to_string(),
+                                    );
+                                };
+                                frame.pc = exit_pc;
+                                if !self.pending_runtime_transitions.is_empty() {
+                                    return ExecResult::FrameChanged;
+                                }
+                                stack = fiber.stack_ptr();
+                                refetch_after_frame_change!();
+                                continue;
+                            }
+                            jit::OsrResult::Panic => {
+                                stack = fiber.stack_ptr();
+                                handle_panic_result!(helpers::panic_unwind(
+                                    &mut self.state.gc,
+                                    fiber,
+                                    stack,
+                                    module
+                                ));
+                            }
+                            jit::OsrResult::JitError(msg) => {
+                                return ExecResult::JitError(msg);
+                            }
                         }
                     }
                 }
@@ -3336,10 +3342,14 @@ impl Vm {
             };
         }
 
+        // Async cancellation is polled once per bounded scheduler quantum.
+        // Native execution uses the same region/quantum contract through its
+        // execution-budget callback, keeping VM and JIT responsiveness aligned.
+        if self.interrupt_requested() {
+            return ExecResult::Interrupted;
+        }
+
         while fiber.execution_budget > 0 {
-            if self.interrupt_requested() {
-                return ExecResult::Interrupted;
-            }
             if self.state.gc.last_memory_error().is_some() {
                 return ExecResult::JitError("Island managed-memory allocation failed".to_string());
             }
@@ -3352,7 +3362,8 @@ impl Vm {
                 // frame already exists, but deferred calls executing under the
                 // unwind machine still need interpreter-owned ordering and
                 // recover eligibility checks.
-                if frame.pc == 0
+                if jit_enabled
+                    && frame.pc == 0
                     && fiber.unwinding.is_none()
                     && can_enter_materialized_frame_at_pc(
                         func,
