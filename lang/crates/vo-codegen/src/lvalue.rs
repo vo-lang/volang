@@ -1452,8 +1452,11 @@ pub fn emit_lvalue_store(
 /// Multi-assignment evaluates all LHS address operands before any RHS or
 /// store. Registers returned by expression compilation can alias mutable
 /// locals, so retaining their register number alone is insufficient. The
-/// container reference, pointer, and index/key are copied to owned temporary
-/// slots here. Direct variables and stack-array storage remain locations.
+/// container reference, pointer, and index/key must therefore live in owned
+/// temporary slots. Lvalue resolution already produces such temporaries for
+/// evaluated address operands; this pass only copies operands that still
+/// refer to mutable storage. Direct variables and stack-array storage remain
+/// locations.
 pub fn snapshot_lvalue_operands(
     lv: &mut LValue,
     func: &mut FuncBuilder,
@@ -1474,22 +1477,26 @@ pub fn snapshot_lvalue_operands(
                 ContainerKind::StackArray { .. } => (1, vec![SlotType::Value]),
                 _ => (1, vec![SlotType::Value]),
             };
-            // Only snapshot if index_reg might be a variable slot that could be modified
-            // Always copy to be safe - the cost is minimal (one copy instruction)
-            let tmp = func.alloc_slots(&key_types);
-            func.emit_copy(tmp, *index_reg, key_slots);
-            *index_reg = tmp;
+            if !func.is_current_temporary_range(*index_reg, key_slots) {
+                let tmp = func.alloc_slots(&key_types);
+                func.emit_copy(tmp, *index_reg, key_slots);
+                *index_reg = tmp;
+            }
 
-            if !matches!(kind, ContainerKind::StackArray { .. }) {
+            if !matches!(kind, ContainerKind::StackArray { .. })
+                && !func.is_current_temporary_range(*container_reg, 1)
+            {
                 let tmp = func.alloc_slots(&[SlotType::GcRef]);
                 func.emit_copy(tmp, *container_reg, 1);
                 *container_reg = tmp;
             }
         }
         LValue::Deref { ptr_reg, .. } => {
-            let tmp = func.alloc_slots(&[SlotType::GcRef]);
-            func.emit_copy(tmp, *ptr_reg, 1);
-            *ptr_reg = tmp;
+            if !func.is_current_temporary_range(*ptr_reg, 1) {
+                let tmp = func.alloc_slots(&[SlotType::GcRef]);
+                func.emit_copy(tmp, *ptr_reg, 1);
+                *ptr_reg = tmp;
+            }
         }
         LValue::Field { base, .. } => {
             snapshot_lvalue_operands(base, func)?;
@@ -1498,14 +1505,18 @@ pub fn snapshot_lvalue_operands(
             array, index_reg, ..
         } => {
             snapshot_lvalue_operands(array, func)?;
-            let tmp = func.alloc_slots(&[SlotType::Value]);
-            func.emit_copy(tmp, *index_reg, 1);
-            *index_reg = tmp;
+            if !func.is_current_temporary_range(*index_reg, 1) {
+                let tmp = func.alloc_slots(&[SlotType::Value]);
+                func.emit_copy(tmp, *index_reg, 1);
+                *index_reg = tmp;
+            }
         }
         LValue::StackArrayField { index_reg, .. } => {
-            let tmp = func.alloc_slots(&[SlotType::Value]);
-            func.emit_copy(tmp, *index_reg, 1);
-            *index_reg = tmp;
+            if !func.is_current_temporary_range(*index_reg, 1) {
+                let tmp = func.alloc_slots(&[SlotType::Value]);
+                func.emit_copy(tmp, *index_reg, 1);
+                *index_reg = tmp;
+            }
         }
         // Other LValue types don't have index registers that could be aliased
         _ => {}
@@ -1812,5 +1823,32 @@ mod tests {
                 && copy.a == new_index
                 && copy.b == old_index
         ));
+    }
+
+    #[test]
+    fn lvalue_snapshot_reuses_owned_statement_temporary() {
+        let mut func = FuncBuilder::new("owned-lvalue-temporary");
+        func.begin_temp_region();
+        let owned_index = func.alloc_slots(&[SlotType::Value]);
+        let mut lvalue = LValue::Index {
+            kind: ContainerKind::StackArray {
+                base_slot: 8,
+                elem_slots: 1,
+                len: 2,
+                elem_slot_types: vec![SlotType::Value],
+            },
+            container_reg: 8,
+            index_reg: owned_index,
+        };
+
+        snapshot_lvalue_operands(&mut lvalue, &mut func).unwrap();
+        let retained_index = match lvalue {
+            LValue::Index { index_reg, .. } => index_reg,
+            _ => unreachable!(),
+        };
+        let function = func.build();
+
+        assert_eq!(retained_index, owned_index);
+        assert!(function.code.is_empty());
     }
 }

@@ -331,6 +331,20 @@ impl FuncBuilder {
         }
     }
 
+    /// Whether a slot range is already owned by the active statement's
+    /// temporary region. Such values cannot alias a mutable local and remain
+    /// stable until the statement finishes, so evaluation-order snapshots can
+    /// retain them directly.
+    pub fn is_current_temporary_range(&self, start: u16, count: u16) -> bool {
+        let Some(&checkpoint) = self.temp_checkpoint_stack.last() else {
+            return false;
+        };
+        let Some(end) = start.checked_add(count) else {
+            return false;
+        };
+        start >= checkpoint && end <= self.next_slot
+    }
+
     /// Allocate slots with the given type sequence.
     ///
     /// Static type principle: slot types are immutable after allocation.

@@ -158,6 +158,21 @@ pub(crate) fn emit_assign_to_lvalue(
     }
 
     let slot_types = info.type_slot_types(dst_type);
+    let direct_source = match &source {
+        AssignSource::Slot { slot, type_key } if *type_key == dst_type => Some(*slot),
+        AssignSource::Expr(expr) if info.expr_type(expr.id) == dst_type => {
+            match crate::expr::get_expr_source(expr, ctx, func, info) {
+                ExprSource::Location(StorageKind::StackValue { slot, .. })
+                | ExprSource::Location(StorageKind::Reference { slot }) => Some(slot),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(slot) = direct_source {
+        return crate::lvalue::emit_lvalue_store(lv, slot, ctx, func, &slot_types);
+    }
+
     let converted = func.alloc_slots(&slot_types);
     emit_assign(converted, source, dst_type, ctx, func, info)?;
     crate::lvalue::emit_lvalue_store(lv, converted, ctx, func, &slot_types)
