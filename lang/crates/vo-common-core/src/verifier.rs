@@ -2367,6 +2367,23 @@ fn verify_function_common(
         validate_loop_end_contract(func, pc, &func.instruction_metadata[pc])?;
     }
 
+    let Some(last) = func.code.last() else {
+        return Err(ModuleVerificationError::FunctionInvariant {
+            func: func.name.clone(),
+            detail: "bytecode is empty and has no terminating control transfer".to_string(),
+        });
+    };
+    let last_opcode = last.opcode();
+    if !matches!(last_opcode, Opcode::Jump | Opcode::Return | Opcode::Panic) {
+        return Err(ModuleVerificationError::FunctionInvariant {
+            func: func.name.clone(),
+            detail: format!(
+                "final {last_opcode:?} instruction falls through beyond code length {}",
+                func.code.len()
+            ),
+        });
+    }
+
     Ok(())
 }
 

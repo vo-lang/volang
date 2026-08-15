@@ -842,10 +842,14 @@ fn load_missing_extern_returns_error_instead_of_registration_panic() {
         vo_runtime::bytecode::ExternEffects::NONE,
     ));
     let func = &mut module.functions[0];
-    func.instruction_metadata = vec![InstructionMetadata::CallExternLayout {
-        arg_layout: Vec::new(),
-        ret_layout: Vec::new(),
-    }];
+    func.code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+    func.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        },
+        InstructionMetadata::None,
+    ];
     refresh_vm_test_function_metadata(func);
     let mut vm = Vm::new();
 

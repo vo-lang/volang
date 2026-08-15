@@ -17,6 +17,63 @@ mod iface_asserts;
 mod metadata_refs;
 mod transfers_and_iface;
 
+/// Most verifier unit fixtures isolate one unrelated contract and historically
+/// omitted the trailing control transfer. Complete those synthetic functions
+/// here so each test still reaches the invariant it was built to exercise.
+/// Production modules go directly through `super::verify_module` unchanged.
+fn verify_module(module: &Module) -> Result<(), ModuleVerificationError> {
+    let mut fixture = module.clone();
+    for func in &mut fixture.functions {
+        if !func.code.last().is_some_and(|inst| {
+            matches!(inst.opcode(), Opcode::Jump | Opcode::Return | Opcode::Panic)
+        }) {
+            let terminal = if func.heap_ret_gcref_count > 0 {
+                Instruction::with_flags(
+                    Opcode::Return,
+                    ReturnFlags::heap_returns(false).bits(),
+                    func.heap_ret_gcref_start,
+                    func.heap_ret_gcref_count,
+                    0,
+                )
+            } else {
+                Instruction::new(Opcode::Return, 0, func.ret_slots, 0)
+            };
+            func.code.push(terminal);
+            func.instruction_metadata.push(InstructionMetadata::None);
+        }
+    }
+    super::verify_module(&fixture).map(|_| ())
+}
+
+#[test]
+fn production_verifier_rejects_empty_function_bytecode() {
+    let mut module = Module::new("empty-function".to_string());
+    module.functions.push(function_with_slot_types(Vec::new()));
+
+    let error = super::verify_module(&module).expect_err("empty function must be rejected");
+    assert!(matches!(
+        error,
+        ModuleVerificationError::FunctionInvariant { detail, .. }
+            if detail.contains("bytecode is empty")
+    ));
+}
+
+#[test]
+fn production_verifier_rejects_final_fallthrough() {
+    let mut module = Module::new("final-fallthrough".to_string());
+    let mut func = function_with_slot_types(Vec::new());
+    func.code.push(Instruction::new(Opcode::Hint, 0, 0, 0));
+    func.instruction_metadata.push(InstructionMetadata::None);
+    module.functions.push(func);
+
+    let error = super::verify_module(&module).expect_err("final fallthrough must be rejected");
+    assert!(matches!(
+        error,
+        ModuleVerificationError::FunctionInvariant { detail, .. }
+            if detail.contains("final Hint instruction") && detail.contains("falls through")
+    ));
+}
+
 fn canonical_test_extern_name(function: &str) -> String {
     crate::extern_key::ExternKeyRef::new("github.com/volang/verifier-tests", function)
         .encode()

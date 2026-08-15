@@ -13,6 +13,11 @@ fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
     crate::test_fixtures::function(code, local_slots)
 }
 
+fn make_osr_func(mut loop_body: Vec<Instruction>, local_slots: u16) -> FunctionDef {
+    loop_body.push(Instruction::new(Opcode::Return, 0, 0, 0));
+    make_func(loop_body, local_slots)
+}
+
 fn make_func_with_sig(
     code: Vec<Instruction>,
     param_count: u16,

@@ -111,6 +111,19 @@ impl Instruction {
         Opcode::from_u8(self.op)
     }
 
+    /// Decode an opcode already admitted by the bytecode verifier.
+    ///
+    /// # Safety
+    ///
+    /// `self.op` must be in the valid `Opcode` discriminant range. Loaded
+    /// modules establish that invariant before either execution backend can
+    /// observe their instruction stream.
+    #[inline]
+    pub unsafe fn verified_opcode(&self) -> Opcode {
+        debug_assert!(self.op <= Opcode::MAX_VALID);
+        unsafe { core::mem::transmute::<u8, Opcode>(self.op) }
+    }
+
     #[inline]
     pub fn imm32(&self) -> i32 {
         ((self.b as u32) | ((self.c as u32) << 16)) as i32

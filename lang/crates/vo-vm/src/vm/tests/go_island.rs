@@ -35,6 +35,7 @@ fn vm_gc_001_interpreter_go_start_transition_marks_spawn_roots_dirty() {
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
     });
+    terminate_vm_test_module(&mut module);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let fid = vm.scheduler.spawn(Fiber::new(0));
@@ -192,6 +193,7 @@ fn vm_goisland_object_kind_002_malformed_closure_target_is_vm_error_instead_of_h
         ret_layout: Vec::new(),
     }];
     refresh_vm_test_function_metadata(func);
+    terminate_vm_test_module(&mut module);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
@@ -230,6 +232,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_island_gcref_before_islan
         ret_layout: Vec::new(),
     }];
     refresh_vm_test_function_metadata(func);
+    terminate_vm_test_module(&mut module);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let not_island =
@@ -272,6 +275,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_closure_gcref_before_clos
         ret_layout: Vec::new(),
     }];
     refresh_vm_test_function_metadata(func);
+    terminate_vm_test_module(&mut module);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
@@ -340,6 +344,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_shape_drift_before_island_effects() 
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
     });
+    terminate_vm_test_module(&mut module);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let remote_island = vo_runtime::island::create(&mut vm.state.gc, 1);
@@ -418,6 +423,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
     });
+    terminate_vm_test_module(&mut module);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let remote_island = vo_runtime::island::create(&mut vm.state.gc, 1);

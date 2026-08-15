@@ -170,6 +170,15 @@ const C_GO_FRAME: EffectContract = EffectContract {
     needs_slot_metadata: true,
     ..EffectContract::PURE
 };
+const C_ISLAND_NEW: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    may_schedule: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_type_metadata: true,
+    ..EffectContract::PURE
+};
 const C_CLOSURE_NEW: EffectContract = EffectContract {
     may_gc: true,
     may_alloc: true,
@@ -346,7 +355,7 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::SliceAddr => C_SLOT_META_PANIC,
         Opcode::PtrSet => C_PTR_SET,
         Opcode::ArraySet | Opcode::SliceSet => C_INDEXED_SET,
-        Opcode::StrNew | Opcode::StrConcat | Opcode::MapNew | Opcode::IslandNew => C_ALLOC_TYPED,
+        Opcode::StrNew | Opcode::StrConcat | Opcode::MapNew => C_ALLOC_TYPED,
         Opcode::StrSlice
         | Opcode::ArrayNew
         | Opcode::SliceNew
@@ -365,6 +374,7 @@ pub const fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
         | Opcode::SelectExec => C_QUEUE_FRAME,
         Opcode::QueueLen | Opcode::QueueCap => C_QUEUE_GET_FRAME,
         Opcode::GoStart | Opcode::GoIsland => C_GO_FRAME,
+        Opcode::IslandNew => C_ISLAND_NEW,
         Opcode::ClosureNew => C_CLOSURE_NEW,
         Opcode::Call => C_CALL,
         Opcode::CallExtern => C_CALL_EXTERN,
@@ -414,5 +424,15 @@ mod tests {
             assert!(effects.may_alloc, "{opcode:?}");
             assert!(effects.may_gc, "{opcode:?}");
         }
+    }
+
+    #[test]
+    fn island_creation_exposes_its_vm_callback_boundary() {
+        let effects = opcode_effect_contract(Opcode::IslandNew);
+        assert!(effects.may_alloc);
+        assert!(effects.may_gc);
+        assert!(effects.may_schedule);
+        assert!(effects.may_observe_frame);
+        assert!(effects.needs_frame);
     }
 }

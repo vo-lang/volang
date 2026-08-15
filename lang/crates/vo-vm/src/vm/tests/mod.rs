@@ -182,8 +182,8 @@ fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
         has_defer: false,
         has_calls: false,
         has_call_extern: false,
-        instruction_metadata: Vec::new(),
-        code: Vec::new(),
+        instruction_metadata: vec![vo_runtime::bytecode::InstructionMetadata::None],
+        code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
         slot_types: vec![SlotType::GcRef; root_slots as usize],
         borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
                 SlotType::GcRef;
@@ -230,9 +230,12 @@ fn apply_gc_env_pairs(vm: &mut Vm, pairs: &[(&str, &str)]) {
 
 fn malformed_single_instruction_module(
     name: &str,
-    code: Vec<Instruction>,
+    mut code: Vec<Instruction>,
     constants: Vec<Constant>,
 ) -> Module {
+    if code.is_empty() {
+        code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+    }
     let mut module = Module::new(name.to_string());
     module.constants = constants;
     module.functions.push(FunctionDef {
@@ -295,6 +298,19 @@ fn refresh_vm_test_function_metadata(func: &mut FunctionDef) {
     let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
     func.has_calls = has_calls;
     func.has_call_extern = has_call_extern;
+}
+
+fn terminate_vm_test_module(module: &mut Module) {
+    for func in &mut module.functions {
+        let already_terminated = func.code.last().is_some_and(|inst| {
+            matches!(inst.opcode(), Opcode::Jump | Opcode::Return | Opcode::Panic)
+        });
+        if !already_terminated {
+            func.code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+            func.instruction_metadata.push(InstructionMetadata::None);
+        }
+        refresh_vm_test_function_metadata(func);
+    }
 }
 
 fn finish_load_and_resolve_externs_for_test(

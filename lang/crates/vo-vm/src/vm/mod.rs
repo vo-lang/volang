@@ -3178,6 +3178,7 @@ impl Vm {
         };
         let mut func_id: u32 = unsafe { (*frame_ptr).func_id };
         let mut bp: usize = unsafe { (*frame_ptr).bp };
+        let mut pc: usize = unsafe { (*frame_ptr).pc };
         let mut func = match module.functions.get(func_id as usize) {
             Some(func) => func,
             None => {
@@ -3187,6 +3188,13 @@ impl Vm {
             }
         };
         let mut code: &[Instruction] = &func.code;
+        if pc >= code.len() {
+            return ExecResult::JitError(format!(
+                "pc {pc} out of bounds for function {} with {} instructions",
+                func.name,
+                code.len()
+            ));
+        }
 
         // Macro to refetch frame after Call/Return - only called when frame actually changes
         macro_rules! refetch {
@@ -3198,6 +3206,7 @@ impl Vm {
                 };
                 func_id = unsafe { (*frame_ptr).func_id };
                 bp = unsafe { (*frame_ptr).bp };
+                pc = unsafe { (*frame_ptr).pc };
                 func = match module.functions.get(func_id as usize) {
                     Some(func) => func,
                     None => {
@@ -3207,6 +3216,13 @@ impl Vm {
                     }
                 };
                 code = &func.code;
+                if pc >= code.len() {
+                    return ExecResult::JitError(format!(
+                        "pc {pc} out of bounds for function {} with {} instructions",
+                        func.name,
+                        code.len()
+                    ));
+                }
             }};
         }
 
@@ -3217,10 +3233,20 @@ impl Vm {
             }};
         }
 
+        // A running interpreter owns the current PC locally. Publish the
+        // resume PC before crossing a boundary that can inspect, suspend, or
+        // replace the active frame.
+        macro_rules! sync_frame_pc {
+            () => {{
+                unsafe { (*frame_ptr).pc = pc };
+            }};
+        }
+
         // Macro to handle panic/trap results that may return FrameChanged (when defer/recover exists).
         // Without this, `return runtime_trap(...)` would leak FrameChanged to the scheduling loop.
         macro_rules! handle_panic_result {
             ($result:expr) => {{
+                sync_frame_pc!();
                 let r = $result;
                 if matches!(r, ExecResult::FrameChanged) {
                     #[cfg(feature = "jit")]
@@ -3242,6 +3268,7 @@ impl Vm {
         macro_rules! check_managed_allocation {
             () => {{
                 if self.state.gc.last_memory_error().is_some() {
+                    sync_frame_pc!();
                     return ExecResult::JitError(
                         "Island managed-memory allocation failed".to_string(),
                     );
@@ -3254,6 +3281,7 @@ impl Vm {
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
                 if jit_enabled {
+                    sync_frame_pc!();
                     fiber.execution_budget = execution_budget;
                     let osr_result =
                         jit::try_loop_osr(self, fiber, loaded_module, func_id, $target_pc, bp);
@@ -3307,7 +3335,8 @@ impl Vm {
         }
 
         macro_rules! handle_queue_action {
-            ($action:expr) => {
+            ($action:expr) => {{
+                sync_frame_pc!();
                 match {
                     let action = $action;
                     prepare_queue_action(&mut self.state, fiber, action)
@@ -3367,7 +3396,7 @@ impl Vm {
                     }
                     Err(message) => return ExecResult::JitError(message),
                 }
-            };
+            }};
         }
 
         // Async cancellation is polled once per bounded scheduler quantum.
@@ -3380,18 +3409,17 @@ impl Vm {
         while execution_budget > 0 {
             #[cfg(feature = "jit")]
             {
-                let frame = unsafe { &mut *frame_ptr };
                 // JIT side exits may materialize a callee frame and return to
                 // this interpreter loop. This is not frame elision: the VM
                 // frame already exists, but deferred calls executing under the
                 // unwind machine still need interpreter-owned ordering and
                 // recover eligibility checks.
                 if jit_enabled
-                    && frame.pc == 0
+                    && pc == 0
                     && fiber.unwinding.is_none()
                     && can_enter_materialized_frame_at_pc(
                         func,
-                        frame.pc,
+                        pc,
                         self.state.extern_registry.resolved_externs(),
                     )
                 {
@@ -3415,6 +3443,7 @@ impl Vm {
                         None
                     };
                     if let Some(jit_func) = jit_func {
+                        sync_frame_pc!();
                         fiber.execution_budget = execution_budget;
                         let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
                         execution_budget = fiber.execution_budget;
@@ -3440,18 +3469,17 @@ impl Vm {
 
             execution_budget -= 1;
 
-            let frame = unsafe { &mut *frame_ptr };
-            let pc = frame.pc;
-            let Some(&inst) = code.get(pc) else {
-                return ExecResult::JitError(format!(
-                    "pc {pc} out of bounds for function {} with {} instructions",
-                    func.name,
-                    code.len()
-                ));
-            };
-            frame.pc = pc + 1;
+            let fetched_pc = pc;
+            debug_assert!(fetched_pc < code.len());
+            // Safety: the active PC is checked at interpreter entry and every
+            // frame/JIT refetch. The verifier proves every branch target and
+            // reachable fallthrough inside that function's code range.
+            let inst = unsafe { *code.get_unchecked(fetched_pc) };
+            pc = fetched_pc + 1;
 
-            match inst.opcode() {
+            // Safety: LoadedModule verification rejects invalid opcode bytes
+            // before this execution path becomes reachable.
+            match unsafe { inst.verified_opcode() } {
                 // === SIMPLE INSTRUCTIONS: no frame change, just continue ===
                 Opcode::Hint => {
                     // HINT_LOOP is now a no-op in VM - provides metadata for JIT analysis only.
@@ -3482,17 +3510,17 @@ impl Vm {
                     exec::exec_slot_set(stack, bp, &inst);
                 }
                 Opcode::SlotGetN => {
-                    let Some(elem_slots) = slot_elem_slots_for_pc(func, pc) else {
+                    let Some(elem_slots) = slot_elem_slots_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "SlotGetN at pc {pc} is missing SlotLayout metadata"
+                            "SlotGetN at pc {fetched_pc} is missing SlotLayout metadata"
                         ));
                     };
                     exec::exec_slot_get_n(stack, bp, &inst, elem_slots);
                 }
                 Opcode::SlotSetN => {
-                    let Some(elem_slots) = slot_elem_slots_for_pc(func, pc) else {
+                    let Some(elem_slots) = slot_elem_slots_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "SlotSetN at pc {pc} is missing SlotLayout metadata"
+                            "SlotSetN at pc {fetched_pc} is missing SlotLayout metadata"
                         ));
                     };
                     exec::exec_slot_set_n(stack, bp, &inst, elem_slots);
@@ -3525,9 +3553,9 @@ impl Vm {
                 }
 
                 Opcode::PtrNew => {
-                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "PtrNew at pc {pc} is missing PtrLayout metadata"
+                            "PtrNew at pc {fetched_pc} is missing PtrLayout metadata"
                         ));
                     };
                     if let Err(msg) =
@@ -3549,9 +3577,9 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSet => {
-                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "PtrSet at pc {pc} is missing PtrLayout metadata"
+                            "PtrSet at pc {fetched_pc} is missing PtrLayout metadata"
                         ));
                     };
                     if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc, layout) {
@@ -3565,9 +3593,9 @@ impl Vm {
                     }
                 }
                 Opcode::PtrGetN => {
-                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "PtrGetN at pc {pc} is missing PtrLayout metadata"
+                            "PtrGetN at pc {fetched_pc} is missing PtrLayout metadata"
                         ));
                     };
                     if !exec::exec_ptr_get_n(stack, bp, &inst, layout) {
@@ -3581,9 +3609,9 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSetN => {
-                    let Some(layout) = ptr_layout_for_pc(func, pc) else {
+                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "PtrSetN at pc {pc} is missing PtrLayout metadata"
+                            "PtrSetN at pc {fetched_pc} is missing PtrLayout metadata"
                         ));
                     };
                     if !exec::exec_ptr_set_n(stack, bp, &inst, layout) {
@@ -3884,27 +3912,27 @@ impl Vm {
                 // Jump
                 Opcode::Jump => {
                     let offset = inst.imm32();
-                    let target_pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                    let target_pc = (pc as i64 + offset as i64 - 1) as usize;
 
                     #[cfg(feature = "jit")]
                     if offset < 0 {
                         handle_loop_osr!(target_pc);
                     }
 
-                    frame.pc = target_pc;
+                    pc = target_pc;
                 }
                 Opcode::JumpIf => {
                     let cond = stack_get(stack, bp + inst.a as usize);
                     if cond != 0 {
                         let offset = inst.imm32();
-                        frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                        pc = (pc as i64 + offset as i64 - 1) as usize;
                     }
                 }
                 Opcode::JumpIfNot => {
                     let cond = stack_get(stack, bp + inst.a as usize);
                     if cond == 0 {
                         let offset = inst.imm32();
-                        frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                        pc = (pc as i64 + offset as i64 - 1) as usize;
                     }
                 }
 
@@ -3943,12 +3971,12 @@ impl Vm {
                     };
 
                     if continue_loop {
-                        let target_pc = (frame.pc as i64 + offset as i64) as usize;
+                        let target_pc = (pc as i64 + offset as i64) as usize;
 
                         #[cfg(feature = "jit")]
                         handle_loop_osr!(target_pc);
 
-                        frame.pc = target_pc;
+                        pc = target_pc;
                     }
                     // else: fall through (loop exit)
                 }
@@ -3964,16 +3992,11 @@ impl Vm {
                     ));
                 }
                 Opcode::CallExtern => {
+                    sync_frame_pc!();
                     use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld};
                     // CallExtern: a=dst, b=extern_id, c=args_start; metadata owns layouts.
                     let extern_id = inst.b as u32;
-                    let fetched_pc = unsafe { (*frame_ptr).pc }.checked_sub(1).ok_or_else(|| {
-                        ExecResult::JitError("CallExtern cannot derive fetched pc 0".to_string())
-                    });
-                    let fetched_pc = match fetched_pc {
-                        Ok(pc) => pc as u32,
-                        Err(result) => return result,
-                    };
+                    let fetched_pc_u32 = fetched_pc as u32;
                     let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
 
                     let Some(_extern_def) = module.externs.get(extern_id as usize) else {
@@ -3989,7 +4012,7 @@ impl Vm {
                     };
                     let (arg_slots, callsite_ret_slots) = match func
                         .instruction_metadata
-                        .get(fetched_pc as usize)
+                        .get(fetched_pc)
                     {
                         Some(InstructionMetadata::CallExternLayout {
                             arg_layout,
@@ -4126,7 +4149,7 @@ impl Vm {
                         }
                     }
                     let transition =
-                        extern_result_to_transition(resolved_extern, extern_result, fetched_pc);
+                        extern_result_to_transition(resolved_extern, extern_result, fetched_pc_u32);
                     apply_extern_replay_scope_effect(fiber, transition.replay_scope);
                     match transition.boundary {
                         ExternBoundary::Continue => {
@@ -4218,7 +4241,7 @@ impl Vm {
                         .index(func_id, inst.dynamic_callsite_ordinal())
                     else {
                         return ExecResult::JitError(format!(
-                            "CallClosure at func_id={func_id} pc={pc} has no verified callsite index"
+                            "CallClosure at func_id={func_id} pc={fetched_pc} has no verified callsite index"
                         ));
                     };
                     let Some(ic_entry) =
@@ -4242,7 +4265,7 @@ impl Vm {
                         .index(func_id, inst.dynamic_callsite_ordinal())
                     else {
                         return ExecResult::JitError(format!(
-                            "CallIface at func_id={func_id} pc={pc} has no verified callsite index"
+                            "CallIface at func_id={func_id} pc={fetched_pc} has no verified callsite index"
                         ));
                     };
                     let Some(ic_entry) =
@@ -4262,12 +4285,13 @@ impl Vm {
                     ));
                 }
                 Opcode::Return => {
+                    sync_frame_pc!();
                     let result = if fiber.is_direct_defer_context() {
                         exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
                         let Some(return_flags) = ReturnFlags::from_bits(inst.flags) else {
                             return ExecResult::JitError(format!(
-                                "Return at pc {pc} has invalid flags 0x{:02x}",
+                                "Return at pc {fetched_pc} has invalid flags 0x{:02x}",
                                 inst.flags
                             ));
                         };
@@ -4396,9 +4420,9 @@ impl Vm {
 
                 // Array operations
                 Opcode::ArrayNew => {
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "ArrayNew at pc {pc} is missing ElemLayout metadata"
+                            "ArrayNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     if let Err(msg) =
@@ -4439,10 +4463,10 @@ impl Vm {
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let Some((elem_bytes, needs_sign_extend, elem_layout)) =
-                        elem_layout_for_pc(func, pc)
+                        elem_layout_for_pc(func, fetched_pc)
                     else {
                         return ExecResult::JitError(format!(
-                            "ArrayGet at pc {pc} is missing ElemLayout metadata"
+                            "ArrayGet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     let val = match (elem_bytes, needs_sign_extend) {
@@ -4487,9 +4511,10 @@ impl Vm {
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let val = stack_get(stack, src);
-                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, pc) else {
+                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, fetched_pc)
+                    else {
                         return ExecResult::JitError(format!(
-                            "ArraySet at pc {pc} is missing ElemLayout metadata"
+                            "ArraySet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     match elem_bytes {
@@ -4568,9 +4593,9 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "ArrayAddr at pc {pc} is missing ElemLayout metadata"
+                            "ArrayAddr at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     let base = unsafe { array::data_ptr_bytes(arr) };
@@ -4580,9 +4605,9 @@ impl Vm {
 
                 // Slice operations
                 Opcode::SliceNew => {
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "SliceNew at pc {pc} is missing ElemLayout metadata"
+                            "SliceNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     if let Err(msg) =
@@ -4631,10 +4656,10 @@ impl Vm {
                         continue;
                     }
                     let Some((elem_bytes, needs_sign_extend, elem_layout)) =
-                        elem_layout_for_pc(func, pc)
+                        elem_layout_for_pc(func, fetched_pc)
                     else {
                         return ExecResult::JitError(format!(
-                            "SliceGet at pc {pc} is missing ElemLayout metadata"
+                            "SliceGet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     let val = match (elem_bytes, needs_sign_extend) {
@@ -4700,9 +4725,10 @@ impl Vm {
                         }
                         continue;
                     }
-                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, pc) else {
+                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, fetched_pc)
+                    else {
                         return ExecResult::JitError(format!(
-                            "SliceSet at pc {pc} is missing ElemLayout metadata"
+                            "SliceSet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     match elem_bytes {
@@ -4797,9 +4823,9 @@ impl Vm {
                     }
                 }
                 Opcode::SliceAppend => {
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "SliceAppend at pc {pc} is missing ElemLayout metadata"
+                            "SliceAppend at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     if let Err(msg) = exec::exec_slice_append(
@@ -4832,9 +4858,10 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let Some((metadata_elem_bytes, _, _)) = elem_layout_for_pc(func, pc) else {
+                    let Some((metadata_elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc)
+                    else {
                         return ExecResult::JitError(format!(
-                            "SliceAddr at pc {pc} is missing ElemLayout metadata"
+                            "SliceAddr at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
                     let elem_bytes =
@@ -4850,9 +4877,10 @@ impl Vm {
 
                 // Map operations
                 Opcode::MapNew => {
-                    let Some((key_layout, val_layout)) = map_new_layout_for_pc(func, pc) else {
+                    let Some((key_layout, val_layout)) = map_new_layout_for_pc(func, fetched_pc)
+                    else {
                         return ExecResult::JitError(format!(
-                            "MapNew at pc {pc} is missing MapNew metadata"
+                            "MapNew at pc {fetched_pc} is missing MapNew metadata"
                         ));
                     };
                     if let Err(msg) = exec::exec_map_new(
@@ -4868,9 +4896,9 @@ impl Vm {
                     check_managed_allocation!();
                 }
                 Opcode::MapGet => {
-                    let Some(layout) = map_get_layout_for_pc(func, pc) else {
+                    let Some(layout) = map_get_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "MapGet at pc {pc} is missing MapGet metadata"
+                            "MapGet at pc {fetched_pc} is missing MapGet metadata"
                         ));
                     };
                     match exec::exec_map_get_with_layout_using_scratch(
@@ -4906,9 +4934,9 @@ impl Vm {
                             RuntimeTrapKind::NilMapWrite
                         ));
                     }
-                    let Some(layout) = map_key_value_layout_for_pc(func, pc) else {
+                    let Some(layout) = map_key_value_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "MapSet at pc {pc} is missing MapSet metadata"
+                            "MapSet at pc {fetched_pc} is missing MapSet metadata"
                         ));
                     };
                     match exec::exec_map_set_with_layout_using_scratch(
@@ -4937,9 +4965,9 @@ impl Vm {
                 Opcode::MapDelete => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if !m.is_null() {
-                        let Some(key_layout) = map_key_layout_for_pc(func, pc) else {
+                        let Some(key_layout) = map_key_layout_for_pc(func, fetched_pc) else {
                             return ExecResult::JitError(format!(
-                                "MapDelete at pc {pc} is missing MapDelete metadata"
+                                "MapDelete at pc {fetched_pc} is missing MapDelete metadata"
                             ));
                         };
                         match exec::exec_map_delete_with_layout_using_scratch(
@@ -4976,9 +5004,9 @@ impl Vm {
                     }
                 }
                 Opcode::MapIterNext => {
-                    let Some(layout) = map_key_value_layout_for_pc(func, pc) else {
+                    let Some(layout) = map_key_value_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "MapIterNext at pc {pc} is missing MapIterNext metadata"
+                            "MapIterNext at pc {fetched_pc} is missing MapIterNext metadata"
                         ));
                     };
                     if let Err(msg) = exec::exec_map_iter_next_with_layout(
@@ -4995,9 +5023,9 @@ impl Vm {
 
                 // Channel operations
                 Opcode::QueueNew => {
-                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "QueueNew missing QueueLayout metadata at pc {pc}"
+                            "QueueNew missing QueueLayout metadata at pc {fetched_pc}"
                         ));
                     };
                     if let Err(msg) = exec::exec_queue_new(
@@ -5031,9 +5059,9 @@ impl Vm {
                         ));
                     }
                     let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
-                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "QueueSend missing QueueLayout metadata at pc {pc}"
+                            "QueueSend missing QueueLayout metadata at pc {fetched_pc}"
                         ));
                     };
                     let elem_slots = elem_layout.len();
@@ -5055,9 +5083,9 @@ impl Vm {
                     ));
                 }
                 Opcode::QueueRecv => {
-                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "QueueRecv missing QueueLayout metadata at pc {pc}"
+                            "QueueRecv missing QueueLayout metadata at pc {fetched_pc}"
                         ));
                     };
                     if fiber.remote_recv_response.is_some() {
@@ -5113,6 +5141,7 @@ impl Vm {
                         }
                         fiber.remote_recv_response = None;
                         self.mark_gc_all_roots_dirty();
+                        sync_frame_pc!();
                         refetch!();
                         continue;
                     }
@@ -5157,16 +5186,16 @@ impl Vm {
                     }
                 }
                 Opcode::SelectSend => {
-                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "SelectSend missing QueueLayout metadata at pc {pc}"
+                            "SelectSend missing QueueLayout metadata at pc {fetched_pc}"
                         ));
                     };
                     let elem_slots = match u16::try_from(elem_layout.len()) {
                         Ok(slots) => slots,
                         Err(_) => {
                             return ExecResult::JitError(format!(
-                                "SelectSend QueueLayout width exceeds u16::MAX at pc {pc}"
+                                "SelectSend QueueLayout width exceeds u16::MAX at pc {fetched_pc}"
                             ))
                         }
                     };
@@ -5182,16 +5211,16 @@ impl Vm {
                     }
                 }
                 Opcode::SelectRecv => {
-                    let Some(elem_layout) = queue_layout_for_pc(func, pc) else {
+                    let Some(elem_layout) = queue_layout_for_pc(func, fetched_pc) else {
                         return ExecResult::JitError(format!(
-                            "SelectRecv missing QueueLayout metadata at pc {pc}"
+                            "SelectRecv missing QueueLayout metadata at pc {fetched_pc}"
                         ));
                     };
                     let elem_slots = match u16::try_from(elem_layout.len()) {
                         Ok(slots) => slots,
                         Err(_) => {
                             return ExecResult::JitError(format!(
-                                "SelectRecv QueueLayout width exceeds u16::MAX at pc {pc}"
+                                "SelectRecv QueueLayout width exceeds u16::MAX at pc {fetched_pc}"
                             ))
                         }
                     };
@@ -5208,6 +5237,7 @@ impl Vm {
                     }
                 }
                 Opcode::SelectExec => {
+                    sync_frame_pc!();
                     match exec::exec_select_exec(
                         exec::SelectExecContext {
                             stack,
@@ -5278,6 +5308,7 @@ impl Vm {
 
                 // Goroutine - spawn new fiber
                 Opcode::GoStart => {
+                    sync_frame_pc!();
                     if inst.call_shape_is_closure() {
                         let closure_ref =
                             stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
@@ -5293,7 +5324,7 @@ impl Vm {
                     }
                     let callsite_arg_layout =
                         match crate::frame_call::shared_call_arg_layout_for_callsite(
-                            func, module, pc, &inst, "GoStart",
+                            func, module, fetched_pc, &inst, "GoStart",
                         ) {
                             Ok(layout) => layout,
                             Err(err) => return ExecResult::JitError(err),
@@ -5333,11 +5364,12 @@ impl Vm {
 
                 // Defer and error handling
                 Opcode::DeferPush => {
+                    sync_frame_pc!();
                     let generation = fiber.effective_defer_generation();
                     let arg_layout = match crate::frame_call::shared_call_arg_layout_for_callsite(
                         func,
                         module,
-                        pc,
+                        fetched_pc,
                         &inst,
                         "DeferPush",
                     ) {
@@ -5361,11 +5393,12 @@ impl Vm {
                     check_managed_allocation!();
                 }
                 Opcode::ErrDeferPush => {
+                    sync_frame_pc!();
                     let generation = fiber.effective_defer_generation();
                     let arg_layout = match crate::frame_call::shared_call_arg_layout_for_callsite(
                         func,
                         module,
-                        pc,
+                        fetched_pc,
                         &inst,
                         "ErrDeferPush",
                     ) {
@@ -5389,6 +5422,7 @@ impl Vm {
                     check_managed_allocation!();
                 }
                 Opcode::Panic => {
+                    sync_frame_pc!();
                     let result = user_panic(&mut self.state.gc, fiber, stack, bp, inst.a, module);
                     if matches!(result, ExecResult::FrameChanged) {
                         refetch_after_frame_change!();
@@ -5397,6 +5431,7 @@ impl Vm {
                     }
                 }
                 Opcode::Recover => {
+                    sync_frame_pc!();
                     exec::exec_recover(stack, bp, fiber, &inst);
                 }
 
@@ -5419,7 +5454,7 @@ impl Vm {
                         assert_kind,
                         target_id,
                         result_layout,
-                    }) = func.instruction_metadata.get(pc)
+                    }) = func.instruction_metadata.get(fetched_pc)
                     else {
                         return ExecResult::JitError(
                             "missing IfaceAssertLayout metadata".to_string(),
@@ -5519,6 +5554,7 @@ impl Vm {
                 // === ISLAND/CHANNEL: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
+                    sync_frame_pc!();
                     let handle = match self.create_island() {
                         Ok(handle) => handle,
                         Err(VmError::Jit(msg)) => return ExecResult::JitError(msg),
@@ -5531,6 +5567,7 @@ impl Vm {
                 }
                 #[cfg(not(feature = "std"))]
                 Opcode::IslandNew => {
+                    sync_frame_pc!();
                     let island_id = match self.state.allocate_island_id() {
                         Ok(island_id) => island_id,
                         Err(error) => return ExecResult::JitError(error.to_string()),
@@ -5539,6 +5576,7 @@ impl Vm {
                     check_managed_allocation!();
                 }
                 Opcode::GoIsland => {
+                    sync_frame_pc!();
                     let island_ref =
                         stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
                     if island_ref.is_null() {
@@ -5579,7 +5617,9 @@ impl Vm {
                         Err(err) => return ExecResult::JitError(err),
                     };
                     let (callsite_arg_layout, callsite_ret_layout) =
-                        match crate::frame_call::call_layout_for_callsite(func, pc, "GoIsland") {
+                        match crate::frame_call::call_layout_for_callsite(
+                            func, fetched_pc, "GoIsland",
+                        ) {
                             Ok(layout) => layout,
                             Err(err) => return ExecResult::JitError(err),
                         };
@@ -5742,6 +5782,7 @@ impl Vm {
             }
         }
 
+        sync_frame_pc!();
         fiber.execution_budget = execution_budget;
         ExecResult::TimesliceExpired
     }

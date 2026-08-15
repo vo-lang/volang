@@ -1558,7 +1558,7 @@ fn jit_code_memory_limit_checks_committed_pages_and_caches_rejections() {
 
 #[test]
 fn jit_code_memory_limit_covers_osr_artifacts_before_executable_allocation() {
-    let func = make_func(vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)], 1);
+    let func = make_osr_func(vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)], 1);
     let mut module = VoModule::new("jit-osr-code-memory-limit".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
@@ -2123,7 +2123,7 @@ fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
 fn wide_osr_loop_writes_memory_backed_suffix_slots() {
     let high_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS + 43;
     let local_slots = high_slot + 1;
-    let func = make_func(
+    let func = make_osr_func(
         vec![Instruction::new(Opcode::LoadInt, high_slot, 123, 0)],
         local_slots,
     );
@@ -2186,7 +2186,7 @@ fn compiled_wide_function_bytes(local_slots: u16) -> usize {
 fn compiled_wide_loop_bytes(local_slots: u16) -> usize {
     let code = wide_straight_line_code(local_slots);
     let end_pc = code.len() - 1;
-    let func = make_func(code, local_slots);
+    let func = make_osr_func(code, local_slots);
     let mut module = VoModule::new(format!("wide-loop-scale-{local_slots}"));
     module.functions.push(func);
     let loop_info = LoopInfo {
@@ -2228,7 +2228,7 @@ fn bounded_ssa_prefix_keeps_function_and_loop_codegen_near_linear() {
 
 #[test]
 fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
-    let func = make_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
+    let func = make_osr_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
     let mut module = VoModule::new("test".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
@@ -2269,12 +2269,12 @@ fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
 #[test]
 fn compile_loop_rejects_module_scope_change_instead_of_reusing_cached_loop_042() {
     let mut first = VoModule::new("jit-loop-cache-a".into());
-    first.functions.push(make_func(
+    first.functions.push(make_osr_func(
         vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)],
         1,
     ));
     let mut second = VoModule::new("jit-loop-cache-b".into());
-    second.functions.push(make_func(
+    second.functions.push(make_osr_func(
         vec![Instruction::new(Opcode::LoadInt, 0, 2, 0)],
         1,
     ));
@@ -2303,7 +2303,7 @@ fn compile_loop_rejects_module_scope_change_instead_of_reusing_cached_loop_042()
 #[test]
 fn compile_loop_rejects_env_scope_change_instead_of_reusing_cached_loop_043() {
     let mut module = VoModule::new("jit-loop-env-cache".into());
-    module.functions.push(make_func(
+    module.functions.push(make_osr_func(
         vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)],
         1,
     ));
@@ -2351,7 +2351,7 @@ fn compile_loop_rejects_env_scope_change_instead_of_reusing_cached_loop_043() {
 #[test]
 fn compile_loop_rejects_loop_scope_change_instead_of_reusing_cached_loop_044() {
     let mut module = VoModule::new("jit-loop-scope-cache".into());
-    module.functions.push(make_func(
+    module.functions.push(make_osr_func(
         vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)],
         1,
     ));
@@ -2378,7 +2378,7 @@ fn compile_loop_rejects_loop_scope_change_instead_of_reusing_cached_loop_044() {
 
 #[test]
 fn compile_loop_rejects_out_of_range_loop_info_instead_of_panicking() {
-    let func = make_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
+    let func = make_osr_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
     let mut module = VoModule::new("test".into());
     module.functions.push(func);
     let loop_info = LoopInfo {

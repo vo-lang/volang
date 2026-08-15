@@ -615,24 +615,14 @@ fn malformed_str_new_non_string_constant_is_vm_error_instead_of_nil_fill() {
 }
 
 #[test]
-fn malformed_pc_fallthrough_is_vm_error_instead_of_unsafe_fetch_abort() {
+fn malformed_pc_fallthrough_is_rejected_before_execution() {
     let module = malformed_single_instruction_module(
         "malformed-pc-fallthrough",
         vec![Instruction::new(Opcode::Hint, 0, 0, 0)],
         Vec::new(),
     );
-    let mut vm = Vm::new();
-    vm.load(module).unwrap();
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-    match result {
-        Ok(Err(VmError::Jit(msg))) => {
-            assert!(msg.contains("pc 1 out of bounds"), "{msg}");
-        }
-        Ok(other) => panic!("pc fallthrough should be a VM error, got {other:?}"),
-        Err(_) => panic!("pc fallthrough must not panic or abort"),
-    }
+    assert_vm_load_rejects(module, &["final Hint instruction", "falls through"]);
 }
 
 #[test]
@@ -661,15 +651,21 @@ fn malformed_go_start_function_id_is_vm_error_instead_of_index_panic() {
 fn malformed_go_start_closure_target_is_vm_error_instead_of_nil_call_trap() {
     let mut module = malformed_single_instruction_module(
         "malformed-go-start-closure",
-        vec![Instruction::with_flags(Opcode::GoStart, 1, 0, 0, 0)],
+        vec![
+            Instruction::with_flags(Opcode::GoStart, 1, 0, 0, 0),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ],
         Vec::new(),
     );
     let func = &mut module.functions[0];
     func.slot_types[0] = SlotType::GcRef;
-    func.instruction_metadata = vec![InstructionMetadata::CallLayout {
-        arg_layout: Vec::new(),
-        ret_layout: Vec::new(),
-    }];
+    func.instruction_metadata = vec![
+        InstructionMetadata::CallLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        },
+        InstructionMetadata::None,
+    ];
     refresh_vm_test_function_metadata(func);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
