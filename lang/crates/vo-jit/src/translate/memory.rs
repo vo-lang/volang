@@ -76,7 +76,14 @@ pub(crate) fn fresh_ptr_set<'a>(
             slot_type,
             vo_runtime::SlotType::GcRef | vo_runtime::SlotType::Interface1
         ) {
-            emit_fresh_parent_write_barrier(e, ptr, slot_offset, value, slot_type);
+            emit_fresh_parent_write_barrier(
+                e,
+                ptr,
+                slot_offset,
+                value,
+                inst.c + index as u16,
+                slot_type,
+            );
         }
         let offset = usize::from(slot_offset).saturating_mul(vo_runtime::slot::SLOT_BYTES) as i32;
         e.builder()
@@ -94,6 +101,7 @@ fn emit_fresh_parent_write_barrier<'a>(
     parent: Value,
     slot_offset: u16,
     child: Value,
+    child_slot: u16,
     slot_type: vo_runtime::SlotType,
 ) {
     let evaluate = e.builder().create_block();
@@ -123,7 +131,10 @@ fn emit_fresh_parent_write_barrier<'a>(
     e.builder().seal_block(active);
     match slot_type {
         vo_runtime::SlotType::GcRef => {
-            emit_gc_ref_write_barrier(e, parent, slot_offset, child);
+            // Shape analysis proves the parent is the exact object returned by
+            // PtrNew. Preserve the inline path when SSA also proves the child.
+            let exact_child = e.current_gc_ref_is_exact_base(child_slot);
+            emit_gc_ref_write_barrier(e, parent, slot_offset, child, exact_child);
         }
         vo_runtime::SlotType::Interface1 => {
             let barrier = e.helper(HelperKind::write_barrier);
@@ -197,7 +208,9 @@ pub(super) fn ptr_set<'a>(
     })?;
     match layout.first() {
         Some(vo_runtime::SlotType::GcRef) => {
-            emit_gc_ref_write_barrier(e, ptr, inst.b, v);
+            let exact_bases =
+                e.current_gc_ref_is_exact_base(inst.a) && e.current_gc_ref_is_exact_base(inst.c);
+            emit_gc_ref_write_barrier(e, ptr, inst.b, v, exact_bases);
         }
         Some(vo_runtime::SlotType::Interface1) => {
             let wb_ref = e.helper(HelperKind::write_barrier);
@@ -220,6 +233,7 @@ fn emit_gc_ref_write_barrier<'a>(
     parent: Value,
     slot_offset: u16,
     child: Value,
+    exact_bases: bool,
 ) {
     let evaluate = e.builder().create_block();
     let slow = crate::compile_common::cold_block(e.builder());
@@ -233,6 +247,15 @@ fn emit_gc_ref_write_barrier<'a>(
     e.builder().switch_to_block(evaluate);
     e.builder().seal_block(evaluate);
     let gc = e.gc_ptr();
+    if !exact_bases {
+        let wb_ref = e.helper(HelperKind::write_barrier);
+        let offset_val = e.builder().ins().iconst(types::I32, i64::from(slot_offset));
+        emit_runtime_helper_call(e, wb_ref, &[gc, parent, offset_val, child]);
+        e.builder().ins().jump(done, &[]);
+        e.builder().switch_to_block(done);
+        e.builder().seal_block(done);
+        return;
+    }
     let state = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I8,

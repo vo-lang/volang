@@ -408,6 +408,14 @@ pub trait MetadataAccess {
         false
     }
 
+    /// Whether the SSA value read from `slot` is proven to be an exact GC
+    /// object base at the current instruction. Inline object-header accesses
+    /// require this proof; interior or merged pointers must go through the
+    /// canonicalizing runtime boundary.
+    fn current_gc_ref_is_exact_base(&self, _slot: u16) -> bool {
+        false
+    }
+
     /// Dense module-wide index derived from a verified function-local ordinal.
     fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32>;
 
@@ -598,6 +606,12 @@ macro_rules! impl_shared_compiler_traits {
 
             fn current_bounds_check_elided(&self) -> bool {
                 self.core.current_bounds_check_elided
+            }
+
+            fn current_gc_ref_is_exact_base(&self, slot: u16) -> bool {
+                self.core
+                    .analysis
+                    .gc_ref_input_is_exact_base(self.core.current_pc, slot)
             }
 
             fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32> {

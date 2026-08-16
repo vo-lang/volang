@@ -161,6 +161,17 @@ impl FunctionAnalysis {
         })
     }
 
+    /// True only when the current SSA input is a proven object base. Memory
+    /// lowering uses this fact before reading a GC header directly.
+    pub(crate) fn gc_ref_input_is_exact_base(&self, pc: usize, slot: u16) -> bool {
+        self.ir.input_value(pc, slot).is_some_and(|value| {
+            matches!(
+                self.ir.value(value).ty,
+                crate::ir::ValueType::GcRef(crate::ir::RootProvenance::ExactBase)
+            )
+        })
+    }
+
     #[inline]
     pub(crate) fn ir(&self) -> &FunctionIr {
         &self.ir
@@ -476,5 +487,51 @@ mod tests {
         .expect("valid root liveness");
         assert_eq!(analysis.native_root_liveness(1).unwrap().direct_roots, &[0]);
         assert_eq!(analysis.native_root_liveness(3).unwrap().direct_roots, &[1]);
+    }
+
+    #[test]
+    fn gc_header_access_requires_exact_base_provenance() {
+        let code = vec![
+            Instruction::new(Opcode::PtrNew, 0, 3, 0),
+            Instruction::new(Opcode::Copy, 1, 0, 0),
+            Instruction::new(Opcode::LoadInt, 4, 1, 0),
+            Instruction::new(Opcode::PtrAdd, 2, 1, 4),
+            Instruction::new(Opcode::PtrSet, 0, 0, 2),
+            Instruction::new(Opcode::PtrSet, 0, 0, 1),
+            Instruction::new(Opcode::Return, 0, 0, 0),
+        ];
+        let mut metadata = vec![InstructionMetadata::None; code.len()];
+        for pc in [0, 4, 5] {
+            metadata[pc] = InstructionMetadata::PtrLayout {
+                value_layout: vec![SlotType::GcRef],
+            };
+        }
+        let mut func = make_func(code, metadata);
+        func.slot_types[..5].copy_from_slice(&[
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ]);
+        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        let mut module = VoModule::new("gc-base-provenance".to_string());
+        module.functions.push(func);
+
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
+        let analysis = FunctionAnalysis::for_function(
+            &module.functions[0],
+            &module,
+            calls,
+            MAX_JIT_ANALYSIS_BYTES,
+        )
+        .expect("valid pointer provenance analysis");
+
+        assert!(analysis.gc_ref_input_is_exact_base(4, 0));
+        assert!(!analysis.gc_ref_input_is_exact_base(4, 2));
+        assert!(analysis.gc_ref_input_is_exact_base(5, 0));
+        assert!(analysis.gc_ref_input_is_exact_base(5, 1));
     }
 }
