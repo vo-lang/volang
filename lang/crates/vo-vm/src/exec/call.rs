@@ -206,7 +206,7 @@ fn interface_meta_label(module: &Module, iface_meta_id: u32) -> String {
 }
 
 #[inline]
-fn stack_overflow_panic(
+pub(crate) fn stack_overflow_panic(
     gc: &mut Gc,
     fiber: &mut Fiber,
     module: &Module,
@@ -291,52 +291,6 @@ pub fn exec_call(
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     }
 
-    ExecResult::FrameChanged
-}
-
-/// Execute a static call whose callee/frame/return-window contracts were
-/// established by the common verifier for this immutable module image.
-/// Capacity admission remains dynamic; structural validation stays on the
-/// hardening entry point above for unverified test and host inputs.
-#[inline]
-pub(crate) fn exec_verified_call(
-    gc: &mut Gc,
-    fiber: &mut Fiber,
-    inst: &Instruction,
-    loaded_module: &LoadedModule,
-    caller_func: &crate::bytecode::FunctionDef,
-) -> ExecResult {
-    let module = loaded_module.module();
-    let func_id = inst.static_call_func_id();
-    let Some(func) = module.functions.get(func_id as usize) else {
-        return ExecResult::JitError(format!(
-            "verified Call references missing target function id {func_id}"
-        ));
-    };
-    debug_assert!(validate_call_frame_shape(func).is_ok());
-    let ret_reg = inst
-        .b
-        .checked_add(func.param_slots)
-        .expect("common verifier proved the static Call return offset");
-    debug_assert!(validate_call_return_window(caller_func, ret_reg, func.ret_slots).is_ok());
-
-    match fiber.try_push_borrowed_call_frame(
-        func_id,
-        inst.b,
-        ret_reg,
-        func.ret_slots,
-        func.local_slots,
-    ) {
-        Ok(bp) => {
-            let roots = loaded_module
-                .frame_root_maps()
-                .function(func_id)
-                .expect("verified call target owns frame-root facts")
-                .initialization_roots();
-            fiber.zero_frame_root_locals_at(bp, func.param_slots, roots);
-        }
-        Err(err) => return stack_overflow_panic(gc, fiber, module, err),
-    }
     ExecResult::FrameChanged
 }
 

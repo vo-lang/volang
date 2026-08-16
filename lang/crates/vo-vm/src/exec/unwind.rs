@@ -49,8 +49,8 @@ use vo_runtime::ValueKind;
 
 use crate::bytecode::{FunctionDef, Module};
 use crate::fiber::{
-    CallFrame, DeferEntry, Fiber, PanicContext, PanicState, ReturnValues, UnwindingMode,
-    UnwindingState,
+    CallFrame, CompletedStackReturn, DeferEntry, Fiber, PanicContext, PanicState, ReturnValues,
+    UnwindingMode, UnwindingState,
 };
 use crate::frame_call::{
     validate_closure_arg_shape, validate_closure_callsite_arg_layout, validate_closure_target,
@@ -111,13 +111,8 @@ pub(crate) fn handle_verified_return(
     // Keep the overwhelmingly common verified return independent from the
     // unwind/replay state machine. This wrapper is intentionally small enough
     // to inline into the interpreter dispatch loop.
-    if fiber.unwinding.is_none()
-        && !func.has_defer
-        && !fiber.closure_replay.at_replay_boundary(fiber.frames.len())
-    {
-        if !flags.has_heap_returns() {
-            return fast_complete_stack_return(fiber, inst);
-        }
+    if fiber.can_complete_verified_stack_return(func.has_defer, flags.has_heap_returns()) {
+        return fast_complete_stack_return(fiber, inst);
     }
 
     handle_complex_return(gc, fiber, inst, func, module, flags, is_error_return)
@@ -1598,30 +1593,9 @@ fn pop_frame(fiber: &mut Fiber) -> Option<CallFrame> {
 /// Complete a no-defer stack return directly from the current frame.
 #[inline]
 fn fast_complete_stack_return(fiber: &mut Fiber, inst: &Instruction) -> ExecResult {
-    let ret_start = inst.a as usize;
-    let ret_count = inst.b as usize;
-    let frame = match pop_frame(fiber) {
-        Some(f) => f,
-        None => return ExecResult::Done,
-    };
-    let write_count = (frame.ret_count as usize).min(ret_count);
-    let src = frame.bp + ret_start;
-
-    if fiber.frames.is_empty() {
-        fiber.copy_stack_slots(0, src, write_count);
-        fiber.sp = write_count;
-        ExecResult::Done
-    } else {
-        let Some(caller_frame) = fiber.frames.last() else {
-            return ExecResult::JitError(
-                "stack return expected caller frame after callee pop".to_string(),
-            );
-        };
-        let caller_bp = caller_frame.bp;
-        let dst = caller_bp + frame.ret_reg as usize;
-        fiber.ensure_capacity(dst + write_count);
-        fiber.copy_stack_slots(dst, src, write_count);
-        ExecResult::FrameChanged
+    match fiber.complete_verified_stack_return(inst.a, inst.b) {
+        CompletedStackReturn::Done => ExecResult::Done,
+        CompletedStackReturn::Resume(_) => ExecResult::FrameChanged,
     }
 }
 

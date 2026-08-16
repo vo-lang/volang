@@ -4001,13 +4001,72 @@ impl Vm {
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
                 Opcode::Call => {
-                    handle_panic_result!(exec::exec_verified_call(
-                        &mut self.state.gc,
-                        fiber,
-                        &inst,
-                        loaded_module,
-                        func,
-                    ));
+                    // LoadedModule verification already proved the target,
+                    // frame shape, and caller return window. Commit that
+                    // proof directly into the fiber and keep the new frame in
+                    // interpreter registers; only capacity failure crosses the
+                    // generic panic boundary.
+                    let target_func_id = inst.static_call_func_id();
+                    // SAFETY: the common verifier rejects a static Call whose
+                    // target function is outside the immutable module image.
+                    let target_func =
+                        unsafe { module.functions.get_unchecked(target_func_id as usize) };
+                    let new_bp = bp + usize::from(inst.b);
+                    let caller_sp = fiber.sp;
+                    let ret_reg = inst
+                        .b
+                        .checked_add(target_func.param_slots)
+                        .expect("common verifier proved the static Call return offset");
+                    sync_frame_pc!();
+                    let reservation = match fiber
+                        .try_reserve_call_window(new_bp, usize::from(target_func.local_slots))
+                    {
+                        Ok(reservation) => reservation,
+                        Err(err) => {
+                            // Frame-vector admission may have reallocated its
+                            // backing store before stack admission failed. The
+                            // caller PC was published above, so do not touch
+                            // the old frame pointer on this cold path.
+                            let result =
+                                exec::stack_overflow_panic(&mut self.state.gc, fiber, module, err);
+                            if matches!(result, ExecResult::FrameChanged) {
+                                #[cfg(feature = "jit")]
+                                if !self.pending_runtime_transitions.is_empty() {
+                                    return ExecResult::FrameChanged;
+                                }
+                                refetch_after_frame_change!();
+                                continue;
+                            }
+                            return result;
+                        }
+                    };
+                    fiber.commit_reserved_call_frame(
+                        reservation,
+                        target_func_id,
+                        caller_sp,
+                        ret_reg,
+                        target_func.ret_slots,
+                    );
+                    let roots = loaded_module
+                        .frame_root_maps()
+                        .function(target_func_id)
+                        .expect("verified call target owns frame-root facts")
+                        .initialization_roots();
+                    fiber.zero_frame_root_locals_at(new_bp, target_func.param_slots, roots);
+                    self.mark_gc_fiber_roots_dirty(fiber_id);
+
+                    let frames = unsafe { &mut *frames_ptr };
+                    frame_ptr = frames
+                        .last_mut()
+                        .expect("committed static Call owns a callee frame");
+                    func_id = target_func_id;
+                    bp = new_bp;
+                    stack = fiber.stack_ptr();
+                    frame_base = unsafe { stack.add(bp) };
+                    pc = 0;
+                    func = target_func;
+                    code = &target_func.code;
+                    debug_assert!(!code.is_empty());
                 }
                 Opcode::CallExtern => {
                     // Providers may allocate or request a nested closure before
@@ -4309,16 +4368,56 @@ impl Vm {
                     ));
                 }
                 Opcode::Return => {
+                    let Some(return_flags) = ReturnFlags::from_bits(inst.flags) else {
+                        return ExecResult::JitError(format!(
+                            "Return at pc {fetched_pc} has invalid flags 0x{:02x}",
+                            inst.flags
+                        ));
+                    };
+                    if fiber.can_complete_verified_stack_return(
+                        func.has_defer,
+                        return_flags.has_heap_returns(),
+                    ) {
+                        match fiber.complete_verified_stack_return(inst.a, inst.b) {
+                            crate::fiber::CompletedStackReturn::Done => {
+                                return ExecResult::Done;
+                            }
+                            crate::fiber::CompletedStackReturn::Resume(caller) => {
+                                self.mark_gc_fiber_roots_dirty(fiber_id);
+                                let frames = unsafe { &mut *frames_ptr };
+                                frame_ptr = frames
+                                    .last_mut()
+                                    .expect("stack return reported a caller frame");
+                                func_id = caller.func_id;
+                                bp = caller.bp;
+                                stack = fiber.stack_ptr();
+                                frame_base = unsafe { stack.add(bp) };
+                                pc = caller.pc;
+                                func = match module.functions.get(func_id as usize) {
+                                    Some(func) => func,
+                                    None => {
+                                        return ExecResult::JitError(format!(
+                                            "return resumed missing function id {func_id}"
+                                        ));
+                                    }
+                                };
+                                code = &func.code;
+                                if pc >= code.len() {
+                                    return ExecResult::JitError(format!(
+                                        "pc {pc} out of bounds for function {} with {} instructions",
+                                        func.name,
+                                        code.len()
+                                    ));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     sync_frame_pc!();
                     let result = if fiber.is_direct_defer_context() {
                         exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
-                        let Some(return_flags) = ReturnFlags::from_bits(inst.flags) else {
-                            return ExecResult::JitError(format!(
-                                "Return at pc {fetched_pc} has invalid flags 0x{:02x}",
-                                inst.flags
-                            ));
-                        };
                         let is_error_return = return_flags.is_error_return();
                         exec::handle_verified_return(
                             &mut self.state.gc,

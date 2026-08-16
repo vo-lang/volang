@@ -110,6 +110,14 @@ pub(crate) struct ReservedCallWindow {
     sp: usize,
 }
 
+/// Result of completing a verifier-authorized stack return without entering
+/// the defer/replay state machine.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CompletedStackReturn {
+    Done,
+    Resume(CallFrame),
+}
+
 #[derive(Debug, Clone)]
 pub struct DeferArgLayout {
     pub slot_types: Vec<vo_runtime::SlotType>,
@@ -1927,6 +1935,48 @@ impl Fiber {
         }
     }
 
+    /// Pop the active frame and copy its ordinary stack return into the caller.
+    ///
+    /// The common verifier has already proved both source and destination
+    /// windows. Callers must establish that no defer, replay, unwind, or heap
+    /// return protocol applies before using this transition.
+    #[inline]
+    pub(crate) fn complete_verified_stack_return(
+        &mut self,
+        ret_start: u16,
+        ret_count: u16,
+    ) -> CompletedStackReturn {
+        let Some(frame) = self.pop_frame() else {
+            return CompletedStackReturn::Done;
+        };
+        let write_count = usize::from(frame.ret_count.min(ret_count));
+        let src = frame.bp + usize::from(ret_start);
+
+        let Some(caller) = self.frames.last().copied() else {
+            self.copy_stack_slots(0, src, write_count);
+            self.sp = write_count;
+            return CompletedStackReturn::Done;
+        };
+
+        let dst = caller.bp + usize::from(frame.ret_reg);
+        debug_assert!(dst + write_count <= self.stack.len());
+        self.copy_stack_slots(dst, src, write_count);
+        CompletedStackReturn::Resume(caller)
+    }
+
+    /// Whether the active return can bypass every extended return protocol.
+    #[inline]
+    pub(crate) fn can_complete_verified_stack_return(
+        &self,
+        func_has_defer: bool,
+        has_heap_returns: bool,
+    ) -> bool {
+        !func_has_defer
+            && !has_heap_returns
+            && self.unwinding.is_none()
+            && !self.closure_replay.at_replay_boundary(self.frames.len())
+    }
+
     /// Take a recoverable panic while preserving typed runtime trap metadata.
     pub fn take_recoverable_panic_with_kind(
         &mut self,
@@ -2520,6 +2570,40 @@ mod tests {
         assert_eq!(bp, 1);
         assert_eq!(&fiber.stack[bp..bp + 2], &[0xfeed, 0xbeef]);
         assert_eq!(fiber.frames.len(), 2);
+    }
+
+    #[test]
+    fn verified_stack_return_copies_results_and_restores_the_caller_window() {
+        let mut fiber = Fiber::new(1);
+        fiber.push_frame(7, 8, 0, 0);
+        let caller_sp = fiber.sp;
+        let callee_bp = fiber.push_borrowed_call_frame(9, 2, 4, 2, 4);
+        fiber.stack[callee_bp..callee_bp + 2].copy_from_slice(&[41, 42]);
+
+        let completed = fiber.complete_verified_stack_return(0, 2);
+
+        let super::CompletedStackReturn::Resume(caller) = completed else {
+            panic!("borrowed callee must resume its caller");
+        };
+        assert_eq!(caller.func_id, 7);
+        assert_eq!(fiber.sp, caller_sp);
+        assert_eq!(&fiber.stack[4..6], &[41, 42]);
+        assert_eq!(fiber.frames.len(), 1);
+    }
+
+    #[test]
+    fn verified_terminal_stack_return_publishes_entry_results() {
+        let mut fiber = Fiber::new(1);
+        fiber.push_frame(7, 4, 0, 2);
+        fiber.stack[1..3].copy_from_slice(&[51, 52]);
+
+        assert!(matches!(
+            fiber.complete_verified_stack_return(1, 2),
+            super::CompletedStackReturn::Done
+        ));
+        assert!(fiber.frames.is_empty());
+        assert_eq!(fiber.sp, 2);
+        assert_eq!(&fiber.stack[..2], &[51, 52]);
     }
 
     #[test]
