@@ -4,22 +4,22 @@ use super::*;
 fn call_native_lane0(
     entry: NativeJitFunc,
     ctx: *mut JitContext,
-    frame: *mut u64,
+    frame_bp: u64,
     ret: *mut u64,
     lane0: u64,
 ) -> JitResult {
-    entry(ctx, frame, ret, lane0, 0, 0, 0, 0)
+    entry(ctx, frame_bp, ret, lane0, 0, 0, 0, 0)
 }
 
 #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
 fn call_native_lane0(
     entry: NativeJitFunc,
     ctx: *mut JitContext,
-    frame: *mut u64,
+    frame_bp: u64,
     ret: *mut u64,
     lane0: u64,
 ) -> JitResult {
-    entry(ctx, frame, ret, lane0, 0, 0)
+    entry(ctx, frame_bp, ret, lane0, 0, 0)
 }
 
 #[cfg(any(
@@ -29,15 +29,15 @@ fn call_native_lane0(
 fn call_native_lane0(
     entry: NativeJitFunc,
     ctx: *mut JitContext,
-    frame: *mut u64,
+    frame_bp: u64,
     ret: *mut u64,
     lane0: u64,
 ) -> JitResult {
-    entry(ctx, frame, ret, lane0)
+    entry(ctx, frame_bp, ret, lane0)
 }
 
 #[test]
-fn function_entry_uses_one_native_abi_for_vm_frames_and_direct_lanes() {
+fn function_entry_uses_stable_frame_index_and_direct_lanes() {
     let mut func = make_func_with_slot_types_and_sig(
         vec![Instruction::new(Opcode::Return, 0, 1, 0)],
         vec![SlotType::Float],
@@ -77,13 +77,7 @@ fn function_entry_uses_one_native_abi_for_vm_frames_and_direct_lanes() {
 
     ret[0] = 0;
     assert_eq!(
-        call_native_lane0(
-            native,
-            &mut ctx,
-            frame.as_mut_ptr(),
-            ret.as_mut_ptr(),
-            lane_value,
-        ),
+        call_native_lane0(native, &mut ctx, 0, ret.as_mut_ptr(), lane_value),
         JitResult::Ok
     );
     assert_eq!(
@@ -1981,13 +1975,16 @@ fn wide_function_reads_a_high_parameter_without_forcing_frame_memory() {
     .expect("compile wide integer function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
 
-    let mut args = vec![0_u64; usize::from(local_slots)];
-    args[usize::from(high_parameter_slot)] = 40;
+    const FRAME_BP: usize = 7;
+    let mut stack = vec![0_u64; FRAME_BP + usize::from(local_slots)];
+    stack[FRAME_BP + usize::from(high_parameter_slot)] = 40;
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
-    let mut ctx = parts.context(&module, &mut args);
+    let mut ctx = parts.context(&module, &mut stack);
+    ctx.jit_bp = FRAME_BP as u32;
 
-    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
+    let result =
+        unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut stack[FRAME_BP..], &mut ret) };
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(ret[0], 42);

@@ -159,8 +159,8 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emitter.store_context_field(new_sp, JitContextField::FiberSp);
     }
     let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
-    let bp_offset = emitter.builder().ins().uextend(types::I64, new_bp);
-    let bp_offset = emitter.builder().ins().imul_imm_u(bp_offset, 8);
+    let frame_bp = emitter.builder().ins().uextend(types::I64, new_bp);
+    let bp_offset = emitter.builder().ins().imul_imm_u(frame_bp, 8);
     let args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
     for (i, val) in arg_values.iter().enumerate() {
         emitter
@@ -238,7 +238,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     let arg_lanes = std::array::from_fn(|lane| arg_values.get(lane).copied().unwrap_or(zero));
     let jit_result_indirect = if let Some(func_ref) = direct_native {
         emit_effect_aware_direct_jit_call(
-            emitter, func_ref, ctx, args_ptr, ret_ptr, &arg_lanes, gc_mode,
+            emitter, func_ref, ctx, frame_bp, ret_ptr, &arg_lanes, gc_mode,
         )
     } else {
         let sig = import_jit_func_sig(emitter);
@@ -248,7 +248,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             linked_func_ptr,
             JitCallOperands {
                 ctx,
-                args_ptr,
+                frame_bp,
                 ret_ptr,
                 arg_lanes: &arg_lanes,
             },

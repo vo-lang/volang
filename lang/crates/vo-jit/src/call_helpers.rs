@@ -215,7 +215,7 @@ pub fn import_jit_func_sig<'a, E: IrEmitter<'a>>(emitter: &mut E) -> SigRef {
         sig.params
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ctx
         sig.params
-            .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // args_ptr
+            .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // frame_bp
         sig.params
             .push(cranelift_codegen::ir::AbiParam::new(types::I64)); // ret_ptr
         for _ in 0..crate::NATIVE_ARG_LANES {
@@ -237,7 +237,7 @@ pub(super) enum JitCallGcMode {
 
 pub(super) struct JitCallOperands<'a> {
     pub(super) ctx: Value,
-    pub(super) args_ptr: Value,
+    pub(super) frame_bp: Value,
     pub(super) ret_ptr: Value,
     pub(super) arg_lanes: &'a [Value; crate::NATIVE_ARG_LANES],
 }
@@ -254,7 +254,7 @@ pub(super) fn emit_effect_aware_jit_call<'a, E: IrEmitter<'a>>(
     let emit_call = |emitter: &mut E, attach_roots: bool| {
         let native_roots = attach_roots.then(|| emitter.spill_native_roots()).flatten();
         let mut args = Vec::with_capacity(3 + crate::NATIVE_ARG_LANES);
-        args.extend_from_slice(&[operands.ctx, operands.args_ptr, operands.ret_ptr]);
+        args.extend_from_slice(&[operands.ctx, operands.frame_bp, operands.ret_ptr]);
         args.extend_from_slice(operands.arg_lanes);
         let call = emitter
             .builder()
@@ -312,7 +312,7 @@ pub(super) fn emit_effect_aware_direct_jit_call<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     jit_func_ref: cranelift_codegen::ir::FuncRef,
     ctx: Value,
-    args_ptr: Value,
+    frame_bp: Value,
     ret_ptr: Value,
     arg_lanes: &[Value; crate::NATIVE_ARG_LANES],
     mode: JitCallGcMode,
@@ -320,7 +320,7 @@ pub(super) fn emit_effect_aware_direct_jit_call<'a, E: IrEmitter<'a>>(
     let emit_call = |emitter: &mut E, attach_roots: bool| {
         let native_roots = attach_roots.then(|| emitter.spill_native_roots()).flatten();
         let mut args = Vec::with_capacity(3 + crate::NATIVE_ARG_LANES);
-        args.extend_from_slice(&[ctx, args_ptr, ret_ptr]);
+        args.extend_from_slice(&[ctx, frame_bp, ret_ptr]);
         args.extend_from_slice(arg_lanes);
         let call = emitter.builder().ins().call(jit_func_ref, &args);
         if attach_roots {

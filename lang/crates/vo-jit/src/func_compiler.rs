@@ -427,7 +427,7 @@ impl<'a> FunctionCompiler<'a> {
         self.builder.seal_block(self.core.entry_block);
 
         let params = self.builder.block_params(self.core.entry_block).to_vec();
-        let args_ptr = params[1];
+        let frame_bp = params[1];
         let _ret = params[2];
         if self.tier == vo_runtime::jit_api::JitTier::Baseline {
             let profile_table = self.builder.ins().load(
@@ -520,14 +520,11 @@ impl<'a> FunctionCompiler<'a> {
             self.store_context_field(current_func_id, JitContextField::CurrentFuncId);
         }
 
-        // Every native function receives the canonical fiber frame pointer.
-        // Recover BP from that pointer once; nested calls may relocate the
-        // backing vector, while the slot index remains stable.
-        let stack_ptr = self.load_context_field(types::I64, JitContextField::StackPtr);
-        let byte_offset = self.builder.ins().isub(args_ptr, stack_ptr);
-        let jit_bp_i64 = self.builder.ins().ushr_imm_u(byte_offset, 3);
-        let jit_bp_i32 = self.builder.ins().ireduce(types::I32, jit_bp_i64);
-        self.builder.def_var(self.saved_jit_bp, jit_bp_i64);
+        // The native ABI carries the canonical slot index directly. It stays
+        // valid across callbacks that relocate the fiber stack; raw pointers
+        // are reconstructed lazily only for memory-backed slots.
+        let jit_bp_i32 = self.builder.ins().ireduce(types::I32, frame_bp);
+        self.builder.def_var(self.saved_jit_bp, frame_bp);
         self.saved_caller_bp = jit_bp_i32;
         self.saved_fiber_sp = self
             .builder
@@ -535,6 +532,13 @@ impl<'a> FunctionCompiler<'a> {
             .iadd_imm_u(jit_bp_i32, i64::from(self.core.func_def.local_slots));
 
         let param_slots = self.core.func_def.param_slots as usize;
+        let needs_frame_ptr = param_slots > crate::NATIVE_ARG_LANES
+            || self
+                .core
+                .memory_slots
+                .slots()
+                .any(|slot| usize::from(slot) >= param_slots);
+        let frame_ptr = needs_frame_ptr.then(|| self.fiber_stack_args_ptr());
 
         // The internal native ABI carries the first raw argument words in
         // machine lanes. Wide signatures continue in frame memory. Float
@@ -547,7 +551,11 @@ impl<'a> FunctionCompiler<'a> {
             let raw = if i < crate::NATIVE_ARG_LANES {
                 params[3 + i]
             } else {
-                crate::compile_common::load_memory_slot_i64(&mut self.builder, args_ptr, slot)
+                crate::compile_common::load_memory_slot_i64(
+                    &mut self.builder,
+                    frame_ptr.expect("wide parameter requires frame memory"),
+                    slot,
+                )
             };
             let val = if self.core.is_float_slot(slot) {
                 self.builder.ins().bitcast(types::F64, MemFlags::new(), raw)
@@ -579,7 +587,12 @@ impl<'a> FunctionCompiler<'a> {
             .slots()
             .filter(|slot| usize::from(*slot) >= param_slots)
         {
-            crate::compile_common::store_memory_slot(&mut self.builder, args_ptr, slot, zero_i64);
+            crate::compile_common::store_memory_slot(
+                &mut self.builder,
+                frame_ptr.expect("memory-backed local requires frame memory"),
+                slot,
+                zero_i64,
+            );
         }
     }
 

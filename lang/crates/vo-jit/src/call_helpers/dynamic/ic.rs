@@ -86,8 +86,8 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
     let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
-    let bp_offset = emitter.builder().ins().uextend(types::I64, new_bp);
-    let bp_offset = emitter.builder().ins().imul_imm_u(bp_offset, 8);
+    let frame_bp = emitter.builder().ins().uextend(types::I64, new_bp);
+    let bp_offset = emitter.builder().ins().imul_imm_u(frame_bp, 8);
     let callee_args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
     emitter
         .builder()
@@ -152,7 +152,7 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         p.ic_jit_ptr,
         JitCallOperands {
             ctx: p.ctx,
-            args_ptr: callee_args_ptr,
+            frame_bp,
             ret_ptr: p.ret_ptr,
             arg_lanes: &arg_lanes,
         },

@@ -185,13 +185,15 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     let jit_func_sig = import_jit_func_sig(emitter);
     let arg_lanes = load_native_arg_lanes_dynamic(emitter, p.callee_args_ptr, p.callee_local_slots);
+    let callee_bp = emitter.load_context_field(types::I32, JitContextField::JitBp);
+    let frame_bp = emitter.builder().ins().uextend(types::I64, callee_bp);
     let jit_result = emit_effect_aware_jit_call(
         emitter,
         jit_func_sig,
         jit_func_ptr,
         JitCallOperands {
             ctx,
-            args_ptr: p.callee_args_ptr,
+            frame_bp,
             ret_ptr: p.ret_ptr,
             arg_lanes: &arg_lanes,
         },

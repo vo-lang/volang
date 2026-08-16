@@ -4,7 +4,7 @@ use cranelift_codegen::isa::CallConv;
 use vo_runtime::jit_api::{JitContext, JitResult};
 
 /// Number of raw machine-word argument lanes carried by the internal native
-/// entry. Wider signatures keep their remaining arguments in `frame_ptr`.
+/// entry. Wider signatures keep their remaining arguments in the fiber frame.
 ///
 /// Lanes deliberately use the raw `u64` representation. Float slots cross the
 /// boundary with an explicit bitcast, so one uniform dispatch table can serve
@@ -18,13 +18,15 @@ pub const NATIVE_ARG_LANES: usize = 1;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub const NATIVE_ARG_LANES: usize = 1;
 
-/// Unified VM/JIT native entry. `frame_ptr` always identifies the callee's
-/// verified fiber-stack window. Static calls additionally pass the leading
-/// argument words in lanes so the callee can enter SSA without reloading them.
+/// Unified VM/JIT native entry. `frame_bp` identifies the callee's verified
+/// fiber-stack window by stable slot index; generated code reconstructs a raw
+/// pointer only when it actually accesses frame memory. Static calls
+/// additionally pass the leading argument words in lanes so the callee can
+/// enter SSA without reloading them.
 #[cfg(target_arch = "aarch64")]
 pub type NativeJitFunc = extern "C" fn(
     ctx: *mut JitContext,
-    frame_ptr: *mut u64,
+    frame_bp: u64,
     ret_ptr: *mut u64,
     lane0: u64,
     lane1: u64,
@@ -36,7 +38,7 @@ pub type NativeJitFunc = extern "C" fn(
 #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
 pub type NativeJitFunc = extern "C" fn(
     ctx: *mut JitContext,
-    frame_ptr: *mut u64,
+    frame_bp: u64,
     ret_ptr: *mut u64,
     lane0: u64,
     lane1: u64,
@@ -47,12 +49,8 @@ pub type NativeJitFunc = extern "C" fn(
     all(target_arch = "x86_64", target_os = "windows"),
     not(any(target_arch = "aarch64", target_arch = "x86_64"))
 ))]
-pub type NativeJitFunc = extern "C" fn(
-    ctx: *mut JitContext,
-    frame_ptr: *mut u64,
-    ret_ptr: *mut u64,
-    lane0: u64,
-) -> JitResult;
+pub type NativeJitFunc =
+    extern "C" fn(ctx: *mut JitContext, frame_bp: u64, ret_ptr: *mut u64, lane0: u64) -> JitResult;
 
 pub type JitFunc = NativeJitFunc;
 
@@ -62,7 +60,7 @@ pub(crate) fn native_signature(
 ) -> Signature {
     let mut signature = Signature::new(call_conv);
     signature.params.push(AbiParam::new(pointer_type));
-    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(types::I64));
     signature.params.push(AbiParam::new(pointer_type));
     for _ in 0..NATIVE_ARG_LANES {
         signature.params.push(AbiParam::new(types::I64));
@@ -75,8 +73,8 @@ pub(crate) fn native_signature(
 ///
 /// # Safety
 /// `frame_ptr` must identify the active fiber stack at `ctx.jit_bp`, address at
-/// least `param_slots` initialized words, and `entry` must carry
-/// [`NativeJitFunc`]'s ABI.
+/// least `param_slots` initialized words, `ctx` must be valid, and `entry` must
+/// carry [`NativeJitFunc`]'s ABI.
 #[inline]
 pub unsafe fn invoke_native_from_frame(
     entry: NativeJitFunc,
@@ -94,10 +92,15 @@ pub unsafe fn invoke_native_from_frame(
         }
     }
 
+    // The VM owns the raw pointer at this boundary. Native callees receive the
+    // canonical slot index, which remains valid if a callback relocates the
+    // fiber stack.
+    let frame_bp = u64::from(unsafe { (*ctx).jit_bp });
+
     #[cfg(target_arch = "aarch64")]
     return entry(
         ctx,
-        frame_ptr,
+        frame_bp,
         ret_ptr,
         unsafe { lane(frame_ptr, param_slots, 0) },
         unsafe { lane(frame_ptr, param_slots, 1) },
@@ -109,7 +112,7 @@ pub unsafe fn invoke_native_from_frame(
     #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
     return entry(
         ctx,
-        frame_ptr,
+        frame_bp,
         ret_ptr,
         unsafe { lane(frame_ptr, param_slots, 0) },
         unsafe { lane(frame_ptr, param_slots, 1) },
@@ -120,7 +123,7 @@ pub unsafe fn invoke_native_from_frame(
         all(target_arch = "x86_64", target_os = "windows"),
         not(any(target_arch = "aarch64", target_arch = "x86_64"))
     ))]
-    return entry(ctx, frame_ptr, ret_ptr, unsafe {
+    return entry(ctx, frame_bp, ret_ptr, unsafe {
         lane(frame_ptr, param_slots, 0)
     });
 }
