@@ -43,9 +43,14 @@ fn exact_source_location(module: &Module, func_id: u32, pc: u32) -> Option<Sourc
 
 fn caller_location(frames: &[CallFrame], module: &Module, skip: usize) -> Option<CallerLocation> {
     let frame = frames.iter().rev().nth(skip)?;
-    // Every active caller frame has already advanced past the instruction that
-    // entered its callee (or the CallExtern currently being dispatched).
-    let pc = u32::try_from(frame.pc.checked_sub(1)?).ok()?;
+    // The innermost frame is executing runtime.Caller's CallExtern now, so its
+    // published PC names that instruction's entry state. Older frames are
+    // suspended after the instruction that entered their callee.
+    let pc = if skip == 0 {
+        u32::try_from(frame.pc).ok()?
+    } else {
+        u32::try_from(frame.pc.checked_sub(1)?).ok()?
+    };
     // Caller requires the source span for this exact call instruction. Falling
     // back to a preceding debug entry would silently report a different call
     // site when metadata is incomplete.
@@ -194,7 +199,7 @@ mod tests {
         fiber.push_frame(3, 1, 0, 0);
         fiber.current_frame_mut().expect("outer frame").pc = 5;
         fiber.push_frame(7, 1, 0, 0);
-        fiber.current_frame_mut().expect("inner frame").pc = 9;
+        fiber.current_frame_mut().expect("inner frame").pc = 8;
 
         let inner = caller_location(&fiber.frames, &module, 0).expect("inner location");
         assert_eq!(inner.source.file, "inner.vo");
@@ -209,12 +214,11 @@ mod tests {
     }
 
     #[test]
-    fn caller_rejects_frames_without_a_completed_call_instruction() {
+    fn caller_rejects_an_empty_stack() {
         let mut module = Module::new("caller-test".to_string());
         module.debug_info.add_loc(0, 0, "main.vo", 1, 1, 1);
         module.debug_info.finalize();
-        let mut fiber = Fiber::new(1);
-        fiber.push_frame(0, 1, 0, 0);
+        let fiber = Fiber::new(1);
         assert!(caller_location(&fiber.frames, &module, 0).is_none());
     }
 

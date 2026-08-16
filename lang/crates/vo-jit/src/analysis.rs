@@ -97,8 +97,9 @@ impl FunctionAnalysis {
                 .memory_sync()
             {
                 MemorySyncEffect::None => u16::MAX,
-                MemorySyncEffect::AliasedFrom(base) | MemorySyncEffect::From(base) => base,
-                MemorySyncEffect::All => 0,
+                MemorySyncEffect::AliasedRange { start, .. } | MemorySyncEffect::From(start) => {
+                    start
+                }
             };
             memory_only_start = memory_only_start.min(start);
             if let Some(&loop_index) = active_loops.last() {
@@ -224,20 +225,18 @@ fn instruction_memory_start(
     inst: &vo_runtime::instruction::Instruction,
 ) -> Result<u16, JitError> {
     Ok(
-        match effects::try_memory_sync_effect(inst).map_err(|err| {
-            JitError::InvalidMetadata(
-                vo_common_core::verifier::ModuleVerificationError::SlotRangeOverflow {
-                    func: func_def.name.clone(),
-                    pc,
-                    start: err.start,
-                    count: err.count,
-                    access: err.access,
-                },
-            )
+        match effects::try_memory_sync_effect(
+            inst,
+            effects::EffectFacts::from_instruction(func_def.instruction_metadata.get(pc)),
+        )
+        .map_err(|err| {
+            JitError::Internal(format!(
+                "verified memory effects failed for {} at pc {pc}: {err:?}",
+                func_def.name
+            ))
         })? {
             MemorySyncEffect::None => u16::MAX,
-            MemorySyncEffect::AliasedFrom(base) | MemorySyncEffect::From(base) => base,
-            MemorySyncEffect::All => 0,
+            MemorySyncEffect::AliasedRange { start, .. } | MemorySyncEffect::From(start) => start,
         },
     )
 }
@@ -254,14 +253,11 @@ mod tests {
     fn make_func(code: Vec<Instruction>, metadata: Vec<InstructionMetadata>) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let slot_types = vec![SlotType::Value; 32];
-        let borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         FunctionDef {
             name: "analysis".to_string(),
             param_count: 0,
             param_slots: 0,
             local_slots: 32,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -276,7 +272,6 @@ mod tests {
             code,
             instruction_metadata: metadata,
             slot_types,
-            borrowed_scan_slots_prefix,
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -471,9 +466,6 @@ mod tests {
             SlotType::Value,
             SlotType::Value,
         ];
-        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-        func.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         let mut module = VoModule::new("root-liveness-cfg".to_string());
         module.functions.push(func);
 
@@ -514,9 +506,6 @@ mod tests {
             SlotType::Value,
             SlotType::Value,
         ]);
-        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-        func.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         let mut module = VoModule::new("gc-base-provenance".to_string());
         module.functions.push(func);
 

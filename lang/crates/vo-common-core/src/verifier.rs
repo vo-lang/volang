@@ -32,8 +32,8 @@ use crate::bytecode::{
     known_builtin_extern_requires_precise_return_layout, known_builtin_extern_return_slot_count,
     slot_type_for_value_kind, validate_ext_param_kinds_with_label, Constant, ExtSlotKind,
     ExternDef, FunctionDef, InstructionMetadata, LoadedModule, Module, ParamShape, ReturnFlags,
-    RuntimeTypeFacts, TransferType, IFACE_ASSIGN_NO_ITAB, MAP_ITER_SLOTS, MAP_ITER_SLOT_TYPES,
-    MAX_CLOSURE_CAPTURE_SLOTS,
+    RuntimeTypeFacts, SelectCaseLayout, TransferType, IFACE_ASSIGN_NO_ITAB, MAP_ITER_SLOTS,
+    MAP_ITER_SLOT_TYPES, MAX_CLOSURE_CAPTURE_SLOTS,
 };
 use crate::instruction::{
     Instruction, Opcode, CONV_F2I_ALLOWED_FLAGS, CONV_I2F_ALLOWED_FLAGS, HINT_LOOP, HINT_NOP,
@@ -2410,6 +2410,7 @@ struct PendingSelectCases {
     seen: u16,
     has_default: bool,
     source_indices: Vec<u16>,
+    layouts: Vec<SelectCaseLayout>,
 }
 
 fn verify_select_case_structure(func: &FunctionDef) -> Result<(), ModuleVerificationError> {
@@ -2444,6 +2445,7 @@ fn verify_select_case_structure(func: &FunctionDef) -> Result<(), ModuleVerifica
                     seen: 0,
                     has_default: inst.flags & 0x01 != 0,
                     source_indices: Vec::new(),
+                    layouts: Vec::new(),
                 });
             }
             Opcode::SelectSend | Opcode::SelectRecv => {
@@ -2472,6 +2474,34 @@ fn verify_select_case_structure(func: &FunctionDef) -> Result<(), ModuleVerifica
                     )));
                 }
                 select.source_indices.push(inst.c);
+                let elem_slots = match func.instruction_metadata.get(pc) {
+                    Some(InstructionMetadata::QueueLayout { elem_layout }) => {
+                        u16::try_from(elem_layout.len()).map_err(|_| {
+                            invariant(format!(
+                                "{opcode:?} at pc {pc} element layout exceeds the register domain"
+                            ))
+                        })?
+                    }
+                    _ => {
+                        return Err(invariant(format!(
+                            "{opcode:?} at pc {pc} is missing QueueLayout metadata"
+                        )))
+                    }
+                };
+                select.layouts.push(match opcode {
+                    Opcode::SelectSend => SelectCaseLayout::Send {
+                        queue: inst.a,
+                        value: inst.b,
+                        elem_slots,
+                    },
+                    Opcode::SelectRecv => SelectCaseLayout::Recv {
+                        destination: inst.a,
+                        queue: inst.b,
+                        elem_slots,
+                        has_ok: inst.recv_has_ok(),
+                    },
+                    _ => unreachable!("select case opcode was matched above"),
+                });
                 select.seen += 1;
             }
             Opcode::SelectExec => {
@@ -2484,6 +2514,18 @@ fn verify_select_case_structure(func: &FunctionDef) -> Result<(), ModuleVerifica
                     return Err(invariant(format!(
                         "SelectBegin declared {} cases but SelectExec saw {}",
                         select.expected, select.seen
+                    )));
+                }
+                let Some(InstructionMetadata::SelectExecLayout { cases }) =
+                    func.instruction_metadata.get(pc)
+                else {
+                    return Err(invariant(format!(
+                        "SelectExec at pc {pc} is missing SelectExecLayout metadata"
+                    )));
+                };
+                if cases != &select.layouts {
+                    return Err(invariant(format!(
+                        "SelectExec at pc {pc} layout does not match its declared cases"
                     )));
                 }
             }
@@ -2565,6 +2607,7 @@ fn validate_instruction_metadata_shape(
         | InstructionMetadata::CallIfaceLayout { .. }
         | InstructionMetadata::CallExternLayout { .. }
         | InstructionMetadata::QueueLayout { .. }
+        | InstructionMetadata::SelectExecLayout { .. }
         | InstructionMetadata::MapIterNext { .. }
         | InstructionMetadata::IfaceAssertLayout { .. } => {
             // Metadata kind and interface-pair semantics are enforced by
@@ -2590,6 +2633,7 @@ enum InstructionMetadataKind {
     CallIfaceLayout,
     CallExternLayout,
     QueueLayout,
+    SelectExecLayout,
     MapIterNext,
     IfaceAssertLayout,
     LoopEnd,
@@ -2610,6 +2654,7 @@ impl InstructionMetadataKind {
             InstructionMetadata::CallIfaceLayout { .. } => Self::CallIfaceLayout,
             InstructionMetadata::CallExternLayout { .. } => Self::CallExternLayout,
             InstructionMetadata::QueueLayout { .. } => Self::QueueLayout,
+            InstructionMetadata::SelectExecLayout { .. } => Self::SelectExecLayout,
             InstructionMetadata::MapIterNext { .. } => Self::MapIterNext,
             InstructionMetadata::IfaceAssertLayout { .. } => Self::IfaceAssertLayout,
             InstructionMetadata::LoopEnd { .. } => Self::LoopEnd,
@@ -2630,6 +2675,7 @@ impl InstructionMetadataKind {
             Self::CallIfaceLayout => "CallIfaceLayout",
             Self::CallExternLayout => "CallExternLayout",
             Self::QueueLayout => "QueueLayout",
+            Self::SelectExecLayout => "SelectExecLayout",
             Self::MapIterNext => "MapIterNext",
             Self::IfaceAssertLayout => "IfaceAssertLayout",
             Self::LoopEnd => "LoopEnd",
@@ -2668,6 +2714,7 @@ fn required_instruction_metadata_kind(opcode: Opcode, flags: u8) -> InstructionM
         | Opcode::QueueRecv
         | Opcode::SelectSend
         | Opcode::SelectRecv => InstructionMetadataKind::QueueLayout,
+        Opcode::SelectExec => InstructionMetadataKind::SelectExecLayout,
         Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush if flags & 1 != 0 => {
             InstructionMetadataKind::CallLayout
         }
@@ -2782,33 +2829,6 @@ fn verify_function_invariants(
             "ret_slot_types.len()={} but ret_slots={}",
             func.ret_slot_types.len(),
             func.ret_slots
-        )));
-    }
-    let expected_gc_scan_slots = FunctionDef::try_compute_gc_scan_slots(&func.slot_types)
-        .ok_or_else(|| {
-            invariant(format!(
-                "slot_types cannot produce a u16 GC scan prefix (len={})",
-                func.slot_types.len()
-            ))
-        })?;
-    if func.gc_scan_slots != expected_gc_scan_slots {
-        return Err(invariant(format!(
-            "gc_scan_slots={} but computed={}",
-            func.gc_scan_slots, expected_gc_scan_slots
-        )));
-    }
-    let expected_prefix = FunctionDef::try_compute_borrowed_scan_slots_prefix(&func.slot_types)
-        .ok_or_else(|| {
-            invariant(format!(
-                "slot_types cannot produce u16 borrowed-scan prefixes (len={})",
-                func.slot_types.len()
-            ))
-        })?;
-    if func.borrowed_scan_slots_prefix != expected_prefix {
-        return Err(invariant(format!(
-            "borrowed_scan_slots_prefix.len()={} but computed len={}",
-            func.borrowed_scan_slots_prefix.len(),
-            expected_prefix.len()
         )));
     }
     let has_defer = func
@@ -3286,41 +3306,6 @@ fn validate_function_gc_layout(
 ) -> Result<(), ModuleVerificationError> {
     let label = format!("function {idx} ({})", func.name);
     validate_slot_layout(&label, func.local_slots as usize, &func.slot_types)?;
-
-    if func.gc_scan_slots as usize > func.slot_types.len() {
-        return Err(ModuleVerificationError::GcLayout {
-            detail: format!(
-                "{label} gc_scan_slots {} exceeds slot_types len {}",
-                func.gc_scan_slots,
-                func.slot_types.len()
-            ),
-        });
-    }
-
-    let expected_scan_slots =
-        FunctionDef::try_compute_gc_scan_slots(&func.slot_types).ok_or_else(|| {
-            ModuleVerificationError::GcLayout {
-                detail: format!("{label} slot_types cannot produce a u16 GC scan prefix"),
-            }
-        })?;
-    if func.gc_scan_slots != expected_scan_slots {
-        return Err(ModuleVerificationError::GcLayout {
-            detail: format!(
-                "{label} gc_scan_slots {} does not match slot_types; expected {}",
-                func.gc_scan_slots, expected_scan_slots
-            ),
-        });
-    }
-
-    let expected_prefix = FunctionDef::try_compute_borrowed_scan_slots_prefix(&func.slot_types)
-        .ok_or_else(|| ModuleVerificationError::GcLayout {
-            detail: format!("{label} slot_types cannot produce u16 borrowed-scan prefixes"),
-        })?;
-    if func.borrowed_scan_slots_prefix != expected_prefix {
-        return Err(ModuleVerificationError::GcLayout {
-            detail: format!("{label} borrowed_scan_slots_prefix does not match slot_types"),
-        });
-    }
 
     validate_slot_layout(
         &format!("{label} return slots"),
@@ -5130,7 +5115,7 @@ fn index_check_slot_set_writes_slot(
     let elem_slots = match inst.opcode() {
         Opcode::SlotSet => 1usize,
         Opcode::SlotSetN => match func.instruction_metadata.get(pc) {
-            Some(InstructionMetadata::SlotLayout { elem_layout }) => elem_layout.len(),
+            Some(InstructionMetadata::SlotLayout { elem_layout, .. }) => elem_layout.len(),
             _ => inst.flags as usize,
         },
         _ => return None,
@@ -5189,7 +5174,7 @@ fn instruction_writes_slot(
         Opcode::SlotSetN => {
             let has_elements = matches!(
                 func.instruction_metadata.get(pc),
-                Some(InstructionMetadata::SlotLayout { elem_layout }) if !elem_layout.is_empty()
+                Some(InstructionMetadata::SlotLayout { elem_layout, .. }) if !elem_layout.is_empty()
             );
             return has_elements && slot >= inst.a;
         }
@@ -5921,13 +5906,16 @@ fn verify_ptr_new_runtime_metadata(
     Ok(())
 }
 
-fn slot_elem_layout(
+fn slot_layout(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
-) -> Result<Vec<SlotType>, ModuleVerificationError> {
+) -> Result<(u16, Vec<SlotType>), ModuleVerificationError> {
     decode_metadata_layout(func, pc, opcode, "SlotLayout", |metadata| match metadata {
-        InstructionMetadata::SlotLayout { elem_layout } => Some(elem_layout.clone()),
+        InstructionMetadata::SlotLayout {
+            array_len,
+            elem_layout,
+        } => Some((*array_len, elem_layout.clone())),
         _ => None,
     })
 }
@@ -6326,7 +6314,7 @@ fn verify_slot_get_contract(
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
-    let elem_layout = slot_elem_layout(func, pc, opcode)?;
+    let (array_len, elem_layout) = slot_layout(func, pc, opcode)?;
     verify_reserved_zero(func, pc, opcode, ctx.inst.flags.into(), "flags")?;
     if (opcode == Opcode::SlotGet) != (elem_layout.len() == 1) {
         return Err(call_shape_mismatch(
@@ -6357,6 +6345,7 @@ fn verify_slot_get_contract(
         index_check_facts,
         base_start,
         index_slot,
+        array_len,
         &elem_layout,
         "SlotGet element span",
     )?;
@@ -6380,7 +6369,7 @@ fn verify_slot_set_contract(
     let func = ctx.func;
     let pc = ctx.pc;
     let opcode = ctx.opcode;
-    let elem_layout = slot_elem_layout(func, pc, opcode)?;
+    let (array_len, elem_layout) = slot_layout(func, pc, opcode)?;
     verify_reserved_zero(func, pc, opcode, ctx.inst.flags.into(), "flags")?;
     if (opcode == Opcode::SlotSet) != (elem_layout.len() == 1) {
         return Err(call_shape_mismatch(
@@ -6411,6 +6400,7 @@ fn verify_slot_set_contract(
         index_check_facts,
         base_start,
         index_slot,
+        array_len,
         &elem_layout,
         "SlotSet element span",
     )?;
@@ -6422,6 +6412,7 @@ fn verify_dynamic_slot_span(
     index_check_facts: &IndexCheckAnalysis,
     base_start: u16,
     index_slot: u16,
+    declared_len: u16,
     elem_layout: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
@@ -6430,6 +6421,16 @@ fn verify_dynamic_slot_span(
     let opcode = ctx.opcode;
     let checked_len =
         index_checked_len_before(index_check_facts, func, pc, opcode, index_slot, access)?;
+    if checked_len != declared_len {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "{access} checked length {checked_len} does not match SlotLayout array length {declared_len}"
+            ),
+        ));
+    }
     let Some(total_slots) = elem_layout.len().checked_mul(usize::from(checked_len)) else {
         return Err(call_shape_mismatch(
             func,
@@ -7110,6 +7111,20 @@ fn verify_call_extern_contract(
                 ),
             ));
         }
+    }
+    let arg_start = usize::from(inst.c);
+    let arg_end = arg_start + arg_layout.len();
+    let ret_start = usize::from(inst.a);
+    let ret_end = ret_start + ret_layout.len();
+    if arg_start < ret_end && ret_start < arg_end {
+        return Err(call_shape_mismatch(
+            func,
+            pc,
+            opcode,
+            format!(
+                "CallExtern argument slots {arg_start}..{arg_end} overlap return slots {ret_start}..{ret_end}"
+            ),
+        ));
     }
     verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "CallExtern args")?;
     verify_local_layout_matches(func, pc, opcode, inst.a, &ret_layout, "CallExtern returns")

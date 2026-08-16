@@ -176,21 +176,17 @@ impl<'a> CompilerStorage<'a> {
 
     /// Materialize the sparse state needed to resume at a basic-block entry.
     ///
-    /// Dead scalar slots are left untouched because bytecode liveness proves
-    /// that they are redefined before use. Dead root-shaped SSA slots are
-    /// cleared so the VM's conservative frame-prefix scan cannot retain stale
-    /// objects after the native frame has returned.
+    /// Dead slots are left untouched because bytecode liveness proves that
+    /// they are redefined before use, and exact frame-root maps exclude them
+    /// from GC scanning at the recovery PC.
     pub(crate) fn spill_recovery_state_to_memory(
         self,
         builder: &mut FunctionBuilder<'_>,
         dst_ptr: Value,
         recovery_values: &[crate::ir::FrameValue],
-        scan_slots: u16,
     ) {
         let mut recovery_index = 0;
-        let zero = builder.ins().iconst(types::I64, 0);
         for (slot, variable) in self.vars.iter() {
-            let slot_index = usize::from(slot);
             while recovery_values
                 .get(recovery_index)
                 .is_some_and(|value| value.slot < slot)
@@ -200,23 +196,15 @@ impl<'a> CompilerStorage<'a> {
             let is_live = recovery_values
                 .get(recovery_index)
                 .is_some_and(|value| value.slot == slot);
-            let value = if is_live {
-                builder.use_var(variable)
-            } else if slot < scan_slots
-                && matches!(
-                    self.slot_types[slot_index],
-                    SlotType::GcRef | SlotType::Interface0 | SlotType::Interface1
-                )
-            {
-                zero
-            } else {
+            if !is_live {
                 continue;
-            };
+            }
+            let value = builder.use_var(variable);
             builder.ins().store(
                 MemFlags::trusted(),
                 value,
                 dst_ptr,
-                indexed_slot_offset(slot_index),
+                indexed_slot_offset(usize::from(slot)),
             );
         }
     }

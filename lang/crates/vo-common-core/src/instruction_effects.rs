@@ -1,7 +1,9 @@
 //! Allocation-free bytecode register and frame-memory effects shared by
 //! verification, interpretation, and native compilation.
 
-use crate::bytecode::{ExternDef, FunctionDef, InstructionMetadata, MAP_ITER_SLOTS};
+use crate::bytecode::{
+    ExternDef, FunctionDef, InstructionMetadata, SelectCaseLayout, MAP_ITER_SLOTS,
+};
 use crate::instruction::{Instruction, Opcode, IFACE_ASSERT_HAS_OK_FLAG};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,16 +23,13 @@ pub enum InstructionReadError {
 
 /// Frame-memory visibility that scalar register effects cannot represent.
 ///
-/// Dynamically indexed Slot operations can observe an entire suffix. Runtime
-/// callbacks can observe a bounded value beginning at one slot, while Select
-/// owns a multi-instruction transaction whose pending cases may cover the
-/// complete frame.
+/// Dynamically indexed Slot operations observe their declared inline-array
+/// range, while runtime callbacks can observe a value beginning at one slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameMemoryEffect {
     None,
-    AliasedFrom(u16),
+    AliasedRange { start: u16, count: u16 },
     From(u16),
-    All,
 }
 
 fn visit_range(
@@ -140,7 +139,6 @@ pub fn visit_instruction_register_reads(
         | Opcode::GlobalGetN
         | Opcode::Jump
         | Opcode::SelectBegin
-        | Opcode::SelectExec
         | Opcode::ClosureNew
         | Opcode::Recover
         | Opcode::StrNew
@@ -228,7 +226,7 @@ pub fn visit_instruction_register_reads(
         Opcode::SlotSet => visit_read_slots(&[inst.b, inst.c], &mut visit),
         Opcode::SlotSetN => {
             let count = match required_read_metadata(opcode, metadata)? {
-                InstructionMetadata::SlotLayout { elem_layout } => elem_layout.len(),
+                InstructionMetadata::SlotLayout { elem_layout, .. } => elem_layout.len(),
                 _ => return Err(InstructionReadError::MissingMetadata(opcode)),
             };
             visit_read_range(inst.b, 1, &mut visit)?;
@@ -358,6 +356,28 @@ pub fn visit_instruction_register_reads(
             visit_read_range(inst.a, 1, &mut visit)?;
             visit_read_range(inst.b, count, &mut visit)
         }
+        Opcode::SelectExec => {
+            let cases = match required_read_metadata(opcode, metadata)? {
+                InstructionMetadata::SelectExecLayout { cases } => cases,
+                _ => return Err(InstructionReadError::MissingMetadata(opcode)),
+            };
+            for case in cases {
+                match case {
+                    SelectCaseLayout::Send {
+                        queue,
+                        value,
+                        elem_slots,
+                    } => {
+                        visit_read_range(*queue, 1, &mut visit)?;
+                        visit_read_range(*value, usize::from(*elem_slots), &mut visit)?;
+                    }
+                    SelectCaseLayout::Recv { queue, .. } => {
+                        visit_read_range(*queue, 1, &mut visit)?;
+                    }
+                }
+            }
+            Ok(())
+        }
         Opcode::ClosureGet => visit_read_range(0, 1, &mut visit),
         Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
             if inst.call_shape_is_closure() {
@@ -404,10 +424,51 @@ pub fn visit_instruction_register_reads(
 /// Report frame-memory visibility beyond scalar register operands.
 pub fn instruction_frame_memory_effect(
     inst: &Instruction,
+    metadata: Option<&InstructionMetadata>,
 ) -> Result<FrameMemoryEffect, InstructionReadError> {
     match inst.opcode() {
-        Opcode::SlotGet | Opcode::SlotGetN => Ok(FrameMemoryEffect::AliasedFrom(inst.b)),
-        Opcode::SlotSet | Opcode::SlotSetN => Ok(FrameMemoryEffect::AliasedFrom(inst.a)),
+        Opcode::SlotGet | Opcode::SlotGetN | Opcode::SlotSet | Opcode::SlotSetN => {
+            let (array_len, elem_slots) = match required_read_metadata(inst.opcode(), metadata)? {
+                InstructionMetadata::SlotLayout {
+                    array_len,
+                    elem_layout,
+                } => (*array_len, elem_layout.len()),
+                _ => return Err(InstructionReadError::MissingMetadata(inst.opcode())),
+            };
+            let count = usize::from(array_len).checked_mul(elem_slots).ok_or(
+                InstructionReadError::SlotRangeOverflow {
+                    start: if matches!(inst.opcode(), Opcode::SlotGet | Opcode::SlotGetN) {
+                        inst.b
+                    } else {
+                        inst.a
+                    },
+                    count: usize::MAX,
+                },
+            )?;
+            let count =
+                u16::try_from(count).map_err(|_| InstructionReadError::SlotRangeOverflow {
+                    start: if matches!(inst.opcode(), Opcode::SlotGet | Opcode::SlotGetN) {
+                        inst.b
+                    } else {
+                        inst.a
+                    },
+                    count,
+                })?;
+            let start = if matches!(inst.opcode(), Opcode::SlotGet | Opcode::SlotGetN) {
+                inst.b
+            } else {
+                inst.a
+            };
+            if count != 0 {
+                start
+                    .checked_add(count - 1)
+                    .ok_or(InstructionReadError::SlotRangeOverflow {
+                        start,
+                        count: usize::from(count),
+                    })?;
+            }
+            Ok(FrameMemoryEffect::AliasedRange { start, count })
+        }
         Opcode::SliceAppend => inst.c.checked_add(1).map(FrameMemoryEffect::From).ok_or(
             InstructionReadError::SlotRangeOverflow {
                 start: inst.c,
@@ -416,7 +477,6 @@ pub fn instruction_frame_memory_effect(
         ),
         Opcode::QueueSend => Ok(FrameMemoryEffect::From(inst.b)),
         Opcode::QueueRecv => Ok(FrameMemoryEffect::From(inst.a)),
-        Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => Ok(FrameMemoryEffect::All),
         Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
             Ok(FrameMemoryEffect::From(inst.b))
         }
@@ -465,6 +525,7 @@ pub fn visit_instruction_register_writes(
         | Opcode::QueueClose
         | Opcode::SelectBegin
         | Opcode::SelectSend
+        | Opcode::SelectRecv
         | Opcode::GoStart
         | Opcode::DeferPush
         | Opcode::ErrDeferPush
@@ -475,7 +536,7 @@ pub fn visit_instruction_register_writes(
         Opcode::CopyN => visit_range(inst.a, inst.copy_n_count() as usize, &mut visit),
         Opcode::SlotGetN => {
             let count = match required_metadata(opcode, metadata)? {
-                InstructionMetadata::SlotLayout { elem_layout } => elem_layout.len(),
+                InstructionMetadata::SlotLayout { elem_layout, .. } => elem_layout.len(),
                 _ => return Err(InstructionWriteError::MissingMetadata(opcode)),
             };
             visit_range(inst.a, count, &mut visit)
@@ -565,7 +626,7 @@ pub fn visit_instruction_register_writes(
             visit_range(inst.a, count, &mut visit)?;
             visit_range(inst.c, 1, &mut visit)
         }
-        Opcode::QueueRecv | Opcode::SelectRecv => {
+        Opcode::QueueRecv => {
             let count = match required_metadata(opcode, metadata)? {
                 InstructionMetadata::QueueLayout { elem_layout } => {
                     elem_layout.len() + usize::from(inst.recv_has_ok())
@@ -573,6 +634,29 @@ pub fn visit_instruction_register_writes(
                 _ => return Err(InstructionWriteError::MissingMetadata(opcode)),
             };
             visit_range(inst.a, count, &mut visit)
+        }
+        Opcode::SelectExec => {
+            visit_range(inst.a, 1, &mut visit)?;
+            let cases = match required_metadata(opcode, metadata)? {
+                InstructionMetadata::SelectExecLayout { cases } => cases,
+                _ => return Err(InstructionWriteError::MissingMetadata(opcode)),
+            };
+            for case in cases {
+                if let SelectCaseLayout::Recv {
+                    destination,
+                    elem_slots,
+                    has_ok,
+                    ..
+                } = case
+                {
+                    visit_range(
+                        *destination,
+                        usize::from(*elem_slots) + usize::from(*has_ok),
+                        &mut visit,
+                    )?;
+                }
+            }
+            Ok(())
         }
         Opcode::IfaceAssign | Opcode::Recover | Opcode::StrDecodeRune => {
             visit_range(inst.a, 2, &mut visit)

@@ -144,8 +144,8 @@ fn format_param_shape(shape: &ParamShape) -> String {
 fn format_function(func_id: u32, f: &FunctionDef) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "func_{} {}(params={}, param_slots={}, locals={}, ret={}, gc_scan_slots={}):\n",
-        func_id, f.name, f.param_count, f.param_slots, f.local_slots, f.ret_slots, f.gc_scan_slots
+        "func_{} {}(params={}, param_slots={}, locals={}, ret={}):\n",
+        func_id, f.name, f.param_count, f.param_slots, f.local_slots, f.ret_slots
     ));
     if let Some(slot_summary) = format_slot_type_summary(&f.slot_types) {
         out.push_str(&format!("  # slot_types: {}\n", slot_summary));

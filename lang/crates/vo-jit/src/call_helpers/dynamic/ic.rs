@@ -273,12 +273,6 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             p.out_slot,
             PreparedCall::OFFSET_JIT_MAY_GC,
         );
-        let out_gc_scan_slots = emitter.builder().ins().stack_load(
-            types::I64,
-            types::I16,
-            p.out_slot,
-            PreparedCall::OFFSET_CALLEE_GC_SCAN_SLOTS,
-        );
         let out_jit_frame_elided = emitter.builder().ins().stack_load(
             types::I64,
             types::I16,
@@ -335,7 +329,6 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
                 .store(MemFlags::trusted(), value, update.entry, offset);
         }
         for (value, offset) in [
-            (out_gc_scan_slots, DynCallIC::OFFSET_GC_SCAN_SLOTS),
             (out_jit_may_gc, DynCallIC::OFFSET_JIT_MAY_GC),
             (out_jit_frame_elided, DynCallIC::OFFSET_JIT_FRAME_ELIDED),
         ] {

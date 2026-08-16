@@ -248,6 +248,38 @@ fn module_verifier_rejects_math_intrinsic_parameter_type_drift() {
 }
 
 #[test]
+fn module_verifier_rejects_overlapping_call_extern_windows() {
+    let mut module = Module::new("call-extern-overlapping-windows".to_string());
+    module.externs.push(ExternDef {
+        name: canonical_test_extern_name("host_overlap"),
+        params: ParamShape::Exact { slots: 1 },
+        returns: ReturnShape::with_slot_types(vec![SlotType::Value]),
+        allowed_effects: ExternEffects::NONE,
+        param_kinds: vec![ExtSlotKind::Value],
+    });
+    let mut caller = function_with_slot_types(vec![SlotType::Value]);
+    caller.code = vec![
+        Instruction::new(Opcode::CallExtern, 0, 0, 0),
+        Instruction::new(Opcode::Return, 0, 0, 0),
+    ];
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallExternLayout {
+            arg_layout: vec![SlotType::Value],
+            ret_layout: vec![SlotType::Value],
+        },
+        InstructionMetadata::None,
+    ];
+    module.functions.push(finish_test_function(caller));
+
+    let error = verify_module(&module).expect_err("extern call windows must be disjoint");
+
+    assert!(
+        error.to_string().contains("overlap return slots"),
+        "{error}"
+    );
+}
+
+#[test]
 fn module_verifier_rejects_builtin_extern_return_slot_drift_062() {
     let mut module = Module::new("builtin-return-slot-drift".to_string());
     module.externs.push(ExternDef {

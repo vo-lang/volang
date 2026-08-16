@@ -25,6 +25,7 @@ use hashbrown::{HashMap, HashSet};
 #[cfg(feature = "std")]
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::bytecode::SelectCaseLayout;
 use crate::bytecode::{
     Constant, ExtSlotKind, ExternDef, ExternEffects, FieldMeta, FunctionDef, GlobalDef,
     InstructionMetadata, InterfaceMeta, InterfaceMethodMeta, Itab, MethodInfo, Module,
@@ -37,7 +38,7 @@ use core::fmt;
 use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 16;
+const VERSION: u32 = 18;
 const MIN_SUPPORTED_VERSION: u32 = VERSION;
 /// Canonical maximum size of an encoded VOB module, for both input and output.
 pub const MAX_VOB_BYTES: usize = 128 * 1024 * 1024;
@@ -598,8 +599,12 @@ fn write_instruction_metadata(w: &mut ByteWriter, meta: &InstructionMetadata) {
                 value_layout,
             );
         }
-        InstructionMetadata::SlotLayout { elem_layout } => {
+        InstructionMetadata::SlotLayout {
+            array_len,
+            elem_layout,
+        } => {
             w.write_u8(10);
+            w.write_u16(*array_len);
             write_slot_layout(w, "InstructionMetadata.SlotLayout.elem_layout", elem_layout);
         }
         InstructionMetadata::CallLayout {
@@ -652,6 +657,37 @@ fn write_instruction_metadata(w: &mut ByteWriter, meta: &InstructionMetadata) {
                 w,
                 "InstructionMetadata.QueueLayout.elem_layout",
                 elem_layout,
+            );
+        }
+        InstructionMetadata::SelectExecLayout { cases } => {
+            w.write_u8(18);
+            w.write_vec(
+                "InstructionMetadata.SelectExecLayout.cases",
+                cases,
+                |w, case| match case {
+                    SelectCaseLayout::Send {
+                        queue,
+                        value,
+                        elem_slots,
+                    } => {
+                        w.write_u8(0);
+                        w.write_u16(*queue);
+                        w.write_u16(*value);
+                        w.write_u16(*elem_slots);
+                    }
+                    SelectCaseLayout::Recv {
+                        destination,
+                        queue,
+                        elem_slots,
+                        has_ok,
+                    } => {
+                        w.write_u8(1);
+                        w.write_u16(*destination);
+                        w.write_u16(*queue);
+                        w.write_u16(*elem_slots);
+                        w.write_u8(u8::from(*has_ok));
+                    }
+                },
             );
         }
         InstructionMetadata::MapIterNext {
@@ -717,6 +753,7 @@ fn read_instruction_metadata_for_version(
             value_layout: read_slot_layout(r)?,
         }),
         10 => Ok(InstructionMetadata::SlotLayout {
+            array_len: r.read_u16()?,
             elem_layout: read_slot_layout(r)?,
         }),
         11 => Ok(InstructionMetadata::CallLayout {
@@ -735,6 +772,22 @@ fn read_instruction_metadata_for_version(
         }),
         13 => Ok(InstructionMetadata::QueueLayout {
             elem_layout: read_slot_layout(r)?,
+        }),
+        18 => Ok(InstructionMetadata::SelectExecLayout {
+            cases: r.read_vec(|r| match r.read_u8()? {
+                0 => Ok(SelectCaseLayout::Send {
+                    queue: r.read_u16()?,
+                    value: r.read_u16()?,
+                    elem_slots: r.read_u16()?,
+                }),
+                1 => Ok(SelectCaseLayout::Recv {
+                    destination: r.read_u16()?,
+                    queue: r.read_u16()?,
+                    elem_slots: r.read_u16()?,
+                    has_ok: read_bool(r)?,
+                }),
+                _ => Err(SerializeError::InvalidInstructionMetadata),
+            })?,
         }),
         14 => Ok(InstructionMetadata::MapIterNext {
             key_layout: read_slot_layout(r)?,
@@ -1678,25 +1731,11 @@ impl Module {
                     slot_types.len()
                 )));
             }
-            let gc_scan_slots = FunctionDef::try_compute_gc_scan_slots(&slot_types).ok_or_else(|| {
-                SerializeError::InvalidFunctionMetadata(format!(
-                    "function {name} slot_types cannot produce a u16 GC scan prefix"
-                ))
-            })?;
-            let borrowed_scan_slots_prefix =
-                FunctionDef::try_compute_borrowed_scan_slots_prefix(&slot_types).ok_or_else(
-                    || {
-                        SerializeError::InvalidFunctionMetadata(format!(
-                            "function {name} slot_types cannot produce u16 borrowed-scan prefixes"
-                        ))
-                    },
-                )?;
             Ok(FunctionDef {
                 name,
                 param_count,
                 param_slots,
                 local_slots,
-                gc_scan_slots,
                 ret_slots,
                 ret_slot_types,
                 recv_slots,
@@ -1709,7 +1748,6 @@ impl Module {
                 has_calls,
                 has_call_extern,
                 slot_types,
-                borrowed_scan_slots_prefix,
                 code,
                 instruction_metadata,
                 capture_types,
@@ -2011,7 +2049,6 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: 2,
-            gc_scan_slots: 0,
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -2024,7 +2061,6 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             slot_types: vec![SlotType::Value, SlotType::Value],
-            borrowed_scan_slots_prefix: vec![0, 0, 0],
             code: vec![
                 Instruction::new(Opcode::LoadInt, 0, 0x0001, 0x0000),
                 Instruction::new(Opcode::LoadInt, 1, 0x0002, 0x0000),
@@ -2076,7 +2112,6 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: RET_SLOTS,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&ret_slot_types),
             ret_slots: RET_SLOTS,
             ret_slot_types: ret_slot_types.clone(),
             recv_slots: 0,
@@ -2089,9 +2124,6 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             slot_types: ret_slot_types.clone(),
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
-                &ret_slot_types,
-            ),
             code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
             instruction_metadata: vec![InstructionMetadata::None],
             capture_types: vec![],
@@ -2114,7 +2146,6 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: 1,
-            gc_scan_slots: 0,
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -2127,7 +2158,6 @@ mod tests {
             has_calls: false,
             has_call_extern: false,
             slot_types: vec![SlotType::Value],
-            borrowed_scan_slots_prefix: vec![0, 0],
             code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
             instruction_metadata: Vec::new(),
             capture_types: vec![],
@@ -2164,6 +2194,7 @@ mod tests {
                 value_layout: vec![SlotType::Interface0, SlotType::Interface1],
             },
             InstructionMetadata::SlotLayout {
+                array_len: 3,
                 elem_layout: vec![SlotType::Value, SlotType::GcRef],
             },
             InstructionMetadata::CallLayout {
@@ -2182,6 +2213,21 @@ mod tests {
             },
             InstructionMetadata::QueueLayout {
                 elem_layout: vec![SlotType::GcRef],
+            },
+            InstructionMetadata::SelectExecLayout {
+                cases: vec![
+                    SelectCaseLayout::Send {
+                        queue: 2,
+                        value: 7,
+                        elem_slots: 2,
+                    },
+                    SelectCaseLayout::Recv {
+                        destination: 11,
+                        queue: 5,
+                        elem_slots: 2,
+                        has_ok: true,
+                    },
+                ],
             },
             InstructionMetadata::MapNew {
                 key_layout: vec![SlotType::Value],
@@ -2571,49 +2617,6 @@ mod tests {
             reader.read_u64(),
             Err(SerializeError::UnexpectedEof)
         ));
-    }
-
-    #[test]
-    fn deserialize_rejects_unrepresentable_gc_prefix_with_function_context() {
-        let mut slot_types = vec![SlotType::Value; u16::MAX as usize];
-        slot_types[u16::MAX as usize - 1] = SlotType::Interface0;
-        let mut module = Module::new("bad-derived-scan".into());
-        module.functions.push(FunctionDef {
-            name: "tail_interface_header".into(),
-            param_count: 0,
-            param_slots: 0,
-            local_slots: u16::MAX,
-            gc_scan_slots: 0,
-            ret_slots: 0,
-            ret_slot_types: Vec::new(),
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer: false,
-            has_calls: false,
-            has_call_extern: false,
-            slot_types,
-            borrowed_scan_slots_prefix: Vec::new(),
-            code: Vec::new(),
-            instruction_metadata: Vec::new(),
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-        });
-
-        let bytes = module.serialize().expect("serialize module");
-        let err = Module::deserialize(&bytes)
-            .expect_err("tail Interface0 cannot be represented in a u16 GC prefix");
-        match err {
-            SerializeError::InvalidFunctionMetadata(detail) => {
-                assert!(detail.contains("tail_interface_header"), "{detail}");
-                assert!(detail.contains("GC scan prefix"), "{detail}");
-            }
-            other => panic!("unexpected decode error: {other:?}"),
-        }
     }
 
     #[test]

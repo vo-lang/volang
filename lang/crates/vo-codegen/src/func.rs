@@ -7,7 +7,7 @@ use vo_common_core::instruction::{
     pack_u8_slot_count, HINT_LOOP, IFACE_ASSERT_HAS_OK_FLAG, QUEUE_KIND_PORT_FLAG,
     QUEUE_RECV_HAS_OK_FLAG,
 };
-use vo_common_core::{InstructionMetadata, TransferType};
+use vo_common_core::{InstructionMetadata, SelectCaseLayout, TransferType};
 use vo_runtime::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
@@ -1285,6 +1285,17 @@ impl FuncBuilder {
         );
     }
 
+    pub fn emit_select_exec(&mut self, destination: u16, cases: Vec<SelectCaseLayout>) {
+        self.emit_with_flags_and_metadata(
+            Opcode::SelectExec,
+            0,
+            destination,
+            0,
+            0,
+            InstructionMetadata::SelectExecLayout { cases },
+        );
+    }
+
     pub fn emit_map_iter_next(
         &mut self,
         iter_kv: u16,
@@ -1619,6 +1630,7 @@ impl FuncBuilder {
                         dst + i * elem_slots,
                         base_slot,
                         idx_reg,
+                        u64::from(len),
                         &elem_slot_types,
                     );
                 }
@@ -1688,6 +1700,7 @@ impl FuncBuilder {
                         base_slot,
                         idx_reg,
                         src + i * elem_slots,
+                        u64::from(len),
                         &elem_slot_types,
                     );
                 }
@@ -1750,12 +1763,20 @@ impl FuncBuilder {
         dst: u16,
         base: u16,
         index: u16,
+        array_len: u64,
         elem_slot_types: &[SlotType],
     ) {
+        let array_len = self.checked_u16_count_or_record(
+            usize::try_from(array_len).unwrap_or(usize::MAX),
+            "SlotGet array length",
+        );
         let elem_slots =
             self.checked_u16_count_or_record(elem_slot_types.len(), "SlotGetN element slot count");
         let elem_layout = elem_slot_types.to_vec();
-        let metadata = InstructionMetadata::SlotLayout { elem_layout };
+        let metadata = InstructionMetadata::SlotLayout {
+            array_len,
+            elem_layout,
+        };
         if elem_slots == 1 {
             self.emit_with_metadata(
                 Instruction::new(Opcode::SlotGet, dst, base, index),
@@ -1772,12 +1793,20 @@ impl FuncBuilder {
         base: u16,
         index: u16,
         src: u16,
+        array_len: u64,
         elem_slot_types: &[SlotType],
     ) {
+        let array_len = self.checked_u16_count_or_record(
+            usize::try_from(array_len).unwrap_or(usize::MAX),
+            "SlotSet array length",
+        );
         let elem_slots =
             self.checked_u16_count_or_record(elem_slot_types.len(), "SlotSetN element slot count");
         let elem_layout = elem_slot_types.to_vec();
-        let metadata = InstructionMetadata::SlotLayout { elem_layout };
+        let metadata = InstructionMetadata::SlotLayout {
+            array_len,
+            elem_layout,
+        };
         if elem_slots == 1 {
             self.emit_with_metadata(
                 Instruction::new(Opcode::SlotSet, base, index, src),
@@ -2343,9 +2372,6 @@ impl FuncBuilder {
             .iter()
             .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
-        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&self.slot_types);
-        let borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
         assert_eq!(self.code.len(), self.instruction_metadata.len());
 
         let call_debug_locs = core::mem::take(&mut self.call_debug_locs);
@@ -2354,7 +2380,6 @@ impl FuncBuilder {
             param_count: self.param_count,
             param_slots: self.param_slots,
             local_slots,
-            gc_scan_slots,
             ret_slots: self.ret_slots,
             ret_slot_types: self.ret_slot_types,
             recv_slots: self.recv_slots,
@@ -2369,7 +2394,6 @@ impl FuncBuilder {
             code: self.code,
             instruction_metadata: self.instruction_metadata,
             slot_types: self.slot_types,
-            borrowed_scan_slots_prefix,
             capture_types: self.capture_types,
             capture_slot_types: self.capture_slot_types,
             param_types: self.param_types,

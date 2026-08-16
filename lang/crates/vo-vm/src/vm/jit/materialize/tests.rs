@@ -14,17 +14,13 @@ fn fill_call_frames_until_remaining(fiber: &mut Fiber, remaining: usize) {
 
 fn frame_capacity_module() -> Module {
     let mut module = Module::new("jit-frame-capacity-test".to_string());
-    module.functions.push(function(0, 0));
-    module.functions.push(function(0, 0));
+    module.functions.push(function(0));
+    module.functions.push(function(0));
     module
 }
 
-fn function_with_returns(
-    local_slots: u16,
-    gc_scan_slots: u16,
-    ret_slots: u16,
-) -> vo_runtime::bytecode::FunctionDef {
-    let mut func = function(local_slots, gc_scan_slots);
+fn function_with_returns(local_slots: u16, ret_slots: u16) -> vo_runtime::bytecode::FunctionDef {
+    let mut func = function(local_slots);
     func.ret_slots = ret_slots;
     func.ret_slot_types = vec![vo_runtime::SlotType::Value; ret_slots as usize];
     func
@@ -87,9 +83,9 @@ fn vm_jit_regular_call_materialize_capacity_failure_is_transactional_058() {
 #[test]
 fn vm_jit_regular_call_actual_borrowed_bp_capacity_failure_is_transactional_058() {
     let mut module = Module::new("jit-regular-call-borrowed-bp-capacity-test".to_string());
-    module.functions.push(function(0, 0));
-    module.functions.push(function(1, 0));
-    module.functions.push(function(1, 0));
+    module.functions.push(function(0));
+    module.functions.push(function(1));
+    module.functions.push(function(1));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 0, 0, 0);
@@ -116,60 +112,10 @@ fn vm_jit_regular_call_actual_borrowed_bp_capacity_failure_is_transactional_058(
 }
 
 #[test]
-fn vm_jit_prepared_call_rejects_scan_slots_beyond_locals_before_zeroing_062() {
-    let mut module = Module::new("jit-prepared-call-frame-shape-test".to_string());
-    module.functions.push(function(1, 0));
-    module.functions.push(function(1, 2));
-
-    let mut fiber = Fiber::new(1);
-    fiber.push_frame(0, 1, 0, 0);
-    let before_frame_count = fiber.frames.len();
-    let before_stack_len = fiber.stack.len();
-    let before_sp = fiber.sp;
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        setup_prepared_call(&mut fiber, &module, 1, 0, 0, 1, 33)
-    }));
-
-    let err = result
-        .expect("prepared call frame-shape drift must return an error, not panic")
-        .expect_err("prepared call frame-shape drift must be rejected");
-    assert!(matches!(err, JitFrameMaterializeError::Invariant(_)));
-    assert_eq!(fiber.frames.len(), before_frame_count);
-    assert_eq!(fiber.stack.len(), before_stack_len);
-    assert_eq!(fiber.sp, before_sp);
-}
-
-#[test]
-fn vm_jit_regular_call_rejects_scan_slots_beyond_locals_before_frame_push_062() {
-    let mut module = Module::new("jit-regular-call-frame-shape-test".to_string());
-    module.functions.push(function(2, 0));
-    module.functions.push(function(1, 2));
-
-    let mut fiber = Fiber::new(1);
-    fiber.push_frame(0, 2, 0, 0);
-    let before_frame_count = fiber.frames.len();
-    let before_stack_len = fiber.stack.len();
-    let before_sp = fiber.sp;
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        setup_regular_call(&mut fiber, &module, 1, 0, 0, 1, 33)
-    }));
-
-    let err = result
-        .expect("regular call frame-shape drift must return an error, not panic")
-        .expect_err("regular call frame-shape drift must be rejected");
-    assert!(matches!(err, JitFrameMaterializeError::Invariant(_)));
-    assert_eq!(fiber.frames.len(), before_frame_count);
-    assert_eq!(fiber.stack.len(), before_stack_len);
-    assert_eq!(fiber.sp, before_sp);
-}
-
-#[test]
 fn vm_jit_prepared_call_rejects_return_window_beyond_caller_locals_before_frame_push_062() {
     let mut module = Module::new("jit-prepared-call-return-window-test".to_string());
-    module.functions.push(function(1, 0));
-    module.functions.push(function_with_returns(1, 0, 1));
+    module.functions.push(function(1));
+    module.functions.push(function_with_returns(1, 1));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 1, 0, 0);
@@ -192,9 +138,9 @@ fn vm_jit_prepared_call_rejects_return_window_beyond_caller_locals_before_frame_
 fn vm_jit_prepared_call_rejects_return_window_beyond_caller_locals_against_materialized_resume_caller_062(
 ) {
     let mut module = Module::new("jit-prepared-call-resume-return-window-test".to_string());
-    module.functions.push(function(4, 0));
-    module.functions.push(function(1, 0));
-    module.functions.push(function_with_returns(1, 0, 1));
+    module.functions.push(function(4));
+    module.functions.push(function(1));
+    module.functions.push(function_with_returns(1, 1));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 4, 0, 0);
@@ -224,8 +170,8 @@ fn vm_jit_prepared_call_rejects_return_window_beyond_caller_locals_against_mater
 #[test]
 fn vm_jit_regular_call_rejects_return_window_beyond_caller_locals_before_frame_push_062() {
     let mut module = Module::new("jit-regular-call-return-window-test".to_string());
-    module.functions.push(function(1, 0));
-    module.functions.push(function_with_returns(1, 0, 1));
+    module.functions.push(function(1));
+    module.functions.push(function_with_returns(1, 1));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 1, 0, 0);
@@ -248,9 +194,9 @@ fn vm_jit_regular_call_rejects_return_window_beyond_caller_locals_before_frame_p
 fn vm_jit_regular_call_rejects_return_window_beyond_caller_locals_against_materialized_resume_caller_transactionally_062(
 ) {
     let mut module = Module::new("jit-regular-call-resume-return-window-test".to_string());
-    module.functions.push(function(4, 0));
-    module.functions.push(function(1, 0));
-    module.functions.push(function_with_returns(1, 0, 1));
+    module.functions.push(function(4));
+    module.functions.push(function(1));
+    module.functions.push(function_with_returns(1, 1));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 4, 0, 0);
@@ -282,9 +228,9 @@ fn vm_jit_regular_call_rejects_return_window_beyond_caller_locals_against_materi
 #[test]
 fn vm_jit_materialize_resume_stack_middle_func_id_failure_is_transactional_058() {
     let mut module = Module::new("jit-materialize-middle-func-id-test".to_string());
-    module.functions.push(function(2, 0));
-    module.functions.push(function(3, 1));
-    module.functions.push(function(4, 2));
+    module.functions.push(function(2));
+    module.functions.push(function(3));
+    module.functions.push(function(4));
 
     let mut fiber = Fiber::new(1);
     let entry_bp = fiber.push_frame(0, 2, 0, 0);
@@ -334,8 +280,8 @@ fn vm_jit_materialize_resume_stack_middle_func_id_failure_is_transactional_058()
 #[test]
 fn vm_jit_materialize_resume_frame_shape_062_rejects_param_slots_beyond_locals_transactionally() {
     let mut module = Module::new("jit-materialize-resume-frame-shape-test".to_string());
-    module.functions.push(function(1, 0));
-    let mut malformed = function(1, 0);
+    module.functions.push(function(1));
+    let mut malformed = function(1);
     malformed.param_count = 2;
     malformed.param_slots = 2;
     module.functions.push(malformed);
@@ -381,7 +327,7 @@ fn vm_jit_materialize_resume_frame_shape_062_rejects_param_slots_beyond_locals_t
 fn vm_jit_materialize_zero_resume_existing_frame_shape_062_rejects_param_slots_beyond_locals_transactionally(
 ) {
     let mut module = Module::new("jit-materialize-zero-resume-frame-shape-test".to_string());
-    let mut malformed = function(1, 0);
+    let mut malformed = function(1);
     malformed.param_count = 2;
     malformed.param_slots = 2;
     module.functions.push(malformed);
@@ -413,7 +359,7 @@ fn vm_jit_materialize_zero_resume_existing_frame_shape_062_rejects_param_slots_b
 #[test]
 fn vm_jit_materialize_zero_resume_uses_frame_extent_without_touching_dead_slots() {
     let mut module = Module::new("jit-materialize-zero-resume-frame-extent-test".to_string());
-    module.functions.push(function(4, 4));
+    module.functions.push(function(4));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 4, 0, 0);
@@ -431,8 +377,8 @@ fn vm_jit_materialize_zero_resume_uses_frame_extent_without_touching_dead_slots(
 #[test]
 fn vm_jit_materialize_resume_point_return_window_failure_is_transactional_058() {
     let mut module = Module::new("jit-materialize-return-window-test".to_string());
-    module.functions.push(function(2, 0));
-    module.functions.push(function_with_returns(0, 0, 1));
+    module.functions.push(function(2));
+    module.functions.push(function_with_returns(0, 1));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 2, 0, 0);
@@ -463,9 +409,9 @@ fn vm_jit_materialize_resume_point_return_window_failure_is_transactional_058() 
 #[test]
 fn vm_jit_prepared_call_resume_stack_rejects_final_sp_below_candidate_frame_base() {
     let mut module = Module::new("jit-prepared-call-resume-final-sp-test".to_string());
-    module.functions.push(function(8, 8));
-    module.functions.push(function(1, 0));
-    module.functions.push(function(0, 0));
+    module.functions.push(function(8));
+    module.functions.push(function(1));
+    module.functions.push(function(0));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 8, 0, 0);
@@ -498,9 +444,9 @@ fn vm_jit_prepared_call_resume_stack_rejects_final_sp_below_candidate_frame_base
 #[test]
 fn vm_gc_materialize_jit_frames_preserves_nested_frame_invariants() {
     let mut module = Module::new("jit-frame-test".to_string());
-    module.functions.push(function(2, 0));
-    module.functions.push(function_with_returns(3, 1, 1));
-    module.functions.push(function_with_returns(4, 2, 1));
+    module.functions.push(function(2));
+    module.functions.push(function_with_returns(3, 1));
+    module.functions.push(function_with_returns(4, 1));
 
     let mut fiber = Fiber::new(1);
     let entry_bp = fiber.push_frame(0, 2, 0, 0);
@@ -540,7 +486,7 @@ fn vm_gc_materialize_jit_frames_preserves_nested_frame_invariants() {
 #[test]
 fn vm_gc_materialize_jit_frames_without_shadow_frames_restores_entry_sp() {
     let mut module = Module::new("jit-entry-frame-test".to_string());
-    module.functions.push(function(9, 3));
+    module.functions.push(function(9));
 
     let mut fiber = Fiber::new(1);
     let bp = fiber.push_frame(0, 9, 0, 0);
@@ -558,7 +504,7 @@ fn vm_gc_materialize_jit_frames_without_shadow_frames_restores_entry_sp() {
 #[test]
 fn vm_materialize_jit_frames_preserves_same_func_and_bp_recursion_depth() {
     let mut module = Module::new("jit-recursive-zero-slot-test".to_string());
-    module.functions.push(function(0, 0));
+    module.functions.push(function(0));
 
     let mut fiber = Fiber::new(1);
     fiber.push_frame(0, 0, 0, 0);
@@ -594,9 +540,9 @@ fn vm_materialize_jit_frames_preserves_same_func_and_bp_recursion_depth() {
 #[test]
 fn vm_gc_materialized_invariants_allow_borrowed_parent_above_current_sp() {
     let mut module = Module::new("jit-borrowed-parent-frame-test".to_string());
-    module.functions.push(function(10, 4));
-    module.functions.push(function(2, 1));
-    module.functions.push(function(3, 1));
+    module.functions.push(function(10));
+    module.functions.push(function(2));
+    module.functions.push(function(3));
 
     let mut fiber = Fiber::new(1);
     let parent_bp = fiber.push_frame(0, 10, 0, 0);

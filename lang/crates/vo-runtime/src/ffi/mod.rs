@@ -1545,6 +1545,15 @@ fn checked_array_slot_count(elem_slots: usize, len: usize) -> Option<usize> {
     elem_slots.checked_mul(len)
 }
 
+#[inline]
+fn invoke_windows_overlap(invoke: ExternInvoke) -> bool {
+    let arg_start = u32::from(invoke.arg_start);
+    let arg_end = arg_start + u32::from(invoke.arg_slots);
+    let ret_start = u32::from(invoke.ret_start);
+    let ret_end = ret_start + u32::from(invoke.ret_slots);
+    arg_start < ret_end && ret_start < arg_end
+}
+
 impl<'a> ExternCallContext<'a> {
     /// Create from structured call types.
     #[inline]
@@ -4052,7 +4061,9 @@ impl<'a> ExternCallContext<'a> {
         Ok(())
     }
 
-    fn snapshot_return_slots(&self) -> Result<Vec<u64>, ExternContractError> {
+    /// Save the prior return window for transactional rollback and establish
+    /// the language zero value for every output before provider code runs.
+    fn prepare_return_slots(&mut self) -> Result<Vec<u64>, ExternContractError> {
         let ret_slots = usize::from(self.ret_slots);
         if ret_slots == 0 {
             return Ok(Vec::new());
@@ -4070,16 +4081,17 @@ impl<'a> ExternCallContext<'a> {
                 self.extern_id, self.ret_start, self.ret_slots
             ))
         })?;
-        let window = self.stack.get(absolute..end).ok_or_else(|| {
+        let stack_len = self.stack.len();
+        let extern_id = self.extern_id;
+        let window = self.stack.get_mut(absolute..end).ok_or_else(|| {
             ExternContractError::new(format!(
                 "extern_id={} return slot range {}..{} out of bounds for stack length {}",
-                self.extern_id,
-                absolute,
-                end,
-                self.stack.len()
+                extern_id, absolute, end, stack_len
             ))
         })?;
-        Ok(window.to_vec())
+        let snapshot = window.to_vec();
+        window.fill(0);
+        Ok(snapshot)
     }
 
     fn restore_return_slots(&mut self, snapshot: &[u64]) -> Result<(), ExternContractError> {
@@ -6794,6 +6806,12 @@ impl ExternRegistry {
         resolved: Option<&ResolvedExtern>,
     ) -> ExternCallOutcome {
         self.ensure_registration_clean()?;
+        if invoke_windows_overlap(invoke) {
+            return Err(ExternContractError::new(format!(
+                "extern id {} argument and return windows overlap",
+                invoke.extern_id
+            )));
+        }
         let registered = if let Some(resolved) = resolved {
             match self.registered_by_name(&resolved.name) {
                 Some(registered) => Some(registered),
@@ -6835,7 +6853,7 @@ impl ExternRegistry {
                         ctx.bind_wasm_extension_bridge_abi(resolved, artifact_generation)?;
                     }
                 }
-                let return_snapshot = ctx.snapshot_return_slots()?;
+                let return_snapshot = ctx.prepare_return_slots()?;
                 let result = match registered.func {
                     RegisteredFn::Internal(f) => call_internal_provider(
                         f,

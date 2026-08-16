@@ -128,31 +128,26 @@ pub(crate) fn prepare_extern_closure_replay_call(
         Ok(args) => args,
         Err(err) => return ExecResult::JitError(err),
     };
-    let resume_frame = match crate::runtime_boundary::frame_index_for_resume(
-        fiber,
-        resume,
-        "CallExtern closure replay",
-    ) {
-        Ok(index) => index,
-        Err(err) => return ExecResult::JitError(err),
+    let ResumePolicy::ReplayCurrentInstruction { pc: replay_pc } = resume else {
+        return ExecResult::JitError(
+            "CallExtern closure replay requires ReplayCurrentInstruction".to_string(),
+        );
     };
-    let setup =
-        prepare_typed_extern_closure_replay_setup(gc, fiber, module, itab_cache, closure_ref, args);
-    if setup.replay_frame_published {
-        if let Err(err) = crate::runtime_boundary::set_frame_pc_for_resume(
-            fiber,
-            resume_frame,
-            resume,
-            "CallExtern closure replay",
-        ) {
-            return ExecResult::JitError(err);
-        }
-    }
-    setup.result
+    prepare_typed_extern_closure_replay_setup(
+        gc,
+        fiber,
+        module,
+        itab_cache,
+        closure_ref,
+        args,
+        replay_pc,
+    )
+    .result
 }
 
 pub(crate) struct ExternReplaySetup {
     pub(crate) result: ExecResult,
+    #[cfg(feature = "jit")]
     pub(crate) replay_frame_published: bool,
 }
 
@@ -163,14 +158,18 @@ pub(crate) fn prepare_typed_extern_closure_replay_setup(
     itab_cache: &vo_runtime::itab::ItabCache,
     closure_ref: vo_runtime::gc::GcRef,
     args: TypedSlotPayload,
+    replay_pc: u32,
 ) -> ExternReplaySetup {
-    let replay_depth_stack_len = fiber.closure_replay.depth_stack.len();
+    #[cfg(feature = "jit")]
+    let replay_boundary_count = fiber.closure_replay.boundary_count();
     let result = FrameCallBuilder::new_with_itab_cache(gc, fiber, module, itab_cache)
-        .call_extern_replay_closure(closure_ref, args);
+        .call_extern_replay_closure_at(closure_ref, args, replay_pc as usize);
+    #[cfg(feature = "jit")]
     let replay_frame_published = matches!(result, ExecResult::FrameChanged)
-        && fiber.closure_replay.depth_stack.len() > replay_depth_stack_len;
+        && fiber.closure_replay.boundary_count() > replay_boundary_count;
     ExternReplaySetup {
         result,
+        #[cfg(feature = "jit")]
         replay_frame_published,
     }
 }
@@ -190,7 +189,6 @@ mod tests {
             param_count: param_slots,
             param_slots,
             local_slots,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -205,10 +203,6 @@ mod tests {
             code: Vec::new(),
             instruction_metadata: Vec::new(),
             slot_types,
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
-                SlotType::Value;
-                local_slots as usize
-            ]),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -266,8 +260,6 @@ mod tests {
         let mut module = Module::new("extern-replay-setup-validation".to_string());
         let mut callee = replay_callee(0, 1);
         callee.slot_types = vec![SlotType::Value];
-        callee.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
         module.functions.push(callee);
         let closure_ref = closure::create(&mut gc, 0, 0);
         let itab_cache = vo_runtime::itab::ItabCache::new();
@@ -287,6 +279,39 @@ mod tests {
             fiber.current_frame().unwrap().pc,
             9,
             "failed closure replay setup must not commit the replay pc"
+        );
+    }
+
+    #[test]
+    fn vm_extern_replay_publishes_suspended_pc_and_retains_replay_pc() {
+        let mut gc = vo_runtime::gc::Gc::new();
+        let mut fiber = Fiber::new(0);
+        fiber.push_frame(0, 4, 0, 0);
+        fiber.current_frame_mut().unwrap().pc = 3;
+        let mut module = Module::new("extern-replay-pc-protocol".to_string());
+        module.functions.push(replay_callee(1, 0));
+        let closure_ref = closure::create(&mut gc, 0, 0);
+        let itab_cache = vo_runtime::itab::ItabCache::new();
+
+        let result = prepare_extern_closure_replay_call(
+            &mut gc,
+            &mut fiber,
+            &module,
+            &itab_cache,
+            closure_ref,
+            Vec::new(),
+            ResumePolicy::ReplayCurrentInstruction { pc: 3 },
+        );
+
+        assert!(matches!(result, ExecResult::FrameChanged));
+        assert_eq!(fiber.frames.len(), 2);
+        assert_eq!(fiber.frames[0].pc, 4);
+        assert_eq!(
+            fiber.closure_replay.active_boundary(),
+            Some(crate::fiber::ClosureReplayBoundary {
+                frame_depth: 2,
+                replay_pc: 3,
+            })
         );
     }
 }

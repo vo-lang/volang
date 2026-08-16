@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn vm_jit_deopt_rejects_absent_artifact_state() {
-        let mut func = function(3, 0);
+        let mut func = function(3);
         func.code = vec![
             Instruction::new(Opcode::LoadInt, 1, 8, 0),
             Instruction::new(Opcode::PtrNew, 0, 1, 0),
@@ -123,10 +123,6 @@ mod tests {
             vo_runtime::bytecode::InstructionMetadata::None,
         ];
         func.slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
-        func.gc_scan_slots =
-            vo_runtime::bytecode::FunctionDef::compute_gc_scan_slots(&func.slot_types);
-        func.borrowed_scan_slots_prefix =
-            vo_runtime::bytecode::FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         let mut module = Module::new("jit-deopt".to_string());
         module.functions.push(func);
 
@@ -194,7 +190,7 @@ mod tests {
     fn vm_jit_runtime_transition_materializes_next_pc_and_yields() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-runtime-transition".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
         vm.finish_load(module.clone());
         let mut fiber = Fiber::new(11);
         fiber.push_frame(0, 1, 0, 0);

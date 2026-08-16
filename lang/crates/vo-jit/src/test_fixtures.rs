@@ -59,7 +59,6 @@ impl JitFunctionBuilder {
             param_count: self.param_count,
             param_slots: self.param_slots,
             local_slots: self.slot_types.len() as u16,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&self.slot_types),
             ret_slots: self.ret_slots,
             ret_slot_types,
             recv_slots: self.recv_slots,
@@ -74,9 +73,6 @@ impl JitFunctionBuilder {
             code: self.code,
             instruction_metadata,
             slot_types: self.slot_types.clone(),
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
-                &self.slot_types,
-            ),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -144,8 +140,7 @@ mod tests {
         .build();
 
         assert_eq!(func.local_slots, 4);
-        assert_eq!(func.gc_scan_slots, 4);
-        assert_eq!(func.borrowed_scan_slots_prefix, vec![0, 0, 2, 4, 4]);
+        assert_eq!(func.slot_types.len(), 4);
         assert_eq!(func.instruction_metadata.len(), func.code.len());
         assert_eq!(func.ret_slot_types, vec![SlotType::Value]);
         assert!(func.has_calls);

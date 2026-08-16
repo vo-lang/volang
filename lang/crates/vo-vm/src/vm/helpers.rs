@@ -337,13 +337,11 @@ mod tests {
         recv_slots: u16,
         is_closure: bool,
     ) -> FunctionDef {
-        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&[]);
         FunctionDef {
             name: String::new(),
             param_count: param_slots,
             param_slots,
             local_slots,
-            gc_scan_slots,
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots,
@@ -358,7 +356,6 @@ mod tests {
             instruction_metadata: Vec::new(),
             code: Vec::new(),
             slot_types: Vec::new(),
-            borrowed_scan_slots_prefix: vec![0],
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),

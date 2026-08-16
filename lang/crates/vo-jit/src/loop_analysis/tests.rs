@@ -4,15 +4,12 @@ use vo_runtime::SlotType;
 fn make_func(code: Vec<Instruction>) -> FunctionDef {
     let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
     let slot_types = vec![];
-    let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-    let borrowed_scan_slots_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
     FunctionDef {
         name: "test".to_string(),
         param_count: 0,
         param_slots: 0,
         param_types: vec![],
         local_slots: 20,
-        gc_scan_slots,
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 0,
@@ -29,7 +26,6 @@ fn make_func(code: Vec<Instruction>) -> FunctionDef {
         instruction_metadata: vec![Default::default(); code.len()],
         code,
         slot_types,
-        borrowed_scan_slots_prefix,
     }
 }
 
@@ -729,7 +725,7 @@ fn test_get_write_reg_queue_and_select_ops() {
     assert_eq!(get_write_reg(&queue_new(1, 2, 3, true)), Some(1));
     assert_eq!(get_write_reg(&queue_len(4, 5)), Some(4));
     assert_eq!(get_write_reg(&queue_cap(6, 7)), Some(6));
-    assert_eq!(get_write_reg(&select_exec(8)), Some(8));
+    assert_eq!(get_write_reg(&select_exec(8)), None);
     assert_eq!(get_write_reg(&queue_close(9)), None);
 }
 
@@ -746,9 +742,20 @@ fn test_get_write_regs_multi_queue_and_select_ops() {
         get_write_regs_multi_with_metadata(&queue_recv(20, 6, false), &two_slots),
         vec![20, 21]
     );
+    assert!(
+        get_write_regs_multi_with_metadata(&select_recv_inst(30, 7, true), &zero_slots).is_empty()
+    );
+    let select = InstructionMetadata::SelectExecLayout {
+        cases: vec![vo_runtime::bytecode::SelectCaseLayout::Recv {
+            destination: 30,
+            queue: 7,
+            elem_slots: 0,
+            has_ok: true,
+        }],
+    };
     assert_eq!(
-        get_write_regs_multi_with_metadata(&select_recv_inst(30, 7, true), &zero_slots),
-        vec![30]
+        get_write_regs_multi_with_metadata(&select_exec(8), &select),
+        vec![8, 30]
     );
 }
 

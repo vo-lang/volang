@@ -32,7 +32,7 @@ pub fn try_instruction_effects_with_module_context(
     Ok(InstructionEffects {
         reads: try_read_regs_with_module_context(inst, facts, functions)?,
         writes: try_write_regs_with_module_context(inst, facts, externs, functions)?,
-        memory_sync: try_memory_sync_effect(inst)?,
+        memory_sync: try_memory_sync_effect(inst, facts)?,
         may_call: may_call(inst),
     })
 }

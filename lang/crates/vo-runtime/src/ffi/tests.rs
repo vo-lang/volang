@@ -3716,6 +3716,64 @@ fn ffi_resolved_non_ok_return_slots_rollback_before_yield_061() {
 
 #[cfg(feature = "std")]
 #[test]
+fn ffi_resolved_ok_return_slots_start_at_language_zero() {
+    let mut registry = ExternRegistry::new();
+    registry.register_test_named(
+        0,
+        test_extern_name("contract_zero_returns"),
+        other_ok_extern,
+    );
+    freeze_single_extern(
+        &mut registry,
+        extern_def(
+            "contract_zero_returns",
+            ParamShape::Exact { slots: 0 },
+            ReturnShape::slots(2),
+            ExternEffects::NONE,
+        ),
+    );
+    let mut stack = [0xaaaa, 0xbbbb, 0xcccc, 0xdddd];
+
+    let result = call_resolved_extern_with_stack(&registry, &mut stack, invoke_with_returns(2))
+        .expect("successful extern call keeps unwritten outputs at their zero value");
+
+    assert!(matches!(result, ExternResult::Ok));
+    assert_eq!(stack, [0, 0, 0xcccc, 0xdddd]);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn ffi_resolved_call_rejects_overlapping_argument_and_return_windows() {
+    let mut registry = ExternRegistry::new();
+    registry.register_test_named(0, test_extern_name("contract_overlap"), other_ok_extern);
+    freeze_single_extern(
+        &mut registry,
+        extern_def(
+            "contract_overlap",
+            ParamShape::Exact { slots: 1 },
+            ReturnShape::slots(1),
+            ExternEffects::NONE,
+        ),
+    );
+    let mut stack = [7, 0];
+    let invoke = ExternInvoke {
+        extern_id: 0,
+        bp: 0,
+        arg_start: 0,
+        arg_slots: 1,
+        ret_start: 0,
+        ret_slots: 1,
+    };
+
+    let error = call_resolved_extern_with_stack(&registry, &mut stack, invoke)
+        .expect_err("overlapping extern windows have order-dependent semantics");
+
+    assert!(error.to_string().contains("windows overlap"));
+    assert_eq!(stack, [7, 0]);
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn ffi_resolved_contract_error_rolls_back_return_slots_061() {
     let mut registry = ExternRegistry::new();
     registry.register_test_named_with_effects(

@@ -1494,7 +1494,6 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: 0,
-            gc_scan_slots: 0,
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -1509,7 +1508,6 @@ mod tests {
             code: Vec::new(),
             instruction_metadata: Vec::new(),
             slot_types: Vec::new(),
-            borrowed_scan_slots_prefix: Vec::new(),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -1521,8 +1519,6 @@ mod tests {
         func.name = name.to_string();
         func.instruction_metadata = vec![InstructionMetadata::None; code.len()];
         func.code = code;
-        func.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         (func.has_calls, func.has_call_extern) = FunctionDef::compute_call_flags(&func.code);
         func
     }
@@ -1532,7 +1528,6 @@ mod tests {
         func.param_count = 3;
         func.param_slots = 3;
         func.local_slots = 4;
-        func.gc_scan_slots = 4;
         func.ret_slots = 1;
         func.ret_slot_types = vec![vo_runtime::SlotType::GcRef];
         func.slot_types = vec![
@@ -1541,8 +1536,6 @@ mod tests {
             vo_runtime::SlotType::Value,
             vo_runtime::SlotType::GcRef,
         ];
-        func.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         func
     }
 
@@ -1944,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn native_gc_clears_dead_managed_slots_before_frame_materialization() {
+    fn native_recovery_does_not_republish_dead_managed_slots() {
         let mut caller = string_slice_func(
             "caller",
             vec![
@@ -1956,10 +1949,7 @@ mod tests {
             ],
         );
         caller.local_slots = 5;
-        caller.gc_scan_slots = 5;
         caller.slot_types.push(vo_runtime::SlotType::GcRef);
-        caller.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
 
         let mut interpreted_callee = string_slice_func(
             "interpreted",
@@ -1967,12 +1957,9 @@ mod tests {
         );
         const LARGE_FRAME_SLOTS: usize = 513;
         interpreted_callee.local_slots = LARGE_FRAME_SLOTS as u16;
-        interpreted_callee.gc_scan_slots = 4;
         interpreted_callee
             .slot_types
             .resize(LARGE_FRAME_SLOTS, vo_runtime::SlotType::Value);
-        interpreted_callee.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&interpreted_callee.slot_types);
 
         let mut module = VoModule::new("jit-dead-native-root-publication".to_string());
         module.functions = vec![caller, interpreted_callee];
@@ -2031,7 +2018,6 @@ mod tests {
         func.param_count = 4;
         func.param_slots = 5;
         func.local_slots = 6;
-        func.gc_scan_slots = 6;
         func.ret_slots = 2;
         func.ret_slot_types = vec![
             vo_runtime::SlotType::Interface0,
@@ -2045,8 +2031,6 @@ mod tests {
             vo_runtime::SlotType::Value,
             vo_runtime::SlotType::GcRef,
         ];
-        func.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         let mut module = VoModule::new("jit-native-interface-root".to_string());
         module.functions.push(func);
 

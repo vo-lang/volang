@@ -249,8 +249,10 @@ pub fn handle_jit_ok_return(
                 Err(result) => return result,
             };
         fiber.closure_replay.results.push((vals, slot_types));
-        fiber.closure_replay.pop_depth();
         let _ = pop_frame(fiber);
+        if let Err(result) = restore_closure_replay_parent_pc(fiber) {
+            return result;
+        }
         return ExecResult::FrameChanged;
     }
 
@@ -1329,8 +1331,16 @@ fn start_panic_unwind_until(
             .closure_replay
             .should_intercept_panic(fiber.frames.len())
         {
-            let target_depth = fiber.closure_replay.depth - 1; // caller's frame depth
-            fiber.closure_replay.pop_depth();
+            let Some(boundary) = fiber.closure_replay.pop_boundary() else {
+                return ExecResult::JitError(
+                    "closure replay panic is missing its boundary".to_string(),
+                );
+            };
+            let Some(target_depth) = boundary.frame_depth.checked_sub(1) else {
+                return ExecResult::JitError(
+                    "closure replay panic boundary has no parent depth".to_string(),
+                );
+            };
             fiber.closure_replay.panic_message =
                 fiber.panic_state.as_ref().map(|state| state.message());
             // Consume the panic — it will be reported as an error by the extern function
@@ -1343,6 +1353,12 @@ fn start_panic_unwind_until(
                     return ExecResult::Panic;
                 }
             }
+            let Some(parent) = fiber.current_frame_mut() else {
+                return ExecResult::JitError(
+                    "closure replay panic boundary lost its parent frame".to_string(),
+                );
+            };
+            parent.pc = boundary.replay_pc;
             restore_suspended_panic(fiber);
             return ExecResult::FrameChanged;
         }
@@ -1457,8 +1473,25 @@ fn finalize_closure_replay_return(
         }
     };
     fiber.closure_replay.results.push((vals, slot_types));
-    fiber.closure_replay.pop_depth();
+    if let Err(result) = restore_closure_replay_parent_pc(fiber) {
+        return result;
+    }
     ExecResult::FrameChanged
+}
+
+fn restore_closure_replay_parent_pc(fiber: &mut Fiber) -> Result<(), ExecResult> {
+    let Some(boundary) = fiber.closure_replay.pop_boundary() else {
+        return Err(ExecResult::JitError(
+            "closure replay return is missing its boundary".to_string(),
+        ));
+    };
+    let Some(parent) = fiber.current_frame_mut() else {
+        return Err(ExecResult::JitError(
+            "closure replay return lost its parent frame".to_string(),
+        ));
+    };
+    parent.pc = boundary.replay_pc;
+    Ok(())
 }
 
 /// Extract return values from current frame for panic/recover.
@@ -2038,6 +2071,7 @@ fn call_defer_entry(
             return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::StackOverflow);
         }
     };
+    fiber.zero_function_root_locals_at(args_start, func);
     if layout.slot0.is_some() && layout.arg_offset > 1 {
         fiber.zero_slots_at(args_start + 1, layout.arg_offset - 1);
     }

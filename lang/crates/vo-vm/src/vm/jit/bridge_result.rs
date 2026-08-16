@@ -382,7 +382,7 @@ mod tests {
         let mut module = Module::new("jit shadow capacity bridge test".to_string());
         module
             .functions
-            .push(super::super::test_support::function(1, 1));
+            .push(super::super::test_support::function(1));
         let mut fiber = Fiber::new(0);
         fiber.push_frame(0, 1, 0, 0);
         fiber.resume_stack.push(ResumePoint {

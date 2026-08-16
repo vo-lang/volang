@@ -644,7 +644,13 @@ fn vm_select_zero_slot_send_contract_018_accepts_empty_element_layout() {
         InstructionMetadata::QueueLayout {
             elem_layout: Vec::new(),
         },
-        InstructionMetadata::None,
+        InstructionMetadata::SelectExecLayout {
+            cases: vec![SelectCaseLayout::Send {
+                queue: 0,
+                value: 1,
+                elem_slots: 0,
+            }],
+        },
     ];
     module.functions.push(func);
 
@@ -700,7 +706,14 @@ fn vm_select_recv_layout_contract_018_rejects_structural_interface_destination()
         InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value, SlotType::Value],
         },
-        InstructionMetadata::None,
+        InstructionMetadata::SelectExecLayout {
+            cases: vec![SelectCaseLayout::Recv {
+                destination: 0,
+                queue: 2,
+                elem_slots: 2,
+                has_ok: false,
+            }],
+        },
     ];
     module.functions.push(func);
 

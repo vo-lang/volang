@@ -553,6 +553,7 @@ mod tests {
         let get = Instruction::with_flags(Opcode::SlotGetN, 0, 500, 10, 20);
         let set = Instruction::with_flags(Opcode::SlotSetN, 0, 10, 20, 500);
         let meta = InstructionMetadata::SlotLayout {
+            array_len: 1,
             elem_layout: vec![SlotType::Value; 300],
         };
         let facts = EffectFacts::from_instruction(Some(&meta));
@@ -572,17 +573,22 @@ mod tests {
         let slot_get = Instruction::with_flags(Opcode::SlotGetN, 0, 20, 2, 7);
         let queue_send = Instruction::new(Opcode::QueueSend, 1, 9, 0);
         let append = Instruction::new(Opcode::SliceAppend, 0, 1, 4);
+        let metadata = InstructionMetadata::SlotLayout {
+            array_len: 3,
+            elem_layout: vec![SlotType::Value; 2],
+        };
+        let facts = EffectFacts::from_instruction(Some(&metadata));
 
         assert_eq!(
-            try_memory_sync_effect(&slot_get).unwrap(),
-            MemorySyncEffect::AliasedFrom(2)
+            try_memory_sync_effect(&slot_get, facts).unwrap(),
+            MemorySyncEffect::AliasedRange { start: 2, count: 6 }
         );
         assert_eq!(
-            try_memory_sync_effect(&queue_send).unwrap(),
+            try_memory_sync_effect(&queue_send, EffectFacts::none()).unwrap(),
             MemorySyncEffect::From(9)
         );
         assert_eq!(
-            try_memory_sync_effect(&append).unwrap(),
+            try_memory_sync_effect(&append, EffectFacts::none()).unwrap(),
             MemorySyncEffect::From(5)
         );
     }

@@ -144,7 +144,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         stack_limit: crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS as u32,
         call_depth: 0,
         call_depth_limit: crate::fiber::MAX_JIT_CALL_DEPTH as u32,
-        jit_bp: 0, // Will be set in dispatch_jit_call
+        jit_bp: 0, // Set when the active VM frame enters native code.
         fiber_sp: fiber.sp as u32,
         push_frame_fn: Some(jit_push_frame),
         pop_frame_fn: Some(jit_pop_frame),
@@ -206,7 +206,7 @@ mod tests {
     fn jit_context_inherits_active_fiber_scheduler_budget() {
         let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("JIT VM");
         let mut module = Module::new("jit-context-budget-test".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
         vm.load(module).expect("load module");
         let mut fiber = Fiber::new(7);
         fiber.execution_budget = 17;
@@ -221,7 +221,7 @@ mod tests {
     fn jit_context_uses_the_vm_loaded_image_as_its_only_module_authority() {
         let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("JIT VM");
         let mut loaded = Module::new("jit-context-loaded".to_string());
-        loaded.functions.push(function(1, 0));
+        loaded.functions.push(function(1));
         vm.load(loaded).expect("load module");
         let loaded = vm.module.as_ref().expect("loaded module").clone();
         let mut fiber = Fiber::new(7);

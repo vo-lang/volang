@@ -124,7 +124,6 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: slot_types.len() as u16,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -138,9 +137,6 @@ mod tests {
             has_call_extern: false,
             code: Vec::new(),
             instruction_metadata: Vec::new(),
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
-                &slot_types,
-            ),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -180,7 +176,6 @@ mod tests {
         target.param_count = 1;
         target.param_slots = 2;
         target.local_slots = 2;
-        target.gc_scan_slots = 1;
         target.is_closure = true;
         module.functions.push(target);
 
@@ -241,7 +236,6 @@ mod tests {
         target.param_count = 1;
         target.param_slots = 2;
         target.local_slots = 2;
-        target.gc_scan_slots = 2;
         target.is_closure = true;
         module.functions.push(target);
 

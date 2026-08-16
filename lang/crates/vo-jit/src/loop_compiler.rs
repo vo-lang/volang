@@ -144,12 +144,7 @@ impl<'a> LoopCompiler<'a> {
         let Some(recovery_values) = self.core.analysis.ir().resume_values(resume_pc) else {
             return false;
         };
-        storage.spill_recovery_state_to_memory(
-            &mut self.builder,
-            locals_ptr,
-            recovery_values,
-            self.core.func_def.gc_scan_slots,
-        );
+        storage.spill_recovery_state_to_memory(&mut self.builder, locals_ptr, recovery_values);
         true
     }
 

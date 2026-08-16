@@ -2005,18 +2005,6 @@ func main() int {
             func.name
         );
         assert_eq!(
-            func.gc_scan_slots,
-            FunctionDef::compute_gc_scan_slots(&func.slot_types),
-            "{} must serialize derived GC scan slots",
-            func.name
-        );
-        assert_eq!(
-            func.borrowed_scan_slots_prefix,
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types),
-            "{} must serialize derived borrowed scan prefix",
-            func.name
-        );
-        assert_eq!(
             func.has_defer,
             func.code
                 .iter()

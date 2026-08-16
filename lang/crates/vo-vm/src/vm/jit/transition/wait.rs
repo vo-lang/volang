@@ -303,6 +303,7 @@ pub(super) fn handle_extern_suspend_transition(
                 &vm.state.itab_cache,
                 closure_ref,
                 args,
+                replay_pc,
             );
             match setup.result {
                 crate::vm::ExecResult::FrameChanged => {

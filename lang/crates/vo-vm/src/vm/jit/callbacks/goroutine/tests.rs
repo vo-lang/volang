@@ -35,7 +35,6 @@ fn minimal_func() -> FunctionDef {
         param_count: 0,
         param_slots: 0,
         local_slots: 1,
-        gc_scan_slots: 0,
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 0,
@@ -50,7 +49,6 @@ fn minimal_func() -> FunctionDef {
         code: Vec::new(),
         instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::Value],
-        borrowed_scan_slots_prefix: vec![0, 0],
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -75,7 +73,6 @@ fn closure_func_with_one_user_arg() -> FunctionDef {
     let mut func = minimal_func();
     func.param_slots = 2;
     func.local_slots = 2;
-    func.gc_scan_slots = 1;
     func.is_closure = true;
     func.slot_types = vec![SlotType::GcRef, SlotType::Value];
     func
@@ -85,7 +82,6 @@ fn closure_func_with_port_capture() -> FunctionDef {
     let mut func = minimal_func();
     func.param_slots = 1;
     func.local_slots = 1;
-    func.gc_scan_slots = 1;
     func.is_closure = true;
     func.slot_types = vec![SlotType::GcRef];
     func.capture_slot_types = vec![SlotType::GcRef];
@@ -114,7 +110,6 @@ fn direct_method_one_slot_struct_func() -> FunctionDef {
         param_count: 1,
         param_slots: 1,
         local_slots: 1,
-        gc_scan_slots: 1,
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 1,
@@ -129,7 +124,6 @@ fn direct_method_one_slot_struct_func() -> FunctionDef {
         code: Vec::new(),
         instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::GcRef],
-        borrowed_scan_slots_prefix: vec![0, 1],
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -955,7 +949,6 @@ fn vm_jit_001_go_start_rejects_arg_slot_drift_before_spawn_publication() {
     let mut func = minimal_func();
     func.param_slots = 1;
     func.local_slots = 1;
-    func.gc_scan_slots = 0;
     func.slot_types = vec![SlotType::Value];
 
     assert_invalid_regular_go_start_rejected(func, 2);
@@ -1145,7 +1138,6 @@ fn vm_jit_001_go_start_rejects_param_slots_past_local_bounds() {
     let mut func = minimal_func();
     func.param_slots = 2;
     func.local_slots = 1;
-    func.gc_scan_slots = 0;
     func.slot_types = vec![SlotType::Value];
 
     assert_invalid_regular_go_start_rejected(func, 2);

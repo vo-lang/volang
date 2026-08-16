@@ -116,6 +116,14 @@ fn compile_supports_port_select_recv_opcode() {
     func.instruction_metadata[1] = InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value],
     };
+    func.instruction_metadata[2] = InstructionMetadata::SelectExecLayout {
+        cases: vec![vo_runtime::bytecode::SelectCaseLayout::Recv {
+            destination: 2,
+            queue: 0,
+            elem_slots: 1,
+            has_ok: false,
+        }],
+    };
     let mut module = VoModule::new("test".into());
     module.functions.push(func);
 

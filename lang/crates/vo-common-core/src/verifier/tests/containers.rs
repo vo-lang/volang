@@ -399,9 +399,11 @@ fn module_verifier_preserves_index_check_fact_across_non_aliasing_slot_set_039()
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::SlotLayout {
+            array_len: 1,
             elem_layout: vec![SlotType::Value],
         },
         InstructionMetadata::SlotLayout {
+            array_len: 1,
             elem_layout: vec![SlotType::Value],
         },
     ];
@@ -490,12 +492,25 @@ fn module_verifier_accepts_wide_queue_layout_metadata() {
         InstructionMetadata::QueueLayout {
             elem_layout: wide_layout.clone(),
         },
-        InstructionMetadata::None,
-        InstructionMetadata::None,
-        InstructionMetadata::QueueLayout {
-            elem_layout: wide_layout,
+        InstructionMetadata::SelectExecLayout {
+            cases: vec![SelectCaseLayout::Send {
+                queue: 0,
+                value: 1,
+                elem_slots: 300,
+            }],
         },
         InstructionMetadata::None,
+        InstructionMetadata::QueueLayout {
+            elem_layout: wide_layout.clone(),
+        },
+        InstructionMetadata::SelectExecLayout {
+            cases: vec![SelectCaseLayout::Recv {
+                destination: recv_start,
+                queue: 0,
+                elem_slots: 300,
+                has_ok: true,
+            }],
+        },
     ];
     module.functions.push(func);
 
@@ -668,7 +683,14 @@ fn module_verifier_preserves_container_fact_across_zero_slot_select_recv_without
         InstructionMetadata::QueueLayout {
             elem_layout: Vec::new(),
         },
-        InstructionMetadata::None,
+        InstructionMetadata::SelectExecLayout {
+            cases: vec![SelectCaseLayout::Recv {
+                destination: 0,
+                queue: 7,
+                elem_slots: 0,
+                has_ok: false,
+            }],
+        },
         InstructionMetadata::None,
         InstructionMetadata::MapGet {
             key_layout: vec![SlotType::Value],
@@ -799,6 +821,7 @@ fn module_verifier_drops_container_fact_across_slot_set_dynamic_write_038() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::SlotLayout {
+            array_len: 1,
             elem_layout: vec![SlotType::GcRef],
         },
         InstructionMetadata::None,
@@ -877,6 +900,7 @@ fn module_verifier_rejects_dynamic_slot_set_gc_layout_drift_039() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::SlotLayout {
+            array_len: 2,
             elem_layout: vec![SlotType::GcRef],
         },
     ];
@@ -910,6 +934,7 @@ fn module_verifier_rejects_dynamic_slot_get_gc_layout_drift_039() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::SlotLayout {
+            array_len: 2,
             elem_layout: vec![SlotType::GcRef],
         },
     ];
@@ -920,6 +945,41 @@ fn module_verifier_rejects_dynamic_slot_get_gc_layout_drift_039() {
 
     let msg = err.to_string();
     assert!(msg.contains("SlotGet element span"), "{msg}");
+}
+
+#[test]
+fn module_verifier_rejects_forged_slot_array_length() {
+    let mut module = Module::new("forged-slot-array-length".to_string());
+    let mut func = function_with_slot_types(vec![
+        SlotType::GcRef,
+        SlotType::GcRef,
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::GcRef,
+    ]);
+    func.code = vec![
+        Instruction::new(Opcode::LoadInt, 2, 0, 0),
+        Instruction::new(Opcode::LoadInt, 3, 2, 0),
+        Instruction::new(Opcode::IndexCheck, 2, 3, 0),
+        Instruction::new(Opcode::SlotGet, 4, 0, 2),
+    ];
+    func.instruction_metadata = vec![
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::None,
+        InstructionMetadata::SlotLayout {
+            array_len: 1,
+            elem_layout: vec![SlotType::GcRef],
+        },
+    ];
+    module.functions.push(func);
+
+    let err = verify_module(&module).expect_err("SlotLayout cannot narrow the proven array span");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("checked length 2 does not match SlotLayout array length 1"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -1046,9 +1106,11 @@ fn module_verifier_accepts_wide_slot_n_layout_metadata() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::SlotLayout {
+            array_len: 2,
             elem_layout: vec![SlotType::Value; 300],
         },
         InstructionMetadata::SlotLayout {
+            array_len: 2,
             elem_layout: vec![SlotType::Value; 300],
         },
     ];

@@ -65,6 +65,7 @@ pub(super) fn setup_prepared_call(
 
     fiber.try_reserve_slots_at(callee_bp, local_slots)?;
     fiber.try_push_call_frame(callee_func_id, callee_bp, call_ret_reg, callee_ret_slots)?;
+    fiber.zero_function_root_locals_at(callee_bp, callee_func_def);
     Ok(())
 }
 
@@ -122,6 +123,7 @@ pub(super) fn setup_regular_call(
         callee_ret_slots,
         callee_local_slots as u16,
     )?;
+    fiber.zero_function_root_locals_at(callee_bp, callee_func_def);
 
     Ok(callee_bp)
 }

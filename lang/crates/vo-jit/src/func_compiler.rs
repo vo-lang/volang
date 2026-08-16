@@ -190,12 +190,7 @@ impl<'a> FunctionCompiler<'a> {
                 )
             });
         crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
-            .spill_recovery_state_to_memory(
-                &mut self.builder,
-                dst_ptr,
-                recovery_values,
-                self.core.func_def.gc_scan_slots,
-            );
+            .spill_recovery_state_to_memory(&mut self.builder, dst_ptr, recovery_values);
     }
 
     fn emit_variable_spill(&mut self) {

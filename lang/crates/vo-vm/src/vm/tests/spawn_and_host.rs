@@ -141,8 +141,6 @@ fn spawn_call_arg_count_mismatch_is_vm_error_instead_of_silent_zero_fill() {
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
     module.functions[0].slot_types = vec![SlotType::Value];
-    module.functions[0].borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&module.functions[0].slot_types);
     let mut vm = Vm::new();
     vm.load(module).unwrap();
 
@@ -171,7 +169,6 @@ fn spawn_call_rejects_invalid_gcref_arg_044() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].gc_scan_slots = 1;
     module.functions[0].slot_types = vec![SlotType::GcRef];
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
@@ -207,7 +204,6 @@ fn spawn_call_transfer_contract_061_rejects_wrong_object_kind_before_enqueue() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].gc_scan_slots = 1;
     module.functions[0].slot_types = vec![SlotType::GcRef];
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
@@ -268,7 +264,6 @@ fn spawn_call_transfer_contract_061_stores_canonical_gcref_args() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].gc_scan_slots = 1;
     module.functions[0].slot_types = vec![SlotType::GcRef];
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
@@ -380,7 +375,6 @@ fn vm_gc_001_spawn_call_marks_spawned_roots_dirty() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].gc_scan_slots = 1;
     module.functions[0].slot_types = vec![SlotType::GcRef];
     module.functions[0].ret_slots = 1;
     module.functions[0].ret_slot_types = vec![SlotType::GcRef];
@@ -993,30 +987,6 @@ fn extern_registry_configuration_is_available_before_load_and_rejected_after_loa
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn load_rejects_function_metadata_that_under_scans_gc_roots() {
-    let mut module = malformed_single_instruction_module("under-scan", Vec::new(), Vec::new());
-    let func = &mut module.functions[0];
-    func.local_slots = 1;
-    func.slot_types = vec![SlotType::GcRef];
-    func.gc_scan_slots = 0;
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
-    let mut vm = Vm::new();
-
-    let err = vm
-        .load(module)
-        .expect_err("under-scanning function metadata should be rejected");
-
-    match err {
-        VmError::Jit(msg) => {
-            assert!(msg.contains("gc_scan_slots"), "{msg}");
-            assert!(msg.contains("expected 1"), "{msg}");
-        }
-        other => panic!("metadata validation should return Jit error, got {other:?}"),
-    }
-}
-
 #[cfg(feature = "std")]
 #[test]
 fn gc_env_stress_flag_enables_step_at_every_boundary() {

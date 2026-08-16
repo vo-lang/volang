@@ -18,7 +18,7 @@ use std::{
     vec::Vec,
 };
 
-use crate::bytecode::{FunctionDef, Module};
+use crate::bytecode::{ExternEffects, FunctionDef, Module};
 use crate::instruction::{Instruction, Opcode};
 use crate::instruction_effects::{
     instruction_frame_memory_effect, visit_instruction_register_reads,
@@ -103,6 +103,7 @@ pub struct FrameRootSet<'a> {
 
 #[derive(Debug)]
 pub struct FunctionFrameRootMap {
+    initialization: u32,
     before: Box<[u32]>,
     suspended: Box<[u32]>,
     sets: Box<[RootSetSpan]>,
@@ -110,6 +111,15 @@ pub struct FunctionFrameRootMap {
 }
 
 impl FunctionFrameRootMap {
+    /// Root-shaped frame cells that require a valid zero value before a newly
+    /// admitted interpreted frame can execute. Callers preserve parameter
+    /// cells and initialize only the remaining entries.
+    #[inline]
+    pub fn initialization_roots(&self) -> FrameRootSet<'_> {
+        self.roots(FrameRootStateId(self.initialization))
+            .expect("frame initialization root state is internally valid")
+    }
+
     #[inline]
     pub fn before(&self, pc: usize) -> Option<FrameRootStateId> {
         self.before.get(pc).copied().map(FrameRootStateId)
@@ -170,17 +180,16 @@ impl FrameRootMaps {
                 .functions
                 .iter()
                 .map(|func| {
-                    let scan_slots = usize::from(func.gc_scan_slots).min(func.slot_types.len());
                     let mut slots = Vec::new();
                     slots.extend(
-                        func.slot_types[..scan_slots].iter().enumerate().filter_map(
-                            |(slot, ty)| (*ty == SlotType::GcRef).then_some(slot as u16),
-                        ),
+                        func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
+                            (*ty == SlotType::GcRef).then_some(slot as u16)
+                        }),
                     );
                     let direct_count = slots.len() as u16;
-                    slots.extend(func.slot_types[..scan_slots].iter().enumerate().filter_map(
-                        |(slot, ty)| (*ty == SlotType::Interface0).then_some(slot as u16),
-                    ));
+                    slots.extend(func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
+                        (*ty == SlotType::Interface0).then_some(slot as u16)
+                    }));
                     let all_state = u32::from(!slots.is_empty());
                     let mut sets = vec![RootSetSpan {
                         start: 0,
@@ -195,6 +204,7 @@ impl FrameRootMaps {
                         });
                     }
                     FunctionFrameRootMap {
+                        initialization: all_state,
                         before: vec![all_state; func.code.len()].into_boxed_slice(),
                         suspended: vec![all_state; func.code.len()].into_boxed_slice(),
                         sets: sets.into_boxed_slice(),
@@ -315,27 +325,23 @@ fn build_function_map(
         if let Some(error) = range_error {
             return Err(error);
         }
-        match instruction_frame_memory_effect(&inst)
+        match instruction_frame_memory_effect(&inst, metadata)
             .map_err(|_| FrameRootMapBuildError::semantic(func_id, pc, "frame memory effects"))?
         {
             FrameMemoryEffect::None | FrameMemoryEffect::From(_) => {}
-            FrameMemoryEffect::AliasedFrom(start) => {
+            FrameMemoryEffect::AliasedRange { start, count } => {
                 budget.charge_work(
                     func_id,
                     pc,
                     logical_roots.len(),
                     "aliased frame root effects",
                 )?;
-                effect.reads.extend(
-                    logical_roots
-                        .iter()
-                        .copied()
-                        .filter(|&root| root_cell_end(func, root) >= start),
-                );
-            }
-            FrameMemoryEffect::All => {
-                budget.charge_work(func_id, pc, logical_roots.len(), "whole-frame root effects")?;
-                effect.reads.extend(logical_roots.iter().copied());
+                let end = start.saturating_add(count.saturating_sub(1));
+                effect
+                    .reads
+                    .extend(logical_roots.iter().copied().filter(|&root| {
+                        count != 0 && root <= end && root_cell_end(func, root) >= start
+                    }));
             }
         }
         budget.charge_bytes(
@@ -352,15 +358,35 @@ fn build_function_map(
     }
 
     if effects.is_empty() {
+        let mut sets = Vec::new();
+        let mut slots = Vec::new();
+        let mut interned = BTreeMap::<Vec<u16>, u32>::new();
+        intern_root_set(
+            func_id,
+            0,
+            func,
+            &BTreeSet::new(),
+            &mut interned,
+            &mut sets,
+            &mut slots,
+            budget,
+        )?;
+        let initialization = intern_root_set(
+            func_id,
+            0,
+            func,
+            &logical_roots.iter().copied().collect(),
+            &mut interned,
+            &mut sets,
+            &mut slots,
+            budget,
+        )?;
         return Ok(FunctionFrameRootMap {
+            initialization,
             before: Box::new([]),
             suspended: Box::new([]),
-            sets: Box::new([RootSetSpan {
-                start: 0,
-                direct_count: 0,
-                total_count: 0,
-            }]),
-            slots: Box::new([]),
+            sets: sets.into_boxed_slice(),
+            slots: slots.into_boxed_slice(),
         });
     }
 
@@ -390,20 +416,33 @@ fn build_function_map(
         &mut slots,
         budget,
     )?;
+    let initialization = intern_root_set(
+        func_id,
+        0,
+        func,
+        &logical_roots.iter().copied().collect(),
+        &mut interned,
+        &mut sets,
+        &mut slots,
+        budget,
+    )?;
 
     for block in &blocks {
         let mut live = block.live_out.clone();
         for pc in (block.start..block.end).rev() {
             if is_call(func.code[pc].opcode()) {
-                let across = live
+                let mut suspended_live = live
                     .difference(&effects[pc].writes)
                     .copied()
                     .collect::<BTreeSet<_>>();
+                if call_replays_while_suspended(module, func.code[pc]) {
+                    suspended_live.extend(effects[pc].reads.iter().copied());
+                }
                 suspended[pc] = intern_root_set(
                     func_id,
                     pc,
                     func,
-                    &across,
+                    &suspended_live,
                     &mut interned,
                     &mut sets,
                     &mut slots,
@@ -428,6 +467,7 @@ fn build_function_map(
     }
 
     Ok(FunctionFrameRootMap {
+        initialization,
         before: before.into_boxed_slice(),
         suspended: suspended.into_boxed_slice(),
         sets: sets.into_boxed_slice(),
@@ -704,6 +744,21 @@ const fn is_call(opcode: Opcode) -> bool {
     )
 }
 
+#[inline]
+fn call_replays_while_suspended(module: &Module, instruction: Instruction) -> bool {
+    if instruction.opcode() != Opcode::CallExtern {
+        return false;
+    }
+    module
+        .externs
+        .get(instruction.b as usize)
+        .is_some_and(|extern_def| {
+            extern_def
+                .allowed_effects
+                .intersects(ExternEffects::MAY_CALL_CLOSURE_REPLAY | ExternEffects::UNKNOWN_CONTROL)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,7 +777,6 @@ mod tests {
             param_count: param_slots,
             param_slots,
             local_slots: slot_types.len() as u16,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots,
             ret_slot_types: slot_types[..ret_slots as usize].to_vec(),
             recv_slots: 0,
@@ -736,9 +790,6 @@ mod tests {
             has_call_extern,
             instruction_metadata: vec![InstructionMetadata::None; code.len()],
             code,
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
-                &slot_types,
-            ),
             slot_types,
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
@@ -803,5 +854,140 @@ mod tests {
         let suspended = caller.roots(caller.suspended_call(0).unwrap()).unwrap();
         assert_eq!(before.direct, &[0, 1]);
         assert_eq!(suspended.direct, &[0]);
+    }
+
+    #[test]
+    fn closure_replay_suspension_keeps_current_extern_inputs_rooted() {
+        let mut module = Module::new("closure-replay-suspended-roots".to_string());
+        module.externs.push(crate::bytecode::ExternDef {
+            name: "replay".to_string(),
+            params: crate::bytecode::ParamShape::Exact { slots: 1 },
+            returns: crate::bytecode::ReturnShape::with_slot_types(vec![SlotType::GcRef]),
+            allowed_effects: ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+            param_kinds: Vec::new(),
+        });
+        let mut caller = function(
+            "caller",
+            vec![
+                Instruction::new(Opcode::CallExtern, 0, 0, 2),
+                Instruction::new(Opcode::Return, 0, 1, 0),
+            ],
+            vec![SlotType::GcRef, SlotType::Value, SlotType::GcRef],
+            3,
+            1,
+        );
+        caller.instruction_metadata[0] = InstructionMetadata::CallExternLayout {
+            arg_layout: vec![SlotType::GcRef],
+            ret_layout: vec![SlotType::GcRef],
+        };
+        module.functions.push(caller);
+
+        let maps = FrameRootMaps::build(&module).expect("build closure replay roots");
+        let caller = maps.function(0).unwrap();
+        let suspended = caller.roots(caller.suspended_call(0).unwrap()).unwrap();
+
+        assert_eq!(suspended.direct, &[2]);
+    }
+
+    #[test]
+    fn suspended_call_roots_bound_future_dynamic_stack_accesses() {
+        let mut module = Module::new("bounded-slot-roots".to_string());
+        let mut caller = function(
+            "caller",
+            vec![
+                Instruction::with_flags(Opcode::Call, 0, 1, 0, 0),
+                Instruction::new(Opcode::SlotGet, 6, 4, 2),
+                Instruction::new(Opcode::StrNew, 8, 0, 0),
+                Instruction::new(Opcode::Return, 8, 1, 0),
+            ],
+            vec![
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::GcRef,
+            ],
+            1,
+            1,
+        );
+        caller.instruction_metadata[1] = InstructionMetadata::SlotLayout {
+            array_len: 2,
+            elem_layout: vec![SlotType::GcRef],
+        };
+        module.functions.push(caller);
+        module.functions.push(function(
+            "callee",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            vec![SlotType::GcRef],
+            1,
+            0,
+        ));
+
+        let maps = FrameRootMaps::build(&module).expect("build bounded dynamic roots");
+        let caller = maps.function(0).unwrap();
+        let suspended = caller.roots(caller.suspended_call(0).unwrap()).unwrap();
+
+        assert_eq!(suspended.direct, &[4, 5]);
+        assert!(!suspended.direct.contains(&8));
+    }
+
+    #[test]
+    fn select_loop_keeps_only_declared_transaction_roots_live() {
+        let mut module = Module::new("select-loop-roots".to_string());
+        let jump = (-4_i32) as u32;
+        let code = vec![
+            Instruction::new(Opcode::Copy, 5, 0, 0),
+            Instruction::new(Opcode::Hint, 0, 0, 0),
+            Instruction::new(Opcode::SelectBegin, 1, 0, 0),
+            Instruction::new(Opcode::SelectSend, 1, 2, 0),
+            Instruction::new(Opcode::SelectExec, 4, 0, 0),
+            Instruction::new(Opcode::Jump, 0, jump as u16, (jump >> 16) as u16),
+        ];
+        let mut func = function(
+            "select_loop",
+            code,
+            vec![
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::GcRef,
+            ],
+            3,
+            0,
+        );
+        func.instruction_metadata = vec![
+            InstructionMetadata::None,
+            InstructionMetadata::None,
+            InstructionMetadata::None,
+            InstructionMetadata::QueueLayout {
+                elem_layout: vec![SlotType::GcRef],
+            },
+            InstructionMetadata::SelectExecLayout {
+                cases: vec![crate::bytecode::SelectCaseLayout::Send {
+                    queue: 1,
+                    value: 2,
+                    elem_slots: 1,
+                }],
+            },
+            InstructionMetadata::None,
+        ];
+        module.functions.push(func);
+
+        let maps = FrameRootMaps::build(&module).expect("build select roots");
+        let function = maps.function(0).unwrap();
+        let before_exec = function.roots(function.before(4).unwrap()).unwrap();
+        let loop_back = function.roots(function.before(5).unwrap()).unwrap();
+
+        assert_eq!(before_exec.direct, &[1, 2]);
+        assert_eq!(loop_back.direct, &[1, 2]);
+        assert!(!loop_back.direct.contains(&0));
+        assert!(!loop_back.direct.contains(&3));
+        assert!(!loop_back.direct.contains(&5));
     }
 }

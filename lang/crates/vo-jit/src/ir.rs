@@ -1179,47 +1179,55 @@ fn ensure_sparse_liveness_budget(sparse_cells: usize) -> Result<(), JitError> {
     Ok(())
 }
 
-#[inline]
-fn memory_sync_start(effect: MemorySyncEffect) -> u16 {
-    match effect {
-        MemorySyncEffect::None | MemorySyncEffect::From(_) => u16::MAX,
-        MemorySyncEffect::AliasedFrom(start) => start,
-        MemorySyncEffect::All => 0,
+/// Frame-memory cells that may be observed by a future dynamically indexed
+/// inline-array access. This is separate from SSA liveness because the
+/// addressed cells stay authoritative in frame memory, yet it follows the
+/// same kill/use dataflow so later definitions do not keep stale roots alive.
+fn compute_aliased_memory_live_out(
+    blocks: &[BlockFacts],
+    raw: &[RawInstruction],
+    slot_types: &[SlotType],
+) -> Result<Vec<BTreeSet<u16>>, JitError> {
+    let mut uses = vec![BTreeSet::new(); blocks.len()];
+    let mut defs = vec![BTreeSet::new(); blocks.len()];
+    for (index, block) in blocks.iter().enumerate() {
+        for instruction in &raw[block.start..block.end] {
+            if let MemorySyncEffect::AliasedRange { start, count } = instruction.memory_sync {
+                for offset in 0..count {
+                    if let Some(root) = root_slot_for_cell(slot_types, start + offset) {
+                        if !defs[index].contains(&root) {
+                            uses[index].insert(root);
+                        }
+                    }
+                }
+            }
+            defs[index].extend(
+                instruction
+                    .writes
+                    .iter()
+                    .filter_map(|&slot| root_slot_for_cell(slot_types, slot)),
+            );
+        }
     }
-}
-
-/// Lowest frame slot whose memory-backed contents may still be observed.
-///
-/// SlotGet/SlotSet address inline aggregates through a dynamic index. Their
-/// individual cells are intentionally absent from scalar SSA read/write sets,
-/// while the frame memory remains authoritative for the aliased suffix. This
-/// compact backward dataflow keeps that memory domain live across safepoints
-/// without expanding every aggregate cell into the scalar SSA graph.
-fn compute_memory_live_out(blocks: &[BlockFacts], raw: &[RawInstruction]) -> Vec<u16> {
-    let uses = blocks
-        .iter()
-        .map(|block| {
-            raw[block.start..block.end]
-                .iter()
-                .map(|instruction| memory_sync_start(instruction.memory_sync))
-                .min()
-                .unwrap_or(u16::MAX)
-        })
-        .collect::<Vec<_>>();
     let mut live_in = uses.clone();
-    let mut live_out = vec![u16::MAX; blocks.len()];
+    let mut live_out = vec![BTreeSet::new(); blocks.len()];
+    let mut sparse_cells = live_in.iter().map(BTreeSet::len).sum::<usize>();
+    ensure_sparse_liveness_budget(sparse_cells)?;
     let mut pending = (0..blocks.len()).rev().collect::<VecDeque<_>>();
     let mut queued = vec![true; blocks.len()];
     while let Some(index) = pending.pop_front() {
         queued[index] = false;
-        let outgoing = blocks[index]
-            .successors
-            .iter()
-            .map(|successor| live_in[successor.index()])
-            .min()
-            .unwrap_or(u16::MAX);
-        let incoming = uses[index].min(outgoing);
+        let mut outgoing = BTreeSet::new();
+        for successor in blocks[index].successors.iter().copied() {
+            outgoing.extend(live_in[successor.index()].iter().copied());
+        }
+        let mut incoming = uses[index].clone();
+        incoming.extend(outgoing.difference(&defs[index]).copied());
         if incoming != live_in[index] || outgoing != live_out[index] {
+            sparse_cells = sparse_cells
+                .saturating_sub(live_in[index].len() + live_out[index].len())
+                .saturating_add(incoming.len() + outgoing.len());
+            ensure_sparse_liveness_budget(sparse_cells)?;
             live_in[index] = incoming;
             live_out[index] = outgoing;
             for predecessor in blocks[index].predecessors.iter().copied() {
@@ -1230,7 +1238,18 @@ fn compute_memory_live_out(blocks: &[BlockFacts], raw: &[RawInstruction]) -> Vec
             }
         }
     }
-    live_out
+    Ok(live_out)
+}
+
+#[inline]
+fn root_slot_for_cell(slot_types: &[SlotType], slot: u16) -> Option<u16> {
+    match slot_types.get(usize::from(slot)).copied()? {
+        SlotType::GcRef | SlotType::Interface0 => Some(slot),
+        SlotType::Interface1 => slot
+            .checked_sub(1)
+            .filter(|&header| slot_types.get(usize::from(header)) == Some(&SlotType::Interface0)),
+        SlotType::Value | SlotType::Float => None,
+    }
 }
 
 type SparseFrameLiveness = (Vec<Option<FrameLiveness>>, Vec<u16>, Vec<u16>);
@@ -1267,16 +1286,23 @@ fn compute_sparse_frame_liveness(
     let mut live_slots = Vec::new();
     let mut root_slots = Vec::new();
     let mut frame_state_count = 0usize;
-    let memory_live_out = compute_memory_live_out(blocks, raw);
+    let memory_live_out = compute_aliased_memory_live_out(blocks, raw, slot_types)?;
     for (block_index, block) in blocks.iter().enumerate() {
         let mut live = block.live_out.clone();
-        let mut memory_live_start = memory_live_out[block_index];
+        let mut memory_live = memory_live_out[block_index].clone();
         for pc in (block.start..block.end).rev() {
             for slot in &raw[pc].writes {
                 live.remove(slot);
+                if let Some(root) = root_slot_for_cell(slot_types, *slot) {
+                    memory_live.remove(&root);
+                }
             }
             live.extend(raw[pc].reads.iter().copied());
-            memory_live_start = memory_live_start.min(memory_sync_start(raw[pc].memory_sync));
+            if let MemorySyncEffect::AliasedRange { start, count } = raw[pc].memory_sync {
+                memory_live.extend(
+                    (0..count).filter_map(|offset| root_slot_for_cell(slot_types, start + offset)),
+                );
+            }
             let is_periodic_checkpoint =
                 pc % crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS == 0;
             let is_loop_header_checkpoint = pc == block.start
@@ -1297,7 +1323,7 @@ fn compute_sparse_frame_liveness(
                     .filter(|(slot, ty)| {
                         **ty == SlotType::GcRef
                             && (live.contains(&(*slot as u16))
-                                || *slot >= memory_live_start as usize)
+                                || memory_live.contains(&(*slot as u16)))
                     })
                     .count();
                 let conditional_root_count = slot_types
@@ -1307,7 +1333,7 @@ fn compute_sparse_frame_liveness(
                         **ty == SlotType::Interface0
                             && (live.contains(&(*slot as u16))
                                 || live.contains(&((*slot + 1) as u16))
-                                || *slot + 1 >= memory_live_start as usize)
+                                || memory_live.contains(&(*slot as u16)))
                     })
                     .count();
                 let root_count = direct_root_count.saturating_add(conditional_root_count);
@@ -1360,8 +1386,8 @@ fn compute_sparse_frame_liveness(
                     slot_types.iter().enumerate().filter_map(|(slot, ty)| {
                         (*ty == SlotType::GcRef
                             && (live.contains(&(slot as u16))
-                                || slot >= memory_live_start as usize))
-                            .then_some(slot as u16)
+                                || memory_live.contains(&(slot as u16))))
+                        .then_some(slot as u16)
                     }),
                 );
                 let conditional_roots = Span::append(
@@ -1370,8 +1396,8 @@ fn compute_sparse_frame_liveness(
                         (*ty == SlotType::Interface0
                             && (live.contains(&(slot as u16))
                                 || live.contains(&((slot + 1) as u16))
-                                || slot + 1 >= memory_live_start as usize))
-                            .then_some(slot as u16)
+                                || memory_live.contains(&(slot as u16))))
+                        .then_some(slot as u16)
                     }),
                 );
                 result[pc] = Some(FrameLiveness {
@@ -1791,9 +1817,6 @@ mod tests {
         let mut func = crate::test_fixtures::function(code, slot_types.len() as u16);
         func.slot_types = slot_types;
         func.local_slots = func.slot_types.len() as u16;
-        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-        func.borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
         func.instruction_metadata = vec![InstructionMetadata::None; func.code.len()];
         let mut module = Module::new("ssa".into());
         module.functions.push(func);
@@ -1932,14 +1955,16 @@ mod tests {
         let mut module = module_with(code, slot_types);
         for pc in [0, 2] {
             module.functions[0].instruction_metadata[pc] = InstructionMetadata::SlotLayout {
+                array_len: 3,
                 elem_layout: vec![SlotType::Interface0, SlotType::Interface1],
             };
         }
 
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         let state = *ir.frame_state(1).expect("allocation frame state");
-        assert_eq!(ir.conditional_roots(state), &[0, 2, 4, 8, 12]);
-        assert!(ir.frame_values(state).iter().all(|value| value.slot >= 6));
+        assert_eq!(ir.conditional_roots(state), &[0, 2, 4]);
+        assert!(!ir.conditional_roots(state).contains(&8));
+        assert!(!ir.conditional_roots(state).contains(&12));
     }
 
     #[test]

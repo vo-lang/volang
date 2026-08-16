@@ -13,7 +13,6 @@ fn function(local_slots: u16) -> FunctionDef {
         param_count: 0,
         param_slots: 0,
         local_slots,
-        gc_scan_slots: 0,
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 0,
@@ -28,10 +27,6 @@ fn function(local_slots: u16) -> FunctionDef {
         code: Vec::new(),
         instruction_metadata: Vec::new(),
         slot_types: vec![SlotType::Value; local_slots as usize],
-        borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
-                SlotType::Value;
-                local_slots as usize
-            ]),
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -253,7 +248,6 @@ fn verified_call_closure_publishes_and_reuses_shared_target_proof() {
         Some(vo_runtime::DynamicCallTarget {
             func_id: 1,
             local_slots: 1,
-            gc_scan_slots: 0,
         })
     );
 }
@@ -279,7 +273,6 @@ fn cached_closure_proof_never_authorizes_an_unrelated_gc_object() {
         vo_runtime::DynamicCallTarget {
             func_id: 1,
             local_slots: 1,
-            gc_scan_slots: 0,
         },
     );
 
@@ -299,123 +292,6 @@ fn cached_closure_proof_never_authorizes_an_unrelated_gc_object() {
 }
 
 #[test]
-fn vm_call_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
-    let mut module = Module::new("call-frame-shape-test".to_string());
-    module.functions.push(function(1));
-    let mut callee = function(1);
-    callee.gc_scan_slots = 2;
-    module.functions.push(callee);
-
-    let mut gc = Gc::new();
-    let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0);
-    let before_frames = fiber.frames.len();
-    let before_sp = fiber.sp;
-    let inst = Instruction::new(Opcode::Call, 1, 0, 0);
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exec_call(&mut gc, &mut fiber, &inst, &module)
-    }));
-
-    match result {
-        Ok(ExecResult::JitError(msg)) => {
-            assert!(msg.contains("Call callee frame shape"), "{msg}");
-        }
-        Ok(other) => panic!("frame-shape drift should be JitError, got {other:?}"),
-        Err(_) => panic!("frame-shape drift must not panic"),
-    }
-    assert_eq!(fiber.frames.len(), before_frames);
-    assert_eq!(fiber.sp, before_sp);
-}
-
-#[test]
-fn vm_call_closure_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
-    let mut module = Module::new("call-closure-frame-shape-test".to_string());
-    let mut caller = function(1);
-    caller.instruction_metadata = vec![vo_runtime::bytecode::InstructionMetadata::CallLayout {
-        arg_layout: Vec::new(),
-        ret_layout: Vec::new(),
-    }];
-    module.functions.push(caller);
-    let mut callee = function(1);
-    callee.gc_scan_slots = 2;
-    module.functions.push(callee);
-
-    let mut gc = Gc::new();
-    let closure_ref = closure::create(&mut gc, 1, 0);
-    let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 1, 0, 0);
-    fiber.stack[bp] = closure_ref as u64;
-    fiber.current_frame_mut().unwrap().pc = 1;
-    let before_frames = fiber.frames.len();
-    let before_sp = fiber.sp;
-    let inst = Instruction::new(Opcode::CallClosure, 0, 0, 0);
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exec_call_closure(&mut gc, &mut fiber, &inst, &module)
-    }));
-
-    match result {
-        Ok(ExecResult::JitError(msg)) => {
-            assert!(msg.contains("CallClosure callee frame shape"), "{msg}");
-        }
-        Ok(other) => panic!("closure frame-shape drift should be JitError, got {other:?}"),
-        Err(_) => panic!("closure frame-shape drift must not panic"),
-    }
-    assert_eq!(fiber.frames.len(), before_frames);
-    assert_eq!(fiber.sp, before_sp);
-}
-
-#[test]
-fn vm_call_iface_rejects_scan_slots_beyond_locals_before_ic_mutation_062() {
-    let mut module = Module::new("call-iface-frame-shape-test".to_string());
-    let mut caller = function(2);
-    caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
-    caller.instruction_metadata =
-        vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
-            iface_meta_id: 0,
-            method_idx: 0,
-            arg_layout: Vec::new(),
-            ret_layout: Vec::new(),
-        }];
-    module.functions.push(caller);
-    let mut target = iface_target_function(1, 1, 0, 1);
-    target.gc_scan_slots = 2;
-    module.functions.push(target);
-    let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::Int, 1, 0);
-    let cache = ItabCache::from_module_itabs(vec![Itab {
-        iface_meta_id: 0,
-        methods: vec![1],
-    }]);
-
-    let mut gc = Gc::new();
-    let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0);
-    fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
-    fiber.stack[bp + 1] = 456;
-    fiber.current_frame_mut().unwrap().pc = 1;
-    let before_frames = fiber.frames.len();
-    let before_sp = fiber.sp;
-    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exec_call_iface(&mut gc, &mut fiber, &inst, &module, &cache)
-    }));
-
-    match result {
-        Ok(ExecResult::JitError(msg)) => {
-            assert!(msg.contains("CallIface callee frame shape"), "{msg}");
-        }
-        Ok(other) => panic!("iface frame-shape drift should be JitError, got {other:?}"),
-        Err(_) => panic!("iface frame-shape drift must not panic"),
-    }
-    assert_eq!(fiber.frames.len(), before_frames);
-    assert_eq!(fiber.sp, before_sp);
-}
-
-#[test]
 fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_frame_push() {
     let mut module = Module::new("call-iface-arg-shape-test".to_string());
     let mut caller = function(5);
@@ -429,9 +305,6 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_
     module.functions.push(caller);
     let mut target = iface_target_function(3, 1, 0, 4);
     target.slot_types[0] = SlotType::GcRef;
-    target.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&target.slot_types);
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::String, 1, 0);
     let cache = ItabCache::from_module_itabs(vec![
@@ -505,8 +378,6 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
     let mut caller = function(u16::MAX);
     caller.slot_types[0] = SlotType::Interface0;
     caller.slot_types[1] = SlotType::Interface1;
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -551,8 +422,6 @@ fn vm_call_iface_contract_061_rejects_frame_capacity_before_ic_mutation() {
         SlotType::Value,
         SlotType::Value,
     ];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -600,8 +469,6 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
         SlotType::Value,
         SlotType::Value,
     ];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -614,9 +481,6 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
     let mut target = iface_target_function(2, 1, 0, 2);
     target.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     target.slot_types[0] = SlotType::Value;
-    target.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&target.slot_types);
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::Int, 1, 0);
     let cache = ItabCache::from_module_itabs(vec![Itab {
@@ -652,8 +516,6 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
     let mut module = Module::new("call-iface-raw-interface-receiver-layout-test".to_string());
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -665,9 +527,6 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
 
     let mut target = iface_target_function(1, 1, 0, 1);
     target.slot_types = vec![SlotType::GcRef];
-    target.gc_scan_slots = 1;
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let cache = ItabCache::from_module_itabs(vec![Itab {
         iface_meta_id: 0,
@@ -700,8 +559,6 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
     let mut module = Module::new("call-iface-raw-interface-kind-receiver-test".to_string());
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -713,9 +570,6 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
 
     let mut target = iface_target_function(1, 1, 0, 1);
     target.slot_types = vec![SlotType::GcRef];
-    target.gc_scan_slots = 1;
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let cache = ItabCache::from_module_itabs(vec![Itab {
         iface_meta_id: 0,
@@ -785,8 +639,6 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
 
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -799,8 +651,6 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
     let mut target = iface_target_function(1, 1, 0, 1);
     target.name = "B.M".to_string();
     target.slot_types = vec![SlotType::Value];
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let cache = ItabCache::from_module_itabs(vec![Itab {
         iface_meta_id: 0,
@@ -861,8 +711,6 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
 
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -875,8 +723,6 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
     let mut target = iface_target_function(1, 1, 0, 1);
     target.name = "(*R).M".to_string();
     target.slot_types = vec![SlotType::GcRef];
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let cache = ItabCache::from_module_itabs(vec![Itab {
         iface_meta_id: 0,
@@ -936,8 +782,6 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
 
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -950,8 +794,6 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
     let mut target = iface_target_function(1, 1, 0, 1);
     target.name = "(*R).M".to_string();
     target.slot_types = vec![SlotType::GcRef];
-    target.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&target.slot_types);
     module.functions.push(target);
     let cache = ItabCache::from_module_itabs(vec![Itab {
         iface_meta_id: 0,
@@ -1078,8 +920,6 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
 
     let mut caller = function(2);
     caller.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    caller.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&caller.slot_types);
     caller.instruction_metadata =
         vec![vo_runtime::bytecode::InstructionMetadata::CallIfaceLayout {
             iface_meta_id: 0,
@@ -1092,14 +932,10 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
     let mut method_m = iface_target_function(1, 1, 0, 1);
     method_m.name = "T.M".to_string();
     method_m.slot_types = vec![SlotType::Value];
-    method_m.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&method_m.slot_types);
     module.functions.push(method_m);
     let mut method_n = iface_target_function(1, 1, 0, 1);
     method_n.name = "T.N".to_string();
     method_n.slot_types = vec![SlotType::Value];
-    method_n.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&method_n.slot_types);
     module.functions.push(method_n);
 
     let cache = ItabCache::from_module_itabs(vec![

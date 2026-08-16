@@ -32,7 +32,6 @@ fn test_function_with_recv(
         param_count: param_slots,
         param_slots,
         local_slots,
-        gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots,
@@ -46,7 +45,6 @@ fn test_function_with_recv(
         has_call_extern: false,
         code: Vec::<Instruction>::new(),
         instruction_metadata: Vec::<InstructionMetadata>::new(),
-        borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         slot_types,
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
@@ -322,9 +320,6 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_metadata_drift_be
     let caller = caller_with_call_layout(4, vec![SlotType::Value], Vec::new());
     let mut callee = test_function(2, 2, true);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
-    callee.gc_scan_slots = 2;
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let mut module = Module::new("closure-call-arg-metadata-test".to_string());
     module.functions.push(caller);
     module.functions.push(callee);
@@ -365,7 +360,13 @@ fn vm_call_closure_canon_001_extern_replay_closure_uses_canonical_ref_for_slot0(
     let frame = fiber.frames.last().expect("closure frame");
     assert_eq!(frame.func_id, 0);
     assert_eq!(fiber.stack[frame.bp], closure_ref as u64);
-    assert_eq!(fiber.closure_replay.depth, fiber.frames.len());
+    assert_eq!(
+        fiber
+            .closure_replay
+            .active_boundary()
+            .map(|boundary| boundary.frame_depth),
+        Some(fiber.frames.len())
+    );
 }
 
 #[test]
@@ -386,7 +387,7 @@ fn vm_closure_call_signature_002_extern_replay_closure_rejects_non_closure_befor
         other => panic!("non-closure replay target should be fatal infra, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -411,56 +412,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_capture_count_metadata_dr
         other => panic!("capture metadata drift should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
-}
-
-#[test]
-fn vm_extern_replay_call_frame_shape_062_rejects_scan_slots_beyond_locals_before_frame_publication()
-{
-    let mut gc = Gc::new();
-    let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0);
-    let mut callee = test_function(1, 1, true);
-    callee.gc_scan_slots = 2;
-    let module = module_with_callee(callee);
-    let closure_ref = closure::create(&mut gc, 0, 0);
-    let before_frames = fiber.frames.len();
-    let before_sp = fiber.sp;
-    let before_stack = fiber.stack.clone();
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        FrameCallBuilder::new(&mut gc, &mut fiber, &module)
-            .call_extern_replay_closure(closure_ref, empty_payload())
-    }));
-
-    let result = result.expect("extern replay frame-shape drift must not panic");
-    match result {
-        ExecResult::JitError(msg) => {
-            assert!(msg.contains("gc_scan_slots"), "{msg}");
-        }
-        other => panic!("extern replay frame-shape drift should be rejected, got {other:?}"),
-    }
-    assert_eq!(fiber.frames.len(), before_frames);
-    assert_eq!(fiber.sp, before_sp);
-    assert_eq!(fiber.stack, before_stack);
-    assert_eq!(fiber.closure_replay.depth, 0);
-}
-
-#[test]
-fn vm_jit_extern_suspend_062_typed_replay_args_rejects_scan_slots_beyond_locals_before_payload_publication(
-) {
-    let mut gc = Gc::new();
-    let mut callee = test_function(1, 1, true);
-    callee.gc_scan_slots = 2;
-    let module = module_with_callee(callee);
-    let closure_ref = closure::create(&mut gc, 0, 0);
-
-    let err = typed_extern_replay_args(&gc, &module, &ItabCache::new(), closure_ref, Vec::new())
-        .expect_err("typed extern replay args must reject malformed callee frames");
-
-    assert!(err.contains("invalid target frame shape"), "{err}");
-    assert!(err.contains("gc_scan_slots=2"), "{err}");
-    assert!(err.contains("local_slots=1"), "{err}");
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -484,7 +436,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_closure_allocation_drift_
         other => panic!("closure allocation drift should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -534,9 +486,6 @@ fn vm_extern_replay_transfer_contract_061_accepts_explicit_receiver_prefix() {
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![string_transfer()];
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
@@ -569,9 +518,6 @@ fn vm_extern_replay_transfer_contract_061_validates_synthesized_receiver_prefix(
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![string_transfer()];
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
@@ -597,9 +543,6 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_with_empty_param_ty
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::Value];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let wrong_receiver = closure_ref;
@@ -626,7 +569,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_with_empty_param_ty
         other => panic!("invalid receiver replay slot should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -636,9 +579,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_empty_param_types_with_gcref_s
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let receiver = string::new_from_string(&mut gc, "receiver".to_string());
@@ -669,7 +609,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_empty_param_types_with_gcref_s
         }
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -679,9 +619,6 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_in_inclusive_metada
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![string_transfer(), string_transfer()];
     let mut module = module_with_callee(callee);
     module
@@ -712,7 +649,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_in_inclusive_metada
         other => panic!("invalid receiver replay slot should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -742,9 +679,6 @@ fn vm_extern_replay_closure_rejects_invalid_gcref_arg_before_frame_push_059() {
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let module = module_with_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let args =
@@ -760,7 +694,7 @@ fn vm_extern_replay_closure_rejects_invalid_gcref_arg_before_frame_push_059() {
         other => panic!("invalid replay GcRef arg should be rejected, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -770,9 +704,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_missing_param_types_before_fra
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let module = module_with_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let arg = string::new_from_string(&mut gc, "payload".to_string());
@@ -802,7 +733,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_missing_param_types_before_fra
         other => panic!("missing transfer metadata should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -812,9 +743,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_wrong_object_kind_before_frame
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![string_transfer()];
     let mut module = module_with_callee(callee);
     module
@@ -843,7 +771,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_wrong_object_kind_before_frame
         other => panic!("wrong object kind should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -853,9 +781,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_slot1_heap_kind_befo
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let (module, itab_cache) = extern_replay_single_method_interface_module(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
@@ -887,7 +812,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_slot1_heap_kind_befo
         other => panic!("forged interface data kind should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -895,9 +820,6 @@ fn vm_extern_replay_interface_boundary_rejects_invalid_tags_without_panicking() 
     let mut gc = Gc::new();
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let module = extern_replay_empty_interface_module(callee);
     let itab_cache = ItabCache::new();
@@ -921,9 +843,6 @@ fn vm_extern_replay_transfer_contract_061_accepts_empty_interface_arg_with_concr
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let mut module = extern_replay_empty_interface_module(callee);
     module
@@ -956,9 +875,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_null_struct_interface_data() {
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let mut module = extern_replay_empty_interface_module(callee);
     module.struct_metas.push(StructMeta {
@@ -991,7 +907,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_null_struct_interface_data() {
         other => panic!("null struct data should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -1001,9 +917,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_null_array_interface_data() {
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let mut module = extern_replay_empty_interface_module(callee);
     module
@@ -1034,7 +947,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_null_array_interface_data() {
         other => panic!("null array data should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -1044,9 +957,6 @@ fn vm_extern_replay_transfer_contract_061_accepts_interface_array_value_slot_box
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let mut module = extern_replay_empty_interface_module(callee);
     module
@@ -1100,9 +1010,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_array_value_slot_box
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let mut module = extern_replay_empty_interface_module(callee);
     module
@@ -1147,7 +1054,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_array_value_slot_box
         other => panic!("array value-slot box slot drift should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -1157,9 +1064,6 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_struct_data_slot_cou
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![interface_transfer(0, 0)];
     let mut module = extern_replay_empty_interface_module(callee);
     module.struct_metas.push(StructMeta {
@@ -1201,7 +1105,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_struct_data_slot_cou
         other => panic!("struct data slot drift should reject replay, got {other:?}"),
     }
     assert_eq!(fiber.frames.len(), 1);
-    assert_eq!(fiber.closure_replay.depth, 0);
+    assert!(fiber.closure_replay.active_boundary().is_none());
 }
 
 #[test]
@@ -1223,9 +1127,6 @@ fn typed_extern_replay_args_rejects_invalid_gcref_arg_059() {
     let mut gc = Gc::new();
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let module = module_with_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let itab_cache = ItabCache::new();
@@ -1241,9 +1142,6 @@ fn typed_extern_replay_args_rejects_invalid_interface_gcref_arg_059() {
     let mut gc = Gc::new();
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     let module = module_with_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let iface = vo_runtime::InterfaceSlot::from_ref(0xdead_beef as GcRef, 0, ValueKind::String);
@@ -1266,9 +1164,6 @@ fn typed_extern_replay_args_rejects_wrong_interface_arg_metadata_060() {
     let mut gc = Gc::new();
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
-    callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
-    callee.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&callee.slot_types);
     callee.param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::Interface).to_raw(),
         rttid_raw: ValueRttid::new(0, ValueKind::Interface).to_raw(),

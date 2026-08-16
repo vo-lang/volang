@@ -574,23 +574,25 @@ pub struct ClosureReplayState {
     /// Tracks how many cached results have been consumed in the current replay.
     /// Reset to 0 at the start of each CallExtern execution.
     pub index: usize,
-    /// Frame depth at which a closure-for-extern-replay was pushed.
-    /// When a Return pops down to this depth, the return values are
-    /// appended to `results` and the extern is replayed.
-    /// 0 = no pending closure replay.
-    pub depth: usize,
+    /// Nested closure-replay boundaries, ordered outermost to innermost.
+    /// Depth and replay PC form one transition record so they cannot drift.
+    boundaries: Vec<ClosureReplayBoundary>,
     /// Original panic message captured when the replayed closure unwound.
     /// Preserved so the replayed extern can report the true root cause.
     /// `is_some()` also serves as the "panicked" flag.
     pub panic_message: Option<String>,
-    /// Stack of saved `depth` values for nested replay cycles.
-    pub depth_stack: Vec<usize>,
     /// Active extern replay scope.
     pub extern_scope: Option<ClosureReplayExternScope>,
     /// Saved parent extern scopes for nested extern calls.
     pub extern_scope_stack: Vec<ClosureReplayExternScope>,
     /// Saved parent panic messages for nested extern calls.
     pub panic_message_stack: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosureReplayBoundary {
+    pub frame_depth: usize,
+    pub replay_pc: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -610,9 +612,8 @@ impl ClosureReplayState {
         Self {
             results: Vec::new(),
             index: 0,
-            depth: 0,
+            boundaries: Vec::new(),
             panic_message: None,
-            depth_stack: Vec::new(),
             extern_scope: None,
             extern_scope_stack: Vec::new(),
             panic_message_stack: Vec::new(),
@@ -622,9 +623,8 @@ impl ClosureReplayState {
     pub fn reset(&mut self) {
         self.results.clear();
         self.index = 0;
-        self.depth = 0;
+        self.boundaries.clear();
         self.panic_message = None;
-        self.depth_stack.clear();
         self.extern_scope = None;
         self.extern_scope_stack.clear();
         self.panic_message_stack.clear();
@@ -714,27 +714,41 @@ impl ClosureReplayState {
         (results, panic_message)
     }
 
-    /// Push a closure frame: save current depth, set new depth.
-    pub fn push_depth(&mut self, frame_count: usize) {
-        self.depth_stack.push(self.depth);
-        self.depth = frame_count;
+    /// Publish the boundary owned by a newly pushed replay closure frame.
+    pub fn push_boundary(&mut self, frame_depth: usize, replay_pc: usize) {
+        self.boundaries.push(ClosureReplayBoundary {
+            frame_depth,
+            replay_pc,
+        });
     }
 
-    /// Pop closure frame depth after return or panic.
-    pub fn pop_depth(&mut self) {
-        self.depth = self.depth_stack.pop().unwrap_or(0);
+    /// Retire the innermost replay boundary after return or intercepted panic.
+    pub fn pop_boundary(&mut self) -> Option<ClosureReplayBoundary> {
+        self.boundaries.pop()
+    }
+
+    #[inline]
+    pub fn active_boundary(&self) -> Option<ClosureReplayBoundary> {
+        self.boundaries.last().copied()
+    }
+
+    #[inline]
+    pub fn boundary_count(&self) -> usize {
+        self.boundaries.len()
     }
 
     /// Check if current frame is at the closure replay boundary.
     #[inline]
     pub fn at_replay_boundary(&self, frame_count: usize) -> bool {
-        self.depth > 0 && frame_count == self.depth
+        self.active_boundary()
+            .is_some_and(|boundary| frame_count == boundary.frame_depth)
     }
 
     /// Check if panic should be intercepted at closure replay boundary.
     #[inline]
     pub fn should_intercept_panic(&self, frame_count: usize) -> bool {
-        self.depth > 0 && frame_count <= self.depth
+        self.active_boundary()
+            .is_some_and(|boundary| frame_count <= boundary.frame_depth)
     }
 }
 
@@ -1059,6 +1073,7 @@ impl PendingSpawn {
         debug_assert_eq!(fiber.sp, 0);
         debug_assert!(fiber.frames.is_empty());
         let bp = fiber.try_push_frame(self.func_id, self.local_slots, 0, self.ret_slots)?;
+        fiber.zero_slots_at(bp, usize::from(self.local_slots));
         fiber.copy_slots_from_slice(bp, &self.entry_slots);
         Ok(())
     }
@@ -1684,6 +1699,59 @@ impl Fiber {
     #[inline]
     pub fn zero_slots_at(&mut self, bp: usize, slot_count: usize) {
         self.stack[bp..bp + slot_count].fill(0);
+    }
+
+    /// Establish valid zero values for root-shaped locals before an
+    /// interpreted frame becomes observable. Parameter cells already contain
+    /// the caller-provided arguments and are intentionally preserved.
+    #[inline]
+    pub fn zero_frame_root_locals_at(
+        &mut self,
+        bp: usize,
+        param_slots: u16,
+        roots: vo_common_core::FrameRootSet<'_>,
+    ) {
+        let param_slots = usize::from(param_slots);
+        for &slot in roots.direct {
+            let slot = usize::from(slot);
+            if slot >= param_slots {
+                self.stack[bp + slot] = 0;
+            }
+        }
+        for &header in roots.conditional {
+            let header = usize::from(header);
+            if header >= param_slots {
+                self.stack[bp + header] = 0;
+                self.stack[bp + header + 1] = 0;
+            }
+        }
+    }
+
+    /// Test and defensive-runtime fallback when verified loaded facts are not
+    /// available. Production interpreter dispatch uses the precomputed root
+    /// set above, keeping scalar-only calls free of frame initialization work.
+    #[inline]
+    pub fn zero_function_root_locals_at(
+        &mut self,
+        bp: usize,
+        func: &vo_runtime::bytecode::FunctionDef,
+    ) {
+        for (slot, ty) in func
+            .slot_types
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(usize::from(func.param_slots))
+        {
+            if matches!(
+                ty,
+                vo_runtime::SlotType::GcRef
+                    | vo_runtime::SlotType::Interface0
+                    | vo_runtime::SlotType::Interface1
+            ) {
+                self.stack[bp + slot] = 0;
+            }
+        }
     }
 
     #[inline]
@@ -2345,6 +2413,36 @@ mod tests {
         replay.finish_extern_terminal();
         assert!(replay.results.is_empty());
         assert!(replay.extern_scope.is_none());
+    }
+
+    #[test]
+    fn closure_replay_boundaries_keep_depth_and_pc_atomic() {
+        let mut replay = super::ClosureReplayState::new();
+        replay.push_boundary(2, 7);
+        replay.push_boundary(5, 19);
+
+        assert_eq!(
+            replay.active_boundary(),
+            Some(super::ClosureReplayBoundary {
+                frame_depth: 5,
+                replay_pc: 19,
+            })
+        );
+        assert_eq!(
+            replay.pop_boundary(),
+            Some(super::ClosureReplayBoundary {
+                frame_depth: 5,
+                replay_pc: 19,
+            })
+        );
+        assert_eq!(
+            replay.pop_boundary(),
+            Some(super::ClosureReplayBoundary {
+                frame_depth: 2,
+                replay_pc: 7,
+            })
+        );
+        assert!(replay.active_boundary().is_none());
     }
 
     #[cfg(feature = "jit")]

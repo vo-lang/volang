@@ -2295,7 +2295,6 @@ impl Vm {
             && function.param_count == 1
             && function.param_slots == 1
             && function.local_slots >= 1
-            && function.gc_scan_slots >= 1
             && function.ret_slots == 0
             && function.param_types.len() == 1
             && function.param_types[0].slots == 1
@@ -4004,12 +4003,15 @@ impl Vm {
                         &mut self.state.gc,
                         fiber,
                         &inst,
-                        module,
+                        loaded_module,
                         func,
                     ));
                 }
                 Opcode::CallExtern => {
-                    sync_frame_pc!();
+                    // Providers may allocate or request a nested closure before
+                    // producing outputs. Keep GC on the instruction-entry root
+                    // state until the boundary has committed its outcome.
+                    unsafe { (*frame_ptr).pc = fetched_pc };
                     use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld};
                     // CallExtern: a=dst, b=extern_id, c=args_start; metadata owns layouts.
                     let extern_id = inst.b as u32;
@@ -4150,7 +4152,7 @@ impl Vm {
                     };
                     stack = fiber.stack_ptr();
                     #[cfg(debug_assertions)]
-                    if !matches!(&extern_result, vo_runtime::ffi::ExternResult::Exit(_)) {
+                    if matches!(&extern_result, vo_runtime::ffi::ExternResult::Ok) {
                         if let Err(msg) = debug_validate_extern_returns(
                             &self.state.gc,
                             module,
@@ -4175,6 +4177,7 @@ impl Vm {
                                     "Island managed-memory allocation failed".to_string(),
                                 );
                             }
+                            sync_frame_pc!();
                             refetch!();
                         }
                         ExternBoundary::Exit(code) => {
@@ -4193,12 +4196,15 @@ impl Vm {
                             return ExecResult::JitError(msg);
                         }
                         ExternBoundary::Yield => {
+                            sync_frame_pc!();
                             return ExecResult::TimesliceExpired;
                         }
                         ExternBoundary::QueueBlock => {
+                            sync_frame_pc!();
                             return ExecResult::Block(crate::fiber::BlockReason::Queue);
                         }
                         ExternBoundary::HostEventWait { token, delay_ms } => {
+                            sync_frame_pc!();
                             return ExecResult::Block(crate::fiber::BlockReason::HostEvent {
                                 token,
                                 delay_ms,
@@ -4268,11 +4274,11 @@ impl Vm {
                             "CallClosure cache index {callsite_index} is out of bounds"
                         ));
                     };
-                    handle_panic_result!(exec::exec_call_closure_cached(
+                    handle_panic_result!(exec::exec_verified_call_closure_cached(
                         &mut self.state.gc,
                         fiber,
                         &inst,
-                        module,
+                        loaded_module,
                         ic_entry,
                     ));
                 }
@@ -4292,11 +4298,11 @@ impl Vm {
                             "CallIface cache index {callsite_index} is out of bounds"
                         ));
                     };
-                    handle_panic_result!(exec::exec_call_iface_cached(
+                    handle_panic_result!(exec::exec_verified_call_iface_cached(
                         &mut self.state.gc,
                         fiber,
                         &inst,
-                        module,
+                        loaded_module,
                         &self.state.itab_cache,
                         ic_entry,
                     ));
@@ -5250,7 +5256,10 @@ impl Vm {
                     }
                 }
                 Opcode::SelectExec => {
-                    sync_frame_pc!();
+                    // SelectExec may allocate while consuming its case inputs.
+                    // Publish the instruction-entry PC until the transaction
+                    // has produced its outputs or committed a replay point.
+                    unsafe { (*frame_ptr).pc = fetched_pc };
                     match exec::exec_select_exec(
                         exec::SelectExecContext {
                             stack,
@@ -5267,6 +5276,7 @@ impl Vm {
                         exec::SelectResult::Block => {
                             // Waiters have been registered on all channels by exec_select_exec.
                             // Block this fiber - it will be woken when any channel is ready.
+                            sync_frame_pc!();
                             let resume = match replay_current_instruction_policy(
                                 fiber,
                                 "SelectExec block",

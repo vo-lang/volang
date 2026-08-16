@@ -7,7 +7,7 @@ use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
 fn callback_module(local_slots: u16) -> Module {
     let mut module = Module::new("jit-select-runtime-contract".to_string());
-    let mut function = crate::vm::jit::test_support::function(local_slots, 0);
+    let mut function = crate::vm::jit::test_support::function(local_slots);
     function.instruction_metadata = vec![InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value],
     }];

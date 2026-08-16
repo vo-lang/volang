@@ -33,6 +33,7 @@ pub(crate) struct FrameCallBuilder<'a> {
     gc: &'a mut Gc,
     fiber: &'a mut Fiber,
     module: &'a Module,
+    frame_root_maps: Option<&'a vo_common_core::FrameRootMaps>,
     itab_cache: Option<&'a ItabCache>,
 }
 
@@ -46,7 +47,6 @@ pub(crate) struct ValidClosureTarget<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CallFrameShapeError {
     ParamSlotsExceedLocals { param_slots: u16, local_slots: u16 },
-    ScanSlotsExceedLocals { scan_slots: u16, local_slots: u16 },
 }
 
 impl CallFrameShapeError {
@@ -56,10 +56,6 @@ impl CallFrameShapeError {
                 param_slots,
                 local_slots,
             } => format!("{context}: param_slots {param_slots} exceed local_slots {local_slots}"),
-            CallFrameShapeError::ScanSlotsExceedLocals {
-                scan_slots,
-                local_slots,
-            } => format!("{context}: gc_scan_slots {scan_slots} exceed local_slots {local_slots}"),
         }
     }
 }
@@ -84,12 +80,6 @@ pub(crate) fn validate_call_frame_shape(func: &FunctionDef) -> Result<(), CallFr
     if func.param_slots > func.local_slots {
         return Err(CallFrameShapeError::ParamSlotsExceedLocals {
             param_slots: func.param_slots,
-            local_slots: func.local_slots,
-        });
-    }
-    if func.gc_scan_slots > func.local_slots {
-        return Err(CallFrameShapeError::ScanSlotsExceedLocals {
-            scan_slots: func.gc_scan_slots,
             local_slots: func.local_slots,
         });
     }
@@ -141,6 +131,21 @@ impl<'a> FrameCallBuilder<'a> {
             gc,
             fiber,
             module,
+            frame_root_maps: None,
+            itab_cache: None,
+        }
+    }
+
+    pub(crate) fn new_loaded(
+        gc: &'a mut Gc,
+        fiber: &'a mut Fiber,
+        loaded_module: &'a vo_runtime::bytecode::LoadedModule,
+    ) -> Self {
+        Self {
+            gc,
+            fiber,
+            module: loaded_module.module(),
+            frame_root_maps: Some(loaded_module.frame_root_maps()),
             itab_cache: None,
         }
     }
@@ -155,7 +160,22 @@ impl<'a> FrameCallBuilder<'a> {
             gc,
             fiber,
             module,
+            frame_root_maps: None,
             itab_cache: Some(itab_cache),
+        }
+    }
+
+    #[inline]
+    fn initialize_frame_root_locals(&mut self, bp: usize, target: &ValidClosureTarget<'_>) {
+        if let Some(root_maps) = self.frame_root_maps {
+            let roots = root_maps
+                .function(target.func_id)
+                .expect("verified closure target owns frame-root facts")
+                .initialization_roots();
+            self.fiber
+                .zero_frame_root_locals_at(bp, target.func.param_slots, roots);
+        } else {
+            self.fiber.zero_function_root_locals_at(bp, target.func);
         }
     }
 
@@ -319,7 +339,6 @@ impl<'a> FrameCallBuilder<'a> {
                     vo_runtime::DynamicCallTarget {
                         func_id: target.func_id,
                         local_slots: target.func.local_slots,
-                        gc_scan_slots: target.func.gc_scan_slots,
                     },
                 );
             }
@@ -343,6 +362,7 @@ impl<'a> FrameCallBuilder<'a> {
                 );
             }
         };
+        self.initialize_frame_root_locals(new_bp, &target);
         for i in 0..target.layout.receiver_capture_count {
             let stack = self.fiber.stack_ptr();
             stack_set(stack, new_bp + i, unsafe {
@@ -357,11 +377,22 @@ impl<'a> FrameCallBuilder<'a> {
         ExecResult::FrameChanged
     }
 
-    pub(crate) fn call_extern_replay_closure(
+    pub(crate) fn call_extern_replay_closure_at(
         &mut self,
         closure_ref: GcRef,
         mut args: TypedSlotPayload,
+        replay_pc: usize,
     ) -> ExecResult {
+        let Some(suspended_pc) = replay_pc.checked_add(1) else {
+            return ExecResult::JitError(
+                "CallExtern closure replay pc exceeds the host address domain".to_string(),
+            );
+        };
+        if self.fiber.frames.is_empty() {
+            return ExecResult::JitError(
+                "CallExtern closure replay requested without a caller frame".to_string(),
+            );
+        }
         let stack = self.fiber.stack_ptr();
         if closure_ref.is_null() {
             return ExecResult::JitError(
@@ -452,6 +483,8 @@ impl<'a> FrameCallBuilder<'a> {
             }
         };
 
+        self.initialize_frame_root_locals(new_bp, &target);
+
         let fstack = self.fiber.stack_ptr();
         for i in 0..target.layout.receiver_capture_count {
             stack_set(fstack, new_bp + i, unsafe {
@@ -479,10 +512,25 @@ impl<'a> FrameCallBuilder<'a> {
             target.func.ret_slots,
         );
 
+        let parent_index = self.fiber.frames.len() - 2;
+        self.fiber.frames[parent_index].pc = suspended_pc;
         self.fiber
             .closure_replay
-            .push_depth(self.fiber.frames.len());
+            .push_boundary(self.fiber.frames.len(), replay_pc);
         ExecResult::FrameChanged
+    }
+
+    #[cfg(test)]
+    pub(crate) fn call_extern_replay_closure(
+        &mut self,
+        closure_ref: GcRef,
+        args: TypedSlotPayload,
+    ) -> ExecResult {
+        let replay_pc = self
+            .fiber
+            .current_frame()
+            .map_or(0, |frame| frame.pc.saturating_sub(1));
+        self.call_extern_replay_closure_at(closure_ref, args, replay_pc)
     }
 
     fn validate_closure_target(
@@ -1302,11 +1350,10 @@ fn validate_function_arg_shape_with_expected(
     }
     if validate_call_frame_shape(func).is_err() {
         return Err(format!(
-            "{context} invalid target frame shape for func_id={} name={}: param_slots={} gc_scan_slots={} local_slots={}",
+            "{context} invalid target frame shape for func_id={} name={}: param_slots={} local_slots={}",
             func_id,
             func.name,
             func.param_slots,
-            func.gc_scan_slots,
             func.local_slots
         ));
     }

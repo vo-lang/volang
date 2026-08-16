@@ -262,6 +262,12 @@ pub(in crate::translate) fn select_exec<'a>(
     let func = e.helper(HelperKind::select_exec);
     let ctx = e.ctx_param();
 
+    // SelectExec is the semantic owner of every case input. Publish its exact
+    // sparse recovery state so the callback observes the same values as the
+    // interpreter without forcing the surrounding function into memory-only
+    // storage.
+    e.publish_current_frame_state();
+
     let resume_pc = e.current_pc() as i32;
     let resume_pc_val = e.builder().ins().iconst(types::I32, resume_pc as i64);
     e.builder().ins().store(

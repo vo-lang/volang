@@ -426,7 +426,7 @@ mod tests {
 
     fn module_with_extern(name: &str, allowed_effects: ExternEffects) -> Module {
         let mut module = Module::new(format!("jit-extern-{name}"));
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name(name),
             params: ParamShape::Exact { slots: 0 },
@@ -542,14 +542,6 @@ mod tests {
         }
     }
 
-    fn call_malformed_closure_extern(ctx: &mut ExternCallContext<'_>) -> ExternResult {
-        let closure_ref = vo_runtime::objects::closure::create(ctx.gc(), 1, 0);
-        ExternResult::CallClosure {
-            closure_ref,
-            args: Vec::new(),
-        }
-    }
-
     fn panic_extern(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
         ExternResult::Panic("bridge panic".to_string())
     }
@@ -566,7 +558,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_ret_abi_002_honors_distinct_args_and_ret_buffers() {
         let mut module = Module::new("jit-extern-distinct-ret-buffer".to_string());
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name("ret_arg_plus_one"),
             params: ParamShape::Exact { slots: 1 },
@@ -749,40 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn vm_jit_extern_suspend_062_rejects_scan_slots_beyond_locals_before_suspend_publication() {
-        let mut module =
-            module_with_extern("malformed_closure", ExternEffects::MAY_CALL_CLOSURE_REPLAY);
-        let mut malformed = function(1, 2);
-        malformed.name = "malformed_closure_target".to_string();
-        malformed.param_count = 1;
-        malformed.param_slots = 1;
-        malformed.is_closure = true;
-        module.functions.push(malformed);
-        let (_vm, fiber, mut ctx) = jit_context_for_extern_bridge_with(
-            &module,
-            call_malformed_closure_extern,
-            ExternEffects::MAY_CALL_CLOSURE_REPLAY,
-        );
-        let mut args = [0u64; 1];
-
-        let result = jit_call_extern(ctx.as_ptr(), 0, args.as_mut_ptr(), 0, args.as_mut_ptr(), 0);
-
-        assert_eq!(result, JitResult::JitError);
-        assert!(fiber.jit_extern_suspend.is_none());
-        assert!(fiber.closure_replay.extern_scope.is_none());
-        assert_eq!(fiber.closure_replay.results.len(), 0);
-        let message = unsafe {
-            ctx.ctx
-                .infra_error_message
-                .as_ref()
-                .cloned()
-                .unwrap_or_default()
-        };
-        assert!(message.contains("invalid target frame shape"), "{message}");
-        assert!(message.contains("gc_scan_slots=2"), "{message}");
-    }
-
-    #[test]
     fn vm_jit_extern_call_maps_panic_and_not_registered_results() {
         let panic_obs = call_jit_extern_bridge(panic_extern, ExternEffects::NONE);
         assert_eq!(panic_obs.result, JitResult::Panic);
@@ -834,7 +792,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_call_declared_arg_count_mismatch_is_jit_error() {
         let mut module = Module::new("jit-extern-arg-mismatch".to_string());
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name("declared_two"),
             params: ParamShape::Exact { slots: 2 },
@@ -855,7 +813,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_callback_abi_rejects_null_non_empty_scratch_before_provider_call() {
         let mut module = Module::new("jit-extern-null-scratch".to_string());
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name("needs_arg"),
             params: ParamShape::Exact { slots: 1 },
@@ -886,7 +844,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_callback_abi_rejects_null_return_scratch_before_provider_call() {
         let mut module = Module::new("jit-extern-null-return-scratch".to_string());
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name("returns_one"),
             params: ParamShape::Exact { slots: 0 },
@@ -917,7 +875,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_callback_abi_rejects_arg_count_width_overflow_before_raw_read() {
         let mut module = Module::new("jit-extern-arg-width".to_string());
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name("variadic"),
             params: ParamShape::CallSiteVariadic,
@@ -949,7 +907,7 @@ mod tests {
     #[test]
     fn vm_jit_extern_call_declared_return_count_mismatch_is_jit_error() {
         let mut module = Module::new("jit-extern-ret-mismatch".to_string());
-        module.functions.push(function(4, 0));
+        module.functions.push(function(4));
         module.externs.push(ExternDef {
             name: test_extern_name("declared_ret"),
             params: ParamShape::Exact { slots: 1 },

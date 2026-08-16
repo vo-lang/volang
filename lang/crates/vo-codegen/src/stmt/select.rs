@@ -1,6 +1,7 @@
 //! Select statement compilation.
 
 use vo_analysis::objects::TypeKey;
+use vo_common_core::SelectCaseLayout;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 
@@ -168,7 +169,37 @@ pub(crate) fn compile_select(
 
     // SelectExec: returns chosen case index (-1 for default)
     let result_reg = func.alloc_slots(&[SlotType::Value]);
-    func.emit_op(Opcode::SelectExec, result_reg, 0, 0);
+    let select_layout = case_plans
+        .iter()
+        .filter_map(|plan| match plan {
+            SelectCasePlan::Default => None,
+            SelectCasePlan::Send {
+                queue_reg,
+                val_reg,
+                elem_layout,
+                ..
+            } => Some(SelectCaseLayout::Send {
+                queue: *queue_reg,
+                value: *val_reg,
+                elem_slots: u16::try_from(elem_layout.len())
+                    .expect("select element layout fits the register domain"),
+            }),
+            SelectCasePlan::Recv {
+                dst_reg,
+                queue_reg,
+                has_ok,
+                elem_layout,
+                ..
+            } => Some(SelectCaseLayout::Recv {
+                destination: *dst_reg,
+                queue: *queue_reg,
+                elem_slots: u16::try_from(elem_layout.len())
+                    .expect("select element layout fits the register domain"),
+                has_ok: *has_ok,
+            }),
+        })
+        .collect();
+    func.emit_select_exec(result_reg, select_layout);
 
     // Phase 3: Generate dispatch jumps
     let mut case_jumps: Vec<usize> = Vec::with_capacity(case_count);

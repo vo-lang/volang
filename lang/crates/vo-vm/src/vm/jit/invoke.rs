@@ -1,15 +1,9 @@
 use vo_runtime::bytecode::Module;
-#[cfg(test)]
-use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitResult;
 
 use crate::fiber::Fiber;
-#[cfg(test)]
-use crate::frame_call::{validate_call_frame_shape, validate_call_return_window};
 use crate::vm::{ExecResult, Vm};
 
-#[cfg(test)]
-use super::bridge_result::stack_overflow_exec_result;
 use super::bridge_result::{exec_result_from_bridge_transition, JitBridgeMode};
 use super::context::{build_jit_context, JitContextWrapper};
 use super::transition::handle_jit_non_ok_transition;
@@ -25,79 +19,6 @@ fn heap_error_return_gcref_index(func: &vo_runtime::bytecode::FunctionDef) -> Op
     } else {
         Some(gcref_count - 1)
     }
-}
-
-/// Execute a JIT-compiled function call.
-///
-/// This function:
-/// 1. Prepares args/ret buffers from caller's stack
-/// 2. Pushes a temporary VM frame (for panic/defer support)
-/// 3. Calls the JIT function
-/// 4. Handles the result (Ok/Panic/Call/WaitIo)
-///
-/// Returns `ExecResult::FrameChanged` on success (return values written to stack).
-#[cfg(test)]
-fn dispatch_jit_call(
-    vm: &mut Vm,
-    fiber: &mut Fiber,
-    inst: &Instruction,
-    module: &Module,
-    jit_func: vo_jit::JitFunc,
-    func_id: u32,
-) -> ExecResult {
-    let arg_start = inst.b as usize;
-    let Some(caller_frame) = fiber.frames.last().copied() else {
-        return ExecResult::JitError("JIT call requested without an active caller frame".into());
-    };
-    let Some(caller_func) = module.functions.get(caller_frame.func_id as usize) else {
-        return ExecResult::JitError(format!(
-            "JIT call requested from missing caller function id {}",
-            caller_frame.func_id
-        ));
-    };
-    let Some(func_def) = module.functions.get(func_id as usize) else {
-        return ExecResult::JitError(format!(
-            "JIT call requested missing callee function id {func_id}"
-        ));
-    };
-    let arg_slots = func_def.param_slots as usize;
-    let local_slots = func_def.local_slots as usize;
-    let ret_slots = func_def.ret_slots as usize;
-    let ret_reg = match arg_start.checked_add(arg_slots) {
-        Some(ret_reg) => match u16::try_from(ret_reg) {
-            Ok(ret_reg) => ret_reg,
-            Err(_) => {
-                return ExecResult::JitError(format!(
-                    "JIT call return offset {ret_reg} exceeds u16 for func_id={} name={}",
-                    func_id, func_def.name
-                ));
-            }
-        },
-        None => {
-            return ExecResult::JitError(format!(
-                "JIT call return offset overflow: arg_start={arg_start} arg_slots={arg_slots} func_id={} name={}",
-                func_id, func_def.name
-            ));
-        }
-    };
-    if let Err(err) = validate_call_frame_shape(func_def) {
-        return ExecResult::JitError(err.message("JIT call callee frame shape"));
-    }
-    if let Err(err) = validate_call_return_window(caller_func, ret_reg, ret_slots as u16) {
-        return ExecResult::JitError(err.message("JIT call caller return window"));
-    }
-
-    let jit_bp = match fiber.try_push_borrowed_call_frame(
-        func_id,
-        arg_start as u16,
-        ret_reg,
-        ret_slots as u16,
-        local_slots as u16,
-    ) {
-        Ok(bp) => bp,
-        Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
-    };
-    invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots)
 }
 
 /// Execute an already-materialized frame through its compiled JIT entry.
@@ -320,7 +241,7 @@ mod tests {
     fn vm_heap_return_metadata_mismatch_is_jit_error() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-heap-return-bounds-test".to_string());
-        let mut func = function(1, 0);
+        let mut func = function(1);
         func.heap_ret_gcref_count = 1;
         func.heap_ret_slots = vec![2];
         func.error_ret_slot = 0;
@@ -345,7 +266,7 @@ mod tests {
     fn vm_stack_return_error_slot_outside_ret_buffer_is_jit_error() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-stack-return-error-slot-test".to_string());
-        let mut func = function(1, 0);
+        let mut func = function(1);
         func.ret_slots = 1;
         func.error_ret_slot = 1;
         module.functions.push(func);
@@ -363,78 +284,11 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
-    extern "C" fn unreachable_jit_call(
-        _ctx: *mut vo_runtime::jit_api::JitContext,
-        _args: *mut u64,
-        _ret: *mut u64,
-        _lane0: u64,
-        _lane1: u64,
-        _lane2: u64,
-        _lane3: u64,
-        _lane4: u64,
-    ) -> JitResult {
-        panic!("frame-shape validation must reject before invoking JIT code")
-    }
-
-    #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-    extern "C" fn unreachable_jit_call(
-        _ctx: *mut vo_runtime::jit_api::JitContext,
-        _args: *mut u64,
-        _ret: *mut u64,
-        _lane0: u64,
-        _lane1: u64,
-        _lane2: u64,
-    ) -> JitResult {
-        panic!("frame-shape validation must reject before invoking JIT code")
-    }
-
-    #[cfg(any(
-        all(target_arch = "x86_64", target_os = "windows"),
-        not(any(target_arch = "aarch64", target_arch = "x86_64"))
-    ))]
-    extern "C" fn unreachable_jit_call(
-        _ctx: *mut vo_runtime::jit_api::JitContext,
-        _args: *mut u64,
-        _ret: *mut u64,
-        _lane0: u64,
-    ) -> JitResult {
-        panic!("frame-shape validation must reject before invoking JIT code")
-    }
-
-    #[test]
-    fn vm_jit_dispatch_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let mut module = Module::new("jit-dispatch-frame-shape-test".to_string());
-        module.functions.push(function(1, 0));
-        module.functions.push(function(1, 2));
-
-        let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0);
-        let before_frames = fiber.frames.len();
-        let before_sp = fiber.sp;
-        let inst = Instruction::new(vo_runtime::instruction::Opcode::Call, 1, 0, 0);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dispatch_jit_call(&mut vm, &mut fiber, &inst, &module, unreachable_jit_call, 1)
-        }));
-
-        match result {
-            Ok(ExecResult::JitError(msg)) => {
-                assert!(msg.contains("JIT call callee frame shape"), "{msg}");
-            }
-            Ok(other) => panic!("JIT frame-shape drift should be JitError, got {other:?}"),
-            Err(_) => panic!("JIT frame-shape drift must not panic"),
-        }
-        assert_eq!(fiber.frames.len(), before_frames);
-        assert_eq!(fiber.sp, before_sp);
-    }
-
     #[test]
     fn vm_jit_ok_errdefer_heap_return_check_rejects_short_error_allocation_before_defer_059() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-errdefer-heap-return-short-error".to_string());
-        let mut func = function(1, 0);
+        let mut func = function(1);
         func.slot_types = vec![SlotType::GcRef];
         func.ret_slots = 2;
         func.ret_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
@@ -444,7 +298,7 @@ mod tests {
         func.error_ret_slot = 0;
         func.has_defer = true;
         module.functions.push(func);
-        module.functions.push(function(0, 0));
+        module.functions.push(function(0));
         vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
@@ -493,7 +347,7 @@ mod tests {
 
     #[test]
     fn vm_jit_heap_error_return_uses_final_heap_ref_058() {
-        let mut func = function(1, 0);
+        let mut func = function(1);
         func.ret_slots = 4;
         func.ret_slot_types = vec![
             SlotType::Value,

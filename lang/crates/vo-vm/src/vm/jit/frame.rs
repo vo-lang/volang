@@ -278,7 +278,7 @@ mod tests {
     fn vm_jit_shadow_capacity_roots_062_push_frame_capacity_before_publication_is_fatal() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-push-frame-contract-test".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
         vm.load(module).unwrap();
 
         let mut fiber = Fiber::new(7);
@@ -320,7 +320,7 @@ mod tests {
     fn vm_jit_shadow_capacity_roots_062_push_resume_point_capacity_before_publication_is_fatal() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-resume-point-capacity-test".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
         vm.finish_load(module);
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0);
@@ -341,10 +341,9 @@ mod tests {
 
     fn function_with_returns(
         local_slots: u16,
-        gc_scan_slots: u16,
         ret_slots: u16,
     ) -> vo_runtime::bytecode::FunctionDef {
-        let mut func = function(local_slots, gc_scan_slots);
+        let mut func = function(local_slots);
         func.ret_slots = ret_slots;
         func.ret_slot_types = vec![SlotType::Value; ret_slots as usize];
         func
@@ -409,8 +408,8 @@ mod tests {
     #[test]
     fn vm_jit_resume_point_contract_062_push_frame_rejects_frame_shape_before_stack_publication() {
         let mut module = Module::new("jit-push-frame-shape-test".to_string());
-        module.functions.push(function(1, 0));
-        let mut malformed = function(1, 0);
+        module.functions.push(function(1));
+        let mut malformed = function(1);
         malformed.param_count = 2;
         malformed.param_slots = 2;
         module.functions.push(malformed);
@@ -422,8 +421,8 @@ mod tests {
     fn vm_jit_resume_point_contract_062_push_frame_rejects_return_window_before_stack_publication()
     {
         let mut module = Module::new("jit-push-frame-return-window-test".to_string());
-        module.functions.push(function(1, 0));
-        module.functions.push(function_with_returns(1, 0, 1));
+        module.functions.push(function(1));
+        module.functions.push(function_with_returns(1, 1));
 
         assert_push_frame_contract_rejects_before_publication(module, 0, 1, 1, 1, 1);
     }
@@ -431,7 +430,7 @@ mod tests {
     #[test]
     fn vm_jit_resume_point_contract_062_rejects_missing_func_before_resume_publication() {
         let mut module = Module::new("jit-resume-point-missing-func-test".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
 
         assert_resume_point_contract_rejects_before_publication(module, 0, 99, 0, 0);
     }
@@ -439,8 +438,8 @@ mod tests {
     #[test]
     fn vm_jit_resume_point_contract_062_rejects_frame_shape_before_resume_publication() {
         let mut module = Module::new("jit-resume-point-frame-shape-test".to_string());
-        module.functions.push(function(1, 0));
-        let mut malformed = function(1, 0);
+        module.functions.push(function(1));
+        let mut malformed = function(1);
         malformed.param_count = 2;
         malformed.param_slots = 2;
         module.functions.push(malformed);
@@ -451,8 +450,8 @@ mod tests {
     #[test]
     fn vm_jit_resume_point_contract_062_rejects_ret_slot_mismatch_before_resume_publication() {
         let mut module = Module::new("jit-resume-point-ret-slot-test".to_string());
-        module.functions.push(function(1, 0));
-        module.functions.push(function_with_returns(1, 0, 1));
+        module.functions.push(function(1));
+        module.functions.push(function_with_returns(1, 1));
 
         assert_resume_point_contract_rejects_before_publication(module, 0, 1, 0, 0);
     }
@@ -460,8 +459,8 @@ mod tests {
     #[test]
     fn vm_jit_resume_point_contract_062_rejects_return_window_before_resume_publication() {
         let mut module = Module::new("jit-resume-point-return-window-test".to_string());
-        module.functions.push(function(1, 0));
-        module.functions.push(function_with_returns(1, 0, 1));
+        module.functions.push(function(1));
+        module.functions.push(function_with_returns(1, 1));
 
         assert_resume_point_contract_rejects_before_publication(module, 0, 1, 1, 1);
     }

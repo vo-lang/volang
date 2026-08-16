@@ -35,7 +35,7 @@ pub use bytecode::{
     Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef,
     InstructionMetadata, InterfaceMeta, Itab, Module, ParamShape, ProviderTrust,
     RegisteredExternSource, ResolvedExtern, ResolvedExternAbi, ResolvedExternTable,
-    ResolvedExternTableError, ReturnShape, StructMeta, TransferType,
+    ResolvedExternTableError, ReturnShape, SelectCaseLayout, StructMeta, TransferType,
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use extern_key::{

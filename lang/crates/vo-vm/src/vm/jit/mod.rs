@@ -3,7 +3,7 @@
 //! ## Overview
 //!
 //! When VM encounters a `Call` instruction for a JIT-compiled function:
-//! 1. `dispatch_jit_call` allocates frame in fiber.stack and prepares JitContext
+//! 1. `dispatch_jit_frame` prepares a JitContext for the active VM frame
 //! 2. JIT function executes natively, using fiber.stack directly
 //! 3. Results (Ok/Panic/Call/WaitIo/WaitQueue) are translated back to VM state
 //!

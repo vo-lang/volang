@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use vo_runtime::objects::closure;
 use vo_runtime::objects::interface;
 
-use crate::bytecode::Module;
+use crate::bytecode::{LoadedModule, Module};
 use crate::fiber::{Fiber, FiberCapacityError};
 use crate::frame_call::{
     call_iface_layout_for_callsite, validate_call_frame_shape, validate_call_return_window,
@@ -142,7 +142,6 @@ pub(crate) fn resolve_iface_call_target(
     Ok(vo_runtime::DynamicCallTarget {
         func_id,
         local_slots: func.local_slots,
-        gc_scan_slots: func.gc_scan_slots,
     })
 }
 
@@ -288,7 +287,7 @@ pub fn exec_call(
         ret_slots,
         local_slots as u16,
     ) {
-        Ok(_) => {}
+        Ok(bp) => fiber.zero_function_root_locals_at(bp, func),
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     }
 
@@ -303,9 +302,10 @@ pub(crate) fn exec_verified_call(
     gc: &mut Gc,
     fiber: &mut Fiber,
     inst: &Instruction,
-    module: &Module,
+    loaded_module: &LoadedModule,
     caller_func: &crate::bytecode::FunctionDef,
 ) -> ExecResult {
+    let module = loaded_module.module();
     let func_id = inst.static_call_func_id();
     let Some(func) = module.functions.get(func_id as usize) else {
         return ExecResult::JitError(format!(
@@ -326,7 +326,14 @@ pub(crate) fn exec_verified_call(
         func.ret_slots,
         func.local_slots,
     ) {
-        Ok(_) => {}
+        Ok(bp) => {
+            let roots = loaded_module
+                .frame_root_maps()
+                .function(func_id)
+                .expect("verified call target owns frame-root facts")
+                .initialization_roots();
+            fiber.zero_frame_root_locals_at(bp, func.param_slots, roots);
+        }
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     }
     ExecResult::FrameChanged
@@ -377,6 +384,30 @@ pub(crate) fn exec_call_closure_cached(
     )
 }
 
+pub(crate) fn exec_verified_call_closure_cached(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    loaded_module: &LoadedModule,
+    ic_entry: &mut vo_runtime::DynCallIC,
+) -> ExecResult {
+    let caller_frame = fiber.frames.last().copied().ok_or_else(|| {
+        ExecResult::JitError("CallClosure requested without an active caller frame".to_string())
+    });
+    let caller_frame = match caller_frame {
+        Ok(frame) => frame,
+        Err(result) => return result,
+    };
+    let caller_bp = caller_frame.bp;
+    let stack = fiber.stack_ptr();
+    let closure_value = stack_get(stack, caller_bp + inst.a as usize);
+    FrameCallBuilder::new_loaded(gc, fiber, loaded_module).call_closure_borrowed_cached(
+        closure_value,
+        inst.b as usize,
+        ic_entry,
+    )
+}
+
 pub fn exec_call_iface(
     gc: &mut Gc,
     fiber: &mut Fiber,
@@ -384,7 +415,7 @@ pub fn exec_call_iface(
     module: &Module,
     itab_cache: &ItabCache,
 ) -> ExecResult {
-    exec_call_iface_impl(gc, fiber, inst, module, itab_cache, None)
+    exec_call_iface_impl(gc, fiber, inst, module, None, itab_cache, None)
 }
 
 pub(crate) fn exec_call_iface_cached(
@@ -395,7 +426,26 @@ pub(crate) fn exec_call_iface_cached(
     itab_cache: &ItabCache,
     ic_entry: &mut vo_runtime::DynCallIC,
 ) -> ExecResult {
-    exec_call_iface_impl(gc, fiber, inst, module, itab_cache, Some(ic_entry))
+    exec_call_iface_impl(gc, fiber, inst, module, None, itab_cache, Some(ic_entry))
+}
+
+pub(crate) fn exec_verified_call_iface_cached(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    loaded_module: &LoadedModule,
+    itab_cache: &ItabCache,
+    ic_entry: &mut vo_runtime::DynCallIC,
+) -> ExecResult {
+    exec_call_iface_impl(
+        gc,
+        fiber,
+        inst,
+        loaded_module.module(),
+        Some(loaded_module.frame_root_maps()),
+        itab_cache,
+        Some(ic_entry),
+    )
 }
 
 fn exec_call_iface_impl(
@@ -403,6 +453,7 @@ fn exec_call_iface_impl(
     fiber: &mut Fiber,
     inst: &Instruction,
     module: &Module,
+    frame_root_maps: Option<&vo_common_core::FrameRootMaps>,
     itab_cache: &ItabCache,
     ic_entry: Option<&mut vo_runtime::DynCallIC>,
 ) -> ExecResult {
@@ -559,6 +610,15 @@ fn exec_call_iface_impl(
         Ok(bp) => bp,
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
     };
+    if let Some(root_maps) = frame_root_maps {
+        let roots = root_maps
+            .function(target.func_id)
+            .expect("verified interface target owns frame-root facts")
+            .initialization_roots();
+        fiber.zero_frame_root_locals_at(new_bp, target_func.param_slots, roots);
+    } else {
+        fiber.zero_function_root_locals_at(new_bp, target_func);
+    }
     if fill_ic_after_validation {
         if let Some(entry) = ic_entry {
             entry.publish_interpreter_target(slot0, target);

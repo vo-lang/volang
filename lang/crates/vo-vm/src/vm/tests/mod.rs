@@ -170,7 +170,6 @@ fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
         param_count: 0,
         param_slots: 0,
         local_slots: root_slots,
-        gc_scan_slots: root_slots,
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 0,
@@ -185,10 +184,6 @@ fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
         instruction_metadata: vec![vo_runtime::bytecode::InstructionMetadata::None],
         code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
         slot_types: vec![SlotType::GcRef; root_slots as usize],
-        borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
-                SlotType::GcRef;
-                root_slots as usize
-            ]),
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -256,7 +251,6 @@ fn malformed_single_instruction_module(
         param_count: 0,
         param_slots: 0,
         local_slots: 4,
-        gc_scan_slots: 0,
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 0,
@@ -271,12 +265,6 @@ fn malformed_single_instruction_module(
         instruction_metadata: vec![vo_runtime::bytecode::InstructionMetadata::None; code.len()],
         code,
         slot_types: vec![SlotType::Value; 4],
-        borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
-            SlotType::Value,
-            SlotType::Value,
-            SlotType::Value,
-            SlotType::Value,
-        ]),
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -301,9 +289,6 @@ fn assert_vm_load_rejects(module: Module, expected: &[&str]) {
 }
 
 fn refresh_vm_test_function_metadata(func: &mut FunctionDef) {
-    func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
     func.has_defer = func
         .code
         .iter()

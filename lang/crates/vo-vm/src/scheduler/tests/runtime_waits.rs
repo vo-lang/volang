@@ -734,7 +734,7 @@ fn pending_spawn_identity_is_assigned_only_at_commit() {
 }
 
 #[test]
-fn repeated_pending_spawns_reuse_stack_without_touching_dead_tail() {
+fn repeated_pending_spawns_reuse_storage_and_zero_the_new_frame() {
     let mut scheduler = Scheduler::new();
     let first = scheduler
         .try_spawn_pending(PendingSpawn::try_new(7, 8, 0, vec![1]).expect("initial spawn shape"))
@@ -764,7 +764,7 @@ fn repeated_pending_spawns_reuse_stack_without_touching_dead_tail() {
         assert_eq!(fiber.stack.as_ptr(), retained_ptr);
         assert_eq!(fiber.stack.len(), retained_len);
         assert_eq!(fiber.stack.capacity(), retained_capacity);
-        assert_eq!(&fiber.stack[..4], &[value, u64::MAX, u64::MAX, u64::MAX]);
+        assert_eq!(&fiber.stack[..4], &[value, 0, 0, 0]);
         scheduler.schedule_next().expect("reused fiber");
         scheduler.kill_current();
     }

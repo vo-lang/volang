@@ -301,7 +301,7 @@ mod tests {
     fn vm_with_jit_frame() -> (Vm, FiberId) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-panic-location-test".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
         vm.load(module).unwrap();
 
         let fid = vm.scheduler.spawn(Fiber::new(0));
@@ -359,7 +359,7 @@ mod tests {
         })
         .expect("jit vm");
         let mut loaded = Module::new("jit-disabled-loop-test".to_string());
-        loaded.functions.push(function(1, 0));
+        loaded.functions.push(function(1));
         vm.load(loaded).expect("load module");
         let module = vm.module.as_ref().cloned().expect("loaded module");
         let loop_pc = 7;
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn best_effort_osr_compile_failure_is_cached_and_interpreted() {
-        let mut func = function(1, 0);
+        let mut func = function(1);
         func.code = vec![
             Instruction::with_flags(Opcode::Hint, vo_runtime::instruction::HINT_LOOP, 0, 0, 0),
             Instruction::new(Opcode::LoadInt, 0, 1, 0),

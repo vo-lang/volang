@@ -30,7 +30,7 @@ fn local_int_queue(vm: &mut Vm) -> vo_runtime::gc::GcRef {
 
 fn module_with_entry() -> Module {
     let mut module = Module::new("jit-extern-suspend-callclosure-test".to_string());
-    module.functions.push(function(1, 0));
+    module.functions.push(function(1));
     module
 }
 

@@ -1189,6 +1189,7 @@ pub fn emit_lvalue_load(
                         dst,
                         *base_slot,
                         *index_reg,
+                        *len,
                         elem_slot_types,
                     );
                 }
@@ -1251,7 +1252,7 @@ pub fn emit_lvalue_load(
             emit_lvalue_load(array, flat, ctx, func)?;
             func.emit_stack_array_index_check(*index_reg, *len, ctx)?;
             if *elem_slots != 0 {
-                func.emit_slot_get_with_slot_types(dst, flat, *index_reg, elem_slot_types);
+                func.emit_slot_get_with_slot_types(dst, flat, *index_reg, *len, elem_slot_types);
             }
         }
 
@@ -1279,7 +1280,13 @@ pub fn emit_lvalue_load(
             debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
             if !elem_slot_types.is_empty() && *field_slots != 0 {
                 let tmp = func.alloc_slots(elem_slot_types);
-                func.emit_slot_get_with_slot_types(tmp, *base_slot, *index_reg, elem_slot_types);
+                func.emit_slot_get_with_slot_types(
+                    tmp,
+                    *base_slot,
+                    *index_reg,
+                    *len,
+                    elem_slot_types,
+                );
                 func.emit_copy(dst, tmp + *field_offset, *field_slots);
             }
         }
@@ -1347,6 +1354,7 @@ pub fn emit_lvalue_store(
                         *base_slot,
                         *index_reg,
                         src,
+                        *len,
                         elem_slot_types,
                     );
                 }
@@ -1408,7 +1416,7 @@ pub fn emit_lvalue_store(
             emit_lvalue_load(array, flat, ctx, func)?;
             func.emit_stack_array_index_check(*index_reg, *len, ctx)?;
             if *elem_slots != 0 {
-                func.emit_slot_set_with_slot_types(flat, *index_reg, src, elem_slot_types);
+                func.emit_slot_set_with_slot_types(flat, *index_reg, src, *len, elem_slot_types);
                 emit_lvalue_store(array, flat, ctx, func, array_slot_types)?;
             }
         }
@@ -1437,9 +1445,21 @@ pub fn emit_lvalue_store(
             debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
             if !elem_slot_types.is_empty() && *field_slots != 0 {
                 let tmp = func.alloc_slots(elem_slot_types);
-                func.emit_slot_get_with_slot_types(tmp, *base_slot, *index_reg, elem_slot_types);
+                func.emit_slot_get_with_slot_types(
+                    tmp,
+                    *base_slot,
+                    *index_reg,
+                    *len,
+                    elem_slot_types,
+                );
                 func.emit_copy(tmp + *field_offset, src, *field_slots);
-                func.emit_slot_set_with_slot_types(*base_slot, *index_reg, tmp, elem_slot_types);
+                func.emit_slot_set_with_slot_types(
+                    *base_slot,
+                    *index_reg,
+                    tmp,
+                    *len,
+                    elem_slot_types,
+                );
             }
         }
     }

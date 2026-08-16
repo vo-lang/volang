@@ -121,7 +121,6 @@ fn function_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
         param_count: 0,
         param_slots: 0,
         local_slots: slot_types.len() as u16,
-        gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
         ret_slots: 0,
         ret_slot_types: Vec::new(),
         recv_slots: 0,
@@ -135,7 +134,6 @@ fn function_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
         has_call_extern: false,
         code: Vec::new(),
         instruction_metadata: Vec::new(),
-        borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types),
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -249,9 +247,7 @@ fn verifier_fuzz_case(case_id: usize) -> Module {
             module.functions[0].local_slots = 1;
         }
         4 => module.functions[0].local_slots = 99,
-        5 => {
-            module.functions[0].gc_scan_slots = module.functions[0].gc_scan_slots.saturating_add(1)
-        }
+        5 => {}
         6 => module.globals.push(GlobalDef {
             name: "g".to_string(),
             slots: 1,
@@ -279,9 +275,6 @@ fn finish_test_function(mut func: FunctionDef) -> FunctionDef {
     let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
     func.has_calls = has_calls;
     func.has_call_extern = has_call_extern;
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
-    func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
     func
 }
 

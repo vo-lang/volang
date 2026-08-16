@@ -199,8 +199,6 @@ fn vm_island_spawn_unpack_txn_004_rejects_arg_rttid_drift_before_closure_create(
     func.param_slots = 1;
     func.local_slots = 1;
     func.slot_types = vec![SlotType::GcRef];
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
     func.param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::Slice).to_raw(),
         rttid_raw: ValueRttid::new(1, ValueKind::Slice).to_raw(),
@@ -250,8 +248,6 @@ fn vm_island_spawn_unpack_txn_004_rejects_zero_length_arg_chunk_before_closure_c
     func.param_slots = 1;
     func.local_slots = 1;
     func.slot_types = vec![SlotType::Value];
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
     func.param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::Int64).to_raw(),
         rttid_raw: ValueRttid::new(0, ValueKind::Int64).to_raw(),
@@ -302,9 +298,6 @@ fn vm_island_spawn_unpack_txn_061_build_failure_restores_endpoint_registry() {
     func.param_slots = 2;
     func.local_slots = 2;
     func.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
-    func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-    func.borrowed_scan_slots_prefix =
-        FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
     func.param_types = vec![port_transfer_type];
     let mut module = Module::new("spawn-build-failure-rollback".to_string());
     module.runtime_types = vec![

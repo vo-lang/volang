@@ -130,9 +130,9 @@ mod tests {
     fn assert_nested_special_call_materializes(call_kind: u8) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-materialize-test".to_string());
-        module.functions.push(function(2, 0));
-        module.functions.push(returning_function(3, 1, 1));
-        module.functions.push(returning_function(4, 2, 1));
+        module.functions.push(function(2));
+        module.functions.push(returning_function(3, 1));
+        module.functions.push(returning_function(4, 1));
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(1);
@@ -186,12 +186,8 @@ mod tests {
         assert_eq!(fiber.frames[2].pc, 33);
     }
 
-    fn returning_function(
-        local_slots: u16,
-        gc_scan_slots: u16,
-        ret_slots: u16,
-    ) -> vo_runtime::bytecode::FunctionDef {
-        let mut func = function(local_slots, gc_scan_slots);
+    fn returning_function(local_slots: u16, ret_slots: u16) -> vo_runtime::bytecode::FunctionDef {
+        let mut func = function(local_slots);
         func.ret_slots = ret_slots;
         func.ret_slot_types = vec![SlotType::Value; ret_slots as usize];
         func
@@ -200,7 +196,7 @@ mod tests {
     fn assert_top_level_special_call_materializes(call_kind: u8) {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-top-level-materialize-test".to_string());
-        module.functions.push(function(5, 0));
+        module.functions.push(function(5));
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(1);
@@ -258,7 +254,7 @@ mod tests {
     fn vm_jit_special_call_materialize_failure_does_not_record_side_exit_058() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-special-call-side-exit-txn-test".to_string());
-        module.functions.push(function(1, 0));
+        module.functions.push(function(1));
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(25);
@@ -303,9 +299,9 @@ mod tests {
         })
         .expect("jit vm");
         let mut module = Module::new("jit-regular-call-resolve-txn-test".to_string());
-        module.functions.push(function(4, 0));
-        module.functions.push(function(3, 0));
-        let mut callee = function(1, 0);
+        module.functions.push(function(4));
+        module.functions.push(function(3));
+        let mut callee = function(1);
         callee.name = "callee_missing_jit_call_layout".to_string();
         callee.has_calls = true;
         callee.code = vec![Instruction::new(Opcode::CallClosure, 0, 0, 0)];
@@ -361,9 +357,9 @@ mod tests {
     fn vm_jit_regular_cold_call_materialize_failure_does_not_record_side_exit_058() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-regular-cold-call-side-exit-txn-test".to_string());
-        module.functions.push(function(0, 0));
-        module.functions.push(function(1, 0));
-        module.functions.push(function(1, 0));
+        module.functions.push(function(0));
+        module.functions.push(function(1));
+        module.functions.push(function(1));
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(26);
@@ -416,8 +412,8 @@ mod tests {
         })
         .expect("jit vm");
         let mut module = Module::new("jit-prepared-call-resolve-txn-test".to_string());
-        module.functions.push(function(2, 0));
-        let mut callee = function(1, 0);
+        module.functions.push(function(2));
+        let mut callee = function(1);
         callee.name = "prepared_missing_jit_call_layout".to_string();
         callee.has_calls = true;
         callee.code = vec![Instruction::new(Opcode::CallClosure, 0, 0, 0)];
@@ -477,8 +473,8 @@ mod tests {
     fn vm_jit_prepared_cold_call_materialize_failure_does_not_record_side_exit_058() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-prepared-cold-call-side-exit-txn-test".to_string());
-        module.functions.push(function(0, 0));
-        module.functions.push(function(1, 0));
+        module.functions.push(function(0));
+        module.functions.push(function(1));
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(27);

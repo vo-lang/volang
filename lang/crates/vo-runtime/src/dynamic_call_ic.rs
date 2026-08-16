@@ -17,7 +17,6 @@ pub struct DynCallIC {
     pub func_id: u32,
     /// Generation of the dispatch entry that supplied `jit_func_ptr`.
     pub dispatch_generation: u64,
-    pub gc_scan_slots: u16,
     pub valid: u16,
     /// Whether the cached native target can reach a managed-heap safepoint.
     pub jit_may_gc: u16,
@@ -40,7 +39,6 @@ impl DynCallIC {
     pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(Self, func_id) as i32;
     pub const OFFSET_DISPATCH_GENERATION: i32 =
         core::mem::offset_of!(Self, dispatch_generation) as i32;
-    pub const OFFSET_GC_SCAN_SLOTS: i32 = core::mem::offset_of!(Self, gc_scan_slots) as i32;
     pub const OFFSET_VALID: i32 = core::mem::offset_of!(Self, valid) as i32;
     pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(Self, jit_may_gc) as i32;
     pub const OFFSET_JIT_FRAME_ELIDED: i32 = core::mem::offset_of!(Self, jit_frame_elided) as i32;
@@ -55,7 +53,6 @@ impl DynCallIC {
         Some(DynamicCallTarget {
             func_id: self.func_id,
             local_slots: u16::try_from(self.local_slots).ok()?,
-            gc_scan_slots: self.gc_scan_slots,
         })
     }
 
@@ -71,7 +68,6 @@ impl DynCallIC {
         }
         self.dispatch_key = dispatch_key;
         self.local_slots = u32::from(target.local_slots);
-        self.gc_scan_slots = target.gc_scan_slots;
         self.func_id = target.func_id;
         self.valid = 1;
     }
@@ -82,7 +78,6 @@ impl DynCallIC {
 pub struct DynamicCallTarget {
     pub func_id: u32,
     pub local_slots: u16,
-    pub gc_scan_slots: u16,
 }
 
 const _: () = assert!(DynCallIC::SIZE == 40);
@@ -111,7 +106,6 @@ mod tests {
         let first = DynamicCallTarget {
             func_id: 7,
             local_slots: 12,
-            gc_scan_slots: 5,
         };
 
         entry.publish_interpreter_target(0xaaaa, first);
@@ -132,7 +126,6 @@ mod tests {
         let second = DynamicCallTarget {
             func_id: 8,
             local_slots: 9,
-            gc_scan_slots: 3,
         };
         entry.publish_interpreter_target(0xbbbb, second);
         assert_eq!(entry.jit_func_ptr, 0);

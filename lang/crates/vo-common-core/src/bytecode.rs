@@ -941,6 +941,29 @@ pub struct IfaceAssertLayout {
     pub result_slots: u16,
 }
 
+/// Compact register layout retained by a `SelectBegin`/case/`SelectExec`
+/// transaction.
+///
+/// Case-building instructions only publish descriptors to the runtime. The
+/// actual queue/value reads and receive writes happen at `SelectExec`, so the
+/// terminal instruction owns these effects explicitly. Element types remain
+/// authoritative on each case's `QueueLayout`; the terminal effect only needs
+/// the verified slot width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectCaseLayout {
+    Send {
+        queue: u16,
+        value: u16,
+        elem_slots: u16,
+    },
+    Recv {
+        destination: u16,
+        queue: u16,
+        elem_slots: u16,
+        has_ok: bool,
+    },
+}
+
 /// Per-instruction metadata attached to a bytecode instruction.
 ///
 /// This table is the sole authority for variable-width instruction layouts.
@@ -977,6 +1000,9 @@ pub enum InstructionMetadata {
         value_layout: Vec<SlotType>,
     },
     SlotLayout {
+        /// Logical element count of the inline stack array. Together with
+        /// `elem_layout`, this bounds the dynamically addressed frame range.
+        array_len: u16,
         elem_layout: Vec<SlotType>,
     },
     CallLayout {
@@ -996,6 +1022,9 @@ pub enum InstructionMetadata {
     },
     QueueLayout {
         elem_layout: Vec<SlotType>,
+    },
+    SelectExecLayout {
+        cases: Vec<SelectCaseLayout>,
     },
     MapIterNext {
         key_layout: Vec<SlotType>,
@@ -1242,16 +1271,30 @@ impl InstructionMetadata {
         }
     }
 
+    pub fn select_cases(&self) -> Option<&[SelectCaseLayout]> {
+        match self {
+            Self::SelectExecLayout { cases } => Some(cases),
+            _ => None,
+        }
+    }
+
     pub fn slot_elem_slots(&self) -> Option<u16> {
-        let Self::SlotLayout { elem_layout } = self else {
+        let Self::SlotLayout { elem_layout, .. } = self else {
             return None;
         };
         u16::try_from(elem_layout.len()).ok()
     }
 
+    pub fn slot_array_len(&self) -> Option<u16> {
+        let Self::SlotLayout { array_len, .. } = self else {
+            return None;
+        };
+        Some(*array_len)
+    }
+
     pub fn slot_elem_layout(&self) -> Option<&[SlotType]> {
         match self {
-            Self::SlotLayout { elem_layout } => Some(elem_layout),
+            Self::SlotLayout { elem_layout, .. } => Some(elem_layout),
             _ => None,
         }
     }
@@ -1282,7 +1325,6 @@ pub struct FunctionDef {
     pub param_count: u16,
     pub param_slots: u16,
     pub local_slots: u16,
-    pub gc_scan_slots: u16,
     pub ret_slots: u16,
     pub ret_slot_types: Vec<SlotType>,
     /// Receiver slots for methods (0 for functions, >0 for methods)
@@ -1324,7 +1366,6 @@ pub struct FunctionDef {
     /// and JIT lowering. Length must match `code.len()`.
     pub instruction_metadata: Vec<InstructionMetadata>,
     pub slot_types: Vec<SlotType>,
-    pub borrowed_scan_slots_prefix: Vec<u16>,
     /// Capture types for cross-island transfer (closures only).
     /// Each entry: (ValueMeta raw, slot_count) for the captured variable's inner type.
     /// Empty for non-closure functions.
@@ -1358,64 +1399,6 @@ impl FunctionDef {
             }
         }
         (has_calls, has_call_extern)
-    }
-
-    pub fn compute_gc_scan_slots(slot_types: &[SlotType]) -> u16 {
-        Self::try_compute_gc_scan_slots(slot_types)
-            .expect("slot layout exceeds the u16 GC scan domain")
-    }
-
-    /// Compute the GC scan prefix without narrowing an unverified layout.
-    ///
-    /// `None` means the layout is wider than the bytecode slot domain, or an
-    /// `Interface0` header would require an unrepresentable trailing data
-    /// slot. Pairing itself is checked by the module verifier.
-    pub fn try_compute_gc_scan_slots(slot_types: &[SlotType]) -> Option<u16> {
-        let mut scan_slots = 0usize;
-        for (idx, slot_type) in slot_types.iter().enumerate() {
-            match slot_type {
-                SlotType::GcRef => scan_slots = idx.checked_add(1)?,
-                SlotType::Interface0 => scan_slots = idx.checked_add(2)?,
-                _ => {}
-            }
-        }
-        u16::try_from(scan_slots).ok()
-    }
-
-    pub fn compute_borrowed_scan_slots_prefix(slot_types: &[SlotType]) -> Vec<u16> {
-        Self::try_compute_borrowed_scan_slots_prefix(slot_types)
-            .expect("slot layout exceeds the u16 borrowed-scan domain")
-    }
-
-    /// Compute every borrowed-frame scan prefix without silent narrowing.
-    pub fn try_compute_borrowed_scan_slots_prefix(slot_types: &[SlotType]) -> Option<Vec<u16>> {
-        if slot_types.len() > u16::MAX as usize {
-            return None;
-        }
-        let mut prefix = Vec::with_capacity(slot_types.len().checked_add(1)?);
-        let mut scan_slots = 0u16;
-        prefix.push(0);
-        for (idx, slot_type) in slot_types.iter().enumerate() {
-            match slot_type {
-                SlotType::GcRef => scan_slots = u16::try_from(idx.checked_add(1)?).ok()?,
-                SlotType::Interface0 => scan_slots = u16::try_from(idx.checked_add(2)?).ok()?,
-                _ => {}
-            }
-            prefix.push(scan_slots);
-        }
-        Some(prefix)
-    }
-
-    #[inline]
-    pub fn scan_slots_before_borrowed_start(&self, borrowed_start: u16) -> u16 {
-        let end = borrowed_start as usize;
-        assert!(
-            end <= self.slot_types.len(),
-            "scan_slots_before_borrowed_start: borrowed_start {} exceeds slot layout length {}",
-            borrowed_start,
-            self.slot_types.len()
-        );
-        self.borrowed_scan_slots_prefix[end]
     }
 }
 
@@ -2967,7 +2950,6 @@ mod tests {
             param_count: 0,
             param_slots: 0,
             local_slots: slot_types.len() as u16,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots: 0,
             ret_slot_types: Vec::new(),
             recv_slots: 0,
@@ -2981,9 +2963,6 @@ mod tests {
             has_call_extern: false,
             code: Vec::new(),
             instruction_metadata: Vec::new(),
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
-                &slot_types,
-            ),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -3053,15 +3032,6 @@ mod tests {
                 true,
             ))
         );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "scan_slots_before_borrowed_start: borrowed_start 2 exceeds slot layout length 1"
-    )]
-    fn scan_slots_before_borrowed_start_rejects_out_of_layout_start() {
-        let func = function_with_slot_types(vec![SlotType::Value]);
-        let _ = func.scan_slots_before_borrowed_start(2);
     }
 
     #[test]
