@@ -2068,13 +2068,13 @@ fn call_defer_entry(
     // Ensure stack has enough space for both local_slots and arg_offset+args
     let arg_space = layout.arg_offset + arg_slots;
     let total_slots = (func.local_slots as usize).max(arg_space);
-    if fiber
-        .try_reserve_call_window(args_start, total_slots)
-        .is_err()
-    {
-        let stack = fiber.stack_ptr();
-        return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::StackOverflow);
-    }
+    let reservation = match fiber.try_reserve_call_window(args_start, total_slots) {
+        Ok(reservation) => reservation,
+        Err(_) => {
+            let stack = fiber.stack_ptr();
+            return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::StackOverflow);
+        }
+    };
     if layout.slot0.is_some() && layout.arg_offset > 1 {
         fiber.zero_slots_at(args_start + 1, layout.arg_offset - 1);
     }
@@ -2104,13 +2104,7 @@ fn call_defer_entry(
         }
     }
 
-    if fiber
-        .try_push_call_frame(func_id, args_start, 0, 0, func.gc_scan_slots)
-        .is_err()
-    {
-        let stack = fiber.stack_ptr();
-        return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::StackOverflow);
-    }
+    fiber.commit_reserved_call_frame(reservation, func_id, args_start, 0, 0, func.gc_scan_slots);
 
     ExecResult::FrameChanged
 }

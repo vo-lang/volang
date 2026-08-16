@@ -120,6 +120,15 @@ impl CallFrame {
     }
 }
 
+/// Proof that one call-frame slot and its stack window were admitted together.
+/// The token is consumed when the frame becomes visible to GC and unwinding.
+#[derive(Debug)]
+#[must_use = "a reserved call window must be committed or deliberately abandoned"]
+pub(crate) struct ReservedCallWindow {
+    bp: usize,
+    sp: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeferArgLayout {
     pub slot_types: Vec<vo_runtime::SlotType>,
@@ -1625,13 +1634,14 @@ impl Fiber {
     }
 
     #[inline]
-    pub fn try_reserve_call_window(
+    pub(crate) fn try_reserve_call_window(
         &mut self,
         bp: usize,
         slot_count: usize,
-    ) -> Result<usize, FiberCapacityError> {
+    ) -> Result<ReservedCallWindow, FiberCapacityError> {
         self.try_reserve_call_frame()?;
-        self.try_reserve_slots_at(bp, slot_count)
+        let sp = self.try_reserve_slots_at(bp, slot_count)?;
+        Ok(ReservedCallWindow { bp, sp })
     }
 
     #[inline]
@@ -1834,6 +1844,32 @@ impl Fiber {
         ));
     }
 
+    /// Commit a frame using capacity owned by `reservation`.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_reserved_call_frame(
+        &mut self,
+        reservation: ReservedCallWindow,
+        func_id: u32,
+        sp_restore: usize,
+        ret_reg: u16,
+        ret_count: u16,
+        scan_slots: u16,
+    ) {
+        debug_assert_eq!(self.sp, reservation.sp);
+        self.push_reserved_call_frame_extended(
+            func_id,
+            reservation.bp,
+            sp_restore,
+            ret_reg,
+            ret_count,
+            scan_slots,
+            None,
+            0,
+            0,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn push_borrowed_call_frame(
         &mut self,
@@ -1940,7 +1976,7 @@ impl Fiber {
             });
         }
         let bp = self.sp;
-        self.try_reserve_call_window(bp, local_slots as usize)?;
+        let reservation = self.try_reserve_call_window(bp, local_slots as usize)?;
         // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
         // previously-used slots (from prior calls that shared this stack region) contain
         // stale values. GC root scanning uses slot_types to determine which slots hold
@@ -1948,7 +1984,7 @@ impl Fiber {
         // This zero-fill is the canonical fix (same approach as JVM/CLR).
         // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
         self.zero_slots_at(bp, scan_slots as usize);
-        self.try_push_call_frame(func_id, bp, ret_reg, ret_count, scan_slots)?;
+        self.commit_reserved_call_frame(reservation, func_id, bp, ret_reg, ret_count, scan_slots);
         Ok(bp)
     }
 

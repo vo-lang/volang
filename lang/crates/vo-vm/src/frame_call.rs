@@ -446,20 +446,19 @@ impl<'a> FrameCallBuilder<'a> {
         }
 
         let new_bp = self.fiber.sp;
-        if self
-            .fiber
-            .try_reserve_call_window(new_bp, local_slots)
-            .is_err()
-        {
-            self.fiber.closure_replay.finish_extern_terminal();
-            return runtime_trap(
-                self.gc,
-                self.fiber,
-                stack,
-                self.module,
-                RuntimeTrapKind::StackOverflow,
-            );
-        }
+        let reservation = match self.fiber.try_reserve_call_window(new_bp, local_slots) {
+            Ok(reservation) => reservation,
+            Err(_) => {
+                self.fiber.closure_replay.finish_extern_terminal();
+                return runtime_trap(
+                    self.gc,
+                    self.fiber,
+                    stack,
+                    self.module,
+                    RuntimeTrapKind::StackOverflow,
+                );
+            }
+        };
 
         self.fiber
             .zero_slots_tail_at(new_bp, target.func.gc_scan_slots as usize, 0);
@@ -482,26 +481,14 @@ impl<'a> FrameCallBuilder<'a> {
         self.fiber
             .copy_slots_from_slice(new_bp + target.layout.arg_offset, &args.values);
 
-        if self
-            .fiber
-            .try_push_call_frame(
-                target.func_id,
-                new_bp,
-                0,
-                target.func.ret_slots,
-                target.func.gc_scan_slots,
-            )
-            .is_err()
-        {
-            self.fiber.closure_replay.finish_extern_terminal();
-            return runtime_trap(
-                self.gc,
-                self.fiber,
-                stack,
-                self.module,
-                RuntimeTrapKind::StackOverflow,
-            );
-        }
+        self.fiber.commit_reserved_call_frame(
+            reservation,
+            target.func_id,
+            new_bp,
+            0,
+            target.func.ret_slots,
+            target.func.gc_scan_slots,
+        );
 
         self.fiber
             .closure_replay
