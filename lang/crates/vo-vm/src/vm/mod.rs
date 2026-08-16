@@ -3165,6 +3165,22 @@ impl Vm {
         fiber: &mut Fiber,
         loaded_module: &LoadedModule,
     ) -> ExecResult {
+        #[cfg(feature = "jit")]
+        if self.jit.is_enabled() {
+            return self.run_detached_fiber_mode::<true>(fiber_id, fiber, loaded_module);
+        }
+        self.run_detached_fiber_mode::<false>(fiber_id, fiber, loaded_module)
+    }
+
+    /// Execute one scheduling lease with the backend mode selected outside the
+    /// instruction loop. Const specialization keeps the VM dispatch free of
+    /// JIT-entry polling while retaining one semantic implementation.
+    fn run_detached_fiber_mode<const JIT_ENABLED: bool>(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        fiber: &mut Fiber,
+        loaded_module: &LoadedModule,
+    ) -> ExecResult {
         let module = loaded_module.module();
         let runtime_metadata = loaded_module.runtime_metadata();
         // The interpreter owns its remaining budget while it is running.  Keep
@@ -3172,8 +3188,6 @@ impl Vm {
         // needs to take over the same scheduling lease.
         let mut execution_budget = TIME_SLICE;
         fiber.execution_budget = execution_budget;
-        #[cfg(feature = "jit")]
-        let jit_enabled = self.jit.is_enabled();
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
         // Get raw pointer to stack for fast access - fiber.ensure_capacity may invalidate this
         let mut stack = fiber.stack_ptr();
@@ -3295,7 +3309,7 @@ impl Vm {
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
-                if jit_enabled {
+                if JIT_ENABLED {
                     sync_frame_pc!();
                     fiber.execution_budget = execution_budget;
                     let osr_result =
@@ -3429,7 +3443,7 @@ impl Vm {
                 // frame already exists, but deferred calls executing under the
                 // unwind machine still need interpreter-owned ordering and
                 // recover eligibility checks.
-                if jit_enabled
+                if JIT_ENABLED
                     && pc == 0
                     && fiber.unwinding.is_none()
                     && can_enter_materialized_frame_at_pc(
