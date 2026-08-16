@@ -238,7 +238,7 @@ fn vm_call_closure_canon_001_borrowed_call_stores_canonical_slot0_for_closure_ge
     module.functions.push(caller);
     module.functions.push(callee);
 
-    let caller_bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let caller_bp = fiber.push_frame(0, 2, 0, 0);
     mark_fetched_callsite(&mut fiber);
     let closure_ref = closure::create(&mut gc, 1, 1);
     // Safety: test fixture initializes a freshly allocated closure.
@@ -269,7 +269,7 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_shape_drift_befor
     module.functions.push(caller);
     module.functions.push(callee);
 
-    let caller_bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let caller_bp = fiber.push_frame(0, 4, 0, 0);
     mark_fetched_callsite(&mut fiber);
     let closure_ref = closure::create(&mut gc, 1, 1);
     fiber.stack[caller_bp] = closure_ref as u64;
@@ -298,7 +298,7 @@ fn vm_closure_call_signature_002_call_closure_rejects_return_slot_shape_drift_be
     module.functions.push(caller);
     module.functions.push(callee);
 
-    let caller_bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let caller_bp = fiber.push_frame(0, 4, 0, 0);
     mark_fetched_callsite(&mut fiber);
     let closure_ref = closure::create(&mut gc, 1, 1);
     fiber.stack[caller_bp] = closure_ref as u64;
@@ -329,7 +329,7 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_metadata_drift_be
     module.functions.push(caller);
     module.functions.push(callee);
 
-    let caller_bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let caller_bp = fiber.push_frame(0, 4, 0, 0);
     mark_fetched_callsite(&mut fiber);
     let closure_ref = closure::create(&mut gc, 1, 0);
     fiber.stack[caller_bp] = closure_ref as u64;
@@ -353,7 +353,7 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_metadata_drift_be
 fn vm_call_closure_canon_001_extern_replay_closure_uses_canonical_ref_for_slot0() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let module = module_with_callee(with_capture_slots(test_function(1, 2, true), 1));
     let closure_ref = closure::create(&mut gc, 0, 1);
     let interior_ref = unsafe { closure_ref.add(closure::HEADER_SLOTS) };
@@ -372,7 +372,7 @@ fn vm_call_closure_canon_001_extern_replay_closure_uses_canonical_ref_for_slot0(
 fn vm_closure_call_signature_002_extern_replay_closure_rejects_non_closure_before_header_read() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let module = module_with_callee(test_function(0, 1, false));
     let string_ref = string::new_from_string(&mut gc, "not a closure".to_string());
 
@@ -394,7 +394,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_capture_count_metadata_dr
 ) {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 2, 0, 0, 0);
+    fiber.push_frame(0, 2, 0, 0);
     let mut callee = test_function(1, 2, true);
     callee.capture_slot_types = vec![SlotType::GcRef];
     let module = module_with_callee(callee);
@@ -419,7 +419,7 @@ fn vm_extern_replay_call_frame_shape_062_rejects_scan_slots_beyond_locals_before
 {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, true);
     callee.gc_scan_slots = 2;
     let module = module_with_callee(callee);
@@ -468,7 +468,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_closure_allocation_drift_
 {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 2, 0, 0, 0);
+    fiber.push_frame(0, 2, 0, 0);
     let module = module_with_callee(test_function(1, 2, true));
     let closure_ref = closure::create(&mut gc, 0, 0);
     unsafe { Gc::header_mut(closure_ref) }.slots = (closure::HEADER_SLOTS + 1) as u16;
@@ -491,7 +491,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_closure_allocation_drift_
 fn extern_replay_closure_accepts_recv_slots_arg_offset() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let module = module_with_callee(test_function_with_recv(2, 3, 2, false));
     let closure_ref = closure::create(&mut gc, 0, 1);
     // Safety: test fixture initializes a freshly allocated closure.
@@ -531,7 +531,7 @@ fn extern_replay_closure_accepts_recv_slots_arg_offset() {
 fn vm_extern_replay_transfer_contract_061_accepts_explicit_receiver_prefix() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -566,7 +566,7 @@ fn vm_extern_replay_transfer_contract_061_accepts_explicit_receiver_prefix() {
 fn vm_extern_replay_transfer_contract_061_validates_synthesized_receiver_prefix() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -594,7 +594,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_with_empty_param_ty
 ) {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::Value];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -633,7 +633,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_with_empty_param_ty
 fn vm_extern_replay_transfer_contract_061_rejects_empty_param_types_with_gcref_suffix() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -676,7 +676,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_empty_param_types_with_gcref_s
 fn vm_extern_replay_transfer_contract_061_validates_receiver_in_inclusive_metadata() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
     callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -719,7 +719,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_in_inclusive_metada
 fn vm_closure_call_signature_002_extern_replay_closure_rejects_payload_slot_metadata_drift() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let module = module_with_callee(test_function(1, 1, false));
     let closure_ref = closure::create(&mut gc, 0, 0);
     let args = TypedSlotPayload::try_new(vec![0], vec![SlotType::GcRef]).expect("typed payload");
@@ -739,7 +739,7 @@ fn vm_closure_call_signature_002_extern_replay_closure_rejects_payload_slot_meta
 fn vm_extern_replay_closure_rejects_invalid_gcref_arg_before_frame_push_059() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -767,7 +767,7 @@ fn vm_extern_replay_closure_rejects_invalid_gcref_arg_before_frame_push_059() {
 fn vm_extern_replay_transfer_contract_061_rejects_missing_param_types_before_frame_push() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -809,7 +809,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_missing_param_types_before_fra
 fn vm_extern_replay_transfer_contract_061_rejects_wrong_object_kind_before_frame_push() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
     callee.slot_types = vec![SlotType::GcRef];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -850,7 +850,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_wrong_object_kind_before_frame
 fn vm_extern_replay_transfer_contract_061_rejects_interface_slot1_heap_kind_before_frame_push() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -918,7 +918,7 @@ fn vm_extern_replay_interface_boundary_rejects_invalid_tags_without_panicking() 
 fn vm_extern_replay_transfer_contract_061_accepts_empty_interface_arg_with_concrete_itab() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -953,7 +953,7 @@ fn vm_extern_replay_transfer_contract_061_accepts_empty_interface_arg_with_concr
 fn vm_extern_replay_transfer_contract_061_rejects_null_struct_interface_data() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -998,7 +998,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_null_struct_interface_data() {
 fn vm_extern_replay_transfer_contract_061_rejects_null_array_interface_data() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -1041,7 +1041,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_null_array_interface_data() {
 fn vm_extern_replay_transfer_contract_061_accepts_interface_array_value_slot_box() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -1097,7 +1097,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_array_value_slot_box
 {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);
@@ -1154,7 +1154,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_array_value_slot_box
 fn vm_extern_replay_transfer_contract_061_rejects_interface_struct_data_slot_count_drift() {
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(2, 2, false);
     callee.slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     callee.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&callee.slot_types);

@@ -28,7 +28,7 @@ fn endpoint_response_ignores_stale_fiber_generation_key() {
     assert_eq!(fid.to_raw(), reused.to_raw());
     {
         let fiber = vm.scheduler.get_fiber_mut(reused);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
     }
     vm.scheduler.schedule_next().expect("reused fiber");
@@ -101,7 +101,7 @@ fn endpoint_response_rejects_wrong_endpoint_id() {
     let key = vm.scheduler.get_fiber(fid).endpoint_response_key();
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         let wait_key = fiber.begin_remote_endpoint_send_wait(42);
         assert_eq!(wait_key.wait_id().get(), 1);
@@ -135,7 +135,7 @@ fn vm_endpoint_response_source_024_missing_registry_rejects_targeted_response() 
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
@@ -163,7 +163,7 @@ fn vm_endpoint_response_commit_001_rejected_closed_send_ack_keeps_remote_proxy_o
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
@@ -201,7 +201,7 @@ fn vm_endpoint_response_commit_001_zero_pending_closed_recv_data_keeps_remote_pr
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
@@ -254,7 +254,7 @@ fn endpoint_response_rejects_stale_wait_id_for_same_fiber_and_endpoint() {
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(42);
     }
@@ -323,7 +323,7 @@ fn endpoint_response_without_pending_count_does_not_mutate_waiter() {
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let wait_key = {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         let wait_key = fiber.begin_remote_endpoint_send_wait(42);
         assert_eq!(wait_key.wait_id().get(), 1);
@@ -372,7 +372,7 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
@@ -454,7 +454,7 @@ fn vm_endpoint_recv_gc_payload_marks_roots_dirty_061() {
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
@@ -497,7 +497,7 @@ fn vm_endpoint_response_source_020_closed_tombstone_preserves_home_send_ack_auth
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
@@ -569,7 +569,7 @@ fn vm_endpoint_tombstone_authority_021_remote_close_transition_preserves_home_se
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }

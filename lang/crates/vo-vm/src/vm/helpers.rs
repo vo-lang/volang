@@ -295,14 +295,8 @@ pub(crate) unsafe fn try_build_validated_closure_pending_spawn_from_args_ptr(
         *slot = *args.add(i);
     }
 
-    PendingSpawn::try_new(
-        func_id,
-        func_def.local_slots,
-        func_def.gc_scan_slots,
-        0,
-        entry_slots,
-    )
-    .map_err(|_| ClosureFiberBuildError::Trap(RuntimeTrapKind::StackOverflow))
+    PendingSpawn::try_new(func_id, func_def.local_slots, 0, entry_slots)
+        .map_err(|_| ClosureFiberBuildError::Trap(RuntimeTrapKind::StackOverflow))
 }
 
 /// # Safety

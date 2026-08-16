@@ -384,7 +384,7 @@ mod tests {
             .functions
             .push(super::super::test_support::function(1, 1));
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.resume_stack.push(ResumePoint {
             func_id: 0,
             resume_pc: 7,

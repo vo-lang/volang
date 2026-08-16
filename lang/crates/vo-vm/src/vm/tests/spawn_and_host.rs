@@ -382,6 +382,9 @@ fn vm_gc_001_spawn_call_marks_spawned_roots_dirty() {
     module.functions[0].local_slots = 1;
     module.functions[0].gc_scan_slots = 1;
     module.functions[0].slot_types = vec![SlotType::GcRef];
+    module.functions[0].ret_slots = 1;
+    module.functions[0].ret_slot_types = vec![SlotType::GcRef];
+    module.functions[0].code[0] = Instruction::new(Opcode::Return, 0, 1, 0);
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
         rttid_raw: vo_runtime::ValueRttid::new(0, ValueKind::String).to_raw(),
@@ -457,7 +460,7 @@ fn host_event_replay_block_at_pc_zero_does_not_rewind() {
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 0;
     }
     vm.scheduler.schedule_next().unwrap();
@@ -515,7 +518,7 @@ fn deadlock_report_corrupted_frame_is_diagnostic_instead_of_index_panic() {
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    vm.scheduler.get_fiber_mut(fid).push_frame(7, 0, 0, 0, 0);
+    vm.scheduler.get_fiber_mut(fid).push_frame(7, 0, 0, 0);
     vm.scheduler.schedule_next().unwrap();
     vm.scheduler.block_for_queue();
 

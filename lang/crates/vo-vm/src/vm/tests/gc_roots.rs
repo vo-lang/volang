@@ -13,7 +13,7 @@ fn wait_io_root_effect_is_precise_about_staged_root_additions() {
 #[test]
 fn committed_pending_spawn_roots_entry_slots() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module());
+    vm.finish_load(gc_live_test_module());
     let root = alloc_gc_test_object(&mut vm);
     let mut transition = RuntimeTransition::new(
         RuntimeBoundary::Continue,
@@ -22,7 +22,7 @@ fn committed_pending_spawn_roots_entry_slots() {
     );
     transition
         .spawns
-        .push(PendingSpawn::try_new(0, 1, 1, 0, vec![root as u64]).expect("root spawn shape"));
+        .push(PendingSpawn::try_new(0, 1, 0, vec![root as u64]).expect("root spawn shape"));
 
     vm.apply_runtime_transition(None, transition)
         .expect("spawn transition");
@@ -37,7 +37,7 @@ fn committed_pending_spawn_roots_entry_slots() {
 #[test]
 fn gc_root_matrix_scans_globals_fibers_stacks_and_call_frames() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_global());
+    vm.finish_load(gc_live_test_module_with_global());
     let global_root = alloc_gc_test_object(&mut vm);
     vm.state.globals[0] = global_root as u64;
 
@@ -47,12 +47,12 @@ fn gc_root_matrix_scans_globals_fibers_stacks_and_call_frames() {
     let second_stack_root = alloc_gc_test_object(&mut vm);
     {
         let fiber = vm.scheduler.get_fiber_mut(first_fiber);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.stack[0] = first_stack_root as u64;
     }
     {
         let fiber = vm.scheduler.get_fiber_mut(second_fiber);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.stack[0] = second_stack_root as u64;
     }
 
@@ -66,7 +66,7 @@ fn gc_root_matrix_scans_async_io_write_back_targets_until_completion_consumption
     use vo_runtime::io::{IoCancellation, IoLease};
 
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module());
+    vm.finish_load(gc_live_test_module());
     let target = vo_runtime::objects::slice::create(
         &mut vm.state.gc,
         ValueMeta::new(0, ValueKind::Uint8),
@@ -107,7 +107,7 @@ fn gc_root_matrix_scans_async_io_write_back_targets_until_completion_consumption
 #[test]
 fn gc_root_matrix_scans_every_nested_unwind_state_until_that_state_finishes() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module());
+    vm.finish_load(gc_live_test_module());
     let fid = vm.scheduler.spawn(Fiber::new(0));
 
     let parent_return = alloc_gc_test_object(&mut vm);
@@ -226,7 +226,7 @@ fn gc_root_matrix_scans_every_nested_unwind_state_until_that_state_finishes() {
 #[test]
 fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(1));
+    vm.finish_load(gc_live_test_module_with_root_slots(1));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let heap_return_fid = vm.scheduler.spawn(Fiber::new(0));
 
@@ -249,7 +249,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
 
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.stack[0] = stack_root as u64;
         fiber.defer_stack.push(DeferEntry {
             frame_depth: 1,
@@ -320,7 +320,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
 
     {
         let fiber = vm.scheduler.get_fiber_mut(heap_return_fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.unwinding.push(UnwindingState {
             pending: Vec::new(),
             target_depth: 0,
@@ -370,13 +370,13 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
 #[test]
 fn vm_gc_panic_island_root_001_recoverable_panic_scans_island_interface_payload() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(1));
+    vm.finish_load(gc_live_test_module_with_root_slots(1));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let island_root = vo_runtime::island::create(&mut vm.state.gc, 77);
 
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.panic_state = Some(PanicState::Recoverable(
             vo_runtime::InterfaceSlot::from_ref(island_root, 0, ValueKind::Island),
         ));
@@ -389,13 +389,13 @@ fn vm_gc_panic_island_root_001_recoverable_panic_scans_island_interface_payload(
 #[test]
 fn vm_gc_panic_island_root_001_jit_panic_msg_scans_island_interface_payload() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(1));
+    vm.finish_load(gc_live_test_module_with_root_slots(1));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let island_root = vo_runtime::island::create(&mut vm.state.gc, 78);
 
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.jit_panic_flag = true;
         fiber.jit_panic_msg =
             vo_runtime::InterfaceSlot::from_ref(island_root, 0, ValueKind::Island);
@@ -408,14 +408,14 @@ fn vm_gc_panic_island_root_001_jit_panic_msg_scans_island_interface_payload() {
 #[test]
 fn gc_root_matrix_scans_jit_extern_suspend_typed_payload() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(1));
+    vm.finish_load(gc_live_test_module_with_root_slots(1));
     let fid = vm.scheduler.spawn(Fiber::new(0));
 
     let closure_ref = vo_runtime::objects::closure::create(&mut vm.state.gc, 0, 0);
     let arg_root = alloc_gc_test_object(&mut vm);
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.jit_extern_suspend = Some(crate::fiber::JitExternSuspend::CallClosure {
             closure_ref,
             args: crate::fiber::TypedSlotPayload::try_new(
@@ -433,11 +433,11 @@ fn gc_root_matrix_scans_jit_extern_suspend_typed_payload() {
 #[test]
 fn gc_root_dirty_fiber_scan_rescues_late_sweep_root() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module());
+    vm.finish_load(gc_live_test_module());
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
     }
 
     let root = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0);
@@ -474,7 +474,7 @@ fn gc_root_dirty_fiber_scan_rescues_late_sweep_root() {
 #[should_panic(expected = "GC verification failed: root")]
 fn gc_verify_rejects_dead_white_root_during_sweep_before_free() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_global());
+    vm.finish_load(gc_live_test_module_with_global());
     let meta = ValueMeta::new(1, ValueKind::Struct);
     for _ in 0..4096 {
         vm.state.gc.alloc(meta, 0);
@@ -507,7 +507,7 @@ fn gc_verify_rejects_dead_white_root_during_sweep_before_free() {
 #[test]
 fn gc_verify_accepts_current_white_root_after_cycle_finishes() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_global());
+    vm.finish_load(gc_live_test_module_with_global());
     let root = alloc_gc_test_object(&mut vm);
     vm.state.globals[0] = root as u64;
     vm.set_gc_verify_after_step(true);
@@ -522,12 +522,12 @@ fn gc_verify_accepts_current_white_root_after_cycle_finishes() {
 fn gc_root_full_vm_scan_is_budgeted() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+    vm.finish_load(gc_live_test_module_with_root_slots(ROOTS));
     vm.set_gc_verify_after_step(true);
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        fiber.push_frame(0, ROOTS, 0, 0);
     }
 
     let meta = ValueMeta::new(1, ValueKind::Struct);
@@ -576,7 +576,7 @@ fn gc_root_full_vm_scan_is_budgeted() {
 fn gc_root_defer_payload_scan_is_budgeted() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(1));
+    vm.finish_load(gc_live_test_module_with_root_slots(1));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let args = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Void), ROOTS);
     let mut roots = Vec::with_capacity(ROOTS as usize);
@@ -587,7 +587,7 @@ fn gc_root_defer_payload_scan_is_budgeted() {
     }
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.defer_stack.push(DeferEntry {
             frame_depth: 1,
             func_id: 0,
@@ -616,11 +616,11 @@ fn gc_root_defer_payload_scan_is_budgeted() {
 fn gc_root_pending_start_cycle_scan_restarts_when_roots_mutate() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+    vm.finish_load(gc_live_test_module_with_root_slots(ROOTS));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        fiber.push_frame(0, ROOTS, 0, 0);
     }
 
     let meta = ValueMeta::new(1, ValueKind::Struct);
@@ -652,11 +652,11 @@ fn gc_root_pending_start_cycle_scan_restarts_when_roots_mutate() {
 fn gc_root_pending_atomic_scan_restarts_when_roots_mutate() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+    vm.finish_load(gc_live_test_module_with_root_slots(ROOTS));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        fiber.push_frame(0, ROOTS, 0, 0);
     }
 
     let meta = ValueMeta::new(1, ValueKind::Struct);
@@ -686,11 +686,11 @@ fn gc_root_pending_atomic_scan_restarts_when_roots_mutate() {
 fn finish_load_resets_pending_gc_root_scan_state() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module_with_root_slots(ROOTS));
+    vm.finish_load(gc_live_test_module_with_root_slots(ROOTS));
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, ROOTS, ROOTS, 0, 0);
+        fiber.push_frame(0, ROOTS, 0, 0);
     }
 
     for idx in 0..ROOTS as usize {
@@ -705,7 +705,7 @@ fn finish_load_resets_pending_gc_root_scan_state() {
     vm.state.record_gc_dirty_fiber_raw(fid.to_raw());
     let epoch_before = vm.state.gc_dirty_epoch;
 
-    vm.finish_load(gc_test_module());
+    vm.finish_load(gc_live_test_module());
 
     assert!(vm.state.gc_root_scan.is_none());
     assert!(vm.state.gc_roots_dirty_all);
@@ -719,11 +719,11 @@ fn finish_load_resets_pending_gc_root_scan_state() {
 #[test]
 fn gc_root_stable_sweep_step_skips_scan_when_roots_unchanged() {
     let mut vm = Vm::new();
-    vm.finish_load(gc_test_module());
+    vm.finish_load(gc_live_test_module());
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
     }
 
     let root = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0);

@@ -102,14 +102,8 @@ pub fn exec_go_start(
         for i in 0..arg_count {
             entry_slots.push(stack_get(stack, src_start + i));
         }
-        PendingSpawn::try_new(
-            func_id,
-            func.local_slots,
-            func.gc_scan_slots,
-            0,
-            entry_slots,
-        )
-        .map_err(|_| GoStartError::Trap(RuntimeTrapKind::StackOverflow))?
+        PendingSpawn::try_new(func_id, func.local_slots, 0, entry_slots)
+            .map_err(|_| GoStartError::Trap(RuntimeTrapKind::StackOverflow))?
     };
 
     Ok(spawn)

@@ -85,26 +85,11 @@ pub struct CallFrame {
     pub sp_restore: usize,
     pub ret_reg: u16,
     pub ret_count: u16,
-    pub scan_slots: u16,
-    pub caller_scan_slots_restore: Option<u16>,
-    pub caller_zero_start: u16,
-    pub caller_zero_end: u16,
 }
 
 impl CallFrame {
     #[inline]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        func_id: u32,
-        bp: usize,
-        sp_restore: usize,
-        ret_reg: u16,
-        ret_count: u16,
-        scan_slots: u16,
-        caller_scan_slots_restore: Option<u16>,
-        caller_zero_start: u16,
-        caller_zero_end: u16,
-    ) -> Self {
+    pub fn new(func_id: u32, bp: usize, sp_restore: usize, ret_reg: u16, ret_count: u16) -> Self {
         Self {
             func_id,
             pc: 0,
@@ -112,10 +97,6 @@ impl CallFrame {
             sp_restore,
             ret_reg,
             ret_count,
-            scan_slots,
-            caller_scan_slots_restore,
-            caller_zero_start,
-            caller_zero_end,
         }
     }
 }
@@ -1048,7 +1029,6 @@ pub struct Fiber {
 pub(crate) struct PendingSpawn {
     func_id: u32,
     local_slots: u16,
-    gc_scan_slots: u16,
     ret_slots: u16,
     entry_slots: Vec<u64>,
 }
@@ -1057,21 +1037,19 @@ impl PendingSpawn {
     pub(crate) fn try_new(
         func_id: u32,
         local_slots: u16,
-        gc_scan_slots: u16,
         ret_slots: u16,
         entry_slots: Vec<u64>,
     ) -> Result<Self, FiberCapacityError> {
         let initialized_slots = entry_slots.len();
-        if gc_scan_slots > local_slots || initialized_slots > local_slots as usize {
+        if initialized_slots > local_slots as usize {
             return Err(FiberCapacityError::StackSlots {
-                required: initialized_slots.max(gc_scan_slots as usize),
+                required: initialized_slots,
                 limit: local_slots as usize,
             });
         }
         Ok(Self {
             func_id,
             local_slots,
-            gc_scan_slots,
             ret_slots,
             entry_slots,
         })
@@ -1080,13 +1058,7 @@ impl PendingSpawn {
     pub(crate) fn initialize(self, fiber: &mut Fiber) -> Result<(), FiberCapacityError> {
         debug_assert_eq!(fiber.sp, 0);
         debug_assert!(fiber.frames.is_empty());
-        let bp = fiber.try_push_frame(
-            self.func_id,
-            self.local_slots,
-            self.gc_scan_slots,
-            0,
-            self.ret_slots,
-        )?;
+        let bp = fiber.try_push_frame(self.func_id, self.local_slots, 0, self.ret_slots)?;
         fiber.copy_slots_from_slice(bp, &self.entry_slots);
         Ok(())
     }
@@ -1100,7 +1072,7 @@ impl PendingSpawn {
 
     #[cfg(test)]
     pub(crate) fn for_test(func_id: u32) -> Self {
-        Self::try_new(func_id, 0, 0, 0, Vec::new()).expect("empty test spawn")
+        Self::try_new(func_id, 0, 0, Vec::new()).expect("empty test spawn")
     }
 }
 
@@ -1715,14 +1687,6 @@ impl Fiber {
     }
 
     #[inline]
-    pub fn zero_slots_tail_at(&mut self, bp: usize, slot_count: usize, initialized_prefix: usize) {
-        let zero_start = initialized_prefix.min(slot_count);
-        if zero_start < slot_count {
-            self.zero_slots_at(bp + zero_start, slot_count - zero_start);
-        }
-    }
-
-    #[inline]
     pub fn copy_stack_slots(&mut self, dst: usize, src: usize, slot_count: usize) {
         if slot_count > 0 {
             self.stack.copy_within(src..src + slot_count, dst);
@@ -1736,15 +1700,8 @@ impl Fiber {
         }
     }
 
-    pub fn push_call_frame(
-        &mut self,
-        func_id: u32,
-        bp: usize,
-        ret_reg: u16,
-        ret_count: u16,
-        scan_slots: u16,
-    ) {
-        self.push_call_frame_extended(func_id, bp, bp, ret_reg, ret_count, scan_slots, None, 0, 0);
+    pub fn push_call_frame(&mut self, func_id: u32, bp: usize, ret_reg: u16, ret_count: u16) {
+        self.push_call_frame_extended(func_id, bp, bp, ret_reg, ret_count);
     }
 
     pub fn try_push_call_frame(
@@ -1753,14 +1710,10 @@ impl Fiber {
         bp: usize,
         ret_reg: u16,
         ret_count: u16,
-        scan_slots: u16,
     ) -> Result<(), FiberCapacityError> {
-        self.try_push_call_frame_extended(
-            func_id, bp, bp, ret_reg, ret_count, scan_slots, None, 0, 0,
-        )
+        self.try_push_call_frame_extended(func_id, bp, bp, ret_reg, ret_count)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_call_frame_extended(
         &mut self,
         func_id: u32,
@@ -1768,26 +1721,11 @@ impl Fiber {
         sp_restore: usize,
         ret_reg: u16,
         ret_count: u16,
-        scan_slots: u16,
-        caller_scan_slots_restore: Option<u16>,
-        caller_zero_start: u16,
-        caller_zero_end: u16,
     ) {
-        self.try_push_call_frame_extended(
-            func_id,
-            bp,
-            sp_restore,
-            ret_reg,
-            ret_count,
-            scan_slots,
-            caller_scan_slots_restore,
-            caller_zero_start,
-            caller_zero_end,
-        )
-        .unwrap_or_else(|err| panic!("{}", err.message()));
+        self.try_push_call_frame_extended(func_id, bp, sp_restore, ret_reg, ret_count)
+            .unwrap_or_else(|err| panic!("{}", err.message()));
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn try_push_call_frame_extended(
         &mut self,
         func_id: u32,
@@ -1795,29 +1733,14 @@ impl Fiber {
         sp_restore: usize,
         ret_reg: u16,
         ret_count: u16,
-        scan_slots: u16,
-        caller_scan_slots_restore: Option<u16>,
-        caller_zero_start: u16,
-        caller_zero_end: u16,
     ) -> Result<(), FiberCapacityError> {
         self.try_reserve_call_frame()?;
-        self.push_reserved_call_frame_extended(
-            func_id,
-            bp,
-            sp_restore,
-            ret_reg,
-            ret_count,
-            scan_slots,
-            caller_scan_slots_restore,
-            caller_zero_start,
-            caller_zero_end,
-        );
+        self.push_reserved_call_frame_extended(func_id, bp, sp_restore, ret_reg, ret_count);
         Ok(())
     }
 
     /// Publish a frame after its single capacity admission has succeeded.
     #[inline]
-    #[allow(clippy::too_many_arguments)]
     fn push_reserved_call_frame_extended(
         &mut self,
         func_id: u32,
@@ -1825,28 +1748,14 @@ impl Fiber {
         sp_restore: usize,
         ret_reg: u16,
         ret_count: u16,
-        scan_slots: u16,
-        caller_scan_slots_restore: Option<u16>,
-        caller_zero_start: u16,
-        caller_zero_end: u16,
     ) {
         debug_assert!(self.frames.len() < self.frames.capacity());
-        self.frames.push(CallFrame::new(
-            func_id,
-            bp,
-            sp_restore,
-            ret_reg,
-            ret_count,
-            scan_slots,
-            caller_scan_slots_restore,
-            caller_zero_start,
-            caller_zero_end,
-        ));
+        self.frames
+            .push(CallFrame::new(func_id, bp, sp_restore, ret_reg, ret_count));
     }
 
     /// Commit a frame using capacity owned by `reservation`.
     #[inline]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_reserved_call_frame(
         &mut self,
         reservation: ReservedCallWindow,
@@ -1854,7 +1763,6 @@ impl Fiber {
         sp_restore: usize,
         ret_reg: u16,
         ret_count: u16,
-        scan_slots: u16,
     ) {
         debug_assert_eq!(self.sp, reservation.sp);
         self.push_reserved_call_frame_extended(
@@ -1863,89 +1771,40 @@ impl Fiber {
             sp_restore,
             ret_reg,
             ret_count,
-            scan_slots,
-            None,
-            0,
-            0,
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_borrowed_call_frame(
         &mut self,
         func_id: u32,
         borrowed_start: u16,
         ret_reg: u16,
         ret_count: u16,
-        caller_scan_slots: u16,
         local_slots: u16,
-        scan_slots: u16,
     ) -> usize {
-        self.try_push_borrowed_call_frame(
-            func_id,
-            borrowed_start,
-            ret_reg,
-            ret_count,
-            caller_scan_slots,
-            local_slots,
-            scan_slots,
-        )
-        .unwrap_or_else(|err| panic!("{}", err.message()))
+        self.try_push_borrowed_call_frame(func_id, borrowed_start, ret_reg, ret_count, local_slots)
+            .unwrap_or_else(|err| panic!("{}", err.message()))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn try_push_borrowed_call_frame(
         &mut self,
         func_id: u32,
         borrowed_start: u16,
         ret_reg: u16,
         ret_count: u16,
-        caller_scan_slots: u16,
         local_slots: u16,
-        scan_slots: u16,
     ) -> Result<usize, FiberCapacityError> {
-        if scan_slots > local_slots {
-            return Err(FiberCapacityError::StackSlots {
-                required: scan_slots as usize,
-                limit: local_slots as usize,
-            });
-        }
         let caller_frame = self
             .frames
             .last()
             .expect("push_borrowed_call_frame: missing caller frame");
         let caller_bp = caller_frame.bp;
         let caller_sp = self.sp;
-        let previous_scan_slots = caller_frame.scan_slots;
-        let caller_scan_slots_restore = if previous_scan_slots != caller_scan_slots {
-            Some(previous_scan_slots)
-        } else {
-            None
-        };
-        let (caller_zero_start, caller_zero_end) = if borrowed_start < previous_scan_slots {
-            (borrowed_start, previous_scan_slots)
-        } else {
-            (0, 0)
-        };
 
         let bp = caller_bp + borrowed_start as usize;
         self.try_reserve_call_frame()?;
         self.try_reserve_slots_at(bp, local_slots as usize)?;
-        self.frames
-            .last_mut()
-            .expect("push_borrowed_call_frame: missing caller frame")
-            .scan_slots = caller_scan_slots;
-        self.push_reserved_call_frame_extended(
-            func_id,
-            bp,
-            caller_sp,
-            ret_reg,
-            ret_count,
-            scan_slots,
-            caller_scan_slots_restore,
-            caller_zero_start,
-            caller_zero_end,
-        );
+        self.push_reserved_call_frame_extended(func_id, bp, caller_sp, ret_reg, ret_count);
         Ok(bp)
     }
 
@@ -1953,11 +1812,10 @@ impl Fiber {
         &mut self,
         func_id: u32,
         local_slots: u16,
-        scan_slots: u16,
         ret_reg: u16,
         ret_count: u16,
     ) -> usize {
-        self.try_push_frame(func_id, local_slots, scan_slots, ret_reg, ret_count)
+        self.try_push_frame(func_id, local_slots, ret_reg, ret_count)
             .unwrap_or_else(|err| panic!("{}", err.message()))
     }
 
@@ -1965,38 +1823,18 @@ impl Fiber {
         &mut self,
         func_id: u32,
         local_slots: u16,
-        scan_slots: u16,
         ret_reg: u16,
         ret_count: u16,
     ) -> Result<usize, FiberCapacityError> {
-        if scan_slots > local_slots {
-            return Err(FiberCapacityError::StackSlots {
-                required: scan_slots as usize,
-                limit: local_slots as usize,
-            });
-        }
         let bp = self.sp;
         let reservation = self.try_reserve_call_window(bp, local_slots as usize)?;
-        // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
-        // previously-used slots (from prior calls that shared this stack region) contain
-        // stale values. GC root scanning uses slot_types to determine which slots hold
-        // GcRefs — a stale integer in a GcRef-typed slot causes mark_gray to segfault.
-        // This zero-fill is the canonical fix (same approach as JVM/CLR).
-        // Safety: ensure_capacity guarantees stack[bp..new_sp] is valid.
-        self.zero_slots_at(bp, scan_slots as usize);
-        self.commit_reserved_call_frame(reservation, func_id, bp, ret_reg, ret_count, scan_slots);
+        self.commit_reserved_call_frame(reservation, func_id, bp, ret_reg, ret_count);
         Ok(bp)
     }
 
     pub fn pop_frame(&mut self) -> Option<CallFrame> {
         if let Some(frame) = self.frames.pop() {
             self.sp = frame.sp_restore;
-            if let Some(scan_slots_restore) = frame.caller_scan_slots_restore {
-                let parent_idx = self.frames.len().checked_sub(1);
-                if let Some(parent_idx) = parent_idx {
-                    self.frames[parent_idx].scan_slots = scan_slots_restore;
-                }
-            }
             Some(frame)
         } else {
             None
@@ -2018,38 +1856,6 @@ impl Fiber {
                 self.panic_state = other;
                 None
             }
-        }
-    }
-
-    #[inline]
-    pub fn clear_parent_borrowed_slots(
-        &mut self,
-        frame: &CallFrame,
-        preserved_start: usize,
-        preserved_len: usize,
-    ) {
-        if frame.caller_scan_slots_restore.is_none() || self.frames.is_empty() {
-            return;
-        }
-
-        let parent_bp = self.frames.last().unwrap().bp;
-        let zero_start = frame.caller_zero_start as usize;
-        let zero_end = frame.caller_zero_end as usize;
-        if zero_start >= zero_end {
-            return;
-        }
-
-        let keep_start = preserved_start.max(zero_start).min(zero_end);
-        let keep_end = preserved_start
-            .saturating_add(preserved_len)
-            .max(keep_start)
-            .min(zero_end);
-
-        if zero_start < keep_start {
-            self.zero_slots_at(parent_bp + zero_start, keep_start - zero_start);
-        }
-        if keep_end < zero_end {
-            self.zero_slots_at(parent_bp + keep_end, zero_end - keep_end);
         }
     }
 
@@ -2201,9 +2007,7 @@ mod tests {
         fiber.generation = 7;
         fiber.ensure_capacity(MAX_RETAINED_STACK_SLOTS);
         for _ in 0..MAX_RETAINED_CALL_FRAMES {
-            fiber
-                .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
-                .unwrap();
+            fiber.try_push_call_frame_extended(0, 0, 0, 0, 0).unwrap();
         }
         let stack_ptr = fiber.stack.as_ptr();
         let stack_capacity = fiber.stack.capacity();
@@ -2242,7 +2046,7 @@ mod tests {
         let mut frame_heavy = Fiber::new(3);
         for _ in 0..=MAX_RETAINED_CALL_FRAMES {
             frame_heavy
-                .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
+                .try_push_call_frame_extended(0, 0, 0, 0, 0)
                 .unwrap();
         }
         frame_heavy.state = FiberState::Dead;
@@ -2270,7 +2074,7 @@ mod tests {
     #[test]
     fn pending_spawn_rejects_entry_prefix_past_frame_capacity() {
         assert!(matches!(
-            PendingSpawn::try_new(0, 1, 1, 0, vec![11, 22]),
+            PendingSpawn::try_new(0, 1, 0, vec![11, 22]),
             Err(FiberCapacityError::StackSlots {
                 required: 2,
                 limit: 1,
@@ -2283,13 +2087,11 @@ mod tests {
         let mut fiber = Fiber::new(1);
 
         for _ in 0..MAX_CALL_FRAMES {
-            fiber
-                .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
-                .unwrap();
+            fiber.try_push_call_frame_extended(0, 0, 0, 0, 0).unwrap();
         }
 
         assert_eq!(
-            fiber.try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0),
+            fiber.try_push_call_frame_extended(0, 0, 0, 0, 0),
             Err(FiberCapacityError::CallFrames {
                 required: MAX_CALL_FRAMES + 1,
                 limit: MAX_CALL_FRAMES,
@@ -2462,7 +2264,7 @@ mod tests {
     #[test]
     fn vm_panic_recover_loc_001_recover_clears_consumed_panic_source_loc() {
         let mut fiber = Fiber::new(1);
-        fiber.push_frame(7, 0, 0, 0, 0);
+        fiber.push_frame(7, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 12;
         fiber.set_recoverable_panic(InterfaceSlot::nil());
         fiber.capture_panic_source_loc();
@@ -2565,20 +2367,18 @@ mod tests {
     }
 
     #[test]
-    fn failed_borrowed_call_frame_setup_leaves_stack_and_caller_scan_unchanged() {
+    fn failed_borrowed_call_frame_setup_is_transactional() {
         let mut fiber = Fiber::new(1);
         for _ in 0..MAX_CALL_FRAMES {
-            fiber
-                .try_push_call_frame_extended(0, 0, 4, 0, 0, 4, None, 0, 0)
-                .unwrap();
+            fiber.try_push_call_frame_extended(0, 0, 4, 0, 0).unwrap();
         }
         fiber.sp = 4;
         fiber.stack.resize(8, 0);
-        fiber.frames.last_mut().unwrap().scan_slots = 4;
+        fiber.stack[1..4].copy_from_slice(&[11, 22, 33]);
 
         let old_sp = fiber.sp;
-        let old_scan = fiber.frames.last().unwrap().scan_slots;
-        let result = fiber.try_push_borrowed_call_frame(1, 1, 1, 0, 1, 4, 4);
+        let old_stack = fiber.stack.clone();
+        let result = fiber.try_push_borrowed_call_frame(1, 1, 1, 0, 4);
 
         assert_eq!(
             result,
@@ -2588,34 +2388,22 @@ mod tests {
             })
         );
         assert_eq!(fiber.sp, old_sp);
-        assert_eq!(fiber.frames.last().unwrap().scan_slots, old_scan);
+        assert_eq!(fiber.stack, old_stack);
     }
 
     #[test]
-    fn borrowed_call_frame_rejects_scan_slots_beyond_locals_without_panic_062() {
+    fn borrowed_call_frame_keeps_dead_local_contents_for_exact_root_scanning() {
         let mut fiber = Fiber::new(1);
-        fiber.try_push_call_frame(0, 4, 1, 0, 0).unwrap();
-        let old_frame_count = fiber.frames.len();
-        let old_sp = fiber.sp;
-        let old_scan = fiber.frames.last().unwrap().scan_slots;
+        fiber.push_frame(0, 4, 0, 0);
+        fiber.stack[1..3].copy_from_slice(&[0xfeed, 0xbeef]);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            fiber.try_push_borrowed_call_frame(1, 1, 1, 0, 1, 1, 2)
-        }));
+        let bp = fiber
+            .try_push_borrowed_call_frame(1, 1, 1, 0, 2)
+            .expect("borrowed frame");
 
-        let err = result
-            .expect("borrowed frame scan/local drift must return an error, not panic")
-            .expect_err("borrowed frame scan/local drift must be rejected");
-        assert_eq!(
-            err,
-            FiberCapacityError::StackSlots {
-                required: 2,
-                limit: 1,
-            }
-        );
-        assert_eq!(fiber.frames.len(), old_frame_count);
-        assert_eq!(fiber.sp, old_sp);
-        assert_eq!(fiber.frames.last().unwrap().scan_slots, old_scan);
+        assert_eq!(bp, 1);
+        assert_eq!(&fiber.stack[bp..bp + 2], &[0xfeed, 0xbeef]);
+        assert_eq!(fiber.frames.len(), 2);
     }
 
     #[test]

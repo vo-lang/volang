@@ -242,7 +242,7 @@ mod tests {
         let non_closure = gc.alloc(ValueMeta::new(0, ValueKind::String), 1);
         let stack = [non_closure as u64];
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let caller_func = caller_func_with_slot_types(vec![SlotType::GcRef]);
         let module = vo_runtime::bytecode::Module::new("defer-closure-kind".to_string());
         let inst = Instruction::with_flags(Opcode::DeferPush, 1, 0, 0, 0);
@@ -275,7 +275,7 @@ mod tests {
         let mut gc = Gc::new();
         let stack = [0_u64];
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let caller_func = caller_func_with_slot_types(vec![SlotType::GcRef]);
         let module = vo_runtime::bytecode::Module::new("defer-nil-closure".to_string());
         let inst = Instruction::with_flags(Opcode::DeferPush, 1, 0, 0, 0);

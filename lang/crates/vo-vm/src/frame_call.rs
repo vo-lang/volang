@@ -291,7 +291,6 @@ impl<'a> FrameCallBuilder<'a> {
                 return ExecResult::JitError(err);
             }
         }
-        let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(borrowed_start);
         let ret_reg = match checked_borrowed_return_reg(
             "CallClosure",
             borrowed_start,
@@ -331,9 +330,7 @@ impl<'a> FrameCallBuilder<'a> {
             borrowed_start,
             ret_reg,
             target.func.ret_slots,
-            caller_scan_slots,
             target.func.local_slots,
-            target.func.gc_scan_slots,
         ) {
             Ok(bp) => bp,
             Err(_) => {
@@ -346,11 +343,6 @@ impl<'a> FrameCallBuilder<'a> {
                 );
             }
         };
-        self.fiber.zero_slots_tail_at(
-            new_bp,
-            target.func.gc_scan_slots as usize,
-            target.func.param_slots as usize,
-        );
         for i in 0..target.layout.receiver_capture_count {
             let stack = self.fiber.stack_ptr();
             stack_set(stack, new_bp + i, unsafe {
@@ -460,8 +452,6 @@ impl<'a> FrameCallBuilder<'a> {
             }
         };
 
-        self.fiber
-            .zero_slots_tail_at(new_bp, target.func.gc_scan_slots as usize, 0);
         let fstack = self.fiber.stack_ptr();
         for i in 0..target.layout.receiver_capture_count {
             stack_set(fstack, new_bp + i, unsafe {
@@ -487,7 +477,6 @@ impl<'a> FrameCallBuilder<'a> {
             new_bp,
             0,
             target.func.ret_slots,
-            target.func.gc_scan_slots,
         );
 
         self.fiber

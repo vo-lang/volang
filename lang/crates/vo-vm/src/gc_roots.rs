@@ -17,7 +17,7 @@ use vo_runtime::jit_api::{JitContext, JitNativeFrame};
 #[cfg(feature = "jit")]
 use crate::vm::{JitManager, NativeRootScanCursor, NativeRootScanStats};
 
-use crate::bytecode::{FunctionDef, GlobalDef, LoadedModule};
+use crate::bytecode::{GlobalDef, LoadedModule};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
 use crate::scheduler::FiberId;
 use crate::vm::{
@@ -74,6 +74,46 @@ fn typed_slot_root(
         }
         _ => None,
     }
+}
+
+fn interpreter_frame_root_set<'a>(
+    loaded_module: &'a LoadedModule,
+    fiber: &Fiber,
+    frame_index: usize,
+) -> vo_common_core::FrameRootSet<'a> {
+    let frame = fiber
+        .frames
+        .get(frame_index)
+        .expect("frame root index was checked by the scanner");
+    let root_map = loaded_module
+        .frame_root_maps()
+        .function(frame.func_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "fiber root frame references missing root map: fiber={} frame={} func_id={}",
+                fiber.id, frame_index, frame.func_id
+            )
+        });
+    let state = if frame_index + 1 < fiber.frames.len() {
+        frame
+            .pc
+            .checked_sub(1)
+            .and_then(|call_pc| root_map.suspended_call(call_pc))
+            .or_else(|| root_map.before(frame.pc))
+    } else {
+        root_map.before(frame.pc)
+    }
+    .unwrap_or(vo_common_core::FrameRootStateId::EMPTY);
+    root_map.roots(state).unwrap_or_else(|| {
+        panic!(
+            "fiber frame published invalid root state: fiber={} frame={} func_id={} pc={} state={}",
+            fiber.id,
+            frame_index,
+            frame.func_id,
+            frame.pc,
+            state.index()
+        )
+    })
 }
 
 fn selected_fiber_index(
@@ -512,7 +552,7 @@ fn scan_vm_root_snapshot_chunk<F>(
     global_defs: &[GlobalDef],
     fibers: &[Box<Fiber>],
     active_fiber: Option<(&Fiber, usize)>,
-    functions: &[FunctionDef],
+    loaded_module: &LoadedModule,
     io_staging_roots: &[Option<GcRef>],
     sentinel_errors: &SentinelErrorCache,
     endpoint_registry: &EndpointRegistry,
@@ -648,43 +688,52 @@ where
                             .frames
                             .get(snapshot.fiber_frame_cursor)
                             .expect("active fiber frame limit was clamped to frame storage");
-                        let func = functions.get(frame.func_id as usize).unwrap_or_else(|| {
+                        let func = loaded_module.module().functions.get(frame.func_id as usize).unwrap_or_else(|| {
                             panic!(
                                 "fiber root frame references missing function: fiber={} frame={} func_id={} functions={}",
                                 fiber.id,
                                 snapshot.fiber_frame_cursor,
                                 frame.func_id,
-                                functions.len()
+                                loaded_module.module().functions.len()
                             )
                         });
-                        let scan_slots = usize::from(frame.scan_slots);
+                        let roots = interpreter_frame_root_set(
+                            loaded_module,
+                            fiber,
+                            snapshot.fiber_frame_cursor,
+                        );
+                        let root_count = roots.direct.len().saturating_add(roots.conditional.len());
                         if snapshot.fiber_slot_cursor == 0 {
                             assert!(
-                                scan_slots <= func.slot_types.len(),
-                                "fiber root layout mismatch: fiber={} func_id={} scan_slots={} slot_types={}",
-                                fiber.id,
-                                frame.func_id,
-                                scan_slots,
-                                func.slot_types.len()
-                            );
-                            assert!(
-                                frame.bp.saturating_add(scan_slots) <= fiber.stack.len(),
+                                frame.bp.saturating_add(func.local_slots as usize) <= fiber.stack.len(),
                                 "fiber root stack range mismatch: fiber={} func_id={} range={}..{} stack={}",
                                 fiber.id,
                                 frame.func_id,
                                 frame.bp,
-                                frame.bp.saturating_add(scan_slots),
+                                frame.bp.saturating_add(func.local_slots as usize),
                                 fiber.stack.len()
                             );
                         }
-                        if snapshot.fiber_slot_cursor < scan_slots {
+                        if snapshot.fiber_slot_cursor < root_count {
                             if work >= limit_bytes {
                                 return GcRootScanChunk::pending(work);
                             }
                             let idx = snapshot.fiber_slot_cursor;
-                            let stack_slots = &fiber.stack[frame.bp..frame.bp + scan_slots];
-                            if let Some(root) = typed_slot_root(stack_slots, &func.slot_types, idx)
-                            {
+                            let (slot, root) = if let Some(&slot) = roots.direct.get(idx) {
+                                let raw = fiber.stack[frame.bp + usize::from(slot)];
+                                (usize::from(slot), (raw != 0).then_some(raw as GcRef))
+                            } else {
+                                let conditional = idx - roots.direct.len();
+                                let header = usize::from(roots.conditional[conditional]);
+                                let data = fiber.stack[frame.bp + header + 1];
+                                let root = (data != 0
+                                    && vo_runtime::objects::interface::data_is_gc_ref(
+                                        fiber.stack[frame.bp + header],
+                                    ))
+                                .then_some(data as GcRef);
+                                (header + 1, root)
+                            };
+                            if let Some(root) = root {
                                 visit_root(
                                     root,
                                     VmRootSource::FiberFrame {
@@ -692,7 +741,7 @@ where
                                         frame: snapshot.fiber_frame_cursor,
                                         func_id: frame.func_id,
                                         pc: frame.pc,
-                                        slot: idx,
+                                        slot,
                                     },
                                 );
                             }
@@ -700,7 +749,7 @@ where
                             work += SLOT_BYTES;
                             continue;
                         }
-                        if scan_slots == 0 {
+                        if root_count == 0 {
                             if work >= limit_bytes {
                                 return GcRootScanChunk::pending(work);
                             }
@@ -1319,7 +1368,7 @@ impl Vm {
                         &module_ref.globals,
                         fibers,
                         active_fiber,
-                        &module_ref.functions,
+                        loaded_module,
                         io_staging_roots,
                         sentinel_errors,
                         endpoint_registry,
@@ -1430,7 +1479,7 @@ impl Vm {
                 &module.globals,
                 &self.scheduler.fibers,
                 active_fiber,
-                &module.functions,
+                loaded_module,
                 io_staging_roots,
                 &self.state.sentinel_errors,
                 &self.state.endpoint_registry,

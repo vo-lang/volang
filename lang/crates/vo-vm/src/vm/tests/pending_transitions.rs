@@ -392,7 +392,7 @@ fn command_queue_endpoint_response_wakes_blocked_fiber() {
     let wait_key;
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(42);
     }

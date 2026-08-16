@@ -151,7 +151,7 @@ fn call_iface_missing_itab_is_jit_error_instead_of_raw_panic() {
     module.functions.push(caller);
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let bp = fiber.push_frame(0, 4, 0, 0);
     fiber.current_frame_mut().unwrap().pc = 1;
     fiber.stack[bp] = (99u64 << 32) | 1;
     fiber.stack[bp + 1] = 0;
@@ -178,7 +178,7 @@ fn call_closure_missing_function_is_jit_error_instead_of_index_panic() {
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 7, 0);
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let bp = fiber.push_frame(0, 4, 0, 0);
     fiber.stack[bp] = closure_ref as u64;
     let inst = Instruction::new(Opcode::CallClosure, 0, 0, 0);
 
@@ -239,7 +239,7 @@ fn verified_call_closure_publishes_and_reuses_shared_target_proof() {
 
     for _ in 0..2 {
         let mut fiber = Fiber::new(0);
-        let bp = fiber.push_frame(0, 1, 0, 0, 0);
+        let bp = fiber.push_frame(0, 1, 0, 0);
         fiber.stack[bp] = closure_ref as u64;
         fiber.current_frame_mut().unwrap().pc = 1;
         assert!(matches!(
@@ -284,7 +284,7 @@ fn cached_closure_proof_never_authorizes_an_unrelated_gc_object() {
     );
 
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 1, 0, 0, 0);
+    let bp = fiber.push_frame(0, 1, 0, 0);
     fiber.stack[bp] = unrelated as u64;
     fiber.current_frame_mut().unwrap().pc = 1;
     let inst = Instruction::new(Opcode::CallClosure, 0, 0, 0);
@@ -308,7 +308,7 @@ fn vm_call_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let before_frames = fiber.frames.len();
     let before_sp = fiber.sp;
     let inst = Instruction::new(Opcode::Call, 1, 0, 0);
@@ -344,7 +344,7 @@ fn vm_call_closure_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_0
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 1, 0);
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 1, 0, 0, 0);
+    let bp = fiber.push_frame(0, 1, 0, 0);
     fiber.stack[bp] = closure_ref as u64;
     fiber.current_frame_mut().unwrap().pc = 1;
     let before_frames = fiber.frames.len();
@@ -392,7 +392,7 @@ fn vm_call_iface_rejects_scan_slots_beyond_locals_before_ic_mutation_062() {
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -444,7 +444,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 5, 0, 0, 0);
+    let bp = fiber.push_frame(0, 5, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(1, receiver_rttid, ValueKind::String);
     fiber.stack[bp + 1] = 123;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -482,7 +482,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_return_slot_shape_drift_befo
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 5, 0, 0, 0);
+    let bp = fiber.push_frame(0, 5, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -524,7 +524,7 @@ fn vm_call_iface_contract_061_rejects_return_offset_overflow_before_ic_mutation(
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, u16::MAX, 0, 0, 0);
+    let bp = fiber.push_frame(0, u16::MAX, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -572,10 +572,10 @@ fn vm_call_iface_contract_061_rejects_frame_capacity_before_ic_mutation() {
     let mut fiber = Fiber::new(0);
     while fiber.try_reserve_call_frames(2).is_ok() {
         fiber
-            .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
+            .try_push_call_frame_extended(0, 0, 0, 0, 0)
             .expect("reserve check should leave room for a filler frame");
     }
-    let bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let bp = fiber.push_frame(0, 4, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.stack[bp + 2] = 789;
@@ -626,7 +626,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_metadata_drift_befo
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 4, 0, 0, 0);
+    let bp = fiber.push_frame(0, 4, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, receiver_rttid, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     fiber.stack[bp + 2] = 789;
@@ -676,7 +676,7 @@ fn vm_call_iface_rejects_raw_interface_receiver_layout_drift_before_frame_push_0
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, ValueKind::Int as u32, ValueKind::Int);
     fiber.stack[bp + 1] = 0xdead_beef;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -724,7 +724,7 @@ fn vm_call_iface_rejects_raw_interface_kind_receiver_before_frame_push_060() {
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, 16, ValueKind::Interface);
     fiber.stack[bp + 1] = 0xdead_beef;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -809,7 +809,7 @@ fn vm_call_iface_rejects_itab_target_not_owned_by_receiver_rttid_060() {
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, 1, ValueKind::Int64);
     fiber.stack[bp + 1] = 123;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -885,7 +885,7 @@ fn vm_call_iface_rejects_pointer_receiver_target_for_non_pointer_reference_recei
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, 1, ValueKind::String);
     fiber.stack[bp + 1] = 0x1234;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -960,7 +960,7 @@ fn vm_call_iface_rejects_noncanonical_pointer_kind_rttid_before_frame_push_060()
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, 1, ValueKind::Pointer);
     fiber.stack[bp + 1] = 0x1234;
     fiber.current_frame_mut().unwrap().pc = 1;
@@ -1000,7 +1000,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_unadvanced_pc_before_ic_muta
 
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(0, ValueKind::Int as u32, ValueKind::Int);
     fiber.stack[bp + 1] = 456;
     let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 1, 0);
@@ -1111,7 +1111,7 @@ fn vm_call_iface_contract_061_rejects_foreign_same_receiver_same_shape_itab_befo
     ]);
     let mut gc = Gc::new();
     let mut fiber = Fiber::new(0);
-    let bp = fiber.push_frame(0, 2, 0, 0, 0);
+    let bp = fiber.push_frame(0, 2, 0, 0);
     fiber.stack[bp] = interface::pack_slot0(1, 1, ValueKind::Int64);
     fiber.stack[bp + 1] = 456;
     fiber.current_frame_mut().unwrap().pc = 1;

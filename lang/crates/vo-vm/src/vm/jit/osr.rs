@@ -305,7 +305,7 @@ mod tests {
         vm.load(module).unwrap();
 
         let fid = vm.scheduler.spawn(Fiber::new(0));
-        vm.scheduler.get_fiber_mut(fid).push_frame(0, 1, 0, 0, 0);
+        vm.scheduler.get_fiber_mut(fid).push_frame(0, 1, 0, 0);
         (vm, fid)
     }
 

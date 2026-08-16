@@ -282,7 +282,7 @@ mod tests {
         vm.load(module).unwrap();
 
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.fiber_sp = MAX_STACK_CAPACITY as u32;
 
@@ -323,13 +323,10 @@ mod tests {
         module.functions.push(function(1, 0));
         vm.finish_load(module);
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = 0;
-        while fiber
-            .try_push_call_frame_extended(0, 0, 0, 0, 0, 0, None, 0, 0)
-            .is_ok()
-        {}
+        while fiber.try_push_call_frame_extended(0, 0, 0, 0, 0).is_ok() {}
 
         let result = jit_push_resume_point(ctx.as_ptr(), 0, 12, 0, 0, 0, 0);
 
@@ -363,7 +360,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(module);
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(current_func_id, 1, 0, 0, 0);
+        fiber.push_frame(current_func_id, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = current_func_id;
 
@@ -389,7 +386,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(module);
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(current_func_id, 1, 0, 0, 0);
+        fiber.push_frame(current_func_id, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.current_func_id = current_func_id;
         let old_sp = fiber.sp;

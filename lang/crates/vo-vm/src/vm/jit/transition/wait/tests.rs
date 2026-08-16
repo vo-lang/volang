@@ -63,7 +63,7 @@ fn vm_jit_waitqueue_materialize_006_cleans_simple_and_remote_wait_state_on_failu
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 0, 0, 0, 0);
+    fiber.push_frame(0, 0, 0, 0);
     let ch = local_int_queue(&mut vm);
     let fiber_key = fiber.wake_key_packed();
     let waiter = QueueWaiter::try_queue(0, fiber_key, ch as u64, SelectWaitKind::Send).unwrap();
@@ -103,7 +103,7 @@ fn vm_jit_waitqueue_materialize_006_cleans_select_waiters_on_failure() {
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 0, 0, 0, 0);
+    fiber.push_frame(0, 0, 0, 0);
     let ch = local_int_queue(&mut vm);
     let fiber_key = fiber.wake_key_packed();
     let select_id = 11;
@@ -149,7 +149,7 @@ fn vm_jit_waitqueue_pending_endpoint_cleanup_007_drops_unpaired_response_obligat
     let module = empty_module();
     vm.finish_load(module.clone());
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 0, 0, 0, 0);
+    fiber.push_frame(0, 0, 0, 0);
     let endpoint_id = 42;
     let wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     let mut pending = RuntimeTransition::new(
@@ -212,7 +212,7 @@ fn vm_jit_extern_suspend_materialize_007_does_not_publish_wait_io_token_on_failu
     let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
     let module = empty_module();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 0, 0, 0, 0);
+    fiber.push_frame(0, 0, 0, 0);
     fiber.jit_extern_suspend = Some(JitExternSuspend::WaitIo {
         token: 17,
         replay_pc: 0,
@@ -251,7 +251,7 @@ fn vm_jit_extern_suspend_callclosure_058_records_replay_only_after_setup_success
     let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
     let module = module_with_entry();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 9, 0, 0, 0);
+    fiber.push_frame(0, 9, 0, 0);
     fiber.jit_extern_suspend = Some(JitExternSuspend::CallClosure {
         closure_ref: core::ptr::null_mut(),
         args: TypedSlotPayload::try_new(Vec::new(), Vec::new()).expect("empty payload"),
@@ -286,7 +286,7 @@ fn vm_jit_extern_suspend_hostwait_062_records_hostevent_not_replay() {
     let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
     let module = module_with_entry();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 9, 0, 0, 0);
+    fiber.push_frame(0, 9, 0, 0);
     fiber.jit_extern_suspend = Some(JitExternSuspend::HostWait {
         token: 41,
         delay_ms: 5,
@@ -323,7 +323,7 @@ fn vm_jit_extern_suspend_hostreplay_062_preserves_replay_side_exit() {
     let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
     let module = module_with_entry();
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 9, 0, 0, 0);
+    fiber.push_frame(0, 9, 0, 0);
     fiber.jit_extern_suspend = Some(JitExternSuspend::HostReplay {
         token: 42,
         source: vo_runtime::ffi::HostEventReplaySource::Extension,

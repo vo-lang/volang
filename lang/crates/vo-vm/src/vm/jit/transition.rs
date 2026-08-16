@@ -148,7 +148,7 @@ mod tests {
             .expect("compile deopt probe");
 
         let mut fiber = Fiber::new(11);
-        fiber.push_frame(0, 3, 0, 0, 0);
+        fiber.push_frame(0, 3, 0, 0);
         fiber.stack[1] = 8;
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.deopt_state_id = u32::MAX;
@@ -197,7 +197,7 @@ mod tests {
         module.functions.push(function(1, 0));
         vm.finish_load(module.clone());
         let mut fiber = Fiber::new(11);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.call_resume_pc = 3;
         let before = vm

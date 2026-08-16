@@ -673,7 +673,7 @@ fn malformed_go_start_closure_target_is_vm_error_instead_of_nil_call_trap() {
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         fiber.stack[0] = closure_ref as u64;
     }
 

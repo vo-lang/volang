@@ -42,7 +42,7 @@ fn vm_defer_static_frame_shape_062_rejects_scan_slots_beyond_locals_before_stack
     module.functions.push(malformed);
 
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let entry = DeferEntry {
         frame_depth: fiber.frames.len(),
         func_id: 1,
@@ -282,7 +282,7 @@ fn vm_errdefer_heap_return_check_rejects_short_error_allocation_before_deref_059
     func.has_defer = true;
 
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let short_ref = gc.alloc(
         vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Struct),
         1,
@@ -327,7 +327,7 @@ fn vm_ver_002_fast_heap_return_rejects_nil_gcref_before_deref() {
     func.heap_ret_slots = vec![1];
 
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 1, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     fiber.stack[0] = 0;
     let inst = Instruction::new(Opcode::Return, 0, 1, 0);
 
@@ -357,7 +357,7 @@ fn jit_ok_return_missing_stack_metadata_is_jit_error_instead_of_panic() {
     func.ret_slots = 2;
 
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 0, 0, 2, 1);
+    fiber.push_frame(0, 0, 2, 1);
     fiber.defer_stack.push(DeferEntry {
         frame_depth: fiber.frames.len(),
         func_id: 0,
@@ -404,7 +404,7 @@ fn fast_heap_return_missing_slot_counts_is_jit_error_instead_of_panic() {
     func.heap_ret_slots = Vec::new();
 
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 1, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     fiber.stack[0] = 0;
     let inst = Instruction::new(Opcode::Return, 0, 1, 0);
 
@@ -437,7 +437,7 @@ fn jit_ok_return_at_closure_replay_boundary_caches_results() {
     func.ret_slots = 3;
     func.ret_slot_types = vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1];
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(7, 3, 0, 0, 3);
+    fiber.push_frame(7, 3, 0, 3);
     fiber.closure_replay.push_depth(fiber.frames.len());
 
     let result = handle_jit_ok_return(
@@ -471,7 +471,7 @@ fn jit_closure_replay_uses_canonical_return_layout_for_packed_buffer() {
     func.ret_slots = 2;
     func.ret_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(7, 1, 0, 0, 2);
+    fiber.push_frame(7, 1, 0, 2);
     fiber.closure_replay.push_depth(fiber.frames.len());
 
     let result = handle_jit_ok_return(
@@ -501,7 +501,7 @@ fn jit_closure_replay_return_skips_errdefer_without_panicking() {
     func.ret_slots = 1;
     func.ret_slot_types = vec![SlotType::Value];
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(7, 1, 0, 0, 1);
+    fiber.push_frame(7, 1, 0, 1);
     fiber.closure_replay.push_depth(fiber.frames.len());
     fiber.defer_stack.push(DeferEntry {
         frame_depth: fiber.frames.len(),
@@ -543,7 +543,7 @@ fn interpreter_closure_replay_return_skips_errdefer_without_panicking() {
     func.ret_slots = 1;
     let inst = Instruction::new(Opcode::Return, 0, 1, 0);
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(7, 1, 0, 0, 1);
+    fiber.push_frame(7, 1, 0, 1);
     fiber.stack[0] = 123;
     fiber.closure_replay.push_depth(fiber.frames.len());
     fiber.defer_stack.push(DeferEntry {
@@ -577,7 +577,7 @@ fn closure_replay_defer_completion_appends_final_return_values() {
     module.functions.push(func);
 
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     fiber.closure_replay.push_depth(fiber.frames.len());
     fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
@@ -611,7 +611,7 @@ fn recovered_closure_replay_panic_finalizes_through_replay_return() {
     let mut gc = Gc::new();
     let module = Module::new("closure-replay-recover-final-test".to_string());
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     fiber.closure_replay.push_depth(fiber.frames.len());
     fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
@@ -647,9 +647,9 @@ fn unrecovered_closure_replay_panic_intercepts_after_defers_finish() {
     let mut gc = Gc::new();
     let module = Module::new("closure-replay-unrecovered-final-test".to_string());
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(99, 1, 0, 0, 0);
+    fiber.push_frame(99, 1, 0, 0);
     fiber.closure_replay.push_depth(2);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     fiber.unwinding.push(UnwindingState {
         pending: Vec::new(),
         target_depth: 1,

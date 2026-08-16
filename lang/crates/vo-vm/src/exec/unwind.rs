@@ -261,7 +261,6 @@ pub fn handle_jit_ok_return(
             None => return ExecResult::Done,
         };
         let result = write_return_values(fiber, ret, frame.ret_reg, frame.ret_count as usize);
-        fiber.clear_parent_borrowed_slots(&frame, frame.ret_reg as usize, frame.ret_count as usize);
         return result;
     }
 
@@ -339,19 +338,6 @@ pub fn handle_jit_ok_return(
         Some(f) => f,
         None => return ExecResult::Done,
     };
-    let preserve_parent_ret_slots = pending_defers.is_empty();
-    let preserved_ret_reg = if preserve_parent_ret_slots {
-        frame.ret_reg as usize
-    } else {
-        0
-    };
-    let preserved_ret_count = if preserve_parent_ret_slots {
-        frame.ret_count as usize
-    } else {
-        0
-    };
-    fiber.clear_parent_borrowed_slots(&frame, preserved_ret_reg, preserved_ret_count);
-
     if !pending_defers.is_empty() {
         let mut pending = pending_defers;
         let first_defer = pending.pop().expect("non-empty JIT defer pending stack");
@@ -919,19 +905,6 @@ fn handle_initial_return(
         Some(f) => f,
         None => return ExecResult::Done,
     };
-    let preserve_parent_ret_slots = pending_defers.is_empty();
-    let preserved_ret_reg = if preserve_parent_ret_slots {
-        frame.ret_reg as usize
-    } else {
-        0
-    };
-    let preserved_ret_count = if preserve_parent_ret_slots {
-        frame.ret_count as usize
-    } else {
-        0
-    };
-    fiber.clear_parent_borrowed_slots(&frame, preserved_ret_reg, preserved_ret_count);
-
     // Execute defers or complete return
     if !pending_defers.is_empty() {
         let mut pending = pending_defers;
@@ -1126,7 +1099,6 @@ fn start_panic_in_active_defer(
             "active defer panic expected a defer frame".to_string(),
         ));
     };
-    fiber.clear_parent_borrowed_slots(&frame, 0, 0);
     let first_defer = pending
         .pop()
         .expect("non-empty active-defer panic pending stack");
@@ -1216,9 +1188,7 @@ fn handle_panic_during_unwinding(gc: &mut Gc, fiber: &mut Fiber, module: &Module
         };
         let pending = &mut state.pending;
         collect_and_stack_nested_defers(&mut fiber.defer_stack, pending, current_frame_depth, true);
-        if let Some(frame) = pop_frame(fiber) {
-            fiber.clear_parent_borrowed_slots(&frame, 0, 0);
-        }
+        let _ = pop_frame(fiber);
     }
 
     // Continue with remaining defers in Panic mode
@@ -1325,7 +1295,6 @@ fn start_panic_unwind_until(
                     "panic unwind expected current frame for pending defers".to_string(),
                 );
             };
-            fiber.clear_parent_borrowed_slots(&frame, 0, 0);
 
             let mut pending = pending;
             let first_defer = pending.pop().expect("non-empty panic unwind pending stack");
@@ -1370,9 +1339,7 @@ fn start_panic_unwind_until(
             while fiber.frames.len() > target_depth {
                 let depth = fiber.frames.len();
                 fiber.defer_stack.retain(|e| e.frame_depth < depth);
-                if let Some(frame) = pop_frame(fiber) {
-                    fiber.clear_parent_borrowed_slots(&frame, 0, 0);
-                } else {
+                if pop_frame(fiber).is_none() {
                     return ExecResult::Panic;
                 }
             }
@@ -1380,9 +1347,7 @@ fn start_panic_unwind_until(
             return ExecResult::FrameChanged;
         }
 
-        if let Some(frame) = pop_frame(fiber) {
-            fiber.clear_parent_borrowed_slots(&frame, 0, 0);
-        }
+        let _ = pop_frame(fiber);
     }
 }
 
@@ -1579,7 +1544,6 @@ fn fast_complete_stack_return(fiber: &mut Fiber, inst: &Instruction) -> ExecResu
         let dst = caller_bp + frame.ret_reg as usize;
         fiber.ensure_capacity(dst + write_count);
         fiber.copy_stack_slots(dst, src, write_count);
-        fiber.clear_parent_borrowed_slots(&frame, frame.ret_reg as usize, write_count);
         ExecResult::FrameChanged
     }
 }
@@ -1626,7 +1590,6 @@ fn fast_complete_heap_return(
     };
 
     let result = write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize);
-    fiber.clear_parent_borrowed_slots(&frame, frame.ret_reg as usize, frame.ret_count as usize);
     result
 }
 
@@ -2078,7 +2041,6 @@ fn call_defer_entry(
     if layout.slot0.is_some() && layout.arg_offset > 1 {
         fiber.zero_slots_at(args_start + 1, layout.arg_offset - 1);
     }
-    fiber.zero_slots_tail_at(args_start, func.gc_scan_slots as usize, arg_space);
     let stack = fiber.stack_ptr();
 
     if layout.receiver_capture_count > 0 {
@@ -2104,7 +2066,7 @@ fn call_defer_entry(
         }
     }
 
-    fiber.commit_reserved_call_frame(reservation, func_id, args_start, 0, 0, func.gc_scan_slots);
+    fiber.commit_reserved_call_frame(reservation, func_id, args_start, 0, 0);
 
     ExecResult::FrameChanged
 }

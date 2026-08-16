@@ -16,10 +16,10 @@ fn vm_runtime_transition_preflights_all_spawn_storage_before_publish() {
     );
     transition
         .spawns
-        .push(PendingSpawn::try_new(0, 1, 0, 0, Vec::new()).expect("valid first spawn"));
+        .push(PendingSpawn::try_new(0, 1, 0, Vec::new()).expect("valid first spawn"));
     transition
         .spawns
-        .push(PendingSpawn::try_new(0, 1, 0, 0, Vec::new()).expect("valid second spawn"));
+        .push(PendingSpawn::try_new(0, 1, 0, Vec::new()).expect("valid second spawn"));
 
     let error = vm
         .apply_runtime_transition(None, transition)
@@ -65,7 +65,7 @@ fn vm_runtime_transition_pending_response_overflow_is_rejected_before_commit() {
 fn vm_arch_boundary_fact_sources_001_resume_policy_owner_is_explicit() {
     let mut vm = Vm::new();
     let mut scheduled = Fiber::new(1);
-    scheduled.push_frame(0, 1, 0, 0, 0);
+    scheduled.push_frame(0, 1, 0, 0);
     scheduled.current_frame_mut().unwrap().pc = 3;
     let fid = vm.scheduler.spawn(scheduled);
     let transition = RuntimeTransition::new(
@@ -92,7 +92,7 @@ fn vm_arch_boundary_fact_sources_001_resume_policy_owner_is_explicit() {
 fn vm_resume_owner_002_preserve_policy_does_not_touch_frame_pc() {
     let mut vm = Vm::new();
     let mut scheduled = Fiber::new(1);
-    scheduled.push_frame(0, 1, 0, 0, 0);
+    scheduled.push_frame(0, 1, 0, 0);
     scheduled.current_frame_mut().unwrap().pc = 3;
     let fid = vm.scheduler.spawn(scheduled);
     let transition = RuntimeTransition::new(
@@ -122,7 +122,7 @@ fn vm_runtime_transition_remote_endpoint_send_failure_is_transactional_058() {
         .island_senders
         .insert(7, std::sync::Arc::new(FailingIslandSender));
     let mut fiber = Fiber::new(1);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let fid = vm.scheduler.spawn(fiber);
     assert_eq!(vm.scheduler.schedule_next(), Some(fid));
 
@@ -407,7 +407,7 @@ fn vm_runtime_transition_remote_publish_waits_for_closed_sender_replay_preflight
     assert_eq!(vm.scheduler.schedule_next(), Some(sender));
     {
         let fiber = vm.scheduler.current_fiber_mut().expect("sender fiber");
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         assert_eq!(fiber.current_frame().expect("sender frame").pc, 0);
     }
     let sender_key = vm.scheduler.get_fiber(sender).wake_key_packed();

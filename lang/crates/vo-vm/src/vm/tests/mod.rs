@@ -196,8 +196,21 @@ fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
     module
 }
 
-fn gc_test_module_with_global() -> Module {
-    let mut module = gc_test_module();
+/// GC tests that place roots in frame slots need bytecode whose current
+/// liveness genuinely observes those slots. The unverified test image uses a
+/// synthetic wide return solely to publish that exact root state.
+fn gc_live_test_module_with_root_slots(root_slots: u16) -> Module {
+    let mut module = gc_test_module_with_root_slots(root_slots);
+    module.functions[0].code[0] = Instruction::new(Opcode::Return, 0, root_slots, 0);
+    module
+}
+
+fn gc_live_test_module() -> Module {
+    gc_live_test_module_with_root_slots(1)
+}
+
+fn gc_live_test_module_with_global() -> Module {
+    let mut module = gc_live_test_module();
     module.globals.push(GlobalDef {
         name: "root_global".to_string(),
         slots: 1,

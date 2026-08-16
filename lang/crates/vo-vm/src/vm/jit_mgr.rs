@@ -1853,7 +1853,7 @@ mod tests {
         vm.state.gc.gc_request_cycle();
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
-        let bp = fiber.push_frame(0, 4, 4, 0, 1);
+        let bp = fiber.push_frame(0, 4, 0, 1);
         fiber.stack[bp] = source as u64;
         fiber.stack[bp + 1] = 0;
         fiber.stack[bp + 2] = 4;
@@ -1917,7 +1917,7 @@ mod tests {
         vm.state.gc.gc_request_cycle();
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
-        let bp = fiber.push_frame(0, 4, 4, 0, 1);
+        let bp = fiber.push_frame(0, 4, 0, 1);
         fiber.stack[bp] = source as u64;
         fiber.stack[bp + 1] = 0;
         fiber.stack[bp + 2] = 5;
@@ -2001,7 +2001,7 @@ mod tests {
         let source = vo_runtime::objects::string::create(&mut vm.state.gc, b"root");
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
-        let bp = fiber.push_frame(0, 5, 5, 0, 1);
+        let bp = fiber.push_frame(0, 5, 0, 1);
         fiber.stack[bp] = source as u64;
         fiber.stack[bp + 1] = 0;
         fiber.stack[bp + 2] = 4;
@@ -2075,7 +2075,7 @@ mod tests {
         vm.state.gc.gc_request_cycle();
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
-        let bp = fiber.push_frame(0, 6, 6, 0, 2);
+        let bp = fiber.push_frame(0, 6, 0, 2);
         fiber.stack[bp] =
             u64::from(vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::String).to_raw());
         fiber.stack[bp + 1] = interface_payload as u64;

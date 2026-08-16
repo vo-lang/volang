@@ -55,8 +55,6 @@ fn dispatch_jit_call(
             caller_frame.func_id
         ));
     };
-    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
-
     let Some(func_def) = module.functions.get(func_id as usize) else {
         return ExecResult::JitError(format!(
             "JIT call requested missing callee function id {func_id}"
@@ -64,7 +62,6 @@ fn dispatch_jit_call(
     };
     let arg_slots = func_def.param_slots as usize;
     let local_slots = func_def.local_slots as usize;
-    let gc_scan_slots = func_def.gc_scan_slots as usize;
     let ret_slots = func_def.ret_slots as usize;
     let ret_reg = match arg_start.checked_add(arg_slots) {
         Some(ret_reg) => match u16::try_from(ret_reg) {
@@ -95,15 +92,11 @@ fn dispatch_jit_call(
         arg_start as u16,
         ret_reg,
         ret_slots as u16,
-        caller_scan_slots,
         local_slots as u16,
-        func_def.gc_scan_slots,
     ) {
         Ok(bp) => bp,
         Err(err) => return stack_overflow_exec_result(vm, fiber, module, err),
     };
-    fiber.zero_slots_tail_at(jit_bp, gc_scan_slots, arg_slots);
-
     invoke_jit_and_handle(vm, fiber, module, jit_func, jit_bp, ret_slots)
 }
 
@@ -335,7 +328,7 @@ mod tests {
         vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         ctx.ctx.ret_is_heap = 1;
         ctx.ctx.ret_gcref_start = u16::MAX;
@@ -359,7 +352,7 @@ mod tests {
         vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         match handle_jit_result(&mut vm, &mut fiber, &module, JitResult::Ok, ctx, 1, &[0]) {
@@ -417,7 +410,7 @@ mod tests {
         module.functions.push(function(1, 2));
 
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let before_frames = fiber.frames.len();
         let before_sp = fiber.sp;
         let inst = Instruction::new(vo_runtime::instruction::Opcode::Call, 1, 0, 0);
@@ -455,7 +448,7 @@ mod tests {
         vm.finish_load(module.clone());
 
         let mut fiber = Fiber::new(7);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let short_ref = vm.state.gc.alloc(
             vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Struct),
             1,

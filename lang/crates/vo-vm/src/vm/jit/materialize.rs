@@ -17,8 +17,8 @@ impl From<FiberCapacityError> for JitFrameMaterializeError {
 
 /// Set up a prepared call frame (closure/interface call where args are already in place).
 ///
-/// Materializes JIT frames, zeros non-arg local slots, sets fiber.sp, and pushes
-/// the callee's CallFrame. Returns the callee_bp for the caller.
+/// Materializes JIT frames, sets fiber.sp, and pushes the callee's CallFrame.
+/// Exact frame-root maps make uninitialized local contents invisible to GC.
 pub(super) fn setup_prepared_call(
     fiber: &mut Fiber,
     module: &Module,
@@ -42,9 +42,7 @@ pub(super) fn setup_prepared_call(
         callee_ret_slots,
         "prepared call caller return window is invalid",
     )?;
-    let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
-    let gc_scan_slots = callee_func_def.gc_scan_slots as usize;
 
     preflight_prepared_call_final_frames(
         fiber,
@@ -54,7 +52,6 @@ pub(super) fn setup_prepared_call(
         call_ret_reg,
         callee_bp,
         local_slots,
-        callee_func_def.gc_scan_slots,
         caller_resume_pc,
     )?;
     preflight_jit_call_materialization(fiber, 1, callee_bp, local_slots)?;
@@ -67,22 +64,14 @@ pub(super) fn setup_prepared_call(
     }
 
     fiber.try_reserve_slots_at(callee_bp, local_slots)?;
-    fiber.zero_slots_tail_at(callee_bp, gc_scan_slots, param_slots);
-
-    fiber.try_push_call_frame(
-        callee_func_id,
-        callee_bp,
-        call_ret_reg,
-        callee_ret_slots,
-        callee_func_def.gc_scan_slots,
-    )?;
+    fiber.try_push_call_frame(callee_func_id, callee_bp, call_ret_reg, callee_ret_slots)?;
     Ok(())
 }
 
 /// Set up a regular call frame (JIT requests VM to execute a non-JIT function).
 ///
 /// Materializes JIT frames, recomputes caller bp/sp, allocates callee frame,
-/// zeros locals, copies args, and pushes the callee's CallFrame.
+/// copies args, and pushes the callee's CallFrame.
 pub(super) fn setup_regular_call(
     fiber: &mut Fiber,
     module: &Module,
@@ -100,8 +89,6 @@ pub(super) fn setup_regular_call(
         "regular call callee frame shape is invalid",
     )?;
     let callee_local_slots = callee_func_def.local_slots as usize;
-    let callee_gc_scan_slots = callee_func_def.gc_scan_slots as usize;
-    let arg_slots = callee_func_def.param_slots as usize;
 
     let callee_bp = regular_call_callee_bp_for_preflight(fiber, call_arg_start)?;
     preflight_jit_call_materialization(fiber, 1, callee_bp, callee_local_slots)?;
@@ -128,18 +115,13 @@ pub(super) fn setup_regular_call(
 
     fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
 
-    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(call_arg_start as u16);
-
     let callee_bp = fiber.try_push_borrowed_call_frame(
         callee_func_id,
         call_arg_start as u16,
         call_ret_reg,
         callee_ret_slots,
-        caller_scan_slots,
         callee_local_slots as u16,
-        callee_func_def.gc_scan_slots,
     )?;
-    fiber.zero_slots_tail_at(callee_bp, callee_gc_scan_slots, arg_slots);
 
     Ok(callee_bp)
 }
@@ -382,18 +364,6 @@ fn build_materialized_resume_plan(
                 "resume frame bp is outside materialized stack extent",
             ));
         }
-        let scan_end = bp.checked_add(func_def.gc_scan_slots as usize).ok_or(
-            FiberCapacityError::StackSlots {
-                required: usize::MAX,
-                limit: crate::fiber::MAX_STACK_CAPACITY,
-            },
-        )?;
-        if scan_end > sp {
-            return Err(JitFrameMaterializeError::Invariant(
-                "resume frame scan extent is outside materialized stack extent",
-            ));
-        }
-
         let pc = if i == 0 {
             resume_pc as usize
         } else {
@@ -406,17 +376,7 @@ fn build_materialized_resume_plan(
                 .resume_pc as usize
         };
 
-        let mut frame = CallFrame::new(
-            func_id,
-            bp,
-            bp,
-            rp.ret_reg,
-            rp.ret_slots,
-            func_def.gc_scan_slots,
-            None,
-            0,
-            0,
-        );
+        let mut frame = CallFrame::new(func_id, bp, bp, rp.ret_reg, rp.ret_slots);
         frame.pc = pc;
         frames.push(frame);
     }
@@ -515,7 +475,6 @@ fn preflight_jit_call_materialization(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn preflight_prepared_call_final_frames(
     fiber: &Fiber,
     module: &Module,
@@ -524,7 +483,6 @@ fn preflight_prepared_call_final_frames(
     call_ret_reg: u16,
     callee_bp: usize,
     callee_local_slots: usize,
-    callee_gc_scan_slots: u16,
     caller_resume_pc: u32,
 ) -> Result<(), JitFrameMaterializeError> {
     let final_sp =
@@ -549,10 +507,6 @@ fn preflight_prepared_call_final_frames(
         callee_bp,
         call_ret_reg,
         callee_ret_slots,
-        callee_gc_scan_slots,
-        None,
-        0,
-        0,
     ));
     preflight_materialized_frame_invariants(&candidate_frames, module, final_sp)
 }
@@ -594,55 +548,12 @@ fn validate_materialized_frame_invariants(
         if frame.bp > sp {
             return Err("materialized frame bp is outside fiber.sp");
         }
-        if frame.scan_slots > func.gc_scan_slots {
-            return Err("materialized frame scan slots exceed function metadata");
-        }
-        if frame.scan_slots > func.local_slots {
-            return Err("materialized frame scan slots exceed function locals");
-        }
-        let scan_end = frame
-            .bp
-            .checked_add(frame.scan_slots as usize)
-            .ok_or("materialized frame scan extent overflowed")?;
-        if scan_end > sp {
-            return Err("materialized frame scan extent is outside fiber.sp");
-        }
         if idx > 0 {
             let parent = frames
                 .get(idx - 1)
                 .ok_or("materialized frame parent frame disappeared")?;
-            let parent_func = module
-                .functions
-                .get(parent.func_id as usize)
-                .ok_or("materialized frame parent func_id is out of module range")?;
-            let parent_scan_slots_after_pop =
-                frame.caller_scan_slots_restore.unwrap_or(parent.scan_slots);
-            if parent_scan_slots_after_pop > parent_func.gc_scan_slots {
-                return Err("materialized frame parent scan restore exceeds metadata");
-            }
-            if parent_scan_slots_after_pop > parent_func.local_slots {
-                return Err("materialized frame parent scan restore exceeds locals");
-            }
-            let parent_scan_end = parent
-                .bp
-                .checked_add(parent_scan_slots_after_pop as usize)
-                .ok_or("materialized frame parent restored scan extent overflowed")?;
-            if parent_scan_end > frame.sp_restore {
-                return Err("materialized frame restore sp is below parent scan extent");
-            }
-        } else if frame.caller_scan_slots_restore.is_some() {
-            return Err("borrowed frame scan restore has no parent frame");
-        }
-
-        if let Some(restore) = frame.caller_scan_slots_restore {
-            if idx == 0 {
-                return Err("borrowed frame scan restore has no parent frame");
-            }
-            if frame.caller_zero_start > frame.caller_zero_end {
-                return Err("borrowed frame caller zero range is inverted");
-            }
-            if frame.caller_zero_end > restore {
-                return Err("borrowed frame caller zero range exceeds restore scan slots");
+            if frame.sp_restore < parent.bp {
+                return Err("materialized frame restore sp is below parent frame base");
             }
         }
     }

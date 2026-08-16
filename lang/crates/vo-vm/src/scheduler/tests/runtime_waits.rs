@@ -376,7 +376,7 @@ fn wake_queue_sender_closed_marks_simple_sender_without_rewriting_pc() {
     scheduler.schedule_next();
     {
         let fiber = scheduler.current_fiber_mut().unwrap();
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 3;
     }
     let waiter = QueueWaiter::try_queue(
@@ -734,10 +734,10 @@ fn pending_spawn_identity_is_assigned_only_at_commit() {
 }
 
 #[test]
-fn repeated_pending_spawns_reuse_stack_and_zero_gc_tail() {
+fn repeated_pending_spawns_reuse_stack_without_touching_dead_tail() {
     let mut scheduler = Scheduler::new();
     let first = scheduler
-        .try_spawn_pending(PendingSpawn::try_new(7, 8, 4, 0, vec![1]).expect("initial spawn shape"))
+        .try_spawn_pending(PendingSpawn::try_new(7, 8, 0, vec![1]).expect("initial spawn shape"))
         .expect("initial slot");
     {
         let fiber = scheduler.get_fiber_mut(first);
@@ -755,7 +755,7 @@ fn repeated_pending_spawns_reuse_stack_and_zero_gc_tail() {
         let value = u64::from(iteration) + 10;
         let reused = scheduler
             .try_spawn_pending(
-                PendingSpawn::try_new(8, 8, 4, 0, vec![value]).expect("reused spawn shape"),
+                PendingSpawn::try_new(8, 8, 0, vec![value]).expect("reused spawn shape"),
             )
             .expect("reused slot");
         assert_eq!(reused, first);
@@ -764,7 +764,7 @@ fn repeated_pending_spawns_reuse_stack_and_zero_gc_tail() {
         assert_eq!(fiber.stack.as_ptr(), retained_ptr);
         assert_eq!(fiber.stack.len(), retained_len);
         assert_eq!(fiber.stack.capacity(), retained_capacity);
-        assert_eq!(&fiber.stack[..4], &[value, 0, 0, 0]);
+        assert_eq!(&fiber.stack[..4], &[value, u64::MAX, u64::MAX, u64::MAX]);
         scheduler.schedule_next().expect("reused fiber");
         scheduler.kill_current();
     }
@@ -830,7 +830,7 @@ fn scheduler_wake_model_deterministic_fuzz_smoke_preserves_wait_invariants() {
             3 => {
                 let fid = ensure_current(&mut scheduler, &mut next_func_id);
                 if rng.range(3) == 0 {
-                    scheduler.get_fiber_mut(fid).push_frame(0, 1, 0, 0, 0);
+                    scheduler.get_fiber_mut(fid).push_frame(0, 1, 0, 0);
                     scheduler.get_fiber_mut(fid).current_frame_mut().unwrap().pc = 2;
                 }
                 scheduler.block_for_queue();

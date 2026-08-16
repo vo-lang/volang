@@ -152,7 +152,7 @@ fn vm_endpoint_request_owner_019_unauthorized_send_closes_source_pending_wait() 
     let wait_key;
     {
         let fiber = source.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 1;
         wait_key = fiber.begin_remote_endpoint_send_wait(endpoint_id);
     }
@@ -298,7 +298,7 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_buffer_on_transfer
     let wait_key;
     {
         let fiber = remote_vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         wait_key = fiber.begin_remote_endpoint_recv_wait(endpoint_id);
     }
     remote_vm.scheduler.schedule_next().expect("remote fiber");

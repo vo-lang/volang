@@ -136,7 +136,7 @@ mod tests {
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(1);
-        let entry_bp = fiber.push_frame(0, 2, 0, 0, 0);
+        let entry_bp = fiber.push_frame(0, 2, 0, 0);
         let outer_bp = fiber.reserve_slots_at(entry_bp + 2, 3) - 3;
         let inner_bp = fiber.reserve_slots_at(outer_bp + 3, 4) - 4;
         fiber.resume_stack.push(ResumePoint {
@@ -204,7 +204,7 @@ mod tests {
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(1);
-        let bp = fiber.push_frame(0, 5, 0, 0, 0);
+        let bp = fiber.push_frame(0, 5, 0, 0);
         fiber.sp = bp;
 
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
@@ -262,7 +262,7 @@ mod tests {
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(25);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.resume_stack.push(ResumePoint {
             func_id: 99,
             resume_pc: 22,
@@ -313,7 +313,7 @@ mod tests {
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(23);
-        let entry_bp = fiber.push_frame(0, 4, 0, 0, 0);
+        let entry_bp = fiber.push_frame(0, 4, 0, 0);
         let caller_bp = fiber.reserve_slots_at(entry_bp + 4, 3) - 3;
         fiber.resume_stack.push(ResumePoint {
             func_id: 1,
@@ -367,7 +367,7 @@ mod tests {
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(26);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.resume_stack.push(ResumePoint {
             func_id: 1,
             resume_pc: 22,
@@ -425,7 +425,7 @@ mod tests {
         finish_jit_test_load(&mut vm, module.clone());
 
         let mut fiber = Fiber::new(24);
-        let caller_bp = fiber.push_frame(0, 2, 0, 0, 0);
+        let caller_bp = fiber.push_frame(0, 2, 0, 0);
         fiber.current_frame_mut().expect("caller frame").pc = 7;
         let before_frame_count = fiber.frames.len();
         let before_sp = fiber.sp;
@@ -484,7 +484,7 @@ mod tests {
         let mut fiber = Fiber::new(27);
         while fiber.try_reserve_call_frames(1).is_ok() {
             fiber
-                .try_push_call_frame(0, 0, 0, 0, 0)
+                .try_push_call_frame(0, 0, 0, 0)
                 .expect("fill call-frame capacity");
         }
         let before_sp = fiber.sp;

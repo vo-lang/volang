@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn vm_arch_boundary_fact_sources_001_resume_helper_owns_frame_pc_update() {
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
 
         set_current_frame_pc_for_resume(
             &mut fiber,
@@ -234,7 +234,7 @@ mod tests {
     fn vm_extern_replay_validation_003_invalid_closure_does_not_rewrite_pc() {
         let mut gc = vo_runtime::gc::Gc::new();
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 9, 0, 0, 0);
+        fiber.push_frame(0, 9, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 9;
         let module = Module::new("extern-replay-validation".to_string());
         let not_closure = gc.alloc(
@@ -261,7 +261,7 @@ mod tests {
     fn vm_extern_replay_validation_058_setup_failure_does_not_rewrite_pc() {
         let mut gc = vo_runtime::gc::Gc::new();
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 9, 0, 0, 0);
+        fiber.push_frame(0, 9, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 9;
         let mut module = Module::new("extern-replay-setup-validation".to_string());
         let mut callee = replay_callee(0, 1);

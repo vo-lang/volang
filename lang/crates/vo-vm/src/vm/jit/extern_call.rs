@@ -415,7 +415,7 @@ mod tests {
             .expect("resolve test externs");
         vm.finish_load(module.clone());
         let mut fiber = Box::new(Fiber::new(7));
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         let ctx = build_jit_context(vm.as_mut(), fiber.as_mut()).expect("jit context");
         (vm, fiber, ctx)
     }
@@ -709,7 +709,7 @@ mod tests {
             .closure_replay
             .results
             .push((vec![42], vec![vo_runtime::SlotType::Value]));
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         ctx.ctx.call_depth = 0;
 
         let replay = jit_call_extern(

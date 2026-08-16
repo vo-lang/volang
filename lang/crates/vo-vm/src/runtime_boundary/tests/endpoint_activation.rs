@@ -17,7 +17,7 @@ fn vm_composite_rollback_061_forwards_frame_and_select_state_rollback() {
     );
     let original_select = select_state_for_queue_061(ch);
     let mut fiber = Fiber::new(0);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     fiber.stack[0] = 0x0610;
     fiber.select_state = Some(original_select.clone());
     let fid = vm.scheduler.spawn(fiber);

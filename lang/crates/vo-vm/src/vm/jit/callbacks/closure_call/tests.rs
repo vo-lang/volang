@@ -81,7 +81,7 @@ extern "C" fn failing_push_frame_with_infra_error(
 
 fn attach_current_frame(ctx: &mut JitContext, fiber: &mut Fiber, func_id: u32) {
     if fiber.current_frame().is_none() {
-        fiber.push_frame(func_id, 0, 0, 0, 0);
+        fiber.push_frame(func_id, 0, 0, 0);
     }
     ctx.fiber = fiber as *mut Fiber as *mut c_void;
 }

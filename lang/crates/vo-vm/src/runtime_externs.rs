@@ -191,9 +191,9 @@ mod tests {
         module.debug_info.finalize();
 
         let mut fiber = Fiber::new(1);
-        fiber.push_frame(3, 1, 0, 0, 0);
+        fiber.push_frame(3, 1, 0, 0);
         fiber.current_frame_mut().expect("outer frame").pc = 5;
-        fiber.push_frame(7, 1, 0, 0, 0);
+        fiber.push_frame(7, 1, 0, 0);
         fiber.current_frame_mut().expect("inner frame").pc = 9;
 
         let inner = caller_location(&fiber.frames, &module, 0).expect("inner location");
@@ -214,7 +214,7 @@ mod tests {
         module.debug_info.add_loc(0, 0, "main.vo", 1, 1, 1);
         module.debug_info.finalize();
         let mut fiber = Fiber::new(1);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         assert!(caller_location(&fiber.frames, &module, 0).is_none());
     }
 
@@ -224,7 +224,7 @@ mod tests {
         module.debug_info.add_loc(0, 0, "main.vo", 1, 1, 1);
         module.debug_info.finalize();
         let mut fiber = Fiber::new(1);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.current_frame_mut().expect("frame").pc = 2;
         assert!(caller_location(&fiber.frames, &module, 0).is_none());
     }

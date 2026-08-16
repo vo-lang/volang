@@ -2227,14 +2227,8 @@ impl Vm {
             .functions
             .get(entry_func as usize)
             .ok_or(VmError::InvalidFunctionId(entry_func))?;
-        let spawn = PendingSpawn::try_new(
-            entry_func,
-            func.local_slots,
-            func.gc_scan_slots,
-            0,
-            Vec::new(),
-        )
-        .map_err(fiber_capacity_error_to_vm_error)?;
+        let spawn = PendingSpawn::try_new(entry_func, func.local_slots, 0, Vec::new())
+            .map_err(fiber_capacity_error_to_vm_error)?;
         self.scheduler
             .try_spawn_pending(spawn)
             .map_err(scheduler_error_to_vm_error)?;
@@ -2274,14 +2268,8 @@ impl Vm {
             .functions
             .get(init_func as usize)
             .ok_or(VmError::InvalidFunctionId(init_func))?;
-        let spawn = PendingSpawn::try_new(
-            init_func,
-            func.local_slots,
-            func.gc_scan_slots,
-            0,
-            Vec::new(),
-        )
-        .map_err(fiber_capacity_error_to_vm_error)?;
+        let spawn = PendingSpawn::try_new(init_func, func.local_slots, 0, Vec::new())
+            .map_err(fiber_capacity_error_to_vm_error)?;
         self.scheduler
             .try_spawn_pending(spawn)
             .map_err(scheduler_error_to_vm_error)?;
@@ -2337,7 +2325,6 @@ impl Vm {
         let spawn = PendingSpawn::try_new(
             function_id,
             function.local_slots,
-            function.gc_scan_slots,
             0,
             vec![init_slice as u64],
         )
@@ -5830,14 +5817,8 @@ impl Vm {
             func_def,
             &mut args,
         )?;
-        let spawn = PendingSpawn::try_new(
-            func_id,
-            func_def.local_slots,
-            func_def.gc_scan_slots,
-            func_def.ret_slots,
-            args,
-        )
-        .map_err(fiber_capacity_error_to_vm_error)?;
+        let spawn = PendingSpawn::try_new(func_id, func_def.local_slots, func_def.ret_slots, args)
+            .map_err(fiber_capacity_error_to_vm_error)?;
         self.scheduler
             .try_spawn_pending(spawn)
             .map_err(scheduler_error_to_vm_error)?;

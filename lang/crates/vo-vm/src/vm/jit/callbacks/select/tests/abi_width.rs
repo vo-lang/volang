@@ -74,7 +74,7 @@ fn vm_jit_select_callback_abi_013_rejects_exec_result_register_width_drift_befor
         "jit-select-exec-register-contract-test".to_string(),
     ));
     let mut fiber = Fiber::new(7);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
     fiber.stack[0] = 123;
 

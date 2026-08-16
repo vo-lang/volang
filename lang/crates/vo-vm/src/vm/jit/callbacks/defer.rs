@@ -251,7 +251,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(
@@ -281,7 +281,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         let args = [99_u64];
 
@@ -306,7 +306,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(ctx.as_ptr(), 0, 0, 0, 0, core::ptr::null(), 1, 0);
@@ -321,7 +321,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
         let args = [99_u64];
 
@@ -347,7 +347,7 @@ mod tests {
         let non_closure = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::String), 1);
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(ctx.as_ptr(), 0, 1, non_closure as u64, 0, [].as_ptr(), 0, 0);
@@ -362,7 +362,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_defer_push(ctx.as_ptr(), 0, 1, 0, 0, [].as_ptr(), 0, 0);
@@ -378,7 +378,7 @@ mod tests {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         vm.finish_load(caller_module());
         let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
 
         let result = jit_recover(ctx.as_ptr(), core::ptr::null_mut());

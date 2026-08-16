@@ -186,7 +186,7 @@ fn vm_resume_owner_002_closed_sender_wake_replays_via_runtime_boundary() {
     vm.scheduler.schedule_next().unwrap();
     {
         let fiber = vm.scheduler.current_fiber_mut().unwrap();
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 3;
         fiber.begin_queue_wait(&sender_waiter);
     }
@@ -263,7 +263,7 @@ fn vm_endpoint_response_source_019_same_island_closed_endpoint_sender_replays_th
     vm.scheduler.schedule_next().unwrap();
     let wait_key = {
         let fiber = vm.scheduler.current_fiber_mut().unwrap();
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 3;
         fiber.begin_remote_endpoint_send_wait(endpoint_id)
     };

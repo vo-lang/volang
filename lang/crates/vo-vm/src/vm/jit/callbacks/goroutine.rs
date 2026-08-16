@@ -324,13 +324,7 @@ pub extern "C" fn jit_go_start(
         for i in 0..arg_slots as usize {
             entry_slots.push(unsafe { *args_ptr.add(i) });
         }
-        let spawn = match PendingSpawn::try_new(
-            func_id,
-            func.local_slots,
-            func.gc_scan_slots,
-            0,
-            entry_slots,
-        ) {
+        let spawn = match PendingSpawn::try_new(func_id, func.local_slots, 0, entry_slots) {
             Ok(spawn) => spawn,
             Err(err) => {
                 record_runtime_trap(ctx, JitRuntimeTrapKind::StackOverflow, ctx.runtime_trap_pc);

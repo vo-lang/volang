@@ -272,7 +272,7 @@ fn endpoint_close_local_home_waiters_replay_through_queue_wake_ownership() {
     vm.scheduler.schedule_next().expect("sender fiber");
     let sender_waiter = {
         let fiber = vm.scheduler.current_fiber_mut().unwrap();
-        fiber.push_frame(0, 1, 0, 0, 0);
+        fiber.push_frame(0, 1, 0, 0);
         fiber.current_frame_mut().unwrap().pc = 3;
         let waiter = QueueWaiter::try_queue(
             vm.state.current_island_id,
@@ -696,7 +696,7 @@ fn vm_endpoint_request_same_island_rejected_response_rolls_back_queue_state_060(
     let fid = vm.scheduler.spawn(Fiber::new(0));
     let wait_key = {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 0, 0, 0, 0);
+        fiber.push_frame(0, 0, 0, 0);
         fiber.current_frame_mut().expect("frame").pc = 1;
         fiber.begin_remote_endpoint_send_wait(endpoint_id)
     };

@@ -264,14 +264,11 @@ pub fn exec_call(
             caller_frame.func_id
         ));
     };
-    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(arg_start as u16);
-
     let Some(func) = module.functions.get(func_id as usize) else {
         return ExecResult::JitError(format!("missing call target function id {func_id}"));
     };
     let arg_slots = func.param_slots as usize;
     let local_slots = func.local_slots as usize;
-    let gc_scan_slots = func.gc_scan_slots as usize;
     let ret_slots = func.ret_slots;
     let ret_reg = match checked_borrowed_return_reg("Call", inst.b, arg_slots, func_id, &func.name)
     {
@@ -284,19 +281,16 @@ pub fn exec_call(
     if let Err(err) = validate_call_return_window(caller_func, ret_reg, ret_slots) {
         return ExecResult::JitError(err.message("Call caller return window"));
     }
-    let new_bp = match fiber.try_push_borrowed_call_frame(
+    match fiber.try_push_borrowed_call_frame(
         func_id,
         arg_start as u16,
         ret_reg,
         ret_slots,
-        caller_scan_slots,
         local_slots as u16,
-        func.gc_scan_slots,
     ) {
-        Ok(bp) => bp,
+        Ok(_) => {}
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
-    };
-    fiber.zero_slots_tail_at(new_bp, gc_scan_slots, arg_slots);
+    }
 
     ExecResult::FrameChanged
 }
@@ -325,24 +319,16 @@ pub(crate) fn exec_verified_call(
         .expect("common verifier proved the static Call return offset");
     debug_assert!(validate_call_return_window(caller_func, ret_reg, func.ret_slots).is_ok());
 
-    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(inst.b);
-    let new_bp = match fiber.try_push_borrowed_call_frame(
+    match fiber.try_push_borrowed_call_frame(
         func_id,
         inst.b,
         ret_reg,
         func.ret_slots,
-        caller_scan_slots,
         func.local_slots,
-        func.gc_scan_slots,
     ) {
-        Ok(bp) => bp,
+        Ok(_) => {}
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
-    };
-    fiber.zero_slots_tail_at(
-        new_bp,
-        func.gc_scan_slots as usize,
-        func.param_slots as usize,
-    );
+    }
     ExecResult::FrameChanged
 }
 
@@ -448,7 +434,6 @@ fn exec_call_iface_impl(
             "CallIface requested from missing caller function id {caller_func_id}"
         ));
     };
-    let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(borrowed_start);
     let (expected_iface_meta_id, method_idx_u32, callsite_arg_layout, callsite_ret_layout) =
         match call_iface_layout_for_callsite(caller_func, callsite_pc as usize, "CallIface") {
             Ok(layout) => layout,
@@ -569,9 +554,7 @@ fn exec_call_iface_impl(
         borrowed_start,
         ret_reg,
         ret_slots,
-        caller_scan_slots,
         target.local_slots,
-        target.gc_scan_slots,
     ) {
         Ok(bp) => bp,
         Err(err) => return stack_overflow_panic(gc, fiber, module, err),
@@ -581,7 +564,6 @@ fn exec_call_iface_impl(
             entry.publish_interpreter_target(slot0, target);
         }
     }
-    fiber.zero_slots_tail_at(new_bp, target.gc_scan_slots as usize, arg_slots);
     let stack = fiber.stack_ptr();
 
     stack_set(stack, new_bp, slot1);

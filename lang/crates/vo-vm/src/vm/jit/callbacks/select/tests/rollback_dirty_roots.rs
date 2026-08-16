@@ -21,7 +21,7 @@ fn vm_jit_select_continue_marks_current_fiber_roots_dirty() {
     let module = callback_module(1);
     vm.finish_load(module);
     let mut fiber = Fiber::new(7);
-    fiber.push_frame(0, 1, 0, 0, 0);
+    fiber.push_frame(0, 1, 0, 0);
     let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("jit context");
     ctx.ctx.current_func_id = 0;
     ctx.ctx.runtime_trap_pc = 0;
@@ -60,7 +60,7 @@ fn vm_jit_select_remote_ack_rolls_back_queue_after_late_route_failure() {
     let module = callback_module(3);
     vm.finish_load(module);
     let mut fiber = Fiber::new(7);
-    fiber.push_frame(0, 3, 0, 0, 0);
+    fiber.push_frame(0, 3, 0, 0);
     fiber.stack[0] = ch as u64;
     fiber.stack[1] = 999;
     fiber.stack[2] = 41;

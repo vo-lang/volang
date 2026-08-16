@@ -39,7 +39,7 @@ fn vm_gc_001_interpreter_go_start_transition_marks_spawn_roots_dirty() {
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    vm.scheduler.get_fiber_mut(fid).push_frame(0, 4, 0, 0, 0);
+    vm.scheduler.get_fiber_mut(fid).push_frame(0, 4, 0, 0);
 
     let result = vm.run_fiber(fid);
     let ExecResult::Transition(transition) = result else {
@@ -129,7 +129,7 @@ fn corrupted_frame_function_id_is_vm_error_instead_of_index_panic() {
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let fid = vm.scheduler.spawn(Fiber::new(0));
-    vm.scheduler.get_fiber_mut(fid).push_frame(7, 0, 0, 0, 0);
+    vm.scheduler.get_fiber_mut(fid).push_frame(7, 0, 0, 0);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_scheduled()));
 
@@ -201,7 +201,7 @@ fn vm_goisland_object_kind_002_malformed_closure_target_is_vm_error_instead_of_h
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         fiber.stack[0] = island as u64;
         fiber.stack[1] = closure_ref as u64;
     }
@@ -241,7 +241,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_island_gcref_before_islan
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         fiber.stack[0] = not_island as u64;
         fiber.stack[1] = closure_ref as u64;
     }
@@ -284,7 +284,7 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_closure_gcref_before_clos
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         fiber.stack[0] = island as u64;
         fiber.stack[1] = not_closure as u64;
     }
@@ -352,7 +352,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_shape_drift_before_island_effects() 
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         fiber.stack[0] = remote_island as u64;
         fiber.stack[1] = closure_ref as u64;
     }
@@ -431,7 +431,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
     let fid = vm.scheduler.spawn(Fiber::new(0));
     {
         let fiber = vm.scheduler.get_fiber_mut(fid);
-        fiber.push_frame(0, 4, 0, 0, 0);
+        fiber.push_frame(0, 4, 0, 0);
         fiber.stack[0] = remote_island as u64;
         fiber.stack[1] = closure_ref as u64;
         fiber.stack[2] = 0;

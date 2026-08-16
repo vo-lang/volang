@@ -66,7 +66,7 @@ fn install_go_callsite(func: &mut FunctionDef, arg_layout: Vec<SlotType>) {
 
 fn attach_go_callsite(ctx: &mut JitContext, fiber: &mut Fiber, func_id: u32) {
     if fiber.current_frame().is_none() {
-        fiber.push_frame(func_id, 0, 0, 0, 0);
+        fiber.push_frame(func_id, 0, 0, 0);
     }
     ctx.runtime_trap_pc = 0;
 }
