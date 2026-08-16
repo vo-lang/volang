@@ -2136,6 +2136,7 @@ pub struct LoadedModule {
     module: Module,
     runtime_type_facts: RuntimeTypeFacts,
     dynamic_callsite_map: Arc<DynamicCallsiteMap>,
+    frame_root_maps: crate::frame_roots::FrameRootMaps,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2225,13 +2226,18 @@ impl DynamicCallsiteMap {
 }
 
 impl LoadedModule {
-    pub(crate) fn new(module: Module, runtime_type_facts: RuntimeTypeFacts) -> Self {
+    pub(crate) fn new(
+        module: Module,
+        runtime_type_facts: RuntimeTypeFacts,
+        frame_root_maps: crate::frame_roots::FrameRootMaps,
+    ) -> Self {
         debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
         let dynamic_callsite_map = Arc::new(DynamicCallsiteMap::for_module(&module));
         Self {
             module,
             runtime_type_facts,
             dynamic_callsite_map,
+            frame_root_maps,
         }
     }
 
@@ -2253,6 +2259,11 @@ impl LoadedModule {
     #[inline]
     pub fn shared_dynamic_callsite_map(&self) -> Arc<DynamicCallsiteMap> {
         Arc::clone(&self.dynamic_callsite_map)
+    }
+
+    #[inline]
+    pub fn frame_root_maps(&self) -> &crate::frame_roots::FrameRootMaps {
+        &self.frame_root_maps
     }
 
     #[inline]
@@ -2290,7 +2301,9 @@ impl LoadedModule {
                 module.runtime_types.len()
             ],
         });
-        Self::new(module, runtime_type_facts)
+        let frame_root_maps = crate::frame_roots::FrameRootMaps::build(&module)
+            .unwrap_or_else(|_| crate::frame_roots::FrameRootMaps::conservative(&module));
+        Self::new(module, runtime_type_facts, frame_root_maps)
     }
 }
 

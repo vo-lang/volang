@@ -29,10 +29,6 @@ impl<'a> MetadataFacts<'a> {
     pub(crate) fn instruction(self) -> Option<&'a InstructionMetadata> {
         self.instruction
     }
-
-    pub(crate) fn call_layout_slots(self) -> Option<(u16, u16)> {
-        self.instruction?.call_layout_slots()
-    }
 }
 
 #[inline]
@@ -75,31 +71,6 @@ pub(crate) fn call_iface_method_index_from_instruction(
 }
 
 #[inline]
-pub fn indexed_set_value_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    facts.instruction?.elem_layout().map(|layout| layout.slots)
-}
-
-#[inline]
-pub fn slice_append_value_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    facts.instruction?.elem_layout().map(|layout| layout.slots)
-}
-
-#[inline]
-pub fn map_get_layout(_: &Instruction, facts: MetadataFacts<'_>) -> Option<MapGetLayout> {
-    facts.instruction?.map_get_layout()
-}
-
-#[inline]
-pub fn map_set_layout(_: &Instruction, facts: MetadataFacts<'_>) -> Option<MapSetLayout> {
-    facts.instruction?.map_set_layout()
-}
-
-#[inline]
-pub fn map_delete_key_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    facts.instruction?.map_delete_key_slots()
-}
-
-#[inline]
 pub fn map_iter_next_layout(
     _: &Instruction,
     facts: MetadataFacts<'_>,
@@ -120,11 +91,6 @@ pub fn queue_elem_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16
 #[inline]
 pub fn slot_elem_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
     facts.instruction?.slot_elem_slots()
-}
-
-#[inline]
-pub fn ptr_value_slots(_: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
-    facts.instruction?.ptr_value_slots()
 }
 
 #[cfg(test)]

@@ -1,8 +1,6 @@
 use vo_runtime::bytecode::{ExternDef, FunctionDef};
 use vo_runtime::instruction::Instruction;
 
-use crate::semantics::opcode_register_effects;
-
 use super::{
     try_memory_sync_effect, try_read_regs_with_module_context, try_write_regs_with_module_context,
     EffectError, EffectFacts, InstructionEffects,
@@ -40,5 +38,5 @@ pub fn try_instruction_effects_with_module_context(
 }
 
 pub fn may_call(inst: &Instruction) -> bool {
-    opcode_register_effects(inst.opcode()).may_call
+    vo_common_core::instruction_effects::instruction_may_call(inst.opcode())
 }

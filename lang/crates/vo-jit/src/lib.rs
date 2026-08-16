@@ -5,6 +5,7 @@ mod abi;
 mod analysis;
 mod call_graph;
 mod call_helpers;
+#[cfg(test)]
 mod capability;
 mod compile_common;
 mod contract;
@@ -21,6 +22,7 @@ mod metadata;
 mod native_frame;
 mod native_stack_map;
 mod optimizer;
+#[cfg(test)]
 mod semantics;
 mod shape;
 #[cfg(test)]

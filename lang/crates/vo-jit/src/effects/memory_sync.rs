@@ -1,8 +1,5 @@
 use vo_runtime::instruction::Instruction;
 
-use crate::semantics::{opcode_register_effects, MemorySyncSpec};
-
-use super::operand_eval::{checked_slot_offset, operand_slot};
 use super::SlotRangeError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,18 +11,27 @@ pub enum MemorySyncEffect {
 }
 
 pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, SlotRangeError> {
-    match opcode_register_effects(inst.opcode()).memory_sync {
-        MemorySyncSpec::None => Ok(MemorySyncEffect::None),
-        MemorySyncSpec::All => Ok(MemorySyncEffect::All),
-        MemorySyncSpec::AliasedFromOperand(operand) => {
-            Ok(MemorySyncEffect::AliasedFrom(operand_slot(inst, operand)))
+    match vo_common_core::instruction_effects::instruction_frame_memory_effect(inst) {
+        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::None) => {
+            Ok(MemorySyncEffect::None)
         }
-        MemorySyncSpec::FromOperand(operand) => {
-            Ok(MemorySyncEffect::From(operand_slot(inst, operand)))
+        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::AliasedFrom(start)) => {
+            Ok(MemorySyncEffect::AliasedFrom(start))
         }
-        MemorySyncSpec::SliceAppendValueStart => {
-            let elem_slot = checked_slot_offset(inst.c, 1, "memory")?;
-            Ok(MemorySyncEffect::From(elem_slot))
+        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::From(start)) => {
+            Ok(MemorySyncEffect::From(start))
         }
+        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::All) => {
+            Ok(MemorySyncEffect::All)
+        }
+        Err(vo_common_core::instruction_effects::InstructionReadError::SlotRangeOverflow {
+            start,
+            count,
+        }) => Err(SlotRangeError::new(
+            "memory",
+            start,
+            u16::try_from(count).unwrap_or(u16::MAX),
+        )),
+        Err(_) => unreachable!("frame-memory effects do not depend on module metadata"),
     }
 }

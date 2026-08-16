@@ -18,6 +18,7 @@ pub mod bytecode;
 pub mod debug_info;
 pub mod execution_effects;
 pub mod extern_key;
+pub mod frame_roots;
 pub mod identifier;
 pub mod instruction;
 pub mod instruction_effects;
@@ -48,6 +49,7 @@ pub use extern_key::{
     MAX_EXTERN_NAME_BYTES, MAX_PORTABLE_PACKAGE_COMPONENT_BYTES, VM_INTERNAL_EXTERN_NAMES,
     VM_VARIABLE_SHAPE_EXTERN_NAMES, WASM_EXTENSION_EXPORT_PREFIX, WASM_EXTENSION_PROTOCOL_VERSION,
 };
+pub use frame_roots::{FrameRootMaps, FrameRootSet, FrameRootStateId, FunctionFrameRootMap};
 pub use identifier::{
     build_local_type_identity, has_unicode_white_space_boundary, is_exported_name, is_identifier,
     is_identifier_continue, is_identifier_start, is_keyword, is_local_type_identity,

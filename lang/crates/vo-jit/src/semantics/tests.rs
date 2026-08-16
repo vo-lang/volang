@@ -30,6 +30,5 @@ fn public_matrix_matches_direct_lookup() {
     assert_eq!(matrix.len(), Opcode::COUNT);
     for row in matrix {
         assert_eq!(row, opcode_semantics(row.opcode));
-        assert_eq!(row.register_effects, opcode_register_effects(row.opcode));
     }
 }

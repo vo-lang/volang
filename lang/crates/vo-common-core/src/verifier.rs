@@ -727,7 +727,24 @@ pub fn verify_loaded_module(module: Module) -> Result<LoadedModule, ModuleVerifi
         let (_, facts) = ModuleVerifier::new(&module).verify_with_runtime_type_facts()?;
         facts
     };
-    Ok(LoadedModule::new(module, runtime_type_facts))
+    let frame_root_maps = crate::frame_roots::FrameRootMaps::build(&module).map_err(|error| {
+        let func = module
+            .functions
+            .get(error.function)
+            .map_or("<missing>", |func| func.name.as_str());
+        ModuleVerificationError::FunctionInvariant {
+            func: func.to_string(),
+            detail: format!(
+                "frame root analysis failed at pc {} while building {}",
+                error.pc, error.detail
+            ),
+        }
+    })?;
+    Ok(LoadedModule::new(
+        module,
+        runtime_type_facts,
+        frame_root_maps,
+    ))
 }
 
 pub fn verify_function(func: &FunctionDef, module: &Module) -> Result<(), ModuleVerificationError> {

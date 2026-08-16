@@ -1,22 +1,20 @@
 //! Shared bytecode instruction effect facts used by JIT analysis and translation.
 
+#[cfg(test)]
 use vo_common_core::bytecode::MAP_ITER_SLOTS as MAP_ITER_SLOT_COUNT;
 use vo_runtime::bytecode::{ExternDef, FunctionDef};
 use vo_runtime::instruction::{Instruction, Opcode};
 
-pub use crate::metadata::{MapGetLayout, MapSetLayout, MetadataFacts as EffectFacts};
-use crate::semantics::opcode_register_effects;
-
-mod dynamic;
+pub use crate::metadata::MetadataFacts as EffectFacts;
 mod effect_analysis;
 mod memory_sync;
-mod operand_eval;
 
 #[cfg(test)]
 pub(crate) use effect_analysis::try_instruction_effects_with_facts;
 pub use effect_analysis::try_instruction_effects_with_module_context;
 pub use memory_sync::{try_memory_sync_effect, MemorySyncEffect};
 
+#[cfg(test)]
 pub const MAP_ITER_SLOTS: u16 = MAP_ITER_SLOT_COUNT as u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,12 +96,17 @@ pub fn try_read_regs_with_module_context(
     functions: &[FunctionDef],
 ) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
-    if let Some(dynamic) = dynamic::try_dynamic_read_regs(inst, facts, functions)? {
-        return Ok(dynamic);
-    }
-
-    let row = opcode_register_effects(inst.opcode());
-    operand_eval::push_register_effect_operands(&mut regs, inst, row.reads, "read")?;
+    vo_common_core::instruction_effects::visit_instruction_register_reads(
+        inst,
+        facts.instruction(),
+        functions,
+        |start, count| {
+            for offset in 0..count {
+                regs.push(start + offset);
+            }
+        },
+    )
+    .map_err(read_effect_error)?;
     Ok(regs)
 }
 
@@ -220,6 +223,38 @@ fn write_effect_error(
         InstructionWriteError::MissingExtern(extern_id) => EffectError::missing_extern(extern_id),
         InstructionWriteError::SlotRangeOverflow { start, count } => EffectError::SlotRange(
             SlotRangeError::new("write", start, u16::try_from(count).unwrap_or(u16::MAX)),
+        ),
+    }
+}
+
+fn read_effect_error(
+    error: vo_common_core::instruction_effects::InstructionReadError,
+) -> EffectError {
+    use vo_common_core::instruction_effects::InstructionReadError;
+    match error {
+        InstructionReadError::MissingMetadata(opcode) => {
+            let layout = match opcode {
+                Opcode::ArraySet | Opcode::SliceSet | Opcode::SliceAppend => "ElemLayout",
+                Opcode::SlotSetN => "SlotLayout",
+                Opcode::PtrSetN => "PtrLayout",
+                Opcode::CallClosure
+                | Opcode::CallIface
+                | Opcode::CallExtern
+                | Opcode::GoIsland
+                | Opcode::GoStart
+                | Opcode::DeferPush
+                | Opcode::ErrDeferPush => "call layout",
+                Opcode::MapGet => "MapGet",
+                Opcode::MapSet => "MapSet",
+                Opcode::MapDelete => "MapDelete",
+                Opcode::QueueSend | Opcode::SelectSend => "QueueLayout",
+                _ => "instruction metadata",
+            };
+            EffectError::missing_layout(opcode, layout)
+        }
+        InstructionReadError::MissingFunction(func_id) => EffectError::missing_function(func_id),
+        InstructionReadError::SlotRangeOverflow { start, count } => EffectError::SlotRange(
+            SlotRangeError::new("read", start, u16::try_from(count).unwrap_or(u16::MAX)),
         ),
     }
 }
