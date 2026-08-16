@@ -967,6 +967,7 @@ fn vm_jit_closure_ic_061_frame_elided_closure_publishes_native_entry() {
     assert_eq!(result, JitResult::Ok);
     assert_eq!(out.jit_func_ptr, entry);
     assert_eq!(out.ic_jit_func_ptr, entry);
+    assert_eq!(out.jit_frame_elided, 1);
     assert_eq!(stack[0], closure_ref as u64);
 }
 
@@ -1026,7 +1027,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_closure_null_push_frame_is_fatal() {
         jit_may_gc: 1,
         native_link_eligible: 1,
         callee_gc_scan_slots: 7,
-        reserved: 0,
+        jit_frame_elided: 0,
         dispatch_generation: 0,
     };
 
@@ -1167,7 +1168,7 @@ fn vm_jit_shadow_capacity_roots_062_prepare_iface_uses_shadow_entry_and_rejects_
         jit_may_gc: 1,
         native_link_eligible: 1,
         callee_gc_scan_slots: 7,
-        reserved: 0,
+        jit_frame_elided: 0,
         dispatch_generation: 0,
     };
 

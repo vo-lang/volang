@@ -445,7 +445,7 @@ pub extern "C" fn jit_prepare_closure_call(
             jit_may_gc: u16::from(eligibility.may_gc),
             native_link_eligible: u16::from(eligibility.prepared_shadow),
             callee_gc_scan_slots: func_def.gc_scan_slots,
-            reserved: 0,
+            jit_frame_elided: u16::from(eligibility.frame_elided),
             dispatch_generation,
         };
     }
@@ -681,7 +681,7 @@ pub extern "C" fn jit_prepare_iface_call(
             jit_may_gc: u16::from(eligibility.may_gc),
             native_link_eligible: u16::from(eligibility.prepared_shadow),
             callee_gc_scan_slots: func_def.gc_scan_slots,
-            reserved: 0,
+            jit_frame_elided: u16::from(eligibility.frame_elided),
             dispatch_generation,
         };
     }

@@ -168,6 +168,7 @@ impl DynamicCallLowering {
                 ic_local_slots: fields.local_slots,
                 ic_func_id: fields.func_id,
                 ic_may_gc: fields.may_gc,
+                ic_frame_elided: fields.frame_elided,
                 ret_ptr: self.ret_ptr,
                 caller_bp: self.caller_bp,
                 old_fiber_sp: self.old_fiber_sp,

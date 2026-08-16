@@ -258,7 +258,9 @@ pub struct PreparedCall {
     /// Exact managed prefix used by the interpreter/JIT shared dynamic-call
     /// cache when this prepared result is published.
     pub callee_gc_scan_slots: u16,
-    pub reserved: u16,
+    /// Non-zero when the selected native entry can run without publishing a
+    /// callee VM execution context on its successful fast path.
+    pub jit_frame_elided: u16,
     /// Dispatch generation paired with `ic_jit_func_ptr`.
     pub dispatch_generation: u64,
 }
@@ -277,6 +279,8 @@ impl PreparedCall {
         core::mem::offset_of!(PreparedCall, native_link_eligible) as i32;
     pub const OFFSET_CALLEE_GC_SCAN_SLOTS: i32 =
         core::mem::offset_of!(PreparedCall, callee_gc_scan_slots) as i32;
+    pub const OFFSET_JIT_FRAME_ELIDED: i32 =
+        core::mem::offset_of!(PreparedCall, jit_frame_elided) as i32;
     pub const OFFSET_DISPATCH_GENERATION: i32 =
         core::mem::offset_of!(PreparedCall, dispatch_generation) as i32;
     pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
@@ -293,7 +297,7 @@ impl Default for PreparedCall {
             jit_may_gc: 0,
             native_link_eligible: 0,
             callee_gc_scan_slots: 0,
-            reserved: 0,
+            jit_frame_elided: 0,
             dispatch_generation: 0,
         }
     }

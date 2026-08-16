@@ -21,7 +21,8 @@ pub struct DynCallIC {
     pub valid: u16,
     /// Whether the cached native target can reach a managed-heap safepoint.
     pub jit_may_gc: u16,
-    pub reserved: u16,
+    /// Whether the cached native entry owns no observable VM frame transition.
+    pub jit_frame_elided: u16,
 }
 
 impl Default for DynCallIC {
@@ -42,6 +43,7 @@ impl DynCallIC {
     pub const OFFSET_GC_SCAN_SLOTS: i32 = core::mem::offset_of!(Self, gc_scan_slots) as i32;
     pub const OFFSET_VALID: i32 = core::mem::offset_of!(Self, valid) as i32;
     pub const OFFSET_JIT_MAY_GC: i32 = core::mem::offset_of!(Self, jit_may_gc) as i32;
+    pub const OFFSET_JIT_FRAME_ELIDED: i32 = core::mem::offset_of!(Self, jit_frame_elided) as i32;
 
     /// Read an interpreter target whose first successful resolution proved the
     /// dynamic call contract for this exact key.
@@ -65,6 +67,7 @@ impl DynCallIC {
             self.jit_func_ptr = 0;
             self.dispatch_generation = 0;
             self.jit_may_gc = 0;
+            self.jit_frame_elided = 0;
         }
         self.dispatch_key = dispatch_key;
         self.local_slots = u32::from(target.local_slots);
@@ -102,6 +105,7 @@ mod tests {
         let mut entry = DynCallIC {
             jit_func_ptr: 0x1234,
             dispatch_generation: 9,
+            jit_frame_elided: 1,
             ..Default::default()
         };
         let first = DynamicCallTarget {
@@ -113,14 +117,17 @@ mod tests {
         entry.publish_interpreter_target(0xaaaa, first);
         assert_eq!(entry.jit_func_ptr, 0);
         assert_eq!(entry.dispatch_generation, 0);
+        assert_eq!(entry.jit_frame_elided, 0);
         assert_eq!(entry.probe(0xaaaa), Some(first));
 
         entry.jit_func_ptr = 0x5678;
         entry.dispatch_generation = 11;
+        entry.jit_frame_elided = 1;
         entry.valid = 0;
         entry.publish_interpreter_target(0xaaaa, first);
         assert_eq!(entry.jit_func_ptr, 0x5678);
         assert_eq!(entry.dispatch_generation, 11);
+        assert_eq!(entry.jit_frame_elided, 1);
 
         let second = DynamicCallTarget {
             func_id: 8,
@@ -130,6 +137,7 @@ mod tests {
         entry.publish_interpreter_target(0xbbbb, second);
         assert_eq!(entry.jit_func_ptr, 0);
         assert_eq!(entry.dispatch_generation, 0);
+        assert_eq!(entry.jit_frame_elided, 0);
         assert_eq!(entry.probe(0xaaaa), None);
         assert_eq!(entry.probe(0xbbbb), Some(second));
     }

@@ -24,6 +24,7 @@ pub(super) struct IcHitParams {
     pub(super) ic_local_slots: Value,
     pub(super) ic_func_id: Value,
     pub(super) ic_may_gc: Value,
+    pub(super) ic_frame_elided: Value,
     pub(super) ret_ptr: Value,
     pub(super) caller_bp: Value,
     pub(super) old_fiber_sp: Value,
@@ -59,6 +60,7 @@ pub(super) struct DynamicIcHitFields {
     pub(super) local_slots: Value,
     pub(super) func_id: Value,
     pub(super) may_gc: Value,
+    pub(super) frame_elided: Value,
 }
 
 /// Emit the shared IC hit fast path: reserve the canonical fiber shadow window,
@@ -100,9 +102,47 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         );
     }
     let caller_func_id = emitter.call_caller_func_id();
+
+    // A dynamic IC carries the same verified entry contract as a static call.
+    // Frame-elided targets cannot contain dynamic calls or acyclic static
+    // descendants; recursive SCC edges inside them retain their own guard.
+    let frame_elided = emitter
+        .builder()
+        .ins()
+        .icmp_imm_u(IntCC::NotEqual, p.ic_frame_elided, 0);
+    let framed_entry_block = emitter.builder().create_block();
+    let jit_call_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .append_block_param(jit_call_block, types::I32);
+    emitter
+        .builder()
+        .append_block_param(jit_call_block, types::I8);
+    let zero_depth = emitter.builder().ins().iconst(types::I32, 0);
+    let no_restore = emitter.builder().ins().iconst(types::I8, 0);
+    emitter.builder().ins().brif(
+        frame_elided,
+        jit_call_block,
+        &[zero_depth.into(), no_restore.into()],
+        framed_entry_block,
+        &[],
+    );
+
+    emitter.builder().switch_to_block(framed_entry_block);
+    emitter.builder().seal_block(framed_entry_block);
     let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
     emitter.store_context_field(new_bp, JitContextField::JitBp);
     emitter.store_context_field(new_sp, JitContextField::FiberSp);
+    let needs_restore = emitter.builder().ins().iconst(types::I8, 1);
+    emitter.builder().ins().jump(
+        jit_call_block,
+        &[old_call_depth.into(), needs_restore.into()],
+    );
+
+    emitter.builder().switch_to_block(jit_call_block);
+    emitter.builder().seal_block(jit_call_block);
+    let old_call_depth = emitter.builder().block_params(jit_call_block)[0];
+    let needs_restore = emitter.builder().block_params(jit_call_block)[1];
 
     let jit_func_sig = import_jit_func_sig(emitter);
     let arg_lanes = load_native_arg_lanes(emitter, callee_args_ptr, p.arg_slots + 1);
@@ -118,7 +158,36 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
         },
         JitCallGcMode::Dynamic(p.ic_may_gc),
     );
+
+    let restore_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .append_block_param(restore_block, types::I32);
+    let result_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .append_block_param(result_block, types::I32);
+    emitter.builder().ins().brif(
+        needs_restore,
+        restore_block,
+        &[jit_result.into()],
+        result_block,
+        &[jit_result.into()],
+    );
+
+    emitter.builder().switch_to_block(restore_block);
+    emitter.builder().seal_block(restore_block);
     emit_call_depth_leave(emitter, old_call_depth);
+    restore_caller_execution_context(emitter, p.caller_bp, p.old_fiber_sp, caller_func_id);
+    let jit_result = emitter.builder().block_params(restore_block)[0];
+    emitter
+        .builder()
+        .ins()
+        .jump(result_block, &[jit_result.into()]);
+
+    emitter.builder().switch_to_block(result_block);
+    emitter.builder().seal_block(result_block);
+    let jit_result = emitter.builder().block_params(result_block)[0];
 
     let ok_val = emitter
         .builder()
@@ -137,7 +206,6 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(ic_ok_block);
     emitter.builder().seal_block(ic_ok_block);
-    restore_caller_execution_context(emitter, p.caller_bp, p.old_fiber_sp, caller_func_id);
     emitter.builder().ins().jump(p.merge_block, &[]);
 
     emitter.builder().switch_to_block(ic_non_ok_block);
@@ -211,6 +279,12 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             p.out_slot,
             PreparedCall::OFFSET_CALLEE_GC_SCAN_SLOTS,
         );
+        let out_jit_frame_elided = emitter.builder().ins().stack_load(
+            types::I64,
+            types::I16,
+            p.out_slot,
+            PreparedCall::OFFSET_JIT_FRAME_ELIDED,
+        );
         let out_dispatch_generation = emitter.builder().ins().stack_load(
             types::I64,
             types::I64,
@@ -263,6 +337,7 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
         for (value, offset) in [
             (out_gc_scan_slots, DynCallIC::OFFSET_GC_SCAN_SLOTS),
             (out_jit_may_gc, DynCallIC::OFFSET_JIT_MAY_GC),
+            (out_jit_frame_elided, DynCallIC::OFFSET_JIT_FRAME_ELIDED),
         ] {
             emitter
                 .builder()
@@ -459,9 +534,17 @@ pub(super) fn load_hit_fields<'a, E: IrEmitter<'a>>(
         DynCallIC::OFFSET_JIT_MAY_GC,
     );
     let may_gc = emitter.builder().ins().uextend(types::I32, may_gc);
+    let frame_elided = emitter.builder().ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        ic_entry,
+        DynCallIC::OFFSET_JIT_FRAME_ELIDED,
+    );
+    let frame_elided = emitter.builder().ins().uextend(types::I32, frame_elided);
     DynamicIcHitFields {
         local_slots,
         func_id,
         may_gc,
+        frame_elided,
     }
 }
