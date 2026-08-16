@@ -46,7 +46,6 @@ impl JitCallbackVm<'_> {
             || vm.terminal_memory_error.is_some()
             || vm.scheduler.has_runnable_waiter()
             || vm.scheduler.has_blocked()
-            || vm.state.gc.should_step()
             || vm.state.runtime_mem_requests.has_pending()
             || !vm.state.command_queue.is_empty()
             || !vm.pending_runtime_transitions.is_empty()
@@ -446,15 +445,21 @@ mod scheduler_poll_tests {
     }
 
     #[test]
-    fn scheduler_or_gc_work_prevents_native_execution_lease_renewal() {
+    fn scheduler_work_prevents_native_execution_lease_renewal() {
         let mut vm = Vm::new();
         vm.scheduler
             .try_spawn_pending(PendingSpawn::for_test(0))
             .expect("test runnable fiber");
         assert_eq!(JitCallbackVm { vm: &mut vm }.refill_execution_budget(1), 0);
+    }
 
+    #[test]
+    fn gc_work_is_owned_by_the_native_checkpoint_before_lease_renewal() {
         let mut vm = Vm::new();
         vm.state.gc.gc_request_cycle();
-        assert_eq!(JitCallbackVm { vm: &mut vm }.refill_execution_budget(1), 0);
+        assert_eq!(
+            JitCallbackVm { vm: &mut vm }.refill_execution_budget(1),
+            vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS
+        );
     }
 }

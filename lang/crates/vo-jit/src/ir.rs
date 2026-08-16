@@ -254,11 +254,7 @@ struct FrameLiveness {
     conditional_roots: Span,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FrameValue {
-    pub slot: u16,
-    pub value: ValueId,
-}
+pub(crate) type FrameValue = ValueUse;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FrameState {
@@ -484,20 +480,14 @@ impl FunctionIr {
                 }
                 let input_count = (instruction_values.len() - value_start) as u16;
 
-                let frame_state = if instruction.effects.requires_frame_state() {
-                    let liveness = liveness_at_frame_state[pc].ok_or_else(|| {
-                        JitError::Internal(format!(
-                            "frame-state root liveness is absent for {} at pc {pc}",
-                            func.name
-                        ))
-                    })?;
+                let frame_state = if let Some(liveness) = liveness_at_frame_state[pc] {
                     let values = Span::append(
                         &mut frame_values,
                         liveness.live_slots.slice(&live_slots).iter().map(|&slot| {
                             let value = current.get(&slot).copied().expect(
                                 "live-before slots must have an SSA value at instruction entry",
                             );
-                            FrameValue { slot, value }
+                            ValueUse { slot, value }
                         }),
                     );
                     let id = frame_states.len() as u32;
@@ -708,6 +698,19 @@ impl FunctionIr {
             .slice(&self.block_parameters)
     }
 
+    /// Values that must survive a side exit before the instruction at `pc`.
+    /// Effect, periodic, loop-header, and terminal OSR checkpoints own
+    /// explicit frame states. Other basic-block entries reuse their canonical
+    /// SSA parameters, avoiding duplicate state.
+    pub(crate) fn resume_values(&self, pc: usize) -> Option<&[FrameValue]> {
+        if let Some(state) = self.frame_state(pc).copied() {
+            return Some(self.frame_values(state));
+        }
+        let instruction = self.instruction(pc)?;
+        let block = &self.blocks[instruction.block().index()];
+        (block.start_pc as usize == pc).then(|| self.block_parameters(block.id))
+    }
+
     pub(crate) fn predecessors(&self, block: BlockId) -> &[BlockId] {
         self.blocks[block.index()]
             .predecessors
@@ -815,6 +818,10 @@ impl FunctionIr {
     #[inline]
     pub(crate) fn value_count(&self) -> usize {
         self.values.len()
+    }
+
+    pub(crate) fn used_slots(&self) -> impl Iterator<Item = u16> + '_ {
+        self.values.iter().map(|value| value.slot)
     }
 
     pub(crate) fn frame_state(&self, pc: usize) -> Option<&FrameState> {
@@ -948,7 +955,7 @@ impl FunctionIr {
                     ))
                 })?;
             }
-            if instruction.effects.requires_frame_state() != instruction.frame_state_id().is_some()
+            if instruction.effects.requires_frame_state() && instruction.frame_state_id().is_none()
             {
                 return Err(JitError::Internal(format!(
                     "SSA effect/frame-state drift for {} at pc {pc}",
@@ -1270,7 +1277,19 @@ fn compute_sparse_frame_liveness(
             }
             live.extend(raw[pc].reads.iter().copied());
             memory_live_start = memory_live_start.min(memory_sync_start(raw[pc].memory_sync));
-            if raw[pc].effects.requires_frame_state() {
+            let is_periodic_checkpoint =
+                pc % crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS == 0;
+            let is_loop_header_checkpoint = pc == block.start
+                && block
+                    .predecessors
+                    .iter()
+                    .any(|predecessor| blocks[predecessor.index()].start >= block.start);
+            let is_terminal_osr_checkpoint = raw[pc].source.opcode() == Opcode::Return;
+            if raw[pc].effects.requires_frame_state()
+                || is_periodic_checkpoint
+                || is_loop_header_checkpoint
+                || is_terminal_osr_checkpoint
+            {
                 let live_count = live.len();
                 let direct_root_count = slot_types
                     .iter()
@@ -1809,6 +1828,10 @@ mod tests {
         let module = module_with(code, vec![SlotType::Value; 2]);
         let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
         let loop_block = ir.instruction(2).unwrap().block();
+        assert!(
+            ir.frame_state(2).is_some(),
+            "native loop-header polls require an exact root projection"
+        );
         let back_edge = ir
             .successors(loop_block)
             .iter()
@@ -1870,6 +1893,26 @@ mod tests {
         let state = *ir.frame_state(1).expect("allocating string slice state");
         assert_eq!(ir.direct_roots(state), &[0]);
         assert!(ir.instruction(1).unwrap().effects().requires_frame_state());
+    }
+
+    #[test]
+    fn return_owns_the_sparse_state_needed_by_an_osr_exit() {
+        let code = vec![
+            Instruction::new(Opcode::LoadInt, 0, 42, 0),
+            Instruction::new(Opcode::LoadInt, 1, 77, 0),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+        ];
+        let module = module_with(code, vec![SlotType::Value; 2]);
+        let ir = FunctionIr::build(&module.functions[0], &module).unwrap();
+        let state = *ir.frame_state(2).expect("OSR return recovery state");
+
+        assert_eq!(
+            ir.frame_values(state)
+                .iter()
+                .map(|value| value.slot)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
     }
 
     #[test]

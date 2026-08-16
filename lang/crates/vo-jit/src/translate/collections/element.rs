@@ -119,7 +119,9 @@ pub(in crate::translate) fn emit_return_if_u64_jit_error<'a>(
 
     e.builder().switch_to_block(error_block);
     e.builder().seal_block(error_block);
-    e.spill_all_vars();
+    // This is a terminal infrastructure failure. The VM reports the context
+    // error and never resumes this frame, so publishing local values adds no
+    // observable state and can dramatically widen otherwise pure helpers.
     let jit_error = e
         .builder()
         .ins()

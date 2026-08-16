@@ -82,7 +82,7 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         .iconst(types::I32, config.current_pc as i64);
     if matches!(jit_route, ExternJitRoute::VmMaterializeBeforeCall) {
         emitter.store_context_field(current_pc_val, JitContextField::CallResumePc);
-        emitter.spill_all_vars();
+        emitter.publish_current_frame_state();
         let replay_result = emitter
             .builder()
             .ins()

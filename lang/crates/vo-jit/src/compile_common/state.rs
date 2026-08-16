@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cranelift_codegen::ir::Block;
-use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_frontend::FunctionBuilder;
 use vo_runtime::bytecode::{FunctionDef, Module};
 use vo_runtime::instruction::{Instruction, Opcode};
 
@@ -16,7 +16,7 @@ pub(crate) struct CompilerCore<'a> {
     pub(crate) vo_module: &'a Module,
     pub(crate) env: JitCompileEnv<'a>,
     pub(crate) entry_eligibility: &'a [JitFrameEntryEligibility],
-    pub(crate) vars: Vec<Variable>,
+    pub(crate) vars: super::SsaSlotVariables,
     pub(crate) blocks: HashMap<usize, Block>,
     pub(crate) entry_block: Block,
     pub(crate) current_pc: usize,
@@ -52,7 +52,7 @@ impl<'a> CompilerCore<'a> {
             vo_module,
             env,
             entry_eligibility,
-            vars: Vec::new(),
+            vars: super::SsaSlotVariables::default(),
             blocks: HashMap::new(),
             entry_block,
             current_pc: 0,
@@ -61,7 +61,7 @@ impl<'a> CompilerCore<'a> {
             helpers,
             execution_budget_regions: BTreeMap::new(),
             checked_non_nil: HashSet::new(),
-            memory_only_start: super::bounded_memory_only_start(memory_only_start),
+            memory_only_start,
             native_scratch_slots: NativeScratchSlots::default(),
             jit_memory_flags,
             analysis,
@@ -70,7 +70,17 @@ impl<'a> CompilerCore<'a> {
     }
 
     pub(crate) fn declare_variables(&mut self, builder: &mut FunctionBuilder<'_>) {
-        self.vars = super::declare_variables(builder, self.func_def, self.memory_only_start);
+        self.vars = super::SsaSlotVariables::declare(
+            builder,
+            self.func_def,
+            self.analysis.ir(),
+            self.memory_only_start,
+        );
+    }
+
+    #[inline]
+    pub(crate) fn is_ssa_slot(&self, slot: u16) -> bool {
+        self.vars.get(slot).is_some()
     }
 
     #[inline]
@@ -154,12 +164,17 @@ impl<'a> CompilerCore<'a> {
             .ir()
             .block_parameters(ir_block.id)
             .iter()
-            .filter(|parameter| parameter.slot < self.memory_only_start)
+            .filter(|parameter| self.is_ssa_slot(parameter.slot))
             .copied()
             .collect::<Vec<_>>();
         let values = builder.block_params(block).to_vec();
         for (parameter, value) in parameters.into_iter().zip(values) {
-            builder.def_var(self.vars[parameter.slot as usize], value);
+            builder.def_var(
+                self.vars
+                    .get(parameter.slot)
+                    .expect("block parameter must have an SSA variable"),
+                value,
+            );
             self.lowered_values[parameter.value.index()] = Some(value);
         }
     }

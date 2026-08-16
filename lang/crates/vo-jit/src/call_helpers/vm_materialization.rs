@@ -23,7 +23,7 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     let set_call_request_func = emitter.helper(HelperKind::set_call_request);
 
     // Spill all variables to fiber.stack before returning Call.
-    emitter.spill_all_vars();
+    emitter.publish_current_frame_state();
 
     let ctx = emitter.ctx_param();
     let func_id_val = emitter
@@ -310,7 +310,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         restore_caller_execution_context(emitter, caller_bp, old_fiber_sp, caller_func_id);
     }
 
-    emitter.spill_all_vars();
+    emitter.publish_current_frame_state();
 
     let set_call_request_func = emitter.helper(HelperKind::set_call_request);
     let arg_start_val = emitter

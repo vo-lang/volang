@@ -113,7 +113,7 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.core.blocks,
             self.core.analysis.ir(),
             policy,
-            self.core.memory_only_start,
+            &self.core.vars,
             self.instruction_optimization.is_some(),
             self.instruction_optimization,
         )?;
@@ -147,7 +147,7 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.core.blocks,
             self.core.analysis.ir(),
             policy,
-            self.core.memory_only_start,
+            &self.core.vars,
             false,
             Some(&optimized),
         )?;
@@ -169,20 +169,37 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
-    /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
-    /// Called on slow path (Call/WaitIo) so VM can see the current state.
+    /// Publish the exact state needed to execute the bytecode at `resume_pc`.
     /// The canonical entry pointer identifies this frame's BP, so a current
     /// destination can always be rebuilt after fiber.stack reallocation.
-    fn emit_variable_spill(&mut self) {
+    fn publish_recovery_state(&mut self, resume_pc: usize) {
         self.materialize_virtual_objects();
         self.publish_execution_context();
         let dst_ptr = self.fiber_stack_args_ptr();
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .spill_ssa_prefix_to_memory(&mut self.builder, dst_ptr);
+        let recovery_values = self
+            .core
+            .analysis
+            .ir()
+            .resume_values(resume_pc)
+            .unwrap_or_else(|| {
+                panic!(
+                    "native side exit lacks recovery state: func={} pc={} opcode={:?}",
+                    self.core.func_def.name,
+                    resume_pc,
+                    self.core.func_def.code[resume_pc].opcode()
+                )
+            });
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .spill_recovery_state_to_memory(
+                &mut self.builder,
+                dst_ptr,
+                recovery_values,
+                self.core.func_def.gc_scan_slots,
+            );
+    }
+
+    fn emit_variable_spill(&mut self) {
+        self.publish_recovery_state(self.core.current_pc);
     }
 
     fn publish_execution_context(&mut self) {
@@ -240,7 +257,7 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn emit_cooperative_yield(&mut self, resume_pc: usize) {
-        self.emit_variable_spill();
+        self.publish_recovery_state(resume_pc);
         let ctx = self.builder.block_params(self.core.entry_block)[0];
         crate::compile_common::emit_cooperative_yield_return(&mut self.builder, ctx, resume_pc);
     }
@@ -252,11 +269,36 @@ impl<'a> FunctionCompiler<'a> {
             .helpers
             .resolve(HelperKind::refill_execution_budget, self.builder.func)
             .func_ref();
-        let poll =
-            crate::compile_common::branch_on_execution_budget(&mut self.builder, ctx, cost, refill);
+        let poll = crate::compile_common::branch_on_execution_budget(&mut self.builder, ctx, cost);
 
         self.builder.switch_to_block(poll.exhausted);
         self.builder.seal_block(poll.exhausted);
+        let yield_block = crate::compile_common::cold_block(&mut self.builder);
+        let can_poll_gc = self
+            .core
+            .entry_eligibility
+            .get(self.core.func_id as usize)
+            .is_some_and(|eligibility| eligibility.may_gc);
+        if can_poll_gc {
+            crate::translator::emit_gc_safepoint_poll(self);
+        } else {
+            let clear = crate::compile_common::continue_if_no_gc_requested(
+                &mut self.builder,
+                ctx,
+                yield_block,
+            );
+            self.builder.switch_to_block(clear);
+            self.builder.seal_block(clear);
+        }
+        crate::compile_common::refill_execution_budget(
+            &mut self.builder,
+            ctx,
+            refill,
+            &poll,
+            yield_block,
+        );
+        self.builder.switch_to_block(yield_block);
+        self.builder.seal_block(yield_block);
         self.emit_cooperative_yield(resume_pc);
 
         crate::compile_common::continue_after_execution_budget_poll(&mut self.builder, ctx, &poll);
@@ -324,7 +366,7 @@ impl<'a> FunctionCompiler<'a> {
             let slot_count = elem_slots + if has_ok { 1 } else { 0 };
             for slot_offset in 0..slot_count {
                 let slot = dst_reg + slot_offset as u16;
-                if slot >= self.core.memory_only_start {
+                if !self.core.is_ssa_slot(slot) {
                     continue;
                 }
                 if self.core.is_float_slot(slot) {
@@ -367,7 +409,6 @@ impl<'a> FunctionCompiler<'a> {
         let slots = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
-            self.core.memory_only_start,
         )
         .load_memory_slot_range(
             &mut self.builder,
@@ -499,14 +540,16 @@ impl<'a> FunctionCompiler<'a> {
             .iadd_imm_u(jit_bp_i32, i64::from(self.core.func_def.local_slots));
 
         let param_slots = self.core.func_def.param_slots as usize;
-        let ssa_slots = self.core.vars.len();
         let num_slots = self.core.func_def.local_slots as usize;
 
         // The internal native ABI carries the first raw argument words in
         // machine lanes. Wide signatures continue in frame memory. Float
         // locals receive an explicit raw-word bitcast at this boundary.
-        for i in 0..param_slots.min(ssa_slots) {
+        for i in 0..param_slots {
             let slot = i as u16;
+            let Some(variable) = self.core.vars.get(slot) else {
+                continue;
+            };
             let raw = if i < crate::NATIVE_ARG_LANES {
                 params[3 + i]
             } else {
@@ -517,20 +560,26 @@ impl<'a> FunctionCompiler<'a> {
             } else {
                 raw
             };
-            self.builder.def_var(self.core.vars[i], val);
+            self.builder.def_var(variable, val);
         }
 
-        // Initialize the non-parameter SSA prefix and memory-backed suffix.
+        // Initialize only active non-parameter SSA slots. Slots forced into
+        // memory by aliasing retain the canonical frame initialization.
         let zero_i64 = self.builder.ins().iconst(types::I64, 0);
         let zero_f64 = self.builder.ins().f64const(0.0);
-        for i in param_slots..ssa_slots {
-            if self.core.is_float_slot(i as u16) {
-                self.builder.def_var(self.core.vars[i], zero_f64);
+        for (slot, variable) in self
+            .core
+            .vars
+            .iter()
+            .filter(|(slot, _)| usize::from(*slot) >= param_slots)
+        {
+            if self.core.is_float_slot(slot) {
+                self.builder.def_var(variable, zero_f64);
             } else {
-                self.builder.def_var(self.core.vars[i], zero_i64);
+                self.builder.def_var(variable, zero_i64);
             }
         }
-        for i in param_slots.max(ssa_slots)..num_slots {
+        for i in param_slots.max(usize::from(self.core.memory_only_start))..num_slots {
             crate::compile_common::store_memory_slot(
                 &mut self.builder,
                 args_ptr,
@@ -843,7 +892,6 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.builder,
             self.core.analysis.ir(),
             &self.core.vars,
-            self.core.memory_only_start,
             target,
         );
         self.builder.ins().jump(block, &arguments);
@@ -860,7 +908,7 @@ impl<'a> FunctionCompiler<'a> {
 
     /// Read variable as I64: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
     fn load_local(&mut self, slot: u16) -> Value {
-        if slot < self.core.memory_only_start {
+        if self.core.is_ssa_slot(slot) {
             if let Some(value) = self.core.lowered_value_for_slot(slot) {
                 return if self.core.is_float_slot(slot) {
                     self.builder
@@ -872,23 +920,18 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
         let args_ptr = self.current_memory_base_ptr();
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .load_i64(&mut self.builder, args_ptr, slot)
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .load_i64(&mut self.builder, args_ptr, slot)
     }
 
     /// Write I64 value to variable slot.
-    /// SSA-prefix slots update their variable and reach memory at frame-sync
-    /// boundaries. Memory-suffix slots write their authoritative frame cell.
+    /// SSA slots update their variable and reach memory at frame-sync
+    /// boundaries. Aliased slots write their authoritative frame cell.
     fn store_local(&mut self, slot: u16, val: Value) {
-        let ir_value = if slot < self.core.memory_only_start {
+        let ir_value = if self.core.is_ssa_slot(slot) {
             let storage = crate::compile_common::CompilerStorage::for_function(
                 self.core.func_def,
                 &self.core.vars,
-                self.core.memory_only_start,
             );
             storage.store_ssa_i64(&mut self.builder, slot, val)
         } else {
@@ -896,7 +939,6 @@ impl<'a> FunctionCompiler<'a> {
             let storage = crate::compile_common::CompilerStorage::for_function(
                 self.core.func_def,
                 &self.core.vars,
-                self.core.memory_only_start,
             );
             storage.store_memory_i64(&mut self.builder, args_ptr, slot, val)
         };
@@ -916,7 +958,6 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.builder,
             self.core.analysis.ir(),
             &self.core.vars,
-            self.core.memory_only_start,
             target,
         );
 
@@ -956,7 +997,6 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.builder,
             self.core.analysis.ir(),
             &self.core.vars,
-            self.core.memory_only_start,
             target,
         );
 
@@ -1017,7 +1057,7 @@ impl<'a> FunctionCompiler<'a> {
             let args_ptr = self.fiber_stack_args_ptr();
             for i in 0..gcref_count {
                 let slot = (inst.a as usize + i) as u16;
-                if slot < self.core.memory_only_start {
+                if self.core.is_ssa_slot(slot) {
                     let val_i64 = crate::compile_common::read_ssa_slot_i64(
                         &mut self.builder,
                         &self.core.vars,
@@ -1163,7 +1203,6 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
                 blocks: &self.core.blocks,
                 ir: self.core.analysis.ir(),
                 vars: &self.core.vars,
-                memory_only_start: self.core.memory_only_start,
                 executable_only: self.instruction_optimization.is_some(),
                 optimized: self.instruction_optimization,
             },
@@ -1255,7 +1294,7 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
         self.core.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
-        if slot < self.core.memory_only_start {
+        if self.core.is_ssa_slot(slot) {
             if let Some(value) = self.core.lowered_value_for_slot(slot) {
                 return if self.core.is_float_slot(slot) {
                     value
@@ -1267,19 +1306,14 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
             }
         }
         let args_ptr = self.current_memory_base_ptr();
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .load_f64(&mut self.builder, args_ptr, slot)
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .load_f64(&mut self.builder, args_ptr, slot)
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
-        let ir_value = if slot < self.core.memory_only_start {
+        let ir_value = if self.core.is_ssa_slot(slot) {
             let storage = crate::compile_common::CompilerStorage::for_function(
                 self.core.func_def,
                 &self.core.vars,
-                self.core.memory_only_start,
             );
             storage.store_ssa_f64(&mut self.builder, slot, val)
         } else {
@@ -1287,7 +1321,6 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
             let storage = crate::compile_common::CompilerStorage::for_function(
                 self.core.func_def,
                 &self.core.vars,
-                self.core.memory_only_start,
             );
             storage.store_memory_f64(&mut self.builder, args_ptr, slot, val)
         };
@@ -1296,12 +1329,8 @@ impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
     }
     fn reload_all_vars_from_memory(&mut self) {
         let args_ptr = self.current_memory_base_ptr();
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .reload_all_from_memory(&mut self.builder, args_ptr);
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .reload_all_from_memory(&mut self.builder, args_ptr);
         self.core.clear_flow_facts();
     }
     fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
@@ -1318,7 +1347,7 @@ impl<'a> crate::translator::RuntimeContext<'a> for FunctionCompiler<'a> {
 crate::translator::impl_shared_compiler_traits!(FunctionCompiler<'_>);
 
 impl crate::translator::FrameBoundary for FunctionCompiler<'_> {
-    fn spill_all_vars(&mut self) {
+    fn publish_current_frame_state(&mut self) {
         self.emit_variable_spill();
     }
 }

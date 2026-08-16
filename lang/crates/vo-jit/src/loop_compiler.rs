@@ -98,7 +98,7 @@ impl<'a> LoopCompiler<'a> {
             &mut self.core.blocks,
             self.core.analysis.ir(),
             policy,
-            self.core.memory_only_start,
+            &self.core.vars,
             true,
             Some(self.instruction_optimization),
         )?;
@@ -131,26 +131,43 @@ impl<'a> LoopCompiler<'a> {
         // it after any call that may have triggered fiber.stack reallocation.
         self.builder.def_var(self.locals_ptr_var, locals_ptr_init);
 
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .reload_all_from_memory(&mut self.builder, locals_ptr_init);
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .reload_all_from_memory(&mut self.builder, locals_ptr_init);
     }
 
-    fn store_vars_to_memory(&mut self) {
+    fn try_publish_recovery_state(&mut self, resume_pc: usize) -> bool {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        crate::compile_common::CompilerStorage::for_function(
+        let storage = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .spill_ssa_prefix_to_memory(&mut self.builder, locals_ptr);
+        );
+        let Some(recovery_values) = self.core.analysis.ir().resume_values(resume_pc) else {
+            return false;
+        };
+        storage.spill_recovery_state_to_memory(
+            &mut self.builder,
+            locals_ptr,
+            recovery_values,
+            self.core.func_def.gc_scan_slots,
+        );
+        true
+    }
+
+    fn publish_recovery_state(&mut self, resume_pc: usize) {
+        assert!(
+            self.try_publish_recovery_state(resume_pc),
+            "OSR side exit lacks recovery state: func={} pc={resume_pc}",
+            self.core.func_def.name
+        );
     }
 
     fn emit_cooperative_yield(&mut self, resume_pc: usize) {
-        self.store_vars_to_memory();
+        if !self.try_publish_recovery_state(resume_pc) {
+            // A synthetic OSR adapter may enter in the middle of a bytecode
+            // block. Its entry poll runs before native code mutates the frame,
+            // so the incoming VM frame is already the exact recovery state.
+            debug_assert_eq!(resume_pc, self.loop_info.begin_pc);
+        }
         crate::compile_common::emit_cooperative_yield_return(
             &mut self.builder,
             self.ctx_ptr,
@@ -168,11 +185,41 @@ impl<'a> LoopCompiler<'a> {
             &mut self.builder,
             self.ctx_ptr,
             cost,
-            refill,
         );
 
         self.builder.switch_to_block(poll.exhausted);
         self.builder.seal_block(poll.exhausted);
+        let yield_block = crate::compile_common::cold_block(&mut self.builder);
+        let can_poll_gc = self
+            .core
+            .entry_eligibility
+            .get(self.core.func_id as usize)
+            .is_some_and(|eligibility| eligibility.may_gc)
+            && self.core.analysis.native_root_liveness(resume_pc).is_some();
+        if can_poll_gc {
+            crate::translator::emit_gc_safepoint_poll(self);
+        } else {
+            // Synthetic OSR adapters may start inside a bytecode block. Their
+            // incoming VM frame is canonical, but no native root projection
+            // exists at that artificial entry. Pure functions likewise keep
+            // their transitive no-GC call contract.
+            let clear = crate::compile_common::continue_if_no_gc_requested(
+                &mut self.builder,
+                self.ctx_ptr,
+                yield_block,
+            );
+            self.builder.switch_to_block(clear);
+            self.builder.seal_block(clear);
+        }
+        crate::compile_common::refill_execution_budget(
+            &mut self.builder,
+            self.ctx_ptr,
+            refill,
+            &poll,
+            yield_block,
+        );
+        self.builder.switch_to_block(yield_block);
+        self.builder.seal_block(yield_block);
         self.emit_cooperative_yield(resume_pc);
 
         crate::compile_common::continue_after_execution_budget_poll(
@@ -345,13 +392,12 @@ impl<'a> LoopCompiler<'a> {
                 &mut self.builder,
                 self.core.analysis.ir(),
                 &self.core.vars,
-                self.core.memory_only_start,
                 self.loop_info.begin_pc,
             );
             self.builder.ins().jump(loop_header, &arguments);
         } else if raw_target < self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
-            self.store_vars_to_memory();
+            self.publish_recovery_state(raw_target);
             self.emit_loop_exit(raw_target as u32);
         } else {
             // Jump within loop body
@@ -360,7 +406,6 @@ impl<'a> LoopCompiler<'a> {
                 &mut self.builder,
                 self.core.analysis.ir(),
                 &self.core.vars,
-                self.core.memory_only_start,
                 raw_target,
             );
             self.builder.ins().jump(block, &arguments);
@@ -394,7 +439,7 @@ impl<'a> LoopCompiler<'a> {
                 .brif(cmp, exit_block, &[], fall_through, &[]);
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
-            self.store_vars_to_memory();
+            self.publish_recovery_state(target);
             self.emit_loop_exit(target as u32);
         } else {
             // Target within loop - stay in JIT
@@ -403,7 +448,6 @@ impl<'a> LoopCompiler<'a> {
                 &mut self.builder,
                 self.core.analysis.ir(),
                 &self.core.vars,
-                self.core.memory_only_start,
                 target,
             );
             self.builder
@@ -441,7 +485,6 @@ impl<'a> LoopCompiler<'a> {
             &mut self.builder,
             self.core.analysis.ir(),
             &self.core.vars,
-            self.core.memory_only_start,
             target,
         );
         let exit_pc = self.core.current_pc + 1;
@@ -473,15 +516,15 @@ impl<'a> LoopCompiler<'a> {
             );
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
-            self.store_vars_to_memory();
+            self.publish_recovery_state(exit_pc);
             self.emit_loop_exit(exit_pc as u32);
             Ok(true)
         }
     }
 
     fn ret(&mut self, _inst: &Instruction) {
-        // Return inside loop - store vars and return to VM
-        self.store_vars_to_memory();
+        // The VM owns function-return bookkeeping after an OSR fragment.
+        self.publish_recovery_state(self.core.current_pc);
         self.emit_loop_exit(self.core.current_pc as u32);
     }
 
@@ -566,10 +609,12 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
-    /// Emit code to spill all SSA variables to fiber.stack.
-    /// Called before returning Call so VM can see/restore state.
+    /// Publish the exact state needed to execute the current bytecode.
     fn emit_variable_spill(&mut self) {
-        self.store_vars_to_memory();
+        assert!(
+            self.try_publish_recovery_state(self.core.current_pc),
+            "every native call boundary must have a recovery state"
+        );
     }
 }
 
@@ -606,7 +651,6 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
                 blocks: &self.core.blocks,
                 ir: self.core.analysis.ir(),
                 vars: &self.core.vars,
-                memory_only_start: self.core.memory_only_start,
                 executable_only: true,
                 optimized: Some(self.instruction_optimization),
             },
@@ -662,13 +706,15 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
         }
 
         self.builder.switch_to_block(self.exit_block);
-        self.store_vars_to_memory();
         let crate::compile_common::ControlPolicy::LoopOsr { exit_pc, .. } = self.control_policy()
         else {
             return Err(JitError::Internal(
                 "LoopCompiler received a non-OSR control policy".to_string(),
             ));
         };
+        if !block_terminated {
+            self.publish_recovery_state(exit_pc);
+        }
         self.emit_loop_exit(exit_pc as u32);
         Ok(())
     }
@@ -692,7 +738,7 @@ impl<'a> crate::translator::ScratchAccess<'a> for LoopCompiler<'a> {
 
 impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
     fn read_var(&mut self, slot: u16) -> Value {
-        if slot < self.core.memory_only_start {
+        if self.core.is_ssa_slot(slot) {
             if let Some(value) = self.core.lowered_value_for_slot(slot) {
                 return if self.core.is_float_slot(slot) {
                     self.builder
@@ -704,20 +750,15 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
             }
         }
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .load_i64(&mut self.builder, locals_ptr, slot)
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .load_i64(&mut self.builder, locals_ptr, slot)
     }
     fn write_var(&mut self, slot: u16, val: Value) {
         let storage = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
-            self.core.memory_only_start,
         );
-        let ir_value = if slot < self.core.memory_only_start {
+        let ir_value = if self.core.is_ssa_slot(slot) {
             storage.store_ssa_i64(&mut self.builder, slot, val)
         } else {
             let locals_ptr = self.builder.use_var(self.locals_ptr_var);
@@ -735,7 +776,7 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
         self.core.func_def.local_slots as usize
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
-        if slot < self.core.memory_only_start {
+        if self.core.is_ssa_slot(slot) {
             if let Some(value) = self.core.lowered_value_for_slot(slot) {
                 return if self.core.is_float_slot(slot) {
                     value
@@ -747,20 +788,15 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
             }
         }
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .load_f64(&mut self.builder, locals_ptr, slot)
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .load_f64(&mut self.builder, locals_ptr, slot)
     }
     fn write_var_f64(&mut self, slot: u16, val: Value) {
         let storage = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
-            self.core.memory_only_start,
         );
-        let ir_value = if slot < self.core.memory_only_start {
+        let ir_value = if self.core.is_ssa_slot(slot) {
             storage.store_ssa_f64(&mut self.builder, slot, val)
         } else {
             let locals_ptr = self.builder.use_var(self.locals_ptr_var);
@@ -771,12 +807,8 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
     }
     fn reload_all_vars_from_memory(&mut self) {
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        crate::compile_common::CompilerStorage::for_function(
-            self.core.func_def,
-            &self.core.vars,
-            self.core.memory_only_start,
-        )
-        .reload_all_from_memory(&mut self.builder, locals_ptr);
+        crate::compile_common::CompilerStorage::for_function(self.core.func_def, &self.core.vars)
+            .reload_all_from_memory(&mut self.builder, locals_ptr);
         self.core.clear_flow_facts();
     }
     fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
@@ -784,7 +816,6 @@ impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
         let slots = crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
             &self.core.vars,
-            self.core.memory_only_start,
         )
         .load_memory_slot_range(
             &mut self.builder,
@@ -813,7 +844,7 @@ impl<'a> crate::translator::RuntimeContext<'a> for LoopCompiler<'a> {
 crate::translator::impl_shared_compiler_traits!(LoopCompiler<'_>);
 
 impl crate::translator::FrameBoundary for LoopCompiler<'_> {
-    fn spill_all_vars(&mut self) {
+    fn publish_current_frame_state(&mut self) {
         self.emit_variable_spill();
     }
 }

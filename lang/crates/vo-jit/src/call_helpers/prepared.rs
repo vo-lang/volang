@@ -146,7 +146,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     emitter.refresh_stack_base_after_reallocation();
 
     // Spill SSA-only vars so VM can read caller state after callee returns.
-    emitter.spill_all_vars();
+    emitter.publish_current_frame_state();
 
     let set_call_request_func = emitter.helper(HelperKind::set_call_request);
     let prepared_kind = emitter
@@ -230,7 +230,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     restore_caller_execution_context(emitter, caller_bp, p.old_fiber_sp, caller_func_id);
     emitter.refresh_stack_base_after_reallocation();
 
-    emitter.spill_all_vars();
+    emitter.publish_current_frame_state();
 
     // Push resume point with CALLEE's func_id.
     // materialize_jit_frames creates CallFrame(rp.func_id, rp.bp); both must be callee's.

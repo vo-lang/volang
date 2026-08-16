@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use cranelift_codegen::ir::{Block, InstBuilder};
-use cranelift_frontend::{FunctionBuilder, Variable};
-use vo_runtime::bytecode::FunctionDef;
+use cranelift_frontend::FunctionBuilder;
 use vo_runtime::instruction::Opcode;
 
 use crate::ir::{FunctionIr, TypedInstruction};
@@ -145,12 +144,18 @@ pub(crate) fn execution_budget_regions(
     let mut starts = BTreeSet::new();
     starts.insert(range.start);
 
-    let mut checkpoint = range.start + EXECUTION_BUDGET_REGION_INSTRUCTIONS;
+    // Use one artifact-independent global lattice. Full functions and OSR
+    // regions can then share the same first-class sparse frame states while
+    // every straight-line span remains bounded by one interval.
+    let mut checkpoint = range
+        .start
+        .saturating_sub(range.start % EXECUTION_BUDGET_REGION_INSTRUCTIONS)
+        .saturating_add(EXECUTION_BUDGET_REGION_INSTRUCTIONS);
     while checkpoint < range.end {
         if !executable_only || instruction_is_executable(ir, optimized, checkpoint) {
             starts.insert(checkpoint);
         }
-        checkpoint += EXECUTION_BUDGET_REGION_INSTRUCTIONS;
+        checkpoint = checkpoint.saturating_add(EXECUTION_BUDGET_REGION_INSTRUCTIONS);
     }
 
     for pc in range.clone() {
@@ -262,7 +267,7 @@ pub(crate) fn prepare_control_flow(
     blocks: &mut HashMap<usize, Block>,
     ir: &FunctionIr,
     policy: ControlPolicy,
-    memory_only_start: u16,
+    vars: &crate::compile_common::SsaSlotVariables,
     executable_only: bool,
     optimized: Option<&crate::optimizer::OptimizedFunction>,
 ) -> Result<BTreeMap<usize, u32>, JitError> {
@@ -279,7 +284,7 @@ pub(crate) fn prepare_control_flow(
             for parameter in ir
                 .block_parameters(block.id)
                 .iter()
-                .filter(|parameter| parameter.slot < memory_only_start)
+                .filter(|parameter| vars.get(parameter.slot).is_some())
             {
                 let ty = ir.value(parameter.value).ty;
                 builder.append_block_param(clif_block, value_type_to_ir_type(ty));
@@ -331,8 +336,7 @@ pub(crate) fn drive_compile(driver: &mut impl CompileDriver) -> Result<(), JitEr
 pub(crate) struct CompileBlockView<'a> {
     pub blocks: &'a HashMap<usize, Block>,
     pub ir: &'a FunctionIr,
-    pub vars: &'a [Variable],
-    pub memory_only_start: u16,
+    pub vars: &'a crate::compile_common::SsaSlotVariables,
     pub executable_only: bool,
     pub optimized: Option<&'a crate::optimizer::OptimizedFunction>,
 }
@@ -348,8 +352,7 @@ pub(crate) fn enter_compile_pc(
     }
     if let Some(&block) = view.blocks.get(&pc) {
         if !*block_terminated {
-            let arguments =
-                block_arguments(builder, view.ir, view.vars, view.memory_only_start, pc);
+            let arguments = block_arguments(builder, view.ir, view.vars, pc);
             builder.ins().jump(block, &arguments);
         }
         builder.switch_to_block(block);
@@ -368,8 +371,7 @@ pub(crate) fn enter_compile_pc(
 pub(crate) fn block_arguments(
     builder: &mut FunctionBuilder<'_>,
     ir: &FunctionIr,
-    vars: &[Variable],
-    memory_only_start: u16,
+    vars: &crate::compile_common::SsaSlotVariables,
     target_pc: usize,
 ) -> Vec<cranelift_codegen::ir::BlockArg> {
     let Some(instruction) = ir.instruction(target_pc).copied() else {
@@ -381,24 +383,8 @@ pub(crate) fn block_arguments(
     }
     ir.block_parameters(block.id)
         .iter()
-        .filter(|parameter| parameter.slot < memory_only_start)
-        .map(|parameter| builder.use_var(vars[parameter.slot as usize]).into())
+        .filter_map(|parameter| Some(builder.use_var(vars.get(parameter.slot)?).into()))
         .collect()
-}
-
-pub(crate) fn declare_variables(
-    builder: &mut FunctionBuilder<'_>,
-    func_def: &FunctionDef,
-    memory_only_start: u16,
-) -> Vec<Variable> {
-    let ssa_slots = usize::from(memory_only_start).min(func_def.local_slots as usize);
-    let mut vars = Vec::with_capacity(ssa_slots);
-    for i in 0..ssa_slots {
-        let ty = crate::compile_common::slot_ir_type(&func_def.slot_types, i as u16);
-        let var = builder.declare_var(ty);
-        vars.push(var);
-    }
-    vars
 }
 
 #[cfg(test)]
@@ -416,21 +402,29 @@ mod tests {
     }
 
     #[test]
-    fn variable_declarations_stop_at_the_bounded_ssa_prefix() {
-        let func_def = crate::test_fixtures::function(Vec::new(), 512);
+    fn variable_declarations_follow_semantic_slot_use_without_a_numeric_cliff() {
+        let mut module = Module::new("sparse-variable-declarations".into());
+        module.functions.push(crate::test_fixtures::function(
+            vec![
+                Instruction::new(Opcode::LoadInt, 511, 7, 0),
+                Instruction::new(Opcode::Return, 511, 1, 0),
+            ],
+            512,
+        ));
+        let ir = FunctionIr::build(&module.functions[0], &module).expect("wide sparse IR");
         let mut func = cranelift_codegen::ir::Function::new();
         let mut func_ctx = cranelift_frontend::FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
 
-        let vars = declare_variables(
+        let vars = crate::compile_common::SsaSlotVariables::declare(
             &mut builder,
-            &func_def,
-            crate::compile_common::MAX_SSA_LOCAL_SLOTS,
+            &module.functions[0],
+            &ir,
+            u16::MAX,
         );
-        assert_eq!(
-            vars.len(),
-            usize::from(crate::compile_common::MAX_SSA_LOCAL_SLOTS)
-        );
+        assert_eq!(vars.iter().count(), 1);
+        assert!(vars.get(511).is_some());
+        assert!(vars.get(255).is_none());
 
         let block = builder.create_block();
         builder.switch_to_block(block);
@@ -499,5 +493,26 @@ mod tests {
                 .expect("OSR budget regions");
 
         assert_eq!(regions, BTreeMap::from([(0, 1)]));
+    }
+
+    #[test]
+    fn osr_regions_share_the_global_periodic_checkpoint_lattice() {
+        let region = EXECUTION_BUDGET_REGION_INSTRUCTIONS;
+        let code = vec![Instruction::new(Opcode::LoadInt, 0, 0, 0); region * 3];
+        let ir = test_ir(code);
+        let begin = region / 2;
+        let end = region * 2 + region / 2;
+        let regions = execution_budget_regions(
+            &ir,
+            ControlPolicy::loop_osr(begin, end, end + 1, region * 3),
+            false,
+            None,
+        )
+        .expect("OSR budget regions");
+
+        assert_eq!(
+            regions.keys().copied().collect::<Vec<_>>(),
+            vec![begin, region, region * 2]
+        );
     }
 }

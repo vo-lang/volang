@@ -5,28 +5,55 @@ use vo_runtime::SlotType;
 
 use crate::JitError;
 
-/// Maximum number of frame slots kept in Cranelift SSA form.
-///
-/// Native execution is checkpointed every 64 bytecode instructions. Bounding
-/// the SSA prefix to four such regions keeps each cooperative-yield spill
-/// bounded and prevents frame width from multiplying the number of checkpoints
-/// into quadratic IR. The suffix remains authoritative in frame memory.
-pub(crate) const MAX_SSA_LOCAL_SLOTS: u16 = 256;
+#[derive(Default)]
+pub(crate) struct SsaSlotVariables {
+    by_slot: Vec<Option<Variable>>,
+}
 
-#[inline]
-pub(crate) const fn bounded_memory_only_start(alias_memory_only_start: u16) -> u16 {
-    if alias_memory_only_start < MAX_SSA_LOCAL_SLOTS {
-        alias_memory_only_start
-    } else {
-        MAX_SSA_LOCAL_SLOTS
+impl SsaSlotVariables {
+    pub(crate) fn declare(
+        builder: &mut FunctionBuilder<'_>,
+        func_def: &FunctionDef,
+        ir: &crate::ir::FunctionIr,
+        memory_only_start: u16,
+    ) -> Self {
+        let eligible_slots = usize::from(memory_only_start).min(func_def.slot_types.len());
+        let used_end = ir
+            .used_slots()
+            .filter(|slot| usize::from(*slot) < eligible_slots)
+            .map(|slot| usize::from(slot) + 1)
+            .max()
+            .unwrap_or(0);
+        let mut by_slot = vec![None; used_end];
+        for slot in ir
+            .used_slots()
+            .filter(|slot| usize::from(*slot) < eligible_slots)
+        {
+            let cell = &mut by_slot[usize::from(slot)];
+            if cell.is_none() {
+                *cell = Some(builder.declare_var(slot_ir_type(&func_def.slot_types, slot)));
+            }
+        }
+        Self { by_slot }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, slot: u16) -> Option<Variable> {
+        self.by_slot.get(usize::from(slot)).copied().flatten()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (u16, Variable)> + '_ {
+        self.by_slot
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, variable)| Some((u16::try_from(slot).ok()?, (*variable)?)))
     }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct CompilerStorage<'a> {
-    vars: &'a [Variable],
+    vars: &'a SsaSlotVariables,
     slot_types: &'a [SlotType],
-    memory_only_start: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -37,37 +64,26 @@ pub(crate) struct LoadedSlot {
 }
 
 impl<'a> CompilerStorage<'a> {
-    pub(crate) fn new(
-        vars: &'a [Variable],
-        slot_types: &'a [SlotType],
-        memory_only_start: u16,
-    ) -> Self {
-        debug_assert_eq!(
-            vars.len(),
-            usize::from(memory_only_start).min(slot_types.len()),
-            "SSA variables must cover exactly the bounded frame prefix"
-        );
-        Self {
-            vars,
-            slot_types,
-            memory_only_start,
-        }
+    pub(crate) fn new(vars: &'a SsaSlotVariables, slot_types: &'a [SlotType]) -> Self {
+        Self { vars, slot_types }
     }
 
-    pub(crate) fn for_function(
-        func_def: &'a FunctionDef,
-        vars: &'a [Variable],
-        memory_only_start: u16,
-    ) -> Self {
-        Self::new(vars, &func_def.slot_types, memory_only_start)
+    pub(crate) fn for_function(func_def: &'a FunctionDef, vars: &'a SsaSlotVariables) -> Self {
+        Self::new(vars, &func_def.slot_types)
     }
 
     pub(crate) fn local_count(self) -> usize {
         self.slot_types.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn ssa_spill_count(self) -> usize {
-        self.vars.len()
+        self.vars.iter().count()
+    }
+
+    #[inline]
+    pub(crate) fn is_ssa_slot(self, slot: u16) -> bool {
+        self.vars.get(slot).is_some()
     }
 
     pub(crate) fn is_float_slot(self, slot: u16) -> bool {
@@ -80,14 +96,7 @@ impl<'a> CompilerStorage<'a> {
         base_ptr: Value,
         slot: u16,
     ) -> Value {
-        load_slot_i64_with_storage_policy(
-            builder,
-            self.vars,
-            self.slot_types,
-            base_ptr,
-            slot,
-            self.memory_only_start,
-        )
+        load_slot_i64_with_storage_policy(builder, self.vars, self.slot_types, base_ptr, slot)
     }
 
     pub(crate) fn store_ssa_i64(
@@ -96,7 +105,7 @@ impl<'a> CompilerStorage<'a> {
         slot: u16,
         val: Value,
     ) -> Value {
-        debug_assert!(slot < self.memory_only_start);
+        debug_assert!(self.is_ssa_slot(slot));
         write_ssa_slot_i64(builder, self.vars, self.slot_types, slot, val);
         if self.is_float_slot(slot) {
             builder.ins().bitcast(types::F64, MemFlags::new(), val)
@@ -112,7 +121,7 @@ impl<'a> CompilerStorage<'a> {
         slot: u16,
         val: Value,
     ) -> Value {
-        debug_assert!(slot >= self.memory_only_start);
+        debug_assert!(!self.is_ssa_slot(slot));
         store_memory_slot(builder, base_ptr, slot, val);
         if self.is_float_slot(slot) {
             builder.ins().bitcast(types::F64, MemFlags::new(), val)
@@ -127,14 +136,7 @@ impl<'a> CompilerStorage<'a> {
         base_ptr: Value,
         slot: u16,
     ) -> Value {
-        load_slot_f64_with_storage_policy(
-            builder,
-            self.vars,
-            self.slot_types,
-            base_ptr,
-            slot,
-            self.memory_only_start,
-        )
+        load_slot_f64_with_storage_policy(builder, self.vars, self.slot_types, base_ptr, slot)
     }
 
     pub(crate) fn store_ssa_f64(
@@ -143,7 +145,7 @@ impl<'a> CompilerStorage<'a> {
         slot: u16,
         val: Value,
     ) -> Value {
-        debug_assert!(slot < self.memory_only_start);
+        debug_assert!(self.is_ssa_slot(slot));
         write_ssa_slot_f64(builder, self.vars, self.slot_types, slot, val);
         if self.is_float_slot(slot) {
             val
@@ -159,7 +161,7 @@ impl<'a> CompilerStorage<'a> {
         slot: u16,
         val: Value,
     ) -> Value {
-        debug_assert!(slot >= self.memory_only_start);
+        debug_assert!(!self.is_ssa_slot(slot));
         store_memory_slot(builder, base_ptr, slot, val);
         if self.is_float_slot(slot) {
             val
@@ -172,12 +174,51 @@ impl<'a> CompilerStorage<'a> {
         reload_vars_from_memory(builder, self.vars, self.slot_types, base_ptr);
     }
 
-    pub(crate) fn spill_ssa_prefix_to_memory(
+    /// Materialize the sparse state needed to resume at a basic-block entry.
+    ///
+    /// Dead scalar slots are left untouched because bytecode liveness proves
+    /// that they are redefined before use. Dead root-shaped SSA slots are
+    /// cleared so the VM's conservative frame-prefix scan cannot retain stale
+    /// objects after the native frame has returned.
+    pub(crate) fn spill_recovery_state_to_memory(
         self,
         builder: &mut FunctionBuilder<'_>,
         dst_ptr: Value,
+        recovery_values: &[crate::ir::FrameValue],
+        scan_slots: u16,
     ) {
-        spill_ssa_prefix_to_memory(builder, self.vars, dst_ptr, self.ssa_spill_count());
+        let mut recovery_index = 0;
+        let zero = builder.ins().iconst(types::I64, 0);
+        for (slot, variable) in self.vars.iter() {
+            let slot_index = usize::from(slot);
+            while recovery_values
+                .get(recovery_index)
+                .is_some_and(|value| value.slot < slot)
+            {
+                recovery_index += 1;
+            }
+            let is_live = recovery_values
+                .get(recovery_index)
+                .is_some_and(|value| value.slot == slot);
+            let value = if is_live {
+                builder.use_var(variable)
+            } else if slot < scan_slots
+                && matches!(
+                    self.slot_types[slot_index],
+                    SlotType::GcRef | SlotType::Interface0 | SlotType::Interface1
+                )
+            {
+                zero
+            } else {
+                continue;
+            };
+            builder.ins().store(
+                MemFlags::trusted(),
+                value,
+                dst_ptr,
+                indexed_slot_offset(slot_index),
+            );
+        }
     }
 
     pub(crate) fn load_memory_slot_range(
@@ -189,9 +230,8 @@ impl<'a> CompilerStorage<'a> {
         context: &'static str,
     ) -> Result<Vec<LoadedSlot>, JitError> {
         let range = checked_sync_range(start_slot, slot_count, self.local_count() as u16, context)?;
-        let range = range.start..range.end.min(self.ssa_spill_count() as u16);
         let mut slots = Vec::with_capacity(range.len());
-        for slot in range {
+        for slot in range.filter(|slot| self.is_ssa_slot(*slot)) {
             if self.is_float_slot(slot) {
                 slots.push(LoadedSlot {
                     slot,
@@ -241,11 +281,11 @@ pub(crate) fn indexed_slot_offset(slot: usize) -> i32 {
 
 pub(crate) fn read_ssa_slot_i64(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     slot: u16,
 ) -> Value {
-    let val = builder.use_var(vars[slot as usize]);
+    let val = builder.use_var(vars.get(slot).expect("SSA slot must have a variable"));
     if slot_type_is_float(slot_types, slot) {
         builder.ins().bitcast(types::I64, MemFlags::new(), val)
     } else {
@@ -255,26 +295,29 @@ pub(crate) fn read_ssa_slot_i64(
 
 pub(crate) fn write_ssa_slot_i64(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     slot: u16,
     val: Value,
 ) {
     if slot_type_is_float(slot_types, slot) {
         let f64_val = builder.ins().bitcast(types::F64, MemFlags::new(), val);
-        builder.def_var(vars[slot as usize], f64_val);
+        builder.def_var(
+            vars.get(slot).expect("SSA slot must have a variable"),
+            f64_val,
+        );
     } else {
-        builder.def_var(vars[slot as usize], val);
+        builder.def_var(vars.get(slot).expect("SSA slot must have a variable"), val);
     }
 }
 
 pub(crate) fn read_ssa_slot_f64(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     slot: u16,
 ) -> Value {
-    let val = builder.use_var(vars[slot as usize]);
+    let val = builder.use_var(vars.get(slot).expect("SSA slot must have a variable"));
     if slot_type_is_float(slot_types, slot) {
         val
     } else {
@@ -284,16 +327,19 @@ pub(crate) fn read_ssa_slot_f64(
 
 pub(crate) fn write_ssa_slot_f64(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     slot: u16,
     val: Value,
 ) {
     if slot_type_is_float(slot_types, slot) {
-        builder.def_var(vars[slot as usize], val);
+        builder.def_var(vars.get(slot).expect("SSA slot must have a variable"), val);
     } else {
         let i64_val = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-        builder.def_var(vars[slot as usize], i64_val);
+        builder.def_var(
+            vars.get(slot).expect("SSA slot must have a variable"),
+            i64_val,
+        );
     }
 }
 
@@ -330,13 +376,12 @@ pub(crate) fn store_memory_slot(
 
 pub(crate) fn load_slot_i64_with_storage_policy(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     base_ptr: Value,
     slot: u16,
-    memory_only_start: u16,
 ) -> Value {
-    if slot < memory_only_start {
+    if vars.get(slot).is_some() {
         read_ssa_slot_i64(builder, vars, slot_types, slot)
     } else {
         load_memory_slot_i64(builder, base_ptr, slot)
@@ -345,45 +390,30 @@ pub(crate) fn load_slot_i64_with_storage_policy(
 
 pub(crate) fn load_slot_f64_with_storage_policy(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     base_ptr: Value,
     slot: u16,
-    memory_only_start: u16,
 ) -> Value {
-    if slot < memory_only_start {
+    if vars.get(slot).is_some() {
         read_ssa_slot_f64(builder, vars, slot_types, slot)
     } else {
         load_memory_slot_f64(builder, base_ptr, slot)
     }
 }
 
-pub(crate) fn spill_ssa_prefix_to_memory(
-    builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
-    dst_ptr: Value,
-    spill_count: usize,
-) {
-    for (i, var) in vars.iter().take(spill_count).enumerate() {
-        let val = builder.use_var(*var);
-        builder
-            .ins()
-            .store(MemFlags::trusted(), val, dst_ptr, indexed_slot_offset(i));
-    }
-}
-
 pub(crate) fn reload_vars_from_memory(
     builder: &mut FunctionBuilder<'_>,
-    vars: &[Variable],
+    vars: &SsaSlotVariables,
     slot_types: &[SlotType],
     base_ptr: Value,
 ) {
-    for (i, var) in vars.iter().enumerate() {
-        let ty = slot_ir_type(slot_types, i as u16);
+    for (slot, var) in vars.iter() {
+        let ty = slot_ir_type(slot_types, slot);
         let val = builder
             .ins()
-            .load(ty, MemFlags::trusted(), base_ptr, indexed_slot_offset(i));
-        builder.def_var(*var, val);
+            .load(ty, MemFlags::trusted(), base_ptr, slot_offset(slot));
+        builder.def_var(var, val);
     }
 }
 
@@ -405,43 +435,44 @@ pub(crate) fn checked_sync_range(
 mod tests {
     use super::*;
 
-    #[test]
-    fn ssa_prefix_budget_preserves_stricter_alias_boundaries_and_caps_wide_frames() {
-        assert_eq!(bounded_memory_only_start(0), 0);
-        assert_eq!(bounded_memory_only_start(73), 73);
-        assert_eq!(
-            bounded_memory_only_start(MAX_SSA_LOCAL_SLOTS),
-            MAX_SSA_LOCAL_SLOTS
-        );
-        assert_eq!(bounded_memory_only_start(u16::MAX), MAX_SSA_LOCAL_SLOTS);
+    fn test_variables(entries: &[(u16, Variable)], slots: usize) -> SsaSlotVariables {
+        let mut by_slot = vec![None; slots];
+        for &(slot, variable) in entries {
+            by_slot[usize::from(slot)] = Some(variable);
+        }
+        SsaSlotVariables { by_slot }
     }
 
     #[test]
-    fn compiler_storage_uses_memory_only_start_as_ssa_spill_prefix() {
-        let vars = [Variable::from_u32(0), Variable::from_u32(1)];
+    fn compiler_storage_tracks_sparse_ssa_slots() {
+        let vars = test_variables(&[(0, Variable::from_u32(0)), (2, Variable::from_u32(1))], 4);
         let slot_types = [
             SlotType::Value,
             SlotType::Float,
             SlotType::GcRef,
             SlotType::Value,
         ];
-        let storage = CompilerStorage::new(&vars, &slot_types, 2);
+        let storage = CompilerStorage::new(&vars, &slot_types);
 
         assert_eq!(storage.local_count(), 4);
         assert_eq!(storage.ssa_spill_count(), 2);
+        assert!(storage.is_ssa_slot(0));
+        assert!(!storage.is_ssa_slot(1));
+        assert!(storage.is_ssa_slot(2));
         assert!(storage.is_float_slot(1));
         assert!(!storage.is_float_slot(2));
     }
 
     #[test]
-    fn compiler_storage_keeps_full_frame_width_with_a_bounded_ssa_prefix() {
-        let vars = (0..MAX_SSA_LOCAL_SLOTS)
-            .map(|slot| Variable::from_u32(u32::from(slot)))
-            .collect::<Vec<_>>();
+    fn compiler_storage_keeps_full_frame_width_with_sparse_ssa_slots() {
+        let vars = test_variables(
+            &[(7, Variable::from_u32(0)), (511, Variable::from_u32(1))],
+            512,
+        );
         let slot_types = vec![SlotType::Value; 512];
-        let storage = CompilerStorage::new(&vars, &slot_types, MAX_SSA_LOCAL_SLOTS);
+        let storage = CompilerStorage::new(&vars, &slot_types);
 
-        assert_eq!(storage.ssa_spill_count(), 256);
+        assert_eq!(storage.ssa_spill_count(), 2);
         assert_eq!(storage.local_count(), 512);
     }
 
@@ -465,12 +496,15 @@ mod tests {
         builder.switch_to_block(block);
         builder.seal_block(block);
 
-        let vars = [
-            builder.declare_var(types::F64),
-            builder.declare_var(types::I64),
-        ];
+        let vars = test_variables(
+            &[
+                (0, builder.declare_var(types::F64)),
+                (1, builder.declare_var(types::I64)),
+            ],
+            2,
+        );
         let slot_types = [SlotType::Float, SlotType::Value];
-        let storage = CompilerStorage::new(&vars, &slot_types, 2);
+        let storage = CompilerStorage::new(&vars, &slot_types);
         let base = builder.ins().iconst(types::I64, 0);
         let raw_float = builder.ins().iconst(types::I64, 0x3ff0_0000_0000_0000);
         let canonical_float = storage.store_ssa_i64(&mut builder, 0, raw_float);

@@ -1952,7 +1952,7 @@ mod tests {
                 Instruction::new(Opcode::Copy, 4, 3, 0),
                 Instruction::new(Opcode::StrSlice, 4, 0, 1),
                 Instruction::new(Opcode::Call, 1, 0, 0),
-                Instruction::new(Opcode::Return, 0, 1, 0),
+                Instruction::new(Opcode::Return, 4, 1, 0),
             ],
         );
         caller.local_slots = 5;

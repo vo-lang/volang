@@ -534,9 +534,8 @@ pub trait RegConstAccess {
 
 /// Slow-path frame publication and JitResult return semantics.
 pub trait FrameBoundary {
-    /// Spill all SSA variables to memory.
-    /// Called before returning non-Ok JitResult so VM can see/restore state.
-    fn spill_all_vars(&mut self);
+    /// Publish the exact state needed to resume the current bytecode in the VM.
+    fn publish_current_frame_state(&mut self);
 }
 
 /// Select lowering state that bridges callback-written memory back into SSA.

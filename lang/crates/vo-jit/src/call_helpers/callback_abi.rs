@@ -133,7 +133,7 @@ pub fn emit_checked_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
     validate_callback_callsite(callsite, JitContextCallbackCallKind::CheckedJitResult)?;
     let needs_spill = callsite.try_requires_pre_call_spill()?;
     if needs_spill {
-        emitter.spill_all_vars();
+        emitter.publish_current_frame_state();
     }
     let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
@@ -151,7 +151,7 @@ pub fn emit_returning_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
     args: &[Value],
 ) -> Result<Value, JitError> {
     validate_callback_callsite(callsite, JitContextCallbackCallKind::ReturningJitResult)?;
-    emitter.spill_all_vars();
+    emitter.publish_current_frame_state();
     let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
     let result = emitter.builder().inst_results(call)[0];
@@ -171,7 +171,7 @@ pub fn emit_raw_jit_context_callback_call<'a, E: IrEmitter<'a>>(
     validate_callback_callsite(callsite, JitContextCallbackCallKind::Raw)?;
     let needs_spill = callsite.try_requires_pre_call_spill()?;
     if needs_spill {
-        emitter.spill_all_vars();
+        emitter.publish_current_frame_state();
     }
     let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);

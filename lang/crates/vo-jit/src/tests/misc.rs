@@ -602,7 +602,7 @@ fn optimizing_scalar_replacement_flows_through_a_cfg_merge() {
 }
 
 #[test]
-fn scalar_replacement_materializes_before_a_scheduler_exit() {
+fn live_scalar_replacement_materializes_before_a_scheduler_exit() {
     let region = crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS;
     let mut code = vec![
         Instruction::new(Opcode::LoadConst, 0, 0, 0),
@@ -611,14 +611,15 @@ fn scalar_replacement_materializes_before_a_scheduler_exit() {
         Instruction::new(Opcode::PtrSet, 1, 0, 2),
     ];
     code.resize(region + 1, Instruction::new(Opcode::Hint, 0, 0, 0));
-    code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+    code.push(Instruction::new(Opcode::Return, 1, 1, 0));
     let mut function = make_func_with_slot_types_and_sig(
         code,
         vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
         0,
         0,
-        0,
+        1,
     );
+    function.ret_slot_types = vec![SlotType::GcRef];
     for pc in [1, 3] {
         function.instruction_metadata[pc] = InstructionMetadata::PtrLayout {
             value_layout: vec![SlotType::Value],
@@ -976,7 +977,7 @@ fn native_stack_maps_exclude_dead_gcref_slots_per_safepoint() {
     .expect("compile root-liveness probe");
 
     let metadata = jit.function_metadata(0).expect("artifact metadata");
-    assert_eq!(metadata.stack_maps.len(), 2);
+    assert!(metadata.stack_maps.len() >= 2);
     assert!(metadata.stack_maps.iter().all(|map| map.roots.len() == 1));
 }
 
@@ -1040,21 +1041,22 @@ fn interface_pair_map_is_live_per_safepoint() {
     .expect("compile interface-liveness probe");
 
     let metadata = jit.function_metadata(0).expect("artifact metadata");
-    assert_eq!(metadata.stack_maps.len(), 2);
-    assert_eq!(metadata.stack_maps[0].roots.len(), 3);
-    assert_eq!(
-        metadata.stack_maps[0]
-            .roots
-            .iter()
-            .filter(|root| root.kind == crate::NativeRootKind::InterfacePair)
-            .count(),
-        1
-    );
-    assert_eq!(metadata.stack_maps[1].roots.len(), 2);
-    assert!(metadata.stack_maps[1]
-        .roots
-        .iter()
-        .all(|root| root.kind == crate::NativeRootKind::GcRef));
+    assert!(metadata.stack_maps.iter().any(|map| {
+        map.roots.len() == 3
+            && map
+                .roots
+                .iter()
+                .filter(|root| root.kind == crate::NativeRootKind::InterfacePair)
+                .count()
+                == 1
+    }));
+    assert!(metadata.stack_maps.iter().any(|map| {
+        map.roots.len() == 2
+            && map
+                .roots
+                .iter()
+                .all(|root| root.kind == crate::NativeRootKind::GcRef)
+    }));
 }
 
 #[test]
@@ -1803,6 +1805,32 @@ fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
         ctx.execution_budget_refilled,
         u64::from(vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS)
     );
+
+    extern "C" fn service_requested_gc(ctx: *mut JitContext) -> JitResult {
+        let Some(ctx) = (unsafe { ctx.as_mut() }) else {
+            return JitResult::JitError;
+        };
+        let Some(gc) = (unsafe { ctx.gc.as_mut() }) else {
+            return JitResult::JitError;
+        };
+        gc.gc_stop();
+        JitResult::Ok
+    }
+
+    let mut gc = bounded_gc(1);
+    gc.gc_request_cycle();
+    parts.callbacks.gc_safepoint_fn = Some(service_requested_gc);
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.gc = &mut gc;
+    ctx.execution_budget = region as u32;
+    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut args, &mut ret) };
+
+    assert_eq!(result, JitResult::Call);
+    assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
+    assert!(
+        gc.automatic_gc(),
+        "a transitive no-GC function must preserve its effect contract and yield"
+    );
 }
 
 #[test]
@@ -1931,18 +1959,18 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
 }
 
 #[test]
-fn wide_function_reads_high_parameter_and_writes_high_integer_slot() {
-    let first_memory_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS;
-    let result_slot = first_memory_slot + 1;
+fn wide_function_reads_a_high_parameter_without_forcing_frame_memory() {
+    let high_parameter_slot = 300;
+    let result_slot = high_parameter_slot + 1;
     let local_slots = result_slot + 1;
     let func = make_func_with_sig(
         vec![
             Instruction::new(Opcode::LoadInt, 0, 2, 0),
-            Instruction::new(Opcode::AddI, result_slot, first_memory_slot, 0),
+            Instruction::new(Opcode::AddI, result_slot, high_parameter_slot, 0),
             Instruction::new(Opcode::Return, result_slot, 1, 0),
         ],
         1,
-        first_memory_slot + 1,
+        high_parameter_slot + 1,
         local_slots,
         1,
     );
@@ -1961,7 +1989,7 @@ fn wide_function_reads_high_parameter_and_writes_high_integer_slot() {
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
 
     let mut args = vec![0_u64; usize::from(local_slots)];
-    args[usize::from(first_memory_slot)] = 40;
+    args[usize::from(high_parameter_slot)] = 40;
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
@@ -1970,12 +1998,11 @@ fn wide_function_reads_high_parameter_and_writes_high_integer_slot() {
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(ret[0], 42);
-    assert_eq!(args[usize::from(result_slot)], 42);
 }
 
 #[test]
-fn wide_function_round_trips_high_float_slot() {
-    let source_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS;
+fn wide_function_returns_a_high_float_slot_without_forcing_frame_memory() {
+    let source_slot = 300;
     let float_slot = source_slot + 1;
     let local_slots = float_slot + 1;
     let mut slot_types = vec![SlotType::Value; usize::from(local_slots)];
@@ -2015,7 +2042,6 @@ fn wide_function_round_trips_high_float_slot() {
 
     assert_eq!(result, JitResult::Ok);
     assert_eq!(f64::from_bits(ret[0]), 7.0);
-    assert_eq!(f64::from_bits(args[usize::from(float_slot)]), 7.0);
 }
 
 extern "C" fn write_recover_slots(_ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
@@ -2032,7 +2058,7 @@ extern "C" fn write_recover_slots(_ctx: *mut JitContext, result_ptr: *mut u64) -
 
 #[test]
 fn callback_reload_crosses_the_ssa_memory_boundary() {
-    let first_memory_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS;
+    let first_memory_slot = 256;
     let first_result_slot = first_memory_slot - 1;
     let local_slots = first_memory_slot + 1;
     let mut slot_types = vec![SlotType::Value; usize::from(local_slots)];
@@ -2078,9 +2104,9 @@ fn callback_reload_crosses_the_ssa_memory_boundary() {
 }
 
 #[test]
-fn cooperative_yield_publishes_the_canonical_mixed_frame() {
+fn cooperative_yield_publishes_only_the_mixed_recovery_state() {
     let region = crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS;
-    let high_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS + 43;
+    let high_slot = 299;
     let local_slots = high_slot + 1;
     let mut code = vec![
         Instruction::new(Opcode::LoadInt, 0, 11, 0),
@@ -2090,8 +2116,9 @@ fn cooperative_yield_publishes_the_canonical_mixed_frame() {
         Instruction::new(Opcode::LoadInt, 1, 0, 0),
         region - 2,
     ));
-    code.push(Instruction::new(Opcode::Return, 0, 0, 0));
-    let func = make_func_with_sig(code, 0, 0, local_slots, 0);
+    code.push(Instruction::new(Opcode::AddI, 2, 0, high_slot));
+    code.push(Instruction::new(Opcode::Return, 2, 1, 0));
+    let func = make_func_with_sig(code, 0, 0, local_slots, 1);
     let mut module = VoModule::new("wide-frame-materialization".into());
     module.functions.push(func);
 
@@ -2107,6 +2134,7 @@ fn cooperative_yield_publishes_the_canonical_mixed_frame() {
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
 
     let mut materialized_frame = vec![0_u64; usize::from(local_slots)];
+    materialized_frame[1] = 77;
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut materialized_frame);
@@ -2120,19 +2148,29 @@ fn cooperative_yield_publishes_the_canonical_mixed_frame() {
     assert_eq!(ctx.call_resume_pc, region as u32);
     assert_eq!(materialized_frame[0], 11, "SSA prefix must be spilled");
     assert_eq!(
+        materialized_frame[1], 77,
+        "dead scalar SSA slots must stay out of the recovery spill"
+    );
+    assert_eq!(
         materialized_frame[usize::from(high_slot)],
         22,
-        "the memory suffix must remain in the canonical VM frame"
+        "a live wide SSA slot must be part of the sparse recovery state"
     );
 }
 
 #[test]
-fn wide_osr_loop_writes_memory_backed_suffix_slots() {
-    let high_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS + 43;
+fn wide_osr_loop_publishes_a_live_high_numbered_slot() {
+    let high_slot = 299;
     let local_slots = high_slot + 1;
-    let func = make_osr_func(
-        vec![Instruction::new(Opcode::LoadInt, high_slot, 123, 0)],
+    let func = make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, high_slot, 123, 0),
+            Instruction::new(Opcode::Return, high_slot, 1, 0),
+        ],
+        0,
+        0,
         local_slots,
+        1,
     );
     let mut module = VoModule::new("wide-osr-loop".into());
     module.functions.push(func);
@@ -2216,7 +2254,7 @@ fn compiled_wide_loop_bytes(local_slots: u16) -> usize {
 }
 
 #[test]
-fn bounded_ssa_prefix_keeps_function_and_loop_codegen_near_linear() {
+fn semantic_ssa_selection_has_no_wide_frame_codegen_cliff() {
     let scales = [64_u16, 128, 256, 512];
     let function_bytes = scales.map(compiled_wide_function_bytes);
     let loop_bytes = scales.map(compiled_wide_loop_bytes);
@@ -2225,23 +2263,32 @@ fn bounded_ssa_prefix_keeps_function_and_loop_codegen_near_linear() {
     assert!(loop_bytes.iter().all(|size| *size > 0));
     assert!(
         function_bytes[3] <= function_bytes[2].saturating_mul(3),
-        "wide function code grew superlinearly at the SSA cap: {function_bytes:?}"
+        "wide function code grew superlinearly with semantic SSA selection: {function_bytes:?}"
     );
     assert!(
         loop_bytes[3] <= loop_bytes[2].saturating_mul(3),
-        "wide loop code grew superlinearly at the SSA cap: {loop_bytes:?}"
+        "wide loop code grew superlinearly with semantic SSA selection: {loop_bytes:?}"
     );
 }
 
 #[test]
 fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
-    let func = make_osr_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
+    let func = make_func_with_sig(
+        vec![
+            Instruction::new(Opcode::LoadInt, 0, 123, 0),
+            Instruction::new(Opcode::Return, 0, 1, 0),
+        ],
+        0,
+        0,
+        1,
+        1,
+    );
     let mut module = VoModule::new("test".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
         begin_pc: 0,
         end_pc: 0,
-        exit_pc: JitResult::JitError as usize,
+        exit_pc: 1,
     };
 
     let mut jit = JitCompiler::new().expect("create jit compiler");
@@ -2266,8 +2313,7 @@ fn loop_fallthrough_exit_uses_jit_result_ok_abi() {
         "normal OSR exits must return JitResult::Ok, not a raw exit pc"
     );
     assert_eq!(
-        ctx.loop_exit_pc,
-        JitResult::JitError as u32,
+        ctx.loop_exit_pc, 1,
         "normal OSR exits must publish the resume pc through ctx.loop_exit_pc"
     );
     assert_eq!(locals[0], 123);

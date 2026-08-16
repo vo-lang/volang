@@ -90,7 +90,8 @@ fn emit_return_if_u64_jit_error<'a>(
 
     e.builder().switch_to_block(error_block);
     e.builder().seal_block(error_block);
-    e.spill_all_vars();
+    // A helper sentinel is terminal and cannot resume bytecode execution.
+    // Context diagnostics are already published by the helper.
     let jit_error = e
         .builder()
         .ins()

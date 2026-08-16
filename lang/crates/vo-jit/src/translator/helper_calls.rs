@@ -14,7 +14,7 @@ pub fn emit_runtime_helper_call<'a>(
         emit_gc_safepoint_poll(emitter);
     }
     if helper.requires_frame_sync() {
-        emitter.spill_all_vars();
+        emitter.publish_current_frame_state();
     }
     emit_funcref_call_raw(emitter, helper.func_ref(), args)
 }
@@ -26,6 +26,16 @@ pub fn emit_runtime_helper_call<'a>(
 /// the SSA frame or unwinding native calls.
 pub(crate) fn emit_gc_safepoint_poll<'a>(emitter: &mut impl HelperCallEmitter<'a>) {
     let gc = emitter.gc_ptr();
+    let gc_is_present = emitter.builder().ins().icmp_imm_u(IntCC::NotEqual, gc, 0);
+    let check_required = emitter.builder().create_block();
+    let continue_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(gc_is_present, check_required, &[], continue_block, &[]);
+
+    emitter.builder().switch_to_block(check_required);
+    emitter.builder().seal_block(check_required);
     let required = emitter.load_trusted(
         JitMemoryRegion::Gc,
         types::I8,
@@ -37,7 +47,6 @@ pub(crate) fn emit_gc_safepoint_poll<'a>(emitter: &mut impl HelperCallEmitter<'a
         .ins()
         .icmp_imm_u(IntCC::NotEqual, required, 0);
     let slow = crate::compile_common::cold_block(emitter.builder());
-    let continue_block = emitter.builder().create_block();
     emitter
         .builder()
         .ins()

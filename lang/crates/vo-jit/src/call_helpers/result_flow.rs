@@ -35,7 +35,7 @@ pub fn emit_checked_jit_result_helper_call<'a, E: HelperCallEmitter<'a>>(
 ///
 /// When a JIT callee returns non-OK, the caller must:
 /// 1. Restore ctx.jit_bp and ctx.fiber_sp to caller's values
-/// 2. Spill SSA variables to fiber.stack
+/// 2. Publish the caller's resumable frame state to fiber.stack
 /// 3. push_frame to materialize callee frame
 /// 4. push_resume_point for frame chain
 /// 5. Return the JIT result
@@ -53,7 +53,7 @@ pub struct NonOkSlowPathParams {
     pub caller_resume_pc_val: Value,
 }
 
-/// Emit the non-OK slow path: restore ctx, spill, push_frame, push_resume_point, return.
+/// Emit the non-OK slow path: restore ctx, publish, push_frame, push_resume_point, return.
 ///
 /// Caller is responsible for creating/switching to the non-OK block before calling this.
 pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
@@ -67,7 +67,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
     restore_caller_execution_context(emitter, p.caller_bp, p.old_fiber_sp, p.caller_func_id);
     emitter.refresh_stack_base_after_reallocation();
 
-    emitter.spill_all_vars();
+    emitter.publish_current_frame_state();
 
     let push_frame_fn_ptr = emitter.load_context_field(types::I64, JitContextField::PushFrameFn);
     let callee_fiber_args_ptr = emit_raw_jit_context_callback_call(
@@ -167,7 +167,7 @@ pub fn check_call_result<'a, E: HelperCallEmitter<'a>>(
     emitter.builder().seal_block(non_ok_block);
 
     if spill_vars {
-        emitter.spill_all_vars();
+        emitter.publish_current_frame_state();
     }
 
     emitter.builder().ins().return_(&[result]);
