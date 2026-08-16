@@ -1791,6 +1791,36 @@ impl Fiber {
         caller_zero_end: u16,
     ) -> Result<(), FiberCapacityError> {
         self.try_reserve_call_frame()?;
+        self.push_reserved_call_frame_extended(
+            func_id,
+            bp,
+            sp_restore,
+            ret_reg,
+            ret_count,
+            scan_slots,
+            caller_scan_slots_restore,
+            caller_zero_start,
+            caller_zero_end,
+        );
+        Ok(())
+    }
+
+    /// Publish a frame after its single capacity admission has succeeded.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn push_reserved_call_frame_extended(
+        &mut self,
+        func_id: u32,
+        bp: usize,
+        sp_restore: usize,
+        ret_reg: u16,
+        ret_count: u16,
+        scan_slots: u16,
+        caller_scan_slots_restore: Option<u16>,
+        caller_zero_start: u16,
+        caller_zero_end: u16,
+    ) {
+        debug_assert!(self.frames.len() < self.frames.capacity());
         self.frames.push(CallFrame::new(
             func_id,
             bp,
@@ -1802,7 +1832,6 @@ impl Fiber {
             caller_zero_start,
             caller_zero_end,
         ));
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1870,7 +1899,7 @@ impl Fiber {
             .last_mut()
             .expect("push_borrowed_call_frame: missing caller frame")
             .scan_slots = caller_scan_slots;
-        self.try_push_call_frame_extended(
+        self.push_reserved_call_frame_extended(
             func_id,
             bp,
             caller_sp,
@@ -1880,7 +1909,7 @@ impl Fiber {
             caller_scan_slots_restore,
             caller_zero_start,
             caller_zero_end,
-        )?;
+        );
         Ok(bp)
     }
 
