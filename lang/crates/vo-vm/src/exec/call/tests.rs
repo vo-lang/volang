@@ -253,6 +253,61 @@ fn verified_call_closure_publishes_and_reuses_shared_target_proof() {
 }
 
 #[test]
+fn verified_call_iface_consumes_cached_target_and_initializes_exact_roots() {
+    let mut module = Module::new("cached-iface-target-test".to_string());
+    let mut caller = function(5);
+    caller.slot_types = vec![
+        SlotType::Interface0,
+        SlotType::Interface1,
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::Value,
+    ];
+    module.functions.push(caller);
+
+    let mut target = iface_target_function(1, 1, 0, 3);
+    target.slot_types = vec![SlotType::Value, SlotType::GcRef, SlotType::Value];
+    module.functions.push(target);
+
+    let loaded_module = crate::vm::test_loaded_module(module);
+    let mut gc = Gc::new();
+    let mut fiber = Fiber::new(0);
+    let bp = fiber.push_frame(0, 5, 0, 0);
+    let slot0 = interface::pack_slot0(1, 7, ValueKind::Pointer);
+    fiber.stack[bp] = slot0;
+    fiber.stack[bp + 1] = 0x1234;
+    fiber.stack[bp + 2] = u64::MAX;
+    fiber.current_frame_mut().unwrap().pc = 1;
+
+    let mut entry = vo_runtime::DynCallIC::default();
+    entry.publish_interpreter_target(
+        slot0,
+        vo_runtime::DynamicCallTarget {
+            func_id: 1,
+            local_slots: 3,
+        },
+    );
+    let inst = Instruction::with_flags(Opcode::CallIface, 0, 0, 2, 0);
+
+    assert!(matches!(
+        exec_verified_call_iface_cached(
+            &mut gc,
+            &mut fiber,
+            &inst,
+            &loaded_module,
+            &ItabCache::default(),
+            &mut entry,
+        ),
+        ExecResult::FrameChanged
+    ));
+    let callee = fiber.current_frame().expect("cached target pushed a frame");
+    assert_eq!(callee.func_id, 1);
+    assert_eq!(callee.bp, bp + 1);
+    assert_eq!(fiber.stack[callee.bp], 0x1234);
+    assert_eq!(fiber.stack[callee.bp + 1], 0);
+}
+
+#[test]
 fn cached_closure_proof_never_authorizes_an_unrelated_gc_object() {
     let mut module = Module::new("cached-closure-object-kind-test".to_string());
     let mut caller = function(1);

@@ -392,6 +392,33 @@ pub(crate) fn exec_verified_call_iface_cached(
     itab_cache: &ItabCache,
     ic_entry: &mut vo_runtime::DynCallIC,
 ) -> ExecResult {
+    let Some(caller) = fiber.frames.last().copied() else {
+        return ExecResult::JitError(
+            "CallIface requested without an active caller frame".to_string(),
+        );
+    };
+    let stack = fiber.stack_ptr();
+    let slot0 = stack_get(stack, caller.bp + usize::from(inst.a));
+    if interface::is_nil(slot0) {
+        return runtime_trap(
+            gc,
+            fiber,
+            stack,
+            loaded_module.module(),
+            RuntimeTrapKind::NilPointerDereference,
+        );
+    }
+    if let Some(target) = ic_entry.probe(slot0) {
+        return exec_verified_iface_ic_hit(
+            gc,
+            fiber,
+            inst,
+            loaded_module,
+            target,
+            stack_get(stack, caller.bp + usize::from(inst.a) + 1),
+        );
+    }
+
     exec_call_iface_impl(
         gc,
         fiber,
@@ -401,6 +428,55 @@ pub(crate) fn exec_verified_call_iface_cached(
         itab_cache,
         Some(ic_entry),
     )
+}
+
+/// Consume the complete dynamic-call proof published by the interpreter miss
+/// path for this exact interface dispatch key.
+#[inline]
+fn exec_verified_iface_ic_hit(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    loaded_module: &LoadedModule,
+    target: vo_runtime::DynamicCallTarget,
+    receiver: u64,
+) -> ExecResult {
+    let module = loaded_module.module();
+    let Some(target_func) = module.functions.get(target.func_id as usize) else {
+        return ExecResult::JitError(format!(
+            "CallIface cached target function id {} out of bounds",
+            target.func_id
+        ));
+    };
+    let Some(borrowed_start) = inst.b.checked_sub(1) else {
+        return ExecResult::JitError(
+            "CallIface ABI requires a hidden receiver prefix slot before arg_start".to_string(),
+        );
+    };
+    let Some(ret_reg) = borrowed_start.checked_add(target_func.param_slots) else {
+        return ExecResult::JitError(format!(
+            "CallIface cached return offset overflow for func_id={} name={}",
+            target.func_id, target_func.name
+        ));
+    };
+    let new_bp = match fiber.try_push_borrowed_call_frame(
+        target.func_id,
+        borrowed_start,
+        ret_reg,
+        target_func.ret_slots,
+        target_func.local_slots,
+    ) {
+        Ok(bp) => bp,
+        Err(err) => return stack_overflow_panic(gc, fiber, module, err),
+    };
+    let roots = loaded_module
+        .frame_root_maps()
+        .function(target.func_id)
+        .expect("verified interface target owns frame-root facts")
+        .initialization_roots();
+    fiber.zero_frame_root_locals_at(new_bp, target_func.param_slots, roots);
+    stack_set(fiber.stack_ptr(), new_bp, receiver);
+    ExecResult::FrameChanged
 }
 
 fn exec_call_iface_impl(
