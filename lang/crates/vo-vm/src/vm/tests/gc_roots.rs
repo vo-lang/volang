@@ -752,7 +752,7 @@ fn gc_root_stable_sweep_step_skips_scan_when_roots_unchanged() {
 }
 
 #[test]
-fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan() {
+fn gc_root_duplicate_dirty_fiber_mark_invalidates_each_active_scan_once() {
     let mut vm = Vm::new();
     let fid = vm.scheduler.spawn(Fiber::new(0));
     vm.state.gc_roots_dirty_all = false;
@@ -785,6 +785,9 @@ fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan
         sentinel_cursor: 0,
         endpoint_cursor: 0,
     });
+    vm.mark_gc_fiber_roots_dirty(fid);
+    assert_eq!(vm.state.gc_dirty_epoch, 9);
+
     vm.mark_gc_fiber_roots_dirty(fid);
     assert_eq!(vm.state.gc_dirty_epoch, 9);
 

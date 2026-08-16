@@ -473,8 +473,10 @@ fn exec_verified_iface_ic_hit(
         .frame_root_maps()
         .function(target.func_id)
         .expect("verified interface target owns frame-root facts")
-        .initialization_roots();
-    fiber.zero_frame_root_locals_at(new_bp, target_func.param_slots, roots);
+        .initialization_roots_to_clear();
+    if let Some(roots) = roots {
+        fiber.zero_frame_root_locals_at(new_bp, roots);
+    }
     stack_set(fiber.stack_ptr(), new_bp, receiver);
     ExecResult::FrameChanged
 }
@@ -645,8 +647,10 @@ fn exec_call_iface_impl(
         let roots = root_maps
             .function(target.func_id)
             .expect("verified interface target owns frame-root facts")
-            .initialization_roots();
-        fiber.zero_frame_root_locals_at(new_bp, target_func.param_slots, roots);
+            .initialization_roots_to_clear();
+        if let Some(roots) = roots {
+            fiber.zero_frame_root_locals_at(new_bp, roots);
+        }
     } else {
         fiber.zero_function_root_locals_at(new_bp, target_func);
     }

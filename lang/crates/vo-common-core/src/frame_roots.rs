@@ -111,13 +111,15 @@ pub struct FunctionFrameRootMap {
 }
 
 impl FunctionFrameRootMap {
-    /// Root-shaped frame cells that require a valid zero value before a newly
-    /// admitted interpreted frame can execute. Callers preserve parameter
-    /// cells and initialize only the remaining entries.
-    #[inline]
-    pub fn initialization_roots(&self) -> FrameRootSet<'_> {
-        self.roots(FrameRootStateId(self.initialization))
-            .expect("frame initialization root state is internally valid")
+    /// Non-parameter root cells that require a valid zero value before a newly
+    /// admitted interpreted frame can execute. `None` means the frame needs no
+    /// initialization work.
+    #[inline(always)]
+    pub fn initialization_roots_to_clear(&self) -> Option<FrameRootSet<'_>> {
+        (self.initialization != FrameRootStateId::EMPTY.0).then(|| {
+            self.roots(FrameRootStateId(self.initialization))
+                .expect("frame initialization root state is internally valid")
+        })
     }
 
     #[inline]
@@ -175,43 +177,64 @@ impl FrameRootMaps {
 
     #[cfg(feature = "test-support")]
     pub(crate) fn conservative(module: &Module) -> Self {
-        let functions =
-            module
-                .functions
-                .iter()
-                .map(|func| {
-                    let mut slots = Vec::new();
-                    slots.extend(
-                        func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
-                            (*ty == SlotType::GcRef).then_some(slot as u16)
-                        }),
-                    );
-                    let direct_count = slots.len() as u16;
-                    slots.extend(func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
-                        (*ty == SlotType::Interface0).then_some(slot as u16)
+        let functions = module
+            .functions
+            .iter()
+            .map(|func| {
+                let encode_roots = |first_slot: usize| {
+                    let mut encoded = Vec::new();
+                    encoded.extend(func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
+                        (slot >= first_slot && *ty == SlotType::GcRef).then_some(slot as u16)
                     }));
-                    let all_state = u32::from(!slots.is_empty());
-                    let mut sets = vec![RootSetSpan {
+                    let direct_count = encoded.len() as u16;
+                    encoded.extend(func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
+                        (slot >= first_slot && *ty == SlotType::Interface0).then_some(slot as u16)
+                    }));
+                    (encoded, direct_count)
+                };
+                let (all_roots, all_direct_count) = encode_roots(0);
+                let (initialization_roots, initialization_direct_count) =
+                    encode_roots(usize::from(func.param_slots));
+                let mut sets = vec![RootSetSpan {
+                    start: 0,
+                    direct_count: 0,
+                    total_count: 0,
+                }];
+                let mut slots = Vec::new();
+                let all_state = if all_roots.is_empty() {
+                    0
+                } else {
+                    sets.push(RootSetSpan {
                         start: 0,
-                        direct_count: 0,
-                        total_count: 0,
-                    }];
-                    if !slots.is_empty() {
-                        sets.push(RootSetSpan {
-                            start: 0,
-                            direct_count,
-                            total_count: slots.len() as u16,
-                        });
-                    }
-                    FunctionFrameRootMap {
-                        initialization: all_state,
-                        before: vec![all_state; func.code.len()].into_boxed_slice(),
-                        suspended: vec![all_state; func.code.len()].into_boxed_slice(),
-                        sets: sets.into_boxed_slice(),
-                        slots: slots.into_boxed_slice(),
-                    }
-                })
-                .collect::<Vec<_>>();
+                        direct_count: all_direct_count,
+                        total_count: all_roots.len() as u16,
+                    });
+                    slots.extend_from_slice(&all_roots);
+                    1
+                };
+                let initialization = if initialization_roots.is_empty() {
+                    0
+                } else if initialization_roots == all_roots {
+                    all_state
+                } else {
+                    let state = sets.len() as u32;
+                    sets.push(RootSetSpan {
+                        start: slots.len() as u32,
+                        direct_count: initialization_direct_count,
+                        total_count: initialization_roots.len() as u16,
+                    });
+                    slots.extend_from_slice(&initialization_roots);
+                    state
+                };
+                FunctionFrameRootMap {
+                    initialization,
+                    before: vec![all_state; func.code.len()].into_boxed_slice(),
+                    suspended: vec![all_state; func.code.len()].into_boxed_slice(),
+                    sets: sets.into_boxed_slice(),
+                    slots: slots.into_boxed_slice(),
+                }
+            })
+            .collect::<Vec<_>>();
         Self {
             functions: functions.into_boxed_slice(),
         }
@@ -285,6 +308,11 @@ fn build_function_map(
         .try_reserve_exact(func.code.len())
         .map_err(|_| FrameRootMapBuildError::resource(func_id, 0, "root effects"))?;
     let logical_roots = logical_root_slots(func);
+    let initialization_roots = logical_roots
+        .iter()
+        .copied()
+        .filter(|slot| *slot >= func.param_slots)
+        .collect::<BTreeSet<_>>();
 
     for (pc, inst) in func.code.iter().copied().enumerate() {
         let metadata = func.instruction_metadata.get(pc);
@@ -375,7 +403,7 @@ fn build_function_map(
             func_id,
             0,
             func,
-            &logical_roots.iter().copied().collect(),
+            &initialization_roots,
             &mut interned,
             &mut sets,
             &mut slots,
@@ -420,7 +448,7 @@ fn build_function_map(
         func_id,
         0,
         func,
-        &logical_roots.iter().copied().collect(),
+        &initialization_roots,
         &mut interned,
         &mut sets,
         &mut slots,
@@ -825,6 +853,70 @@ mod tests {
         assert!(first.conditional.is_empty());
         assert_eq!(ret.direct, &[1]);
         assert!(ret.conditional.is_empty());
+    }
+
+    #[test]
+    fn initialization_roots_contain_only_non_parameter_cells() {
+        let mut module = Module::new("frame-initialization-roots".to_string());
+        module.functions.push(function(
+            "with-roots",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            vec![
+                SlotType::GcRef,
+                SlotType::Interface0,
+                SlotType::Interface1,
+                SlotType::GcRef,
+                SlotType::Interface0,
+                SlotType::Interface1,
+            ],
+            3,
+            0,
+        ));
+        module.functions.push(function(
+            "scalar-only",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            vec![SlotType::Value, SlotType::Float],
+            1,
+            0,
+        ));
+
+        let maps = FrameRootMaps::build(&module).expect("valid frame root maps");
+        let roots = maps
+            .function(0)
+            .expect("first function root map")
+            .initialization_roots_to_clear()
+            .expect("root-shaped locals require initialization");
+        assert_eq!(roots.direct, &[3]);
+        assert_eq!(roots.conditional, &[4]);
+        assert!(maps
+            .function(1)
+            .expect("second function root map")
+            .initialization_roots_to_clear()
+            .is_none());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn conservative_maps_keep_parameter_roots_in_scan_states() {
+        let mut module = Module::new("conservative-frame-roots".to_string());
+        module.functions.push(function(
+            "f",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            vec![SlotType::GcRef, SlotType::Value, SlotType::GcRef],
+            2,
+            0,
+        ));
+
+        let maps = FrameRootMaps::conservative(&module);
+        let map = maps.function(0).expect("function root map");
+        let before = map
+            .roots(map.before(0).expect("instruction root state"))
+            .expect("valid instruction root state");
+        assert_eq!(before.direct, &[0, 2]);
+        let initialization = map
+            .initialization_roots_to_clear()
+            .expect("local root requires initialization");
+        assert_eq!(initialization.direct, &[2]);
     }
 
     #[test]

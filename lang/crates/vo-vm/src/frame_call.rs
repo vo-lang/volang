@@ -171,9 +171,10 @@ impl<'a> FrameCallBuilder<'a> {
             let roots = root_maps
                 .function(target.func_id)
                 .expect("verified closure target owns frame-root facts")
-                .initialization_roots();
-            self.fiber
-                .zero_frame_root_locals_at(bp, target.func.param_slots, roots);
+                .initialization_roots_to_clear();
+            if let Some(roots) = roots {
+                self.fiber.zero_frame_root_locals_at(bp, roots);
+            }
         } else {
             self.fiber.zero_function_root_locals_at(bp, target.func);
         }

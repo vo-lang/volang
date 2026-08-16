@@ -1039,12 +1039,23 @@ impl VmState {
         self.clear_gc_dirty_fibers();
     }
 
-    #[inline]
+    /// A root mutation only has to invalidate the snapshot that observed the
+    /// current epoch. Once their epochs diverge, that snapshot can no longer
+    /// clear any dirty state when it completes.
+    #[inline(always)]
+    fn gc_root_scan_observes_current_epoch(&self) -> bool {
+        self.gc_root_scan
+            .as_ref()
+            .is_some_and(|scan| scan.dirty_epoch == self.gc_dirty_epoch)
+    }
+
+    #[inline(always)]
     pub fn mark_gc_all_roots_dirty(&mut self) {
-        if self.gc_root_scan.is_some() || !self.gc_roots_dirty_all {
-            self.gc.roots_changed();
-            self.bump_gc_dirty_epoch_or_restart_scan();
+        if self.gc_roots_dirty_all && !self.gc_root_scan_observes_current_epoch() {
+            return;
         }
+        self.gc.roots_changed();
+        self.bump_gc_dirty_epoch_or_restart_scan();
         self.gc_roots_dirty_all = true;
         self.clear_gc_dirty_fibers();
     }
@@ -1087,7 +1098,7 @@ impl VmState {
         true
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn mark_gc_fiber_roots_dirty(&mut self, raw: u32) {
         let already_dirty = self.gc_roots_dirty_all
             || self
@@ -1095,10 +1106,11 @@ impl VmState {
                 .get(raw as usize)
                 .copied()
                 .unwrap_or(false);
-        if self.gc_root_scan.is_some() || !already_dirty {
-            self.gc.roots_changed();
-            self.bump_gc_dirty_epoch_or_restart_scan();
+        if already_dirty && !self.gc_root_scan_observes_current_epoch() {
+            return;
         }
+        self.gc.roots_changed();
+        self.bump_gc_dirty_epoch_or_restart_scan();
         if !self.gc_roots_dirty_all {
             self.record_gc_dirty_fiber_raw(raw);
         }

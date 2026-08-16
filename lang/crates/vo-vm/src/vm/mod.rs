@@ -4051,8 +4051,10 @@ impl Vm {
                         .frame_root_maps()
                         .function(target_func_id)
                         .expect("verified call target owns frame-root facts")
-                        .initialization_roots();
-                    fiber.zero_frame_root_locals_at(new_bp, target_func.param_slots, roots);
+                        .initialization_roots_to_clear();
+                    if let Some(roots) = roots {
+                        fiber.zero_frame_root_locals_at(new_bp, roots);
+                    }
                     self.mark_gc_fiber_roots_dirty(fiber_id);
 
                     let frames = unsafe { &mut *frames_ptr };

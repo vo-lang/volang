@@ -1735,22 +1735,16 @@ impl Fiber {
     pub fn zero_frame_root_locals_at(
         &mut self,
         bp: usize,
-        param_slots: u16,
         roots: vo_common_core::FrameRootSet<'_>,
     ) {
-        let param_slots = usize::from(param_slots);
         for &slot in roots.direct {
             let slot = usize::from(slot);
-            if slot >= param_slots {
-                self.stack[bp + slot] = 0;
-            }
+            self.stack[bp + slot] = 0;
         }
         for &header in roots.conditional {
             let header = usize::from(header);
-            if header >= param_slots {
-                self.stack[bp + header] = 0;
-                self.stack[bp + header + 1] = 0;
-            }
+            self.stack[bp + header] = 0;
+            self.stack[bp + header + 1] = 0;
         }
     }
 
