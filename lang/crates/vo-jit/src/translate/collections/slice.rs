@@ -6,7 +6,9 @@ use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::translate::{emit_jit_error_if_zero, emit_runtime_trap_if};
-use crate::translator::{emit_runtime_helper_call, CollectionEmitter, HelperKind};
+use crate::translator::{
+    emit_runtime_helper_call, CollectionEmitter, HelperKind, NativeScratchKind,
+};
 use crate::JitError;
 
 use super::array::{emit_typed_write_barrier_single_by_meta, emit_write_barrier_multi_by_meta};
@@ -450,9 +452,39 @@ pub(in crate::translate) fn slice_append<'a>(
     // elem_bytes (as i32)
     let elem_bytes = emit_elem_bytes_i32(e, inst.opcode())?;
 
-    // val_ptr: pointer to element value in stack
-    let elem_slot = inst.c + 1;
-    let val_ptr = e.var_addr(elem_slot);
+    // The helper observes the element only for this call. Keep the source in
+    // SSA and materialize an exact native scratch window instead of forcing
+    // every higher-numbered frame slot into memory for the whole function.
+    let elem_layout = e.elem_layout().ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "ElemLayout",
+    })?;
+    let elem_slots = usize::from(elem_layout.slots);
+    let scratch = e.native_scratch_slot(NativeScratchKind::CollectionValue, elem_slots * 8);
+    let elem_start = if elem_slots == 0 {
+        0
+    } else {
+        inst.c.checked_add(1).ok_or_else(|| {
+            JitError::Internal("verified slice append source start overflows".to_string())
+        })?
+    };
+    let elem_end = elem_start
+        .checked_add(elem_layout.slots)
+        .filter(|end| usize::from(*end) <= e.local_slot_count())
+        .ok_or_else(|| {
+            JitError::Internal(format!(
+                "verified slice append source {elem_start}+{} exceeds the frame",
+                elem_layout.slots
+            ))
+        })?;
+    for (offset, slot) in (elem_start..elem_end).enumerate() {
+        let value = e.read_var(slot);
+        e.builder()
+            .ins()
+            .stack_store(types::I64, value, scratch, (offset * 8) as i32);
+    }
+    let val_ptr = e.builder().ins().stack_addr(types::I64, scratch, 0);
 
     // vo_slice_append(ctx, elem_meta: u32, elem_bytes: u32, s: u64, val_ptr: *const u64) -> u64
     let call = emit_runtime_helper_call(

@@ -24,12 +24,13 @@ pub enum InstructionReadError {
 /// Frame-memory visibility that scalar register effects cannot represent.
 ///
 /// Dynamically indexed Slot operations observe their declared inline-array
-/// range, while runtime callbacks can observe a value beginning at one slot.
+/// range beyond the scalar operands reported by the read/write visitors.
+/// Runtime helpers that receive a temporary address remain ordinary scalar
+/// effects: native lowering materializes their exact operands at the callsite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameMemoryEffect {
     None,
     AliasedRange { start: u16, count: u16 },
-    From(u16),
 }
 
 fn visit_range(
@@ -469,18 +470,6 @@ pub fn instruction_frame_memory_effect(
             }
             Ok(FrameMemoryEffect::AliasedRange { start, count })
         }
-        Opcode::SliceAppend => inst.c.checked_add(1).map(FrameMemoryEffect::From).ok_or(
-            InstructionReadError::SlotRangeOverflow {
-                start: inst.c,
-                count: 2,
-            },
-        ),
-        Opcode::QueueSend => Ok(FrameMemoryEffect::From(inst.b)),
-        Opcode::QueueRecv => Ok(FrameMemoryEffect::From(inst.a)),
-        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
-            Ok(FrameMemoryEffect::From(inst.b))
-        }
-        Opcode::GoIsland => Ok(FrameMemoryEffect::From(inst.c)),
         _ => Ok(FrameMemoryEffect::None),
     }
 }

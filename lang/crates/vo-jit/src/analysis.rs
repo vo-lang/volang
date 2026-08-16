@@ -3,6 +3,7 @@
 //! Full-function JIT and loop OSR should consume the same metadata/effects/
 //! register facts so they cannot silently diverge on operand semantics.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use vo_runtime::bytecode::{DynamicCallsiteRange, FunctionDef, Module as VoModule};
@@ -17,12 +18,124 @@ use crate::{ir::FunctionIr, loop_analysis::LoopInfo, JitError, MAX_JIT_COMPILE_W
 use crate::{effects::EffectFacts, MAX_JIT_ANALYSIS_BYTES};
 
 pub struct FunctionAnalysis {
-    pub memory_only_start: u16,
+    memory_slots: MemorySlotSet,
     loops: Arc<[LoopInfo]>,
-    loop_memory_only_starts: Vec<u16>,
+    loop_memory_slots: Vec<MemorySlotSet>,
     dynamic_callsites: DynamicCallsiteRange,
     ir: FunctionIr,
     retained_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemorySlotRange {
+    start: u16,
+    end: u16,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MemorySlotSet {
+    ranges: Box<[MemorySlotRange]>,
+}
+
+impl MemorySlotSet {
+    #[inline]
+    pub(crate) fn contains(&self, slot: u16) -> bool {
+        self.ranges
+            .binary_search_by(|range| {
+                if slot < range.start {
+                    core::cmp::Ordering::Greater
+                } else if slot >= range.end {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn slots(&self) -> impl Iterator<Item = u16> + '_ {
+        self.ranges.iter().flat_map(|range| range.start..range.end)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>().saturating_add(
+            self.ranges
+                .len()
+                .saturating_mul(core::mem::size_of::<MemorySlotRange>()),
+        )
+    }
+}
+
+#[derive(Default)]
+struct MemorySlotSetBuilder {
+    ranges: Vec<MemorySlotRange>,
+}
+
+impl MemorySlotSetBuilder {
+    fn push(
+        &mut self,
+        range: Option<MemorySlotRange>,
+        raw_range_count: &mut usize,
+    ) -> Result<(), JitError> {
+        let Some(range) = range else {
+            return Ok(());
+        };
+        charge_raw_ranges(raw_range_count, 1)?;
+        self.ranges
+            .try_reserve(1)
+            .map_err(|_| JitError::CompileWorkLimitExceeded {
+                limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+                requested_bytes: raw_range_count
+                    .saturating_mul(core::mem::size_of::<MemorySlotRange>()),
+            })?;
+        self.ranges.push(range);
+        Ok(())
+    }
+
+    fn extend_from(&mut self, child: &Self, raw_range_count: &mut usize) -> Result<(), JitError> {
+        charge_raw_ranges(raw_range_count, child.ranges.len())?;
+        self.ranges.try_reserve(child.ranges.len()).map_err(|_| {
+            JitError::CompileWorkLimitExceeded {
+                limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+                requested_bytes: raw_range_count
+                    .saturating_mul(core::mem::size_of::<MemorySlotRange>()),
+            }
+        })?;
+        self.ranges.extend_from_slice(&child.ranges);
+        Ok(())
+    }
+
+    fn finish(mut self) -> MemorySlotSet {
+        self.ranges
+            .sort_unstable_by_key(|range| (range.start, range.end));
+        let mut write = 0usize;
+        for read in 0..self.ranges.len() {
+            let candidate = self.ranges[read];
+            if write != 0 && candidate.start <= self.ranges[write - 1].end {
+                self.ranges[write - 1].end = self.ranges[write - 1].end.max(candidate.end);
+            } else {
+                self.ranges[write] = candidate;
+                write += 1;
+            }
+        }
+        self.ranges.truncate(write);
+        MemorySlotSet {
+            ranges: self.ranges.into_boxed_slice(),
+        }
+    }
+}
+
+fn charge_raw_ranges(total: &mut usize, additional: usize) -> Result<(), JitError> {
+    let requested_count = total.saturating_add(additional);
+    let requested_bytes = requested_count.saturating_mul(core::mem::size_of::<MemorySlotRange>());
+    if requested_bytes > MAX_JIT_COMPILE_WORK_BYTES {
+        return Err(JitError::CompileWorkLimitExceeded {
+            limit_bytes: MAX_JIT_COMPILE_WORK_BYTES,
+            requested_bytes,
+        });
+    }
+    *total = requested_count;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,17 +147,39 @@ pub(crate) struct NativeRootLiveness<'a> {
 }
 
 impl FunctionAnalysis {
+    #[cfg(test)]
     pub fn for_function(
         func_def: &FunctionDef,
         vo_module: &VoModule,
         dynamic_callsites: DynamicCallsiteRange,
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
-        let ir = FunctionIr::build_with_limit(func_def, vo_module, retained_limit_bytes)?;
+        Self::for_function_with_return_summaries(
+            func_def,
+            vo_module,
+            dynamic_callsites,
+            &[],
+            retained_limit_bytes,
+        )
+    }
+
+    pub(crate) fn for_function_with_return_summaries(
+        func_def: &FunctionDef,
+        vo_module: &VoModule,
+        dynamic_callsites: DynamicCallsiteRange,
+        exact_base_returns: &[Box<[bool]>],
+        retained_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
+        let ir = FunctionIr::build_with_limit_and_return_summaries(
+            func_def,
+            vo_module,
+            exact_base_returns,
+            retained_limit_bytes,
+        )?;
         let loops = crate::loop_analysis::try_analyze_loops(func_def)?;
-        let loop_bytes = loops
-            .len()
-            .saturating_mul(core::mem::size_of::<LoopInfo>() + core::mem::size_of::<u16>());
+        let loop_bytes = loops.len().saturating_mul(
+            core::mem::size_of::<LoopInfo>() + core::mem::size_of::<MemorySlotSet>(),
+        );
         if loop_bytes > retained_limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {
                 limit_bytes: retained_limit_bytes,
@@ -66,14 +201,14 @@ impl FunctionAnalysis {
             });
         }
         let requested_bytes = fixed_analysis_bytes;
-        let mut loop_memory_only_starts = Vec::new();
-        loop_memory_only_starts
+        let mut loop_memory_builders = Vec::new();
+        loop_memory_builders
             .try_reserve_exact(loops.len())
             .map_err(|_| JitError::AnalysisResourceLimitExceeded {
                 limit_bytes: retained_limit_bytes,
                 requested_bytes,
             })?;
-        loop_memory_only_starts.resize(loops.len(), u16::MAX);
+        loop_memory_builders.resize_with(loops.len(), MemorySlotSetBuilder::default);
         let mut active_loops = Vec::new();
         active_loops.try_reserve_exact(loops.len()).map_err(|_| {
             JitError::CompileWorkLimitExceeded {
@@ -82,7 +217,8 @@ impl FunctionAnalysis {
             }
         })?;
         let mut next_loop = 0;
-        let mut memory_only_start = u16::MAX;
+        let mut memory_builder = MemorySlotSetBuilder::default();
+        let mut raw_range_count = 0usize;
         for pc in 0..func_def.code.len() {
             while loops
                 .get(next_loop)
@@ -91,20 +227,15 @@ impl FunctionAnalysis {
                 active_loops.push(next_loop);
                 next_loop += 1;
             }
-            let start = match ir
-                .instruction(pc)
-                .expect("IR cardinality was verified before memory analysis")
-                .memory_sync()
-            {
-                MemorySyncEffect::None => u16::MAX,
-                MemorySyncEffect::AliasedRange { start, .. } | MemorySyncEffect::From(start) => {
-                    start
-                }
-            };
-            memory_only_start = memory_only_start.min(start);
+            let range = memory_range_for_effect(
+                ir.instruction(pc)
+                    .expect("IR cardinality was verified before memory analysis")
+                    .memory_sync(),
+                func_def.local_slots,
+            )?;
+            memory_builder.push(range, &mut raw_range_count)?;
             if let Some(&loop_index) = active_loops.last() {
-                loop_memory_only_starts[loop_index] =
-                    loop_memory_only_starts[loop_index].min(start);
+                loop_memory_builders[loop_index].push(range, &mut raw_range_count)?;
             }
             while active_loops
                 .last()
@@ -112,20 +243,28 @@ impl FunctionAnalysis {
             {
                 let loop_index = active_loops.pop().expect("checked active loop");
                 if let Some(&parent_index) = active_loops.last() {
-                    loop_memory_only_starts[parent_index] = loop_memory_only_starts[parent_index]
-                        .min(loop_memory_only_starts[loop_index]);
+                    debug_assert!(parent_index < loop_index);
+                    let (parents, children) = loop_memory_builders.split_at_mut(loop_index);
+                    parents[parent_index].extend_from(&children[0], &mut raw_range_count)?;
                 }
             }
         }
         debug_assert!(active_loops.is_empty());
+        let memory_slots = memory_builder.finish();
+        let loop_memory_slots = loop_memory_builders
+            .into_iter()
+            .map(MemorySlotSetBuilder::finish)
+            .collect::<Vec<_>>();
         let retained_bytes = loops
             .len()
             .saturating_mul(core::mem::size_of::<LoopInfo>())
             .saturating_add(ir.retained_bytes())
+            .saturating_add(memory_slots.retained_bytes())
             .saturating_add(
-                loop_memory_only_starts
-                    .capacity()
-                    .saturating_mul(core::mem::size_of::<u16>()),
+                loop_memory_slots
+                    .iter()
+                    .map(MemorySlotSet::retained_bytes)
+                    .sum::<usize>(),
             );
         if retained_bytes > retained_limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {
@@ -135,9 +274,9 @@ impl FunctionAnalysis {
         }
 
         Ok(Self {
-            memory_only_start,
+            memory_slots,
             loops: loops.into(),
-            loop_memory_only_starts,
+            loop_memory_slots,
             dynamic_callsites,
             ir,
             retained_bytes,
@@ -182,20 +321,24 @@ impl FunctionAnalysis {
         Arc::clone(&self.loops)
     }
 
-    pub fn memory_only_start_for_loop(
-        &self,
+    pub(crate) fn memory_slots(&self) -> &MemorySlotSet {
+        &self.memory_slots
+    }
+
+    pub(crate) fn memory_slots_for_loop<'a>(
+        &'a self,
         func_def: &FunctionDef,
         loop_info: &LoopInfo,
-    ) -> Result<u16, JitError> {
+    ) -> Result<Cow<'a, MemorySlotSet>, JitError> {
         if let Ok(index) = self
             .loops
             .binary_search_by_key(&loop_info.begin_pc, |candidate| candidate.begin_pc)
         {
             if self.loops[index] == *loop_info {
                 return self
-                    .loop_memory_only_starts
+                    .loop_memory_slots
                     .get(index)
-                    .copied()
+                    .map(Cow::Borrowed)
                     .ok_or_else(|| {
                         JitError::Internal(
                             "loop memory analysis is out of sync with loop metadata".to_string(),
@@ -206,39 +349,63 @@ impl FunctionAnalysis {
 
         // Unit-test adapters may supply an independently validated synthetic
         // loop. Production callers hit the precomputed catalogue above.
-        func_def.code[loop_info.begin_pc..=loop_info.end_pc]
+        let mut builder = MemorySlotSetBuilder::default();
+        let mut raw_range_count = 0usize;
+        for (offset, inst) in func_def.code[loop_info.begin_pc..=loop_info.end_pc]
             .iter()
             .enumerate()
-            .try_fold(u16::MAX, |minimum, (offset, inst)| {
-                Ok(minimum.min(instruction_memory_start(
-                    func_def,
-                    loop_info.begin_pc + offset,
-                    inst,
-                )?))
-            })
+        {
+            let effect = instruction_memory_effect(func_def, loop_info.begin_pc + offset, inst)?;
+            builder.push(
+                memory_range_for_effect(effect, func_def.local_slots)?,
+                &mut raw_range_count,
+            )?;
+        }
+        Ok(Cow::Owned(builder.finish()))
     }
 }
 
-fn instruction_memory_start(
+fn instruction_memory_effect(
     func_def: &FunctionDef,
     pc: usize,
     inst: &vo_runtime::instruction::Instruction,
-) -> Result<u16, JitError> {
-    Ok(
-        match effects::try_memory_sync_effect(
-            inst,
-            effects::EffectFacts::from_instruction(func_def.instruction_metadata.get(pc)),
-        )
-        .map_err(|err| {
-            JitError::Internal(format!(
-                "verified memory effects failed for {} at pc {pc}: {err:?}",
-                func_def.name
-            ))
-        })? {
-            MemorySyncEffect::None => u16::MAX,
-            MemorySyncEffect::AliasedRange { start, .. } | MemorySyncEffect::From(start) => start,
-        },
+) -> Result<MemorySyncEffect, JitError> {
+    effects::try_memory_sync_effect(
+        inst,
+        effects::EffectFacts::from_instruction(func_def.instruction_metadata.get(pc)),
     )
+    .map_err(|err| {
+        JitError::Internal(format!(
+            "verified memory effects failed for {} at pc {pc}: {err:?}",
+            func_def.name
+        ))
+    })
+}
+
+fn memory_range_for_effect(
+    effect: MemorySyncEffect,
+    local_slots: u16,
+) -> Result<Option<MemorySlotRange>, JitError> {
+    let (start, end) = match effect {
+        MemorySyncEffect::None => return Ok(None),
+        MemorySyncEffect::AliasedRange { start, count } => {
+            if count == 0 {
+                return Ok(None);
+            }
+            let end = start.checked_add(count).ok_or_else(|| {
+                JitError::Internal(format!(
+                    "verified aliased memory range {start}+{count} overflows the slot domain"
+                ))
+            })?;
+            (start, end)
+        }
+    };
+    if start > end || end > local_slots {
+        return Err(JitError::Internal(format!(
+            "verified memory range {start}..{end} exceeds frame width {local_slots}"
+        )));
+    }
+    Ok((start != end).then_some(MemorySlotRange { start, end }))
 }
 
 #[cfg(test)]
@@ -313,7 +480,7 @@ mod tests {
             MAX_JIT_ANALYSIS_BYTES,
         )
         .expect("valid analysis");
-        assert_eq!(analysis.memory_only_start, u16::MAX);
+        assert!(analysis.memory_slots().slots().next().is_none());
 
         let map_get_effects = effects::try_instruction_effects_with_module_context(
             &module.functions[0].code[0],
@@ -335,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_recv_output_is_memory_backed_from_destination() {
+    fn queue_recv_temporary_address_does_not_widen_persistent_memory() {
         let code = vec![
             Instruction::with_flags(Opcode::QueueRecv, 0, 7, 0, 0),
             Instruction::new(Opcode::LoadInt, 0, 1, 0),
@@ -358,12 +525,44 @@ mod tests {
         )
         .expect("valid analysis");
 
-        assert_eq!(analysis.memory_only_start, 7);
+        assert!(analysis.memory_slots().slots().next().is_none());
         assert!(analysis.loops.is_empty());
     }
 
     #[test]
-    fn nested_loop_memory_minima_are_computed_in_one_scan() {
+    fn inline_array_aliasing_keeps_only_the_declared_range_in_memory() {
+        let code = vec![
+            Instruction::new(Opcode::SlotGet, 0, 7, 20),
+            Instruction::new(Opcode::LoadInt, 31, 1, 0),
+        ];
+        let metadata = vec![
+            InstructionMetadata::SlotLayout {
+                array_len: 3,
+                elem_layout: vec![SlotType::Value, SlotType::Value],
+            },
+            InstructionMetadata::None,
+        ];
+        let mut module = VoModule::new("inline-array-range-analysis".to_string());
+        module.functions.push(make_func(code, metadata));
+
+        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
+        let analysis = FunctionAnalysis::for_function(
+            &module.functions[0],
+            &module,
+            calls,
+            MAX_JIT_ANALYSIS_BYTES,
+        )
+        .expect("valid inline-array memory range");
+
+        assert_eq!(
+            analysis.memory_slots().slots().collect::<Vec<_>>(),
+            (7..13).collect::<Vec<_>>()
+        );
+        assert!(!analysis.memory_slots().contains(31));
+    }
+
+    #[test]
+    fn nested_loop_memory_ranges_are_computed_in_one_scan() {
         fn with_imm32(opcode: Opcode, flags: u8, value: i32) -> Instruction {
             Instruction::with_flags(
                 opcode,
@@ -378,7 +577,7 @@ mod tests {
             with_imm32(Opcode::Hint, HINT_LOOP, 7),
             Instruction::new(Opcode::LoadInt, 0, 0, 0),
             with_imm32(Opcode::Hint, HINT_LOOP, 6),
-            Instruction::with_flags(Opcode::QueueRecv, 0, 7, 0, 0),
+            Instruction::new(Opcode::SlotGet, 1, 7, 0),
             Instruction::new(Opcode::LoadInt, 1, 0, 0),
             with_imm32(Opcode::Jump, 0, -2),
             with_imm32(Opcode::Jump, 0, -5),
@@ -387,7 +586,8 @@ mod tests {
         let mut metadata = vec![InstructionMetadata::None; code.len()];
         metadata[0] = InstructionMetadata::LoopEnd { end_pc: 6 };
         metadata[2] = InstructionMetadata::LoopEnd { end_pc: 5 };
-        metadata[3] = InstructionMetadata::QueueLayout {
+        metadata[3] = InstructionMetadata::SlotLayout {
+            array_len: 2,
             elem_layout: vec![SlotType::Value],
         };
         let mut module = VoModule::new("nested-loop-analysis".to_string());
@@ -402,15 +602,18 @@ mod tests {
         )
         .expect("valid nested analysis");
 
-        assert_eq!(analysis.memory_only_start, 7);
+        assert!(analysis.memory_slots().contains(7));
+        assert!(analysis.memory_slots().contains(8));
+        assert!(!analysis.memory_slots().contains(31));
         assert_eq!(analysis.loops.len(), 2);
         for loop_info in analysis.loops.iter() {
-            assert_eq!(
-                analysis
-                    .memory_only_start_for_loop(&module.functions[0], loop_info)
-                    .unwrap(),
-                7
-            );
+            let memory_slots = analysis
+                .memory_slots_for_loop(&module.functions[0], loop_info)
+                .unwrap();
+            assert!(!memory_slots.contains(6));
+            assert!(memory_slots.contains(7));
+            assert!(memory_slots.contains(8));
+            assert!(!memory_slots.contains(31));
         }
     }
 

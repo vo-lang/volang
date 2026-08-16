@@ -88,7 +88,7 @@ impl<'a> FunctionCompiler<'a> {
                 entry_block,
                 helpers,
                 analysis,
-                analysis.memory_only_start,
+                std::borrow::Cow::Borrowed(analysis.memory_slots()),
                 jit_memory_flags,
             ),
             saved_jit_bp,
@@ -535,7 +535,6 @@ impl<'a> FunctionCompiler<'a> {
             .iadd_imm_u(jit_bp_i32, i64::from(self.core.func_def.local_slots));
 
         let param_slots = self.core.func_def.param_slots as usize;
-        let num_slots = self.core.func_def.local_slots as usize;
 
         // The internal native ABI carries the first raw argument words in
         // machine lanes. Wide signatures continue in frame memory. Float
@@ -574,13 +573,13 @@ impl<'a> FunctionCompiler<'a> {
                 self.builder.def_var(variable, zero_i64);
             }
         }
-        for i in param_slots.max(usize::from(self.core.memory_only_start))..num_slots {
-            crate::compile_common::store_memory_slot(
-                &mut self.builder,
-                args_ptr,
-                i as u16,
-                zero_i64,
-            );
+        for slot in self
+            .core
+            .memory_slots
+            .slots()
+            .filter(|slot| usize::from(*slot) >= param_slots)
+        {
+            crate::compile_common::store_memory_slot(&mut self.builder, args_ptr, slot, zero_i64);
         }
     }
 

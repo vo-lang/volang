@@ -385,6 +385,15 @@ impl FunctionIr {
         module: &Module,
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
+        Self::build_with_limit_and_return_summaries(func, module, &[], retained_limit_bytes)
+    }
+
+    pub(crate) fn build_with_limit_and_return_summaries(
+        func: &FunctionDef,
+        module: &Module,
+        exact_base_returns: &[Box<[bool]>],
+        retained_limit_bytes: usize,
+    ) -> Result<Self, JitError> {
         if func.code.is_empty() {
             return Ok(Self::empty());
         }
@@ -509,7 +518,13 @@ impl FunctionIr {
                             [value_start..value_start + usize::from(input_count)];
                         alias_source(instruction.source, slot, input_slice, &values)
                     };
-                    let provenance = fixed_output_provenance(instruction.source.opcode(), alias);
+                    let provenance = fixed_output_provenance(
+                        instruction.source,
+                        slot,
+                        alias,
+                        module,
+                        exact_base_returns,
+                    );
                     let origin = alias
                         .map(ValueOrigin::Alias)
                         .unwrap_or(ValueOrigin::Instruction);
@@ -793,6 +808,42 @@ impl FunctionIr {
 
     pub(crate) fn is_executable_block(&self, block: BlockId) -> bool {
         bitset_contains(&self.executable_blocks, block.index())
+    }
+
+    pub(crate) fn exact_base_return_slots(&self, func: &FunctionDef) -> Box<[bool]> {
+        let mut exact = func
+            .ret_slot_types
+            .iter()
+            .map(|slot_type| *slot_type == SlotType::GcRef)
+            .collect::<Vec<_>>();
+        let mut saw_return = false;
+        for (pc, instruction) in self.instructions.iter().copied().enumerate() {
+            if instruction.source.opcode() != Opcode::Return
+                || !self.is_executable_block(instruction.block())
+            {
+                continue;
+            }
+            saw_return = true;
+            for (offset, candidate) in exact.iter_mut().enumerate() {
+                if !*candidate {
+                    continue;
+                }
+                let Some(slot) = instruction.source.a.checked_add(offset as u16) else {
+                    *candidate = false;
+                    continue;
+                };
+                *candidate = self.input_value(pc, slot).is_some_and(|value| {
+                    matches!(
+                        self.value(value).ty,
+                        ValueType::GcRef(RootProvenance::ExactBase)
+                    )
+                });
+            }
+        }
+        if !saw_return {
+            exact.fill(false);
+        }
+        exact.into_boxed_slice()
     }
 
     pub(crate) fn executable_successors(
@@ -1463,11 +1514,39 @@ fn alias_source(
     })
 }
 
-fn fixed_output_provenance(opcode: Opcode, alias: Option<ValueId>) -> RootProvenance {
+fn fixed_output_provenance(
+    source: Instruction,
+    output_slot: u16,
+    alias: Option<ValueId>,
+    module: &Module,
+    exact_base_returns: &[Box<[bool]>],
+) -> RootProvenance {
     if alias.is_some() {
         return RootProvenance::Unreachable;
     }
-    match opcode {
+    if source.opcode() == Opcode::Call {
+        let callee_id = source.static_call_func_id() as usize;
+        let Some(callee) = module.functions.get(callee_id) else {
+            return RootProvenance::Unknown;
+        };
+        let Some(first_return) = source.b.checked_add(callee.param_slots) else {
+            return RootProvenance::Unknown;
+        };
+        let Some(return_offset) = output_slot.checked_sub(first_return) else {
+            return RootProvenance::Unknown;
+        };
+        return if exact_base_returns
+            .get(callee_id)
+            .and_then(|summary| summary.get(return_offset as usize))
+            .copied()
+            .unwrap_or(false)
+        {
+            RootProvenance::ExactBase
+        } else {
+            RootProvenance::Unknown
+        };
+    }
+    match source.opcode() {
         Opcode::PtrNew
         | Opcode::StrNew
         | Opcode::StrConcat

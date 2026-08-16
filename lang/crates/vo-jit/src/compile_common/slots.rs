@@ -15,20 +15,16 @@ impl SsaSlotVariables {
         builder: &mut FunctionBuilder<'_>,
         func_def: &FunctionDef,
         ir: &crate::ir::FunctionIr,
-        memory_only_start: u16,
+        memory_slots: &crate::analysis::MemorySlotSet,
     ) -> Self {
-        let eligible_slots = usize::from(memory_only_start).min(func_def.slot_types.len());
         let used_end = ir
             .used_slots()
-            .filter(|slot| usize::from(*slot) < eligible_slots)
+            .filter(|slot| !memory_slots.contains(*slot))
             .map(|slot| usize::from(slot) + 1)
             .max()
             .unwrap_or(0);
         let mut by_slot = vec![None; used_end];
-        for slot in ir
-            .used_slots()
-            .filter(|slot| usize::from(*slot) < eligible_slots)
-        {
+        for slot in ir.used_slots().filter(|slot| !memory_slots.contains(*slot)) {
             let cell = &mut by_slot[usize::from(slot)];
             if cell.is_none() {
                 *cell = Some(builder.declare_var(slot_ir_type(&func_def.slot_types, slot)));

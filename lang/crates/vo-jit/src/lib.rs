@@ -22,6 +22,7 @@ mod metadata;
 mod native_frame;
 mod native_stack_map;
 mod optimizer;
+mod return_provenance;
 #[cfg(test)]
 mod semantics;
 mod shape;
@@ -364,6 +365,7 @@ impl ModuleJitAnalysis {
     fn build(
         module: &VoModule,
         env: JitCompileEnv<'_>,
+        graph: Arc<call_graph::ModuleCallGraph>,
         limit_bytes: usize,
     ) -> Result<Self, JitError> {
         let requested_work_bytes = module.functions.iter().fold(0usize, |total, function| {
@@ -379,14 +381,10 @@ impl ModuleJitAnalysis {
             });
         }
         let minimum_bytes = core::mem::size_of::<Self>()
-            .saturating_add(core::mem::size_of::<call_graph::ModuleCallGraph>())
             .saturating_add(core::mem::size_of::<optimizer::ModuleInlinePlan>())
             .saturating_add(module.functions.len().saturating_mul(
                 core::mem::size_of::<JitFrameEntryEligibility>()
-                    + core::mem::size_of::<Option<Arc<call_helpers::SmallPureLeafInline>>>()
-                    + core::mem::size_of::<Box<[usize]>>() * 2
-                    + core::mem::size_of::<usize>()
-                    + core::mem::size_of::<bool>(),
+                    + core::mem::size_of::<Option<Arc<call_helpers::SmallPureLeafInline>>>(),
             ));
         if minimum_bytes > limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {
@@ -394,37 +392,14 @@ impl ModuleJitAnalysis {
                 requested_bytes: minimum_bytes,
             });
         }
-        let graph_budget = limit_bytes
-            .saturating_sub(core::mem::size_of::<Self>())
-            .saturating_sub(
-                module
-                    .functions
-                    .len()
-                    .saturating_mul(core::mem::size_of::<JitFrameEntryEligibility>()),
-            );
-        let graph_reserved_bytes = limit_bytes.saturating_sub(graph_budget);
-        let graph = match call_graph::ModuleCallGraph::build_with_limit(module, graph_budget) {
-            Ok(graph) => Arc::new(graph),
-            Err(JitError::AnalysisResourceLimitExceeded {
-                requested_bytes, ..
-            }) => {
-                return Err(JitError::AnalysisResourceLimitExceeded {
-                    limit_bytes,
-                    requested_bytes: graph_reserved_bytes.saturating_add(requested_bytes),
-                });
-            }
-            Err(error) => return Err(error),
-        };
         let entry_eligibility: Arc<[JitFrameEntryEligibility]> = Arc::from(
             contract::module_frame_entry_eligibility_with_graph(module, env, &graph),
         );
-        let committed_before_plan = core::mem::size_of::<Self>()
-            .saturating_add(graph.retained_bytes())
-            .saturating_add(
-                entry_eligibility
-                    .len()
-                    .saturating_mul(core::mem::size_of::<JitFrameEntryEligibility>()),
-            );
+        let committed_before_plan = core::mem::size_of::<Self>().saturating_add(
+            entry_eligibility
+                .len()
+                .saturating_mul(core::mem::size_of::<JitFrameEntryEligibility>()),
+        );
         let inline_plan = match optimizer::ModuleInlinePlan::build_with_graph(
             module,
             Arc::clone(&graph),
@@ -606,6 +581,7 @@ impl JitCache {
         func: &FunctionDef,
         vo_module: &VoModule,
         dynamic_callsites: DynamicCallsiteRange,
+        exact_base_returns: &[Box<[bool]>],
     ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
         self.analysis_tick = self.analysis_tick.saturating_add(1);
         if let Some(entry) = self
@@ -616,10 +592,11 @@ impl JitCache {
             entry.last_access = self.analysis_tick;
             return Ok(Arc::clone(&entry.base));
         }
-        let analysis = match analysis::FunctionAnalysis::for_function(
+        let analysis = match analysis::FunctionAnalysis::for_function_with_return_summaries(
             func,
             vo_module,
             dynamic_callsites,
+            exact_base_returns,
             self.analysis_memory_limit_bytes
                 .saturating_sub(self.module_analysis_bytes),
         ) {
@@ -1047,6 +1024,8 @@ pub struct JitCompiler {
     loaded_module: Option<Arc<LoadedModule>>,
     verified_env: Option<JitCompileEnvScope>,
     dynamic_callsites: Option<Arc<DynamicCallsiteMap>>,
+    module_call_graph: Option<Arc<call_graph::ModuleCallGraph>>,
+    return_provenance: Option<return_provenance::ModuleReturnProvenance>,
     module_analysis: Option<Arc<ModuleJitAnalysis>>,
     optimization_plan: Option<Arc<optimizer::ModuleOptimizationPlan>>,
     publication_failure: Option<String>,
@@ -1144,6 +1123,8 @@ impl JitCompiler {
             loaded_module: None,
             verified_env: None,
             dynamic_callsites: None,
+            module_call_graph: None,
+            return_provenance: None,
             module_analysis: None,
             optimization_plan: None,
             publication_failure: None,
@@ -1200,6 +1181,103 @@ impl JitCompiler {
         Ok(())
     }
 
+    fn module_call_graph(
+        &mut self,
+        vo_module: &VoModule,
+    ) -> Result<Arc<call_graph::ModuleCallGraph>, JitError> {
+        if let Some(graph) = &self.module_call_graph {
+            return Ok(Arc::clone(graph));
+        }
+        let remaining = self
+            .cache
+            .analysis_memory_limit_bytes
+            .saturating_sub(self.cache.module_analysis_bytes);
+        let graph = match call_graph::ModuleCallGraph::build_with_limit(vo_module, remaining) {
+            Ok(graph) => Arc::new(graph),
+            Err(JitError::AnalysisResourceLimitExceeded {
+                requested_bytes, ..
+            }) => {
+                self.cache.reject_analysis();
+                return Err(JitError::AnalysisResourceLimitExceeded {
+                    limit_bytes: self.cache.analysis_memory_limit_bytes,
+                    requested_bytes: self
+                        .cache
+                        .module_analysis_bytes
+                        .saturating_add(requested_bytes),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        self.cache.record_module_analysis(graph.retained_bytes())?;
+        self.module_call_graph = Some(Arc::clone(&graph));
+        Ok(graph)
+    }
+
+    fn ensure_return_provenance(
+        &mut self,
+        func_id: u32,
+        vo_module: &VoModule,
+        graph: &call_graph::ModuleCallGraph,
+    ) -> Result<(), JitError> {
+        if self.return_provenance.is_none() {
+            let remaining = self
+                .cache
+                .analysis_memory_limit_bytes
+                .saturating_sub(self.cache.module_analysis_bytes);
+            let summaries =
+                match return_provenance::ModuleReturnProvenance::new(vo_module, graph, remaining) {
+                    Ok(summaries) => summaries,
+                    Err(JitError::AnalysisResourceLimitExceeded {
+                        requested_bytes, ..
+                    }) => {
+                        self.cache.reject_analysis();
+                        return Err(JitError::AnalysisResourceLimitExceeded {
+                            limit_bytes: self.cache.analysis_memory_limit_bytes,
+                            requested_bytes: self
+                                .cache
+                                .module_analysis_bytes
+                                .saturating_add(requested_bytes),
+                        });
+                    }
+                    Err(error) => return Err(error),
+                };
+            self.cache
+                .record_module_analysis(summaries.retained_bytes())?;
+            self.return_provenance = Some(summaries);
+        }
+        let transient_limit = self
+            .cache
+            .analysis_memory_limit_bytes
+            .saturating_sub(self.cache.module_analysis_bytes);
+        self.return_provenance
+            .as_mut()
+            .expect("return provenance was initialized above")
+            .ensure_function(func_id as usize, vo_module, graph, transient_limit)
+    }
+
+    fn get_or_analyze_function(
+        &mut self,
+        func_id: u32,
+        func: &FunctionDef,
+        vo_module: &VoModule,
+    ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
+        let graph = self.module_call_graph(vo_module)?;
+        self.ensure_return_provenance(func_id, vo_module, &graph)?;
+        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
+        let exact_base_returns = self
+            .return_provenance
+            .as_ref()
+            .expect("return provenance precedes function analysis")
+            .summaries();
+        self.cache.get_or_analyze(
+            func_id,
+            func,
+            vo_module,
+            dynamic_callsites,
+            exact_base_returns,
+        )
+    }
+
     fn module_analysis(
         &mut self,
         vo_module: &VoModule,
@@ -1208,12 +1286,24 @@ impl JitCompiler {
         if let Some(analysis) = &self.module_analysis {
             return Ok(Arc::clone(analysis));
         }
-        let limit = self.cache.analysis_memory_limit_bytes;
-        let analysis = match ModuleJitAnalysis::build(vo_module, env, limit) {
+        let graph = self.module_call_graph(vo_module)?;
+        let limit = self
+            .cache
+            .analysis_memory_limit_bytes
+            .saturating_sub(self.cache.module_analysis_bytes);
+        let analysis = match ModuleJitAnalysis::build(vo_module, env, graph, limit) {
             Ok(analysis) => Arc::new(analysis),
-            Err(error @ JitError::AnalysisResourceLimitExceeded { .. }) => {
+            Err(JitError::AnalysisResourceLimitExceeded {
+                requested_bytes, ..
+            }) => {
                 self.cache.reject_analysis();
-                return Err(error);
+                return Err(JitError::AnalysisResourceLimitExceeded {
+                    limit_bytes: self.cache.analysis_memory_limit_bytes,
+                    requested_bytes: self
+                        .cache
+                        .module_analysis_bytes
+                        .saturating_add(requested_bytes),
+                });
             }
             Err(error) => return Err(error),
         };
@@ -1530,6 +1620,8 @@ impl JitCompiler {
             return Err(error);
         }
         Self::verify_compile_work_budget(func)?;
+        let graph = self.module_call_graph(vo_module)?;
+        self.ensure_return_provenance(func_id, vo_module, &graph)?;
         let module_analysis = self.module_analysis(vo_module, env)?;
         let entry_eligibility = Arc::clone(&module_analysis.entry_eligibility);
         let optimization_plan = if tier == JitTier::Optimizing {
@@ -1537,10 +1629,7 @@ impl JitCompiler {
         } else {
             None
         };
-        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
-        let analysis = self
-            .cache
-            .get_or_analyze(func_id, func, vo_module, dynamic_callsites)?;
+        let analysis = self.get_or_analyze_function(func_id, func, vo_module)?;
         let instruction_optimization = match optimization_plan.as_deref() {
             Some(module_plan) => {
                 Some(
@@ -1716,10 +1805,7 @@ impl JitCompiler {
             .get(func_id as usize)
             .ok_or(JitError::FunctionNotFound(func_id))?;
         Self::verify_compile_work_budget(func)?;
-        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
-        let analysis = self
-            .cache
-            .get_or_analyze(func_id, func, vo_module, dynamic_callsites)?;
+        let analysis = self.get_or_analyze_function(func_id, func, vo_module)?;
         Ok(analysis.shared_loops())
     }
 
@@ -1752,12 +1838,11 @@ impl JitCompiler {
             return Err(error);
         }
         Self::verify_compile_work_budget(func)?;
+        let graph = self.module_call_graph(vo_module)?;
+        self.ensure_return_provenance(func_id, vo_module, &graph)?;
         let module_analysis = self.module_analysis(vo_module, env)?;
         let entry_eligibility = Arc::clone(&module_analysis.entry_eligibility);
-        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
-        let analysis = self
-            .cache
-            .get_or_analyze(func_id, func, vo_module, dynamic_callsites)?;
+        let analysis = self.get_or_analyze_function(func_id, func, vo_module)?;
         let optimization_plan = self.optimization_plan(vo_module)?;
         let canonical_optimization =
             self.cache

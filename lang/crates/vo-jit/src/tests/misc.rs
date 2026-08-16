@@ -1877,15 +1877,8 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
         .module_analysis(&module, default_compile_env(&externs))
         .expect("module analysis");
     let optimization_plan = jit.optimization_plan(&module).expect("optimization plan");
-    let dynamic_callsites = jit
-        .dynamic_callsites
-        .as_ref()
-        .expect("dynamic callsite facts")
-        .range(0)
-        .expect("caller dynamic callsite range");
     let analysis = jit
-        .cache
-        .get_or_analyze(0, &module.functions[0], &module, dynamic_callsites)
+        .get_or_analyze_function(0, &module.functions[0], &module)
         .expect("caller analysis");
     let target_config = jit.module.target_config();
     let ptr_type = target_config.pointer_type();

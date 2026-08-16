@@ -43,6 +43,12 @@ impl JitFunctionBuilder {
         self
     }
 
+    pub(crate) fn return_slot_types(mut self, ret_slot_types: Vec<SlotType>) -> Self {
+        self.ret_slots = ret_slot_types.len() as u16;
+        self.ret_slot_types = Some(ret_slot_types);
+        self
+    }
+
     pub(crate) fn build(self) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
         let has_defer = self

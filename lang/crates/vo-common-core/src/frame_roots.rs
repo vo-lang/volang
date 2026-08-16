@@ -328,7 +328,7 @@ fn build_function_map(
         match instruction_frame_memory_effect(&inst, metadata)
             .map_err(|_| FrameRootMapBuildError::semantic(func_id, pc, "frame memory effects"))?
         {
-            FrameMemoryEffect::None | FrameMemoryEffect::From(_) => {}
+            FrameMemoryEffect::None => {}
             FrameMemoryEffect::AliasedRange { start, count } => {
                 budget.charge_work(
                     func_id,

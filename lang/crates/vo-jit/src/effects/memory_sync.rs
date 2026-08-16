@@ -6,7 +6,6 @@ use super::{EffectError, EffectFacts, SlotRangeError};
 pub enum MemorySyncEffect {
     None,
     AliasedRange { start: u16, count: u16 },
-    From(u16),
 }
 
 pub fn try_memory_sync_effect(
@@ -24,9 +23,6 @@ pub fn try_memory_sync_effect(
             start,
             count,
         }) => Ok(MemorySyncEffect::AliasedRange { start, count }),
-        Ok(vo_common_core::instruction_effects::FrameMemoryEffect::From(start)) => {
-            Ok(MemorySyncEffect::From(start))
-        }
         Err(vo_common_core::instruction_effects::InstructionReadError::SlotRangeOverflow {
             start,
             count,

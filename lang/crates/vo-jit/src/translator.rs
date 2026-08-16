@@ -118,10 +118,11 @@ pub enum NativeScratchKind {
     ExternArgs,
     ExternReturns,
     GcRoots,
+    CollectionValue,
 }
 
 impl NativeScratchKind {
-    const COUNT: usize = 7;
+    const COUNT: usize = 8;
 
     #[inline]
     const fn index(self) -> usize {

@@ -420,7 +420,7 @@ mod tests {
             &mut builder,
             &module.functions[0],
             &ir,
-            u16::MAX,
+            &crate::analysis::MemorySlotSet::default(),
         );
         assert_eq!(vars.iter().count(), 1);
         assert!(vars.get(511).is_some());

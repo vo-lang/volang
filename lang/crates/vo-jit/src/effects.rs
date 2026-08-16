@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_effect_distinguishes_dynamic_aliases_from_bounded_values() {
+    fn memory_effect_tracks_only_persistent_dynamic_aliases() {
         let slot_get = Instruction::with_flags(Opcode::SlotGetN, 0, 20, 2, 7);
         let queue_send = Instruction::new(Opcode::QueueSend, 1, 9, 0);
         let append = Instruction::new(Opcode::SliceAppend, 0, 1, 4);
@@ -585,11 +585,11 @@ mod tests {
         );
         assert_eq!(
             try_memory_sync_effect(&queue_send, EffectFacts::none()).unwrap(),
-            MemorySyncEffect::From(9)
+            MemorySyncEffect::None
         );
         assert_eq!(
             try_memory_sync_effect(&append, EffectFacts::none()).unwrap(),
-            MemorySyncEffect::From(5)
+            MemorySyncEffect::None
         );
     }
 

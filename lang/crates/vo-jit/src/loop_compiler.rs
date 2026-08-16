@@ -61,7 +61,7 @@ impl<'a> LoopCompiler<'a> {
         let locals_ptr_var = builder.declare_var(types::I64);
         let jit_memory_flags = crate::translator::JitMemoryFlags::new(&mut builder);
 
-        let memory_only_start = analysis.memory_only_start_for_loop(func_def, loop_info)?;
+        let memory_slots = analysis.memory_slots_for_loop(func_def, loop_info)?;
         Ok(Self {
             builder,
             core: crate::compile_common::CompilerCore::new(
@@ -73,7 +73,7 @@ impl<'a> LoopCompiler<'a> {
                 entry_block,
                 helpers,
                 analysis,
-                memory_only_start,
+                memory_slots,
                 jit_memory_flags,
             ),
             loop_info,

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cranelift_codegen::ir::Block;
@@ -25,7 +26,7 @@ pub(crate) struct CompilerCore<'a> {
     pub(crate) helpers: HelperRefs<'a>,
     pub(crate) execution_budget_regions: BTreeMap<usize, u32>,
     pub(crate) checked_non_nil: HashSet<u16>,
-    pub(crate) memory_only_start: u16,
+    pub(crate) memory_slots: Cow<'a, crate::analysis::MemorySlotSet>,
     pub(crate) native_scratch_slots: NativeScratchSlots,
     pub(crate) jit_memory_flags: JitMemoryFlags,
     pub(crate) analysis: &'a FunctionAnalysis,
@@ -43,7 +44,7 @@ impl<'a> CompilerCore<'a> {
         entry_block: Block,
         helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
-        memory_only_start: u16,
+        memory_slots: Cow<'a, crate::analysis::MemorySlotSet>,
         jit_memory_flags: JitMemoryFlags,
     ) -> Self {
         Self {
@@ -61,7 +62,7 @@ impl<'a> CompilerCore<'a> {
             helpers,
             execution_budget_regions: BTreeMap::new(),
             checked_non_nil: HashSet::new(),
-            memory_only_start,
+            memory_slots,
             native_scratch_slots: NativeScratchSlots::default(),
             jit_memory_flags,
             analysis,
@@ -74,7 +75,7 @@ impl<'a> CompilerCore<'a> {
             builder,
             self.func_def,
             self.analysis.ir(),
-            self.memory_only_start,
+            &self.memory_slots,
         );
     }
 
