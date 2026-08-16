@@ -14,7 +14,8 @@ use super::DynamicCallLowering;
 /// owns the method identity and argument/return layouts.
 ///
 /// The callsite owner fixes the method index; exact receiver slot0 is the IC key.
-/// IC fast path: compare exact slot0, then use native stack receiver + user args.
+/// IC fast path: compare exact slot0, then reserve a fiber shadow window for
+/// the receiver and user arguments.
 /// IC slow path: call prepare_iface_call, update IC, dispatch via emit_prepared_call.
 pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
@@ -58,9 +59,14 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(ic_hit_block);
 
     let hit_fields = lowering.load_hit_fields(emitter);
-    lowering.emit_hit_slot0(emitter, slot1);
-
-    lowering.emit_hit_call(emitter, ic_jit_ptr, hit_fields, merge_block, ic_miss_block)?;
+    lowering.emit_hit_call(
+        emitter,
+        slot1,
+        ic_jit_ptr,
+        hit_fields,
+        merge_block,
+        ic_miss_block,
+    )?;
 
     emitter.builder().switch_to_block(ic_miss_block);
     emitter.builder().seal_block(ic_miss_block);

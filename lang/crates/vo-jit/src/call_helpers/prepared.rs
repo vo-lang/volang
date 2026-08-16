@@ -8,9 +8,9 @@ use crate::translator::{HelperKind, IrEmitter};
 use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_checked_jit_result_indirect_callback_call,
     emit_effect_aware_jit_call, emit_native_link, emit_raw_jit_context_callback_call,
-    import_jit_func_sig, load_current_func_id, load_native_arg_lanes_dynamic,
-    restore_caller_execution_context, JitCallGcMode, JitCallOperands, JIT_RESULT_CALL,
-    JIT_RESULT_OK, PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
+    import_jit_func_sig, load_native_arg_lanes_dynamic, restore_caller_execution_context,
+    JitCallGcMode, JitCallOperands, JIT_RESULT_CALL, JIT_RESULT_OK,
+    PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
 
 /// Parameters for the common prepared-call dispatch.
@@ -52,7 +52,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
 
     // caller_bp was saved BEFORE the prepare callback (which updates ctx.jit_bp via push_frame).
     let caller_bp = p.caller_bp;
-    let caller_func_id = load_current_func_id(emitter);
+    let caller_func_id = emitter.call_caller_func_id();
 
     // Load pop_frame resources before branching (needed in both trampoline and JIT-OK paths)
     let pop_frame_fn_ptr = emitter.load_context_field(types::I64, JitContextField::PopFrameFn);

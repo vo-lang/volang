@@ -1,4 +1,4 @@
-use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlagsData as MemFlags, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::SlotType;
@@ -370,28 +370,6 @@ pub(crate) fn spill_ssa_prefix_to_memory(
             .ins()
             .store(MemFlags::trusted(), val, dst_ptr, indexed_slot_offset(i));
     }
-}
-
-pub(crate) fn copy_memory_slot_suffix_with_helper(
-    builder: &mut FunctionBuilder<'_>,
-    src_ptr: Value,
-    dst_ptr: Value,
-    start_slot: usize,
-    end_slot: usize,
-    copy_frame_slots: FuncRef,
-) {
-    if start_slot >= end_slot {
-        return;
-    }
-    let byte_offset = (start_slot * 8) as i64;
-    let src = builder.ins().iadd_imm_s(src_ptr, byte_offset);
-    let dst = builder.ins().iadd_imm_s(dst_ptr, byte_offset);
-    let slot_count = builder
-        .ins()
-        .iconst(types::I32, (end_slot - start_slot) as i64);
-    builder
-        .ins()
-        .call(copy_frame_slots, &[dst, src, slot_count]);
 }
 
 pub(crate) fn reload_vars_from_memory(

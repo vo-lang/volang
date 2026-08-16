@@ -2078,7 +2078,7 @@ fn callback_reload_crosses_the_ssa_memory_boundary() {
 }
 
 #[test]
-fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
+fn cooperative_yield_publishes_the_canonical_mixed_frame() {
     let region = crate::compile_common::EXECUTION_BUDGET_REGION_INSTRUCTIONS;
     let high_slot = crate::compile_common::MAX_SSA_LOCAL_SLOTS + 43;
     let local_slots = high_slot + 1;
@@ -2106,25 +2106,23 @@ fn cooperative_yield_spills_ssa_prefix_and_copies_memory_suffix() {
     .expect("compile wide yielding function");
     let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
 
-    let mut entry_args = vec![0_u64; usize::from(local_slots)];
     let mut materialized_frame = vec![0_u64; usize::from(local_slots)];
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut materialized_frame);
     ctx.execution_budget = region as u32;
 
-    let result = unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut entry_args, &mut ret) };
+    let result =
+        unsafe { crate::invoke_test_jit(jit_func, &mut ctx, &mut materialized_frame, &mut ret) };
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
     assert_eq!(ctx.call_resume_pc, region as u32);
-    assert_eq!(entry_args[0], 0, "SSA prefix must remain register-backed");
     assert_eq!(materialized_frame[0], 11, "SSA prefix must be spilled");
-    assert_eq!(entry_args[usize::from(high_slot)], 22);
     assert_eq!(
         materialized_frame[usize::from(high_slot)],
         22,
-        "memory suffix must be bulk-copied into the VM frame"
+        "the memory suffix must remain in the canonical VM frame"
     );
 }
 

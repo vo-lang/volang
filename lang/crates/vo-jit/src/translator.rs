@@ -113,7 +113,6 @@ pub trait IrBuilder<'a> {
 pub enum NativeScratchKind {
     StaticReturns,
     DynamicReturns,
-    DynamicIcArgs,
     DynamicUserArgs,
     DynamicPreparedCall,
     ExternArgs,
@@ -122,7 +121,7 @@ pub enum NativeScratchKind {
 }
 
 impl NativeScratchKind {
-    const COUNT: usize = 8;
+    const COUNT: usize = 7;
 
     #[inline]
     const fn index(self) -> usize {
@@ -666,14 +665,16 @@ pub trait CallBoundary<'a>: IrBuilder<'a> {
 
     /// Fiber sp value to restore if a call returns through the native fast path.
     fn call_old_fiber_sp(&mut self) -> Value;
+
+    /// Compile-time identity of the caller activation.
+    fn call_caller_func_id(&mut self) -> Value;
 }
 
 /// Stack base refresh after callbacks or calls that may reallocate fiber.stack.
 pub trait StackRefresh {
-    /// Refresh the cached fiber.stack base pointer after a call that may have triggered
-    /// fiber.stack reallocation (via jit_push_frame inside prepare_closure_call, etc.).
-    /// Implementations use def_var on their args_ptr/locals_ptr Variable so Cranelift
-    /// inserts phi nodes correctly at join points.
+    /// Refresh any cached fiber.stack pointer after a call that may have
+    /// reallocated it. Full functions retain a stable BP slot index and rebuild
+    /// pointers on demand; OSR artifacts redefine their cached locals pointer.
     fn refresh_stack_base_after_reallocation(&mut self) {}
 }
 

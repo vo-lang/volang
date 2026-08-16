@@ -90,10 +90,6 @@ fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E) {
     emitter.store_context_field(pc_val, JitContextField::RuntimeTrapPc);
 }
 
-fn load_current_func_id<'a, E: IrEmitter<'a>>(emitter: &mut E) -> Value {
-    emitter.load_context_field(types::I32, JitContextField::CurrentFuncId)
-}
-
 /// Resolve a cold callee and reload its native dispatch pointer. The callback
 /// keeps the current native root chain linked and publishes through the same
 /// generation-tracked table used by inline caches.
@@ -447,6 +443,8 @@ mod tests {
             CallRoute::DynamicJitTable,
             "self recursion uses the guarded JIT table path once its entry is published"
         );
+        assert!(self_plan.requires_depth_guard(true));
+        assert!(!self_plan.requires_depth_guard(false));
 
         let defer_self = CallPlan::new(7, 2, &func(8, true));
         assert_eq!(
@@ -495,6 +493,7 @@ mod tests {
             CallRoute::PreparedJitTable,
             "runtime traps use the prepared shadow route"
         );
+        assert!(trapping_plan.requires_depth_guard(false));
     }
 
     #[test]

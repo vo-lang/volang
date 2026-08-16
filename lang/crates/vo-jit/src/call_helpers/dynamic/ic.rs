@@ -11,23 +11,16 @@ use crate::JitError;
 use super::super::prepared::{emit_prepared_call, PreparedCallParams};
 use super::super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_jit_call,
-    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_current_func_id,
-    load_native_arg_lanes, restore_caller_execution_context, JitCallGcMode, JitCallOperands,
-    NonOkSlowPathParams, JIT_RESULT_OK,
+    emit_non_ok_slow_path, emit_stack_capacity_check, import_jit_func_sig, load_native_arg_lanes,
+    restore_caller_execution_context, JitCallGcMode, JitCallOperands, NonOkSlowPathParams,
+    JIT_RESULT_OK,
 };
-
-/// Maximum callee local_slots for the IC native-stack optimization.
-/// This is only a cache-admission budget: larger callees still dispatch through
-/// the validated PreparedCall produced by the prepare callback on every call.
-/// 64 slots = 512 bytes on native stack per dynamic call site.
-pub(super) const MAX_IC_NATIVE_SLOTS: usize = 64;
 
 /// Parameters for the shared IC hit fast path after slot0 setup.
 pub(super) struct IcHitParams {
     pub(super) ctx: Value,
     pub(super) ic_jit_ptr: Value,
-    pub(super) ic_args_slot: StackSlot,
-    pub(super) ic_args_ptr: Value,
+    pub(super) receiver: Value,
     pub(super) ic_local_slots: Value,
     pub(super) ic_func_id: Value,
     pub(super) ic_may_gc: Value,
@@ -68,22 +61,13 @@ pub(super) struct DynamicIcHitFields {
     pub(super) may_gc: Value,
 }
 
-/// Emit the shared IC hit fast path: copy user args, update ctx, call JIT, and
-/// route OK/non-OK results. Called after slot0 setup is complete.
+/// Emit the shared IC hit fast path: reserve the canonical fiber shadow window,
+/// copy arguments, update ctx, call JIT, and route OK/non-OK results.
 pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     p: IcHitParams,
     user_arg_vals: &[Value],
 ) -> Result<(), JitError> {
-    for (i, val) in user_arg_vals.iter().enumerate() {
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            *val,
-            p.ic_args_ptr,
-            ((i + 1) * 8) as i32,
-        );
-    }
-
     let new_bp = p.old_fiber_sp;
     let new_sp = emitter.builder().ins().iadd(new_bp, p.ic_local_slots);
     let (capacity_materialize_block, capacity_ok_block) =
@@ -99,20 +83,36 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
-    let caller_func_id = load_current_func_id(emitter);
+    let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
+    let bp_offset = emitter.builder().ins().uextend(types::I64, new_bp);
+    let bp_offset = emitter.builder().ins().imul_imm_u(bp_offset, 8);
+    let callee_args_ptr = emitter.builder().ins().iadd(stack_ptr, bp_offset);
+    emitter
+        .builder()
+        .ins()
+        .store(MemFlags::trusted(), p.receiver, callee_args_ptr, 0);
+    for (i, val) in user_arg_vals.iter().enumerate() {
+        emitter.builder().ins().store(
+            MemFlags::trusted(),
+            *val,
+            callee_args_ptr,
+            ((i + 1) * 8) as i32,
+        );
+    }
+    let caller_func_id = emitter.call_caller_func_id();
     let old_call_depth = emit_call_depth_enter(emitter, p.ctx)?;
     emitter.store_context_field(new_bp, JitContextField::JitBp);
     emitter.store_context_field(new_sp, JitContextField::FiberSp);
 
     let jit_func_sig = import_jit_func_sig(emitter);
-    let arg_lanes = load_native_arg_lanes(emitter, p.ic_args_ptr, p.arg_slots + 1);
+    let arg_lanes = load_native_arg_lanes(emitter, callee_args_ptr, p.arg_slots + 1);
     let jit_result = emit_effect_aware_jit_call(
         emitter,
         jit_func_sig,
         p.ic_jit_ptr,
         JitCallOperands {
             ctx: p.ctx,
-            args_ptr: p.ic_args_ptr,
+            args_ptr: callee_args_ptr,
             ret_ptr: p.ret_ptr,
             arg_lanes: &arg_lanes,
         },
@@ -169,7 +169,6 @@ pub(super) fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
             ret_reg_val: ic_ret_reg_val,
             ret_slots_val: ic_ret_slots_val,
             caller_resume_pc_val: ic_resume_pc_val,
-            copy_args: Some((p.ic_args_slot, p.arg_slots + 1)),
         },
     )?;
     Ok(())
@@ -223,22 +222,12 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
             .builder()
             .ins()
             .icmp(IntCC::NotEqual, out_ic_jit_ptr, null_jit);
-        let max_slots = emitter
-            .builder()
-            .ins()
-            .iconst(types::I32, MAX_IC_NATIVE_SLOTS as i64);
-        let fits = emitter.builder().ins().icmp(
-            IntCC::UnsignedLessThanOrEqual,
-            out_local_slots,
-            max_slots,
-        );
-        let can_cache = emitter.builder().ins().band(has_jit, fits);
         let ic_update_block = emitter.builder().create_block();
         let ic_skip_block = emitter.builder().create_block();
         emitter
             .builder()
             .ins()
-            .brif(can_cache, ic_update_block, &[], ic_skip_block, &[]);
+            .brif(has_jit, ic_update_block, &[], ic_skip_block, &[]);
 
         emitter.builder().switch_to_block(ic_update_block);
         emitter.builder().seal_block(ic_update_block);

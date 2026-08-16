@@ -2397,6 +2397,11 @@ impl ModuleInlinePlan {
         self.pure_leaf_inlines.get(callee)?.as_deref()
     }
 
+    pub(crate) fn is_recursive_edge(&self, caller_id: u32, callee_id: u32) -> bool {
+        self.graph
+            .is_recursive_edge(caller_id as usize, callee_id as usize)
+    }
+
     fn direct_self_call(&self, caller_id: u32, callee_id: u32) -> bool {
         caller_id == callee_id
             && self
@@ -2502,6 +2507,10 @@ impl ModuleOptimizationPlan {
             concrete_iface_itabs,
             interface_methods,
         })
+    }
+
+    pub(crate) fn is_recursive_edge(&self, caller_id: u32, callee_id: u32) -> bool {
+        self.inline_plan.is_recursive_edge(caller_id, callee_id)
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {

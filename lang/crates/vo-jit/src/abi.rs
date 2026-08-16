@@ -18,8 +18,9 @@ pub const NATIVE_ARG_LANES: usize = 1;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub const NATIVE_ARG_LANES: usize = 1;
 
-/// Unified VM/JIT native entry. Static calls pass SSA arguments in lanes; VM
-/// dispatch loads the same lanes directly from the verified frame window.
+/// Unified VM/JIT native entry. `frame_ptr` always identifies the callee's
+/// verified fiber-stack window. Static calls additionally pass the leading
+/// argument words in lanes so the callee can enter SSA without reloading them.
 #[cfg(target_arch = "aarch64")]
 pub type NativeJitFunc = extern "C" fn(
     ctx: *mut JitContext,
@@ -73,8 +74,9 @@ pub(crate) fn native_signature(
 /// Invoke the unified native ABI from a verified VM frame window.
 ///
 /// # Safety
-/// `frame_ptr` must address at least `param_slots` initialized words and
-/// `entry` must carry [`NativeJitFunc`]'s ABI.
+/// `frame_ptr` must identify the active fiber stack at `ctx.jit_bp`, address at
+/// least `param_slots` initialized words, and `entry` must carry
+/// [`NativeJitFunc`]'s ABI.
 #[inline]
 pub unsafe fn invoke_native_from_frame(
     entry: NativeJitFunc,

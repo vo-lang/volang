@@ -8,9 +8,8 @@ use crate::translator::{HelperKind, IrEmitter, NativeScratchKind};
 use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_effect_aware_direct_jit_call,
     emit_effect_aware_jit_call, emit_non_ok_slow_path, emit_stack_capacity_check,
-    import_jit_func_sig, load_current_func_id, restore_caller_execution_context, CallPlan,
-    CallViaVmConfig, JitCallGcMode, JitCallOperands, NonOkSlowPathParams, JIT_RESULT_CALL,
-    JIT_RESULT_OK,
+    import_jit_func_sig, restore_caller_execution_context, CallPlan, CallViaVmConfig,
+    JitCallGcMode, JitCallOperands, NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
 };
 
 /// Emit a call by materializing a VM-owned call request.
@@ -90,12 +89,13 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     plan: CallPlan,
     direct_native: Option<cranelift_codegen::ir::FuncRef>,
+    recursive_edge: bool,
 ) -> Result<(), crate::JitError> {
     let ctx = emitter.ctx_param();
 
     let caller_bp = emitter.call_caller_bp();
     let old_fiber_sp = emitter.call_old_fiber_sp();
-    let caller_func_id = load_current_func_id(emitter);
+    let caller_func_id = emitter.call_caller_func_id();
 
     let mut arg_values = Vec::with_capacity(plan.arg_slots);
     for i in 0..plan.arg_slots {
@@ -153,8 +153,11 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
-    emitter.store_context_field(new_bp, JitContextField::JitBp);
-    emitter.store_context_field(new_sp, JitContextField::FiberSp);
+    let eager_context_transition = !plan.eligibility.frame_elided;
+    if eager_context_transition {
+        emitter.store_context_field(new_bp, JitContextField::JitBp);
+        emitter.store_context_field(new_sp, JitContextField::FiberSp);
+    }
     let stack_ptr = emitter.load_context_field(types::I64, JitContextField::StackPtr);
     let bp_offset = emitter.builder().ins().uextend(types::I64, new_bp);
     let bp_offset = emitter.builder().ins().imul_imm_u(bp_offset, 8);
@@ -222,7 +225,10 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     emitter.builder().seal_block(jit_call_block);
     let linked_func_ptr = emitter.builder().block_params(jit_call_block)[0];
 
-    let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
+    let old_call_depth = plan
+        .requires_depth_guard(recursive_edge)
+        .then(|| emit_call_depth_enter(emitter, ctx))
+        .transpose()?;
     let gc_mode = if plan.eligibility.may_gc {
         JitCallGcMode::MayGc
     } else {
@@ -249,7 +255,9 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             gc_mode,
         )
     };
-    emit_call_depth_leave(emitter, old_call_depth);
+    if let Some(old_call_depth) = old_call_depth {
+        emit_call_depth_leave(emitter, old_call_depth);
+    }
 
     let ok_val = emitter
         .builder()
@@ -284,20 +292,23 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             ret_reg_val,
             ret_slots_val,
             caller_resume_pc_val,
-            copy_args: None,
         },
     )?;
 
     emitter.builder().switch_to_block(jit_ok_block);
     emitter.builder().seal_block(jit_ok_block);
-    restore_caller_execution_context(emitter, caller_bp, old_fiber_sp, caller_func_id);
+    if eager_context_transition {
+        restore_caller_execution_context(emitter, caller_bp, old_fiber_sp, caller_func_id);
+    }
     emitter.refresh_stack_base_after_reallocation();
     emitter.builder().ins().jump(merge_block, &[]);
 
     emitter.builder().switch_to_block(vm_call_block);
     emitter.builder().seal_block(vm_call_block);
 
-    restore_caller_execution_context(emitter, caller_bp, old_fiber_sp, caller_func_id);
+    if eager_context_transition {
+        restore_caller_execution_context(emitter, caller_bp, old_fiber_sp, caller_func_id);
+    }
 
     emitter.spill_all_vars();
 

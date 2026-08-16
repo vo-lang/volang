@@ -1,5 +1,5 @@
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, StackSlot, Value};
+use cranelift_codegen::ir::{types, InstBuilder, Value};
 
 use vo_runtime::jit_api::{JitContextField, JitResult};
 
@@ -37,9 +37,8 @@ pub fn emit_checked_jit_result_helper_call<'a, E: HelperCallEmitter<'a>>(
 /// 1. Restore ctx.jit_bp and ctx.fiber_sp to caller's values
 /// 2. Spill SSA variables to fiber.stack
 /// 3. push_frame to materialize callee frame
-/// 4. Optionally copy args from native stack to fiber.stack
-/// 5. push_resume_point for frame chain
-/// 6. Return the JIT result
+/// 4. push_resume_point for frame chain
+/// 5. Return the JIT result
 pub struct NonOkSlowPathParams {
     pub jit_result: Value,
     pub ctx: Value,
@@ -52,8 +51,6 @@ pub struct NonOkSlowPathParams {
     pub ret_reg_val: Value,
     pub ret_slots_val: Value,
     pub caller_resume_pc_val: Value,
-    /// Optional arguments to copy from native stack to fiber.stack after push_frame.
-    pub copy_args: Option<(StackSlot, usize)>,
 }
 
 /// Emit the non-OK slow path: restore ctx, spill, push_frame, push_resume_point, return.
@@ -92,23 +89,6 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
         })
     })?;
     emit_return_jit_error_if_null_callee_args(emitter, callee_fiber_args_ptr);
-
-    if let Some((args_slot, arg_count)) = p.copy_args {
-        for i in 0..arg_count {
-            let val = emitter.builder().ins().stack_load(
-                types::I64,
-                types::I64,
-                args_slot,
-                (i * 8) as i32,
-            );
-            emitter.builder().ins().store(
-                MemFlags::trusted(),
-                val,
-                callee_fiber_args_ptr,
-                (i * 8) as i32,
-            );
-        }
-    }
 
     let push_resume_point_fn_ptr =
         emitter.load_context_field(types::I64, JitContextField::PushResumePointFn);

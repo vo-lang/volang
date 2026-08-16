@@ -533,13 +533,27 @@ impl<'a> LoopCompiler<'a> {
             return Ok(false);
         }
 
+        let recursive_edge = self
+            .optimization_plan
+            .is_recursive_edge(self.core.func_id, func_id);
+
         match call_plan.route_for_loop() {
             crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan, None)?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(
+                    self,
+                    call_plan,
+                    None,
+                    recursive_edge,
+                )?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::PreparedJitTable => {
-                crate::call_helpers::emit_jit_call_with_vm_materialization(self, call_plan, None)?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(
+                    self,
+                    call_plan,
+                    None,
+                    recursive_edge,
+                )?;
                 Ok(false)
             }
             crate::call_helpers::CallRoute::VmCallMaterialization => {
@@ -812,6 +826,11 @@ impl<'a> crate::translator::CallBoundary<'a> for LoopCompiler<'a> {
     }
     fn call_old_fiber_sp(&mut self) -> Value {
         self.load_context_field(types::I32, JitContextField::FiberSp)
+    }
+    fn call_caller_func_id(&mut self) -> Value {
+        self.builder
+            .ins()
+            .iconst(types::I32, i64::from(self.core.func_id))
     }
 }
 

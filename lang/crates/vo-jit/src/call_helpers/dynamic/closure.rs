@@ -106,8 +106,14 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
     let hit_fields = lowering.load_hit_fields(emitter);
-    lowering.emit_hit_slot0(emitter, closure_ref);
-    lowering.emit_hit_call(emitter, ic_jit_ptr, hit_fields, merge_block, ic_miss_block)?;
+    lowering.emit_hit_call(
+        emitter,
+        closure_ref,
+        ic_jit_ptr,
+        hit_fields,
+        merge_block,
+        ic_miss_block,
+    )?;
 
     emitter.builder().switch_to_block(ic_miss_block);
     emitter.builder().seal_block(ic_miss_block);

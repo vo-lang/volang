@@ -15,7 +15,6 @@ mod closure;
 mod ic;
 mod iface;
 mod scratch;
-mod slot0;
 
 pub use closure::emit_call_closure;
 use ic::{
@@ -25,9 +24,8 @@ use ic::{
 };
 pub use iface::emit_call_iface;
 use scratch::{
-    allocate_dynamic_call_returns, allocate_ic_args_scratch, allocate_prepared_call_out,
-    copy_dynamic_call_returns, copy_user_args_to_stack, dynamic_call_scalar_values,
-    read_dynamic_user_args, DynamicCallMiss,
+    allocate_dynamic_call_returns, allocate_prepared_call_out, copy_dynamic_call_returns,
+    copy_user_args_to_stack, dynamic_call_scalar_values, read_dynamic_user_args, DynamicCallMiss,
 };
 
 fn dynamic_ic_match(
@@ -56,8 +54,6 @@ struct DynamicCallLowering {
 }
 
 struct DynamicIcState {
-    args_slot: StackSlot,
-    args_ptr: Value,
     entry: Value,
 }
 
@@ -101,13 +97,8 @@ impl DynamicCallLowering {
         let (ret_slot, ret_ptr) = allocate_dynamic_call_returns(emitter, ret_slots);
         let caller_bp = emitter.call_caller_bp();
         let old_fiber_sp = emitter.call_old_fiber_sp();
-        let ic = with_ic.then(|| {
-            let (args_slot, args_ptr) = allocate_ic_args_scratch(emitter);
-            DynamicIcState {
-                args_slot,
-                args_ptr,
-                entry: dynamic_ic_entry(emitter, inst.dynamic_callsite_ordinal()),
-            }
+        let ic = with_ic.then(|| DynamicIcState {
+            entry: dynamic_ic_entry(emitter, inst.dynamic_callsite_ordinal()),
         });
 
         Ok(Self {
@@ -159,13 +150,10 @@ impl DynamicCallLowering {
         load_hit_fields(emitter, self.ic().entry)
     }
 
-    fn emit_hit_slot0<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, slot0: Value) {
-        slot0::emit_hit_slot0(emitter, self.ic().args_slot, slot0);
-    }
-
     fn emit_hit_call<'a, E: IrEmitter<'a>>(
         &self,
         emitter: &mut E,
+        receiver: Value,
         ic_jit_ptr: Value,
         fields: DynamicIcHitFields,
         merge_block: Block,
@@ -176,8 +164,7 @@ impl DynamicCallLowering {
             IcHitParams {
                 ctx: self.ctx,
                 ic_jit_ptr,
-                ic_args_slot: self.ic().args_slot,
-                ic_args_ptr: self.ic().args_ptr,
+                receiver,
                 ic_local_slots: fields.local_slots,
                 ic_func_id: fields.func_id,
                 ic_may_gc: fields.may_gc,

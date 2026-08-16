@@ -1473,17 +1473,11 @@ mod tests {
         let mut fiber = Fiber::new(16);
         fiber.execution_budget = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
-        let mut frame = [0_u64; 1];
+        let frame = ctx.ctx.stack_ptr;
         let mut ret = [0_u64; 1];
         assert_eq!(
             unsafe {
-                vo_jit::invoke_native_from_frame(
-                    entry,
-                    ctx.as_ptr(),
-                    frame.as_mut_ptr(),
-                    ret.as_mut_ptr(),
-                    0,
-                )
+                vo_jit::invoke_native_from_frame(entry, ctx.as_ptr(), frame, ret.as_mut_ptr(), 0)
             },
             JitResult::Ok
         );
@@ -1698,17 +1692,11 @@ mod tests {
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = 100;
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
-        let mut args = [0_u64; 1];
+        let args = ctx.ctx.stack_ptr;
         let mut ret = [0xfeed_u64];
 
         let result = unsafe {
-            vo_jit::invoke_native_from_frame(
-                caller_entry,
-                ctx.as_ptr(),
-                args.as_mut_ptr(),
-                ret.as_mut_ptr(),
-                0,
-            )
+            vo_jit::invoke_native_from_frame(caller_entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 0)
         };
 
         assert_eq!(result, JitResult::Call);
@@ -1759,17 +1747,11 @@ mod tests {
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = 100;
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
-        let mut args = [0_u64; 1];
+        let args = ctx.ctx.stack_ptr;
         let mut ret = [0xfeed_u64];
 
         let result = unsafe {
-            vo_jit::invoke_native_from_frame(
-                caller_entry,
-                ctx.as_ptr(),
-                args.as_mut_ptr(),
-                ret.as_mut_ptr(),
-                0,
-            )
+            vo_jit::invoke_native_from_frame(caller_entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 0)
         };
 
         assert_eq!(result, JitResult::Ok);
@@ -1820,16 +1802,10 @@ mod tests {
         let mut fiber = Fiber::new(1);
         fiber.execution_budget = 100;
         let mut ctx = build_jit_context(&mut vm, &mut fiber).expect("JIT context");
-        let mut args = [0_u64; 1];
+        let args = ctx.ctx.stack_ptr;
         let mut ret = [0xfeed_u64];
         let result = unsafe {
-            vo_jit::invoke_native_from_frame(
-                caller_entry,
-                ctx.as_ptr(),
-                args.as_mut_ptr(),
-                ret.as_mut_ptr(),
-                0,
-            )
+            vo_jit::invoke_native_from_frame(caller_entry, ctx.as_ptr(), args, ret.as_mut_ptr(), 0)
         };
 
         assert_eq!(result, JitResult::Ok);

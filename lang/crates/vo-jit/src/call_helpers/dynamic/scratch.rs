@@ -4,8 +4,6 @@ use vo_runtime::jit_api::PreparedCall;
 use crate::call_helpers::DynamicCallPlan;
 use crate::translator::{IrEmitter, NativeScratchKind};
 
-use super::ic::MAX_IC_NATIVE_SLOTS;
-
 pub(super) struct DynamicCallScalarValues {
     pub(super) ret_reg_val: Value,
     pub(super) ret_slots_val: Value,
@@ -44,15 +42,6 @@ pub(super) fn allocate_dynamic_call_returns<'a, E: IrEmitter<'a>>(
         emitter.native_scratch_slot(NativeScratchKind::DynamicReturns, ret_slots.max(1) * 8);
     let ret_ptr = stack_addr(emitter, ret_slot);
     (ret_slot, ret_ptr)
-}
-
-pub(super) fn allocate_ic_args_scratch<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-) -> (StackSlot, Value) {
-    let slot =
-        emitter.native_scratch_slot(NativeScratchKind::DynamicIcArgs, MAX_IC_NATIVE_SLOTS * 8);
-    let ptr = stack_addr(emitter, slot);
-    (slot, ptr)
 }
 
 pub(super) fn copy_user_args_to_stack<'a, E: IrEmitter<'a>>(

@@ -26,18 +26,11 @@ struct VirtualObject {
 pub struct FunctionCompiler<'a> {
     builder: FunctionBuilder<'a>,
     core: crate::compile_common::CompilerCore<'a>,
-    copy_frame_slots: FuncRef,
     /// Saved jit_bp from function entry, used to recompute fiber.stack address after reallocation
     saved_jit_bp: Variable,
-    /// Variable wrapping the args_ptr for this function (points to fiber.stack[jit_bp]).
-    /// Declared as a Cranelift Variable so def_var/use_var handle phi insertion at join points,
-    /// allowing refresh_stack_base_after_reallocation to redefine it after any call that may
-    /// have triggered fiber.stack reallocation via jit_push_frame.
-    args_ptr_var: Variable,
-    args_ptr_is_stack_var: Variable,
-    /// ctx.jit_bp at function entry (i32). Reused by all call sites as caller_bp.
+    /// Frame base derived from the canonical frame pointer at function entry.
     saved_caller_bp: Value,
-    /// ctx.fiber_sp at function entry (i32). Reused by all call sites as old_fiber_sp.
+    /// End of this function's verified frame window.
     saved_fiber_sp: Value,
     pending_select_cases: Vec<SelectSyncCase>,
     tier: vo_runtime::jit_api::JitTier,
@@ -57,7 +50,7 @@ impl<'a> FunctionCompiler<'a> {
         vo_module: &'a VoModule,
         env: JitCompileEnv<'a>,
         entry_eligibility: &'a [crate::JitFrameEntryEligibility],
-        mut helpers: HelperRefs<'a>,
+        helpers: HelperRefs<'a>,
         analysis: &'a FunctionAnalysis,
         tier: vo_runtime::jit_api::JitTier,
         inline_plan: &'a crate::optimizer::ModuleInlinePlan,
@@ -65,16 +58,11 @@ impl<'a> FunctionCompiler<'a> {
         instruction_optimization: Option<&'a crate::optimizer::OptimizedFunction>,
         self_native_ref: Option<FuncRef>,
     ) -> Self {
-        let copy_frame_slots = helpers
-            .resolve(HelperKind::copy_frame_slots, func)
-            .func_ref();
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
 
         let saved_jit_bp = builder.declare_var(types::I64);
-        let args_ptr_var = builder.declare_var(types::I64);
-        let args_ptr_is_stack_var = builder.declare_var(types::I8);
         let jit_memory_flags = crate::translator::JitMemoryFlags::new(&mut builder);
         let virtual_objects = instruction_optimization
             .map(crate::optimizer::OptimizedFunction::scalar_object_slots)
@@ -103,10 +91,7 @@ impl<'a> FunctionCompiler<'a> {
                 analysis.memory_only_start,
                 jit_memory_flags,
             ),
-            copy_frame_slots,
             saved_jit_bp,
-            args_ptr_var,
-            args_ptr_is_stack_var,
             saved_caller_bp: Value::from_u32(0),
             saved_fiber_sp: Value::from_u32(0),
             pending_select_cases: Vec::new(),
@@ -186,11 +171,11 @@ impl<'a> FunctionCompiler<'a> {
 
     /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
     /// Called on slow path (Call/WaitIo) so VM can see the current state.
-    /// Note: args_ptr may be stale if fiber.stack was reallocated during nested calls,
-    /// so we recompute the destination from ctx.stack_ptr + saved_jit_bp.
+    /// The canonical entry pointer identifies this frame's BP, so a current
+    /// destination can always be rebuilt after fiber.stack reallocation.
     fn emit_variable_spill(&mut self) {
         self.materialize_virtual_objects();
-        let args_ptr = self.current_memory_base_ptr();
+        self.publish_execution_context();
         let dst_ptr = self.fiber_stack_args_ptr();
         crate::compile_common::CompilerStorage::for_function(
             self.core.func_def,
@@ -198,14 +183,16 @@ impl<'a> FunctionCompiler<'a> {
             self.core.memory_only_start,
         )
         .spill_ssa_prefix_to_memory(&mut self.builder, dst_ptr);
-        crate::compile_common::copy_memory_slot_suffix_with_helper(
-            &mut self.builder,
-            args_ptr,
-            dst_ptr,
-            self.core.vars.len(),
-            self.core.func_def.local_slots as usize,
-            self.copy_frame_slots,
-        );
+    }
+
+    fn publish_execution_context(&mut self) {
+        let func_id = self
+            .builder
+            .ins()
+            .iconst(types::I32, i64::from(self.core.func_id));
+        self.store_context_field(self.saved_caller_bp, JitContextField::JitBp);
+        self.store_context_field(self.saved_fiber_sp, JitContextField::FiberSp);
+        self.store_context_field(func_id, JitContextField::CurrentFuncId);
     }
 
     fn initialize_virtual_objects(&mut self) {
@@ -276,16 +263,7 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn current_memory_base_ptr(&mut self) -> Value {
-        let entry_args_ptr = self.builder.use_var(self.args_ptr_var);
-        let uses_stack = self.builder.use_var(self.args_ptr_is_stack_var);
-        let use_stack = self
-            .builder
-            .ins()
-            .icmp_imm_u(IntCC::NotEqual, uses_stack, 0);
-        let stack_args_ptr = self.fiber_stack_args_ptr();
-        self.builder
-            .ins()
-            .select(use_stack, stack_args_ptr, entry_args_ptr)
+        self.fiber_stack_args_ptr()
     }
 
     /// Compute fiber.stack base dynamically from ctx.stack_ptr + saved_jit_bp.
@@ -498,37 +476,27 @@ impl<'a> FunctionCompiler<'a> {
             self.builder.switch_to_block(continue_block);
             self.builder.seal_block(continue_block);
         }
-        let current_func_id = self
-            .builder
-            .ins()
-            .iconst(types::I32, i64::from(self.core.func_id));
-        self.store_context_field(current_func_id, JitContextField::CurrentFuncId);
+        if !self.core.entry_eligibility[self.core.func_id as usize].frame_elided {
+            let current_func_id = self
+                .builder
+                .ins()
+                .iconst(types::I32, i64::from(self.core.func_id));
+            self.store_context_field(current_func_id, JitContextField::CurrentFuncId);
+        }
 
-        // Wrap args_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
-        // it after any call that may have triggered fiber.stack reallocation.
-        self.builder.def_var(self.args_ptr_var, args_ptr);
-
-        // Save jit_bp from ctx at function entry.
-        // This is needed to compute fiber.stack address for spilling.
-        // Also saved as caller_bp (i32) for reuse by all call sites.
-        let jit_bp_i32 = self.load_context_field(types::I32, JitContextField::JitBp);
-        let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
+        // Every native function receives the canonical fiber frame pointer.
+        // Recover BP from that pointer once; nested calls may relocate the
+        // backing vector, while the slot index remains stable.
+        let stack_ptr = self.load_context_field(types::I64, JitContextField::StackPtr);
+        let byte_offset = self.builder.ins().isub(args_ptr, stack_ptr);
+        let jit_bp_i64 = self.builder.ins().ushr_imm_u(byte_offset, 3);
+        let jit_bp_i32 = self.builder.ins().ireduce(types::I32, jit_bp_i64);
         self.builder.def_var(self.saved_jit_bp, jit_bp_i64);
-        let stack_args_ptr = self.fiber_stack_args_ptr();
-        let uses_stack = self
+        self.saved_caller_bp = jit_bp_i32;
+        self.saved_fiber_sp = self
             .builder
             .ins()
-            .icmp(IntCC::Equal, args_ptr, stack_args_ptr);
-        let one_i8 = self.builder.ins().iconst(types::I8, 1);
-        let zero_i8 = self.builder.ins().iconst(types::I8, 0);
-        let uses_stack_i8 = self.builder.ins().select(uses_stack, one_i8, zero_i8);
-        self.builder
-            .def_var(self.args_ptr_is_stack_var, uses_stack_i8);
-        self.saved_caller_bp = jit_bp_i32;
-
-        // Save fiber_sp from ctx at function entry. Reused by all call sites.
-        let fiber_sp_i32 = self.load_context_field(types::I32, JitContextField::FiberSp);
-        self.saved_fiber_sp = fiber_sp_i32;
+            .iadd_imm_u(jit_bp_i32, i64::from(self.core.func_def.local_slots));
 
         let param_slots = self.core.func_def.param_slots as usize;
         let ssa_slots = self.core.vars.len();
@@ -1133,12 +1101,16 @@ impl<'a> FunctionCompiler<'a> {
             .optimization_plan
             .is_some_and(|plan| plan.direct_self_call(self.core.func_id, target_func_id));
         let direct_native = direct_self.then_some(self.self_native_ref).flatten();
+        let recursive_edge = self
+            .inline_plan
+            .is_recursive_edge(self.core.func_id, target_func_id);
         match call_plan.route_for_full_function(self.core.func_id) {
             crate::call_helpers::CallRoute::DynamicJitTable => {
                 crate::call_helpers::emit_jit_call_with_vm_materialization(
                     self,
                     call_plan,
                     direct_native,
+                    recursive_edge,
                 )?;
                 Ok(false)
             }
@@ -1147,6 +1119,7 @@ impl<'a> FunctionCompiler<'a> {
                     self,
                     call_plan,
                     direct_native,
+                    recursive_edge,
                 )?;
                 Ok(false)
             }
@@ -1383,6 +1356,11 @@ impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
     }
     fn call_old_fiber_sp(&mut self) -> Value {
         self.saved_fiber_sp
+    }
+    fn call_caller_func_id(&mut self) -> Value {
+        self.builder
+            .ins()
+            .iconst(types::I32, i64::from(self.core.func_id))
     }
 }
 
