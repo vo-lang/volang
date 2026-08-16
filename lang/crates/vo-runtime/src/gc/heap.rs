@@ -240,7 +240,6 @@ pub struct HeapAllocLane {
     pub logical_size_cursor: *mut u16,
     pub live_cells: *mut u16,
     pub logical_bytes: *mut usize,
-    pub first_bit: u64,
     pub class_size: usize,
 }
 
@@ -453,7 +452,6 @@ impl SpanHeap {
             cursor.write_bytes(0, (end - start) * class_size);
         }
         let word = start / 64;
-        let first_bit = 1u64 << (start % 64);
         Ok(Some(HeapAllocLane {
             cursor,
             limit,
@@ -461,7 +459,6 @@ impl SpanHeap {
             logical_size_cursor: unsafe { block.logical_sizes.as_mut_ptr().add(start) },
             live_cells: &mut block.live_cells,
             logical_bytes: &mut block.logical_bytes,
-            first_bit,
             class_size,
         }))
     }
@@ -1613,7 +1610,8 @@ mod tests {
 
         for cell in 0..3usize {
             unsafe {
-                *lane.bitmap_word |= lane.first_bit << cell;
+                let first_cell = (lane.cursor as usize & (HEAP_BLOCK_SIZE - 1)) / lane.class_size;
+                *lane.bitmap_word |= 1_u64 << ((first_cell + cell) % 64);
                 *lane.logical_size_cursor.add(cell) = 24;
                 *lane.live_cells += 1;
                 *lane.logical_bytes += 24;

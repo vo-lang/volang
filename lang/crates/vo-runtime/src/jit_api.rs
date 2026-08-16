@@ -644,8 +644,8 @@ pub struct JitContext {
     /// Updated by VM before each JIT call.
     pub stack_ptr: *mut u64,
 
-    /// Capacity of fiber.stack (fiber.stack.len()).
-    /// Allows JIT to check if frame push needs reallocation.
+    /// Usable capacity for direct shadow frames: the allocated fiber stack
+    /// length clamped to `stack_limit`.
     pub stack_cap: u32,
 
     /// Maximum stack slots allowed for direct JIT native-stack call chains.

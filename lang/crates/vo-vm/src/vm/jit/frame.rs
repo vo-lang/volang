@@ -92,7 +92,7 @@ pub extern "C" fn jit_push_frame(
 
     // Update ctx fields (stack_ptr may have changed due to reallocation)
     ctx_ref.stack_ptr = fiber.stack_ptr();
-    ctx_ref.stack_cap = fiber.stack.len() as u32;
+    ctx_ref.stack_cap = super::context::direct_stack_capacity(fiber);
     ctx_ref.jit_bp = new_bp as u32;
     ctx_ref.fiber_sp = new_sp as u32;
 

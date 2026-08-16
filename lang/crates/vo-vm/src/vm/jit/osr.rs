@@ -6,7 +6,7 @@ use crate::runtime_boundary::RuntimeTransition;
 use crate::vm::{JitSideExitReason, Vm};
 
 use super::bridge_result::{osr_result_from_bridge_transition, JitBridgeMode};
-use super::context::build_jit_context;
+use super::context::{build_jit_context, direct_stack_capacity};
 use super::transition::handle_jit_non_ok_transition;
 
 struct OsrBorrowBoundaryGuard {
@@ -78,7 +78,7 @@ pub fn dispatch_loop_osr(
             Err(err) => return OsrResult::JitError(err),
         };
         ctx.ctx.stack_ptr = fiber.stack_ptr();
-        ctx.ctx.stack_cap = fiber.stack.len() as u32;
+        ctx.ctx.stack_cap = direct_stack_capacity(fiber);
         ctx.ctx.jit_bp = bp as u32;
         ctx.ctx.current_func_id = fiber
             .frames

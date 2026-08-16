@@ -10,6 +10,16 @@ use crate::vm::Vm;
 use super::callbacks;
 use super::frame::{jit_pop_frame, jit_push_frame, jit_push_resume_point};
 
+/// Capacity visible to unmaterialized native call windows. Keeping this value
+/// clamped makes `stack_cap` the single hot-path bound: a successful capacity
+/// check also proves the direct-shadow resource limit.
+pub(super) fn direct_stack_capacity(fiber: &Fiber) -> u32 {
+    fiber
+        .stack
+        .len()
+        .min(crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS) as u32
+}
+
 static JIT_CONTEXT_CALLBACKS: JitContextCallbacks = JitContextCallbacks {
     call_extern_fn: Some(super::jit_call_extern),
     create_island_fn: Some(callbacks::jit_create_island),
@@ -140,7 +150,7 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber) -> Result<JitContextWra
         loop_exit_pc: 0,
         // Fiber stack access fields - will be updated before JIT call
         stack_ptr: fiber.stack_ptr(),
-        stack_cap: fiber.stack.len() as u32,
+        stack_cap: direct_stack_capacity(fiber),
         stack_limit: crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS as u32,
         call_depth: 0,
         call_depth_limit: crate::fiber::MAX_JIT_CALL_DEPTH as u32,
@@ -215,6 +225,20 @@ mod tests {
 
         assert_eq!(ctx.ctx.execution_budget, 17);
         assert_eq!(ctx.ctx.validate_required_callbacks(), Ok(()));
+    }
+
+    #[test]
+    fn direct_stack_capacity_is_clamped_to_the_native_shadow_limit() {
+        let mut fiber = Fiber::new(7);
+        fiber
+            .try_ensure_capacity(crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS + 1)
+            .expect("grow test fiber beyond the direct-shadow limit");
+
+        assert!(fiber.stack.len() > crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS);
+        assert_eq!(
+            direct_stack_capacity(&fiber),
+            crate::fiber::MAX_JIT_DIRECT_STACK_SLOTS as u32
+        );
     }
 
     #[test]

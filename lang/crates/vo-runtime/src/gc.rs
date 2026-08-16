@@ -565,7 +565,6 @@ struct JitAllocationRegion {
     bitmap_word: *mut u64,
     live_cells: *mut u16,
     logical_bytes: *mut usize,
-    next_bit: u64,
     shape: u64,
     class_size: u32,
     logical_size: u32,
@@ -579,7 +578,6 @@ impl Default for JitAllocationRegion {
             bitmap_word: core::ptr::null_mut(),
             live_cells: core::ptr::null_mut(),
             logical_bytes: core::ptr::null_mut(),
-            next_bit: 0,
             shape: 0,
             class_size: 0,
             logical_size: 0,
@@ -608,7 +606,6 @@ pub enum JitAllocationRegionField {
     Cursor,
     Limit,
     BitmapWord,
-    NextBit,
     Shape,
 }
 
@@ -623,7 +620,6 @@ impl JitAllocationRegionField {
             Self::Cursor => core::mem::offset_of!(JitAllocationRegion, cursor),
             Self::Limit => core::mem::offset_of!(JitAllocationRegion, limit),
             Self::BitmapWord => core::mem::offset_of!(JitAllocationRegion, bitmap_word),
-            Self::NextBit => core::mem::offset_of!(JitAllocationRegion, next_bit),
             Self::Shape => core::mem::offset_of!(JitAllocationRegion, shape),
         };
         i32::try_from(region.checked_add(field)?).ok()
@@ -1094,7 +1090,6 @@ impl Gc {
                 bitmap_word: lane.bitmap_word,
                 live_cells: lane.live_cells,
                 logical_bytes: lane.logical_bytes,
-                next_bit: lane.first_bit,
                 shape: JitAllocationRegionField::shape(size, value_meta.to_raw()),
                 class_size: class_size as u32,
                 logical_size: size as u32,

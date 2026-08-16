@@ -710,9 +710,9 @@ fn jit_region_admission_is_exact_at_close_and_respects_object_limit() {
     assert_eq!(gc.memory_stats().managed_live_bytes, 0);
     let class_size = region.class_size as usize;
     unsafe {
-        *region.bitmap_word |= region.next_bit;
+        let cell = (region.cursor as usize & (heap::HEAP_BLOCK_SIZE - 1)) / class_size;
+        *region.bitmap_word |= 1_u64 << (cell % 64);
         gc.jit_allocation_regions[0].cursor = region.cursor.add(class_size);
-        gc.jit_allocation_regions[0].next_bit <<= 1;
     }
 
     gc.close_jit_allocation_region_for_boundary();

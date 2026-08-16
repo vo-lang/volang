@@ -1626,6 +1626,25 @@ impl Fiber {
         bp: usize,
         slot_count: usize,
     ) -> Result<ReservedCallWindow, FiberCapacityError> {
+        let sp = bp
+            .checked_add(slot_count)
+            .ok_or(FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: MAX_STACK_CAPACITY,
+            })?;
+        if self.frames.len() < self.frames.capacity() && sp <= self.stack.len() {
+            self.sp = sp;
+            return Ok(ReservedCallWindow { bp, sp });
+        }
+        self.try_reserve_call_window_slow(bp, slot_count)
+    }
+
+    #[cold]
+    fn try_reserve_call_window_slow(
+        &mut self,
+        bp: usize,
+        slot_count: usize,
+    ) -> Result<ReservedCallWindow, FiberCapacityError> {
         self.try_reserve_call_frame()?;
         let sp = self.try_reserve_slots_at(bp, slot_count)?;
         Ok(ReservedCallWindow { bp, sp })
@@ -1870,9 +1889,8 @@ impl Fiber {
         let caller_sp = self.sp;
 
         let bp = caller_bp + borrowed_start as usize;
-        self.try_reserve_call_frame()?;
-        self.try_reserve_slots_at(bp, local_slots as usize)?;
-        self.push_reserved_call_frame_extended(func_id, bp, caller_sp, ret_reg, ret_count);
+        let reservation = self.try_reserve_call_window(bp, local_slots as usize)?;
+        self.commit_reserved_call_frame(reservation, func_id, caller_sp, ret_reg, ret_count);
         Ok(bp)
     }
 

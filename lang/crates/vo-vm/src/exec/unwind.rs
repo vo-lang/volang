@@ -82,12 +82,54 @@ fn push_unwind_state(fiber: &mut Fiber, state: UnwindingState) -> Result<(), Exe
 /// 1. Defer just returned in Return mode → continue with next defer or complete
 /// 2. Defer just returned in Panic mode → delegate to panic_defer_returned()
 /// 3. Normal return → start defer execution or complete immediately
+#[inline]
 pub fn handle_return(
     gc: &mut Gc,
     fiber: &mut Fiber,
     inst: &Instruction,
     func: &FunctionDef,
     module: &Module,
+    is_error_return: bool,
+) -> ExecResult {
+    let flags = match verified_return_flags(inst) {
+        Ok(flags) => flags,
+        Err(result) => return result,
+    };
+    handle_verified_return(gc, fiber, inst, func, module, flags, is_error_return)
+}
+
+#[inline]
+pub(crate) fn handle_verified_return(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    func: &FunctionDef,
+    module: &Module,
+    flags: ReturnFlags,
+    is_error_return: bool,
+) -> ExecResult {
+    // Keep the overwhelmingly common verified return independent from the
+    // unwind/replay state machine. This wrapper is intentionally small enough
+    // to inline into the interpreter dispatch loop.
+    if fiber.unwinding.is_none()
+        && !func.has_defer
+        && !fiber.closure_replay.at_replay_boundary(fiber.frames.len())
+    {
+        if !flags.has_heap_returns() {
+            return fast_complete_stack_return(fiber, inst);
+        }
+    }
+
+    handle_complex_return(gc, fiber, inst, func, module, flags, is_error_return)
+}
+
+fn handle_complex_return(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    inst: &Instruction,
+    func: &FunctionDef,
+    module: &Module,
+    flags: ReturnFlags,
     is_error_return: bool,
 ) -> ExecResult {
     // Case 1 & 2: Defer just returned
@@ -100,11 +142,17 @@ pub fn handle_return(
         let mode = unwinding.mode;
         return match mode {
             UnwindingMode::Return => {
-                let include_errdefers =
-                    match compute_include_errdefers(gc, fiber, inst, func, is_error_return) {
-                        Ok(include) => include,
-                        Err(result) => return result,
-                    };
+                let include_errdefers = match compute_include_errdefers(
+                    gc,
+                    fiber,
+                    inst,
+                    func,
+                    flags,
+                    is_error_return,
+                ) {
+                    Ok(include) => include,
+                    Err(result) => return result,
+                };
                 handle_return_defer_returned(gc, fiber, module, include_errdefers)
             }
             UnwindingMode::Panic => handle_panic_defer_returned(gc, fiber, module),
@@ -112,7 +160,7 @@ pub fn handle_return(
     }
 
     // Case 3: Normal return (may start defer execution)
-    handle_initial_return(gc, fiber, inst, func, module, is_error_return)
+    handle_initial_return(gc, fiber, inst, func, module, flags, is_error_return)
 }
 
 /// Handle a normal return from JIT (JitResult::Ok).
@@ -447,6 +495,7 @@ fn compute_include_errdefers(
     fiber: &Fiber,
     inst: &Instruction,
     func: &FunctionDef,
+    flags: ReturnFlags,
     is_error_return: bool,
 ) -> Result<bool, ExecResult> {
     if is_error_return {
@@ -466,7 +515,7 @@ fn compute_include_errdefers(
     let bp = frame.bp;
     let stack = fiber.stack.as_ptr();
 
-    let error_slot0 = if verified_return_flags(inst)?.has_heap_returns() {
+    let error_slot0 = if flags.has_heap_returns() {
         // heap_returns: each return value is a GcRef, error is always the last one
         // inst.a = gcref_start, inst.b = gcref_count
         let gcref_count = inst.b as usize;
@@ -664,6 +713,7 @@ fn handle_initial_return(
     inst: &Instruction,
     func: &FunctionDef,
     module: &Module,
+    flags: ReturnFlags,
     is_error_return: bool,
 ) -> ExecResult {
     let current_frame_depth = fiber.frames.len();
@@ -673,10 +723,7 @@ fn handle_initial_return(
 
     // Check: is this return from a closure-for-extern-replay?
     if fiber.closure_replay.at_replay_boundary(current_frame_depth) && current_frame_depth > 0 {
-        let heap_returns = match verified_return_flags(inst) {
-            Ok(flags) => flags.has_heap_returns(),
-            Err(err) => return err,
-        };
+        let heap_returns = flags.has_heap_returns();
         let has_defers = fiber
             .defer_stack
             .last()
@@ -735,7 +782,7 @@ fn handle_initial_return(
 
         if has_defers {
             let include_errdefers =
-                match compute_include_errdefers(gc, fiber, inst, func, is_error_return) {
+                match compute_include_errdefers(gc, fiber, inst, func, flags, is_error_return) {
                     Ok(include) => include,
                     Err(result) => return result,
                 };
@@ -805,10 +852,7 @@ fn handle_initial_return(
         );
     }
 
-    let heap_returns = match verified_return_flags(inst) {
-        Ok(flags) => flags.has_heap_returns(),
-        Err(err) => return err,
-    };
+    let heap_returns = flags.has_heap_returns();
     let has_defers = fiber
         .defer_stack
         .last()
@@ -822,11 +866,11 @@ fn handle_initial_return(
         return fast_complete_stack_return(fiber, inst);
     }
 
-    let include_errdefers = match compute_include_errdefers(gc, fiber, inst, func, is_error_return)
-    {
-        Ok(include) => include,
-        Err(result) => return result,
-    };
+    let include_errdefers =
+        match compute_include_errdefers(gc, fiber, inst, func, flags, is_error_return) {
+            Ok(include) => include,
+            Err(result) => return result,
+        };
 
     // Collect return values and pending defers
     let stack = fiber.stack.as_ptr();

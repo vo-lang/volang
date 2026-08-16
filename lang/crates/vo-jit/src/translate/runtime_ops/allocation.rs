@@ -129,27 +129,22 @@ fn emit_jit_small_ptr_new<'a>(
         gc,
         region_offset(JitAllocationRegionField::BitmapWord),
     );
-    let next_bit = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I64,
-        gc,
-        region_offset(JitAllocationRegionField::NextBit),
-    );
+    let class_size = total_size.max(16).next_power_of_two();
+    let cell_index = e
+        .builder()
+        .ins()
+        .ushr_imm_u(cursor, class_size.trailing_zeros() as i64);
+    let bit_index = e.builder().ins().band_imm_u(cell_index, 63);
+    let one = e.builder().ins().iconst(types::I64, 1);
+    let allocated_bit = e.builder().ins().ishl(one, bit_index);
     let allocated = e
         .builder()
         .ins()
         .load(types::I64, MemFlags::trusted(), bitmap_word, 0);
-    let allocated = e.builder().ins().bor(allocated, next_bit);
+    let allocated = e.builder().ins().bor(allocated, allocated_bit);
     e.builder()
         .ins()
         .store(MemFlags::trusted(), allocated, bitmap_word, 0);
-    let following_bit = e.builder().ins().ishl_imm_u(next_bit, 1);
-    e.store_trusted(
-        JitMemoryRegion::Gc,
-        following_bit,
-        gc,
-        region_offset(JitAllocationRegionField::NextBit),
-    );
 
     let object = e
         .builder()

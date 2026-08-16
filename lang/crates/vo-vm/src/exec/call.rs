@@ -298,6 +298,7 @@ pub fn exec_call(
 /// established by the common verifier for this immutable module image.
 /// Capacity admission remains dynamic; structural validation stays on the
 /// hardening entry point above for unverified test and host inputs.
+#[inline]
 pub(crate) fn exec_verified_call(
     gc: &mut Gc,
     fiber: &mut Fiber,

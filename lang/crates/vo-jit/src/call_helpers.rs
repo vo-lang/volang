@@ -138,8 +138,6 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
     ctx: Value,
     new_sp: Value,
 ) -> Result<(Block, Block), crate::JitError> {
-    emit_stack_limit_guard(emitter, ctx, new_sp)?;
-
     let capacity = emitter.load_context_field(types::I32, JitContextField::StackCap);
     let exceeds_capacity =
         emitter
@@ -154,7 +152,16 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
         .ins()
         .brif(exceeds_capacity, materialize_block, &[], ok_block, &[]);
 
-    Ok((materialize_block, ok_block))
+    // `stack_cap` is clamped to the direct-shadow limit by every VM producer.
+    // Keep the explicit overflow callback on the already-cold capacity miss so
+    // malformed contexts and true resource overflow still fail precisely.
+    emitter.builder().switch_to_block(materialize_block);
+    emitter.builder().seal_block(materialize_block);
+    emit_stack_limit_guard(emitter, ctx, new_sp)?;
+    let checked_materialize_block = emitter.builder().create_block();
+    emitter.builder().ins().jump(checked_materialize_block, &[]);
+
+    Ok((checked_materialize_block, ok_block))
 }
 
 pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(
