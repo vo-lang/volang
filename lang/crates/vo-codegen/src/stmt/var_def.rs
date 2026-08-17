@@ -154,16 +154,22 @@ pub fn compile_var_decl(
                 } else {
                     info.try_type_slot_count(target_type)
                         .map_err(CodegenError::Internal)?;
-                    let target_layout = info.type_slot_types(target_type);
-                    let temp = func.alloc_slots(&target_layout);
-                    crate::assign::emit_assign(
-                        temp,
-                        crate::assign::AssignSource::Expr(value),
-                        target_type,
-                        ctx,
-                        func,
-                        info,
-                    )?;
+                    let source_type = info.expr_type(value.id);
+                    let temp = if source_type == target_type {
+                        crate::expr::compile_expr_snapshot(value, ctx, func, info)?
+                    } else {
+                        let target_layout = info.type_slot_types(target_type);
+                        let temp = func.alloc_slots(&target_layout);
+                        crate::assign::emit_assign(
+                            temp,
+                            crate::assign::AssignSource::Expr(value),
+                            target_type,
+                            ctx,
+                            func,
+                            info,
+                        )?;
+                        temp
+                    };
                     initializers.push(Some(PreparedInitializer::Flat {
                         slot: temp,
                         type_key: target_type,

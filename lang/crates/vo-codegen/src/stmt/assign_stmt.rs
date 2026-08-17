@@ -130,20 +130,7 @@ pub(super) fn compile_short_var(
                 };
                 rhs_temps.push(Some(PreparedRhs::Array { value, type_key }));
             } else {
-                let slot_types = info
-                    .try_type_slot_types(type_key)
-                    .map_err(CodegenError::Internal)?;
-                let tmp = func.alloc_slots(&slot_types);
-                crate::assign::emit_assign(
-                    tmp,
-                    crate::assign::AssignSource::Expr(expr),
-                    type_key,
-                    ctx,
-                    func,
-                    info,
-                )?;
-                // Apply truncation for narrow integer types (Go semantics)
-                emit_int_trunc(tmp, type_key, func, info);
+                let tmp = crate::expr::compile_expr_snapshot(expr, ctx, func, info)?;
                 rhs_temps.push(Some(PreparedRhs::Flat {
                     slot: tmp,
                     type_key,

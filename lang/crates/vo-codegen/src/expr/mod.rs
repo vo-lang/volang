@@ -143,7 +143,7 @@ pub fn get_expr_source(
     ExprSource::NeedsCompile
 }
 
-fn expr_runtime_slot_types(
+pub(super) fn expr_runtime_slot_types(
     expr: &Expr,
     ctx: &CodegenContext,
     func: &FuncBuilder,
@@ -302,12 +302,41 @@ pub fn compile_expr(
             _ => {}
         }
     }
+    if let ExprKind::Call(call) = &expr.kind {
+        return call::compile_call_natural(expr, call, ctx, func, info);
+    }
     let slot_types = expr_runtime_slot_types(expr, ctx, func, info)?;
     let dst = func.alloc_slots(&slot_types);
     compile_expr_to(expr, dst, ctx, func, info)?;
     // Truncate narrow integer types to ensure Go semantics (operations in 64-bit, result in type width)
     let expr_type = info.expr_type(expr.id);
     emit_int_trunc(dst, expr_type, func, info);
+    Ok(dst)
+}
+
+/// Evaluate an expression into storage whose value is independent of every
+/// pre-existing variable location. Computed expressions already own their
+/// result slot; locations are copied once to freeze source-order semantics.
+///
+/// Declaration and loop lowering can transfer this storage directly to a new
+/// binding after all sibling expressions have been evaluated.
+pub fn compile_expr_snapshot(
+    expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    if matches!(
+        get_expr_source(expr, ctx, func, info),
+        ExprSource::NeedsCompile
+    ) {
+        return compile_expr(expr, ctx, func, info);
+    }
+
+    let slot_types = expr_runtime_slot_types(expr, ctx, func, info)?;
+    let dst = func.alloc_slots(&slot_types);
+    compile_expr_to(expr, dst, ctx, func, info)?;
+    emit_int_trunc(dst, info.expr_type(expr.id), func, info);
     Ok(dst)
 }
 

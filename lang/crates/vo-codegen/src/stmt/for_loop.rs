@@ -205,25 +205,14 @@ fn compile_simple_for(
 ) -> Result<(), CodegenError> {
     func.enter_scope();
 
-    // Compile init expression
-    let init_val = crate::expr::compile_expr(pattern.init_expr, ctx, func, info)?;
-
-    // Allocate a dedicated slot for the loop variable and copy init value
-    // This is important: we can't reuse init_val directly because:
-    // 1. It might be a reference to another variable (e.g., commonLen)
-    // 2. ForLoop modifies the idx slot, so we'd corrupt the original variable
-    let idx_slot = func.alloc_slots(&[SlotType::Value]);
-    func.emit_op(Opcode::Copy, idx_slot, init_val, 0);
+    // Freeze borrowed initializers once and transfer computed initializer
+    // storage directly to the induction variable. ForLoop can mutate this slot
+    // without aliasing a pre-existing variable such as `commonLen`.
+    let idx_slot = crate::expr::compile_expr_snapshot(pattern.init_expr, ctx, func, info)?;
 
     // Define loop variable
     let type_key = info.obj_type(pattern.obj_key, "loop var must have type");
-    func.define_local(
-        pattern.var_name,
-        StorageKind::StackValue {
-            slot: idx_slot,
-            slots: 1,
-        },
-    );
+    func.define_local_at(pattern.var_name, idx_slot, 1);
 
     // Compile limit expression (must be single variable or constant)
     let limit_slot = crate::expr::compile_expr(pattern.limit_expr, ctx, func, info)?;

@@ -140,7 +140,46 @@ fn encode_declared_extern_name(
     })
 }
 
-fn maybe_copy_call_result(
+#[derive(Clone, Copy)]
+enum ResultPlacement {
+    Fixed(u16),
+    Natural,
+}
+
+impl ResultPlacement {
+    fn materialized_slot(
+        self,
+        expr: &Expr,
+        ctx: &CodegenContext,
+        func: &mut FuncBuilder,
+        info: &TypeInfoWrapper,
+    ) -> Result<u16, CodegenError> {
+        match self {
+            Self::Fixed(slot) => Ok(slot),
+            Self::Natural => {
+                let slot_types = super::expr_runtime_slot_types(expr, ctx, func, info)?;
+                Ok(func.alloc_slots(&slot_types))
+            }
+        }
+    }
+
+    fn finish_abi_call(
+        self,
+        expr: &Expr,
+        ret_start: u16,
+        actual_ret_slots: u16,
+        func: &mut FuncBuilder,
+        info: &TypeInfoWrapper,
+    ) -> u16 {
+        let Self::Fixed(dst) = self else {
+            return ret_start;
+        };
+        copy_call_result(expr, dst, ret_start, actual_ret_slots, func, info);
+        dst
+    }
+}
+
+fn copy_call_result(
     expr: &Expr,
     dst: u16,
     ret_start: u16,
@@ -303,13 +342,13 @@ fn emit_direct_func_call(
     call: &vo_syntax::ast::CallExpr,
     callee_expr: &Expr,
     func_idx: u32,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     let func_type = info.expr_type(callee_expr.id);
-    emit_direct_func_call_with_type(expr, call, func_type, func_idx, dst, ctx, func, info)
+    emit_direct_func_call_with_type(expr, call, func_type, func_idx, result, ctx, func, info)
 }
 
 fn emit_direct_func_call_with_type(
@@ -317,11 +356,11 @@ fn emit_direct_func_call_with_type(
     call: &vo_syntax::ast::CallExpr,
     func_type: TypeKey,
     func_idx: u32,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     let ret_slot_types = func_result_slot_types(func_type, info);
     let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
     let param_types = info.func_param_types(func_type);
@@ -336,8 +375,7 @@ fn emit_direct_func_call_with_type(
     func.emit_static_call(func_idx, args_start);
 
     let ret_start = args_start + total_arg_slots;
-    maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
-    Ok(())
+    Ok(result.finish_abi_call(expr, ret_start, ret_slots, func, info))
 }
 
 fn compile_framework_entry_intrinsic(
@@ -345,16 +383,16 @@ fn compile_framework_entry_intrinsic(
     call: &vo_syntax::ast::CallExpr,
     package_path: &str,
     function_name: &str,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<bool, CodegenError> {
+) -> Result<Option<u16>, CodegenError> {
     let (prefix, suffix, value_argument, argument_count) = match (package_path, function_name) {
         ("github.com/vo-lang/vogui", "Run") => ("__VoguiRun", "TypedAppAdapter", 0, 1),
         ("github.com/vo-lang/voplay", "Run") => ("__VoplayRun", "GeneratedGame", 0, 1),
         ("github.com/vo-lang/voplay", "Install") => ("__VoplayInstall", "GeneratedGame", 1, 3),
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     if call.args.len() != argument_count {
         return Err(CodegenError::Internal(format!(
@@ -392,8 +430,17 @@ fn compile_framework_entry_intrinsic(
         ))
     })?;
     let helper_type = info.obj_type(helper, "generated entry helper must have a type");
-    emit_direct_func_call_with_type(expr, call, helper_type, helper_index, dst, ctx, func, info)?;
-    Ok(true)
+    let slot = emit_direct_func_call_with_type(
+        expr,
+        call,
+        helper_type,
+        helper_index,
+        result,
+        ctx,
+        func,
+        info,
+    )?;
+    Ok(Some(slot))
 }
 
 // =============================================================================
@@ -409,39 +456,68 @@ pub fn compile_call(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
+    compile_call_with_placement(expr, call, ResultPlacement::Fixed(dst), ctx, func, info)
+        .map(|_| ())
+}
+
+/// Compile a call whose result has no pre-existing destination. Ordinary Vo
+/// calls retain the return region of their ABI buffer as the expression value,
+/// avoiding a second frame slot and copy.
+pub fn compile_call_natural(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    compile_call_with_placement(expr, call, ResultPlacement::Natural, ctx, func, info)
+}
+
+fn compile_call_with_placement(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    result: ResultPlacement,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
     let previous_span = func.replace_active_call_span(Some(expr.span));
-    let result = compile_call_inner(expr, call, dst, ctx, func, info);
+    let compiled = compile_call_inner(expr, call, result, ctx, func, info);
     func.replace_active_call_span(previous_span);
-    result
+    compiled
 }
 
 fn compile_call_inner(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     let callee_expr = strip_paren_expr(&call.func);
 
     // Check if method call (selector expression)
     if let ExprKind::Selector(sel) = &callee_expr.kind {
         if let Some(selection) = info.get_selection(callee_expr.id) {
             if matches!(selection.kind(), SelectionKind::MethodExpr) {
-                return compile_method_expr_call(expr, call, sel, selection, dst, ctx, func, info);
+                return compile_method_expr_call(
+                    expr, call, sel, selection, result, ctx, func, info,
+                );
             }
         }
-        return compile_method_call(expr, call, callee_expr, sel, dst, ctx, func, info);
+        return compile_method_call(expr, call, callee_expr, sel, result, ctx, func, info);
     }
 
     // Check if builtin or type conversion
     if let ExprKind::Ident(ident) = &callee_expr.kind {
         // Use analysis phase info for builtin detection - correctly handles variable shadowing
         if let Some(builtin_id) = info.expr_builtin(callee_expr.id) {
-            return super::builtin::compile_builtin_call_by_id(
+            let dst = result.materialized_slot(expr, ctx, func, info)?;
+            super::builtin::compile_builtin_call_by_id(
                 expr, builtin_id, call, dst, ctx, func, info,
-            );
+            )?;
+            return Ok(dst);
         }
 
         // Check if this is a type conversion (ident refers to a type, not a function)
@@ -452,32 +528,23 @@ fn compile_call_inner(
             if obj.entity_type().is_type_name() {
                 // This is a type conversion
                 if call.args.len() == 1 {
-                    return super::conversion::compile_type_conversion(
+                    let dst = result.materialized_slot(expr, ctx, func, info)?;
+                    super::conversion::compile_type_conversion(
                         &call.args[0],
                         dst,
                         expr,
                         ctx,
                         func,
                         info,
-                    );
+                    )?;
+                    return Ok(dst);
                 } else if call.args.is_empty() {
                     // Zero value - already handled by default initialization
-                    return Ok(());
+                    return result.materialized_slot(expr, ctx, func, info);
                 }
             }
         }
     }
-
-    // Get function type and parameter types for interface conversion
-    let func_type = info.expr_type(callee_expr.id);
-    let ret_slot_types = func_result_slot_types(func_type, info);
-    let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
-    let param_types = info.func_param_types(func_type);
-    let is_variadic = info.is_variadic(func_type);
-
-    // Compute total arg slots using calc_method_arg_slots (handles variadic packing)
-    let total_arg_slots_usize = calc_method_arg_slots(call, &param_types, is_variadic, info);
-    let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slots_usize);
 
     if let ExprKind::FuncLit(func_lit) = &callee_expr.kind {
         if info.closure_captures(callee_expr.id).is_empty() {
@@ -486,7 +553,16 @@ fn compile_call_inner(
             if !captures.is_empty() {
                 panic!("zero-capture func literal lowering returned captures");
             }
-            return emit_direct_func_call(expr, call, callee_expr, func_id, dst, ctx, func, info);
+            return emit_direct_func_call(
+                expr,
+                call,
+                callee_expr,
+                func_id,
+                result,
+                ctx,
+                func,
+                info,
+            );
         }
     }
 
@@ -500,21 +576,7 @@ fn compile_call_inner(
             || ctx.get_global_index(obj_key).is_some();
 
         if is_closure {
-            let closure_value = compile_expr(callee_expr, ctx, func, info)?;
-            let closure_reg = snapshot_closure_value(closure_value, func);
-            let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
-            let args_start = func.alloc_dynamic_call_buffer(
-                &[SlotType::Value],
-                &arg_slot_types,
-                &ret_slot_types,
-            );
-            compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
-
-            func.emit_call_closure(closure_reg, args_start, &arg_slot_types, &ret_slot_types);
-
-            let ret_start = args_start + total_arg_slots;
-            maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
-            return Ok(());
+            return compile_closure_call(expr, call, callee_expr, result, ctx, func, info);
         }
 
         // Function call - check if it's a Vo function (has body) or extern (no body)
@@ -524,29 +586,39 @@ fn compile_call_inner(
             let func_idx = ctx.get_func_by_objkey(obj_key).ok_or_else(|| {
                 CodegenError::Internal(format!("function not registered: {:?}", ident.symbol))
             })?;
-            return emit_direct_func_call(expr, call, callee_expr, func_idx, dst, ctx, func, info);
+            return emit_direct_func_call(
+                expr,
+                call,
+                callee_expr,
+                func_idx,
+                result,
+                ctx,
+                func,
+                info,
+            );
         } else {
             // Extern function (no body) - use CallExtern instruction
             let extern_name = get_extern_name_for_obj(obj_key, ident.symbol, info)?;
-            return compile_extern_call(call, &extern_name, dst, ctx, func, info);
+            let dst = result.materialized_slot(expr, ctx, func, info)?;
+            compile_extern_call(call, &extern_name, dst, ctx, func, info)?;
+            return Ok(dst);
         }
     }
 
     // Non-ident function call (e.g., expression returning a closure)
-    let closure_reg = compile_expr(callee_expr, ctx, func, info)?;
-    compile_closure_call_from_reg(expr, call, callee_expr, closure_reg, dst, ctx, func, info)
+    compile_closure_call(expr, call, callee_expr, result, ctx, func, info)
 }
 
-pub fn compile_method_expr_call(
+fn compile_method_expr_call(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
     sel: &vo_syntax::ast::SelectorExpr,
     selection: &vo_analysis::selection::Selection,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     let recv_type = selection.recv().ok_or_else(|| {
         CodegenError::Internal("method expression has no receiver type".to_string())
     })?;
@@ -574,7 +646,7 @@ pub fn compile_method_expr_call(
                 call.spread,
                 method_name,
                 &target.call_info,
-                dst,
+                result,
                 ctx,
                 func,
                 info,
@@ -612,27 +684,25 @@ pub fn compile_method_expr_call(
         call.spread,
         method_name,
         &call_info,
-        dst,
+        result,
         ctx,
         func,
         info,
     )
 }
 
-/// Compile closure call when closure is already in a register.
-/// Used for func field calls like h.logic(args) and IIFE calls.
-pub fn compile_closure_call_from_reg(
+/// Evaluate a dynamic callee before its arguments and use the call buffer's
+/// mandatory hidden receiver slot as that snapshot. Frame materialization
+/// overwrites the slot only after dispatch has consumed the closure value.
+fn compile_closure_call(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
     callee_expr: &Expr,
-    closure_reg: u16,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
-    let closure_reg = snapshot_closure_value(closure_reg, func);
-
+) -> Result<u16, CodegenError> {
     // Get function type from the closure expression to handle variadic properly
     let func_type = info.expr_type(callee_expr.id);
     let ret_slot_types = func_result_slot_types(func_type, info);
@@ -646,14 +716,22 @@ pub fn compile_closure_call_from_reg(
 
     let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
     let args_start =
-        func.alloc_dynamic_call_buffer(&[SlotType::Value], &arg_slot_types, &ret_slot_types);
+        func.alloc_dynamic_call_buffer(&[SlotType::GcBase], &arg_slot_types, &ret_slot_types);
+    let closure_snapshot = args_start
+        .checked_sub(1)
+        .expect("closure call buffer must reserve one hidden receiver slot");
+    compile_expr_to(callee_expr, closure_snapshot, ctx, func, info)?;
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    func.emit_call_closure(closure_reg, args_start, &arg_slot_types, &ret_slot_types);
+    func.emit_call_closure(
+        closure_snapshot,
+        args_start,
+        &arg_slot_types,
+        &ret_slot_types,
+    );
 
     let ret_start = args_start + total_arg_slots;
-    maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
-    Ok(())
+    Ok(result.finish_abi_call(expr, ret_start, ret_slots, func, info))
 }
 
 // =============================================================================
@@ -751,11 +829,11 @@ fn compile_method_call(
     call: &vo_syntax::ast::CallExpr,
     callee_expr: &Expr,
     sel: &vo_syntax::ast::SelectorExpr,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     // 1. Check for package function call or type conversion (e.g., bytes.Contains, json.Number)
     if let ExprKind::Ident(pkg_ident) = &sel.expr.kind {
         // Check if it's a package reference
@@ -766,17 +844,19 @@ fn compile_method_call(
             if obj.entity_type().is_type_name() {
                 // This is a type conversion: pkg.Type(x)
                 if call.args.len() == 1 {
-                    return super::conversion::compile_type_conversion(
+                    let dst = result.materialized_slot(expr, ctx, func, info)?;
+                    super::conversion::compile_type_conversion(
                         &call.args[0],
                         dst,
                         expr,
                         ctx,
                         func,
                         info,
-                    );
+                    )?;
+                    return Ok(dst);
                 } else if call.args.is_empty() {
                     // Zero value - already handled by default initialization
-                    return Ok(());
+                    return result.materialized_slot(expr, ctx, func, info);
                 }
             }
 
@@ -784,17 +864,7 @@ fn compile_method_call(
             // callee. Evaluate and snapshot its closure value before arguments,
             // exactly like a local or struct-field function value.
             if obj.entity_type().is_var() && info.is_func_type(info.expr_type(callee_expr.id)) {
-                let closure = compile_expr(callee_expr, ctx, func, info)?;
-                return compile_closure_call_from_reg(
-                    expr,
-                    call,
-                    callee_expr,
-                    closure,
-                    dst,
-                    ctx,
-                    func,
-                    info,
-                );
+                return compile_closure_call(expr, call, callee_expr, result, ctx, func, info);
             }
 
             let function_name = info
@@ -804,17 +874,17 @@ fn compile_method_call(
                 .ok_or_else(|| {
                     CodegenError::Internal("cannot resolve function name".to_string())
                 })?;
-            if compile_framework_entry_intrinsic(
+            if let Some(slot) = compile_framework_entry_intrinsic(
                 expr,
                 call,
                 &package_path,
                 function_name,
-                dst,
+                result,
                 ctx,
                 func,
                 info,
             )? {
-                return Ok(());
+                return Ok(slot);
             }
 
             // Check if it's a Vo function (has body) or extern (no body)
@@ -829,7 +899,7 @@ fn compile_method_call(
                     call,
                     callee_expr,
                     func_idx,
-                    dst,
+                    result,
                     ctx,
                     func,
                     info,
@@ -837,7 +907,9 @@ fn compile_method_call(
             }
             // Extern function - use CallExtern
             let extern_name = get_extern_name(sel, info)?;
-            return compile_extern_call(call, &extern_name, dst, ctx, func, info);
+            let dst = result.materialized_slot(expr, ctx, func, info)?;
+            compile_extern_call(call, &extern_name, dst, ctx, func, info)?;
+            return Ok(dst);
         }
     }
 
@@ -859,17 +931,7 @@ fn compile_method_call(
                 // Both compile to closure call
                 let field_type = info.expr_type(callee_expr.id);
                 if info.is_func_type(field_type) {
-                    let closure_reg = compile_expr(callee_expr, ctx, func, info)?;
-                    return compile_closure_call_from_reg(
-                        expr,
-                        call,
-                        callee_expr,
-                        closure_reg,
-                        dst,
-                        ctx,
-                        func,
-                        info,
-                    );
+                    return compile_closure_call(expr, call, callee_expr, result, ctx, func, info);
                 }
             }
             SelectionKind::MethodVal => {
@@ -894,7 +956,7 @@ fn compile_method_call(
                 call.spread,
                 method_name,
                 &target.call_info,
-                dst,
+                result,
                 ctx,
                 func,
                 info,
@@ -932,7 +994,7 @@ fn compile_method_call(
         call.spread,
         method_name,
         &call_info,
-        dst,
+        result,
         ctx,
         func,
         info,
@@ -949,11 +1011,11 @@ fn emit_static_method_call(
     call_info: &crate::embed::MethodCallInfo,
     func_id: u32,
     expects_ptr_recv: bool,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     let base_type = if call_info.recv_is_pointer {
         info.pointer_base(recv_type)
     } else {
@@ -1015,8 +1077,7 @@ fn emit_static_method_call(
     func.emit_static_call(func_id, args_start);
 
     let ret_start = args_start + total_slots;
-    maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
-    Ok(())
+    Ok(result.finish_abi_call(expr, ret_start, ret_slots, func, info))
 }
 
 fn emit_interface_call_with_args(
@@ -1027,11 +1088,11 @@ fn emit_interface_call_with_args(
     method_idx: u32,
     iface_snapshot: u16,
     method_name: &str,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     let (param_types, is_variadic) = info.get_interface_method_signature(iface_type, method_name);
     let arg_slots_usize =
         calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
@@ -1073,8 +1134,7 @@ fn emit_interface_call_with_args(
     );
 
     let ret_start = args_start + arg_slots;
-    maybe_copy_call_result(expr, dst, ret_start, ret_slots, func, info);
-    Ok(())
+    Ok(result.finish_abi_call(expr, ret_start, ret_slots, func, info))
 }
 
 /// Dispatch method call based on MethodCallInfo.
@@ -1087,11 +1147,11 @@ fn compile_method_dispatch_with_args(
     spread: bool,
     method_name: &str,
     call_info: &crate::embed::MethodCallInfo,
-    dst: u16,
+    result: ResultPlacement,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) -> Result<(), CodegenError> {
+) -> Result<u16, CodegenError> {
     use crate::embed::MethodDispatch;
 
     match &call_info.dispatch {
@@ -1109,7 +1169,7 @@ fn compile_method_dispatch_with_args(
                 *method_idx,
                 iface_snapshot,
                 method_name,
-                dst,
+                result,
                 ctx,
                 func,
                 info,
@@ -1137,7 +1197,7 @@ fn compile_method_dispatch_with_args(
                 *method_idx,
                 iface_snapshot,
                 method_name,
-                dst,
+                result,
                 ctx,
                 func,
                 info,
@@ -1158,7 +1218,7 @@ fn compile_method_dispatch_with_args(
                 call_info,
                 *func_id,
                 *expects_ptr_recv,
-                dst,
+                result,
                 ctx,
                 func,
                 info,
