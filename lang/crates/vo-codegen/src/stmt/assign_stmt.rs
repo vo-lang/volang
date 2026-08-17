@@ -394,7 +394,9 @@ fn compile_assign(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use crate::lvalue::{resolve_lvalue, snapshot_lvalue_operands};
+    use crate::lvalue::{
+        resolve_lvalue, resolve_lvalue_for_stable_assignment, snapshot_lvalue_operands,
+    };
 
     // Handle blank identifier: compile RHS for side effects only
     if let vo_syntax::ast::ExprKind::Ident(ident) = &lhs.kind {
@@ -404,9 +406,18 @@ fn compile_assign(
         }
     }
 
-    // Resolve LHS to an LValue
-    let mut lv = resolve_lvalue(lhs, ctx, func, info)?;
-    snapshot_lvalue_operands(&mut lv, func)?;
+    // A storage-preserving RHS cannot change a direct LHS container or index.
+    // Retain those operands in place while preserving the ordinary assignment
+    // contract that the final store owns its bounds check.
+    let stable_rhs = crate::expr::preserves_preexisting_storage(rhs);
+    let mut lv = if stable_rhs {
+        resolve_lvalue_for_stable_assignment(lhs, ctx, func, info)?
+    } else {
+        resolve_lvalue(lhs, ctx, func, info)?
+    };
+    if !stable_rhs {
+        snapshot_lvalue_operands(&mut lv, func)?;
+    }
     let lhs_type = info.expr_type(lhs.id);
 
     crate::assign::emit_assign_to_lvalue(
@@ -464,7 +475,9 @@ fn compile_compound_assign(
 
     // Resolve LHS to an LValue
     let mut lv = resolve_lvalue_for_read(lhs, ctx, func, info)?;
-    snapshot_lvalue_operands(&mut lv, func)?;
+    if !crate::expr::preserves_preexisting_storage(rhs) {
+        snapshot_lvalue_operands(&mut lv, func)?;
+    }
 
     // StackValue and Reference variables are selected precisely when escape
     // analysis proved that nested evaluation cannot mutate their storage.

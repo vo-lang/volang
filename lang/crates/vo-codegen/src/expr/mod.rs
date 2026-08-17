@@ -26,6 +26,53 @@ pub use literal::{compile_const_value, get_const_value};
 pub use pointer::compile_expr_to_ptr;
 pub use selector::{is_pkg_qualified_name, traverse_indirect_field};
 
+/// Return true when evaluating `expr` cannot invoke user code, receive, block,
+/// or write an already-existing language storage location.
+///
+/// Call and lvalue lowering use this proof to retain an earlier value in its
+/// authoritative slot across later evaluation. Keep the accepted expression
+/// set structural and deliberately closed: adding a new AST form requires an
+/// explicit effects decision here.
+pub(crate) fn preserves_preexisting_storage(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::RuneLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::TypeAsExpr(_)
+        | ExprKind::Ellipsis => true,
+        ExprKind::Paren(inner) => preserves_preexisting_storage(inner),
+        ExprKind::Unary(unary) => preserves_preexisting_storage(&unary.operand),
+        ExprKind::Binary(binary) => {
+            preserves_preexisting_storage(&binary.left)
+                && preserves_preexisting_storage(&binary.right)
+        }
+        ExprKind::Conversion(conversion) => preserves_preexisting_storage(&conversion.expr),
+        ExprKind::Index(index) => {
+            preserves_preexisting_storage(&index.expr)
+                && preserves_preexisting_storage(&index.index)
+        }
+        ExprKind::Slice(slice) => {
+            preserves_preexisting_storage(&slice.expr)
+                && slice.low.as_ref().is_none_or(preserves_preexisting_storage)
+                && slice
+                    .high
+                    .as_ref()
+                    .is_none_or(preserves_preexisting_storage)
+                && slice.max.as_ref().is_none_or(preserves_preexisting_storage)
+        }
+        ExprKind::Selector(selector) => preserves_preexisting_storage(&selector.expr),
+        ExprKind::TypeAssert(assertion) => preserves_preexisting_storage(&assertion.expr),
+        ExprKind::Call(_)
+        | ExprKind::CompositeLit(_)
+        | ExprKind::FuncLit(_)
+        | ExprKind::Receive(_)
+        | ExprKind::TryUnwrap(_)
+        | ExprKind::DynAccess(_) => false,
+    }
+}
+
 // =============================================================================
 // Tuple Expansion Helper
 // =============================================================================

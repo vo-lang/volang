@@ -1552,6 +1552,45 @@ func main() {}
 }
 
 #[test]
+fn slice_index_assignment_with_stable_rhs_uses_direct_operands() {
+    let module = compile_source(
+        r#"
+package main
+
+func write(xs []int, i, value int) {
+    xs[i] = value
+}
+
+func main() {}
+"#,
+    );
+    let func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "write")
+        .expect("write function");
+    let slice_set = func
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::SliceSet)
+        .expect("slice store");
+
+    assert_eq!(slice_set.a, 0, "stable RHS keeps the slice parameter live");
+    assert_eq!(slice_set.b, 1, "stable RHS keeps the index parameter live");
+    assert_eq!(
+        slice_set.c, 2,
+        "stable RHS stores the value parameter directly"
+    );
+    assert_eq!(
+        func.code
+            .iter()
+            .filter(|inst| inst.opcode() == Opcode::Copy)
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn slice_struct_field_read_projects_through_element_address() {
     let module = compile_source(
         r#"
@@ -1596,6 +1635,16 @@ func main() {}
     );
     assert!(!opcodes.contains(&Opcode::SliceGet));
     assert!(!opcodes.contains(&Opcode::IndexCheck));
+    let slice_addr = func
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::SliceAddr)
+        .expect("slice element address");
+    assert_eq!(slice_addr.b, 0, "pure index keeps the slice parameter live");
+    assert_eq!(
+        slice_addr.c, 1,
+        "final read consumes the index parameter directly"
+    );
 }
 
 #[test]

@@ -15,40 +15,7 @@ use crate::error::CodegenError;
 use crate::func::{ElemLayoutSpec, ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
-use super::{compile_expr, compile_expr_to};
-
-/// Return true only for the deliberately small expression subset whose
-/// evaluation cannot invoke user code, block, receive, or write storage.
-/// This proof allows a dynamic callee location to stay live through argument
-/// evaluation without violating left-to-right call semantics.
-fn preserves_preexisting_storage(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Ident(_)
-        | ExprKind::IntLit(_)
-        | ExprKind::FloatLit(_)
-        | ExprKind::RuneLit(_)
-        | ExprKind::StringLit(_)
-        | ExprKind::TypeAsExpr(_)
-        | ExprKind::Ellipsis => true,
-        ExprKind::Paren(inner) => preserves_preexisting_storage(inner),
-        ExprKind::Unary(unary) => preserves_preexisting_storage(&unary.operand),
-        ExprKind::Binary(binary) => {
-            preserves_preexisting_storage(&binary.left)
-                && preserves_preexisting_storage(&binary.right)
-        }
-        ExprKind::Conversion(conversion) => preserves_preexisting_storage(&conversion.expr),
-        ExprKind::Call(_)
-        | ExprKind::Index(_)
-        | ExprKind::Slice(_)
-        | ExprKind::Selector(_)
-        | ExprKind::TypeAssert(_)
-        | ExprKind::CompositeLit(_)
-        | ExprKind::FuncLit(_)
-        | ExprKind::Receive(_)
-        | ExprKind::TryUnwrap(_)
-        | ExprKind::DynAccess(_) => false,
-    }
-}
+use super::{compile_expr, compile_expr_to, preserves_preexisting_storage};
 
 fn arguments_preserve_preexisting_storage(args: &[Expr]) -> bool {
     args.iter().all(preserves_preexisting_storage)

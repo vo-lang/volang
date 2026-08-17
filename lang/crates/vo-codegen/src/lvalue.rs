@@ -114,6 +114,11 @@ enum ResolveMode {
     /// Assignment targets freeze their operands and defer every bounds check
     /// until the eventual store commits.
     Place,
+    /// A single assignment whose RHS is proven unable to mutate existing
+    /// storage. Its target still defers bounds checks until the store, while
+    /// direct container/index operands may remain in their authoritative
+    /// slots through RHS evaluation.
+    StablePlace,
     /// The final value-consuming access. Its concrete load/address opcode owns
     /// the bounds check, avoiding an adjacent duplicate `IndexCheck`.
     ReadFinal,
@@ -124,7 +129,7 @@ enum ResolveMode {
 
 impl ResolveMode {
     fn is_read(self) -> bool {
-        self != Self::Place
+        matches!(self, Self::ReadFinal | Self::ReadNested)
     }
 
     fn requires_early_check(self) -> bool {
@@ -132,11 +137,16 @@ impl ResolveMode {
     }
 
     fn nested(self) -> Self {
-        if self.is_read() {
-            Self::ReadNested
-        } else {
-            Self::Place
+        match self {
+            Self::ReadFinal | Self::ReadNested => Self::ReadNested,
+            // Nested LHS evaluation can itself mutate an earlier operand, so
+            // keep the existing freeze contract inside the aggregate.
+            Self::Place | Self::StablePlace => Self::Place,
         }
+    }
+
+    fn freezes_final_operands(self) -> bool {
+        matches!(self, Self::Place | Self::ReadNested)
     }
 }
 
@@ -351,6 +361,18 @@ pub fn resolve_lvalue(
     resolve_lvalue_with_mode(expr, ResolveMode::Place, ctx, func, info)
 }
 
+/// Resolve a single-assignment target whose RHS preserves all existing
+/// storage. This keeps assignment-time bounds behavior while allowing the
+/// target's final direct operands to stay in place.
+pub(crate) fn resolve_lvalue_for_stable_assignment(
+    expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<LValue, CodegenError> {
+    resolve_lvalue_with_mode(expr, ResolveMode::StablePlace, ctx, func, info)
+}
+
 /// Resolve a location that will be consumed immediately as a value. Unlike an
 /// assignment place, a multi-dimensional read completes and checks each outer
 /// indexing operation before evaluating the next index expression.
@@ -560,9 +582,19 @@ fn resolve_index_lvalue(
     // For slice/map/string: compile container FIRST, then index (left-to-right order)
     if info.is_slice(container_type) {
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gc_base_slot(container_value, func);
+        let container_reg = if !mode.freezes_final_operands()
+            && crate::expr::preserves_preexisting_storage(&idx.index)
+        {
+            container_value
+        } else {
+            snapshot_gc_base_slot(container_value, func)
+        };
         let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
-        let index_reg = snapshot_value_slot(index_value, func);
+        let index_reg = if !mode.freezes_final_operands() {
+            index_value
+        } else {
+            snapshot_value_slot(index_value, func)
+        };
         if mode.requires_early_check() {
             let len_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::SliceLen, len_reg, container_reg, 0);
@@ -584,7 +616,13 @@ fn resolve_index_lvalue(
 
     if info.is_map(container_type) {
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gc_base_slot(container_value, func);
+        let container_reg = if !mode.freezes_final_operands()
+            && crate::expr::preserves_preexisting_storage(&idx.index)
+        {
+            container_value
+        } else {
+            snapshot_gc_base_slot(container_value, func)
+        };
         let (key_type, _) = info.map_key_val_types(container_type);
         let index_reg = crate::expr::compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let key_slot_types = info.map_key_slot_types(container_type);
@@ -601,7 +639,13 @@ fn resolve_index_lvalue(
 
     if info.is_string(container_type) {
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gc_base_slot(container_value, func);
+        let container_reg = if !mode.freezes_final_operands()
+            && crate::expr::preserves_preexisting_storage(&idx.index)
+        {
+            container_value
+        } else {
+            snapshot_gc_base_slot(container_value, func)
+        };
         let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
         return Ok(LValue::Index {
             kind: ContainerKind::String,
@@ -1717,7 +1761,11 @@ pub fn compile_index_addr(
 
     if info.is_slice(container_type) {
         let container_value = crate::expr::compile_expr(container_expr, ctx, func, info)?;
-        let container_reg = snapshot_gc_base_slot(container_value, func);
+        let container_reg = if crate::expr::preserves_preexisting_storage(index_expr) {
+            container_value
+        } else {
+            snapshot_gc_base_slot(container_value, func)
+        };
         let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
         let elem_type = info.slice_elem_type(container_type);
         let elem_bytes = info.slice_elem_bytes(container_type);

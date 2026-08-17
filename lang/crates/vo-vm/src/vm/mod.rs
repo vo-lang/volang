@@ -86,17 +86,9 @@ fn ptr_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::Slot
     func.instruction_metadata.get(pc)?.ptr_value_layout()
 }
 
-fn elem_layout_for_pc(
-    func: &FunctionDef,
-    pc: usize,
-) -> Option<(usize, bool, &[vo_runtime::SlotType])> {
-    let metadata = func.instruction_metadata.get(pc)?;
-    let layout = metadata.elem_layout()?;
-    Some((
-        layout.bytes,
-        layout.needs_sign_extend,
-        metadata.elem_slot_layout()?,
-    ))
+#[inline]
+fn elem_slot_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::SlotType]> {
+    func.instruction_metadata.get(pc)?.elem_slot_layout()
 }
 
 pub(crate) enum PreparedQueueAction {
@@ -3205,6 +3197,10 @@ impl Vm {
             .exact_base_maps()
             .function(func_id)
             .expect("verified function owns exact-base facts");
+        let mut element_layouts = loaded_module
+            .element_layout_maps()
+            .function(func_id)
+            .expect("verified function owns element-layout facts");
         if pc >= code.len() {
             return ExecResult::JitError(format!(
                 "pc {pc} out of bounds for function {} with {} instructions",
@@ -3239,6 +3235,10 @@ impl Vm {
                     .exact_base_maps()
                     .function(func_id)
                     .expect("verified function owns exact-base facts");
+                element_layouts = loaded_module
+                    .element_layout_maps()
+                    .function(func_id)
+                    .expect("verified function owns element-layout facts");
                 if pc >= code.len() {
                     return ExecResult::JitError(format!(
                         "pc {pc} out of bounds for function {} with {} instructions",
@@ -4088,6 +4088,10 @@ impl Vm {
                         .exact_base_maps()
                         .function(func_id)
                         .expect("verified call target owns exact-base facts");
+                    element_layouts = loaded_module
+                        .element_layout_maps()
+                        .function(func_id)
+                        .expect("verified call target owns element-layout facts");
                     debug_assert!(!code.is_empty());
                 }
                 Opcode::CallExtern => {
@@ -4414,6 +4418,10 @@ impl Vm {
                                     .exact_base_maps()
                                     .function(func_id)
                                     .expect("verified caller owns exact-base facts");
+                                element_layouts = loaded_module
+                                    .element_layout_maps()
+                                    .function(func_id)
+                                    .expect("verified caller owns element-layout facts");
                                 if pc >= code.len() {
                                     return ExecResult::JitError(format!(
                                         "pc {pc} out of bounds for function {} with {} instructions",
@@ -4564,11 +4572,12 @@ impl Vm {
 
                 // Array operations
                 Opcode::ArrayNew => {
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArrayNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
                     match exec::exec_array_new(stack, bp, &inst, &mut self.state.gc, elem_bytes) {
                         Ok(()) => {}
                         Err(exec::InstructionError::Malformed(message)) => {
@@ -4608,13 +4617,13 @@ impl Vm {
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
-                    let Some((elem_bytes, needs_sign_extend, elem_layout)) =
-                        elem_layout_for_pc(func, fetched_pc)
-                    else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArrayGet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
+                    let needs_sign_extend = layout.needs_sign_extend;
                     let val = match (elem_bytes, needs_sign_extend) {
                         (1, false) => unsafe { *base.offset(off) as u64 },
                         (2, false) => unsafe { *(base.offset(off * 2) as *const u16) as u64 },
@@ -4624,6 +4633,12 @@ impl Vm {
                         (2, true) => unsafe { *(base.offset(off * 2) as *const i16) as i64 as u64 },
                         (4, true) => unsafe { *(base.offset(off * 4) as *const i32) as i64 as u64 },
                         _ => {
+                            let Some(elem_layout) = elem_slot_layout_for_pc(func, fetched_pc)
+                            else {
+                                return ExecResult::JitError(format!(
+                                    "ArrayGet at pc {fetched_pc} is missing element slot metadata"
+                                ));
+                            };
                             for i in 0..elem_layout.len() {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
@@ -4657,12 +4672,12 @@ impl Vm {
                     let off = idx as isize;
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let val = stack_get(stack, src);
-                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, fetched_pc)
-                    else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArraySet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
                     match elem_bytes {
                         1 => unsafe { *base.offset(off) = val as u8 },
                         2 => unsafe { *(base.offset(off * 2) as *mut u16) = val as u16 },
@@ -4685,6 +4700,12 @@ impl Vm {
                             unsafe { *(base.offset(off * 8) as *mut u64) = val };
                         }
                         _ => {
+                            let Some(elem_layout) = elem_slot_layout_for_pc(func, fetched_pc)
+                            else {
+                                return ExecResult::JitError(format!(
+                                    "ArraySet at pc {fetched_pc} is missing element slot metadata"
+                                ));
+                            };
                             let elem_slots = elem_layout.len();
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let em = unsafe { array::elem_meta(arr) };
@@ -4739,11 +4760,12 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "ArrayAddr at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
                     let base = unsafe { array::data_ptr_bytes(arr) };
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(frame_base, inst.a as usize, addr);
@@ -4751,11 +4773,12 @@ impl Vm {
 
                 // Slice operations
                 Opcode::SliceNew => {
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceNew at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
                     match exec::exec_slice_new(stack, bp, &inst, &mut self.state.gc, elem_bytes) {
                         Ok(()) => {}
                         Err(exec::InstructionError::Malformed(message)) => {
@@ -4803,13 +4826,13 @@ impl Vm {
                         }
                         continue;
                     }
-                    let Some((elem_bytes, needs_sign_extend, elem_layout)) =
-                        elem_layout_for_pc(func, fetched_pc)
-                    else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceGet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
+                    let needs_sign_extend = layout.needs_sign_extend;
                     let val = match (elem_bytes, needs_sign_extend) {
                         (1, false) => unsafe { *base.add(idx) as u64 },
                         (2, false) => unsafe { *(base.add(idx * 2) as *const u16) as u64 },
@@ -4819,6 +4842,12 @@ impl Vm {
                         (2, true) => unsafe { *(base.add(idx * 2) as *const i16) as i64 as u64 },
                         (4, true) => unsafe { *(base.add(idx * 4) as *const i32) as i64 as u64 },
                         _ => {
+                            let Some(elem_layout) = elem_slot_layout_for_pc(func, fetched_pc)
+                            else {
+                                return ExecResult::JitError(format!(
+                                    "SliceGet at pc {fetched_pc} is missing element slot metadata"
+                                ));
+                            };
                             for i in 0..elem_layout.len() {
                                 let ptr =
                                     unsafe { base.add(idx * elem_bytes + i * 8) as *const u64 };
@@ -4873,12 +4902,12 @@ impl Vm {
                         }
                         continue;
                     }
-                    let Some((elem_bytes, _, elem_layout)) = elem_layout_for_pc(func, fetched_pc)
-                    else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceSet at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
                     match elem_bytes {
                         1 => unsafe { *base.add(idx) = val as u8 },
                         2 => unsafe { *(base.add(idx * 2) as *mut u16) = val as u16 },
@@ -4904,6 +4933,12 @@ impl Vm {
                             unsafe { *(base.add(idx * 8) as *mut u64) = val };
                         }
                         _ => {
+                            let Some(elem_layout) = elem_slot_layout_for_pc(func, fetched_pc)
+                            else {
+                                return ExecResult::JitError(format!(
+                                    "SliceSet at pc {fetched_pc} is missing element slot metadata"
+                                ));
+                            };
                             let elem_slots = elem_layout.len();
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let owner = unsafe { vo_runtime::objects::slice::owner_ref(s) };
@@ -4975,11 +5010,12 @@ impl Vm {
                     }
                 }
                 Opcode::SliceAppend => {
-                    let Some((elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc) else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceAppend at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let elem_bytes = layout.bytes;
                     instruction_result!(exec::exec_slice_append(
                         stack,
                         bp,
@@ -5007,12 +5043,12 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let Some((metadata_elem_bytes, _, _)) = elem_layout_for_pc(func, fetched_pc)
-                    else {
+                    let Some(layout) = element_layouts.get(fetched_pc) else {
                         return ExecResult::JitError(format!(
                             "SliceAddr at pc {fetched_pc} is missing ElemLayout metadata"
                         ));
                     };
+                    let metadata_elem_bytes = layout.bytes;
                     let elem_bytes =
                         if unsafe { vo_runtime::objects::slice::uses_flat_slot_storage(s) } {
                             unsafe { vo_runtime::objects::slice::storage_stride(s) }
