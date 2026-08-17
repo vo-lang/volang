@@ -1595,7 +1595,7 @@ fn pop_frame(fiber: &mut Fiber) -> Option<CallFrame> {
 fn fast_complete_stack_return(fiber: &mut Fiber, inst: &Instruction) -> ExecResult {
     match fiber.complete_verified_stack_return(inst.a, inst.b) {
         CompletedStackReturn::Done => ExecResult::Done,
-        CompletedStackReturn::Resume(_) => ExecResult::FrameChanged,
+        CompletedStackReturn::Resume => ExecResult::FrameChanged,
     }
 }
 

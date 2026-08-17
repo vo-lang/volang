@@ -4390,17 +4390,17 @@ impl Vm {
                             crate::fiber::CompletedStackReturn::Done => {
                                 return ExecResult::Done;
                             }
-                            crate::fiber::CompletedStackReturn::Resume(caller) => {
+                            crate::fiber::CompletedStackReturn::Resume => {
                                 self.mark_gc_fiber_roots_dirty(fiber_id);
                                 let frames = unsafe { &mut *frames_ptr };
                                 frame_ptr = frames
                                     .last_mut()
                                     .expect("stack return reported a caller frame");
-                                func_id = caller.func_id;
-                                bp = caller.bp;
+                                func_id = unsafe { (*frame_ptr).func_id };
+                                bp = unsafe { (*frame_ptr).bp };
                                 stack = fiber.stack_ptr();
                                 frame_base = unsafe { stack.add(bp) };
-                                pc = caller.pc;
+                                pc = unsafe { (*frame_ptr).pc };
                                 func = match module.functions.get(func_id as usize) {
                                     Some(func) => func,
                                     None => {

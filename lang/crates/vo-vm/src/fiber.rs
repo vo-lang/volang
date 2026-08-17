@@ -115,7 +115,7 @@ pub(crate) struct ReservedCallWindow {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CompletedStackReturn {
     Done,
-    Resume(CallFrame),
+    Resume,
 }
 
 #[derive(Debug, Clone)]
@@ -1778,8 +1778,33 @@ impl Fiber {
 
     #[inline]
     pub fn copy_stack_slots(&mut self, dst: usize, src: usize, slot_count: usize) {
-        if slot_count > 0 {
-            self.stack.copy_within(src..src + slot_count, dst);
+        match slot_count {
+            0 => {}
+            1 => self.stack[dst] = self.stack[src],
+            2 => {
+                let values = [self.stack[src], self.stack[src + 1]];
+                self.stack[dst] = values[0];
+                self.stack[dst + 1] = values[1];
+            }
+            3 => {
+                let values = [self.stack[src], self.stack[src + 1], self.stack[src + 2]];
+                self.stack[dst] = values[0];
+                self.stack[dst + 1] = values[1];
+                self.stack[dst + 2] = values[2];
+            }
+            4 => {
+                let values = [
+                    self.stack[src],
+                    self.stack[src + 1],
+                    self.stack[src + 2],
+                    self.stack[src + 3],
+                ];
+                self.stack[dst] = values[0];
+                self.stack[dst + 1] = values[1];
+                self.stack[dst + 2] = values[2];
+                self.stack[dst + 3] = values[3];
+            }
+            _ => self.stack.copy_within(src..src + slot_count, dst),
         }
     }
 
@@ -1947,7 +1972,7 @@ impl Fiber {
         let write_count = usize::from(frame.ret_count.min(ret_count));
         let src = frame.bp + usize::from(ret_start);
 
-        let Some(caller) = self.frames.last().copied() else {
+        let Some(caller) = self.frames.last() else {
             self.copy_stack_slots(0, src, write_count);
             self.sp = write_count;
             return CompletedStackReturn::Done;
@@ -1956,7 +1981,7 @@ impl Fiber {
         let dst = caller.bp + usize::from(frame.ret_reg);
         debug_assert!(dst + write_count <= self.stack.len());
         self.copy_stack_slots(dst, src, write_count);
-        CompletedStackReturn::Resume(caller)
+        CompletedStackReturn::Resume
     }
 
     /// Whether the active return can bypass every extended return protocol.
@@ -2577,9 +2602,10 @@ mod tests {
 
         let completed = fiber.complete_verified_stack_return(0, 2);
 
-        let super::CompletedStackReturn::Resume(caller) = completed else {
+        let super::CompletedStackReturn::Resume = completed else {
             panic!("borrowed callee must resume its caller");
         };
+        let caller = fiber.frames.last().expect("resumed caller frame");
         assert_eq!(caller.func_id, 7);
         assert_eq!(fiber.sp, caller_sp);
         assert_eq!(&fiber.stack[4..6], &[41, 42]);
@@ -2599,6 +2625,22 @@ mod tests {
         assert!(fiber.frames.is_empty());
         assert_eq!(fiber.sp, 2);
         assert_eq!(&fiber.stack[..2], &[51, 52]);
+    }
+
+    #[test]
+    fn narrow_stack_slot_copies_preserve_overlap_semantics() {
+        for slot_count in 1..=4 {
+            for (src, dst) in [(0, 1), (1, 0), (1, 1)] {
+                let mut expected = vec![10, 20, 30, 40, 50, 60];
+                expected.copy_within(src..src + slot_count, dst);
+
+                let mut fiber = Fiber::new(1);
+                fiber.stack = vec![10, 20, 30, 40, 50, 60];
+                fiber.copy_stack_slots(dst, src, slot_count);
+
+                assert_eq!(fiber.stack, expected);
+            }
+        }
     }
 
     #[test]

@@ -308,11 +308,6 @@ fn build_function_map(
         .try_reserve_exact(func.code.len())
         .map_err(|_| FrameRootMapBuildError::resource(func_id, 0, "root effects"))?;
     let logical_roots = logical_root_slots(func);
-    let initialization_roots = logical_roots
-        .iter()
-        .copied()
-        .filter(|slot| *slot >= func.param_slots)
-        .collect::<BTreeSet<_>>();
 
     for (pc, inst) in func.code.iter().copied().enumerate() {
         let metadata = func.instruction_metadata.get(pc);
@@ -389,21 +384,11 @@ fn build_function_map(
         let mut sets = Vec::new();
         let mut slots = Vec::new();
         let mut interned = BTreeMap::<Vec<u16>, u32>::new();
-        intern_root_set(
-            func_id,
-            0,
-            func,
-            &BTreeSet::new(),
-            &mut interned,
-            &mut sets,
-            &mut slots,
-            budget,
-        )?;
         let initialization = intern_root_set(
             func_id,
             0,
             func,
-            &initialization_roots,
+            &BTreeSet::new(),
             &mut interned,
             &mut sets,
             &mut slots,
@@ -420,6 +405,16 @@ fn build_function_map(
 
     let mut blocks = build_blocks(func_id, &func.code, budget)?;
     compute_liveness(func_id, &mut blocks, &effects, budget)?;
+    // A reused stack cell needs its language zero value only when its old
+    // contents can flow into the function from entry. Backward liveness has
+    // already proved exactly that property: roots written on every path before
+    // their first use do not appear in the entry block's live-in set.
+    let initialization_roots = blocks[0]
+        .live_in
+        .iter()
+        .copied()
+        .filter(|slot| *slot >= func.param_slots)
+        .collect::<BTreeSet<_>>();
 
     budget.charge_bytes(
         func_id,
@@ -864,17 +859,22 @@ mod tests {
         let mut module = Module::new("frame-initialization-roots".to_string());
         module.functions.push(function(
             "with-roots",
-            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
             vec![
+                Instruction::new(Opcode::CopyN, 6, 4, 2),
+                Instruction::new(Opcode::Return, 3, 1, 0),
+            ],
+            vec![
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
                 SlotType::GcRef,
                 SlotType::Interface0,
                 SlotType::Interface1,
-                SlotType::GcRef,
                 SlotType::Interface0,
                 SlotType::Interface1,
             ],
-            3,
-            0,
+            1,
+            1,
         ));
         module.functions.push(function(
             "scalar-only",
@@ -895,6 +895,28 @@ mod tests {
         assert!(maps
             .function(1)
             .expect("second function root map")
+            .initialization_roots_to_clear()
+            .is_none());
+    }
+
+    #[test]
+    fn initialization_skips_roots_written_before_every_use() {
+        let mut module = Module::new("frame-initialization-definite-write".to_string());
+        module.functions.push(function(
+            "copy-before-use",
+            vec![
+                Instruction::new(Opcode::Copy, 1, 0, 0),
+                Instruction::new(Opcode::Return, 1, 1, 0),
+            ],
+            vec![SlotType::GcRef, SlotType::GcRef],
+            1,
+            1,
+        ));
+
+        let maps = FrameRootMaps::build(&module).expect("valid frame root maps");
+        assert!(maps
+            .function(0)
+            .expect("function root map")
             .initialization_roots_to_clear()
             .is_none());
     }

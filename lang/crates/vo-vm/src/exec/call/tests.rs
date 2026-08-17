@@ -265,7 +265,9 @@ fn verified_call_iface_consumes_cached_target_and_initializes_exact_roots() {
     ];
     module.functions.push(caller);
 
-    let mut target = iface_target_function(1, 1, 0, 3);
+    let mut target = iface_target_function(1, 1, 1, 3);
+    target.code = vec![Instruction::new(Opcode::Return, 1, 1, 0)];
+    target.ret_slot_types = vec![SlotType::GcRef];
     target.slot_types = vec![SlotType::Value, SlotType::GcRef, SlotType::Value];
     module.functions.push(target);
 
