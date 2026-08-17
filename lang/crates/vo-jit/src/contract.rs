@@ -79,7 +79,7 @@ pub(crate) fn function_contract_in_env(
             && !env
                 .externs
                 .get(inst.b as u32)
-                .is_some_and(|resolved| resolved.jit_route == ExternJitRoute::Intrinsic)
+                .is_some_and(|resolved| matches!(resolved.jit_route, ExternJitRoute::Intrinsic(_)))
     });
     if func.has_calls || has_non_intrinsic_extern {
         contract = contract.union(EffectContract {
@@ -101,7 +101,7 @@ pub(crate) fn function_contract_in_env(
             && env
                 .externs
                 .get(inst.b as u32)
-                .is_some_and(|resolved| resolved.jit_route == ExternJitRoute::Intrinsic)
+                .is_some_and(|resolved| matches!(resolved.jit_route, ExternJitRoute::Intrinsic(_)))
         {
             continue;
         }
@@ -255,7 +255,7 @@ fn local_function_contract_in_env(
             && env
                 .externs
                 .get(inst.b as u32)
-                .is_some_and(|resolved| resolved.jit_route == ExternJitRoute::Intrinsic)
+                .is_some_and(|resolved| matches!(resolved.jit_route, ExternJitRoute::Intrinsic(_)))
         {
             continue;
         }

@@ -135,8 +135,8 @@ pub fn register_externs(
 mod tests {
     use super::*;
     use vo_runtime::bytecode::{
-        ExternEffects, ExternJitRoute, ParamShape, RegisteredExternSource, ResolvedExtern,
-        ReturnShape,
+        ExternEffects, ExternIntrinsic, ExternJitRoute, ParamShape, RegisteredExternSource,
+        ResolvedExtern, ReturnShape,
     };
     use vo_runtime::SlotType;
 
@@ -175,8 +175,16 @@ mod tests {
 
         for (id, name) in names.iter().enumerate() {
             let entry: &ResolvedExtern = resolved.get(id as u32).expect("resolved math extern");
+            let intrinsic = match *name {
+                vo_runtime::ffi::MATH_SQRT_EXTERN_NAME => ExternIntrinsic::Sqrt,
+                vo_runtime::ffi::MATH_FLOOR_EXTERN_NAME => ExternIntrinsic::Floor,
+                vo_runtime::ffi::MATH_CEIL_EXTERN_NAME => ExternIntrinsic::Ceil,
+                vo_runtime::ffi::MATH_TRUNC_EXTERN_NAME => ExternIntrinsic::Trunc,
+                vo_runtime::ffi::MATH_FMA_EXTERN_NAME => ExternIntrinsic::Fma,
+                _ => unreachable!("test lists only supported math intrinsics"),
+            };
             assert_eq!(entry.name, *name);
-            assert_eq!(entry.jit_route, ExternJitRoute::Intrinsic);
+            assert_eq!(entry.jit_route, ExternJitRoute::Intrinsic(intrinsic));
             assert_eq!(entry.source, RegisteredExternSource::Builtin);
         }
     }

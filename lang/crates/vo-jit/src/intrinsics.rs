@@ -8,6 +8,8 @@
 
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags, Value};
 
+use vo_runtime::bytecode::ExternIntrinsic;
+#[cfg(test)]
 use vo_runtime::ffi::{
     MATH_CEIL_EXTERN_NAME, MATH_FLOOR_EXTERN_NAME, MATH_FMA_EXTERN_NAME, MATH_SQRT_EXTERN_NAME,
     MATH_TRUNC_EXTERN_NAME,
@@ -20,21 +22,15 @@ use crate::translator::ScalarEmitter;
 pub fn emit_resolved_intrinsic<'a>(
     e: &mut impl ScalarEmitter<'a>,
     inst: &Instruction,
-    name: &str,
-) -> Result<(), crate::JitError> {
-    match name {
-        MATH_SQRT_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
-        MATH_FLOOR_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().floor(v)),
-        MATH_CEIL_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
-        MATH_TRUNC_EXTERN_NAME => emit_unary(e, inst, |b, v| b.ins().trunc(v)),
-        MATH_FMA_EXTERN_NAME => emit_fma(e, inst),
-        _ => {
-            return Err(crate::JitError::Internal(format!(
-                "resolved intrinsic route for unsupported extern '{name}'"
-            )))
-        }
+    intrinsic: ExternIntrinsic,
+) {
+    match intrinsic {
+        ExternIntrinsic::Sqrt => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
+        ExternIntrinsic::Floor => emit_unary(e, inst, |b, v| b.ins().floor(v)),
+        ExternIntrinsic::Ceil => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
+        ExternIntrinsic::Trunc => emit_unary(e, inst, |b, v| b.ins().trunc(v)),
+        ExternIntrinsic::Fma => emit_fma(e, inst),
     }
-    Ok(())
 }
 
 /// Emit a unary f64 → f64 intrinsic.
@@ -83,7 +79,7 @@ mod tests {
 
     #[test]
     fn runtime_intrinsic_route_list_matches_jit_support() {
-        let mut runtime = vo_runtime::ffi::jit_intrinsic_extern_names().to_vec();
+        let mut runtime = vo_runtime::ffi::resolved_intrinsic_extern_names().to_vec();
         let mut jit = SUPPORTED_EXTERN_NAMES.to_vec();
         runtime.sort_unstable();
         jit.sort_unstable();

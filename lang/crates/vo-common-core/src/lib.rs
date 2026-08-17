@@ -34,7 +34,7 @@ pub mod types;
 pub mod verifier;
 
 pub use bytecode::{
-    Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef,
+    Constant, ExternDef, ExternEffects, ExternIntrinsic, ExternJitRoute, FunctionDef, GlobalDef,
     InstructionMetadata, InterfaceMeta, Itab, Module, ParamShape, ProviderTrust,
     RegisteredExternSource, ResolvedExtern, ResolvedExternAbi, ResolvedExternTable,
     ResolvedExternTableError, ReturnShape, SelectCaseLayout, StructMeta, TransferType,

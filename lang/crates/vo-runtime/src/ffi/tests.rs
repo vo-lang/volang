@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn verified_intrinsics_execute_the_resolved_operation() {
+    let cases: [(ExternIntrinsic, [f64; 3], f64); 5] = [
+        (ExternIntrinsic::Sqrt, [9.0, 0.0, 0.0], 3.0),
+        (ExternIntrinsic::Floor, [2.75, 0.0, 0.0], 2.0),
+        (ExternIntrinsic::Ceil, [2.25, 0.0, 0.0], 3.0),
+        (ExternIntrinsic::Trunc, [-2.75, 0.0, 0.0], -2.0),
+        (ExternIntrinsic::Fma, [2.0, 3.0, 4.0], 10.0),
+    ];
+
+    for (intrinsic, args, expected) in cases {
+        let mut stack = [0u64; 6];
+        for (index, value) in args.into_iter().enumerate() {
+            stack[1 + index] = value.to_bits();
+        }
+        // Safety: this local frame provides three argument slots at r1 and
+        // one return slot at r4, covering every intrinsic ABI in the table.
+        unsafe { execute_verified_intrinsic(intrinsic, stack.as_mut_ptr(), 0, 1, 4) };
+        assert_eq!(f64::from_bits(stack[4]), expected);
+    }
+}
+
+#[test]
 fn process_identity_allocator_exhausts_without_wrapping_or_reuse() {
     let counter = AtomicU64::new(u64::MAX - 1);
 
@@ -3412,7 +3434,7 @@ fn resolve_module_externs_freezes_jit_route_metadata() {
 
     assert_eq!(
         resolved.get(0).expect("math extern").jit_route,
-        ExternJitRoute::Intrinsic
+        ExternJitRoute::Intrinsic(ExternIntrinsic::Sqrt)
     );
     assert_eq!(
         resolved.get(1).expect("yield extern").jit_route,

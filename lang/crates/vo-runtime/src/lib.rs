@@ -52,8 +52,8 @@ pub mod jit_api;
 
 // Re-exports from vo-common-core (no_std compatible)
 pub use vo_common_core::bytecode::{
-    Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef, InterfaceMeta,
-    Itab, Module, ParamShape, ProviderTrust, RegisteredExternSource, ResolvedExtern,
+    Constant, ExternDef, ExternEffects, ExternIntrinsic, ExternJitRoute, FunctionDef, GlobalDef,
+    InterfaceMeta, Itab, Module, ParamShape, ProviderTrust, RegisteredExternSource, ResolvedExtern,
     ResolvedExternAbi, ResolvedExternTable, ResolvedExternTableError, ReturnShape, StructMeta,
 };
 pub use vo_common_core::instruction::{Instruction, Opcode};

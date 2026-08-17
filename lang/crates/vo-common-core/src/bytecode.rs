@@ -218,8 +218,17 @@ pub enum RegisteredExternSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternIntrinsic {
+    Sqrt,
+    Floor,
+    Ceil,
+    Trunc,
+    Fma,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternJitRoute {
-    Intrinsic,
+    Intrinsic(ExternIntrinsic),
     DirectHelper,
     VmMaterializeBeforeCall,
 }
@@ -698,7 +707,7 @@ impl ResolvedExternTable {
                 )));
             }
             match entry.jit_route {
-                ExternJitRoute::Intrinsic => {
+                ExternJitRoute::Intrinsic(intrinsic) => {
                     if entry.trust != ProviderTrust::IntrinsicEligible {
                         return Err(ResolvedExternTableError::new(format!(
                             "resolved extern '{}' selects the intrinsic JIT route without intrinsic-eligible trust",
@@ -718,7 +727,7 @@ impl ResolvedExternTable {
                             entry.name, entry.source
                         )));
                     }
-                    if !resolved_intrinsic_abi_matches(name_class, entry) {
+                    if !resolved_intrinsic_abi_matches(name_class, entry, intrinsic) {
                         return Err(ResolvedExternTableError::new(format!(
                             "resolved extern '{}' selects the intrinsic JIT route with an unsupported name or ABI",
                             entry.name
@@ -859,19 +868,25 @@ impl ResolvedExternTable {
 fn resolved_intrinsic_abi_matches(
     name_class: crate::extern_key::ExternNameClass<'_>,
     entry: &ResolvedExtern,
+    intrinsic: ExternIntrinsic,
 ) -> bool {
     let crate::extern_key::ExternNameClass::Canonical(key) = name_class else {
         return false;
     };
-    let expected_params = match (key.package(), key.function()) {
-        ("math", "Sqrt" | "Floor" | "Ceil" | "Trunc") => 1,
-        ("math", "FMA") => 3,
-        _ => return false,
+    let (expected_function, expected_params) = match intrinsic {
+        ExternIntrinsic::Sqrt => ("Sqrt", 1),
+        ExternIntrinsic::Floor => ("Floor", 1),
+        ExternIntrinsic::Ceil => ("Ceil", 1),
+        ExternIntrinsic::Trunc => ("Trunc", 1),
+        ExternIntrinsic::Fma => ("FMA", 3),
     };
-    matches!(
-        &entry.params,
-        ParamShape::Exact { slots } if *slots == expected_params
-    ) && entry.returns.slots == 1
+    key.package() == "math"
+        && key.function() == expected_function
+        && matches!(
+            &entry.params,
+            ParamShape::Exact { slots } if *slots == expected_params
+        )
+        && entry.returns.slots == 1
         && entry.returns.slot_types.as_slice() == [SlotType::Float]
         && (entry.param_kinds.is_empty()
             || entry
@@ -3610,6 +3625,13 @@ mod tests {
     }
 
     fn resolved_math_intrinsic(function: &str, param_slots: u16) -> ResolvedExtern {
+        let intrinsic = match function {
+            "Floor" => ExternIntrinsic::Floor,
+            "Ceil" => ExternIntrinsic::Ceil,
+            "Trunc" => ExternIntrinsic::Trunc,
+            "FMA" => ExternIntrinsic::Fma,
+            _ => ExternIntrinsic::Sqrt,
+        };
         ResolvedExtern {
             id: 0,
             name: crate::extern_key::ExternKeyRef::new("math", function)
@@ -3627,7 +3649,7 @@ mod tests {
             provider_identity: 1,
             abi_fingerprint: 2,
             trust: ProviderTrust::IntrinsicEligible,
-            jit_route: ExternJitRoute::Intrinsic,
+            jit_route: ExternJitRoute::Intrinsic(intrinsic),
         }
     }
 
@@ -3713,7 +3735,7 @@ mod tests {
         assert!(error.message().contains("must materialize"));
 
         let mut untrusted_intrinsic = resolved_extension_entry("github.com/acme/demo/pkg");
-        untrusted_intrinsic.jit_route = ExternJitRoute::Intrinsic;
+        untrusted_intrinsic.jit_route = ExternJitRoute::Intrinsic(ExternIntrinsic::Sqrt);
         let error = ResolvedExternTable::try_new(vec![untrusted_intrinsic])
             .expect_err("intrinsic dispatch requires explicit trust");
         assert!(error.message().contains("intrinsic-eligible trust"));
@@ -3723,7 +3745,7 @@ mod tests {
         effectful_intrinsic.provider_effects = ExternEffects::MAY_YIELD;
         effectful_intrinsic.effective_effects = ExternEffects::MAY_YIELD;
         effectful_intrinsic.trust = ProviderTrust::IntrinsicEligible;
-        effectful_intrinsic.jit_route = ExternJitRoute::Intrinsic;
+        effectful_intrinsic.jit_route = ExternJitRoute::Intrinsic(ExternIntrinsic::Sqrt);
         let error = ResolvedExternTable::try_new(vec![effectful_intrinsic])
             .expect_err("effectful providers cannot use intrinsic dispatch");
         assert!(error.message().contains("intrinsic JIT route with effects"));

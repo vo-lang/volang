@@ -60,15 +60,16 @@ pub use types::{
     VmRootScanSnapshot, VmRootScanStage, VmState, TIME_SLICE,
 };
 
-use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
+use extern_call::{
+    apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary,
+    ExternResultTransition,
+};
 use helpers::{
     runtime_panic, runtime_panic_msg, runtime_trap, slice_cap, slice_data_ptr, slice_len,
     string_index, string_len, user_panic,
 };
 
-#[cfg(feature = "jit")]
-use crate::bytecode::ExternJitRoute;
-use crate::bytecode::{FunctionDef, Module, TransferType};
+use crate::bytecode::{ExternJitRoute, FunctionDef, Module, TransferType};
 use crate::exec;
 use crate::fiber::{Fiber, FiberCapacityError, PendingSpawn};
 use crate::runtime_boundary::{
@@ -84,6 +85,14 @@ fn queue_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::Sl
 
 fn ptr_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::SlotType]> {
     func.instruction_metadata.get(pc)?.ptr_value_layout()
+}
+
+#[inline]
+fn extern_arg_slots_for_pc(func: &FunctionDef, pc: usize) -> Option<u16> {
+    func.instruction_metadata
+        .get(pc)?
+        .call_layout_slots()
+        .map(|(arg_slots, _)| arg_slots)
 }
 
 #[inline]
@@ -925,48 +934,131 @@ fn debug_validate_extern_returns(
     Ok(())
 }
 
-fn check_extern_frame_range(
-    op: &'static str,
-    func: &FunctionDef,
-    bp: usize,
-    stack_len: usize,
-    start: u16,
-    count: u16,
-) -> Result<(), String> {
-    if count == 0 {
-        return Ok(());
-    }
+struct InvokedExtern {
+    transition: ExternResultTransition,
+    #[cfg(feature = "std")]
+    staged_io_roots_added: bool,
+}
 
-    let start = start as usize;
-    let count = count as usize;
-    let Some(end) = start.checked_add(count) else {
+/// Cross the general provider boundary outside the interpreter dispatch body.
+///
+/// Intrinsics never enter this function. Keeping world construction, replay
+/// input plumbing, provider dispatch, and return validation out of line makes
+/// unrelated opcode layout stable as the external ABI evolves.
+#[inline(never)]
+fn invoke_verified_extern(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    loaded_module: &LoadedModule,
+    func: &FunctionDef,
+    _fiber_id: crate::scheduler::FiberId,
+    _func_id: u32,
+    bp: usize,
+    inst: Instruction,
+    fetched_pc: usize,
+) -> Result<InvokedExtern, String> {
+    use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld};
+
+    let extern_id = inst.b as u32;
+    let resolved_extern = unsafe {
+        vm.state
+            .extern_registry
+            .resolved_externs()
+            .entries()
+            .get_unchecked(extern_id as usize)
+    };
+    let Some(arg_slots) = extern_arg_slots_for_pc(func, fetched_pc) else {
         return Err(format!(
-            "CallExtern {op} range {start}..+{count} overflows slot index space in function {}",
-            func.name
+            "CallExtern at pc {fetched_pc} is missing call layout metadata"
         ));
     };
-    let local_slots = func.local_slots as usize;
-    if end > local_slots {
-        return Err(format!(
-            "CallExtern {op} range {start}..{end} out of bounds for function {} with {local_slots} local slots",
-            func.name
-        ));
-    }
-    let Some(stack_end) = bp.checked_add(end) else {
-        return Err(format!(
-            "CallExtern {op} stack range bp {bp} + end {end} overflows stack index space in function {}",
-            func.name
-        ));
+    let invoke = ExternInvoke {
+        extern_id,
+        bp: bp as u32,
+        arg_start: inst.c,
+        arg_slots,
+        ret_start: inst.a,
+        ret_slots: resolved_extern.returns.slots,
     };
-    if stack_end > stack_len {
-        return Err(format!(
-            "CallExtern {op} stack range {}..{} out of bounds for stack length {stack_len} in function {}",
-            bp + start,
-            stack_end,
-            func.name
-        ));
+    #[cfg(feature = "std")]
+    let staged_io_root_additions_before = vm.state.io.staged_gc_root_additions();
+    let world = ExternWorld::new(
+        &mut vm.state.gc,
+        loaded_module.runtime_metadata(),
+        &mut vm.state.itab_cache,
+        &vm.state.program_args,
+        &*vm.state.output,
+        &mut vm.state.sentinel_errors,
+        &mut vm.state.host_output,
+    )
+    .with_runtime_mem_requests(&mut vm.state.runtime_mem_requests)
+    .with_host_services_v2(vm.state.host_services_v2.as_ref());
+    #[cfg(feature = "std")]
+    let world = world.with_io(&mut vm.state.io);
+    let (replay_results, replay_panic_message) =
+        fiber.closure_replay.snapshot_for_extern(fiber.frames.len());
+    let resume_io_token = {
+        #[cfg(feature = "std")]
+        {
+            fiber.resume_io_token.take()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            None
+        }
+    };
+    let fiber_inputs = ExternFiberInputs {
+        fiber_opaque: fiber as *mut Fiber as *mut core::ffi::c_void,
+        resume_io_token,
+        resume_host_event_token: fiber.resume_host_event_token.take(),
+        resume_host_event_data: fiber.resume_host_event_data.take(),
+        replay_results,
+        replay_panic_message,
+    };
+    let extern_result = unsafe {
+        vm.state.extern_registry.call_verified_resolved(
+            resolved_extern,
+            &mut fiber.stack,
+            invoke,
+            world,
+            fiber_inputs,
+        )
+    };
+    #[cfg(feature = "std")]
+    let staged_io_roots_added =
+        vm.state.io.staged_gc_root_additions() != staged_io_root_additions_before;
+    let extern_result = match extern_result {
+        Ok(result) => result,
+        Err(err) => {
+            #[cfg(feature = "std")]
+            if staged_io_roots_added {
+                vm.mark_gc_all_roots_dirty();
+            }
+            fiber.closure_replay.finish_extern_terminal();
+            return Err(err.to_string());
+        }
+    };
+    #[cfg(debug_assertions)]
+    if matches!(&extern_result, vo_runtime::ffi::ExternResult::Ok) {
+        if let Err(message) = debug_validate_extern_returns(
+            &vm.state.gc,
+            loaded_module.module(),
+            fiber,
+            _fiber_id,
+            _func_id,
+            extern_id,
+            bp,
+            &inst,
+        ) {
+            fiber.closure_replay.finish_extern_terminal();
+            return Err(message);
+        }
     }
-    Ok(())
+    Ok(InvokedExtern {
+        transition: extern_result_to_transition(resolved_extern, extern_result, fetched_pc as u32),
+        #[cfg(feature = "std")]
+        staged_io_roots_added,
+    })
 }
 
 #[cfg(feature = "std")]
@@ -4083,7 +4175,7 @@ impl Vm {
                     frame_base = unsafe { stack.add(bp) };
                     pc = 0;
                     func = target_func;
-                    code = &target_func.code;
+                    code = &func.code;
                     exact_bases = loaded_module
                         .exact_base_maps()
                         .function(func_id)
@@ -4095,167 +4187,50 @@ impl Vm {
                     debug_assert!(!code.is_empty());
                 }
                 Opcode::CallExtern => {
+                    // CallExtern: a=dst, b=extern_id, c=args_start.
+                    let extern_id = inst.b as u32;
+                    // Safety: module admission resolves and freezes one extern
+                    // entry for every verified module extern id.
+                    let resolved_extern = unsafe {
+                        self.state
+                            .extern_registry
+                            .resolved_externs()
+                            .entries()
+                            .get_unchecked(extern_id as usize)
+                    };
+                    if let ExternJitRoute::Intrinsic(intrinsic) = resolved_extern.jit_route {
+                        // Safety: load-time extern resolution admits this route
+                        // only for its exact, effect-free scalar ABI; bytecode
+                        // verification proves both frame windows.
+                        unsafe {
+                            vo_runtime::ffi::execute_verified_intrinsic(
+                                intrinsic, stack, bp, inst.c, inst.a,
+                            )
+                        };
+                        continue;
+                    }
                     // Providers may allocate or request a nested closure before
                     // producing outputs. Keep GC on the instruction-entry root
                     // state until the boundary has committed its outcome.
                     unsafe { (*frame_ptr).pc = fetched_pc };
-                    use vo_runtime::ffi::{ExternFiberInputs, ExternInvoke, ExternWorld};
-                    // CallExtern: a=dst, b=extern_id, c=args_start; metadata owns layouts.
-                    let extern_id = inst.b as u32;
-                    let fetched_pc_u32 = fetched_pc as u32;
-                    let fiber_ptr = fiber as *mut crate::fiber::Fiber as *mut core::ffi::c_void;
-
-                    let Some(_extern_def) = module.externs.get(extern_id as usize) else {
-                        return ExecResult::JitError(format!(
-                            "CallExtern missing extern id {extern_id}"
-                        ));
-                    };
-                    let Some(resolved_extern) = self.state.extern_registry.resolved(extern_id)
-                    else {
-                        return ExecResult::JitError(format!(
-                            "CallExtern id {extern_id} missing resolved extern entry"
-                        ));
-                    };
-                    let (arg_slots, callsite_ret_slots) = match func
-                        .instruction_metadata
-                        .get(fetched_pc)
-                    {
-                        Some(InstructionMetadata::CallExternLayout {
-                            arg_layout,
-                            ret_layout,
-                        }) => {
-                            let Ok(arg_slots) = u16::try_from(arg_layout.len()) else {
-                                return ExecResult::JitError(format!(
-                                    "CallExtern argument layout has {} slots, exceeding u16::MAX",
-                                    arg_layout.len()
-                                ));
-                            };
-                            (arg_slots, ret_layout.len())
-                        }
-                        other => {
-                            return ExecResult::JitError(format!(
-                                "CallExtern missing authoritative metadata at pc {fetched_pc}: {other:?}"
-                            ));
-                        }
-                    };
-                    let ret_slots = resolved_extern.returns.slots;
-                    if callsite_ret_slots != usize::from(ret_slots) {
-                        return ExecResult::JitError(format!(
-                            "CallExtern return layout has {callsite_ret_slots} slots but extern {} returns {ret_slots}",
-                            resolved_extern.name
-                        ));
-                    }
-                    if !resolved_extern.params.accepts_slots(arg_slots) {
-                        return ExecResult::JitError(format!(
-                            "CallExtern arg slot count {arg_slots} does not match extern {} params {}",
-                            resolved_extern.name,
-                            resolved_extern.params.display_name()
-                        ));
-                    }
-                    if let Err(msg) = check_extern_frame_range(
-                        "arg",
+                    let invoked = match invoke_verified_extern(
+                        self,
+                        fiber,
+                        loaded_module,
                         func,
+                        fiber_id,
+                        func_id,
                         bp,
-                        fiber.stack.len(),
-                        inst.c,
-                        arg_slots,
+                        inst,
+                        fetched_pc,
                     ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    if let Err(msg) = check_extern_frame_range(
-                        "return",
-                        func,
-                        bp,
-                        fiber.stack.len(),
-                        inst.a,
-                        ret_slots,
-                    ) {
-                        return ExecResult::JitError(msg);
-                    }
-                    let invoke = ExternInvoke {
-                        extern_id,
-                        bp: bp as u32,
-                        arg_start: inst.c,
-                        arg_slots,
-                        ret_start: inst.a,
-                        ret_slots,
-                    };
-                    #[cfg(feature = "std")]
-                    let staged_io_root_additions_before = self.state.io.staged_gc_root_additions();
-                    let world = ExternWorld::new(
-                        &mut self.state.gc,
-                        runtime_metadata,
-                        &mut self.state.itab_cache,
-                        &self.state.program_args,
-                        &*self.state.output,
-                        &mut self.state.sentinel_errors,
-                        &mut self.state.host_output,
-                    )
-                    .with_runtime_mem_requests(&mut self.state.runtime_mem_requests)
-                    .with_host_services_v2(self.state.host_services_v2.as_ref());
-                    #[cfg(feature = "std")]
-                    let world = world.with_io(&mut self.state.io);
-                    let (closure_replay_results, closure_replay_panic_message) =
-                        fiber.closure_replay.snapshot_for_extern(fiber.frames.len());
-                    let resume_io_token = {
-                        #[cfg(feature = "std")]
-                        {
-                            fiber.resume_io_token.take()
-                        }
-                        #[cfg(not(feature = "std"))]
-                        {
-                            None
-                        }
-                    };
-                    let resume_host_event_token = fiber.resume_host_event_token.take();
-                    let resume_host_event_data = fiber.resume_host_event_data.take();
-                    let fiber_inputs = ExternFiberInputs {
-                        fiber_opaque: fiber_ptr,
-                        resume_io_token,
-                        resume_host_event_token,
-                        resume_host_event_data,
-                        replay_results: closure_replay_results,
-                        replay_panic_message: closure_replay_panic_message,
-                    };
-                    let extern_result = self.state.extern_registry.call_resolved(
-                        &mut fiber.stack,
-                        invoke,
-                        world,
-                        fiber_inputs,
-                    );
-                    #[cfg(feature = "std")]
-                    let staged_io_roots_added =
-                        self.state.io.staged_gc_root_additions() != staged_io_root_additions_before;
-                    let extern_result = match extern_result {
-                        Ok(result) => result,
-                        Err(err) => {
-                            #[cfg(feature = "std")]
-                            if staged_io_roots_added {
-                                self.mark_gc_all_roots_dirty();
-                            }
-                            fiber.closure_replay.finish_extern_terminal();
-                            return ExecResult::JitError(err.to_string());
-                        }
+                        Ok(invoked) => invoked,
+                        Err(message) => return ExecResult::JitError(message),
                     };
                     stack = fiber.stack_ptr();
-                    #[cfg(debug_assertions)]
-                    if matches!(&extern_result, vo_runtime::ffi::ExternResult::Ok) {
-                        if let Err(msg) = debug_validate_extern_returns(
-                            &self.state.gc,
-                            module,
-                            fiber,
-                            fiber_id,
-                            func_id,
-                            extern_id,
-                            bp,
-                            &inst,
-                        ) {
-                            fiber.closure_replay.finish_extern_terminal();
-                            return ExecResult::JitError(msg);
-                        }
-                    }
-                    let transition =
-                        extern_result_to_transition(resolved_extern, extern_result, fetched_pc_u32);
+                    let transition = invoked.transition;
+                    #[cfg(feature = "std")]
+                    let staged_io_roots_added = invoked.staged_io_roots_added;
                     apply_extern_replay_scope_effect(fiber, transition.replay_scope);
                     match transition.boundary {
                         ExternBoundary::Continue => {
@@ -5043,18 +5018,13 @@ impl Vm {
                         ));
                     }
                     let idx = idx_raw as usize;
-                    let Some(layout) = element_layouts.get(fetched_pc) else {
-                        return ExecResult::JitError(format!(
-                            "SliceAddr at pc {fetched_pc} is missing ElemLayout metadata"
-                        ));
-                    };
-                    let metadata_elem_bytes = layout.bytes;
-                    let elem_bytes =
-                        if unsafe { vo_runtime::objects::slice::uses_flat_slot_storage(s) } {
-                            unsafe { vo_runtime::objects::slice::storage_stride(s) }
-                        } else {
-                            metadata_elem_bytes
-                        };
+                    // Every admitted slice descriptor records its physical
+                    // stride. Packed slices store the semantic element width;
+                    // flat inline-array views store their slot stride. Using
+                    // that invariant directly avoids re-decoding static type
+                    // metadata and branching on storage mode for every
+                    // element-address operation.
+                    let elem_bytes = unsafe { vo_runtime::objects::slice::storage_stride(s) };
                     let base = slice_data_ptr(s);
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(frame_base, inst.a as usize, addr);

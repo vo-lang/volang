@@ -40,7 +40,6 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     };
     let resolved = emitter.resolved_extern(extern_id)?;
     let jit_route = resolved.jit_route;
-    let resolved_name = resolved.name.clone();
     let arg_slots_u16 = u16::try_from(arg_count).map_err(|_| {
         crate::JitError::Internal(format!(
             "CallExtern arg slot count {arg_count} exceeds u16 ABI range"
@@ -69,8 +68,8 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
         })?;
     let extern_ret_slots = callsite_ret_slots;
 
-    if matches!(jit_route, ExternJitRoute::Intrinsic) {
-        intrinsics::emit_resolved_intrinsic(emitter, inst, &resolved_name)?;
+    if let ExternJitRoute::Intrinsic(intrinsic) = jit_route {
+        intrinsics::emit_resolved_intrinsic(emitter, inst, intrinsic);
         return Ok(false);
     }
 

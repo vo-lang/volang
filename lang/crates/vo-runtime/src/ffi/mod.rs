@@ -44,8 +44,9 @@ use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::{
-    ExtSlotKind, ExternEffects, ExternJitRoute, Module, ModuleRuntimeMetadata, ParamShape,
-    ProviderTrust, RegisteredExternSource, ResolvedExtern, ResolvedExternTable, ReturnShape,
+    ExtSlotKind, ExternEffects, ExternIntrinsic, ExternJitRoute, Module, ModuleRuntimeMetadata,
+    ParamShape, ProviderTrust, RegisteredExternSource, ResolvedExtern, ResolvedExternTable,
+    ReturnShape,
 };
 use crate::output::OutputSink;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -295,7 +296,7 @@ pub const MATH_CEIL_EXTERN_NAME: &str = crate::vo_extern_name!("math", "Ceil");
 pub const MATH_TRUNC_EXTERN_NAME: &str = crate::vo_extern_name!("math", "Trunc");
 pub const MATH_FMA_EXTERN_NAME: &str = crate::vo_extern_name!("math", "FMA");
 
-pub const JIT_INTRINSIC_EXTERN_NAMES: &[&str] = &[
+pub const RESOLVED_INTRINSIC_EXTERN_NAMES: &[&str] = &[
     MATH_SQRT_EXTERN_NAME,
     MATH_FLOOR_EXTERN_NAME,
     MATH_CEIL_EXTERN_NAME,
@@ -303,42 +304,76 @@ pub const JIT_INTRINSIC_EXTERN_NAMES: &[&str] = &[
     MATH_FMA_EXTERN_NAME,
 ];
 
-pub fn jit_intrinsic_extern_names() -> &'static [&'static str] {
-    JIT_INTRINSIC_EXTERN_NAMES
+pub fn resolved_intrinsic_extern_names() -> &'static [&'static str] {
+    RESOLVED_INTRINSIC_EXTERN_NAMES
 }
 
-fn extern_jit_intrinsic(
+fn resolved_intrinsic(
     name: &str,
     params: &ParamShape,
     returns: &ReturnShape,
     provider_effects: ExternEffects,
     trust: ProviderTrust,
-) -> bool {
-    provider_effects.is_empty()
-        && trust == ProviderTrust::IntrinsicEligible
-        && intrinsic_abi_matches(name, params, returns)
+) -> Option<ExternIntrinsic> {
+    (provider_effects.is_empty() && trust == ProviderTrust::IntrinsicEligible)
+        .then(|| intrinsic_abi(name, params, returns))
+        .flatten()
 }
 
-fn intrinsic_abi_matches(name: &str, params: &ParamShape, returns: &ReturnShape) -> bool {
-    let expected_args: u16 = match name {
-        MATH_SQRT_EXTERN_NAME
-        | MATH_FLOOR_EXTERN_NAME
-        | MATH_CEIL_EXTERN_NAME
-        | MATH_TRUNC_EXTERN_NAME => 1,
-        MATH_FMA_EXTERN_NAME => 3,
-        _ => return false,
+fn intrinsic_abi(
+    name: &str,
+    params: &ParamShape,
+    returns: &ReturnShape,
+) -> Option<ExternIntrinsic> {
+    let (intrinsic, expected_args): (ExternIntrinsic, u16) = match name {
+        MATH_SQRT_EXTERN_NAME => (ExternIntrinsic::Sqrt, 1),
+        MATH_FLOOR_EXTERN_NAME => (ExternIntrinsic::Floor, 1),
+        MATH_CEIL_EXTERN_NAME => (ExternIntrinsic::Ceil, 1),
+        MATH_TRUNC_EXTERN_NAME => (ExternIntrinsic::Trunc, 1),
+        MATH_FMA_EXTERN_NAME => (ExternIntrinsic::Fma, 3),
+        _ => return None,
     };
     if params
         != &(ParamShape::Exact {
             slots: expected_args,
         })
     {
-        return false;
+        return None;
     }
     if returns.slots != 1 {
-        return false;
+        return None;
     }
-    returns.slot_types.as_slice() == [crate::SlotType::Float]
+    (returns.slot_types.as_slice() == [crate::SlotType::Float]).then_some(intrinsic)
+}
+
+/// Execute a load-time-resolved, effect-free scalar intrinsic directly on a
+/// verified VM frame.
+///
+/// # Safety
+///
+/// `stack` must point to the active frame storage. The resolved intrinsic ABI
+/// must prove that its argument and return slots are in bounds for that frame.
+#[inline(never)]
+pub unsafe fn execute_verified_intrinsic(
+    intrinsic: ExternIntrinsic,
+    stack: *mut u64,
+    bp: usize,
+    arg_start: u16,
+    ret_start: u16,
+) {
+    let args = unsafe { stack.add(bp + usize::from(arg_start)) };
+    let result = match intrinsic {
+        ExternIntrinsic::Sqrt => libm::sqrt(f64::from_bits(unsafe { *args })),
+        ExternIntrinsic::Floor => libm::floor(f64::from_bits(unsafe { *args })),
+        ExternIntrinsic::Ceil => libm::ceil(f64::from_bits(unsafe { *args })),
+        ExternIntrinsic::Trunc => libm::trunc(f64::from_bits(unsafe { *args })),
+        ExternIntrinsic::Fma => libm::fma(
+            f64::from_bits(unsafe { *args }),
+            f64::from_bits(unsafe { *args.add(1) }),
+            f64::from_bits(unsafe { *args.add(2) }),
+        ),
+    };
+    unsafe { *stack.add(bp + usize::from(ret_start)) = result.to_bits() };
 }
 
 fn runtime_provider_abi_fingerprint() -> u64 {
@@ -1073,7 +1108,7 @@ pub fn register_stdlib_providers(
             .is_some_and(|registered| {
                 registered.source() == RegisteredExternSource::Builtin
                     && registered.trust() == ProviderTrust::IntrinsicEligible
-                    && JIT_INTRINSIC_EXTERN_NAMES.contains(&entry.name())
+                    && RESOLVED_INTRINSIC_EXTERN_NAMES.contains(&entry.name())
             });
         if !builtin_intrinsic_is_authoritative {
             entry.try_register(registry, id as u32)?;
@@ -5724,6 +5759,9 @@ pub struct ExternRegistry {
     funcs_by_name: BTreeMap<String, RegisteredExtern>,
     id_to_name: BTreeMap<u32, String>,
     resolved_externs: ResolvedExternTable,
+    /// Provider bindings indexed exactly like `resolved_externs`. Resolution
+    /// freezes these once so verified call sites never repeat a name lookup.
+    resolved_providers: Vec<RegisteredExtern>,
     /// Complete pre-freeze extension owner catalog. Ownership is selected
     /// from this set before provider function lookup.
     extension_module_owners: BTreeMap<String, ExtensionOwnerCatalog>,
@@ -5745,6 +5783,7 @@ impl ExternRegistry {
             funcs_by_name: BTreeMap::new(),
             id_to_name: BTreeMap::new(),
             resolved_externs: ResolvedExternTable::empty(),
+            resolved_providers: Vec::new(),
             extension_module_owners: BTreeMap::new(),
             #[cfg(feature = "std")]
             native_catalog_built: false,
@@ -5765,7 +5804,22 @@ impl ExternRegistry {
         extern_defs: &[crate::bytecode::ExternDef],
     ) -> Result<(), ExternContractError> {
         self.ensure_mutable()?;
-        self.resolved_externs = self.resolve_module_externs(extern_defs)?;
+        let resolved_externs = self.resolve_module_externs(extern_defs)?;
+        let mut resolved_providers = Vec::with_capacity(resolved_externs.len());
+        for resolved in resolved_externs.entries() {
+            let provider = self.funcs_by_name.get(&resolved.name).ok_or_else(|| {
+                ExternContractError::provider_not_registered(resolved.id, resolved.name.clone())
+            })?;
+            if provider.provider_identity != resolved.provider_identity {
+                return Err(ExternContractError::new(format!(
+                    "extern '{}' provider identity changed during resolution",
+                    resolved.name
+                )));
+            }
+            resolved_providers.push(provider.clone());
+        }
+        self.resolved_externs = resolved_externs;
+        self.resolved_providers = resolved_providers;
         self.frozen = true;
         Ok(())
     }
@@ -6172,7 +6226,7 @@ impl ExternRegistry {
         effects: ExternEffects,
     ) -> Result<(), ExternContractError> {
         let name = name.into();
-        let trust = if JIT_INTRINSIC_EXTERN_NAMES.contains(&name.as_str()) {
+        let trust = if RESOLVED_INTRINSIC_EXTERN_NAMES.contains(&name.as_str()) {
             ProviderTrust::IntrinsicEligible
         } else {
             ProviderTrust::RuntimeInternal
@@ -6731,14 +6785,14 @@ impl ExternRegistry {
             }
             let jit_route = if registered.requires_vm_materialization {
                 ExternJitRoute::VmMaterializeBeforeCall
-            } else if extern_jit_intrinsic(
+            } else if let Some(intrinsic) = resolved_intrinsic(
                 &def.name,
                 &def.params,
                 &def.returns,
                 provider_effects,
                 registered.trust,
             ) {
-                ExternJitRoute::Intrinsic
+                ExternJitRoute::Intrinsic(intrinsic)
             } else if provider_effects.contains(ExternEffects::UNKNOWN_CONTROL) {
                 ExternJitRoute::VmMaterializeBeforeCall
             } else {
@@ -6815,6 +6869,36 @@ impl ExternRegistry {
         self.call_with_resolved_effects(stack, invoke, world, fiber_inputs, Some(resolved))
     }
 
+    /// Dispatch a call site whose module, frame windows, and ABI shape were
+    /// admitted by the common bytecode verifier and whose registry has already
+    /// been resolved and frozen for that module.
+    ///
+    /// # Safety
+    ///
+    /// `resolved` must be the entry at `invoke.extern_id` in this registry's
+    /// frozen resolved table. The invoke argument and return windows must be
+    /// disjoint, in bounds, and match that resolved ABI.
+    pub unsafe fn call_verified_resolved(
+        &self,
+        resolved: &ResolvedExtern,
+        stack: &mut [u64],
+        invoke: ExternInvoke,
+        world: ExternWorld,
+        fiber_inputs: ExternFiberInputs,
+    ) -> ExternCallOutcome {
+        debug_assert!(self.frozen);
+        debug_assert_eq!(resolved.id, invoke.extern_id);
+        debug_assert!(resolved.params.accepts_slots(invoke.arg_slots));
+        debug_assert_eq!(resolved.returns.slots, invoke.ret_slots);
+        debug_assert!(!invoke_windows_overlap(invoke));
+        let provider = unsafe {
+            self.resolved_providers
+                .get_unchecked(invoke.extern_id as usize)
+        };
+        debug_assert_eq!(provider.provider_identity, resolved.provider_identity);
+        self.call_bound_provider(provider, Some(resolved), stack, invoke, world, fiber_inputs)
+    }
+
     fn call_with_resolved_effects(
         &self,
         stack: &mut [u64],
@@ -6845,82 +6929,92 @@ impl ExternRegistry {
         };
         match registered {
             Some(registered) => {
-                if resolved.is_none()
-                    && registered.source == RegisteredExternSource::WasmExtensionBridge
-                {
-                    return Err(ExternContractError::new(format!(
-                        "wasm extension bridge extern '{}' requires resolved ABI metadata before dispatch",
-                        registered.provider_name
-                    )));
-                }
-                let effect_authority = if let Some(resolved) = resolved {
-                    resolved.effective_effects
-                } else {
-                    registered.provider_effects
-                };
-                let mut ctx = ExternCallContext::new(stack, invoke, world, fiber_inputs);
-                if registered.source == RegisteredExternSource::WasmExtensionBridge {
-                    if let Some(resolved) = resolved {
-                        let artifact_generation =
-                            registered.provider_artifact_generation.ok_or_else(|| {
-                                ExternContractError::new(format!(
-                                    "WASM extension bridge '{}' is missing its artifact generation",
-                                    registered.provider_name
-                                ))
-                            })?;
-                        ctx.bind_wasm_extension_bridge_abi(resolved, artifact_generation)?;
-                    }
-                }
-                let return_snapshot = ctx.prepare_return_slots()?;
-                let result = match registered.func {
-                    RegisteredFn::Internal(f) => call_internal_provider(
-                        f,
-                        &mut ctx,
-                        invoke.extern_id,
-                        registered.provider_name.as_str(),
-                    ),
-                    #[cfg(feature = "std")]
-                    RegisteredFn::Extension(f) => {
-                        let mut abi = ctx.native_abi_frame();
-                        let code = f(&mut abi as *mut ExtAbiContextV10);
-                        ctx.decode_ext_result(code)
-                    }
-                };
-                let result = match result {
-                    Ok(result) => result,
-                    Err(err) => {
-                        ctx.restore_return_slots(&return_snapshot)?;
-                        return Err(err);
-                    }
-                };
-                let effect = result_effect(&result);
-                if !effect.is_subset_of(effect_authority) {
-                    ctx.restore_return_slots(&return_snapshot)?;
-                    return Err(ExternContractError::new(format!(
-                        "extern id {} returned effect 0x{:x} outside resolved effects 0x{:x}",
-                        invoke.extern_id,
-                        effect.bits(),
-                        effect_authority.bits()
-                    )));
-                }
-                if matches!(result, ExternResult::Ok) {
-                    if let Some(resolved) = resolved {
-                        if let Err(err) = ctx.verify_return_shape(&resolved.returns) {
-                            ctx.restore_return_slots(&return_snapshot)?;
-                            return Err(err);
-                        }
-                    }
-                } else {
-                    ctx.restore_return_slots(&return_snapshot)?;
-                }
-                if let Err(err) = ctx.verify_after_result(&result) {
-                    ctx.restore_return_slots(&return_snapshot)?;
-                    return Err(err);
-                }
-                Ok(result)
+                self.call_bound_provider(registered, resolved, stack, invoke, world, fiber_inputs)
             }
             _ => Ok(ExternResult::NotRegistered(invoke.extern_id)),
         }
+    }
+
+    fn call_bound_provider(
+        &self,
+        registered: &RegisteredExtern,
+        resolved: Option<&ResolvedExtern>,
+        stack: &mut [u64],
+        invoke: ExternInvoke,
+        world: ExternWorld,
+        fiber_inputs: ExternFiberInputs,
+    ) -> ExternCallOutcome {
+        if resolved.is_none() && registered.source == RegisteredExternSource::WasmExtensionBridge {
+            return Err(ExternContractError::new(format!(
+                "WASM extension bridge extern '{}' requires resolved ABI metadata before dispatch",
+                registered.provider_name
+            )));
+        }
+        let effect_authority = if let Some(resolved) = resolved {
+            resolved.effective_effects
+        } else {
+            registered.provider_effects
+        };
+        let mut ctx = ExternCallContext::new(stack, invoke, world, fiber_inputs);
+        if registered.source == RegisteredExternSource::WasmExtensionBridge {
+            if let Some(resolved) = resolved {
+                let artifact_generation =
+                    registered.provider_artifact_generation.ok_or_else(|| {
+                        ExternContractError::new(format!(
+                            "WASM extension bridge '{}' is missing its artifact generation",
+                            registered.provider_name
+                        ))
+                    })?;
+                ctx.bind_wasm_extension_bridge_abi(resolved, artifact_generation)?;
+            }
+        }
+        let return_snapshot = ctx.prepare_return_slots()?;
+        let result = match registered.func {
+            RegisteredFn::Internal(f) => call_internal_provider(
+                f,
+                &mut ctx,
+                invoke.extern_id,
+                registered.provider_name.as_str(),
+            ),
+            #[cfg(feature = "std")]
+            RegisteredFn::Extension(f) => {
+                let mut abi = ctx.native_abi_frame();
+                let code = f(&mut abi as *mut ExtAbiContextV10);
+                ctx.decode_ext_result(code)
+            }
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                ctx.restore_return_slots(&return_snapshot)?;
+                return Err(err);
+            }
+        };
+        let effect = result_effect(&result);
+        if !effect.is_subset_of(effect_authority) {
+            ctx.restore_return_slots(&return_snapshot)?;
+            return Err(ExternContractError::new(format!(
+                "extern id {} returned effect 0x{:x} outside resolved effects 0x{:x}",
+                invoke.extern_id,
+                effect.bits(),
+                effect_authority.bits()
+            )));
+        }
+        if matches!(result, ExternResult::Ok) {
+            if let Some(resolved) = resolved {
+                if let Err(err) = ctx.verify_return_shape(&resolved.returns) {
+                    ctx.restore_return_slots(&return_snapshot)?;
+                    return Err(err);
+                }
+            }
+        } else {
+            ctx.restore_return_slots(&return_snapshot)?;
+        }
+        if let Err(err) = ctx.verify_after_result(&result) {
+            ctx.restore_return_slots(&return_snapshot)?;
+            return Err(err);
+        }
+        Ok(result)
     }
 
     /// Check if a function is registered.
