@@ -811,42 +811,6 @@ impl FunctionIr {
         bitset_contains(&self.executable_blocks, block.index())
     }
 
-    pub(crate) fn exact_base_return_slots(&self, func: &FunctionDef) -> Box<[bool]> {
-        let mut exact = func
-            .ret_slot_types
-            .iter()
-            .map(SlotType::is_managed_ref)
-            .collect::<Vec<_>>();
-        let mut saw_return = false;
-        for (pc, instruction) in self.instructions.iter().copied().enumerate() {
-            if instruction.source.opcode() != Opcode::Return
-                || !self.is_executable_block(instruction.block())
-            {
-                continue;
-            }
-            saw_return = true;
-            for (offset, candidate) in exact.iter_mut().enumerate() {
-                if !*candidate {
-                    continue;
-                }
-                let Some(slot) = instruction.source.a.checked_add(offset as u16) else {
-                    *candidate = false;
-                    continue;
-                };
-                *candidate = self.input_value(pc, slot).is_some_and(|value| {
-                    matches!(
-                        self.value(value).ty,
-                        ValueType::GcRef(RootProvenance::ExactBase)
-                    )
-                });
-            }
-        }
-        if !saw_return {
-            exact.fill(false);
-        }
-        exact.into_boxed_slice()
-    }
-
     pub(crate) fn executable_successors(
         &self,
         block: BlockId,

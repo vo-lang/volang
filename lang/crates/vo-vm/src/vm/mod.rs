@@ -3201,6 +3201,10 @@ impl Vm {
             }
         };
         let mut code: &[Instruction] = &func.code;
+        let mut exact_bases = loaded_module
+            .exact_base_maps()
+            .function(func_id)
+            .expect("verified function owns exact-base facts");
         if pc >= code.len() {
             return ExecResult::JitError(format!(
                 "pc {pc} out of bounds for function {} with {} instructions",
@@ -3231,6 +3235,10 @@ impl Vm {
                     }
                 };
                 code = &func.code;
+                exact_bases = loaded_module
+                    .exact_base_maps()
+                    .function(func_id)
+                    .expect("verified function owns exact-base facts");
                 if pc >= code.len() {
                     return ExecResult::JitError(format!(
                         "pc {pc} out of bounds for function {} with {} instructions",
@@ -3601,7 +3609,14 @@ impl Vm {
                             "PtrSet at pc {fetched_pc} is missing PtrLayout metadata"
                         ));
                     };
-                    if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc, layout) {
+                    if !exec::exec_ptr_set(
+                        stack,
+                        bp,
+                        &inst,
+                        &mut self.state.gc,
+                        layout,
+                        exact_bases.write_barrier(fetched_pc),
+                    ) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -4069,6 +4084,10 @@ impl Vm {
                     pc = 0;
                     func = target_func;
                     code = &target_func.code;
+                    exact_bases = loaded_module
+                        .exact_base_maps()
+                        .function(func_id)
+                        .expect("verified call target owns exact-base facts");
                     debug_assert!(!code.is_empty());
                 }
                 Opcode::CallExtern => {
@@ -4391,6 +4410,10 @@ impl Vm {
                                     }
                                 };
                                 code = &func.code;
+                                exact_bases = loaded_module
+                                    .exact_base_maps()
+                                    .function(func_id)
+                                    .expect("verified caller owns exact-base facts");
                                 if pc >= code.len() {
                                     return ExecResult::JitError(format!(
                                         "pc {pc} out of bounds for function {} with {} instructions",

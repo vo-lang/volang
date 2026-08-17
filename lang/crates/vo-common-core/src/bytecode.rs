@@ -2130,6 +2130,7 @@ pub struct LoadedModule {
     runtime_type_facts: RuntimeTypeFacts,
     dynamic_callsite_count: usize,
     frame_root_maps: crate::frame_roots::FrameRootMaps,
+    exact_base_maps: crate::exact_bases::ExactBaseMaps,
 }
 
 impl LoadedModule {
@@ -2137,6 +2138,7 @@ impl LoadedModule {
         module: Module,
         runtime_type_facts: RuntimeTypeFacts,
         frame_root_maps: crate::frame_roots::FrameRootMaps,
+        exact_base_maps: crate::exact_bases::ExactBaseMaps,
     ) -> Self {
         debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
         let dynamic_callsite_count = module.dynamic_callsite_count();
@@ -2145,6 +2147,7 @@ impl LoadedModule {
             runtime_type_facts,
             dynamic_callsite_count,
             frame_root_maps,
+            exact_base_maps,
         }
     }
 
@@ -2166,6 +2169,11 @@ impl LoadedModule {
     #[inline]
     pub fn frame_root_maps(&self) -> &crate::frame_roots::FrameRootMaps {
         &self.frame_root_maps
+    }
+
+    #[inline]
+    pub fn exact_base_maps(&self) -> &crate::exact_bases::ExactBaseMaps {
+        &self.exact_base_maps
     }
 
     #[inline]
@@ -2205,7 +2213,8 @@ impl LoadedModule {
         });
         let frame_root_maps = crate::frame_roots::FrameRootMaps::build(&module)
             .unwrap_or_else(|_| crate::frame_roots::FrameRootMaps::conservative(&module));
-        Self::new(module, runtime_type_facts, frame_root_maps)
+        let exact_base_maps = crate::exact_bases::ExactBaseMaps::conservative(&module);
+        Self::new(module, runtime_type_facts, frame_root_maps, exact_base_maps)
     }
 }
 

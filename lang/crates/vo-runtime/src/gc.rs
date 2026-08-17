@@ -2165,6 +2165,27 @@ impl Gc {
         self.write_barrier_canonicalized(parent, child);
     }
 
+    /// Apply a write barrier to verifier-proven allocation bases without
+    /// repeating heap range lookup for either object.
+    ///
+    /// # Safety
+    ///
+    /// Every non-null reference must be the live payload base of an allocation
+    /// owned by this collector. Interior-capable language pointers must use
+    /// [`Gc::write_barrier`].
+    #[inline]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub unsafe fn write_barrier_exact_bases(&mut self, parent: GcRef, child: GcRef) {
+        if parent.is_null() || child.is_null() {
+            return;
+        }
+        if self.owner_dispatch.is_none() {
+            debug_assert_eq!(self.canonicalize_ref(parent), Some(parent));
+            debug_assert_eq!(self.canonicalize_ref(child), Some(child));
+        }
+        self.write_barrier_canonicalized(parent, child);
+    }
+
     /// Fail-closed barrier entry for runtime ABIs that cannot surface an
     /// invalid-parent panic. Both references are canonicalized exactly once in
     /// the owning collector's common case.
@@ -2196,7 +2217,9 @@ impl Gc {
             if self.cycle_kind == GcCycleKind::Minor
                 && matches!(self.state, GcState::Propagate | GcState::Atomic)
             {
-                self.mark_gray(child);
+                // SAFETY: every entry path canonicalizes the child or carries
+                // a verifier proof that it is already an allocation base.
+                unsafe { self.mark_gray_exact_base(child) };
             }
         }
 
@@ -2207,7 +2230,8 @@ impl Gc {
                 // Incremental-update barrier: preserve the strong tri-color
                 // invariant by shading the new child.
                 if (p_header.is_black() || p_header.is_gray()) && c_header.is_white() {
-                    self.mark_gray(child);
+                    // SAFETY: `write_barrier_canonicalized` accepts bases only.
+                    unsafe { self.mark_gray_exact_base(child) };
                 }
             }
             GcState::Sweep => {

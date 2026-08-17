@@ -5,6 +5,8 @@ use std::cell::Cell;
 
 use vo_common_core::verifier as module_verifier;
 #[cfg(test)]
+use vo_runtime::bytecode::LoadedModule;
+#[cfg(test)]
 use vo_runtime::bytecode::Module as VoModule;
 
 pub(crate) use module_verifier::ModuleVerificationError as JitMetadataError;
@@ -26,4 +28,10 @@ pub(crate) fn verify_module(
     #[cfg(test)]
     COMMON_MODULE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
     module_verifier::verify_module(vo_module)
+}
+
+#[cfg(test)]
+pub(crate) fn verify_loaded_module(vo_module: &VoModule) -> Result<LoadedModule, JitMetadataError> {
+    COMMON_MODULE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+    module_verifier::verify_loaded_module(vo_module.clone())
 }

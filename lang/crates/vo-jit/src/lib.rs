@@ -22,7 +22,6 @@ mod metadata;
 mod native_frame;
 mod native_stack_map;
 mod optimizer;
-mod return_provenance;
 #[cfg(test)]
 mod semantics;
 mod shape;
@@ -1021,7 +1020,8 @@ pub struct JitCompiler {
     loaded_module: Option<Arc<LoadedModule>>,
     verified_env: Option<JitCompileEnvScope>,
     module_call_graph: Option<Arc<call_graph::ModuleCallGraph>>,
-    return_provenance: Option<return_provenance::ModuleReturnProvenance>,
+    #[cfg(test)]
+    test_exact_base_returns: Option<Box<[Box<[bool]>]>>,
     module_analysis: Option<Arc<ModuleJitAnalysis>>,
     optimization_plan: Option<Arc<optimizer::ModuleOptimizationPlan>>,
     publication_failure: Option<String>,
@@ -1107,7 +1107,8 @@ impl JitCompiler {
             loaded_module: None,
             verified_env: None,
             module_call_graph: None,
-            return_provenance: None,
+            #[cfg(test)]
+            test_exact_base_returns: None,
             module_analysis: None,
             optimization_plan: None,
             publication_failure: None,
@@ -1125,7 +1126,16 @@ impl JitCompiler {
                 Err(JitError::ModuleScopeChanged)
             };
         }
-        verifier::verify_module(vo_module)?;
+        let loaded = verifier::verify_loaded_module(vo_module)?;
+        self.test_exact_base_returns = Some(
+            loaded
+                .exact_base_maps()
+                .exact_base_returns()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
         self.verified_module_identity = Some(identity);
         self.cache.bind_function_count(vo_module.functions.len());
         Ok(())
@@ -1194,61 +1204,29 @@ impl JitCompiler {
         Ok(graph)
     }
 
-    fn ensure_return_provenance(
-        &mut self,
-        func_id: u32,
-        vo_module: &VoModule,
-        graph: &call_graph::ModuleCallGraph,
-    ) -> Result<(), JitError> {
-        if self.return_provenance.is_none() {
-            let remaining = self
-                .cache
-                .analysis_memory_limit_bytes
-                .saturating_sub(self.cache.module_analysis_bytes);
-            let summaries =
-                match return_provenance::ModuleReturnProvenance::new(vo_module, graph, remaining) {
-                    Ok(summaries) => summaries,
-                    Err(JitError::AnalysisResourceLimitExceeded {
-                        requested_bytes, ..
-                    }) => {
-                        self.cache.reject_analysis();
-                        return Err(JitError::AnalysisResourceLimitExceeded {
-                            limit_bytes: self.cache.analysis_memory_limit_bytes,
-                            requested_bytes: self
-                                .cache
-                                .module_analysis_bytes
-                                .saturating_add(requested_bytes),
-                        });
-                    }
-                    Err(error) => return Err(error),
-                };
-            self.cache
-                .record_module_analysis(summaries.retained_bytes())?;
-            self.return_provenance = Some(summaries);
-        }
-        let transient_limit = self
-            .cache
-            .analysis_memory_limit_bytes
-            .saturating_sub(self.cache.module_analysis_bytes);
-        self.return_provenance
-            .as_mut()
-            .expect("return provenance was initialized above")
-            .ensure_function(func_id as usize, vo_module, graph, transient_limit)
-    }
-
     fn get_or_analyze_function(
         &mut self,
         func_id: u32,
         func: &FunctionDef,
         vo_module: &VoModule,
     ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
-        let graph = self.module_call_graph(vo_module)?;
-        self.ensure_return_provenance(func_id, vo_module, &graph)?;
-        let exact_base_returns = self
-            .return_provenance
-            .as_ref()
-            .expect("return provenance precedes function analysis")
-            .summaries();
+        let exact_base_returns = if let Some(loaded) = self.loaded_module.as_ref() {
+            debug_assert!(core::ptr::eq(loaded.module(), vo_module));
+            loaded.exact_base_maps().exact_base_returns()
+        } else {
+            #[cfg(test)]
+            {
+                self.test_exact_base_returns
+                    .as_deref()
+                    .ok_or_else(|| JitError::Internal("exact-base facts are unavailable".into()))?
+            }
+            #[cfg(not(test))]
+            {
+                return Err(JitError::Internal(
+                    "JIT compiler has no loaded module".into(),
+                ));
+            }
+        };
         self.cache
             .get_or_analyze(func_id, func, vo_module, exact_base_returns)
     }
@@ -1595,8 +1573,6 @@ impl JitCompiler {
             return Err(error);
         }
         Self::verify_compile_work_budget(func)?;
-        let graph = self.module_call_graph(vo_module)?;
-        self.ensure_return_provenance(func_id, vo_module, &graph)?;
         let module_analysis = self.module_analysis(vo_module, env)?;
         let entry_eligibility = Arc::clone(&module_analysis.entry_eligibility);
         let optimization_plan = if tier == JitTier::Optimizing {
@@ -1813,8 +1789,6 @@ impl JitCompiler {
             return Err(error);
         }
         Self::verify_compile_work_budget(func)?;
-        let graph = self.module_call_graph(vo_module)?;
-        self.ensure_return_provenance(func_id, vo_module, &graph)?;
         let module_analysis = self.module_analysis(vo_module, env)?;
         let entry_eligibility = Arc::clone(&module_analysis.entry_eligibility);
         let analysis = self.get_or_analyze_function(func_id, func, vo_module)?;

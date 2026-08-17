@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod bytecode;
 pub mod debug_info;
+pub mod exact_bases;
 pub mod execution_effects;
 pub mod extern_key;
 pub mod frame_roots;
@@ -38,6 +39,7 @@ pub use bytecode::{
     ResolvedExternTableError, ReturnShape, SelectCaseLayout, StructMeta, TransferType,
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
+pub use exact_bases::{ExactBaseMaps, FunctionExactBaseMap, WriteBarrierBaseProvenance};
 pub use extern_key::{
     classify_extern_name, decode_extern_name, is_portable_package_component,
     is_vm_internal_extern_name, is_vm_variable_shape_extern_name,

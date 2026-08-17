@@ -11,8 +11,6 @@ pub(crate) struct ModuleCallGraph {
     callees: Box<[Box<[usize]>]>,
     component_ids: Box<[usize]>,
     recursive_components: Box<[bool]>,
-    component_members: Box<[Box<[usize]>]>,
-    component_callees: Box<[Box<[usize]>]>,
 }
 
 impl ModuleCallGraph {
@@ -28,8 +26,7 @@ impl ModuleCallGraph {
             core::mem::size_of::<Self>().saturating_add(function_count.saturating_mul(
                 core::mem::size_of::<Box<[usize]>>() * 2
                     + core::mem::size_of::<usize>()
-                    + core::mem::size_of::<bool>()
-                    + core::mem::size_of::<Box<[usize]>>() * 2,
+                    + core::mem::size_of::<bool>(),
             ));
         if fixed_bytes > limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {
@@ -84,24 +81,6 @@ impl ModuleCallGraph {
         }
 
         let (component_ids, recursive_components) = components(&callees, &callers);
-        let mut component_members = vec![Vec::new(); recursive_components.len()];
-        for (func_id, &component) in component_ids.iter().enumerate() {
-            component_members[component].push(func_id);
-        }
-        let mut component_callees = vec![Vec::new(); recursive_components.len()];
-        for (caller, targets) in callees.iter().enumerate() {
-            let caller_component = component_ids[caller];
-            for &callee in targets {
-                let callee_component = component_ids[callee];
-                if caller_component != callee_component {
-                    component_callees[caller_component].push(callee_component);
-                }
-            }
-        }
-        for targets in &mut component_callees {
-            targets.sort_unstable();
-            targets.dedup();
-        }
         let graph = Self {
             callers: callers
                 .into_iter()
@@ -115,16 +94,6 @@ impl ModuleCallGraph {
                 .into_boxed_slice(),
             component_ids: component_ids.into_boxed_slice(),
             recursive_components: recursive_components.into_boxed_slice(),
-            component_members: component_members
-                .into_iter()
-                .map(Vec::into_boxed_slice)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            component_callees: component_callees
-                .into_iter()
-                .map(Vec::into_boxed_slice)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
         };
         let requested_bytes = graph.retained_bytes();
         if requested_bytes > limit_bytes {
@@ -170,28 +139,6 @@ impl ModuleCallGraph {
                     .len()
                     .saturating_mul(core::mem::size_of::<bool>()),
             )
-            .saturating_add(
-                self.component_members
-                    .len()
-                    .saturating_mul(core::mem::size_of::<Box<[usize]>>()),
-            )
-            .saturating_add(
-                self.component_members
-                    .iter()
-                    .map(|members| members.len().saturating_mul(core::mem::size_of::<usize>()))
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                self.component_callees
-                    .len()
-                    .saturating_mul(core::mem::size_of::<Box<[usize]>>()),
-            )
-            .saturating_add(
-                self.component_callees
-                    .iter()
-                    .map(|callees| callees.len().saturating_mul(core::mem::size_of::<usize>()))
-                    .sum::<usize>(),
-            )
     }
 
     #[inline]
@@ -202,30 +149,6 @@ impl ModuleCallGraph {
     #[inline]
     pub(crate) fn callees(&self, func_id: usize) -> &[usize] {
         self.callees.get(func_id).map_or(&[], AsRef::as_ref)
-    }
-
-    #[inline]
-    pub(crate) fn component_id(&self, func_id: usize) -> Option<usize> {
-        self.component_ids.get(func_id).copied()
-    }
-
-    #[inline]
-    pub(crate) fn component_count(&self) -> usize {
-        self.component_members.len()
-    }
-
-    #[inline]
-    pub(crate) fn component_members(&self, component: usize) -> &[usize] {
-        self.component_members
-            .get(component)
-            .map_or(&[], AsRef::as_ref)
-    }
-
-    #[inline]
-    pub(crate) fn component_callees(&self, component: usize) -> &[usize] {
-        self.component_callees
-            .get(component)
-            .map_or(&[], AsRef::as_ref)
     }
 
     #[inline]

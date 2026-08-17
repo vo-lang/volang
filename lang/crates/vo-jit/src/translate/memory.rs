@@ -335,9 +335,8 @@ fn emit_gc_ref_write_barrier<'a>(
 
     e.builder().switch_to_block(slow);
     e.builder().seal_block(slow);
-    let wb_ref = e.helper(HelperKind::write_barrier);
-    let offset_val = e.builder().ins().iconst(types::I32, i64::from(slot_offset));
-    emit_runtime_helper_call(e, wb_ref, &[gc, parent, offset_val, child]);
+    let wb_ref = e.helper(HelperKind::write_barrier_exact_bases);
+    emit_runtime_helper_call(e, wb_ref, &[gc, parent, child]);
     e.builder().ins().jump(done, &[]);
 
     e.builder().switch_to_block(done);

@@ -9,7 +9,6 @@ pub(crate) struct JitFunctionBuilder {
     param_count: u16,
     param_slots: u16,
     ret_slots: u16,
-    ret_slot_types: Option<Vec<SlotType>>,
     recv_slots: u16,
 }
 
@@ -21,7 +20,6 @@ impl JitFunctionBuilder {
             param_count: 0,
             param_slots: 0,
             ret_slots: 0,
-            ret_slot_types: None,
             recv_slots: 0,
         }
     }
@@ -43,21 +41,13 @@ impl JitFunctionBuilder {
         self
     }
 
-    pub(crate) fn return_slot_types(mut self, ret_slot_types: Vec<SlotType>) -> Self {
-        self.ret_slots = ret_slot_types.len() as u16;
-        self.ret_slot_types = Some(ret_slot_types);
-        self
-    }
-
     pub(crate) fn build(self) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&self.code);
         let has_defer = self
             .code
             .iter()
             .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
-        let ret_slot_types = self
-            .ret_slot_types
-            .unwrap_or_else(|| vec![SlotType::Value; self.ret_slots as usize]);
+        let ret_slot_types = vec![SlotType::Value; self.ret_slots as usize];
         let instruction_metadata = vec![InstructionMetadata::None; self.code.len()];
 
         FunctionDef {

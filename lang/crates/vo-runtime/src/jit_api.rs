@@ -1698,6 +1698,21 @@ pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: 
     gc.write_barrier_if_valid(obj as GcRef, val as GcRef);
 }
 
+/// Write barrier for a JIT-proven pair of exact allocation bases.
+///
+/// The generated fast path already reads both headers directly. Reaching this
+/// helper therefore carries the same verifier-backed proof and does not need
+/// a second heap-range lookup.
+pub extern "C" fn vo_gc_write_barrier_exact_bases(gc: *mut Gc, parent: u64, child: u64) {
+    if gc.is_null() || parent == 0 || child == 0 {
+        return;
+    }
+    let gc = unsafe { &mut *gc };
+    // SAFETY: this ABI is emitted only when SSA provenance proves both inputs
+    // are exact live allocation bases or null.
+    unsafe { gc.write_barrier_exact_bases(parent as GcRef, child as GcRef) };
+}
+
 /// Type-safe write barrier for JIT writes whose element metadata is known only
 /// at runtime from an array/slice/map header.
 pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
@@ -4162,6 +4177,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
         (
+            "vo_gc_write_barrier_exact_bases",
+            vo_gc_write_barrier_exact_bases as *const u8,
+        ),
+        (
             "vo_gc_typed_write_barrier_by_meta",
             vo_gc_typed_write_barrier_by_meta as *const u8,
         ),
@@ -4244,6 +4263,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_jit_refill_execution_budget",
         "vo_jit_gc_alloc_value_slots",
         "vo_gc_write_barrier",
+        "vo_gc_write_barrier_exact_bases",
         "vo_gc_typed_write_barrier_by_meta",
         "vo_panic",
         "vo_runtime_trap",
@@ -4354,6 +4374,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         JitRuntimeHelperAbi {
             name: "vo_gc_write_barrier",
             params: &[T::Ptr, T::U64, T::U32, T::U64],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_gc_write_barrier_exact_bases",
+            params: &[T::Ptr, T::U64, T::U64],
             ret: T::Void,
             return_policy: Ret::Void,
             panic_policy: Panic::MustNotPanicAcrossAbi,

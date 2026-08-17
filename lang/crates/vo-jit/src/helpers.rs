@@ -207,6 +207,7 @@ runtime_helper_table! {
     refill_execution_budget => "vo_jit_refill_execution_budget",
     gc_alloc_value_slots => "vo_jit_gc_alloc_value_slots",
     write_barrier => "vo_gc_write_barrier",
+    write_barrier_exact_bases => "vo_gc_write_barrier_exact_bases",
     typed_write_barrier_by_meta => "vo_gc_typed_write_barrier_by_meta",
     panic => "vo_panic",
     runtime_trap => "vo_runtime_trap",

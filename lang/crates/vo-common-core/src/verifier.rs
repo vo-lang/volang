@@ -742,10 +742,30 @@ pub fn verify_loaded_module(module: Module) -> Result<LoadedModule, ModuleVerifi
             ),
         }
     })?;
+    let exact_base_maps = match crate::exact_bases::ExactBaseMaps::build(&module) {
+        Ok(maps) => maps,
+        Err(error) if error.resource_limit => {
+            crate::exact_bases::ExactBaseMaps::conservative(&module)
+        }
+        Err(error) => {
+            let func = module
+                .functions
+                .get(error.function)
+                .map_or("<missing>", |func| func.name.as_str());
+            return Err(ModuleVerificationError::FunctionInvariant {
+                func: func.to_string(),
+                detail: format!(
+                    "exact-base analysis failed at pc {} while building {}",
+                    error.pc, error.detail
+                ),
+            });
+        }
+    };
     Ok(LoadedModule::new(
         module,
         runtime_type_facts,
         frame_root_maps,
+        exact_base_maps,
     ))
 }
 

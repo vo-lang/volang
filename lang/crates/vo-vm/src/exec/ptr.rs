@@ -5,6 +5,7 @@ use alloc::string::ToString;
 #[cfg(feature = "std")]
 use std::string::ToString;
 
+use vo_common_core::WriteBarrierBaseProvenance;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
 use vo_runtime::{SlotType, ValueMeta};
@@ -63,6 +64,7 @@ pub fn exec_ptr_set(
     inst: &Instruction,
     gc: &mut Gc,
     value_layout: &[SlotType],
+    base_provenance: WriteBarrierBaseProvenance,
 ) -> bool {
     let ptr = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ptr.is_null() {
@@ -74,7 +76,18 @@ pub fn exec_ptr_set(
         .first()
         .is_some_and(|slot| slot.needs_write_barrier())
     {
-        gc.write_barrier(ptr, val as GcRef);
+        if base_provenance.both_are_exact()
+            && matches!(
+                value_layout.first(),
+                Some(SlotType::GcBase | SlotType::GcRef)
+            )
+        {
+            // SAFETY: the immutable LoadedModule fact proves both inputs at
+            // this instruction are exact live allocation bases or null.
+            unsafe { gc.write_barrier_exact_bases(ptr, val as GcRef) };
+        } else {
+            gc.write_barrier(ptr, val as GcRef);
+        }
     }
     unsafe { Gc::write_slot(ptr, offset, val) };
     true
@@ -153,6 +166,7 @@ mod tests {
             &store,
             &mut gc,
             &[SlotType::GcBase],
+            WriteBarrierBaseProvenance::UNKNOWN,
         ));
 
         let minor_cycles = gc.memory_stats().minor_cycles;

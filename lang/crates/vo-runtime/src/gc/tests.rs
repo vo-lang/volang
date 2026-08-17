@@ -153,6 +153,47 @@ fn generational_minor_uses_remembered_parents_and_major_reclaims_old() {
 }
 
 #[test]
+fn exact_base_write_barrier_preserves_generational_edge() {
+    fn run_minor(gc: &mut Gc) {
+        let before = gc.memory_stats().minor_cycles;
+        gc.gc_request_cycle();
+        for _ in 0..1024 {
+            gc_step(
+                gc,
+                |_| {},
+                |gc, object| {
+                    if test_header(object).slots > 0 {
+                        let child = unsafe { Gc::read_slot(object, 0) } as GcRef;
+                        if !child.is_null() {
+                            gc.mark_gray(child);
+                        }
+                    }
+                },
+                |_| {},
+            );
+            if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > before {
+                return;
+            }
+        }
+        panic!("exact-base barrier minor cycle did not converge");
+    }
+
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    let parent = gc.alloc(meta, 1);
+    let child = gc.alloc(meta, 0);
+    test_header_mut(parent).set_age(G_OLD);
+
+    // SAFETY: both values came directly from this collector's allocator.
+    unsafe { gc.write_barrier_exact_bases(parent, child) };
+    unsafe { Gc::write_slot(parent, 0, child as u64) };
+    assert!(gc.memory_stats().dirty_cards > 0);
+
+    run_minor(&mut gc);
+    assert_eq!(gc.canonicalize_ref(child), Some(child));
+}
+
+#[test]
 fn minor_root_stops_at_the_old_generation_boundary() {
     let mut gc = Gc::new();
     let meta = ValueMeta::new(0, ValueKind::Struct);
