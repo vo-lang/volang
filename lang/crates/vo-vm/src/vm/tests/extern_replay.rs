@@ -68,16 +68,6 @@ fn extern_returns_invalid_gcref(ctx: &mut ExternCallContext<'_>) -> ExternResult
     ExternResult::Ok
 }
 
-fn extern_reads_first_arg(ctx: &mut ExternCallContext<'_>) -> ExternResult {
-    let _ = ctx.slot(ctx.arg_start());
-    ExternResult::Ok
-}
-
-fn extern_writes_return_start(ctx: &mut ExternCallContext<'_>) -> ExternResult {
-    ctx.set_slot(ctx.ret_start(), 123);
-    ExternResult::Ok
-}
-
 fn extern_returns_not_registered(_ctx: &mut ExternCallContext<'_>) -> ExternResult {
     ExternResult::NotRegistered(123)
 }
@@ -271,24 +261,15 @@ fn call_extern_return_range_outside_frame_is_vm_error_instead_of_silent_write() 
         vo_runtime::bytecode::ExternEffects::NONE,
     ));
     let mut vm = Vm::new();
-    finish_load_and_resolve_externs_for_test(
-        &mut vm,
-        module,
-        &[(
-            0,
-            extern_writes_return_start,
-            vo_runtime::bytecode::ExternEffects::NONE,
-        )],
-    );
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-    match result {
-        Ok(Err(VmError::Jit(msg))) => {
-            assert!(msg.contains("CallExtern return range 3..4"), "{msg}");
+    match vm.load(module) {
+        Err(VmError::Jit(msg)) => {
+            assert!(
+                msg.contains("CallExtern returns slot 3 out of range"),
+                "{msg}"
+            );
         }
-        Ok(other) => panic!("out-of-frame extern return should be a VM error, got {other:?}"),
-        Err(_) => panic!("out-of-frame extern return must not panic"),
+        other => panic!("out-of-frame extern return should reject at load, got {other:?}"),
     }
 }
 
@@ -297,7 +278,7 @@ fn call_extern_arg_slot_count_mismatch_is_vm_error_instead_of_abi_guess() {
     let mut module = malformed_single_instruction_module(
         "extern-arg-count-mismatch",
         vec![
-            Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 0),
+            Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0),
             Instruction::new(Opcode::Return, 0, 0, 0),
         ],
         Vec::new(),
@@ -312,20 +293,9 @@ fn call_extern_arg_slot_count_mismatch_is_vm_error_instead_of_abi_guess() {
         vo_runtime::bytecode::ExternEffects::NONE,
     ));
     let mut vm = Vm::new();
-    finish_load_and_resolve_externs_for_test(
-        &mut vm,
-        module,
-        &[(
-            0,
-            extern_reads_first_arg,
-            vo_runtime::bytecode::ExternEffects::NONE,
-        )],
-    );
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-    match result {
-        Ok(Err(VmError::Jit(msg))) => {
+    match vm.load(module) {
+        Err(VmError::Jit(msg)) => {
             let extern_name = vo_common_core::extern_key::ExternKeyRef::new(
                 "github.com/volang/vm-tests",
                 "reads_arg",
@@ -339,8 +309,7 @@ fn call_extern_arg_slot_count_mismatch_is_vm_error_instead_of_abi_guess() {
                 "{msg}"
             );
         }
-        Ok(other) => panic!("extern arg count mismatch should be a VM error, got {other:?}"),
-        Err(_) => panic!("extern arg count mismatch must not panic"),
+        other => panic!("extern arg count mismatch should reject at load, got {other:?}"),
     }
 }
 

@@ -709,6 +709,7 @@ impl<'m> ModuleVerifier<'m> {
         for (idx, func) in self.module.functions.iter().enumerate() {
             verify_function_at(self.module, idx, func, &mut resources)?;
         }
+        verify_module_entry_targets(self.module)?;
         Ok((
             VerifiedModule {
                 module: self.module,
@@ -716,6 +717,24 @@ impl<'m> ModuleVerifier<'m> {
             runtime_type_facts,
         ))
     }
+}
+
+fn verify_module_entry_targets(module: &Module) -> Result<(), ModuleVerificationError> {
+    for (label, func_id) in [
+        ("entry_func", module.entry_func),
+        ("island_init_func", module.island_init_func),
+    ] {
+        let function = &module.functions[func_id as usize];
+        if function.is_closure {
+            return Err(ModuleVerificationError::ModuleInvariant {
+                detail: format!(
+                    "{label}={func_id} ({}) cannot be closure-shaped; closure frames require validated closure admission",
+                    function.name
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn verify_module(module: &Module) -> Result<VerifiedModule<'_>, ModuleVerificationError> {
@@ -6863,6 +6882,7 @@ fn verify_static_call_contract(
             callee_id,
         }
     })?;
+    verify_static_target_admission(func, pc, opcode, callee_id, callee)?;
 
     verify_reserved_zero(func, pc, opcode, inst.c.into(), "c")?;
 
@@ -6907,6 +6927,27 @@ fn verify_static_call_contract(
         &callee.ret_slot_types,
         "Call return buffer",
     )
+}
+
+fn verify_static_target_admission(
+    caller: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    callee_id: u32,
+    callee: &FunctionDef,
+) -> Result<(), ModuleVerificationError> {
+    if callee.is_closure {
+        return Err(call_shape_mismatch(
+            caller,
+            pc,
+            opcode,
+            format!(
+                "static target {callee_id} ({}) is closure-shaped and requires validated closure admission",
+                callee.name
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_dynamic_call_contract(
@@ -8648,6 +8689,7 @@ fn verify_shared_call_shape_contract(
                 callee_id,
             }
         })?;
+        verify_static_target_admission(func, pc, opcode, callee_id, callee)?;
         let expected_args = callee
             .slot_types
             .get(..callee.param_slots as usize)

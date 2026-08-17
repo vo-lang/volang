@@ -41,7 +41,10 @@ pub use bytecode::{
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use exact_bases::{ExactBaseMaps, FunctionExactBaseMap, WriteBarrierBaseProvenance};
-pub use execution_layouts::{ElementLayoutMaps, FunctionElementLayouts};
+pub use execution_layouts::{
+    ElementLayoutMaps, FunctionElementLayouts, FunctionPointerLayouts, PointerExecutionLayout,
+    PointerLayoutMaps,
+};
 pub use extern_key::{
     classify_extern_name, decode_extern_name, is_portable_package_component,
     is_vm_internal_extern_name, is_vm_variable_shape_extern_name,

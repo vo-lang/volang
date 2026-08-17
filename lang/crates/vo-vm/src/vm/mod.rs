@@ -83,10 +83,6 @@ fn queue_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::Sl
     func.instruction_metadata.get(pc)?.queue_elem_layout()
 }
 
-fn ptr_layout_for_pc(func: &FunctionDef, pc: usize) -> Option<&[vo_runtime::SlotType]> {
-    func.instruction_metadata.get(pc)?.ptr_value_layout()
-}
-
 #[inline]
 fn extern_arg_slots_for_pc(func: &FunctionDef, pc: usize) -> Option<u16> {
     func.instruction_metadata
@@ -3285,10 +3281,10 @@ impl Vm {
             }
         };
         let mut code: &[Instruction] = &func.code;
-        let mut exact_bases = loaded_module
-            .exact_base_maps()
+        let mut pointer_layouts = loaded_module
+            .pointer_layout_maps()
             .function(func_id)
-            .expect("verified function owns exact-base facts");
+            .expect("verified function owns pointer-layout facts");
         let mut element_layouts = loaded_module
             .element_layout_maps()
             .function(func_id)
@@ -3323,10 +3319,10 @@ impl Vm {
                     }
                 };
                 code = &func.code;
-                exact_bases = loaded_module
-                    .exact_base_maps()
+                pointer_layouts = loaded_module
+                    .pointer_layout_maps()
                     .function(func_id)
-                    .expect("verified function owns exact-base facts");
+                    .expect("verified function owns pointer-layout facts");
                 element_layouts = loaded_module
                     .element_layout_maps()
                     .function(func_id)
@@ -3341,9 +3337,22 @@ impl Vm {
             }};
         }
 
+        // Native execution may collect before the scheduling boundary, so a
+        // JIT-capable lease must publish interpreter frame changes first. A
+        // pure interpreter lease reaches GC only after returning to the
+        // scheduler, where the whole mutated fiber is already marked once.
+        // Const specialization removes this operation from the VM-only loop.
+        macro_rules! publish_frame_roots_for_native {
+            () => {{
+                if JIT_ENABLED {
+                    self.mark_gc_fiber_roots_dirty(fiber_id);
+                }
+            }};
+        }
+
         macro_rules! refetch_after_frame_change {
             () => {{
-                self.mark_gc_fiber_roots_dirty(fiber_id);
+                publish_frame_roots_for_native!();
                 refetch!();
             }};
         }
@@ -3671,17 +3680,14 @@ impl Vm {
                 }
 
                 Opcode::PtrNew => {
-                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
-                        return ExecResult::JitError(format!(
-                            "PtrNew at pc {fetched_pc} is missing PtrLayout metadata"
-                        ));
-                    };
+                    // Safety: verifier requires PtrLayout at every PtrNew.
+                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
                     instruction_result!(exec::exec_ptr_new(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
-                        layout
+                        layout.value_slots
                     ));
                 }
                 Opcode::PtrGet => {
@@ -3696,19 +3702,10 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSet => {
-                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
-                        return ExecResult::JitError(format!(
-                            "PtrSet at pc {fetched_pc} is missing PtrLayout metadata"
-                        ));
-                    };
-                    if !exec::exec_ptr_set(
-                        stack,
-                        bp,
-                        &inst,
-                        &mut self.state.gc,
-                        layout,
-                        exact_bases.write_barrier(fetched_pc),
-                    ) {
+                    // Safety: verifier requires PtrLayout at every PtrSet and
+                    // the compact fact includes its exact-base provenance.
+                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    if !exec::exec_ptr_set(stack, bp, &inst, &mut self.state.gc, layout) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -3719,12 +3716,9 @@ impl Vm {
                     }
                 }
                 Opcode::PtrGetN => {
-                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
-                        return ExecResult::JitError(format!(
-                            "PtrGetN at pc {fetched_pc} is missing PtrLayout metadata"
-                        ));
-                    };
-                    if !exec::exec_ptr_get_n(stack, bp, &inst, layout) {
+                    // Safety: verifier requires PtrLayout at every PtrGetN.
+                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    if !exec::exec_ptr_get_n(stack, bp, &inst, layout.value_slots) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -3735,12 +3729,9 @@ impl Vm {
                     }
                 }
                 Opcode::PtrSetN => {
-                    let Some(layout) = ptr_layout_for_pc(func, fetched_pc) else {
-                        return ExecResult::JitError(format!(
-                            "PtrSetN at pc {fetched_pc} is missing PtrLayout metadata"
-                        ));
-                    };
-                    if !exec::exec_ptr_set_n(stack, bp, &inst, layout) {
+                    // Safety: verifier requires PtrLayout at every PtrSetN.
+                    let layout = unsafe { pointer_layouts.get_verified(fetched_pc) };
+                    if !exec::exec_ptr_set_n(stack, bp, &inst, layout.value_slots) {
                         handle_panic_result!(runtime_trap(
                             &mut self.state.gc,
                             fiber,
@@ -4163,7 +4154,7 @@ impl Vm {
                     if let Some(roots) = roots {
                         fiber.zero_frame_root_locals_at(new_bp, roots);
                     }
-                    self.mark_gc_fiber_roots_dirty(fiber_id);
+                    publish_frame_roots_for_native!();
 
                     let frames = unsafe { &mut *frames_ptr };
                     frame_ptr = frames
@@ -4176,10 +4167,10 @@ impl Vm {
                     pc = 0;
                     func = target_func;
                     code = &func.code;
-                    exact_bases = loaded_module
-                        .exact_base_maps()
+                    pointer_layouts = loaded_module
+                        .pointer_layout_maps()
                         .function(func_id)
-                        .expect("verified call target owns exact-base facts");
+                        .expect("verified call target owns pointer-layout facts");
                     element_layouts = loaded_module
                         .element_layout_maps()
                         .function(func_id)
@@ -4370,7 +4361,7 @@ impl Vm {
                                 return ExecResult::Done;
                             }
                             crate::fiber::CompletedStackReturn::Resume => {
-                                self.mark_gc_fiber_roots_dirty(fiber_id);
+                                publish_frame_roots_for_native!();
                                 let frames = unsafe { &mut *frames_ptr };
                                 frame_ptr = frames
                                     .last_mut()
@@ -4389,10 +4380,10 @@ impl Vm {
                                     }
                                 };
                                 code = &func.code;
-                                exact_bases = loaded_module
-                                    .exact_base_maps()
+                                pointer_layouts = loaded_module
+                                    .pointer_layout_maps()
                                     .function(func_id)
-                                    .expect("verified caller owns exact-base facts");
+                                    .expect("verified caller owns pointer-layout facts");
                                 element_layouts = loaded_module
                                     .element_layout_maps()
                                     .function(func_id)
@@ -5446,9 +5437,10 @@ impl Vm {
                     ));
                 }
                 Opcode::ClosureGet => {
-                    if let Err(err) = exec::exec_closure_get(&self.state.gc, stack, bp, &inst) {
-                        return ExecResult::JitError(err.to_string());
-                    }
+                    // Safety: module verification admits ClosureGet only in a
+                    // closure-shaped function, proves the capture index, and
+                    // every closure-frame entry validates the runtime shape.
+                    unsafe { exec::exec_verified_closure_get(frame_base, &inst) };
                 }
 
                 // Goroutine - spawn new fiber
@@ -5934,6 +5926,12 @@ impl Vm {
             .functions
             .get(func_id as usize)
             .ok_or(VmError::InvalidFunctionId(func_id))?;
+        if func_def.is_closure {
+            return Err(VmError::Jit(format!(
+                "spawn_call target {func_id} ({}) is closure-shaped; use spawn_closure_call",
+                func_def.name
+            )));
+        }
         crate::frame_call::validate_function_arg_shape("spawn_call", func_id, func_def, args.len())
             .map_err(VmError::Jit)?;
         let mut args = args.to_vec();
@@ -5957,7 +5955,7 @@ impl Vm {
     /// Spawn a new fiber that calls a closure with user arguments.
     pub fn spawn_closure_call(&mut self, closure_ref: GcRef, args: &[u64]) -> Result<(), VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
-        let (func_id, full_args) = {
+        let (func_id, mut full_args) = {
             let target = crate::frame_call::validate_closure_target(
                 &self.state.gc,
                 module,
@@ -5987,8 +5985,26 @@ impl Vm {
             full_args.extend_from_slice(args);
             (target.func_id, full_args)
         };
-
-        self.spawn_call(func_id, &full_args)
+        let func_def = module
+            .functions
+            .get(func_id as usize)
+            .ok_or(VmError::InvalidFunctionId(func_id))?;
+        validate_spawn_call_args(
+            &self.state.gc,
+            module,
+            &self.state.itab_cache,
+            func_id,
+            func_def,
+            &mut full_args,
+        )?;
+        let spawn =
+            PendingSpawn::try_new(func_id, func_def.local_slots, func_def.ret_slots, full_args)
+                .map_err(fiber_capacity_error_to_vm_error)?;
+        self.scheduler
+            .try_spawn_pending(spawn)
+            .map_err(scheduler_error_to_vm_error)?;
+        self.mark_gc_all_roots_dirty();
+        Ok(())
     }
 }
 

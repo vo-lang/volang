@@ -1,14 +1,9 @@
 //! Pointer instructions: PtrNew, PtrGet, PtrSet, PtrGetN, PtrSetN
 
-#[cfg(not(feature = "std"))]
-use alloc::string::ToString;
-#[cfg(feature = "std")]
-use std::string::ToString;
-
-use vo_common_core::WriteBarrierBaseProvenance;
+use vo_common_core::PointerExecutionLayout;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
-use vo_runtime::{SlotType, ValueMeta};
+use vo_runtime::ValueMeta;
 
 use crate::exec::InstructionError;
 use crate::instruction::Instruction;
@@ -20,19 +15,17 @@ pub fn exec_ptr_new(
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
-    value_layout: &[SlotType],
+    value_slots: u16,
 ) -> Result<(), InstructionError> {
     let meta_raw = stack_get(stack, bp + inst.b as usize) as u32;
     let value_meta = ValueMeta::from_raw(meta_raw);
-    let slots = u16::try_from(value_layout.len())
-        .map_err(|_| "PtrNew value layout exceeds u16 slots".to_string())?;
-    let ptr = gc.try_alloc_value_slots_in_region(value_meta, slots)?;
+    let ptr = gc.try_alloc_value_slots_in_region(value_meta, value_slots)?;
     stack_set(stack, bp + inst.a as usize, ptr as u64);
     Ok(())
 }
 
 /// Returns false if ptr is nil (caller should trigger panic)
-#[inline]
+#[inline(always)]
 pub fn exec_ptr_get(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
     let ptr = stack_get(stack, bp + inst.b as usize) as GcRef;
     if ptr.is_null() {
@@ -57,14 +50,13 @@ pub fn exec_ptr_get(stack: *mut Slot, bp: usize, inst: &Instruction) -> bool {
 /// PtrSet: a=ptr, b=offset, c=val
 /// PtrLayout determines whether the value needs a write barrier.
 /// Returns false if ptr is nil (caller should trigger panic)
-#[inline]
+#[inline(always)]
 pub fn exec_ptr_set(
     stack: *const Slot,
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
-    value_layout: &[SlotType],
-    base_provenance: WriteBarrierBaseProvenance,
+    layout: PointerExecutionLayout,
 ) -> bool {
     let ptr = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ptr.is_null() {
@@ -72,16 +64,8 @@ pub fn exec_ptr_set(
     }
     let offset = inst.b as usize;
     let val = stack_get(stack, bp + inst.c as usize);
-    if value_layout
-        .first()
-        .is_some_and(|slot| slot.needs_write_barrier())
-    {
-        if base_provenance.both_are_exact()
-            && matches!(
-                value_layout.first(),
-                Some(SlotType::GcBase | SlotType::GcRef)
-            )
-        {
+    if layout.needs_write_barrier {
+        if layout.base_provenance.both_are_exact() && layout.supports_exact_barrier {
             // SAFETY: the immutable LoadedModule fact proves both inputs at
             // this instruction are exact live allocation bases or null.
             unsafe { gc.write_barrier_exact_bases(ptr, val as GcRef) };
@@ -94,19 +78,14 @@ pub fn exec_ptr_set(
 }
 
 /// Returns false if ptr is nil (caller should trigger panic)
-#[inline]
-pub fn exec_ptr_get_n(
-    stack: *mut Slot,
-    bp: usize,
-    inst: &Instruction,
-    value_layout: &[SlotType],
-) -> bool {
+#[inline(always)]
+pub fn exec_ptr_get_n(stack: *mut Slot, bp: usize, inst: &Instruction, value_slots: u16) -> bool {
     let ptr = stack_get(stack, bp + inst.b as usize) as GcRef;
     if ptr.is_null() {
         return false;
     }
     let offset = inst.c as usize;
-    let count = value_layout.len();
+    let count = usize::from(value_slots);
     let dst_start = bp + inst.a as usize;
 
     for i in 0..count {
@@ -121,19 +100,14 @@ pub fn exec_ptr_get_n(
 /// codegen emits individual PtrSet instructions (with one-slot metadata) for
 /// each slot using emit_ptr_set_with_slot_types().
 /// Returns false if ptr is nil (caller should trigger panic)
-#[inline]
-pub fn exec_ptr_set_n(
-    stack: *const Slot,
-    bp: usize,
-    inst: &Instruction,
-    value_layout: &[SlotType],
-) -> bool {
+#[inline(always)]
+pub fn exec_ptr_set_n(stack: *const Slot, bp: usize, inst: &Instruction, value_slots: u16) -> bool {
     let ptr = stack_get(stack, bp + inst.a as usize) as GcRef;
     if ptr.is_null() {
         return false;
     }
     let offset = inst.b as usize;
-    let count = value_layout.len();
+    let count = usize::from(value_slots);
     let src_start = bp + inst.c as usize;
 
     for i in 0..count {
@@ -165,8 +139,12 @@ mod tests {
             0,
             &store,
             &mut gc,
-            &[SlotType::GcBase],
-            WriteBarrierBaseProvenance::UNKNOWN,
+            PointerExecutionLayout {
+                value_slots: 1,
+                needs_write_barrier: true,
+                supports_exact_barrier: true,
+                base_provenance: vo_common_core::WriteBarrierBaseProvenance::UNKNOWN,
+            },
         ));
 
         let minor_cycles = gc.memory_stats().minor_cycles;

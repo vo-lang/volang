@@ -244,6 +244,7 @@ fn malformed_single_instruction_module(
     if code.is_empty() {
         code.push(Instruction::new(Opcode::Return, 0, 0, 0));
     }
+    let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
     let mut module = Module::new(name.to_string());
     module.constants = constants;
     module.functions.push(FunctionDef {
@@ -260,8 +261,8 @@ fn malformed_single_instruction_module(
         is_closure: false,
         error_ret_slot: -1,
         has_defer: false,
-        has_calls: false,
-        has_call_extern: false,
+        has_calls,
+        has_call_extern,
         instruction_metadata: vec![vo_runtime::bytecode::InstructionMetadata::None; code.len()],
         code,
         slot_types: vec![SlotType::Value; 4],

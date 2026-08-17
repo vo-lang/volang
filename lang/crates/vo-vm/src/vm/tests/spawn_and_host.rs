@@ -342,6 +342,41 @@ fn spawn_closure_call_rejects_invalid_closure_ref_047() {
 }
 
 #[test]
+fn closure_shaped_functions_require_the_closure_spawn_api() {
+    let mut module = gc_test_module_with_root_slots(1);
+    module.functions[0].param_count = 1;
+    module.functions[0].param_slots = 1;
+    module.functions[0].local_slots = 1;
+    module.functions[0].slot_types = vec![SlotType::GcBase];
+    module.functions[0].is_closure = true;
+    refresh_vm_test_function_metadata(&mut module.functions[0]);
+    let entry = gc_test_module_with_root_slots(0)
+        .functions
+        .pop()
+        .expect("test entry function");
+    module.functions.push(entry);
+    module.entry_func = 1;
+    module.island_init_func = 1;
+
+    let mut vm = Vm::new();
+    vm.load(module).expect("valid module with a closure target");
+    let closure_ref = vo_runtime::objects::closure::create(&mut vm.state.gc, 0, 0);
+
+    let err = vm
+        .spawn_call(0, &[closure_ref as u64])
+        .expect_err("raw function spawning must reject closure-shaped targets");
+    assert!(
+        matches!(err, VmError::Jit(ref msg) if msg.contains("use spawn_closure_call")),
+        "{err:?}"
+    );
+    assert!(vm.scheduler.ready_queue.is_empty());
+
+    vm.spawn_closure_call(closure_ref, &[])
+        .expect("validated closure spawning should succeed");
+    assert_eq!(vm.scheduler.ready_queue.len(), 1);
+}
+
+#[test]
 fn spawn_closure_call_rejects_invalid_root_arg_047() {
     let mut module = gc_test_module_with_root_slots(2);
     module.functions[0].param_count = 2;
@@ -350,6 +385,13 @@ fn spawn_closure_call_rejects_invalid_root_arg_047() {
     module.functions[0].slot_types = vec![SlotType::GcBase, SlotType::GcRef];
     module.functions[0].is_closure = true;
     refresh_vm_test_function_metadata(&mut module.functions[0]);
+    let entry = gc_test_module_with_root_slots(0)
+        .functions
+        .pop()
+        .expect("test entry function");
+    module.functions.push(entry);
+    module.entry_func = 1;
+    module.island_init_func = 1;
     let mut vm = Vm::new();
     vm.load(module).unwrap();
     let closure_ref = vo_runtime::objects::closure::create(&mut vm.state.gc, 0, 0);

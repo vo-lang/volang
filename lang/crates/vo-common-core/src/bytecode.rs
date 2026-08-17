@@ -2145,6 +2145,7 @@ pub struct LoadedModule {
     runtime_type_facts: RuntimeTypeFacts,
     dynamic_callsite_count: usize,
     element_layout_maps: crate::execution_layouts::ElementLayoutMaps,
+    pointer_layout_maps: crate::execution_layouts::PointerLayoutMaps,
     frame_root_maps: crate::frame_roots::FrameRootMaps,
     exact_base_maps: crate::exact_bases::ExactBaseMaps,
 }
@@ -2159,11 +2160,14 @@ impl LoadedModule {
         debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
         let dynamic_callsite_count = module.dynamic_callsite_count();
         let element_layout_maps = crate::execution_layouts::ElementLayoutMaps::build(&module);
+        let pointer_layout_maps =
+            crate::execution_layouts::PointerLayoutMaps::build(&module, &exact_base_maps);
         Self {
             module,
             runtime_type_facts,
             dynamic_callsite_count,
             element_layout_maps,
+            pointer_layout_maps,
             frame_root_maps,
             exact_base_maps,
         }
@@ -2187,6 +2191,11 @@ impl LoadedModule {
     #[inline]
     pub fn element_layout_maps(&self) -> &crate::execution_layouts::ElementLayoutMaps {
         &self.element_layout_maps
+    }
+
+    #[inline]
+    pub fn pointer_layout_maps(&self) -> &crate::execution_layouts::PointerLayoutMaps {
+        &self.pointer_layout_maps
     }
 
     #[inline]

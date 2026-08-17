@@ -516,6 +516,50 @@ fn vm_ver_closureget_scope_001_rejects_closure_get_in_non_closure_function() {
 }
 
 #[test]
+fn module_verifier_rejects_closure_shaped_entry_target() {
+    let mut module = Module::new("closure-entry-admission".to_string());
+    let mut closure = function_with_slot_types(vec![SlotType::GcBase]);
+    closure.name = "closure_entry".to_string();
+    closure.is_closure = true;
+    closure.param_slots = 1;
+    module.functions.push(closure);
+
+    let err = verify_module(&module).expect_err("entry frames lack a validated closure object");
+
+    assert!(
+        err.to_string()
+            .contains("entry_func=0 (closure_entry) cannot be closure-shaped"),
+        "{err}"
+    );
+}
+
+#[test]
+fn module_verifier_rejects_static_call_to_closure_shaped_target() {
+    let mut module = Module::new("static-closure-admission".to_string());
+    let mut caller = function_with_slot_types(vec![SlotType::GcBase]);
+    caller.name = "caller".to_string();
+    caller.code = vec![Instruction::with_flags(Opcode::Call, 0, 1, 0, 0)];
+    caller.instruction_metadata = vec![InstructionMetadata::None];
+
+    let mut closure = function_with_slot_types(vec![SlotType::GcBase]);
+    closure.name = "closure_target".to_string();
+    closure.is_closure = true;
+    closure.param_slots = 1;
+
+    module.functions.push(finish_test_function(caller));
+    module.functions.push(closure);
+
+    let err = verify_module(&module).expect_err("static calls lack closure admission");
+
+    assert!(
+        err.to_string().contains(
+            "static target 1 (closure_target) is closure-shaped and requires validated closure admission"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
 fn module_verifier_rejects_retired_queue_width_flags() {
     let mut module = Module::new("queue-new-layout".to_string());
     let mut func =

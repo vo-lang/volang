@@ -89,6 +89,34 @@ pub fn exec_closure_get(
     Ok(())
 }
 
+/// Read a capture from an already-admitted closure frame.
+///
+/// Module verification proves that `bp[0]` is the exact managed base owned by
+/// the active closure frame and that the encoded capture index belongs to the
+/// function's capture layout. Every dynamic entry path validates the runtime
+/// closure header against that same function before installing the frame.
+/// Keeping those checks at frame admission avoids a heap-span lookup on every
+/// capture read while retaining the checked helper for untrusted boundaries.
+///
+/// # Safety
+/// `frame_base` must point at the active frame of the verified function whose
+/// `ClosureGet` instruction is supplied by `inst`.
+#[inline(always)]
+pub unsafe fn exec_verified_closure_get(frame_base: *mut Slot, inst: &Instruction) {
+    let closure_ref = stack_get(frame_base, 0) as GcRef;
+    debug_assert!(!closure_ref.is_null());
+    debug_assert_eq!(
+        unsafe { Gc::header(closure_ref) }.kind(),
+        ValueKind::Closure
+    );
+    debug_assert!(
+        (inst.b as usize) < unsafe { closure::capture_count(closure_ref) },
+        "verified ClosureGet capture index exceeds admitted closure shape"
+    );
+    let val = unsafe { closure::get_capture(closure_ref, inst.b as usize) };
+    stack_set(frame_base, inst.a as usize, val);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +155,18 @@ mod tests {
                 count: 0
             }
         );
+    }
+
+    #[test]
+    fn verified_closure_get_reads_the_admitted_frame_directly() {
+        let mut gc = Gc::new();
+        let closure_ref = closure::create(&mut gc, 7, 1);
+        unsafe { closure::set_capture(closure_ref, 0, 42) };
+        let mut stack = vec![closure_ref as u64, 0];
+        let inst = Instruction::new(Opcode::ClosureGet, 1, 0, 0);
+
+        unsafe { exec_verified_closure_get(stack.as_mut_ptr(), &inst) };
+
+        assert_eq!(stack[1], 42);
     }
 }
