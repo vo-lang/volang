@@ -236,7 +236,8 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
     let direct_defer_arg_root = alloc_gc_test_object(&mut vm);
     let pending_defer_arg_root = alloc_gc_test_object(&mut vm);
     let panic_root = alloc_gc_test_object(&mut vm);
-    let sentinel_root = alloc_gc_test_object(&mut vm);
+    let sentinel_allocation = vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 2);
+    let sentinel_root = unsafe { sentinel_allocation.add(1) };
     let endpoint_root = alloc_gc_test_object(&mut vm);
     let select_root = alloc_gc_test_object(&mut vm);
     let queue_wait_root = alloc_gc_test_object(&mut vm);
@@ -343,7 +344,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
     vm.state.sentinel_errors.insert(
         "gc-root-matrix",
         vec![(
-            interface::pack_slot0(0, 0, ValueKind::Struct),
+            interface::pack_slot0(0, 0, ValueKind::Pointer),
             sentinel_root as u64,
         )],
     );
@@ -358,7 +359,7 @@ fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
             direct_defer_arg_root,
             pending_defer_arg_root,
             panic_root,
-            sentinel_root,
+            sentinel_allocation,
             endpoint_root,
             select_root,
             queue_wait_root,

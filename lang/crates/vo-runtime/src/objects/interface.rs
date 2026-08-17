@@ -251,6 +251,14 @@ pub fn data_is_gc_ref(slot0: u64) -> bool {
     vk.may_contain_gc_refs()
 }
 
+/// Check whether slot1 is a managed allocation base rather than a language
+/// pointer that may address an object interior.
+#[inline]
+pub fn data_is_gc_base(slot0: u64) -> bool {
+    let vk = unpack_value_kind(slot0);
+    vk.may_contain_gc_refs() && vk != ValueKind::Pointer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +299,11 @@ mod tests {
         let slot = InterfaceSlot::from_ref(core::ptr::null_mut(), 0, ValueKind::Island);
 
         assert!(data_is_gc_ref(slot.slot0));
+        assert!(data_is_gc_base(slot.slot0));
         assert!(slot.is_ref_type());
+
+        let pointer = InterfaceSlot::from_ref(core::ptr::null_mut(), 0, ValueKind::Pointer);
+        assert!(data_is_gc_ref(pointer.slot0));
+        assert!(!data_is_gc_base(pointer.slot0));
     }
 }

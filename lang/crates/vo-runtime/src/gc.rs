@@ -561,6 +561,33 @@ impl GcHeader {
 /// GC reference - pointer to GcObject data (after header).
 pub type GcRef = *mut Slot;
 
+/// Collector-internal provenance for one traced managed edge.
+///
+/// Exact bases can skip allocation-range canonicalization. Interior-capable
+/// references retain the full validation path required by language pointers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GcTraceEdge {
+    ExactBase(GcRef),
+    InteriorCapable(GcRef),
+}
+
+impl GcTraceEdge {
+    #[inline]
+    pub(crate) const fn raw(self) -> GcRef {
+        match self {
+            Self::ExactBase(raw) | Self::InteriorCapable(raw) => raw,
+        }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn mark(self, gc: &mut Gc) {
+        match self {
+            Self::ExactBase(raw) => unsafe { gc.mark_gray_exact_base(raw) },
+            Self::InteriorCapable(raw) => gc.mark_gray(raw),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct JitAllocationRegion {
@@ -1913,6 +1940,36 @@ impl Gc {
         let Some(obj) = self.canonicalize_ref_for_mark(obj) else {
             return Err(MemoryError::InvalidPointer);
         };
+        self.mark_gray_canonical(obj);
+        Ok(())
+    }
+
+    /// Mark a verifier-proven exact allocation base without repeating heap
+    /// range canonicalization.
+    ///
+    /// # Safety
+    ///
+    /// Every non-null `obj` must be the live payload base of an allocation
+    /// owned by this collector. Language pointers that may address an object
+    /// interior must use [`Gc::mark_gray`].
+    #[inline]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub unsafe fn mark_gray_exact_base(&mut self, obj: GcRef) {
+        if let Some(dispatch) = self.owner_dispatch {
+            unsafe { (dispatch.mark_gray)(dispatch.state, obj) };
+            return;
+        }
+        if obj.is_null() {
+            return;
+        }
+        debug_assert_eq!(self.canonicalize_ref(obj), Some(obj));
+        let raw = unsafe { (obj as *mut u8).sub(GcHeader::SIZE) };
+        self.heap.record_marked(raw, self.cycle_id);
+        self.mark_gray_canonical(obj);
+    }
+
+    #[inline]
+    fn mark_gray_canonical(&mut self, obj: GcRef) {
         let age = unsafe { Self::header(obj) }.age();
         if self.pending_remembered_parent.is_some() && age < G_OLD {
             self.pending_remembered_has_young = true;
@@ -1927,11 +1984,11 @@ impl Gc {
             && self.cycle_kind == GcCycleKind::Minor
             && age >= G_OLD
         {
-            return Ok(());
+            return;
         }
         if self.state == GcState::Sweep {
             self.shade_dead_white_gray(obj);
-            return Ok(());
+            return;
         }
         let header = unsafe { Self::header_mut(obj) };
         if header.is_white() {
@@ -1939,7 +1996,6 @@ impl Gc {
             debug_assert!(self.gray.len() < self.gray.capacity());
             self.gray.push(obj);
         }
-        Ok(())
     }
 
     #[inline]
@@ -3076,6 +3132,19 @@ pub fn trace_slots_by_types<F>(slots: &[u64], slot_types: &[crate::SlotType], mu
 where
     F: FnMut(GcRef),
 {
+    trace_slots_by_types_precise(slots, slot_types, |edge| visit(edge.raw()));
+}
+
+/// Visit managed edges while preserving the exact-base proof carried by
+/// verified slot metadata.
+#[inline]
+pub(crate) fn trace_slots_by_types_precise<F>(
+    slots: &[u64],
+    slot_types: &[crate::SlotType],
+    mut visit: F,
+) where
+    F: FnMut(GcTraceEdge),
+{
     use crate::objects::interface;
     use crate::SlotType;
 
@@ -3090,10 +3159,11 @@ where
     let mut i = 0;
     while i < slot_types.len() {
         match slot_types[i] {
-            SlotType::GcBase | SlotType::GcRef => {
-                if slots[i] != 0 {
-                    visit(slots[i] as GcRef);
-                }
+            SlotType::GcBase if slots[i] != 0 => {
+                visit(GcTraceEdge::ExactBase(slots[i] as GcRef));
+            }
+            SlotType::GcRef if slots[i] != 0 => {
+                visit(GcTraceEdge::InteriorCapable(slots[i] as GcRef));
             }
             SlotType::Interface0 => {
                 assert!(
@@ -3106,7 +3176,13 @@ where
                 );
                 // Interface header slot - check if data slot contains GcRef
                 if interface::data_is_gc_ref(slots[i]) && slots[i + 1] != 0 {
-                    visit(slots[i + 1] as GcRef);
+                    let raw = slots[i + 1] as GcRef;
+                    let edge = if interface::data_is_gc_base(slots[i]) {
+                        GcTraceEdge::ExactBase(raw)
+                    } else {
+                        GcTraceEdge::InteriorCapable(raw)
+                    };
+                    visit(edge);
                 }
                 i += 1;
             }

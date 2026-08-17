@@ -56,23 +56,66 @@ fn new_vm_root_scan_snapshot(
     }
 }
 
+#[derive(Clone, Copy)]
+enum VmTraceEdge {
+    ExactBase(GcRef),
+    InteriorCapable(GcRef),
+}
+
+impl VmTraceEdge {
+    #[inline]
+    const fn exact_base(raw: GcRef) -> Self {
+        Self::ExactBase(raw)
+    }
+
+    #[inline]
+    const fn raw(self) -> GcRef {
+        match self {
+            Self::ExactBase(raw) | Self::InteriorCapable(raw) => raw,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// Every `ExactBase` edge must name a live allocation payload base owned
+    /// by `gc`. `InteriorCapable` edges retain collector-side validation.
+    #[inline]
+    unsafe fn mark(self, gc: &mut vo_runtime::gc::Gc) -> Result<(), MemoryError> {
+        match self {
+            Self::ExactBase(raw) => {
+                unsafe { gc.mark_gray_exact_base(raw) };
+                Ok(())
+            }
+            Self::InteriorCapable(raw) => gc.try_mark_gray(raw),
+        }
+    }
+}
+
+#[inline]
+fn interface_trace_edge(header: u64, raw: GcRef) -> VmTraceEdge {
+    if vo_runtime::objects::interface::data_is_gc_base(header) {
+        VmTraceEdge::ExactBase(raw)
+    } else {
+        VmTraceEdge::InteriorCapable(raw)
+    }
+}
+
 #[inline]
 fn typed_slot_root(
     slots: &[u64],
     slot_types: &[vo_runtime::SlotType],
     idx: usize,
-) -> Option<GcRef> {
+) -> Option<VmTraceEdge> {
     let raw = *slots.get(idx)?;
     match slot_types.get(idx).copied()? {
-        vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef if raw != 0 => {
-            Some(raw as GcRef)
-        }
+        vo_runtime::SlotType::GcBase if raw != 0 => Some(VmTraceEdge::ExactBase(raw as GcRef)),
+        vo_runtime::SlotType::GcRef if raw != 0 => Some(VmTraceEdge::InteriorCapable(raw as GcRef)),
         vo_runtime::SlotType::Interface1
             if raw != 0
                 && idx > 0
                 && vo_runtime::objects::interface::data_is_gc_ref(slots[idx - 1]) =>
         {
-            Some(raw as GcRef)
+            Some(interface_trace_edge(slots[idx - 1], raw as GcRef))
         }
         _ => None,
     }
@@ -145,7 +188,7 @@ fn selected_fiber_index(
 }
 
 enum AuxRootScanStep {
-    Consumed(Option<GcRef>),
+    Consumed(Option<VmTraceEdge>),
     BudgetExhausted,
     Done,
 }
@@ -208,14 +251,15 @@ impl core::fmt::Display for VmRootSource {
     }
 }
 
-fn interface_value_root(value: vo_runtime::InterfaceSlot) -> Option<GcRef> {
-    (value.is_ref_type() && value.slot1 != 0).then_some(value.as_ref())
+fn interface_value_root(value: vo_runtime::InterfaceSlot) -> Option<VmTraceEdge> {
+    (value.is_ref_type() && value.slot1 != 0)
+        .then(|| interface_trace_edge(value.slot0, value.as_ref()))
 }
 
-fn defer_entry_root_at(entry: &DeferEntry, cursor: usize) -> Option<Option<GcRef>> {
+fn defer_entry_root_at(entry: &DeferEntry, cursor: usize) -> Option<Option<VmTraceEdge>> {
     match cursor {
-        0 => Some((!entry.closure.is_null()).then_some(entry.closure)),
-        1 => Some((!entry.args.is_null()).then_some(entry.args)),
+        0 => Some((!entry.closure.is_null()).then(|| VmTraceEdge::exact_base(entry.closure))),
+        1 => Some((!entry.args.is_null()).then(|| VmTraceEdge::exact_base(entry.args))),
         _ if entry.args.is_null() => None,
         _ => {
             let slot = cursor - 2;
@@ -339,7 +383,7 @@ fn scan_fiber_aux_root(
                             snapshot.fiber_aux_slot_cursor = 0;
                             return AuxRootScanStep::Consumed(None);
                         };
-                        (raw != 0).then_some(raw as GcRef)
+                        (raw != 0).then(|| VmTraceEdge::exact_base(raw as GcRef))
                     }
                 };
                 if !budget_available {
@@ -430,7 +474,9 @@ fn scan_fiber_aux_root(
                         );
                     }
                     let root = match snapshot.fiber_aux_slot_cursor {
-                        0 => Some((!closure_ref.is_null()).then_some(*closure_ref)),
+                        0 => Some(
+                            (!closure_ref.is_null()).then(|| VmTraceEdge::exact_base(*closure_ref)),
+                        ),
                         cursor => {
                             let slot = cursor - 1;
                             (slot < args.values.len())
@@ -460,7 +506,9 @@ fn scan_fiber_aux_root(
                     return AuxRootScanStep::BudgetExhausted;
                 }
                 snapshot.fiber_aux_outer_cursor += 1;
-                return AuxRootScanStep::Consumed((!queue.queue.is_null()).then_some(queue.queue));
+                return AuxRootScanStep::Consumed(
+                    (!queue.queue.is_null()).then(|| VmTraceEdge::exact_base(queue.queue)),
+                );
             }
             VmFiberRootScanStage::SelectResult => {
                 let Some(crate::fiber::SelectWokenResult::Recv {
@@ -508,7 +556,7 @@ fn scan_fiber_aux_root(
                 }
                 snapshot.fiber_aux_slot_cursor = 1;
                 return AuxRootScanStep::Consumed(
-                    (!state.queue_ref.is_null()).then_some(state.queue_ref),
+                    (!state.queue_ref.is_null()).then(|| VmTraceEdge::exact_base(state.queue_ref)),
                 );
             }
             VmFiberRootScanStage::JitPanic => {
@@ -562,7 +610,7 @@ fn scan_vm_root_snapshot_chunk<F>(
     mut visit_root: F,
 ) -> GcRootScanChunk
 where
-    F: FnMut(GcRef, VmRootSource),
+    F: FnMut(VmTraceEdge, VmRootSource),
 {
     let limit_bytes = limit_bytes.max(SLOT_BYTES);
     let mut work = 0usize;
@@ -723,16 +771,30 @@ where
                             let idx = snapshot.fiber_slot_cursor;
                             let (slot, root) = if let Some(&slot) = roots.direct.get(idx) {
                                 let raw = fiber.stack[frame.bp + usize::from(slot)];
-                                (usize::from(slot), (raw != 0).then_some(raw as GcRef))
+                                (
+                                    usize::from(slot),
+                                    (raw != 0).then(|| {
+                                        match func.slot_types[usize::from(slot)] {
+                                            vo_runtime::SlotType::GcBase => {
+                                                VmTraceEdge::ExactBase(raw as GcRef)
+                                            }
+                                            vo_runtime::SlotType::GcRef => {
+                                                VmTraceEdge::InteriorCapable(raw as GcRef)
+                                            }
+                                            slot_type => panic!(
+                                                "direct frame root has non-managed slot type {slot_type:?}"
+                                            ),
+                                        }
+                                    }),
+                                )
                             } else {
                                 let conditional = idx - roots.direct.len();
                                 let header = usize::from(roots.conditional[conditional]);
+                                let header_raw = fiber.stack[frame.bp + header];
                                 let data = fiber.stack[frame.bp + header + 1];
                                 let root = (data != 0
-                                    && vo_runtime::objects::interface::data_is_gc_ref(
-                                        fiber.stack[frame.bp + header],
-                                    ))
-                                .then_some(data as GcRef);
+                                    && vo_runtime::objects::interface::data_is_gc_ref(header_raw))
+                                .then(|| interface_trace_edge(header_raw, data as GcRef));
                                 (header + 1, root)
                             };
                             if let Some(root) = root {
@@ -801,21 +863,26 @@ where
                     }
                     if let Some(root) = *root {
                         if !root.is_null() {
-                            visit_root(root, VmRootSource::IoStaging(snapshot.io_staging_cursor));
+                            visit_root(
+                                VmTraceEdge::exact_base(root),
+                                VmRootSource::IoStaging(snapshot.io_staging_cursor),
+                            );
                         }
                     }
                     snapshot.io_staging_cursor += 1;
                     work += SLOT_BYTES;
                 }
                 VmRootScanStage::SentinelErrors => {
-                    let Some(root) = sentinel_errors.gc_root_at(snapshot.sentinel_cursor) else {
+                    let Some(value) = sentinel_errors.gc_root_at(snapshot.sentinel_cursor) else {
                         snapshot.stage = VmRootScanStage::Endpoints;
                         continue;
                     };
                     if work >= limit_bytes {
                         return GcRootScanChunk::pending(work);
                     }
-                    visit_root(root, VmRootSource::Sentinel(snapshot.sentinel_cursor));
+                    if let Some(root) = interface_value_root(value) {
+                        visit_root(root, VmRootSource::Sentinel(snapshot.sentinel_cursor));
+                    }
                     snapshot.sentinel_cursor += 1;
                     work += SLOT_BYTES;
                 }
@@ -829,7 +896,10 @@ where
                         return GcRootScanChunk::pending(work);
                     }
                     if !root.is_null() {
-                        visit_root(root, VmRootSource::Endpoint(snapshot.endpoint_cursor));
+                        visit_root(
+                            VmTraceEdge::exact_base(root),
+                            VmRootSource::Endpoint(snapshot.endpoint_cursor),
+                        );
                     }
                     snapshot.endpoint_cursor += 1;
                     work += SLOT_BYTES;
@@ -1375,14 +1445,14 @@ impl Vm {
                         sentinel_errors,
                         endpoint_registry,
                         &mut completed_root_scan,
-                        |root, source| {
+                        |edge, source| {
                             if invalid_vm_root.is_some() {
                                 return;
                             }
-                            if gc.try_mark_gray(root).is_err() {
+                            if edge.mark(gc).is_err() {
                                 invalid_vm_root = Some(format!(
                                     "{source} exposed invalid GC root {:#x}",
-                                    root as usize
+                                    edge.raw() as usize
                                 ));
                             }
                         },
@@ -1486,7 +1556,8 @@ impl Vm {
                 &self.state.sentinel_errors,
                 &self.state.endpoint_registry,
                 &mut completion,
-                |root, source| {
+                |edge, source| {
+                    let root = edge.raw();
                     if root_error.is_some() || root.is_null() {
                         return;
                     }

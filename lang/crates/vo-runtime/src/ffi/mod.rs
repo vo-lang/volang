@@ -110,7 +110,7 @@ pub struct SentinelErrorCache {
     inner: HashMap<&'static str, Vec<(u64, u64)>>,
     #[cfg(not(feature = "std"))]
     inner: BTreeMap<&'static str, Vec<(u64, u64)>>,
-    gc_roots: Vec<GcRef>,
+    gc_roots: Vec<InterfaceSlot>,
 }
 
 impl SentinelErrorCache {
@@ -138,7 +138,7 @@ impl SentinelErrorCache {
         for values in self.inner.values() {
             for &(slot0, slot1) in values {
                 if crate::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
-                    self.gc_roots.push(slot1 as GcRef);
+                    self.gc_roots.push(InterfaceSlot::new(slot0, slot1));
                 }
             }
         }
@@ -151,7 +151,7 @@ impl SentinelErrorCache {
     }
 
     /// Random access for budgeted VM root scanning.
-    pub fn gc_root_at(&self, index: usize) -> Option<GcRef> {
+    pub fn gc_root_at(&self, index: usize) -> Option<InterfaceSlot> {
         self.gc_roots.get(index).copied()
     }
 }

@@ -1646,9 +1646,15 @@ pub struct RuntimeTypeFact {
 /// Constant-time GC interpretation for one flattened value slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTypeScan {
+    /// The flattened value contains no managed edge at this slot.
     None,
+    /// The slot contains a stable managed handle naming an allocation payload base.
+    GcBase,
+    /// The slot contains a language pointer that may name an allocation interior.
     GcRef,
+    /// The slot belongs to an interface pair whose dynamic kind decides provenance.
     Interface,
+    /// The slot belongs to a struct value interpreted by verified slot metadata.
     Struct { meta_id: u32, slots: u32 },
 }
 
@@ -1962,14 +1968,18 @@ impl RuntimeTypeFacts {
                                     kind: *kind,
                                     slot_count: 1,
                                     scan: if matches!(kind, ValueKind::String) {
-                                        RuntimeTypeScan::GcRef
+                                        RuntimeTypeScan::GcBase
                                     } else {
                                         RuntimeTypeScan::None
                                     },
                                 }
                             }
-                            RuntimeType::Pointer(_)
-                            | RuntimeType::Slice(_)
+                            RuntimeType::Pointer(_) => RuntimeTypeFact {
+                                kind: ValueKind::Pointer,
+                                slot_count: 1,
+                                scan: RuntimeTypeScan::GcRef,
+                            },
+                            RuntimeType::Slice(_)
                             | RuntimeType::Map { .. }
                             | RuntimeType::Chan { .. }
                             | RuntimeType::Port { .. }
@@ -1984,7 +1994,7 @@ impl RuntimeTypeFacts {
                                 RuntimeTypeFact {
                                     kind,
                                     slot_count: 1,
-                                    scan: RuntimeTypeScan::GcRef,
+                                    scan: RuntimeTypeScan::GcBase,
                                 }
                             }
                             RuntimeType::Interface { .. } => RuntimeTypeFact {
@@ -3002,7 +3012,7 @@ mod tests {
             .expect("outer array fact");
         assert_eq!(facts.len(), DEPTH + 1);
         assert_eq!(outer.slot_count(), Some(1));
-        assert_eq!(outer.scan(), RuntimeTypeScan::GcRef);
+        assert_eq!(outer.scan(), RuntimeTypeScan::GcBase);
     }
 
     #[test]
@@ -3022,7 +3032,50 @@ mod tests {
             .expect("array fact");
         assert_eq!(facts.len(), runtime_types.len());
         assert_eq!(array.slot_count(), Some(4_096));
-        assert_eq!(array.scan(), RuntimeTypeScan::GcRef);
+        assert_eq!(array.scan(), RuntimeTypeScan::GcBase);
+    }
+
+    #[test]
+    fn runtime_type_facts_preserve_exact_base_provenance() {
+        let runtime_types = [
+            RuntimeType::Struct {
+                fields: Vec::new(),
+                meta_id: 0,
+            },
+            RuntimeType::Pointer(ValueRttid::new(0, ValueKind::Struct)),
+            RuntimeType::Basic(ValueKind::String),
+            RuntimeType::Slice(ValueRttid::new(0, ValueKind::Struct)),
+        ];
+        let struct_metas = [StructMeta {
+            slot_types: Vec::new(),
+            fields: Vec::new(),
+            field_index: HashMap::new(),
+        }];
+
+        let facts = RuntimeTypeFacts::from_module_parts(&struct_metas, &[], &runtime_types)
+            .expect("valid runtime type facts");
+
+        assert_eq!(
+            facts
+                .get(ValueRttid::new(1, ValueKind::Pointer))
+                .expect("pointer fact")
+                .scan(),
+            RuntimeTypeScan::GcRef
+        );
+        assert_eq!(
+            facts
+                .get(ValueRttid::new(2, ValueKind::String))
+                .expect("string fact")
+                .scan(),
+            RuntimeTypeScan::GcBase
+        );
+        assert_eq!(
+            facts
+                .get(ValueRttid::new(3, ValueKind::Slice))
+                .expect("slice fact")
+                .scan(),
+            RuntimeTypeScan::GcBase
+        );
     }
 
     #[test]

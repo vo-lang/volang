@@ -773,6 +773,22 @@ fn try_mark_gray_reports_invalid_root_without_panicking() {
 }
 
 #[test]
+fn exact_bases_and_interior_refs_share_one_mark_state_machine() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(1, ValueKind::Struct);
+    let exact = gc.alloc(meta, 2);
+    let interior_owner = gc.alloc(meta, 2);
+    let interior = unsafe { interior_owner.add(1) };
+
+    unsafe { gc.mark_gray_exact_base(exact) };
+    gc.mark_gray(interior);
+
+    assert!(test_header(exact).is_gray());
+    assert!(test_header(interior_owner).is_gray());
+    assert_eq!(gc.gray.as_slice(), &[exact, interior_owner]);
+}
+
+#[test]
 fn vm_jit_typed_barrier_001_no_ref_struct_scalar_is_not_barriered() {
     let mut module = vo_common_core::bytecode::Module::new("test".to_string());
     module

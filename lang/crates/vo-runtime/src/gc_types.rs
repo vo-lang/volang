@@ -5,7 +5,9 @@
 //! Unsafe scanners require canonical live GC objects whose allocation layout
 //! matches the supplied runtime metadata for the complete call.
 
-use crate::gc::{trace_slots_by_types, Gc, GcObjectScanChunk, GcRef, GcTraceCursor};
+use crate::gc::{
+    trace_slots_by_types_precise, Gc, GcObjectScanChunk, GcRef, GcTraceCursor, GcTraceEdge,
+};
 #[cfg(test)]
 use crate::objects::string;
 use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
@@ -17,6 +19,24 @@ use vo_common_core::bytecode::{
 #[cfg(test)]
 use vo_common_core::runtime_type::RuntimeType;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
+
+#[inline]
+fn value_edge(kind: ValueKind, raw: GcRef) -> GcTraceEdge {
+    if kind == ValueKind::Pointer {
+        GcTraceEdge::InteriorCapable(raw)
+    } else {
+        GcTraceEdge::ExactBase(raw)
+    }
+}
+
+#[inline]
+fn interface_edge(header: u64, raw: GcRef) -> GcTraceEdge {
+    if interface::data_is_gc_base(header) {
+        GcTraceEdge::ExactBase(raw)
+    } else {
+        GcTraceEdge::InteriorCapable(raw)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypedWriteBarrierByMetaError {
@@ -314,8 +334,8 @@ fn try_typed_write_barrier_by_type_metadata(
                     type_metadata.struct_metas,
                     runtime_type_facts,
                 );
-                trace_value_slots_by_meta(vals, meta, ctx, &mut |child| {
-                    gc.write_barrier(parent, child)
+                trace_value_slots_by_meta(vals, meta, ctx, &mut |edge| {
+                    gc.write_barrier(parent, edge.raw())
                 })?;
             } else if allow_raw_array_layout {
                 let value_rttid = ValueRttid::try_new(meta.meta_id(), ValueKind::Array).ok_or(
@@ -459,8 +479,8 @@ pub unsafe fn scan_object_with_context<'a, F>(
 ) where
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
 {
-    trace_object_children_with_context(obj, context, func_closure_scan_layout, |child| {
-        gc.mark_gray(child)
+    trace_object_edges_with_context(obj, context, func_closure_scan_layout, |edge| unsafe {
+        edge.mark(gc)
     });
 }
 
@@ -515,6 +535,9 @@ where
             if cursor.reference_index == 0 {
                 let owner = unsafe { slice::owner_ref(obj) };
                 if !owner.is_null() {
+                    // Inline-array views deliberately retain an interior pointer as
+                    // their liveness anchor. Canonicalization is part of the owner
+                    // field's representation contract.
                     gc.mark_gray(owner);
                 }
                 cursor.reference_index = 1;
@@ -584,12 +607,12 @@ fn scan_value_slots_chunk(
     let end = start.saturating_add(slot_budget).min(slots.len());
     for flat_index in start..end {
         let result = if let Some(fact) = array_fact {
-            trace_flat_array_slot(slots, fact, context, flat_index, &mut |child| {
-                gc.mark_gray(child)
+            trace_flat_array_slot(slots, fact, context, flat_index, &mut |edge| unsafe {
+                edge.mark(gc)
             })
         } else {
-            trace_flat_value_slot(slots, meta, context, flat_index, &mut |child| {
-                gc.mark_gray(child)
+            trace_flat_value_slot(slots, meta, context, flat_index, &mut |edge| unsafe {
+                edge.mark(gc)
             })
         };
         result.unwrap_or_else(|err| panic!("{label}: {err}"));
@@ -620,7 +643,9 @@ fn scan_slot_types_chunk(
     let start = cursor.reference_index.min(slots.len());
     let end = start.saturating_add(slot_budget).min(slots.len());
     for index in start..end {
-        trace_flat_slot_by_types(slots, slot_types, index, &mut |child| gc.mark_gray(child));
+        trace_flat_slot_by_types(slots, slot_types, index, &mut |edge| unsafe {
+            edge.mark(gc)
+        });
     }
     cursor.reference_index = end;
     let work_bytes = (end - start) * SLOT_BYTES;
@@ -633,11 +658,14 @@ fn scan_slot_types_chunk(
 
 fn trace_flat_slot_by_types<V>(slots: &[u64], slot_types: &[SlotType], index: usize, visit: &mut V)
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     match slot_types.get(index).copied() {
-        Some(SlotType::GcBase | SlotType::GcRef) if slots[index] != 0 => {
-            visit(slots[index] as GcRef)
+        Some(SlotType::GcBase) if slots[index] != 0 => {
+            visit(GcTraceEdge::ExactBase(slots[index] as GcRef))
+        }
+        Some(SlotType::GcRef) if slots[index] != 0 => {
+            visit(GcTraceEdge::InteriorCapable(slots[index] as GcRef))
         }
         Some(SlotType::Interface1)
             if index > 0
@@ -645,7 +673,7 @@ where
                 && interface::data_is_gc_ref(slots[index - 1])
                 && slots[index] != 0 =>
         {
-            visit(slots[index] as GcRef)
+            visit(interface_edge(slots[index - 1], slots[index] as GcRef))
         }
         _ => {}
     }
@@ -721,15 +749,19 @@ fn trace_flat_array_slot<V>(
     visit: &mut V,
 ) -> Result<(), TypedWriteBarrierByMetaError>
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     if flat_index >= slots.len() {
         return Ok(());
     }
     match fact.scan() {
         RuntimeTypeScan::None => {}
+        RuntimeTypeScan::GcBase if slots[flat_index] != 0 => {
+            visit(GcTraceEdge::ExactBase(slots[flat_index] as GcRef));
+        }
+        RuntimeTypeScan::GcBase => {}
         RuntimeTypeScan::GcRef if slots[flat_index] != 0 => {
-            visit(slots[flat_index] as GcRef);
+            visit(GcTraceEdge::InteriorCapable(slots[flat_index] as GcRef));
         }
         RuntimeTypeScan::GcRef => {}
         RuntimeTypeScan::Interface => {
@@ -738,7 +770,10 @@ where
                 && interface::data_is_gc_ref(slots[flat_index - 1])
                 && slots[flat_index] != 0
             {
-                visit(slots[flat_index] as GcRef);
+                visit(interface_edge(
+                    slots[flat_index - 1],
+                    slots[flat_index] as GcRef,
+                ));
             }
         }
         RuntimeTypeScan::Struct {
@@ -779,7 +814,7 @@ fn trace_flat_value_slot<V>(
     visit: &mut V,
 ) -> Result<(), TypedWriteBarrierByMetaError>
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     if meta.value_kind() == ValueKind::Array {
         let fact = array_runtime_type_fact(meta, context)?;
@@ -810,7 +845,7 @@ where
                 && interface::data_is_gc_ref(slots[0])
                 && slots[1] != 0
             {
-                visit(slots[1] as GcRef);
+                visit(interface_edge(slots[0], slots[1] as GcRef));
             }
         }
         ValueKind::String
@@ -822,7 +857,7 @@ where
         | ValueKind::Port
         | ValueKind::Island => {
             if flat_index == 0 && slots.first().copied().unwrap_or(0) != 0 {
-                visit(slots[0] as GcRef);
+                visit(value_edge(meta.value_kind(), slots[0] as GcRef));
             }
         }
         _ => {}
@@ -857,6 +892,22 @@ pub unsafe fn trace_object_children_with_context<'a, F, V>(
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
     V: FnMut(GcRef),
 {
+    unsafe {
+        trace_object_edges_with_context(obj, context, func_closure_scan_layout, |edge| {
+            visit(edge.raw())
+        })
+    };
+}
+
+unsafe fn trace_object_edges_with_context<'a, F, V>(
+    obj: GcRef,
+    context: GcScanContext<'_>,
+    func_closure_scan_layout: &F,
+    mut visit: V,
+) where
+    F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
+    V: FnMut(GcTraceEdge),
+{
     let gc_header = unsafe { Gc::header(obj) };
 
     if gc_header.is_value_slots_object() {
@@ -881,14 +932,14 @@ pub unsafe fn trace_object_children_with_context<'a, F, V>(
         ValueKind::String => {
             let owner = slice::owner_ref(obj);
             if !owner.is_null() {
-                visit(owner);
+                visit(GcTraceEdge::InteriorCapable(owner));
             }
         }
 
         ValueKind::Slice => {
             let owner = slice::owner_ref(obj);
             if !owner.is_null() {
-                visit(owner);
+                visit(GcTraceEdge::InteriorCapable(owner));
             }
         }
 
@@ -948,7 +999,7 @@ pub unsafe fn trace_object_children_with_context<'a, F, V>(
 unsafe fn trace_closure_children<'a, F, V>(obj: GcRef, func_capture_slot_types: &F, visit: &mut V)
 where
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     let func_id = closure::func_id(obj);
     let cap_count = closure::capture_count(obj);
@@ -963,14 +1014,14 @@ where
     let layout = func_capture_slot_types(func_id);
     let capture_types = layout.capture_slot_types;
     if !capture_types.is_empty() {
-        trace_slots_by_types(capture_slots, capture_types, visit);
+        trace_slots_by_types_precise(capture_slots, capture_types, visit);
         return;
     }
 
     let runtime_capture_types = layout.runtime_capture_slot_types;
     if !runtime_capture_types.is_empty() {
         if runtime_capture_types.len() == cap_count {
-            trace_slots_by_types(capture_slots, runtime_capture_types, visit);
+            trace_slots_by_types_precise(capture_slots, runtime_capture_types, visit);
             return;
         }
         panic!(
@@ -1073,13 +1124,17 @@ unsafe fn scan_array_chunk(
             unsafe { (obj as *const u8).add(base_off + element_index * elem_bytes) as *const u64 };
         let slots = unsafe { core::slice::from_raw_parts(elem_ptr, elem_slots) };
         let result = if let Some(fact) = array_fact {
-            trace_flat_array_slot(slots, fact, context, element_slot, &mut |child| {
-                gc.mark_gray(child)
+            trace_flat_array_slot(slots, fact, context, element_slot, &mut |edge| unsafe {
+                edge.mark(gc)
             })
         } else {
-            trace_flat_value_slot(slots, elem_meta, context, element_slot, &mut |child| {
-                gc.mark_gray(child)
-            })
+            trace_flat_value_slot(
+                slots,
+                elem_meta,
+                context,
+                element_slot,
+                &mut |edge| unsafe { edge.mark(gc) },
+            )
         };
         result.unwrap_or_else(|err| panic!("scan_array_chunk: {err}"));
     }
@@ -1114,7 +1169,7 @@ unsafe fn scan_map_chunk(
         // bucket cannot be mistaken for the corresponding new bucket.
         cursor.element_index = 0;
         cursor.reference_index = 0;
-        gc.mark_gray(backing);
+        unsafe { gc.mark_gray_exact_base(backing) };
         cursor.auxiliary = generation;
         work_slots += 1;
     }
@@ -1134,7 +1189,7 @@ unsafe fn scan_map_chunk(
                                 key_meta,
                                 context,
                                 reference_index,
-                                &mut |child| gc.mark_gray(child),
+                                &mut |edge| edge.mark(gc),
                             )
                             .unwrap_or_else(|err| panic!("scan_map_chunk key: {err}"));
                         } else {
@@ -1143,7 +1198,7 @@ unsafe fn scan_map_chunk(
                                 val_meta,
                                 context,
                                 reference_index - key.len(),
-                                &mut |child| gc.mark_gray(child),
+                                &mut |edge| edge.mark(gc),
                             )
                             .unwrap_or_else(|err| panic!("scan_map_chunk value: {err}"));
                         }
@@ -1232,7 +1287,7 @@ unsafe fn scan_queue_chunk(
         };
         if cursor.reference_index == 0 {
             if let Some(backing) = message.backing_ref() {
-                gc.mark_gray(backing);
+                unsafe { gc.mark_gray_exact_base(backing) };
             }
             cursor.reference_index = 1;
             work_slots += 1;
@@ -1247,9 +1302,13 @@ unsafe fn scan_queue_chunk(
             continue;
         }
         if elem_meta.value_kind().may_contain_gc_refs() {
-            trace_flat_value_slot(message, scan_meta, context, payload_index, &mut |child| {
-                gc.mark_gray(child)
-            })
+            trace_flat_value_slot(
+                message,
+                scan_meta,
+                context,
+                payload_index,
+                &mut |edge| unsafe { edge.mark(gc) },
+            )
             .unwrap_or_else(|err| panic!("scan_queue_chunk: {err}"));
         }
         cursor.reference_index += 1;
@@ -1261,7 +1320,7 @@ unsafe fn scan_queue_chunk(
 
 unsafe fn trace_array_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     let elem_meta = array::elem_meta(obj);
     let elem_kind = elem_meta.value_kind();
@@ -1311,7 +1370,7 @@ where
 
 unsafe fn trace_queue_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     // REMOTE channels have no local state — elements live on the home island
     if queue::is_remote(obj) {
@@ -1322,7 +1381,7 @@ where
     let state = unsafe { queue::local_state(obj) };
     for message in state.buffer.iter() {
         if let Some(backing) = message.backing_ref() {
-            visit(backing);
+            visit(GcTraceEdge::ExactBase(backing));
         }
         if elem_meta.value_kind().may_contain_gc_refs() {
             trace_queue_elem(
@@ -1336,7 +1395,7 @@ where
     }
     for (_, message) in state.waiting_senders.iter() {
         if let Some(backing) = message.backing_ref() {
-            visit(backing);
+            visit(GcTraceEdge::ExactBase(backing));
         }
         if elem_meta.value_kind().may_contain_gc_refs() {
             trace_queue_elem(
@@ -1357,7 +1416,7 @@ fn trace_queue_elem<V>(
     context: GcScanContext<'_>,
     visit: &mut V,
 ) where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     let scan_meta = if meta.value_kind() == ValueKind::Array && meta.meta_id() == 0 {
         ValueMeta::new(rttid.rttid(), ValueKind::Array)
@@ -1375,7 +1434,7 @@ fn trace_value_slots_by_meta<V>(
     visit: &mut V,
 ) -> Result<(), TypedWriteBarrierByMetaError>
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     match meta.value_kind() {
         ValueKind::Struct => {
@@ -1385,14 +1444,14 @@ where
                 .get(meta_id)
                 .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?
                 .slot_types;
-            trace_slots_by_types(slots, slot_types, visit);
+            trace_slots_by_types_precise(slots, slot_types, visit);
         }
         ValueKind::Array => {
             trace_array_value_slots(slots, meta, context, visit)?;
         }
         ValueKind::Interface => {
             if slots.len() >= 2 && interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
-                visit(slots[1] as GcRef);
+                visit(interface_edge(slots[0], slots[1] as GcRef));
             }
         }
         ValueKind::String
@@ -1405,7 +1464,7 @@ where
         | ValueKind::Island => {
             if let Some(&slot) = slots.first() {
                 if slot != 0 {
-                    visit(slot as GcRef);
+                    visit(value_edge(meta.value_kind(), slot as GcRef));
                 }
             }
         }
@@ -1421,7 +1480,7 @@ fn trace_array_value_slots<V>(
     visit: &mut V,
 ) -> Result<(), TypedWriteBarrierByMetaError>
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     let fact = array_runtime_type_fact(meta, context)?;
     validate_array_fact_width(slots, fact)?;
@@ -1436,11 +1495,11 @@ where
 
 unsafe fn trace_map_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     let backing = map::backing_ref(obj);
     if !backing.is_null() {
-        visit(backing);
+        visit(GcTraceEdge::ExactBase(backing));
     }
     let key_meta = map::key_meta(obj);
     let val_meta = map::val_meta(obj);
@@ -1474,7 +1533,7 @@ unsafe fn trace_struct_children<V>(
     struct_metas: &[StructMeta],
     visit: &mut V,
 ) where
-    V: FnMut(GcRef),
+    V: FnMut(GcTraceEdge),
 {
     let meta = struct_metas
         .get(meta_id)
@@ -1482,17 +1541,22 @@ unsafe fn trace_struct_children<V>(
     let mut i = 0;
     while i < meta.slot_types.len() {
         let st = meta.slot_types[i];
-        if st.is_managed_ref() {
+        if matches!(st, SlotType::GcBase | SlotType::GcRef) {
             let child = unsafe { Gc::read_slot(obj, i) };
             if child != 0 {
-                visit(child as GcRef);
+                let edge = if st == SlotType::GcBase {
+                    GcTraceEdge::ExactBase(child as GcRef)
+                } else {
+                    GcTraceEdge::InteriorCapable(child as GcRef)
+                };
+                visit(edge);
             }
         } else if st == SlotType::Interface0 {
             let header_slot = unsafe { Gc::read_slot(obj, i) };
             if interface::data_is_gc_ref(header_slot) {
                 let child = unsafe { Gc::read_slot(obj, i + 1) };
                 if child != 0 {
-                    visit(child as GcRef);
+                    visit(interface_edge(header_slot, child as GcRef));
                 }
             }
             i += 1;
@@ -1538,6 +1602,40 @@ mod tests {
     fn runtime_type_facts(runtime_types: &[RuntimeType]) -> RuntimeTypeFacts {
         RuntimeTypeFacts::from_module_parts(&[], &[], runtime_types)
             .expect("valid test runtime type facts")
+    }
+
+    #[test]
+    fn slice_owner_preserves_interior_pointer_provenance() {
+        let mut gc = Gc::new();
+        let allocation = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 4);
+        let interior_owner = unsafe { allocation.add(1) };
+        let view = unsafe {
+            slice::from_inline_array_range_with_cap(
+                &mut gc,
+                interior_owner,
+                allocation.cast(),
+                4,
+                0,
+                1,
+                1,
+                ValueMeta::new(0, ValueKind::Uint64),
+                SLOT_BYTES,
+                SLOT_BYTES,
+            )
+        };
+        assert!(!view.is_null());
+
+        let mut visited = Vec::new();
+        unsafe {
+            trace_object_edges_with_context(
+                view,
+                GcScanContext::new(&[]),
+                &|_| ClosureScanLayout::default(),
+                |edge| visited.push(edge),
+            );
+        }
+
+        assert_eq!(visited, [GcTraceEdge::InteriorCapable(interior_owner)]);
     }
 
     #[test]
@@ -1944,7 +2042,7 @@ mod tests {
         )
         .expect("deep nested Array metadata must scan through collapsed facts");
 
-        assert_eq!(visited, [leaf]);
+        assert_eq!(visited, [GcTraceEdge::ExactBase(leaf)]);
     }
 
     #[test]
@@ -2124,7 +2222,14 @@ mod tests {
             &mut |child| visited.push(child),
         )
         .expect("struct array scan");
-        assert_eq!(visited, [direct_0, direct_1, iface_ref]);
+        assert_eq!(
+            visited,
+            [
+                GcTraceEdge::InteriorCapable(direct_0),
+                GcTraceEdge::InteriorCapable(direct_1),
+                GcTraceEdge::ExactBase(iface_ref),
+            ]
+        );
 
         visited.clear();
         trace_value_slots_by_meta(
@@ -2139,7 +2244,7 @@ mod tests {
             &mut |child| visited.push(child),
         )
         .expect("interface array scan");
-        assert_eq!(visited, [iface_ref]);
+        assert_eq!(visited, [GcTraceEdge::ExactBase(iface_ref)]);
     }
 
     #[test]
