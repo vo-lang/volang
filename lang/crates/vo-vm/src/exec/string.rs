@@ -1,7 +1,7 @@
 //! String instructions: StrNew, StrConcat, StrSlice
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::String};
+use alloc::format;
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::string;

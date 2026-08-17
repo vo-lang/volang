@@ -1,5 +1,8 @@
 //! Array instructions: ArrayNew
 
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+
 use vo_runtime::gc::Gc;
 use vo_runtime::objects::array;
 use vo_runtime::slot::Slot;

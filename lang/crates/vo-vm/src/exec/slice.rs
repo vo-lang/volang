@@ -1,8 +1,6 @@
 //! Slice instructions: SliceNew, SliceSlice, SliceAppend
 
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
-#[cfg(not(feature = "std"))]
 use alloc::string::ToString;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::slice;
