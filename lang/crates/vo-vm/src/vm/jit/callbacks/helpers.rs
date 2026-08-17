@@ -416,20 +416,46 @@ pub extern "C" fn jit_stack_overflow(ctx: *mut JitContext) -> JitResult {
     ) {
         return result;
     }
-    let gc = unsafe { &mut *(*ctx).gc };
-    let fiber = unsafe { extract_fiber(ctx) };
-    set_jit_trap(
-        gc,
-        fiber,
-        RuntimeTrapKind::StackOverflow,
-        "runtime error: stack overflow",
-    )
+    // Keep the native overflow boundary allocation-free. Ancestor native
+    // frames are materialized after this result unwinds; setup_jit_panic then
+    // constructs the canonical language message from the typed trap payload.
+    let ctx = unsafe { &mut *ctx };
+    let pc = ctx.runtime_trap_pc;
+    record_runtime_trap(ctx, JitRuntimeTrapKind::StackOverflow, pc);
+    JitResult::Panic
 }
 
 #[cfg(test)]
 mod scheduler_poll_tests {
     use super::*;
     use crate::fiber::PendingSpawn;
+
+    #[test]
+    fn stack_overflow_callback_records_a_deferred_typed_trap() {
+        let mut module = Module::new("jit-stack-overflow-callback".to_string());
+        module
+            .functions
+            .push(crate::vm::jit::test_support::function(1));
+        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("jit vm");
+        vm.load(module).expect("load module");
+        let mut fiber = Fiber::new(7);
+        fiber.push_frame(0, 1, 0, 0);
+        let mut ctx =
+            crate::vm::jit::context::build_jit_context(&mut vm, &mut fiber).expect("jit context");
+        ctx.ctx.runtime_trap_pc = 23;
+
+        let result = jit_stack_overflow(ctx.as_ptr());
+
+        assert_eq!(result, JitResult::Panic);
+        assert!(fiber.jit_panic_flag);
+        assert!(!fiber.jit_is_user_panic);
+        assert_eq!(
+            ctx.ctx.runtime_trap_kind,
+            JitRuntimeTrapKind::StackOverflow as u8
+        );
+        assert_eq!(ctx.ctx.runtime_trap_pc, 23);
+        assert!(fiber.panic_state.is_none());
+    }
 
     #[test]
     fn idle_vm_renews_native_execution_lease_for_the_whole_region() {
