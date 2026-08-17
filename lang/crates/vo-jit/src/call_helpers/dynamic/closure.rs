@@ -11,7 +11,8 @@ use super::DynamicCallLowering;
 
 /// Emit a closure call instruction through the VM-owned prepared-call path.
 ///
-/// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = dynamic callsite ordinal.
+/// CallClosure: inst.a = closure_slot, inst.b = arg_start, and the instruction's
+/// `c`/`flags` payload owns the module-global inline-cache identity.
 ///
 /// Allocation-level closure validation and canonicalization run through a
 /// non-materializing runtime helper on every call. The first call for a target

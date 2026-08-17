@@ -23,8 +23,8 @@ fn dynamic_call_metadata_accepts_full_width_shapes() {
 }
 
 #[test]
-fn dynamic_callsite_ordinals_must_be_consecutive_across_call_kinds() {
-    let mut module = Module::new("dynamic-callsite-ordinal".to_string());
+fn dynamic_callsite_indices_must_be_consecutive_across_call_kinds() {
+    let mut module = Module::new("dynamic-callsite-index".to_string());
     let mut caller = function_with_slot_types(vec![
         SlotType::GcRef,
         SlotType::Interface0,
@@ -50,8 +50,8 @@ fn dynamic_callsite_ordinals_must_be_consecutive_across_call_kinds() {
     ];
     module.functions.push(finish_test_function(caller));
 
-    let err = verify_module(&module).expect_err("duplicate callsite ordinals must be rejected");
-    assert!(err.to_string().contains("ordinal 0, expected 1"), "{err}");
+    let err = verify_module(&module).expect_err("duplicate callsite indices must be rejected");
+    assert!(err.to_string().contains("index 0, expected 1"), "{err}");
 }
 
 #[test]

@@ -38,6 +38,9 @@ pub const SLICE_SLICE_FLAG_HAS_MAX: u8 = 0x02;
 pub const SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW: u8 = 0x04;
 pub const SLICE_SLICE_ALLOWED_FLAGS: u8 =
     SLICE_SLICE_FLAG_ARRAY | SLICE_SLICE_FLAG_HAS_MAX | SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW;
+/// Largest dynamic-call inline-cache identity encodable by `CallClosure` and
+/// `CallIface`. The low 16 bits live in `c`; `flags` owns the high 8 bits.
+pub const MAX_DYNAMIC_CALLSITE_INDEX: u32 = 0x00ff_ffff;
 
 #[inline]
 pub const fn conv_f2i_width_bits(flags: u8) -> u8 {
@@ -180,15 +183,26 @@ impl Instruction {
         (self.b as u32) | ((self.flags as u32) << 16)
     }
 
-    /// Function-local ordinal for `CallClosure` and `CallIface`.
+    /// Module-global inline-cache identity for `CallClosure` and `CallIface`.
     ///
-    /// The code generator assigns consecutive ordinals and the module
-    /// verifier proves that encoding before execution. A loaded module can
-    /// therefore derive the process-wide inline-cache index from a compact
-    /// per-function base instead of retaining a PC-sized side table.
+    /// The code generator assigns consecutive identities after the complete
+    /// function table is known, and the module verifier proves that encoding
+    /// before execution. This makes the instruction the sole owner of its
+    /// cache identity and keeps runtime dispatch independent from side tables.
     #[inline]
-    pub const fn dynamic_callsite_ordinal(&self) -> u16 {
-        self.c
+    pub const fn dynamic_callsite_index(&self) -> u32 {
+        (self.c as u32) | ((self.flags as u32) << 16)
+    }
+
+    /// Encode a module-global dynamic-call identity in this instruction.
+    #[inline]
+    pub fn set_dynamic_callsite_index(&mut self, index: u32) -> bool {
+        if index > MAX_DYNAMIC_CALLSITE_INDEX {
+            return false;
+        }
+        self.c = index as u16;
+        self.flags = (index >> 16) as u8;
+        true
     }
 
     /// Whether the opcode's shared call/defer/go shape targets a closure value.
@@ -491,6 +505,18 @@ mod tests {
 
         let closure_new = Instruction::with_flags(Opcode::ClosureNew, 0xAB, 1, 0xCDEF, 4);
         assert_eq!(closure_new.closure_new_func_id(), 0xAB_CDEF);
+
+        let mut dynamic_call = Instruction::new(Opcode::CallClosure, 1, 2, 0);
+        assert!(dynamic_call.set_dynamic_callsite_index(MAX_DYNAMIC_CALLSITE_INDEX));
+        assert_eq!(
+            dynamic_call.dynamic_callsite_index(),
+            MAX_DYNAMIC_CALLSITE_INDEX
+        );
+        assert!(!dynamic_call.set_dynamic_callsite_index(MAX_DYNAMIC_CALLSITE_INDEX + 1));
+        assert_eq!(
+            dynamic_call.dynamic_callsite_index(),
+            MAX_DYNAMIC_CALLSITE_INDEX
+        );
 
         let go = Instruction::with_flags(Opcode::GoStart, 0x24, 0x1000, 4, 2);
         assert!(!go.call_shape_is_closure());

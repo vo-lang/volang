@@ -417,9 +417,6 @@ pub trait MetadataAccess {
         false
     }
 
-    /// Dense module-wide index derived from a verified function-local ordinal.
-    fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32>;
-
     /// Exact managed roots live at the current allocation/call safepoint.
     ///
     /// A native safepoint is valid only when the verified IR owns a frame
@@ -613,10 +610,6 @@ macro_rules! impl_shared_compiler_traits {
                 self.core
                     .analysis
                     .gc_ref_input_is_exact_base(self.core.current_pc, slot)
-            }
-
-            fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32> {
-                self.core.analysis.dynamic_callsite_index(ordinal)
             }
 
             fn exact_native_roots_for_current_pc(&self) -> $crate::translator::ExactNativeRoots {

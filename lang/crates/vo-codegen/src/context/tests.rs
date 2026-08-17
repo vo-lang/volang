@@ -843,6 +843,33 @@ fn function_and_serialized_table_id_boundaries_are_checked_without_allocations()
 }
 
 #[test]
+fn finish_assigns_one_dense_dynamic_callsite_identity_space() {
+    let mut ctx = CodegenContext::new("dynamic-callsite-identities");
+    let mut first = minimal_function(3);
+    first.code[0] = Instruction::with_flags(Opcode::CallClosure, 0xff, 0, 0, 0xffff);
+    first.code[1] = Instruction::with_flags(Opcode::CallIface, 0xff, 0, 0, 0xffff);
+    let mut second = minimal_function(2);
+    second.code[0] = Instruction::with_flags(Opcode::CallClosure, 0xff, 0, 0, 0xffff);
+    ctx.module.functions.extend([first, second]);
+
+    let module = ctx.finish().expect("assign dynamic callsite identities");
+    let indices = module
+        .functions
+        .iter()
+        .flat_map(|function| function.code.iter())
+        .filter(|instruction| {
+            matches!(
+                instruction.opcode(),
+                Opcode::CallClosure | Opcode::CallIface
+            )
+        })
+        .map(Instruction::dynamic_callsite_index)
+        .collect::<Vec<_>>();
+
+    assert_eq!(indices, vec![0, 1, 2]);
+}
+
+#[test]
 fn well_known_error_metadata_is_absent_when_only_the_predeclared_interface_exists() {
     let mut ctx = CodegenContext::new("error-interface-only");
     ctx.module.interface_metas.push(InterfaceMeta {

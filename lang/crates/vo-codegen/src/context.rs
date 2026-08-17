@@ -2538,6 +2538,13 @@ impl CodegenContext {
                 MAX_ENCODED_FUNCTION_ID as usize + 1
             ));
         }
+        let dynamic_callsites = self.module.dynamic_callsite_count();
+        if dynamic_callsites > vo_runtime::instruction::MAX_DYNAMIC_CALLSITE_INDEX as usize + 1 {
+            return Err(format!(
+                "module has {dynamic_callsites} dynamic callsites, exceeding the 24-bit inline-cache identity limit of {}",
+                vo_runtime::instruction::MAX_DYNAMIC_CALLSITE_INDEX as usize + 1
+            ));
+        }
         if self.module.externs.len() > u32::MAX as usize {
             return Err(format!(
                 "extern table has {} entries, exceeding the u32 serialized table-length limit",
@@ -2631,8 +2638,28 @@ impl CodegenContext {
         Ok(())
     }
 
-    pub fn finish(self) -> Module {
-        self.module
+    pub fn finish(mut self) -> Result<Module, String> {
+        let mut next = 0_u32;
+        for function in &mut self.module.functions {
+            for instruction in &mut function.code {
+                if !matches!(
+                    instruction.opcode(),
+                    vo_runtime::instruction::Opcode::CallClosure
+                        | vo_runtime::instruction::Opcode::CallIface
+                ) {
+                    continue;
+                }
+                if !instruction.set_dynamic_callsite_index(next) {
+                    return Err(format!(
+                        "dynamic callsite index {next} exceeds the 24-bit instruction encoding"
+                    ));
+                }
+                next = next.checked_add(1).ok_or_else(|| {
+                    "dynamic callsite count exceeds the u32 identity domain".to_string()
+                })?;
+            }
+        }
+        Ok(self.module)
     }
 }
 

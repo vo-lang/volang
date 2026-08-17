@@ -126,13 +126,12 @@ fn call_iface_metadata_preserves_zero_and_wide_method_indices() {
     let iface_meta_id =
         push_non_empty_test_interface_meta(&mut module, boundary_interface_meta(257, 0));
 
-    for method_idx in [0_u32, 255, 256] {
+    for (callsite_index, method_idx) in [0_u32, 255, 256].into_iter().enumerate() {
         let mut caller = function_with_slot_types(vec![SlotType::Interface0, SlotType::Interface1]);
         caller.name = format!("call_method_{method_idx}");
-        caller.code = vec![
-            Instruction::new(Opcode::CallIface, 0, 2, 0),
-            Instruction::new(Opcode::Return, 0, 0, 0),
-        ];
+        let mut call = Instruction::new(Opcode::CallIface, 0, 2, 0);
+        assert!(call.set_dynamic_callsite_index(callsite_index as u32));
+        caller.code = vec![call, Instruction::new(Opcode::Return, 0, 0, 0)];
         caller.instruction_metadata = vec![
             InstructionMetadata::CallIfaceLayout {
                 iface_meta_id,

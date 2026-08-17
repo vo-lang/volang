@@ -2118,94 +2118,8 @@ impl RuntimeTypeFacts {
 pub struct LoadedModule {
     module: Module,
     runtime_type_facts: RuntimeTypeFacts,
-    dynamic_callsite_map: Arc<DynamicCallsiteMap>,
+    dynamic_callsite_count: usize,
     frame_root_maps: crate::frame_roots::FrameRootMaps,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DynamicCallsiteMap {
-    /// Prefix sum of dynamic callsite counts. Function `f` owns the half-open
-    /// range `boundaries[f]..boundaries[f + 1]`. Instructions already carry a
-    /// verifier-proven function-local ordinal, keeping this loaded-module fact
-    /// proportional to function count rather than bytecode size.
-    boundaries: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DynamicCallsiteRange {
-    base: u32,
-    len: u32,
-}
-
-impl DynamicCallsiteRange {
-    #[inline]
-    pub fn index(self, ordinal: u16) -> Option<u32> {
-        (u32::from(ordinal) < self.len).then(|| self.base + u32::from(ordinal))
-    }
-
-    #[inline]
-    pub const fn len(self) -> u32 {
-        self.len
-    }
-
-    #[inline]
-    pub const fn is_empty(self) -> bool {
-        self.len == 0
-    }
-}
-
-impl DynamicCallsiteMap {
-    pub fn for_module(module: &Module) -> Self {
-        let mut next = 0u32;
-        let mut boundaries = Vec::with_capacity(module.functions.len().saturating_add(1));
-        boundaries.push(0);
-        for func in &module.functions {
-            let count = u32::try_from(
-                func.code
-                    .iter()
-                    .filter(|inst| {
-                        matches!(
-                            inst.opcode(),
-                            crate::instruction::Opcode::CallClosure
-                                | crate::instruction::Opcode::CallIface
-                        )
-                    })
-                    .count(),
-            )
-            .expect("verified function dynamic callsite count must fit u32");
-            next = next
-                .checked_add(count)
-                .expect("verified module dynamic callsite count must fit u32");
-            boundaries.push(next);
-        }
-        Self { boundaries }
-    }
-
-    #[inline]
-    pub fn range(&self, func_id: u32) -> Option<DynamicCallsiteRange> {
-        let func = func_id as usize;
-        let base = *self.boundaries.get(func)?;
-        let end = *self.boundaries.get(func.checked_add(1)?)?;
-        Some(DynamicCallsiteRange {
-            base,
-            len: end - base,
-        })
-    }
-
-    #[inline]
-    pub fn index(&self, func_id: u32, ordinal: u16) -> Option<u32> {
-        self.range(func_id)?.index(ordinal)
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.boundaries.last().copied().unwrap_or(0) as usize
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 impl LoadedModule {
@@ -2215,11 +2129,11 @@ impl LoadedModule {
         frame_root_maps: crate::frame_roots::FrameRootMaps,
     ) -> Self {
         debug_assert_eq!(runtime_type_facts.len(), module.runtime_types.len());
-        let dynamic_callsite_map = Arc::new(DynamicCallsiteMap::for_module(&module));
+        let dynamic_callsite_count = module.dynamic_callsite_count();
         Self {
             module,
             runtime_type_facts,
-            dynamic_callsite_map,
+            dynamic_callsite_count,
             frame_root_maps,
         }
     }
@@ -2235,13 +2149,8 @@ impl LoadedModule {
     }
 
     #[inline]
-    pub fn dynamic_callsite_map(&self) -> &DynamicCallsiteMap {
-        &self.dynamic_callsite_map
-    }
-
-    #[inline]
-    pub fn shared_dynamic_callsite_map(&self) -> Arc<DynamicCallsiteMap> {
-        Arc::clone(&self.dynamic_callsite_map)
+    pub fn dynamic_callsite_count(&self) -> usize {
+        self.dynamic_callsite_count
     }
 
     #[inline]
@@ -2444,6 +2353,21 @@ impl Module {
             island_init_func: 0,
             debug_info: DebugInfo::new(),
         }
+    }
+
+    /// Number of module-global inline-cache identities carried by dynamic
+    /// call instructions. Verified modules encode these identities densely.
+    pub fn dynamic_callsite_count(&self) -> usize {
+        self.functions
+            .iter()
+            .flat_map(|function| function.code.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.opcode(),
+                    crate::instruction::Opcode::CallClosure | crate::instruction::Opcode::CallIface
+                )
+            })
+            .count()
     }
 
     pub fn canonical_value_meta_for_value_rttid(
@@ -2942,61 +2866,6 @@ mod tests {
         assert_eq!(ExtSlotKind::try_from_u8(1), Some(ExtSlotKind::Bytes));
         assert_eq!(ExtSlotKind::try_from_u8(2), None);
         assert!(std::panic::catch_unwind(|| ExtSlotKind::from_u8(2)).is_err());
-    }
-
-    fn function_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
-        FunctionDef {
-            name: "test".to_string(),
-            param_count: 0,
-            param_slots: 0,
-            local_slots: slot_types.len() as u16,
-            ret_slots: 0,
-            ret_slot_types: Vec::new(),
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer: false,
-            has_calls: false,
-            has_call_extern: false,
-            code: Vec::new(),
-            instruction_metadata: Vec::new(),
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-            slot_types,
-        }
-    }
-
-    #[test]
-    fn dynamic_callsite_map_assigns_dense_exact_dynamic_indices() {
-        let mut module = Module::new("dynamic-callsites".to_string());
-        let mut first = function_with_slot_types(Vec::new());
-        first.code = vec![
-            crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 0),
-            crate::instruction::Instruction::new(crate::instruction::Opcode::CallClosure, 0, 0, 1),
-            crate::instruction::Instruction::new(crate::instruction::Opcode::CallIface, 0, 0, 2),
-        ];
-        let mut second = function_with_slot_types(Vec::new());
-        second.code = vec![crate::instruction::Instruction::new(
-            crate::instruction::Opcode::CallIface,
-            0,
-            0,
-            0,
-        )];
-        module.functions.extend([first, second]);
-
-        let map = DynamicCallsiteMap::for_module(&module);
-        assert_eq!(map.len(), 4);
-        assert_eq!(map.index(0, 0), Some(0));
-        assert_eq!(map.index(0, 1), Some(1));
-        assert_eq!(map.index(0, 2), Some(2));
-        assert_eq!(map.index(0, 3), None);
-        assert_eq!(map.index(1, 0), Some(3));
-        assert_eq!(map.range(0).map(DynamicCallsiteRange::len), Some(3));
-        assert_eq!(map.index(2, 0), None);
     }
 
     #[test]

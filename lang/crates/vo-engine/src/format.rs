@@ -373,14 +373,27 @@ fn format_instruction(instr: &Instruction, metadata: Option<&InstructionMetadata
             a, b, c
         ),
         Opcode::CallClosure => {
-            format!("CallClosure   r{}, args=r{}, layout=metadata", a, b)
+            format!(
+                "CallClosure   r{}, args=r{}, ic={}, layout=metadata",
+                a,
+                b,
+                instr.dynamic_callsite_index()
+            )
         }
         Opcode::CallIface => match metadata {
             Some(InstructionMetadata::CallIfaceLayout { method_idx, .. }) => format!(
-                "CallIface     r{}, args=r{}, method={}, layout=metadata",
-                a, b, method_idx
+                "CallIface     r{}, args=r{}, method={}, ic={}, layout=metadata",
+                a,
+                b,
+                method_idx,
+                instr.dynamic_callsite_index()
             ),
-            _ => format!("CallIface     r{}, args=r{}, layout=metadata", a, b),
+            _ => format!(
+                "CallIface     r{}, args=r{}, ic={}, layout=metadata",
+                a,
+                b,
+                instr.dynamic_callsite_index()
+            ),
         },
         Opcode::Return => {
             if a == 0 && b == 0 {
@@ -602,5 +615,26 @@ fn format_instruction(instr: &Instruction, metadata: Option<&InstructionMetadata
             "Invalid       op={}, flags={}, a={}, b={}, c={}",
             instr.op, flags, a, b, c
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_call_format_exposes_the_instruction_owned_cache_identity() {
+        let mut call = Instruction::new(Opcode::CallClosure, 3, 5, 0);
+        assert!(call.set_dynamic_callsite_index(0x12_3456));
+        assert_eq!(
+            format_instruction(&call, None),
+            "CallClosure   r3, args=r5, ic=1193046, layout=metadata"
+        );
+
+        call.op = Opcode::CallIface as u8;
+        assert_eq!(
+            format_instruction(&call, None),
+            "CallIface     r3, args=r5, ic=1193046, layout=metadata"
+        );
     }
 }

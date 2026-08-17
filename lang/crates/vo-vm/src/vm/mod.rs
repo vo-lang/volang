@@ -1837,8 +1837,7 @@ impl Vm {
         self.state.last_gc_step_stats = VmGcStepStats::default();
         // Initialize itab_cache from module's compile-time itabs
         self.state.itab_cache = ItabCache::from_module_itabs(module.itabs.clone());
-        self.state.dynamic_call_ic =
-            vo_runtime::alloc_ic_table(module.dynamic_callsite_map().len());
+        self.state.dynamic_call_ic = vo_runtime::alloc_ic_table(module.dynamic_callsite_count());
         // Reset sentinel error cache for new module (prevents cross-module corruption)
         self.state.sentinel_errors = vo_runtime::SentinelErrorCache::new();
 
@@ -4321,14 +4320,7 @@ impl Vm {
                     }
                 }
                 Opcode::CallClosure => {
-                    let Some(callsite_index) = loaded_module
-                        .dynamic_callsite_map()
-                        .index(func_id, inst.dynamic_callsite_ordinal())
-                    else {
-                        return ExecResult::JitError(format!(
-                            "CallClosure at func_id={func_id} pc={fetched_pc} has no verified callsite index"
-                        ));
-                    };
+                    let callsite_index = inst.dynamic_callsite_index();
                     let Some(ic_entry) =
                         self.state.dynamic_call_ic.get_mut(callsite_index as usize)
                     else {
@@ -4345,14 +4337,7 @@ impl Vm {
                     ));
                 }
                 Opcode::CallIface => {
-                    let Some(callsite_index) = loaded_module
-                        .dynamic_callsite_map()
-                        .index(func_id, inst.dynamic_callsite_ordinal())
-                    else {
-                        return ExecResult::JitError(format!(
-                            "CallIface at func_id={func_id} pc={fetched_pc} has no verified callsite index"
-                        ));
-                    };
+                    let callsite_index = inst.dynamic_callsite_index();
                     let Some(ic_entry) =
                         self.state.dynamic_call_ic.get_mut(callsite_index as usize)
                     else {

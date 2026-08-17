@@ -412,12 +412,9 @@ pub(super) fn emit_dynamic_miss_dispatch<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
-pub(super) fn dynamic_ic_entry<'a, E: IrEmitter<'a>>(emitter: &mut E, ordinal: u16) -> Value {
+pub(super) fn dynamic_ic_entry<'a, E: IrEmitter<'a>>(emitter: &mut E, index: u32) -> Value {
     let ic_table = emitter.load_context_field(types::I64, JitContextField::InlineCacheTable);
-    let ic_index = emitter
-        .dynamic_callsite_index(ordinal)
-        .expect("verified dynamic call must have a module-wide callsite index");
-    let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
+    let ic_byte_offset = (index as usize) * DynCallIC::SIZE;
     emitter
         .builder()
         .ins()

@@ -133,7 +133,7 @@ impl JitContextParts {
             .loaded_module
             .as_deref()
             .map_or(core::ptr::null(), core::ptr::from_ref);
-        let callsite_count = vo_runtime::bytecode::DynamicCallsiteMap::for_module(module).len();
+        let callsite_count = module.dynamic_callsite_count();
         if self.ic_table.len() != callsite_count {
             self.ic_table = alloc_ic_table(callsite_count);
         }

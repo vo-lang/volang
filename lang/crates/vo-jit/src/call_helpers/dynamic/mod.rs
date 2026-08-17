@@ -98,7 +98,7 @@ impl DynamicCallLowering {
         let caller_bp = emitter.call_caller_bp();
         let old_fiber_sp = emitter.call_old_fiber_sp();
         let ic = with_ic.then(|| DynamicIcState {
-            entry: dynamic_ic_entry(emitter, inst.dynamic_callsite_ordinal()),
+            entry: dynamic_ic_entry(emitter, inst.dynamic_callsite_index()),
         });
 
         Ok(Self {

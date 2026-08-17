@@ -205,7 +205,6 @@ pub struct FuncBuilder {
     stack_array_elem_layouts: HashMap<u16, Vec<SlotType>>,
     code: Vec<Instruction>,
     instruction_metadata: Vec<InstructionMetadata>,
-    dynamic_callsite_count: u32,
     active_call_span: Option<Span>,
     call_debug_locs: Vec<(u32, Span)>,
     loop_stack: Vec<LoopContext>,
@@ -251,7 +250,6 @@ impl FuncBuilder {
             stack_array_elem_layouts: HashMap::new(),
             code: Vec::new(),
             instruction_metadata: Vec::new(),
-            dynamic_callsite_count: 0,
             active_call_span: None,
             call_debug_locs: Vec::new(),
             loop_stack: Vec::new(),
@@ -1069,9 +1067,8 @@ impl FuncBuilder {
         arg_layout: &[SlotType],
         ret_layout: &[SlotType],
     ) {
-        let ordinal = self.next_dynamic_callsite_ordinal();
         self.emit_with_metadata(
-            Instruction::new(Opcode::CallClosure, closure_reg, args_start, ordinal),
+            Instruction::new(Opcode::CallClosure, closure_reg, args_start, 0),
             InstructionMetadata::CallLayout {
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: ret_layout.to_vec(),
@@ -1089,13 +1086,8 @@ impl FuncBuilder {
         arg_layout: &[SlotType],
         ret_layout: &[SlotType],
     ) {
-        let ordinal = self.next_dynamic_callsite_ordinal();
-        self.emit_with_flags_and_metadata(
-            Opcode::CallIface,
-            0,
-            iface_slot,
-            args_start,
-            ordinal,
+        self.emit_with_metadata(
+            Instruction::new(Opcode::CallIface, iface_slot, args_start, 0),
             InstructionMetadata::CallIfaceLayout {
                 iface_meta_id,
                 method_idx,
@@ -1103,22 +1095,6 @@ impl FuncBuilder {
                 ret_layout: ret_layout.to_vec(),
             },
         );
-    }
-
-    fn next_dynamic_callsite_ordinal(&mut self) -> u16 {
-        match u16::try_from(self.dynamic_callsite_count) {
-            Ok(ordinal) => {
-                self.dynamic_callsite_count += 1;
-                ordinal
-            }
-            Err(_) => {
-                self.record_layout_error(format!(
-                    "function {} has more than 65536 dynamic callsites",
-                    self.name
-                ));
-                0
-            }
-        }
     }
 
     pub fn emit_go_island(
@@ -2752,28 +2728,6 @@ mod tests {
                 }) if *actual == method_idx
             ));
         }
-        assert_eq!(iface_func.code[0].flags, iface_func.code[2].flags);
-        assert_eq!(
-            iface_func
-                .code
-                .iter()
-                .map(Instruction::dynamic_callsite_ordinal)
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
-    }
-
-    #[test]
-    fn dynamic_callsite_ordinal_overflow_is_a_codegen_error() {
-        let mut func = FuncBuilder::new("dynamic-callsite-overflow");
-        func.dynamic_callsite_count = u32::from(u16::MAX) + 1;
-
-        func.emit_call_closure(0, 0, &[], &[]);
-
-        assert_eq!(
-            func.check_layout_error().unwrap_err(),
-            "function dynamic-callsite-overflow has more than 65536 dynamic callsites"
-        );
     }
 
     #[test]

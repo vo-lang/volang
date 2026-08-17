@@ -761,6 +761,25 @@ fn verify_module_invariants(module: &Module) -> Result<RuntimeTypeFacts, ModuleV
         module.runtime_types.len(),
     )?;
 
+    let mut expected_dynamic_callsite_index = 0usize;
+    for (func_id, function) in module.functions.iter().enumerate() {
+        for (pc, instruction) in function.code.iter().enumerate() {
+            if !matches!(
+                instruction.opcode(),
+                Opcode::CallClosure | Opcode::CallIface
+            ) {
+                continue;
+            }
+            let actual = instruction.dynamic_callsite_index() as usize;
+            if actual != expected_dynamic_callsite_index {
+                return Err(invariant(format!(
+                    "dynamic callsite in function {func_id} at pc {pc} has index {actual}, expected {expected_dynamic_callsite_index}"
+                )));
+            }
+            expected_dynamic_callsite_index += 1;
+        }
+    }
+
     if module.entry_func as usize >= module.functions.len() {
         return Err(invariant(format!(
             "entry_func={} exceeds function count {}",
@@ -2853,18 +2872,6 @@ fn verify_function_invariants(
             "has_call_extern={} but bytecode has_call_extern={}",
             func.has_call_extern, has_call_extern
         )));
-    }
-    let mut expected_dynamic_callsite_ordinal = 0u32;
-    for (pc, inst) in func.code.iter().enumerate() {
-        if matches!(inst.opcode(), Opcode::CallClosure | Opcode::CallIface) {
-            let ordinal = u32::from(inst.dynamic_callsite_ordinal());
-            if ordinal != expected_dynamic_callsite_ordinal {
-                return Err(invariant(format!(
-                    "dynamic callsite at pc {pc} has ordinal {ordinal}, expected {expected_dynamic_callsite_ordinal}"
-                )));
-            }
-            expected_dynamic_callsite_ordinal += 1;
-        }
     }
     if func.heap_ret_slots.len() != func.heap_ret_gcref_count as usize {
         return Err(invariant(format!(
@@ -6904,7 +6911,6 @@ fn verify_dynamic_call_contract(
     inst: Instruction,
     is_closure: bool,
 ) -> Result<(), ModuleVerificationError> {
-    verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let (arg_layout, ret_layout) = if is_closure {
         verify_layout(
             func,

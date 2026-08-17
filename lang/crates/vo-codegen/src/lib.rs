@@ -84,7 +84,7 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     // 11. Final check: all IDs within 24-bit limit
     ctx.check_id_limits().map_err(CodegenError::Internal)?;
 
-    Ok(ctx.finish())
+    ctx.finish().map_err(CodegenError::Internal)
 }
 
 /// Validate arena layout metadata and the child types of intrinsically flat

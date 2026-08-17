@@ -55,10 +55,7 @@ use cranelift_frontend::FunctionBuilderContext;
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{Module, ModuleReloc};
 
-use vo_runtime::bytecode::{
-    DynamicCallsiteMap, DynamicCallsiteRange, FunctionDef, LoadedModule, Module as VoModule,
-    ResolvedExternTable,
-};
+use vo_runtime::bytecode::{FunctionDef, LoadedModule, Module as VoModule, ResolvedExternTable};
 use vo_runtime::instruction::Opcode;
 #[cfg(test)]
 use vo_runtime::jit_api::{JitContext, JitResult};
@@ -580,7 +577,6 @@ impl JitCache {
         func_id: u32,
         func: &FunctionDef,
         vo_module: &VoModule,
-        dynamic_callsites: DynamicCallsiteRange,
         exact_base_returns: &[Box<[bool]>],
     ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
         self.analysis_tick = self.analysis_tick.saturating_add(1);
@@ -595,7 +591,6 @@ impl JitCache {
         let analysis = match analysis::FunctionAnalysis::for_function_with_return_summaries(
             func,
             vo_module,
-            dynamic_callsites,
             exact_base_returns,
             self.analysis_memory_limit_bytes
                 .saturating_sub(self.module_analysis_bytes),
@@ -1023,7 +1018,6 @@ pub struct JitCompiler {
     verified_module_identity: Option<*const VoModule>,
     loaded_module: Option<Arc<LoadedModule>>,
     verified_env: Option<JitCompileEnvScope>,
-    dynamic_callsites: Option<Arc<DynamicCallsiteMap>>,
     module_call_graph: Option<Arc<call_graph::ModuleCallGraph>>,
     return_provenance: Option<return_provenance::ModuleReturnProvenance>,
     module_analysis: Option<Arc<ModuleJitAnalysis>>,
@@ -1033,18 +1027,6 @@ pub struct JitCompiler {
 }
 
 impl JitCompiler {
-    fn dynamic_callsite_range(&self, func_id: u32) -> Result<DynamicCallsiteRange, JitError> {
-        self.dynamic_callsites
-            .as_ref()
-            .expect("verified module must carry dynamic callsite facts")
-            .range(func_id)
-            .ok_or_else(|| {
-                JitError::Internal(format!(
-                    "function {func_id} has no verified dynamic callsite range"
-                ))
-            })
-    }
-
     pub fn new() -> Result<Self, JitError> {
         Self::with_debug(false)
     }
@@ -1122,7 +1104,6 @@ impl JitCompiler {
             verified_module_identity: None,
             loaded_module: None,
             verified_env: None,
-            dynamic_callsites: None,
             module_call_graph: None,
             return_provenance: None,
             module_analysis: None,
@@ -1145,7 +1126,6 @@ impl JitCompiler {
         verifier::verify_module(vo_module)?;
         self.verified_module_identity = Some(identity);
         self.cache.bind_function_count(vo_module.functions.len());
-        self.dynamic_callsites = Some(Arc::new(DynamicCallsiteMap::for_module(vo_module)));
         Ok(())
     }
 
@@ -1161,7 +1141,6 @@ impl JitCompiler {
             return Ok(());
         }
         self.cache.bind_function_count(vo_module.functions.len());
-        self.dynamic_callsites = Some(loaded.shared_dynamic_callsite_map());
         #[cfg(test)]
         {
             self.verified_module_identity = Some(core::ptr::from_ref(vo_module));
@@ -1263,19 +1242,13 @@ impl JitCompiler {
     ) -> Result<Arc<analysis::FunctionAnalysis>, JitError> {
         let graph = self.module_call_graph(vo_module)?;
         self.ensure_return_provenance(func_id, vo_module, &graph)?;
-        let dynamic_callsites = self.dynamic_callsite_range(func_id)?;
         let exact_base_returns = self
             .return_provenance
             .as_ref()
             .expect("return provenance precedes function analysis")
             .summaries();
-        self.cache.get_or_analyze(
-            func_id,
-            func,
-            vo_module,
-            dynamic_callsites,
-            exact_base_returns,
-        )
+        self.cache
+            .get_or_analyze(func_id, func, vo_module, exact_base_returns)
     }
 
     fn module_analysis(

@@ -6,10 +6,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use vo_runtime::bytecode::{DynamicCallsiteRange, FunctionDef, Module as VoModule};
-
-#[cfg(test)]
-use vo_runtime::bytecode::DynamicCallsiteMap;
+use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
 use crate::effects::{self, MemorySyncEffect};
 use crate::{ir::FunctionIr, loop_analysis::LoopInfo, JitError, MAX_JIT_COMPILE_WORK_BYTES};
@@ -21,7 +18,6 @@ pub struct FunctionAnalysis {
     memory_slots: MemorySlotSet,
     loops: Arc<[LoopInfo]>,
     loop_memory_slots: Vec<MemorySlotSet>,
-    dynamic_callsites: DynamicCallsiteRange,
     ir: FunctionIr,
     retained_bytes: usize,
 }
@@ -151,22 +147,14 @@ impl FunctionAnalysis {
     pub fn for_function(
         func_def: &FunctionDef,
         vo_module: &VoModule,
-        dynamic_callsites: DynamicCallsiteRange,
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
-        Self::for_function_with_return_summaries(
-            func_def,
-            vo_module,
-            dynamic_callsites,
-            &[],
-            retained_limit_bytes,
-        )
+        Self::for_function_with_return_summaries(func_def, vo_module, &[], retained_limit_bytes)
     }
 
     pub(crate) fn for_function_with_return_summaries(
         func_def: &FunctionDef,
         vo_module: &VoModule,
-        dynamic_callsites: DynamicCallsiteRange,
         exact_base_returns: &[Box<[bool]>],
         retained_limit_bytes: usize,
     ) -> Result<Self, JitError> {
@@ -277,7 +265,6 @@ impl FunctionAnalysis {
             memory_slots,
             loops: loops.into(),
             loop_memory_slots,
-            dynamic_callsites,
             ir,
             retained_bytes,
         })
@@ -286,11 +273,6 @@ impl FunctionAnalysis {
     #[inline]
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
-    }
-
-    #[inline]
-    pub fn dynamic_callsite_index(&self, ordinal: u16) -> Option<u32> {
-        self.dynamic_callsites.index(ordinal)
     }
 
     pub(crate) fn native_root_liveness(&self, pc: usize) -> Option<NativeRootLiveness<'_>> {
@@ -472,14 +454,9 @@ mod tests {
         });
         module.functions.push(make_func(code, metadata));
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("valid analysis");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("valid analysis");
         assert!(analysis.memory_slots().slots().next().is_none());
 
         let map_get_effects = effects::try_instruction_effects_with_module_context(
@@ -516,14 +493,9 @@ mod tests {
         let mut module = VoModule::new("queue-recv-analysis".to_string());
         module.functions.push(make_func(code, metadata));
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("valid analysis");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("valid analysis");
 
         assert!(analysis.memory_slots().slots().next().is_none());
         assert!(analysis.loops.is_empty());
@@ -545,14 +517,9 @@ mod tests {
         let mut module = VoModule::new("inline-array-range-analysis".to_string());
         module.functions.push(make_func(code, metadata));
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("valid inline-array memory range");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("valid inline-array memory range");
 
         assert_eq!(
             analysis.memory_slots().slots().collect::<Vec<_>>(),
@@ -593,14 +560,9 @@ mod tests {
         let mut module = VoModule::new("nested-loop-analysis".to_string());
         module.functions.push(make_func(code, metadata));
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("valid nested analysis");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("valid nested analysis");
 
         assert!(analysis.memory_slots().contains(7));
         assert!(analysis.memory_slots().contains(8));
@@ -627,14 +589,9 @@ mod tests {
         let mut module = VoModule::new("sparse-wide-analysis".to_string());
         module.functions.push(func);
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("sparse facts fit the analysis budget");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("sparse facts fit the analysis budget");
 
         assert!(analysis.retained_bytes() < 256 * 1024);
     }
@@ -672,14 +629,9 @@ mod tests {
         let mut module = VoModule::new("root-liveness-cfg".to_string());
         module.functions.push(func);
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("valid root liveness");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("valid root liveness");
         assert_eq!(analysis.native_root_liveness(1).unwrap().direct_roots, &[0]);
         assert_eq!(analysis.native_root_liveness(3).unwrap().direct_roots, &[1]);
     }
@@ -712,14 +664,9 @@ mod tests {
         let mut module = VoModule::new("gc-base-provenance".to_string());
         module.functions.push(func);
 
-        let calls = DynamicCallsiteMap::for_module(&module).range(0).unwrap();
-        let analysis = FunctionAnalysis::for_function(
-            &module.functions[0],
-            &module,
-            calls,
-            MAX_JIT_ANALYSIS_BYTES,
-        )
-        .expect("valid pointer provenance analysis");
+        let analysis =
+            FunctionAnalysis::for_function(&module.functions[0], &module, MAX_JIT_ANALYSIS_BYTES)
+                .expect("valid pointer provenance analysis");
 
         assert!(analysis.gc_ref_input_is_exact_base(4, 0));
         assert!(!analysis.gc_ref_input_is_exact_base(4, 2));
