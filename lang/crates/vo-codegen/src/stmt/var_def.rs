@@ -630,6 +630,26 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             });
         }
 
+        // The initializer slot was allocated before the new lexical binding
+        // became visible and already owns the variable's canonical layout.
+        // Non-escaping locals can adopt that storage directly. Escaping
+        // locals continue through alloc_storage so their shared box identity
+        // and per-iteration allocation rules remain intact.
+        if !needs_box {
+            if self.info.is_reference_type(type_key) {
+                let storage = StorageKind::Reference { slot: src_slot };
+                self.func.define_local(sym, storage);
+                return Ok(storage);
+            }
+            let slots = self.info.type_slot_count(type_key);
+            let storage = StorageKind::StackValue {
+                slot: src_slot,
+                slots,
+            };
+            self.func.define_local_at(sym, src_slot, slots);
+            return Ok(storage);
+        }
+
         let (storage, deferred) = self.alloc_storage(sym, type_key, escapes, obj_key)?;
 
         if let Some(d) = deferred {

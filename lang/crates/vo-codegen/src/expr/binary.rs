@@ -183,15 +183,11 @@ fn compile_binary_with_evaluated_left(
     let right_type = info.expr_type(bin.right.id);
     let operand_type = left_type;
 
-    let left_slot_types = info.type_slot_types(left_type);
-    let left_reg = func.alloc_slots(&left_slot_types);
-    let left_slots = u16::try_from(left_slot_types.len()).map_err(|_| {
-        CodegenError::Internal(format!(
-            "binary operand layout exceeds u16::MAX: {} slots",
-            left_slot_types.len()
-        ))
-    })?;
-    func.emit_copy(left_reg, evaluated_left, left_slots);
+    // `compile_expr` only returns an existing slot for non-escaping local
+    // storage. Every other expression is already materialized into an owned
+    // temporary. In both cases the value survives evaluation of the RHS, so a
+    // second defensive copy here only widens the frame and interpreter trace.
+    let left_reg = evaluated_left;
     let right_reg = compile_expr(&bin.right, ctx, func, info)?;
 
     let is_float = info.is_float(operand_type);

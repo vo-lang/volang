@@ -479,11 +479,28 @@ fn compile_compound_assign(
     let mut lv = resolve_lvalue_for_read(lhs, ctx, func, info)?;
     snapshot_lvalue_operands(&mut lv, func)?;
 
-    // Capture the old LHS value before evaluating the RHS. This also prevents
-    // a direct local from aliasing an RHS side effect that mutates that local.
-    let slot_types = info.type_slot_types(lhs_type);
-    let tmp = func.alloc_slots(&slot_types);
-    emit_lvalue_load(&lv, tmp, ctx, func)?;
+    // StackValue and Reference variables are selected precisely when escape
+    // analysis proved that nested evaluation cannot mutate their storage.
+    // Compute single-slot compound assignments in place; addressable and
+    // composite lvalues retain the snapshot/store path below.
+    let direct_local = match &lv {
+        crate::lvalue::LValue::Variable(crate::func::StorageKind::StackValue {
+            slot,
+            slots: 1,
+        })
+        | crate::lvalue::LValue::Variable(crate::func::StorageKind::Reference { slot }) => {
+            Some(*slot)
+        }
+        _ => None,
+    };
+    let tmp = if let Some(slot) = direct_local {
+        slot
+    } else {
+        let slot_types = info.type_slot_types(lhs_type);
+        let tmp = func.alloc_slots(&slot_types);
+        emit_lvalue_load(&lv, tmp, ctx, func)?;
+        tmp
+    };
 
     let rhs_reg = crate::expr::compile_expr(rhs, ctx, func, info)?;
     if info.is_float32(lhs_type) {
@@ -507,6 +524,9 @@ fn compile_compound_assign(
     }
     if !is_float && !is_string {
         emit_int_trunc(tmp, lhs_type, func, info);
+    }
+    if direct_local.is_some() {
+        return Ok(());
     }
     crate::assign::emit_assign_to_lvalue(
         &lv,

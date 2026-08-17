@@ -1448,6 +1448,9 @@ impl FuncBuilder {
 
     /// Emit Copy or CopyN based on slot count
     pub fn emit_copy(&mut self, dst: u16, src: u16, slots: u16) {
+        if slots == 0 || dst == src {
+            return;
+        }
         if slots == 1 {
             self.emit_op(Opcode::Copy, dst, src, 0);
         } else {
@@ -2441,6 +2444,23 @@ impl FuncBuilder {
 mod tests {
     use super::*;
     use vo_common_core::ValueKind;
+
+    #[test]
+    fn copy_emission_elides_empty_and_identity_moves() {
+        let mut func = FuncBuilder::new("copy_elision");
+
+        func.emit_copy(0, 1, 0);
+        func.emit_copy(2, 2, 1);
+        func.emit_copy(3, 3, 4);
+
+        assert!(func.code.is_empty());
+
+        func.emit_copy(0, 1, 1);
+        func.emit_copy(2, 4, 3);
+        assert_eq!(func.code.len(), 2);
+        assert_eq!(func.code[0].opcode(), Opcode::Copy);
+        assert_eq!(func.code[1].opcode(), Opcode::CopyN);
+    }
 
     #[test]
     fn closure_new_reserves_header_slot_before_emission() {

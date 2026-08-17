@@ -1025,19 +1025,13 @@ fn emit_interface_call_with_args(
     spread: bool,
     iface_type: vo_analysis::objects::TypeKey,
     method_idx: u32,
-    iface_slot: u16,
+    iface_snapshot: u16,
     method_name: &str,
     dst: u16,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    // The receiver is evaluated before the arguments. Preserve the complete
-    // interface pair now; an argument may reassign the variable from which the
-    // receiver was loaded.
-    let iface_snapshot = func.alloc_interface();
-    func.emit_copy(iface_snapshot, iface_slot, 2);
-
     let (param_types, is_variadic) = info.get_interface_method_signature(iface_type, method_name);
     let arg_slots_usize =
         calc_method_arg_slots_for_args(args, spread, &param_types, is_variadic, info);
@@ -1102,15 +1096,18 @@ fn compile_method_dispatch_with_args(
 
     match &call_info.dispatch {
         MethodDispatch::Interface { method_idx } => {
-            // Interface dispatch - interface is the receiver directly
-            let iface_slot = compile_expr(recv_expr, ctx, func, info)?;
+            // Evaluate the receiver directly into its one authoritative
+            // pre-argument snapshot. Argument side effects can then mutate the
+            // source variable without changing the selected receiver.
+            let iface_snapshot = func.alloc_interface();
+            compile_expr_to(recv_expr, iface_snapshot, ctx, func, info)?;
             emit_interface_call_with_args(
                 expr,
                 args,
                 spread,
                 recv_type,
                 *method_idx,
-                iface_slot,
+                iface_snapshot,
                 method_name,
                 dst,
                 ctx,
@@ -1125,9 +1122,12 @@ fn compile_method_dispatch_with_args(
             // Embedded interface dispatch - extract interface first
             let recv_is_ptr = info.is_pointer(recv_type);
             let recv_reg = compile_expr(recv_expr, ctx, func, info)?;
-            let iface_slot = func.alloc_interface();
+            // Embedded traversal produces the same authoritative snapshot
+            // directly, so every interface dispatch observes one uniform
+            // receiver-evaluation contract.
+            let iface_snapshot = func.alloc_interface();
             let start = crate::embed::TraverseStart::new(recv_reg, recv_is_ptr);
-            call_info.emit_target(func, start, iface_slot);
+            call_info.emit_target(func, start, iface_snapshot);
 
             emit_interface_call_with_args(
                 expr,
@@ -1135,7 +1135,7 @@ fn compile_method_dispatch_with_args(
                 spread,
                 *iface_type,
                 *method_idx,
-                iface_slot,
+                iface_snapshot,
                 method_name,
                 dst,
                 ctx,
