@@ -12,10 +12,47 @@ use vo_syntax::ast::{Expr, ExprKind};
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::{ElemLayoutSpec, FuncBuilder, StorageKind};
+use crate::func::{ElemLayoutSpec, ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 use super::{compile_expr, compile_expr_to};
+
+/// Return true only for the deliberately small expression subset whose
+/// evaluation cannot invoke user code, block, receive, or write storage.
+/// This proof allows a dynamic callee location to stay live through argument
+/// evaluation without violating left-to-right call semantics.
+fn preserves_preexisting_storage(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::RuneLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::TypeAsExpr(_)
+        | ExprKind::Ellipsis => true,
+        ExprKind::Paren(inner) => preserves_preexisting_storage(inner),
+        ExprKind::Unary(unary) => preserves_preexisting_storage(&unary.operand),
+        ExprKind::Binary(binary) => {
+            preserves_preexisting_storage(&binary.left)
+                && preserves_preexisting_storage(&binary.right)
+        }
+        ExprKind::Conversion(conversion) => preserves_preexisting_storage(&conversion.expr),
+        ExprKind::Call(_)
+        | ExprKind::Index(_)
+        | ExprKind::Slice(_)
+        | ExprKind::Selector(_)
+        | ExprKind::TypeAssert(_)
+        | ExprKind::CompositeLit(_)
+        | ExprKind::FuncLit(_)
+        | ExprKind::Receive(_)
+        | ExprKind::TryUnwrap(_)
+        | ExprKind::DynAccess(_) => false,
+    }
+}
+
+fn arguments_preserve_preexisting_storage(args: &[Expr]) -> bool {
+    args.iter().all(preserves_preexisting_storage)
+}
 
 /// Preserve a function value before argument evaluation. A one-slot local
 /// function variable is otherwise returned by `compile_expr` as its storage
@@ -714,21 +751,35 @@ fn compile_closure_call(
     let total_arg_slots_usize = calc_method_arg_slots(call, &param_types, is_variadic, info);
     let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slots_usize);
 
+    let direct_closure = if arguments_preserve_preexisting_storage(&call.args) {
+        match super::get_expr_source(callee_expr, ctx, func, info) {
+            ExprSource::Location(StorageKind::Reference { slot })
+            | ExprSource::Location(StorageKind::StackValue { slot, slots: 1 }) => Some(slot),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let hidden_slot_type = if direct_closure.is_some() {
+        SlotType::Value
+    } else {
+        SlotType::GcBase
+    };
     let arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
     let args_start =
-        func.alloc_dynamic_call_buffer(&[SlotType::GcBase], &arg_slot_types, &ret_slot_types);
-    let closure_snapshot = args_start
-        .checked_sub(1)
-        .expect("closure call buffer must reserve one hidden receiver slot");
-    compile_expr_to(callee_expr, closure_snapshot, ctx, func, info)?;
+        func.alloc_dynamic_call_buffer(&[hidden_slot_type], &arg_slot_types, &ret_slot_types);
+    let closure_reg = if let Some(slot) = direct_closure {
+        slot
+    } else {
+        let snapshot = args_start
+            .checked_sub(1)
+            .expect("closure call buffer must reserve one hidden receiver slot");
+        compile_expr_to(callee_expr, snapshot, ctx, func, info)?;
+        snapshot
+    };
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    func.emit_call_closure(
-        closure_snapshot,
-        args_start,
-        &arg_slot_types,
-        &ret_slot_types,
-    );
+    func.emit_call_closure(closure_reg, args_start, &arg_slot_types, &ret_slot_types);
 
     let ret_start = args_start + total_arg_slots;
     Ok(result.finish_abi_call(expr, ret_start, ret_slots, func, info))
@@ -1156,11 +1207,25 @@ fn compile_method_dispatch_with_args(
 
     match &call_info.dispatch {
         MethodDispatch::Interface { method_idx } => {
-            // Evaluate the receiver directly into its one authoritative
-            // pre-argument snapshot. Argument side effects can then mutate the
-            // source variable without changing the selected receiver.
-            let iface_snapshot = func.alloc_interface();
-            compile_expr_to(recv_expr, iface_snapshot, ctx, func, info)?;
+            // An inert argument list cannot change a direct interface
+            // location, so dispatch may consume it in place. Every other case
+            // retains the authoritative pre-argument snapshot required by the
+            // language's call evaluation order.
+            let direct_iface = if arguments_preserve_preexisting_storage(args) {
+                match super::get_expr_source(recv_expr, ctx, func, info) {
+                    ExprSource::Location(StorageKind::StackValue { slot, slots: 2 }) => Some(slot),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let iface_snapshot = if let Some(slot) = direct_iface {
+                slot
+            } else {
+                let snapshot = func.alloc_interface();
+                compile_expr_to(recv_expr, snapshot, ctx, func, info)?;
+                snapshot
+            };
             emit_interface_call_with_args(
                 expr,
                 args,

@@ -560,7 +560,7 @@ func main() {
 }
 
 #[test]
-fn global_array_expression_loads_into_gcref_slot() {
+fn global_array_expression_loads_into_exact_gc_base_slot() {
     let source = r#"
 package main
 
@@ -589,8 +589,8 @@ func main() int {
 
     assert_eq!(
         pick.slot_types[global_get.a as usize],
-        vo_runtime::SlotType::GcRef,
-        "global arrays are stored as GcRef roots, so GlobalGet destinations must be GcRef locals"
+        vo_runtime::SlotType::GcBase,
+        "global arrays are allocation bases, so GlobalGet must preserve exact base provenance"
     );
 }
 
@@ -918,7 +918,7 @@ func main() int {
 }
 
 #[test]
-fn named_reference_iface_wrapper_uses_gcref_data_slot() {
+fn named_reference_iface_wrapper_uses_exact_gc_base_data_slot() {
     let source = r#"
 package main
 
@@ -947,8 +947,8 @@ func main() int {
 
     assert_eq!(
         wrapper.slot_types[0],
-        SlotType::GcRef,
-        "interface wrapper data slot for named slice receiver must be a GcRef"
+        SlotType::GcBase,
+        "interface wrapper data slot for a named slice must preserve exact base provenance"
     );
     for (pc, inst) in wrapper.code.iter().enumerate() {
         if inst.opcode() == Opcode::Copy {
@@ -1411,8 +1411,8 @@ func main() int {
                             has_ok: true
                         } if key_layout.len() == 9
                             && val_layout.len() == 9
-                            && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
-                            && val_layout.iter().any(|st| matches!(st, SlotType::GcRef))
+                            && key_layout.iter().any(SlotType::is_exact_gc_base)
+                            && val_layout.iter().any(SlotType::is_exact_gc_base)
                     )
             }),
         "comma-ok MapGet should carry explicit key/value/ok metadata"
@@ -1430,8 +1430,8 @@ func main() int {
                             val_layout
                         } if key_layout.len() == 9
                             && val_layout.len() == 9
-                            && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
-                            && val_layout.iter().any(|st| matches!(st, SlotType::GcRef))
+                            && key_layout.iter().any(SlotType::is_exact_gc_base)
+                            && val_layout.iter().any(SlotType::is_exact_gc_base)
                     )
             }),
         "MapSet should carry explicit key/value metadata"
@@ -1446,7 +1446,7 @@ func main() int {
                         meta,
                         InstructionMetadata::MapDelete { key_layout }
                             if key_layout.len() == 9
-                                && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
+                                && key_layout.iter().any(SlotType::is_exact_gc_base)
                     )
             }),
         "MapDelete should carry explicit key metadata"
@@ -1670,7 +1670,7 @@ func main() int {
                     && matches!(
                         meta,
                         InstructionMetadata::IfaceAssertLayout { result_layout, .. }
-                            if result_layout.as_slice() == [SlotType::GcRef]
+                            if result_layout.as_slice() == [SlotType::GcBase]
                     )
             }),
         "type assertion to string must carry exact IfaceAssert result layout"
@@ -1687,7 +1687,7 @@ func main() int {
                         InstructionMetadata::CallLayout {
                             arg_layout,
                             ret_layout
-                        } if arg_layout.as_slice() == [SlotType::GcRef, SlotType::GcRef]
+                        } if arg_layout.as_slice() == [SlotType::GcBase, SlotType::GcRef]
                             && ret_layout.is_empty()
                     )
             }),
@@ -1706,7 +1706,7 @@ func main() int {
                         .get(inst.call_shape_static_func_id() as usize)
                         .is_some_and(|callee| {
                             callee.slot_types[..callee.param_slots as usize]
-                                == [SlotType::GcRef, SlotType::GcRef]
+                                == [SlotType::GcBase, SlotType::GcRef]
                         })
             }),
         "static go call must use the callee signature as its argument layout"
@@ -1723,7 +1723,7 @@ func main() int {
                         InstructionMetadata::CallLayout {
                             arg_layout,
                             ret_layout
-                        } if arg_layout.as_slice() == [SlotType::GcRef] && ret_layout.is_empty()
+                        } if arg_layout.as_slice() == [SlotType::GcBase] && ret_layout.is_empty()
                     )
             }),
         "closure defer call must carry exact CallLayout argument slots"
@@ -1786,7 +1786,7 @@ func main() {
 }
 
 #[test]
-fn extern_call_string_and_slice_arguments_use_gc_ref_slots() {
+fn extern_call_string_and_slice_arguments_use_exact_gc_base_slots() {
     let source = r#"
 package main
 
@@ -1811,8 +1811,8 @@ func main() {
 
     assert_eq!(
         &main.slot_types[call.b as usize..call.b as usize + 2],
-        &[SlotType::GcRef, SlotType::GcRef],
-        "extern call argument buffers must preserve GC-ref layout for string/slice values"
+        &[SlotType::GcBase, SlotType::GcBase],
+        "extern call argument buffers must preserve exact bases for string/slice values"
     );
 
     for inst in main
@@ -1822,14 +1822,14 @@ func main() {
     {
         assert_eq!(
             main.slot_types[inst.a as usize],
-            SlotType::GcRef,
-            "StrNew destination slot must be a GC root"
+            SlotType::GcBase,
+            "StrNew destination slot must be an exact allocation base"
         );
     }
 }
 
 #[test]
-fn string_conversion_uses_gc_ref_source_and_destination_slots() {
+fn string_conversion_uses_exact_gc_base_source_and_destination_slots() {
     let source = r#"
 package main
 
@@ -1852,18 +1852,18 @@ func main() {
 
     assert_eq!(
         main.slot_types[call.a as usize],
-        SlotType::GcRef,
-        "string-to-slice conversion destination must be a GC root"
+        SlotType::GcBase,
+        "string-to-slice conversion destination must be an exact allocation base"
     );
     assert_eq!(
         main.slot_types[call.c as usize],
-        SlotType::GcRef,
-        "string-to-slice conversion source argument must be a GC root"
+        SlotType::GcBase,
+        "string-to-slice conversion source must preserve exact base provenance"
     );
 }
 
 #[test]
-fn composite_string_comparison_loads_string_slots_as_gc_refs() {
+fn composite_string_comparison_loads_string_slots_as_exact_gc_bases() {
     let source = r#"
 package main
 
@@ -1895,13 +1895,13 @@ func main() bool {
         saw_str_eq = true;
         assert_eq!(
             main.slot_types[inst.b as usize],
-            SlotType::GcRef,
-            "StrEq lhs must be loaded into a GC-ref temp"
+            SlotType::GcBase,
+            "StrEq lhs must preserve exact string-base provenance"
         );
         assert_eq!(
             main.slot_types[inst.c as usize],
-            SlotType::GcRef,
-            "StrEq rhs must be loaded into a GC-ref temp"
+            SlotType::GcBase,
+            "StrEq rhs must preserve exact string-base provenance"
         );
     }
     assert!(saw_str_eq, "composite string comparison should emit StrEq");
@@ -1939,7 +1939,7 @@ func main() {
 
     assert_eq!(
         main.slot_types[map_set.b as usize],
-        SlotType::GcRef,
+        SlotType::GcBase,
         "MapSet key buffer must use the map key's precise slot layout"
     );
     assert!(
@@ -1953,7 +1953,7 @@ func main() {
                         InstructionMetadata::MapSet {
                             key_layout,
                             val_layout,
-                        } if key_layout == &[SlotType::GcRef] && val_layout == &[SlotType::Value]
+                        } if key_layout == &[SlotType::GcBase] && val_layout == &[SlotType::Value]
                     )
             }),
         "MapSet instruction metadata must carry exact key/value layouts"
@@ -2198,6 +2198,171 @@ func main() {
     }
     assert!(saw_iface, "test must exercise discarded CallIface");
     assert!(saw_closure, "test must exercise discarded CallClosure");
+}
+
+#[test]
+fn computed_call_result_stays_in_its_natural_abi_slot() {
+    let module = compile_source(
+        r#"
+package main
+
+func plusOne(x int) int { return x + 1 }
+
+func main() int {
+    return plusOne(40) + 1
+}
+"#,
+    );
+    verify_module(&module).expect("natural call result module must verify");
+    let plus_one = module
+        .functions
+        .iter()
+        .position(|func| func.name == "plusOne")
+        .expect("plusOne function") as u32;
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let call = main
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::Call && inst.static_call_func_id() == plus_one)
+        .expect("plusOne call");
+    let natural_result = call.b + 1;
+
+    assert!(main.code.iter().any(|inst| {
+        inst.opcode() == Opcode::AddI && (inst.b == natural_result || inst.c == natural_result)
+    }));
+    assert!(!main.code.iter().any(|inst| {
+        matches!(inst.opcode(), Opcode::Copy | Opcode::CopyN) && inst.b == natural_result
+    }));
+}
+
+#[test]
+fn inert_closure_arguments_use_the_callee_location_directly() {
+    let module = compile_source(
+        r#"
+package main
+
+func main() int {
+    f := func(x int) int { return x + 1 }
+    return f(40 + 1)
+}
+"#,
+    );
+    verify_module(&module).expect("direct closure callee module must verify");
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let call = main
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::CallClosure)
+        .expect("closure call");
+    let hidden_receiver = call.b - 1;
+
+    assert_ne!(call.a, hidden_receiver);
+    assert_eq!(main.slot_types[call.a as usize], SlotType::GcBase);
+    assert_eq!(
+        main.slot_types[hidden_receiver as usize],
+        SlotType::Value,
+        "an unused borrowed-frame receiver slot must stay outside the caller GC root set"
+    );
+}
+
+#[test]
+fn inert_interface_arguments_use_the_receiver_location_directly() {
+    let module = compile_source(
+        r#"
+package main
+
+type Reader interface { Read(int) int }
+type Box struct { value int }
+func (b Box) Read(x int) int { return b.value + x }
+
+func main() int {
+    var reader Reader = Box{value: 1}
+    return reader.Read(40 + 1)
+}
+"#,
+    );
+    verify_module(&module).expect("direct interface receiver module must verify");
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let call = main
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::CallIface)
+        .expect("interface call");
+
+    assert_eq!(main.slot_types[call.a as usize], SlotType::Interface0);
+    assert_eq!(main.slot_types[call.a as usize + 1], SlotType::Interface1);
+    assert!(!main
+        .code
+        .iter()
+        .any(|inst| { inst.opcode() == Opcode::CopyN && inst.a == call.a }));
+}
+
+#[test]
+fn side_effecting_dynamic_call_arguments_keep_pre_argument_snapshots() {
+    let module = compile_source(
+        r#"
+package main
+
+type Reader interface { Read(int) int }
+type Box struct { value int }
+func (b Box) Read(_ int) int { return b.value }
+
+func main() int {
+    f := func(_ int) int { return 21 }
+    replaceF := func() int {
+        f = func(_ int) int { return 34 }
+        return 0
+    }
+    first := f(replaceF())
+
+    var reader Reader = Box{value: 21}
+    replaceReader := func() int {
+        reader = Box{value: 34}
+        return 0
+    }
+    return first + reader.Read(replaceReader())
+}
+"#,
+    );
+    verify_module(&module).expect("dynamic callee snapshot module must verify");
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+
+    assert!(main.code.iter().any(|inst| {
+        inst.opcode() == Opcode::CallClosure
+            && inst.a == inst.b - 1
+            && main.slot_types[inst.a as usize] == SlotType::GcBase
+    }));
+    let (iface_pc, iface_call) = main
+        .code
+        .iter()
+        .enumerate()
+        .find(|(_, inst)| inst.opcode() == Opcode::CallIface)
+        .expect("interface call");
+    let snapshot_pc = main.code[..iface_pc]
+        .iter()
+        .position(|inst| {
+            matches!(inst.opcode(), Opcode::CopyN | Opcode::PtrGetN) && inst.a == iface_call.a
+        })
+        .expect("interface receiver must be materialized before argument evaluation");
+    assert!(main.code[snapshot_pc + 1..iface_pc]
+        .iter()
+        .any(|inst| inst.opcode() == Opcode::CallClosure));
 }
 
 #[test]
@@ -2648,7 +2813,10 @@ func main() (string, any, Result) {
         .expect("__entry__ must call main");
 
     assert!(
-        main_func.ret_slot_types.iter().any(SlotType::is_gc_ref),
+        main_func
+            .ret_slot_types
+            .iter()
+            .any(SlotType::is_managed_ref),
         "fixture must exercise GC-backed discarded results"
     );
     assert_eq!(main_func.param_slots, 0);
@@ -3343,7 +3511,7 @@ func main() {
     let wrapper = wrappers[0];
     assert_eq!(
         wrapper.capture_slot_types,
-        vec![vo_runtime::SlotType::GcRef]
+        vec![vo_runtime::SlotType::GcBase]
     );
     assert_eq!(
         wrapper.capture_types.len(),
@@ -3362,15 +3530,15 @@ func main() {
     assert_eq!(
         wrapper.slot_types,
         vec![
-            vo_runtime::SlotType::GcRef,
-            vo_runtime::SlotType::GcRef,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
+            vo_runtime::SlotType::GcBase,
+            vo_runtime::SlotType::GcBase,
             vo_runtime::SlotType::Interface0,
             vo_runtime::SlotType::Interface1,
             vo_runtime::SlotType::Interface0,
             vo_runtime::SlotType::Interface1,
-            vo_runtime::SlotType::GcRef,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
+            vo_runtime::SlotType::GcBase,
         ],
         "value-receiver method value wrapper must keep receiver and call buffer slot layout precise",
     );
@@ -3406,7 +3574,7 @@ func main() {
     let wrapper = wrappers[0];
     assert_eq!(
         wrapper.capture_slot_types,
-        vec![vo_runtime::SlotType::GcRef]
+        vec![vo_runtime::SlotType::GcBase]
     );
     assert_eq!(
         wrapper.capture_types.len(),
@@ -3425,14 +3593,14 @@ func main() {
     assert_eq!(
         wrapper.slot_types,
         vec![
-            vo_runtime::SlotType::GcRef,
-            vo_runtime::SlotType::GcRef,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
+            vo_runtime::SlotType::GcBase,
+            vo_runtime::SlotType::GcBase,
             vo_runtime::SlotType::Interface0,
             vo_runtime::SlotType::Interface1,
             vo_runtime::SlotType::Value,
-            vo_runtime::SlotType::GcRef,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
+            vo_runtime::SlotType::GcBase,
         ],
         "interface method value wrapper must keep interface temp slots and call buffer precisely typed",
     );
@@ -3471,9 +3639,9 @@ func main() {
         vec![
             vo_runtime::SlotType::Interface0,
             vo_runtime::SlotType::Interface1,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
             vo_runtime::SlotType::Value,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
         ],
         "defer iface wrapper must keep interface receiver and forwarded args precisely typed",
     );
@@ -4563,8 +4731,8 @@ func main() {
     assert_eq!(variadic.param_types.len(), 2);
     assert_eq!(
         &variadic.slot_types[..2],
-        &[SlotType::GcRef, SlotType::GcRef],
-        "string and variadic slice parameters retain precise GC layouts"
+        &[SlotType::GcBase, SlotType::GcBase],
+        "string and variadic slice parameters retain exact base provenance"
     );
     assert_eq!(variadic.ret_slots, 3, "string + error uses three slots");
     assert_eq!(variadic.error_ret_slot, 1);
