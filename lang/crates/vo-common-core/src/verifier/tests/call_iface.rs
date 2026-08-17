@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn dynamic_call_metadata_accepts_full_width_shapes() {
     let mut module = Module::new("wide-dynamic-call-metadata".to_string());
-    let mut slots = vec![SlotType::GcRef];
+    let mut slots = vec![SlotType::GcBase];
     slots.extend(vec![SlotType::Value; 300 + 257]);
     let mut caller = function_with_slot_types(slots);
     caller.code = vec![
@@ -23,10 +23,39 @@ fn dynamic_call_metadata_accepts_full_width_shapes() {
 }
 
 #[test]
+fn call_closure_requires_a_verified_exact_object_base() {
+    let mut module = Module::new("call-closure-exact-base".to_string());
+    let mut caller = function_with_slot_types(vec![SlotType::GcRef]);
+    caller.code = vec![
+        Instruction::new(Opcode::CallClosure, 0, 1, 0),
+        Instruction::new(Opcode::Return, 0, 0, 0),
+    ];
+    caller.instruction_metadata = vec![
+        InstructionMetadata::CallLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        },
+        InstructionMetadata::None,
+    ];
+    module.functions.push(finish_test_function(caller));
+
+    let error = verify_module(&module).expect_err("interior-capable callee slots must be rejected");
+    assert!(matches!(
+        error,
+        ModuleVerificationError::SlotTypeMismatch {
+            opcode: Opcode::CallClosure,
+            expected,
+            actual,
+            ..
+        } if expected == vec![SlotType::GcBase] && actual == vec![SlotType::GcRef]
+    ));
+}
+
+#[test]
 fn dynamic_callsite_indices_must_be_consecutive_across_call_kinds() {
     let mut module = Module::new("dynamic-callsite-index".to_string());
     let mut caller = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Interface0,
         SlotType::Interface1,
     ]);
@@ -122,7 +151,7 @@ fn vm_ver_zero_slot_range_001_rejects_static_call_zero_arg_ret_out_of_frame_star
 #[test]
 fn vm_ver_zero_slot_range_001_rejects_call_closure_zero_arg_ret_out_of_frame_start() {
     let mut module = Module::new("vm-ver-zero-slot-call-closure".to_string());
-    let mut caller = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut caller = function_with_slot_types(vec![SlotType::GcBase]);
     caller.name = "caller".to_string();
     caller.code = vec![
         Instruction::with_flags(Opcode::CallClosure, 0, 0, 2, 0),

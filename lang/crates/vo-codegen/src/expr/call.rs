@@ -21,13 +21,13 @@ use super::{compile_expr, compile_expr_to};
 /// function variable is otherwise returned by `compile_expr` as its storage
 /// slot, allowing an argument side effect to change which closure gets called.
 pub(crate) fn snapshot_closure_value(src: u16, func: &mut FuncBuilder) -> u16 {
-    let snapshot = func.alloc_slots(&[SlotType::GcRef]);
+    let snapshot = func.alloc_slots(&[SlotType::GcBase]);
     func.emit_copy(snapshot, src, 1);
     snapshot
 }
 
 /// Compute slot types for the arg region of a call buffer, matching `calc_method_arg_slots`.
-/// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
+/// For variadic (non-spread) calls the packed slice contributes one exact object base.
 pub(crate) fn calc_arg_slot_types(
     call: &vo_syntax::ast::CallExpr,
     param_types: &[TypeKey],
@@ -38,7 +38,7 @@ pub(crate) fn calc_arg_slot_types(
 }
 
 /// Compute slot types for the arg region of a call buffer, matching `calc_method_arg_slots`.
-/// For variadic (non-spread) calls the packed slice contributes a single GcRef slot.
+/// For variadic (non-spread) calls the packed slice contributes one exact object base.
 pub(crate) fn calc_arg_slot_types_for_args(
     args: &[Expr],
     spread: bool,
@@ -60,7 +60,7 @@ pub(crate) fn calc_arg_slot_types_for_args(
             .take(n_fixed)
             .flat_map(|&t| info.type_slot_types(t))
             .collect();
-        types.push(SlotType::GcRef);
+        types.push(SlotType::GcBase);
         types
     } else {
         param_types
@@ -1458,7 +1458,7 @@ fn pack_variadic_args(
     func.emit_op(Opcode::LoadConst, meta_reg, elem_meta_idx, 0);
 
     // Create slice
-    let dst = func.alloc_slots(&[SlotType::GcRef]);
+    let dst = func.alloc_slots(&[SlotType::GcBase]);
     let len_cap_reg = func.alloc_slots(&[SlotType::Value; 2]);
     let total_elems_idx = ctx.const_int(total_elems_i64);
     func.emit_op(Opcode::LoadConst, len_cap_reg, total_elems_idx, 0); // len

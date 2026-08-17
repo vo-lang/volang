@@ -127,7 +127,7 @@ pub fn traverse_indirect_field(
     };
 
     // Determine initial state based on storage kind
-    // HeapBoxed/Reference: GcRef slot acts as pointer, skip loading entire struct
+    // HeapBoxed/Reference: the managed slot is already the addressable value.
     let base_source = get_expr_source(&sel.expr, ctx, func, info);
     let (mut current_reg, mut is_ptr, mut accumulated_offset) = match &base_source {
         ExprSource::Location(StorageKind::HeapBoxed {

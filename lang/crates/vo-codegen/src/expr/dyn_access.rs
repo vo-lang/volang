@@ -197,7 +197,7 @@ fn compile_dyn_call_unified(
     let mut call_arg_types = vec![
         SlotType::Interface0,
         SlotType::Interface1, // base
-        SlotType::GcRef,      // args_slice_ref
+        SlotType::GcBase,     // args_slice_ref
         SlotType::Value,      // expected_ret_count
     ];
     for _ in ret_types {
@@ -411,7 +411,7 @@ fn dyn_result_value_slot_types(
     let mut layout = if info.is_any_type(ret_type) || ret_vk == ValueKind::Interface {
         vec![SlotType::Interface0, SlotType::Interface1]
     } else if ret_vk == ValueKind::Array || (ret_slots > 2 && ret_vk == ValueKind::Struct) {
-        vec![SlotType::Value, SlotType::GcRef]
+        vec![SlotType::Value, SlotType::GcBase]
     } else {
         let mut layout = info.type_slot_types(ret_type);
         if layout.is_empty() {
@@ -459,7 +459,7 @@ fn dyn_pack_any_slice_return_shape(
     info: &TypeInfoWrapper,
 ) -> Result<ReturnShape, CodegenError> {
     return_shape_from_slots_and_metas(
-        vec![SlotType::GcRef, SlotType::Interface0, SlotType::Interface1],
+        vec![SlotType::GcBase, SlotType::Interface0, SlotType::Interface1],
         vec![None, Some(error_interface_meta_id(ctx, info)), None],
     )
 }
@@ -637,7 +637,7 @@ fn compile_dyn_op(
             let args = func.alloc_slots(&[
                 SlotType::Interface0,
                 SlotType::Interface1, // base
-                SlotType::GcRef,      // field_name string
+                SlotType::GcBase,     // field_name string
                 SlotType::Value,      // expected_rttid
                 SlotType::Value,      // expected_vk
             ]);
@@ -910,8 +910,8 @@ fn compile_dyn_method_unified(
     let mut call_arg_types = vec![
         SlotType::Interface0,
         SlotType::Interface1, // base
-        SlotType::GcRef,      // method_name
-        SlotType::GcRef,      // args_slice_ref
+        SlotType::GcBase,     // method_name
+        SlotType::GcBase,     // args_slice_ref
         SlotType::Value,      // expected_ret_count
     ];
     for _ in ret_types {

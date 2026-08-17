@@ -332,7 +332,7 @@ fn compile_builtin_call_impl(
             let type_key = info.pointer_elem(ptr_type_key);
             let slots = info.type_slot_count(type_key);
             let slot_types = info.type_slot_types(type_key);
-            let meta_idx = ctx.get_boxing_meta(type_key, info);
+            let meta_idx = ctx.get_or_create_value_slots_meta(type_key, info);
             let meta_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
             assert_eq!(slots as usize, slot_types.len());
@@ -347,7 +347,7 @@ fn compile_builtin_call_impl(
                 ));
             }
             let slice_value = compile_expr(&call.args[0], ctx, func, info)?;
-            let slice_reg = func.alloc_slots(&[SlotType::GcRef]);
+            let slice_reg = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_copy(slice_reg, slice_value, 1);
 
             let slice_type = info.expr_type(call.args[0].id);
@@ -370,13 +370,13 @@ fn compile_builtin_call_impl(
                 // Spread append: append all elements from second slice/string
                 // String and slice have identical memory layout, so vo_slice_append_slice works for both
                 let other_reg = compile_expr(&call.args[1], ctx, func, info)?;
-                let ret_slot_types = vec![SlotType::GcRef];
+                let ret_slot_types = vec![SlotType::GcBase];
                 let extern_id = ctx.get_or_register_extern_with_return_layout(
                     "vo_slice_append_slice",
                     ret_slot_types.clone(),
                 );
                 let args_reg =
-                    func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef, SlotType::Value]);
+                    func.alloc_slots(&[SlotType::GcBase, SlotType::GcBase, SlotType::Value]);
                 func.emit_op(Opcode::Copy, args_reg, slice_reg, 0);
                 func.emit_op(Opcode::Copy, args_reg + 1, other_reg, 0);
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
@@ -414,7 +414,7 @@ fn compile_builtin_call_impl(
                     let append_dst = if is_last {
                         dst
                     } else {
-                        func.alloc_slots(&[SlotType::GcRef])
+                        func.alloc_slots(&[SlotType::GcBase])
                     };
 
                     func.emit_op(Opcode::LoadConst, meta_and_elem_reg, elem_meta_idx, 0);
@@ -435,7 +435,7 @@ fn compile_builtin_call_impl(
         "copy" => {
             // copy(dst, src) - use extern for now
             let extern_id = ctx.get_or_register_extern("vo_copy");
-            let args_start = func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef]);
+            let args_start = func.alloc_slots(&[SlotType::GcBase, SlotType::GcBase]);
             compile_expr_to(&call.args[0], args_start, ctx, func, info)?;
             compile_expr_to(&call.args[1], args_start + 1, ctx, func, info)?;
             func.emit_call_extern(dst, extern_id, args_start, 2, &[SlotType::Value]);
@@ -446,7 +446,7 @@ fn compile_builtin_call_impl(
                 return Err(CodegenError::Internal("delete requires 2 args".to_string()));
             }
             let map_value = compile_expr(&call.args[0], ctx, func, info)?;
-            let map_reg = func.alloc_slots(&[SlotType::GcRef]);
+            let map_reg = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_copy(map_reg, map_value, 1);
 
             // MapDelete: a=map, b=key_start.

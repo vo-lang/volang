@@ -233,6 +233,7 @@ fn format_transfer_type_summary(prefix: &str, transfer_types: &[TransferType]) -
 fn format_slot_type(slot_type: SlotType) -> &'static str {
     match slot_type {
         SlotType::Value => "Value",
+        SlotType::GcBase => "GcBase",
         SlotType::GcRef => "GcRef",
         SlotType::Interface0 => "Interface0",
         SlotType::Interface1 => "Interface1",

@@ -304,10 +304,13 @@ impl ValueKind {
 
 /// Slot type for GC stack scanning and JIT type optimization.
 ///
-/// `GcRef` covers both an object base pointer and an interior pointer derived
-/// from an object base. The runtime GC canonicalizes interior pointers before
-/// marking, so any bytecode/JIT instruction that produces or carries either
-/// form must use a `GcRef`-typed slot.
+/// A non-null `GcBase` is a live managed allocation base. The verifier proves
+/// this invariant across every producer and transfer, so runtimes may inspect
+/// the allocation header directly without searching the heap for a canonical
+/// base. Nil remains the canonical zero value for reference-like types.
+///
+/// `GcRef` is a managed pointer that may be an allocation base or an interior
+/// pointer derived from one.  The runtime GC canonicalizes it before marking.
 ///
 /// Interface0 and Interface1 are paired:
 /// - Interface0: header slot (contains value_kind)
@@ -321,10 +324,11 @@ impl ValueKind {
 pub enum SlotType {
     #[default]
     Value = 0,
-    GcRef = 1,
-    Interface0 = 2,
-    Interface1 = 3,
-    Float = 4,
+    GcBase = 1,
+    GcRef = 2,
+    Interface0 = 3,
+    Interface1 = 4,
+    Float = 5,
 }
 
 impl SlotType {
@@ -344,8 +348,33 @@ impl SlotType {
     }
 
     #[inline]
-    pub fn is_gc_ref(&self) -> bool {
-        matches!(self, SlotType::GcRef)
+    pub fn is_managed_ref(&self) -> bool {
+        matches!(self, SlotType::GcBase | SlotType::GcRef)
+    }
+
+    #[inline]
+    pub fn is_exact_gc_base(&self) -> bool {
+        matches!(self, SlotType::GcBase)
+    }
+
+    /// Whether publishing a slot value into managed memory requires the
+    /// collector's typed new-value barrier.
+    #[inline]
+    pub const fn needs_write_barrier(self) -> bool {
+        matches!(
+            self,
+            SlotType::GcBase | SlotType::GcRef | SlotType::Interface1
+        )
+    }
+
+    /// Whether a value proven to have this slot type may be stored in `target`.
+    ///
+    /// `GcBase` refines `GcRef`: forgetting exact allocation-base provenance is
+    /// safe, while manufacturing that provenance from an arbitrary managed
+    /// interior reference is not.
+    #[inline]
+    pub const fn can_flow_to(self, target: Self) -> bool {
+        self as u8 == target as u8 || matches!((self, target), (SlotType::GcBase, SlotType::GcRef))
     }
 
     #[inline]
@@ -357,6 +386,25 @@ impl SlotType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gc_base_provenance_has_one_way_refinement_flow() {
+        assert!(SlotType::GcBase.can_flow_to(SlotType::GcBase));
+        assert!(SlotType::GcBase.can_flow_to(SlotType::GcRef));
+        assert!(SlotType::GcRef.can_flow_to(SlotType::GcRef));
+        assert!(!SlotType::GcRef.can_flow_to(SlotType::GcBase));
+        assert!(!SlotType::Value.can_flow_to(SlotType::GcRef));
+    }
+
+    #[test]
+    fn managed_payload_slots_share_one_write_barrier_contract() {
+        assert!(SlotType::GcBase.needs_write_barrier());
+        assert!(SlotType::GcRef.needs_write_barrier());
+        assert!(SlotType::Interface1.needs_write_barrier());
+        assert!(!SlotType::Interface0.needs_write_barrier());
+        assert!(!SlotType::Value.needs_write_barrier());
+        assert!(!SlotType::Float.needs_write_barrier());
+    }
 
     #[test]
     fn packed_type_constructors_reject_reserved_and_truncating_ids() {

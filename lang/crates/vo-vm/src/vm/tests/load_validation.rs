@@ -412,7 +412,7 @@ fn vm_load_rejects_map_new_missing_key_rttid_before_execution() {
         .constants
         .push(Constant::Int((int_meta << 32) | int_meta));
     let func = &mut module.functions[0];
-    func.slot_types[0] = SlotType::GcRef;
+    func.slot_types[0] = SlotType::GcBase;
     func.slot_types.push(SlotType::Value);
     func.local_slots = func.slot_types.len() as u16;
     func.instruction_metadata = vec![
@@ -452,7 +452,7 @@ fn vm_load_rejects_map_new_metadata_drift_before_execution() {
     ];
     let func = &mut module.functions[0];
     func.local_slots = 3;
-    func.slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    func.slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     func.instruction_metadata = vec![
         InstructionMetadata::None,
         InstructionMetadata::None,
@@ -493,7 +493,7 @@ fn vm_load_rejects_queue_new_metadata_drift_before_execution() {
     ));
     let func = &mut module.functions[0];
     func.local_slots = 3;
-    func.slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    func.slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     func.instruction_metadata = vec![
         InstructionMetadata::None,
         InstructionMetadata::QueueLayout {
@@ -555,7 +555,7 @@ fn vm_load_rejects_raw_value_collection_into_gcref_slot_before_execution() {
     );
     let func = &mut module.functions[0];
     func.slot_types = vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::GcRef,
         SlotType::Value,
         SlotType::Value,
@@ -658,7 +658,7 @@ fn malformed_go_start_closure_target_is_vm_error_instead_of_nil_call_trap() {
         Vec::new(),
     );
     let func = &mut module.functions[0];
-    func.slot_types[0] = SlotType::GcRef;
+    func.slot_types[0] = SlotType::GcBase;
     func.instruction_metadata = vec![
         InstructionMetadata::CallLayout {
             arg_layout: Vec::new(),

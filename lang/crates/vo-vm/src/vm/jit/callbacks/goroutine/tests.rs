@@ -710,10 +710,10 @@ fn vm_jit_goisland_transfer_txn_006_jit_error_commits_spawn_after_local_endpoint
         1,
         0,
     );
-    let capture_box = vm.state.gc.alloc(
-        vo_runtime::island_msg::capture_box_meta(ValueMeta::new(0, ValueKind::Port)),
-        1,
-    );
+    let capture_box = vm
+        .state
+        .gc
+        .alloc_value_slots(ValueMeta::new(0, ValueKind::Port), 1);
     unsafe {
         vo_runtime::gc::Gc::write_slot(capture_box, 0, port as u64);
     }
@@ -803,10 +803,10 @@ fn vm_jit_goisland_transfer_txn_006_validates_later_capture_before_endpoint_publ
         1,
         0,
     );
-    let capture_box = vm.state.gc.alloc(
-        vo_runtime::island_msg::capture_box_meta(ValueMeta::new(0, ValueKind::Port)),
-        1,
-    );
+    let capture_box = vm
+        .state
+        .gc
+        .alloc_value_slots(ValueMeta::new(0, ValueKind::Port), 1);
     unsafe {
         vo_runtime::gc::Gc::write_slot(capture_box, 0, port as u64);
     }

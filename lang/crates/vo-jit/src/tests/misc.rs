@@ -453,7 +453,7 @@ fn optimizing_scalar_replacement_preserves_allocation_admission() {
         ],
         vec![
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
         ],
@@ -538,7 +538,7 @@ fn optimizing_scalar_replacement_flows_through_a_cfg_merge() {
         vec![
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
         ],
@@ -867,16 +867,16 @@ fn compiled_artifact_retains_precise_live_gcref_stack_maps() {
             Instruction::new(Opcode::Return, 0, 1, 0),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         3,
         3,
         1,
     );
-    func.ret_slot_types = vec![SlotType::GcRef];
+    func.ret_slot_types = vec![SlotType::GcBase];
     let mut module = VoModule::new("jit-native-stack-map".into());
     module.functions.push(func);
     let externs = ResolvedExternTable::empty();
@@ -946,17 +946,17 @@ fn native_stack_maps_exclude_dead_gcref_slots_per_safepoint() {
             Instruction::new(Opcode::Return, 4, 1, 0),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
-            SlotType::GcRef,
+            SlotType::GcBase,
+            SlotType::GcBase,
         ],
         3,
         3,
         1,
     );
-    func.ret_slot_types = vec![SlotType::GcRef];
+    func.ret_slot_types = vec![SlotType::GcBase];
     let mut module = VoModule::new("jit-native-root-liveness".into());
     module.functions.push(func);
     let externs = ResolvedExternTable::empty();
@@ -990,20 +990,20 @@ fn interface_pair_map_is_live_per_safepoint() {
             Instruction::new(Opcode::Return, 7, 1, 0),
         ],
         vec![
-            SlotType::GcRef,
-            SlotType::GcRef,
+            SlotType::GcBase,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Interface0,
             SlotType::Interface1,
             SlotType::Value,
-            SlotType::GcRef,
-            SlotType::GcRef,
+            SlotType::GcBase,
+            SlotType::GcBase,
         ],
         3,
         7,
         1,
     );
-    func.ret_slot_types = vec![SlotType::GcRef];
+    func.ret_slot_types = vec![SlotType::GcBase];
     func.instruction_metadata[2] = InstructionMetadata::ElemLayout {
         elem_bytes: 16,
         needs_sign_extend: false,
@@ -1012,7 +1012,7 @@ fn interface_pair_map_is_live_per_safepoint() {
     func.instruction_metadata[3] = InstructionMetadata::ElemLayout {
         elem_bytes: 8,
         needs_sign_extend: false,
-        slot_layout: vec![SlotType::GcRef],
+        slot_layout: vec![SlotType::GcBase],
     };
     let mut module = VoModule::new("jit-native-interface-liveness".into());
     module
@@ -1097,16 +1097,16 @@ fn osr_artifact_retains_precise_live_gcref_stack_maps() {
             Instruction::new(Opcode::Jump, 0, u16::MAX, u16::MAX),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         3,
         3,
         1,
     );
-    func.ret_slot_types = vec![SlotType::GcRef];
+    func.ret_slot_types = vec![SlotType::GcBase];
     let mut module = VoModule::new("jit-osr-native-stack-map".into());
     module.functions.push(func);
     let loop_info = LoopInfo {
@@ -1159,16 +1159,16 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
             Instruction::new(Opcode::Return, 3, 1, 0),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         3,
         3,
         1,
     );
-    str_func.ret_slot_types = vec![SlotType::GcRef];
+    str_func.ret_slot_types = vec![SlotType::GcBase];
 
     let mut slice_func = make_func_with_slot_types_and_sig(
         vec![
@@ -1176,16 +1176,16 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
             Instruction::new(Opcode::Return, 3, 1, 0),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         3,
         3,
         1,
     );
-    slice_func.ret_slot_types = vec![SlotType::GcRef];
+    slice_func.ret_slot_types = vec![SlotType::GcBase];
 
     let mut array_func = make_func_with_slot_types_and_sig(
         vec![
@@ -1193,16 +1193,16 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
             Instruction::new(Opcode::Return, 3, 1, 0),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         3,
         3,
         1,
     );
-    array_func.ret_slot_types = vec![SlotType::GcRef];
+    array_func.ret_slot_types = vec![SlotType::GcBase];
 
     let mut inline_func = make_func_with_slot_types_and_sig(
         vec![
@@ -1224,13 +1224,13 @@ fn jit_view_lowering_returns_jit_error_on_descriptor_oom_and_keeps_legal_nil() {
             SlotType::Value,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         8,
         8,
         1,
     );
-    inline_func.ret_slot_types = vec![SlotType::GcRef];
+    inline_func.ret_slot_types = vec![SlotType::GcBase];
 
     let mut module = VoModule::new("jit-view-oom".into());
     module.functions = vec![str_func, slice_func, array_func, inline_func];
@@ -1350,12 +1350,12 @@ fn jit_checked_allocations_prioritize_managed_oom_over_runtime_traps() {
             Instruction::with_flags(Opcode::ArrayNew, 0, 2, 0, 1),
             Instruction::new(Opcode::Return, 2, 1, 0),
         ],
-        vec![SlotType::Value, SlotType::Value, SlotType::GcRef],
+        vec![SlotType::Value, SlotType::Value, SlotType::GcBase],
         0,
         0,
         1,
     );
-    array_func.ret_slot_types = vec![SlotType::GcRef];
+    array_func.ret_slot_types = vec![SlotType::GcBase];
     array_func.instruction_metadata[2] = InstructionMetadata::ElemLayout {
         elem_bytes: 8,
         needs_sign_extend: false,
@@ -1374,13 +1374,13 @@ fn jit_checked_allocations_prioritize_managed_oom_over_runtime_traps() {
             SlotType::Value,
             SlotType::Value,
             SlotType::Value,
-            SlotType::GcRef,
+            SlotType::GcBase,
         ],
         0,
         0,
         1,
     );
-    slice_func.ret_slot_types = vec![SlotType::GcRef];
+    slice_func.ret_slot_types = vec![SlotType::GcBase];
     slice_func.instruction_metadata[3] = InstructionMetadata::ElemLayout {
         elem_bytes: 8,
         needs_sign_extend: false,
@@ -1394,12 +1394,12 @@ fn jit_checked_allocations_prioritize_managed_oom_over_runtime_traps() {
             Instruction::new(Opcode::QueueNew, 2, 0, 1),
             Instruction::new(Opcode::Return, 2, 1, 0),
         ],
-        vec![SlotType::Value, SlotType::Value, SlotType::GcRef],
+        vec![SlotType::Value, SlotType::Value, SlotType::GcBase],
         0,
         0,
         1,
     );
-    queue_func.ret_slot_types = vec![SlotType::GcRef];
+    queue_func.ret_slot_types = vec![SlotType::GcBase];
     queue_func.instruction_metadata[2] = InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value],
     };

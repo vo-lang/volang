@@ -56,7 +56,7 @@ fn dynamic_call_metadata_owns_layout_width_boundaries() {
             let mut closure_module = Module::new(format!(
                 "call-closure-width-boundary-{arg_slots}-{ret_slots}"
             ));
-            let mut closure_slots = vec![SlotType::GcRef];
+            let mut closure_slots = vec![SlotType::GcBase];
             closure_slots.extend(vec![SlotType::Value; arg_slots + ret_slots]);
             let mut closure_caller = function_with_slot_types(closure_slots);
             closure_caller.code = vec![
@@ -182,7 +182,7 @@ fn call_extern_and_go_island_metadata_own_argument_width_boundaries() {
         });
 
         let mut island_module = Module::new(format!("go-island-width-boundary-{arg_slots}"));
-        let mut island_slots = vec![SlotType::GcRef, SlotType::GcRef];
+        let mut island_slots = vec![SlotType::GcBase, SlotType::GcBase];
         island_slots.extend(vec![SlotType::Value; arg_slots]);
         let mut island_caller = function_with_slot_types(island_slots);
         island_caller.code = vec![

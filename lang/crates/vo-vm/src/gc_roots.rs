@@ -64,7 +64,9 @@ fn typed_slot_root(
 ) -> Option<GcRef> {
     let raw = *slots.get(idx)?;
     match slot_types.get(idx).copied()? {
-        vo_runtime::SlotType::GcRef if raw != 0 => Some(raw as GcRef),
+        vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef if raw != 0 => {
+            Some(raw as GcRef)
+        }
         vo_runtime::SlotType::Interface1
             if raw != 0
                 && idx > 0

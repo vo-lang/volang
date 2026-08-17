@@ -72,10 +72,7 @@ pub(crate) fn fresh_ptr_set<'a>(
     for (index, slot_type) in layout.into_iter().take(count).enumerate() {
         let value = e.read_var(inst.c + index as u16);
         let slot_offset = inst.b + index as u16;
-        if matches!(
-            slot_type,
-            vo_runtime::SlotType::GcRef | vo_runtime::SlotType::Interface1
-        ) {
+        if slot_type.needs_write_barrier() {
             emit_fresh_parent_write_barrier(
                 e,
                 ptr,
@@ -130,7 +127,7 @@ fn emit_fresh_parent_write_barrier<'a>(
     e.builder().switch_to_block(active);
     e.builder().seal_block(active);
     match slot_type {
-        vo_runtime::SlotType::GcRef => {
+        vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef => {
             // Shape analysis proves the parent is the exact object returned by
             // PtrNew. Preserve the inline path when SSA also proves the child.
             let exact_child = e.current_gc_ref_is_exact_base(child_slot);
@@ -207,7 +204,7 @@ pub(super) fn ptr_set<'a>(
         layout: "PtrLayout",
     })?;
     match layout.first() {
-        Some(vo_runtime::SlotType::GcRef) => {
+        Some(vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef) => {
             let exact_bases =
                 e.current_gc_ref_is_exact_base(inst.a) && e.current_gc_ref_is_exact_base(inst.c);
             emit_gc_ref_write_barrier(e, ptr, inst.b, v, exact_bases);

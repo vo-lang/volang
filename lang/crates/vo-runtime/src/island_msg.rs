@@ -603,30 +603,6 @@ fn validate_sendable_type_graph(
     Ok(())
 }
 
-/// Determine the GC allocation meta for a boxed capture value.
-/// Reference-like value kinds (arrays, maps, queues, slices, strings, closures, islands)
-/// are allocated as opaque Struct so the GC does not misinterpret the inner layout.
-#[inline]
-pub fn capture_box_meta(value_meta: ValueMeta) -> ValueMeta {
-    let vk = value_meta.value_kind();
-    if vk.is_queue()
-        || matches!(
-            vk,
-            ValueKind::Array
-                | ValueKind::Map
-                | ValueKind::Pointer
-                | ValueKind::Slice
-                | ValueKind::String
-                | ValueKind::Closure
-                | ValueKind::Island
-        )
-    {
-        ValueMeta::new(0, ValueKind::Struct)
-    } else {
-        value_meta
-    }
-}
-
 #[inline]
 pub fn alloc_capture_box(gc: &mut Gc, value_meta: ValueMeta, slots: u16) -> GcRef {
     gc.alloc_value_slots(value_meta, slots)

@@ -88,7 +88,7 @@ fn register_remote_proxy_for_home(vm: &mut Vm, endpoint_id: u64, home_island: u3
 
 fn pair_struct_meta() -> StructMeta {
     StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase, SlotType::GcBase],
         fields: vec![
             FieldMeta {
                 name: "left".to_string(),

@@ -25,7 +25,7 @@ pub fn exec_ptr_new(
     let value_meta = ValueMeta::from_raw(meta_raw);
     let slots = u16::try_from(value_layout.len())
         .map_err(|_| "PtrNew value layout exceeds u16 slots".to_string())?;
-    let ptr = gc.try_alloc(value_meta, slots)?;
+    let ptr = gc.try_alloc_value_slots(value_meta, slots)?;
     stack_set(stack, bp + inst.a as usize, ptr as u64);
     Ok(())
 }
@@ -72,7 +72,7 @@ pub fn exec_ptr_set(
     let val = stack_get(stack, bp + inst.c as usize);
     if value_layout
         .first()
-        .is_some_and(|slot| matches!(slot, SlotType::GcRef | SlotType::Interface1))
+        .is_some_and(|slot| slot.needs_write_barrier())
     {
         gc.write_barrier(ptr, val as GcRef);
     }
@@ -128,4 +128,60 @@ pub fn exec_ptr_set_n(
         unsafe { Gc::write_slot(ptr, offset + i, val) };
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instruction::Opcode;
+    use vo_runtime::gc::{GcObjectScanChunk, GcRootScanChunk, GcRootState, GcState, G_OLD};
+    use vo_runtime::slot::SLOT_BYTES;
+    use vo_runtime::ValueKind;
+
+    #[test]
+    fn ptr_set_gc_base_store_keeps_old_to_young_edge_alive() {
+        let mut gc = Gc::new();
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        let child = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 0);
+        unsafe { Gc::header_mut(parent) }.set_age(G_OLD);
+
+        let stack = [parent as u64, child as u64];
+        let store = Instruction::new(Opcode::PtrSet, 0, 0, 1);
+        assert!(exec_ptr_set(
+            stack.as_ptr(),
+            0,
+            &store,
+            &mut gc,
+            &[SlotType::GcBase],
+        ));
+
+        let minor_cycles = gc.memory_stats().minor_cycles;
+        gc.gc_request_cycle();
+        for _ in 0..1024 {
+            unsafe {
+                gc.step_with_scanners_budget(
+                    GcRootState::MayHaveChanged,
+                    1,
+                    |_, _, _| GcRootScanChunk::complete(0),
+                    |gc, object, _, _| {
+                        if Gc::header(object).slots > 0 {
+                            let referenced = Gc::read_slot(object, 0) as GcRef;
+                            if !referenced.is_null() {
+                                gc.mark_gray(referenced);
+                            }
+                        }
+                        GcObjectScanChunk::complete(SLOT_BYTES)
+                    },
+                    |_| {},
+                );
+            }
+            if gc.state() == GcState::Pause && gc.memory_stats().minor_cycles > minor_cycles {
+                break;
+            }
+        }
+
+        assert_eq!(gc.state(), GcState::Pause);
+        assert!(gc.memory_stats().minor_cycles > minor_cycles);
+        assert!(gc.objects().any(|object| object == child));
+    }
 }

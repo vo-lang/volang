@@ -129,9 +129,9 @@ fn iface_data_slot_type(value_kind: ValueKind) -> SlotType {
         | ValueKind::Map
         | ValueKind::Channel
         | ValueKind::Closure
-        | ValueKind::Pointer
         | ValueKind::Port
-        | ValueKind::Island => SlotType::GcRef,
+        | ValueKind::Island => SlotType::GcBase,
+        ValueKind::Pointer => SlotType::GcRef,
         ValueKind::Float32 | ValueKind::Float64 => SlotType::Float,
         _ => SlotType::Value,
     }
@@ -212,7 +212,7 @@ pub fn generate_iface_wrapper(
     for (i, param) in params.iter().enumerate() {
         let variadic_last = func_decl.sig.variadic && i == params.len() - 1;
         let (slots, slot_types) = if variadic_last {
-            (1, vec![SlotType::GcRef])
+            (1, vec![SlotType::GcBase])
         } else {
             info.type_expr_layout(param.ty.id)
         };
@@ -443,7 +443,7 @@ pub fn generate_method_expr_promoted_wrapper(
 ///
 /// For example, if `Outer` embeds `*Inner` and `Inner` has method `Foo()`,
 /// calling `outer.Foo()` through interface needs a wrapper that:
-/// 1. Receives GcRef to Outer
+/// 1. Receives Outer through its exact interface receiver ABI
 /// 2. Reads the embedded *Inner pointer from Outer
 /// 3. Dereferences *Inner to get Inner value (if value receiver)
 /// 4. Calls Inner.Foo directly with the value
@@ -490,9 +490,17 @@ pub fn generate_promoted_wrapper(
     let wrapper_name = format!("{}$promoted", method_name);
     let mut builder = FuncBuilder::new(&wrapper_name);
 
-    // Define receiver parameter (GcRef to outer type)
+    // A value receiver arrives as an exact interface box. A pointer receiver
+    // retains the language pointer's potentially-interior provenance.
+    let outer_is_pointer_receiver =
+        !path_info.has_pointer_step && tc_objs.lobjs[method_obj].entity_type().func_has_ptr_recv();
+    let outer_receiver_slot_type = if outer_is_pointer_receiver {
+        SlotType::GcRef
+    } else {
+        SlotType::GcBase
+    };
     builder.set_recv_slots(1);
-    let outer_gcref = builder.define_param(None, 1, &[SlotType::GcRef]);
+    let outer_gcref = builder.define_param(None, 1, &[outer_receiver_slot_type]);
     let outer_rttid = ctx.intern_type_key(outer_type, info);
     let outer_kind = vo_analysis::check::type_info::type_value_kind(outer_type, tc_objs);
     ctx.intern_rttid(RuntimeType::Pointer(ValueRttid::new(
@@ -522,7 +530,8 @@ pub fn generate_promoted_wrapper(
     let args_start = builder.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
 
     // Emit receiver loading based on embedding type
-    // For promoted wrapper, outer is always GcRef (outer_is_pointer = true)
+    // Both receiver forms are addressable; exact boxes are a refinement of
+    // the managed-reference input accepted by embed traversal.
     let start = crate::embed::TraverseStart::new(outer_gcref, true);
     crate::embed::emit_embed_path_traversal(
         &mut builder,
@@ -558,8 +567,8 @@ pub fn generate_promoted_wrapper(
 
 /// Receiver type for embedded interface wrapper generation.
 pub enum EmbedIfaceRecvType {
-    /// GcRef to outer struct (for interface dispatch)
-    GcRef,
+    /// Exact allocation base of the boxed outer struct (for interface dispatch).
+    GcBase,
     /// Value or pointer based on outer_is_pointer flag (for method expression)
     ValueOrPointer {
         outer_type: TypeKey,
@@ -570,7 +579,7 @@ pub enum EmbedIfaceRecvType {
 /// Generate wrapper for embedded interface method dispatch.
 ///
 /// Unified function for both:
-/// - Interface dispatch: receiver is always GcRef
+/// - Interface dispatch: receiver is the boxed outer value's exact base
 /// - Method expression: receiver is value or pointer
 ///
 /// The wrapper:
@@ -626,9 +635,9 @@ fn generate_embedded_iface_wrapper_impl(
 
     // Define receiver based on type
     let (outer_recv, outer_is_pointer) = match recv_type {
-        EmbedIfaceRecvType::GcRef => {
+        EmbedIfaceRecvType::GcBase => {
             builder.set_recv_slots(1);
-            (builder.define_param(None, 1, &[SlotType::GcRef]), true)
+            (builder.define_param(None, 1, &[SlotType::GcBase]), true)
         }
         EmbedIfaceRecvType::ValueOrPointer {
             outer_type,
@@ -888,7 +897,7 @@ pub fn generate_embedded_iface_wrapper(
         iface_type,
         method_name,
         method_obj,
-        EmbedIfaceRecvType::GcRef,
+        EmbedIfaceRecvType::GcBase,
         "$embed_iface",
         info,
         None,

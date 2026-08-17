@@ -1105,7 +1105,7 @@ pub(crate) fn compile_go(
     if let Some(island_expr) = target_island {
         // Compile island expression
         let island_value = crate::expr::compile_expr(island_expr, ctx, func, info)?;
-        let island_reg = func.alloc_slots(&[SlotType::GcRef]);
+        let island_reg = func.alloc_slots(&[SlotType::GcBase]);
         func.emit_copy(island_reg, island_value, 1);
 
         // The call must be a closure literal for go @(island)

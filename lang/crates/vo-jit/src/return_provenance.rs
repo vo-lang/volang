@@ -181,7 +181,7 @@ impl ModuleReturnProvenance {
                 .iter_mut()
                 .zip(function.ret_slot_types.iter())
             {
-                *known = *slot_type == vo_runtime::SlotType::GcRef;
+                *known = slot_type.is_managed_ref();
             }
         }
         while let Some(member) = worklist.pop() {

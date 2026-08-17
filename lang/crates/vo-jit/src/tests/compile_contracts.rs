@@ -111,7 +111,7 @@ fn compile_supports_port_select_recv_opcode() {
             Instruction::new(Opcode::SelectExec, 1, 0, 0),
             Instruction::new(Opcode::Return, 0, 0, 0),
         ],
-        vec![SlotType::GcRef, SlotType::Value, SlotType::Value],
+        vec![SlotType::GcBase, SlotType::Value, SlotType::Value],
     );
     func.instruction_metadata[1] = InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value],
@@ -162,7 +162,7 @@ fn compile_supports_port_queue_opcodes() {
             Instruction::new(Opcode::Return, 0, 0, 0),
         ],
         vec![
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
             SlotType::Value,
@@ -267,7 +267,7 @@ fn jit_queue_runtime_transition_stops_before_following_recv() {
             Instruction::with_flags(Opcode::QueueRecv, 0, 2, 0, 0),
             Instruction::new(Opcode::Return, 0, 0, 0),
         ],
-        vec![SlotType::GcRef, SlotType::Value, SlotType::Value],
+        vec![SlotType::GcBase, SlotType::Value, SlotType::Value],
     );
     for pc in 0..2 {
         func.instruction_metadata[pc] = InstructionMetadata::QueueLayout {
@@ -313,7 +313,7 @@ fn jit_queue_recv_transition_preserves_callback_output() {
             Instruction::with_flags(Opcode::QueueRecv, 0, 1, 0, 0),
             Instruction::new(Opcode::Return, 0, 0, 0),
         ],
-        vec![SlotType::GcRef, SlotType::Value],
+        vec![SlotType::GcBase, SlotType::Value],
     );
     func.instruction_metadata[0] = InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::Value],

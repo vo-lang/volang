@@ -195,12 +195,12 @@ fn emit_array_value_to_lvalue(
             // Ordinary assignment updates that stable variable storage so
             // pointers and already-evaluated element lvalues keep referring to
             // the global array variable.
-            let dst_ref = func.alloc_slots(&[SlotType::GcRef]);
+            let dst_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_global_get(dst_ref, *index, 1);
             value.copy_into_ref(dst_ref, array_type, ctx, func, info)
         }
         crate::lvalue::LValue::Capture { capture_index, .. } => {
-            let dst_ref = func.alloc_slots(&[SlotType::GcRef]);
+            let dst_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, dst_ref, *capture_index, 0);
             value.copy_into_ref(dst_ref, array_type, ctx, func, info)
         }
@@ -361,9 +361,9 @@ fn emit_concrete_to_iface_from_slot(
         // Struct/Array: allocate box and copy data
         let src_slots = info.type_slot_count(src_type);
         let src_slot_types = info.type_slot_types(src_type);
-        let meta_idx = ctx.get_boxing_meta(src_type, info);
+        let meta_idx = ctx.get_or_create_value_slots_meta(src_type, info);
 
-        let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+        let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         assert_eq!(src_slots as usize, src_slot_types.len());
@@ -438,7 +438,7 @@ fn compile_iface_assign_internal(
                 if src_vk == vo_runtime::ValueKind::Array =>
             {
                 // Global array: stored as 1 slot GcRef, load and pass directly
-                let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+                let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_op(Opcode::GlobalGet, gcref_slot, index, 0);
                 func.emit_with_flags(
                     Opcode::IfaceAssign,
@@ -451,7 +451,7 @@ fn compile_iface_assign_internal(
             ExprSource::Location(StorageKind::GlobalBoxed { index, .. })
                 if src_vk == vo_runtime::ValueKind::Struct =>
             {
-                let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+                let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_global_get(gcref_slot, index, 1);
                 func.emit_with_flags(
                     Opcode::IfaceAssign,
@@ -465,7 +465,7 @@ fn compile_iface_assign_internal(
                 // Stack value or expression: allocate box and copy data
                 let src_slots = info.type_slot_count(src_type);
                 let src_slot_types = info.type_slot_types(src_type);
-                let meta_idx = ctx.get_boxing_meta(src_type, info);
+                let meta_idx = ctx.get_or_create_value_slots_meta(src_type, info);
 
                 let tmp_data = func.alloc_slots(&src_slot_types);
                 if info.is_array(src_type) {
@@ -477,7 +477,7 @@ fn compile_iface_assign_internal(
                 let gcref_slot = if src_vk == vo_runtime::ValueKind::Array {
                     crate::materialize_array_from_slots(tmp_data, src_type, ctx, func, info)?
                 } else {
-                    let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+                    let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
                     let meta_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                     assert_eq!(src_slots as usize, src_slot_types.len());

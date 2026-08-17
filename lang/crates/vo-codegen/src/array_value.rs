@@ -200,7 +200,7 @@ pub(crate) fn borrowed_expr_ref(
     match crate::expr::get_expr_source(expr, ctx, func, info) {
         ExprSource::Location(StorageKind::HeapArray { gcref_slot, .. }) => Some(gcref_slot),
         ExprSource::Location(StorageKind::Global { index, slots: 1 }) => {
-            let array_ref = func.alloc_slots(&[SlotType::GcRef]);
+            let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_global_get(array_ref, index, 1);
             Some(array_ref)
         }
@@ -209,7 +209,7 @@ pub(crate) fn borrowed_expr_ref(
                 return None;
             };
             let capture_index = func.lookup_capture(ident.symbol)?.index;
-            let array_ref = func.alloc_slots(&[SlotType::GcRef]);
+            let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, array_ref, capture_index, 0);
             Some(array_ref)
         }
@@ -256,7 +256,7 @@ pub(crate) fn allocate_ref(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<u16, CodegenError> {
-    let dst = func.alloc_slots(&[SlotType::GcRef]);
+    let dst = func.alloc_slots(&[SlotType::GcBase]);
     emit_new_ref_at(dst, array_type, ctx, func, info)?;
     Ok(dst)
 }

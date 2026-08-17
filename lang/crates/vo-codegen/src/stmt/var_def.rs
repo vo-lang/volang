@@ -217,7 +217,7 @@ pub fn compile_var_decl(
 /// When a loop variable escapes, heap allocation must happen each iteration, not just once.
 #[derive(Clone)]
 pub struct DeferredHeapAlloc {
-    /// The GcRef slot that holds the pointer to the heap object.
+    /// The exact-base slot that owns the heap object reference.
     pub gcref_slot: u16,
     /// Number of value slots in the heap object.
     pub value_slots: u16,
@@ -384,8 +384,8 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
                 // Reference type captured by closure: box to share storage
                 self.alloc_escaped_boxed_deferred(sym, type_key, slots)
             } else {
-                // Reference type not captured: 1 slot GcRef IS the value
-                let slot = self.func.define_local_reference(sym);
+                let slot_type = slot_types[0];
+                let slot = self.func.define_local_reference(sym, slot_type);
                 Ok((StorageKind::Reference { slot }, None))
             }
         } else if needs_box {
@@ -538,7 +538,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         let gcref_slot = self
             .func
             .define_local_heap_boxed(sym, slots, stores_pointer);
-        let meta_idx = self.ctx.get_boxing_meta(type_key, self.info);
+        let meta_idx = self.ctx.get_or_create_value_slots_meta(type_key, self.info);
 
         let storage = StorageKind::HeapBoxed {
             gcref_slot,

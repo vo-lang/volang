@@ -76,6 +76,10 @@ pub(crate) const WHITE1_BIT: u8 = 1 << 4; // bit 4
 pub(crate) const BLACK_BIT: u8 = 1 << 5; // bit 5
 pub(crate) const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
 pub const JIT_GC_HEADER_MARKED_OFFSET: i32 = -(GcHeader::SIZE as i32);
+pub const JIT_GC_HEADER_SLOTS_OFFSET: i32 =
+    JIT_GC_HEADER_MARKED_OFFSET + core::mem::offset_of!(GcHeader, slots) as i32;
+pub const JIT_GC_HEADER_VALUE_META_OFFSET: i32 =
+    JIT_GC_HEADER_MARKED_OFFSET + core::mem::offset_of!(GcHeader, value_meta) as i32;
 pub const JIT_GC_AGE_MASK: u8 = AGE_MASK;
 pub const JIT_GC_WHITE_BITS: u8 = WHITE_BITS;
 pub const JIT_GC_BLACK_BIT: u8 = BLACK_BIT;
@@ -1011,7 +1015,7 @@ impl Gc {
     /// admission is charged here, before generated code can expose the first
     /// object. The region publishes cells without fallible work and refunds
     /// its unused suffix at the next VM/GC boundary.
-    pub(crate) fn prepare_jit_allocation_region(
+    pub(crate) fn prepare_jit_value_slots_allocation_region(
         &mut self,
         size: usize,
         value_meta: ValueMeta,
@@ -1060,7 +1064,8 @@ impl Gc {
             let admitted_cells = (lane.limit as usize - lane.cursor as usize) / lane.class_size;
             let admitted_bytes = admitted_cells.saturating_mul(size);
             debug_assert_eq!(size, GcHeader::SIZE + usize::from(slots) * SLOT_BYTES);
-            let header = GcHeader::new_with_white(value_meta, slots, self.current_white);
+            let mut header = GcHeader::new_with_white(value_meta, slots, self.current_white);
+            header.set_value_slots_object();
             for cell in 0..admitted_cells {
                 unsafe {
                     core::ptr::write(
@@ -3085,7 +3090,7 @@ where
     let mut i = 0;
     while i < slot_types.len() {
         match slot_types[i] {
-            SlotType::GcRef => {
+            SlotType::GcBase | SlotType::GcRef => {
                 if slots[i] != 0 {
                     visit(slots[i] as GcRef);
                 }

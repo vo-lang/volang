@@ -824,7 +824,7 @@ fn debug_validate_extern_returns(
             ));
         };
         match *slot_type {
-            vo_runtime::SlotType::GcRef => {
+            vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef => {
                 let Some(stack_idx) = bp.checked_add(slot_idx) else {
                     return Err(format!(
                         "CallExtern return stack index overflow caller_func={} caller_name={} extern={} ret_slot={}",
@@ -841,17 +841,19 @@ fn debug_validate_extern_returns(
                         extern_id
                     ));
                 };
-                if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
-                    return Err(format!(
-                        "CallExtern returned invalid GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x}",
-                        fiber_id.to_raw(),
-                        func_id,
-                        func.name,
-                        extern_id,
-                        extern_def.name,
-                        slot_idx,
-                        raw,
-                    ));
+                if raw != 0 {
+                    let Some(canonical) = gc.canonicalize_ref(raw as GcRef) else {
+                        return Err(format!(
+                            "CallExtern returned invalid managed reference fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x}",
+                            fiber_id.to_raw(), func_id, func.name, extern_id, extern_def.name, slot_idx, raw,
+                        ));
+                    };
+                    if *slot_type == vo_runtime::SlotType::GcBase && canonical as u64 != raw {
+                        return Err(format!(
+                            "CallExtern returned interior pointer for GcBase fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x}",
+                            fiber_id.to_raw(), func_id, func.name, extern_id, extern_def.name, slot_idx, raw,
+                        ));
+                    }
                 }
                 slot_idx += 1;
             }
@@ -2297,7 +2299,7 @@ impl Vm {
             && function.ret_slots == 0
             && function.param_types.len() == 1
             && function.param_types[0].slots == 1
-            && function.slot_types.first() == Some(&vo_runtime::SlotType::GcRef)
+            && function.slot_types.first() == Some(&vo_runtime::SlotType::GcBase)
             && vo_common_core::types::ValueMeta::try_from_raw(function.param_types[0].meta_raw)
                 .is_some_and(|meta| meta.value_kind() == vo_common_core::types::ValueKind::Slice);
         if !valid_shape {
@@ -6120,7 +6122,8 @@ fn spawn_call_slot_types_require_transfer_metadata(slot_types: &[vo_runtime::Slo
     slot_types.iter().any(|slot| {
         matches!(
             slot,
-            vo_runtime::SlotType::GcRef
+            vo_runtime::SlotType::GcBase
+                | vo_runtime::SlotType::GcRef
                 | vo_runtime::SlotType::Interface0
                 | vo_runtime::SlotType::Interface1
         )

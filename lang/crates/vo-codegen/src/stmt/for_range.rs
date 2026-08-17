@@ -211,7 +211,9 @@ pub(crate) fn range_var_info(
                                 Some(RangeVarAlloc::Boxed(DeferredHeapAlloc {
                                     gcref_slot,
                                     value_slots,
-                                    meta_idx: sc.ctx.get_boxing_meta(lhs_type, sc.info),
+                                    meta_idx: sc
+                                        .ctx
+                                        .get_or_create_value_slots_meta(lhs_type, sc.info),
                                     slot_types: sc.info.type_slot_types(lhs_type),
                                 })),
                             )

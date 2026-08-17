@@ -254,7 +254,9 @@ pub trait NativeRootMapAccess<'a>: ScratchAccess<'a> + SlotAccess<'a> + Metadata
         for (slot, ty) in self.function_def().slot_types.iter().copied().enumerate() {
             let slot = slot as u16;
             match ty {
-                vo_runtime::SlotType::GcRef if roots.direct.binary_search(&slot).is_err() => {
+                vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef
+                    if roots.direct.binary_search(&slot).is_err() =>
+                {
                     dead_slots.push(slot);
                 }
                 vo_runtime::SlotType::Interface0

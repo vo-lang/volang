@@ -155,7 +155,7 @@ fn vm_transfer_rttid_kind_drift_010_rejects_array_tag_to_non_array_runtime_type(
 #[test]
 fn vm_raw_receiver_root_contract_006_rejects_closure_receiver_shape() {
     let mut module = Module::new("closure-receiver-shape".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut func = function_with_slot_types(vec![SlotType::GcBase]);
     func.is_closure = true;
     func.param_slots = 1;
     func.recv_slots = 1;
@@ -185,7 +185,7 @@ fn vm_raw_receiver_root_contract_006_rejects_receiver_with_capture_metadata() {
 }
 
 #[test]
-fn vm_iface_wrapper_suffix_authority_006_rejects_boxed_receiver_without_gcref_abi() {
+fn vm_iface_wrapper_suffix_authority_006_rejects_boxed_receiver_without_gc_base_abi() {
     let mut module = Module::new("boxed-receiver-abi-shape".to_string());
     module.struct_metas.push(StructMeta {
         slot_types: vec![SlotType::GcRef],
@@ -221,7 +221,7 @@ fn vm_iface_wrapper_suffix_authority_006_rejects_boxed_receiver_without_gcref_ab
     let err = verify_module(&module).unwrap_err();
 
     assert!(
-        err.to_string().contains("must have layout [GcRef]"),
+        err.to_string().contains("must have layout [GcBase]"),
         "{err}"
     );
 }
@@ -253,7 +253,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
     let mut caller = function_with_slot_types(vec![
         SlotType::Interface0,
         SlotType::Interface1,
-        SlotType::GcRef,
+        SlotType::GcBase,
     ]);
     caller.name = "caller".to_string();
     caller.code = vec![
@@ -263,7 +263,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
     caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
-    let mut wrapper = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut wrapper = function_with_slot_types(vec![SlotType::GcBase]);
     wrapper.name = "Send$iface".to_string();
     wrapper.param_slots = 1;
     wrapper.recv_slots = 1;
@@ -295,7 +295,7 @@ fn vm_iface_assign_receiver_layout_058_accepts_boxed_value_receiver_wrapper() {
     });
 
     verify_module(&module)
-        .expect("IfaceAssign must accept itab targets using the boxed GcRef receiver ABI");
+        .expect("IfaceAssign must accept itab targets using the exact boxed receiver ABI");
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn vm_iface_assign_receiver_layout_058_nil_source_does_not_validate_itab_zero() 
     caller.instruction_metadata = vec![InstructionMetadata::None, InstructionMetadata::None];
     module.functions.push(finish_test_function(caller));
 
-    let mut target = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut target = function_with_slot_types(vec![SlotType::GcBase]);
     target.name = "Close".to_string();
     target.param_slots = 1;
     target.recv_slots = 1;
@@ -458,10 +458,10 @@ fn vm_iface_assign_rejects_concrete_itab_zero_collision_060() {
 #[test]
 fn module_verifier_rejects_closure_new_capture_count_drift() {
     let mut module = Module::new("closure-new-capture-count".to_string());
-    let mut maker = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut maker = function_with_slot_types(vec![SlotType::GcBase]);
     maker.code = vec![Instruction::with_flags(Opcode::ClosureNew, 0, 0, 1, 1)];
     maker.instruction_metadata = vec![InstructionMetadata::None];
-    let mut target = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut target = function_with_slot_types(vec![SlotType::GcBase]);
     target.is_closure = true;
     target.param_slots = 1;
     target.capture_slot_types = vec![SlotType::GcRef, SlotType::GcRef];
@@ -479,7 +479,7 @@ fn module_verifier_rejects_closure_new_capture_count_drift() {
 #[test]
 fn module_verifier_rejects_closure_new_without_header_capacity() {
     let mut module = Module::new("closure-new-allocation-width".to_string());
-    let mut maker = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut maker = function_with_slot_types(vec![SlotType::GcBase]);
     maker.code = vec![Instruction::with_flags(
         Opcode::ClosureNew,
         0,
@@ -503,7 +503,7 @@ fn module_verifier_rejects_closure_new_without_header_capacity() {
 #[test]
 fn vm_ver_closureget_scope_001_rejects_closure_get_in_non_closure_function() {
     let mut module = Module::new("closure-get-non-closure-scope".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::Value]);
+    let mut func = function_with_slot_types(vec![SlotType::GcBase, SlotType::Value]);
     func.code = vec![Instruction::new(Opcode::ClosureGet, 1, 0, 0)];
     func.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(func);
@@ -519,7 +519,7 @@ fn vm_ver_closureget_scope_001_rejects_closure_get_in_non_closure_function() {
 fn module_verifier_rejects_retired_queue_width_flags() {
     let mut module = Module::new("queue-new-layout".to_string());
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![Instruction::with_flags(Opcode::QueueNew, 2, 0, 1, 2)];
     func.instruction_metadata = vec![InstructionMetadata::QueueLayout {
         elem_layout: vec![SlotType::GcRef],
@@ -550,7 +550,7 @@ fn vm_pack_pointer_slot_contract_017_rejects_struct_meta_above_gc_width() {
 #[test]
 fn vm_select_case_contract_017_rejects_extra_case_beyond_select_begin_count() {
     let mut module = Module::new("select-extra-case-count".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::Value, SlotType::GcRef]);
+    let mut func = function_with_slot_types(vec![SlotType::Value, SlotType::GcBase]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
         Instruction::new(Opcode::SelectRecv, 0, 1, 0),
@@ -580,7 +580,7 @@ fn vm_select_case_contract_017_rejects_extra_case_beyond_select_begin_count() {
 fn vm_select_case_contract_017_rejects_source_case_index_outside_domain() {
     let mut module = Module::new("select-source-case-index-domain".to_string());
     let mut func =
-        function_with_slot_types(vec![SlotType::Value, SlotType::GcRef, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::Value, SlotType::GcBase, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
         Instruction::new(Opcode::SelectRecv, 0, 1, 1),
@@ -606,7 +606,7 @@ fn vm_select_case_contract_017_rejects_source_case_index_outside_domain() {
 fn vm_select_case_contract_017_rejects_duplicate_source_case_index() {
     let mut module = Module::new("select-duplicate-source-case-index".to_string());
     let mut func =
-        function_with_slot_types(vec![SlotType::Value, SlotType::GcRef, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::Value, SlotType::GcBase, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 2, 0, 0),
         Instruction::new(Opcode::SelectRecv, 0, 1, 0),
@@ -633,7 +633,7 @@ fn vm_select_case_contract_017_rejects_duplicate_source_case_index() {
 #[test]
 fn vm_select_zero_slot_send_contract_018_accepts_empty_element_layout() {
     let mut module = Module::new("select-zero-slot-send".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::Value]);
+    let mut func = function_with_slot_types(vec![SlotType::GcBase, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
         Instruction::with_flags(Opcode::SelectSend, 0, 0, 1, 0),
@@ -661,7 +661,7 @@ fn vm_select_zero_slot_send_contract_018_accepts_empty_element_layout() {
 fn vm_select_pending_region_contract_018_rejects_non_select_opcode_before_exec() {
     let mut module = Module::new("select-pending-non-select-op".to_string());
     let mut func =
-        function_with_slot_types(vec![SlotType::Value, SlotType::GcRef, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::Value, SlotType::GcBase, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::SelectBegin, 1, 0, 0),
         Instruction::new(Opcode::LoadInt, 0, 0, 0),
@@ -693,7 +693,7 @@ fn vm_select_recv_layout_contract_018_rejects_structural_interface_destination()
     let mut func = function_with_slot_types(vec![
         SlotType::Interface0,
         SlotType::Interface1,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
     ]);
     func.code = vec![
@@ -727,7 +727,7 @@ fn vm_select_recv_layout_contract_018_rejects_structural_interface_destination()
 fn module_verifier_rejects_retired_map_new_width_operand() {
     let mut module = Module::new("map-new-layout".to_string());
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![Instruction::new(Opcode::MapNew, 0, 1, 1)];
     func.instruction_metadata = vec![InstructionMetadata::MapNew {
         key_layout: vec![SlotType::GcRef],
@@ -753,7 +753,7 @@ fn module_verifier_rejects_map_new_runtime_meta_layout_drift_031() {
         .push(Constant::Int((int_meta << 32) | int_meta));
     module.constants.push(Constant::Int(int_rttid));
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),

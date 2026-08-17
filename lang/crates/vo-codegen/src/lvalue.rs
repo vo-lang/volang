@@ -159,8 +159,8 @@ fn snapshot_value_slot(src: u16, func: &mut FuncBuilder) -> u16 {
     snapshot
 }
 
-fn snapshot_gcref_slot(src: u16, func: &mut FuncBuilder) -> u16 {
-    let snapshot = func.alloc_slots(&[SlotType::GcRef]);
+fn snapshot_gc_base_slot(src: u16, func: &mut FuncBuilder) -> u16 {
+    let snapshot = func.alloc_slots(&[SlotType::GcBase]);
     func.emit_copy(snapshot, src, 1);
     snapshot
 }
@@ -169,7 +169,7 @@ fn compile_captured_array_ref(expr: &Expr, func: &mut FuncBuilder) -> Option<u16
     match &expr.kind {
         ExprKind::Ident(ident) => {
             let capture_index = func.lookup_capture(ident.symbol)?.index;
-            let array_ref = func.alloc_slots(&[SlotType::GcRef]);
+            let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, array_ref, capture_index, 0);
             Some(array_ref)
         }
@@ -560,7 +560,7 @@ fn resolve_index_lvalue(
     // For slice/map/string: compile container FIRST, then index (left-to-right order)
     if info.is_slice(container_type) {
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gcref_slot(container_value, func);
+        let container_reg = snapshot_gc_base_slot(container_value, func);
         let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
         let index_reg = snapshot_value_slot(index_value, func);
         if mode.requires_early_check() {
@@ -584,7 +584,7 @@ fn resolve_index_lvalue(
 
     if info.is_map(container_type) {
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gcref_slot(container_value, func);
+        let container_reg = snapshot_gc_base_slot(container_value, func);
         let (key_type, _) = info.map_key_val_types(container_type);
         let index_reg = crate::expr::compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let key_slot_types = info.map_key_slot_types(container_type);
@@ -601,7 +601,7 @@ fn resolve_index_lvalue(
 
     if info.is_string(container_type) {
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gcref_slot(container_value, func);
+        let container_reg = snapshot_gc_base_slot(container_value, func);
         let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
         return Ok(LValue::Index {
             kind: ContainerKind::String,
@@ -654,7 +654,7 @@ fn resolve_index_field_lvalue(
         }
 
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gcref_slot(container_value, func);
+        let container_reg = snapshot_gc_base_slot(container_value, func);
         let index_value = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
         let index_reg = snapshot_value_slot(index_value, func);
         let elem_type = info.slice_elem_type(container_type);
@@ -724,7 +724,7 @@ fn resolve_index_field_lvalue(
 
         // Compile map get: container first, then index (Go evaluation order)
         let container_value = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
-        let container_reg = snapshot_gcref_slot(container_value, func);
+        let container_reg = snapshot_gc_base_slot(container_value, func);
         let index_reg = crate::expr::compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
 
         let key_start = func.alloc_slots(&key_slot_types);
@@ -769,12 +769,12 @@ fn emit_address_of_array_lvalue(
                 capture_index,
                 offset,
             }) => {
-                let capture = func.alloc_slots(&[SlotType::GcRef]);
+                let capture = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_op(Opcode::ClosureGet, capture, capture_index, 0);
                 Ok(Some(emit_gcref_with_slot_offset(capture, offset, func)))
             }
             Some(FlattenedBase::GlobalBoxed { index, offset }) => {
-                let object = func.alloc_slots(&[SlotType::GcRef]);
+                let object = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_global_get(object, index, 1);
                 Ok(Some(emit_gcref_with_slot_offset(object, offset, func)))
             }
@@ -1261,7 +1261,7 @@ pub fn emit_lvalue_load(
             value_slots,
         } => {
             // ClosureGet gets the GcRef, then PtrGet to read value
-            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_get(dst, gcref_slot, 0, *value_slots);
         }
@@ -1295,7 +1295,7 @@ pub fn emit_lvalue_load(
 }
 
 /// Emit code to store value from source slot to an LValue.
-/// `slot_types`: SlotTypes of the value being stored (for write barrier on GcRef slots)
+/// `slot_types`: physical value layout used for precise managed write barriers.
 pub fn emit_lvalue_store(
     lv: &LValue,
     src: u16,
@@ -1426,7 +1426,7 @@ pub fn emit_lvalue_store(
             value_slots: _,
         } => {
             // ClosureGet gets the GcRef, then PtrSet to write value
-            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_set_with_slot_types(gcref_slot, 0, src, slot_types);
         }
@@ -1506,7 +1506,7 @@ pub fn snapshot_lvalue_operands(
             if !matches!(kind, ContainerKind::StackArray { .. })
                 && !func.is_current_temporary_range(*container_reg, 1)
             {
-                let tmp = func.alloc_slots(&[SlotType::GcRef]);
+                let tmp = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_copy(tmp, *container_reg, 1);
                 *container_reg = tmp;
             }
@@ -1599,7 +1599,7 @@ fn emit_flattened_load(flat: &FlattenedBase, dst: u16, slots: u16, func: &mut Fu
             func.emit_global_get(dst, index + offset, slots);
         }
         FlattenedBase::GlobalBoxed { index, offset } => {
-            let object = func.alloc_slots(&[SlotType::GcRef]);
+            let object = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_global_get(object, *index, 1);
             func.emit_ptr_get(dst, object, *offset, slots);
         }
@@ -1607,7 +1607,7 @@ fn emit_flattened_load(flat: &FlattenedBase, dst: u16, slots: u16, func: &mut Fu
             capture_index,
             offset,
         } => {
-            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_get(dst, gcref_slot, *offset, slots);
         }
@@ -1636,7 +1636,7 @@ fn emit_flattened_store(
             func.emit_global_set(index + offset, src, slots);
         }
         FlattenedBase::GlobalBoxed { index, offset } => {
-            let object = func.alloc_slots(&[SlotType::GcRef]);
+            let object = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_global_get(object, *index, 1);
             func.emit_ptr_set_with_slot_types(object, *offset, src, slot_types);
         }
@@ -1644,7 +1644,7 @@ fn emit_flattened_store(
             capture_index,
             offset,
         } => {
-            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+            let gcref_slot = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_op(Opcode::ClosureGet, gcref_slot, *capture_index, 0);
             func.emit_ptr_set_with_slot_types(gcref_slot, *offset, src, slot_types);
         }
@@ -1717,7 +1717,7 @@ pub fn compile_index_addr(
 
     if info.is_slice(container_type) {
         let container_value = crate::expr::compile_expr(container_expr, ctx, func, info)?;
-        let container_reg = snapshot_gcref_slot(container_value, func);
+        let container_reg = snapshot_gc_base_slot(container_value, func);
         let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
         let elem_type = info.slice_elem_type(container_type);
         let elem_bytes = info.slice_elem_bytes(container_type);

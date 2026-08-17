@@ -229,7 +229,7 @@ pub fn compile_addr_of(
         let type_key = info.expr_type(operand.id);
         let slots = info.type_slot_count(type_key);
         let slot_types = info.type_slot_types(type_key);
-        let meta_idx = ctx.get_boxing_meta(type_key, info);
+        let meta_idx = ctx.get_or_create_value_slots_meta(type_key, info);
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         assert_eq!(slots as usize, slot_types.len());

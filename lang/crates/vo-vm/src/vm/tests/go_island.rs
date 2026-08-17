@@ -182,8 +182,8 @@ fn vm_goisland_object_kind_002_malformed_closure_target_is_vm_error_instead_of_h
         Vec::new(),
     );
     let func = &mut module.functions[0];
-    func.slot_types[0] = SlotType::GcRef;
-    func.slot_types[1] = SlotType::GcRef;
+    func.slot_types[0] = SlotType::GcBase;
+    func.slot_types[1] = SlotType::GcBase;
     func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
@@ -221,8 +221,8 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_island_gcref_before_islan
         Vec::new(),
     );
     let func = &mut module.functions[0];
-    func.slot_types[0] = SlotType::GcRef;
-    func.slot_types[1] = SlotType::GcRef;
+    func.slot_types[0] = SlotType::GcBase;
+    func.slot_types[1] = SlotType::GcBase;
     func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
@@ -264,8 +264,8 @@ fn vm_goisland_object_kind_002_interpreter_rejects_non_closure_gcref_before_clos
         Vec::new(),
     );
     let func = &mut module.functions[0];
-    func.slot_types[0] = SlotType::GcRef;
-    func.slot_types[1] = SlotType::GcRef;
+    func.slot_types[0] = SlotType::GcBase;
+    func.slot_types[1] = SlotType::GcBase;
     func.instruction_metadata = vec![InstructionMetadata::CallLayout {
         arg_layout: Vec::new(),
         ret_layout: Vec::new(),
@@ -305,8 +305,8 @@ fn vm_goisland_remote_shape_002_rejects_arg_shape_drift_before_island_effects() 
     );
     {
         let func = &mut module.functions[0];
-        func.slot_types[0] = SlotType::GcRef;
-        func.slot_types[1] = SlotType::GcRef;
+        func.slot_types[0] = SlotType::GcBase;
+        func.slot_types[1] = SlotType::GcBase;
         func.instruction_metadata = vec![InstructionMetadata::CallLayout {
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
@@ -378,8 +378,8 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
     );
     {
         let func = &mut module.functions[0];
-        func.slot_types[0] = SlotType::GcRef;
-        func.slot_types[1] = SlotType::GcRef;
+        func.slot_types[0] = SlotType::GcBase;
+        func.slot_types[1] = SlotType::GcBase;
         func.slot_types[2] = SlotType::Value;
         func.instruction_metadata = vec![InstructionMetadata::CallLayout {
             arg_layout: vec![SlotType::Value],
@@ -405,7 +405,7 @@ fn vm_goisland_remote_shape_002_rejects_arg_slot_metadata_drift_before_island_ef
         has_call_extern: false,
         instruction_metadata: Vec::new(),
         code: Vec::new(),
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase, SlotType::GcRef],
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),

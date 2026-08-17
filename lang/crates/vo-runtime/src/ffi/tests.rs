@@ -4239,7 +4239,7 @@ fn ffi_resolved_return_shape_rejects_array_value_slot_box_count_drift_061() {
         elem: ValueRttid::new(0, ValueKind::String),
     });
     module.struct_metas.push(StructMeta {
-        slot_types: vec![crate::SlotType::GcRef, crate::SlotType::GcRef],
+        slot_types: vec![crate::SlotType::GcBase, crate::SlotType::GcBase],
         fields: Vec::new(),
         field_index: HashMap::new(),
     });

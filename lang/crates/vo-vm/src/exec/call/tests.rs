@@ -359,7 +359,7 @@ fn vm_closure_call_signature_002_call_iface_rejects_arg_slot_shape_drift_before_
         }];
     module.functions.push(caller);
     let mut target = iface_target_function(3, 1, 0, 4);
-    target.slot_types[0] = SlotType::GcRef;
+    target.slot_types[0] = SlotType::GcBase;
     module.functions.push(target);
     let receiver_rttid = add_named_receiver_method(&mut module, "R", ValueKind::String, 1, 0);
     let cache = ItabCache::from_module_itabs(vec![

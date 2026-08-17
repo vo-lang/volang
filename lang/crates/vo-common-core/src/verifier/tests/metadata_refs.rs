@@ -680,9 +680,9 @@ fn module_verifier_rejects_error_return_flag_without_error_ret_slot_058() {
 #[test]
 fn module_verifier_rejects_heap_error_return_flag_without_error_ret_slot_058() {
     let mut module = Module::new("heap-return-error-flag-without-error-slot".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut func = function_with_slot_types(vec![SlotType::GcBase]);
     func.ret_slots = 1;
-    func.ret_slot_types = vec![SlotType::GcRef];
+    func.ret_slot_types = vec![SlotType::GcBase];
     func.heap_ret_gcref_count = 1;
     func.heap_ret_gcref_start = 0;
     func.heap_ret_slots = vec![1];
@@ -798,7 +798,7 @@ fn module_verifier_rejects_error_ret_slot_without_interface_layout_058() {
 #[test]
 fn vm_module_verifier_rejects_heap_error_return_partition_drift_059() {
     let mut module = Module::new("heap-error-return-partition-drift".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::GcRef]);
+    let mut func = function_with_slot_types(vec![SlotType::GcBase, SlotType::GcBase]);
     func.ret_slots = 4;
     func.ret_slot_types = vec![
         SlotType::Value,
@@ -825,7 +825,7 @@ fn vm_module_verifier_rejects_heap_error_return_partition_drift_059() {
 #[test]
 fn vm_module_verifier_rejects_heap_return_partition_splitting_interface_pair_059() {
     let mut module = Module::new("heap-return-interface-partition-drift".to_string());
-    let mut func = function_with_slot_types(vec![SlotType::GcRef, SlotType::GcRef]);
+    let mut func = function_with_slot_types(vec![SlotType::GcBase, SlotType::GcBase]);
     func.ret_slots = 2;
     func.ret_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     func.heap_ret_gcref_count = 2;
@@ -1100,7 +1100,7 @@ fn module_verifier_checks_global_metadata_refs() {
         slots: 1,
         value_kind: ValueKind::Struct as u8,
         meta_id: 0,
-        slot_types: vec![SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase],
     });
 
     let err = verify_module(&module).unwrap_err();
@@ -1171,13 +1171,13 @@ fn struct_metadata_requires_canonical_physical_field_layout() {
     });
 
     let layout = validate_struct_metadata_refs(&module)
-        .expect_err("string fields require a GcRef physical slot");
+        .expect_err("string fields require an exact managed-base physical slot");
     assert!(
         layout.to_string().contains("physical slot layout"),
         "{layout}"
     );
 
-    module.struct_metas[0].slot_types[0] = SlotType::GcRef;
+    module.struct_metas[0].slot_types[0] = SlotType::GcBase;
     module.struct_metas[0].fields[1].offset = 0;
     let overlap = validate_struct_metadata_refs(&module)
         .expect_err("overlapping fields must not be accepted");
@@ -1302,15 +1302,15 @@ fn globals_must_match_their_canonical_value_layout() {
     });
     module.functions.push(function_with_slot_types(Vec::new()));
 
-    let err = verify_module(&module).expect_err("string globals must be scanned as GcRef");
+    let err = verify_module(&module).expect_err("string globals require exact managed bases");
     assert!(err.to_string().contains("canonical value layout"), "{err}");
 
-    module.globals[0].slot_types[0] = SlotType::GcRef;
+    module.globals[0].slot_types[0] = SlotType::GcBase;
     verify_module(&module).expect("canonical string global layout verifies");
 }
 
 #[test]
-fn aggregate_globals_use_canonical_gcref_storage_for_overwide_runtime_values() {
+fn aggregate_globals_use_canonical_gc_base_storage_for_overwide_runtime_values() {
     let mut module = Module::new("canonical-aggregate-global-layout".to_string());
     module.struct_metas.push(StructMeta {
         slot_types: vec![SlotType::Value],
@@ -1330,14 +1330,14 @@ fn aggregate_globals_use_canonical_gcref_storage_for_overwide_runtime_values() {
         slots: 1,
         value_kind: ValueKind::Array as u8,
         meta_id: 1,
-        slot_types: vec![SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase],
     });
     module.globals.push(GlobalDef {
         name: "empty".to_string(),
         slots: 1,
         value_kind: ValueKind::Struct as u8,
         meta_id: 0,
-        slot_types: vec![SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase],
     });
     module.functions.push(function_with_slot_types(Vec::new()));
 
@@ -1367,11 +1367,13 @@ fn valid_well_known_error_module() -> Module {
     use crate::runtime_type::InterfaceMethod;
 
     let mut module = Module::new("well-known-error-contract".to_string());
-    let mut error_method = function_with_slot_types(vec![SlotType::GcRef]);
+    let mut error_method = function_with_slot_types(vec![SlotType::GcRef, SlotType::GcBase]);
     error_method.param_slots = 1;
     error_method.recv_slots = 1;
     error_method.ret_slots = 1;
-    error_method.ret_slot_types = vec![SlotType::GcRef];
+    error_method.ret_slot_types = vec![SlotType::GcBase];
+    error_method.code = vec![Instruction::new(Opcode::Return, 1, 1, 0)];
+    error_method.instruction_metadata = vec![InstructionMetadata::None];
     module.functions.push(error_method);
 
     module.interface_metas.push(InterfaceMeta {
@@ -1391,7 +1393,7 @@ fn valid_well_known_error_module() -> Module {
     let msg_type = ValueRttid::new(0, ValueKind::String);
     let cause_type = ValueRttid::new(2, ValueKind::Interface);
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::Interface0, SlotType::Interface1],
+        slot_types: vec![SlotType::GcBase, SlotType::Interface0, SlotType::Interface1],
         fields: vec![
             FieldMeta {
                 name: "msg".to_string(),
@@ -1652,7 +1654,7 @@ fn module_verifier_rejects_array_new_metadata_layout_drift_053() {
     module.constants.push(Constant::Int(8));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -1699,7 +1701,7 @@ fn module_verifier_rejects_slice_new_metadata_layout_drift_053() {
     module.constants.push(Constant::Int(8));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -1743,8 +1745,8 @@ fn module_verifier_rejects_slice_append_metadata_layout_drift_057() {
     ));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
-        SlotType::GcRef,
+        SlotType::GcBase,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::GcRef,
     ]);

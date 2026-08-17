@@ -771,7 +771,7 @@ fn collect_file_declarations(
                         // structs use an ordinary typed Ptr allocation.
                         let (slots, slot_types) =
                             if info.is_array(type_key) || info.is_struct(type_key) {
-                                (1, vec![vo_runtime::SlotType::GcRef])
+                                (1, vec![vo_runtime::SlotType::GcBase])
                             } else {
                                 (
                                     info.type_slot_count(type_key),
@@ -1370,7 +1370,7 @@ fn compile_func_body(
         if info.is_array(type_key) {
             crate::array_value::materialize_escaped_param(sym, type_key, ctx, &mut builder, info)?;
         } else {
-            let meta_idx = ctx.get_boxing_meta(type_key, info);
+            let meta_idx = ctx.get_or_create_value_slots_meta(type_key, info);
             builder.emit_box_escaped_param(
                 sym,
                 slots,
@@ -1437,8 +1437,8 @@ fn compile_func_body(
     // IMPORTANT: For panic/recover to work correctly, if ANY named return escapes,
     // ALL named returns must escape. This is because the VM's heap_ret recovery path
     // only works when all named returns are heap-allocated (mixed case not supported).
-    // Two-pass approach for escaped returns to ensure contiguous GcRef slots:
-    // 1. First allocate all slots (so escaped GcRef slots are contiguous)
+    // Two-pass approach for escaped returns to ensure contiguous heap-reference slots:
+    // 1. First allocate all slots so escaped object bases are contiguous
     // 2. Then emit PtrNew instructions
     struct EscapedReturn {
         gcref_slot: u16,
@@ -1466,7 +1466,7 @@ fn compile_func_body(
             let escapes = any_escapes || info.is_escaped(obj_key);
 
             let slot = if escapes {
-                // Allocate all return GcRef slots before emitting allocation
+                // Allocate all return object-base slots before emitting allocation
                 // instructions so the heap-return ABI remains contiguous.
                 let is_array = info.is_array(result_type);
                 let gcref_slot = if is_array {
@@ -1508,7 +1508,7 @@ fn compile_func_body(
         }
     }
 
-    // Now emit PtrNew for all escaped returns (after all GcRef slots are allocated contiguously)
+    // Now emit PtrNew for all escaped returns after their base slots are contiguous.
     for er in escaped_returns {
         if er.is_array {
             crate::array_value::emit_new_ref_at(
@@ -1520,7 +1520,7 @@ fn compile_func_body(
             )?;
             continue;
         }
-        let meta_idx = ctx.get_boxing_meta(er.result_type, info);
+        let meta_idx = ctx.get_or_create_value_slots_meta(er.result_type, info);
         let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
         builder.emit_op(
             vo_runtime::instruction::Opcode::LoadConst,
@@ -1584,9 +1584,9 @@ pub(crate) fn allocate_global_struct(
         ));
     }
     let slot_types = info.type_slot_types(struct_type);
-    let object = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+    let object = func.alloc_slots(&[vo_runtime::SlotType::GcBase]);
     let meta = func.alloc_slots(&[vo_runtime::SlotType::Value]);
-    let meta_idx = ctx.get_boxing_meta(struct_type, info);
+    let meta_idx = ctx.get_or_create_value_slots_meta(struct_type, info);
     func.emit_op(
         vo_runtime::instruction::Opcode::LoadConst,
         meta,
@@ -1610,7 +1610,7 @@ pub(crate) fn compile_global_struct_from_slots(
             "global boxed commit requires a struct type".to_string(),
         ));
     }
-    let object = func.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+    let object = func.alloc_slots(&[vo_runtime::SlotType::GcBase]);
     func.emit_global_get(object, global_idx, 1);
     func.emit_ptr_set_with_slot_types(object, 0, src, &info.type_slot_types(struct_type));
     Ok(())
@@ -1860,7 +1860,7 @@ fn compile_package_globals(
             })?;
             match prepared {
                 PreparedGlobalInitializer::Array { value, .. } => {
-                    let dst_ref = init_builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+                    let dst_ref = init_builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
                     init_builder.emit_global_get(dst_ref, global_idx, 1);
                     value.copy_into_ref(dst_ref, dst_type, ctx, init_builder, info)?;
                 }

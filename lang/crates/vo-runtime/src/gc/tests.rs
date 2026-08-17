@@ -669,7 +669,7 @@ fn runtime_allocation_returns_unconsumed_jit_region_admission() {
     let meta = ValueMeta::new(0, ValueKind::Struct);
     assert!(!gc.alloc(meta, 0).is_null());
 
-    gc.prepare_jit_allocation_region(GcHeader::SIZE, meta, 0);
+    gc.prepare_jit_value_slots_allocation_region(GcHeader::SIZE, meta, 0);
     let region = gc.jit_allocation_regions[0];
     assert!(region.cursor < region.limit);
     assert_eq!(gc.jit_active_allocation_region, 0);
@@ -700,7 +700,7 @@ fn jit_region_admission_is_exact_at_close_and_respects_object_limit() {
     .expect("bounded collector");
 
     let meta = ValueMeta::new(0, ValueKind::Struct);
-    gc.prepare_jit_allocation_region(GcHeader::SIZE, meta, 0);
+    gc.prepare_jit_value_slots_allocation_region(GcHeader::SIZE, meta, 0);
     let region = gc.jit_allocation_regions[0];
     assert_eq!(
         gc.live_object_count, 4,
@@ -736,11 +736,11 @@ fn jit_region_switch_refunds_the_previous_size_class() {
     .expect("bounded collector");
 
     let meta = ValueMeta::new(0, ValueKind::Struct);
-    gc.prepare_jit_allocation_region(GcHeader::SIZE, meta, 0);
+    gc.prepare_jit_value_slots_allocation_region(GcHeader::SIZE, meta, 0);
     assert_eq!(gc.live_object_count, 8);
     assert_eq!(gc.object_count(), 0);
     let second_size = GcHeader::SIZE + 2 * SLOT_BYTES;
-    gc.prepare_jit_allocation_region(second_size, meta, 2);
+    gc.prepare_jit_value_slots_allocation_region(second_size, meta, 2);
 
     let second_class = heap::allocation_class(second_size).expect("small class").0;
     assert_eq!(gc.jit_active_allocation_region, second_class as u8);

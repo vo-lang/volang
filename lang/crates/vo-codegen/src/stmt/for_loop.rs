@@ -364,11 +364,11 @@ fn emit_next_iteration_copy(
             let value = func.alloc_slots(&slot_types);
             func.emit_ptr_get_with_slot_types(value, gcref_slot, 0, &slot_types);
 
-            let fresh_ref = func.alloc_gcref();
+            let fresh_ref = func.alloc_gc_base();
             DeferredHeapAlloc {
                 gcref_slot: fresh_ref,
                 value_slots,
-                meta_idx: ctx.get_boxing_meta(loop_var.type_key, info),
+                meta_idx: ctx.get_or_create_value_slots_meta(loop_var.type_key, info),
                 slot_types,
             }
             .emit_with_copy(func, value);

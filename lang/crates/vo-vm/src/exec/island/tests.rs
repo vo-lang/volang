@@ -301,7 +301,7 @@ fn vm_goisland_transfer_txn_002_preflight_prevents_partial_queue_publication() {
         0,
     );
     let struct_metas = vec![StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase, SlotType::GcBase],
         fields: vec![
             FieldMeta {
                 name: "port".to_string(),
@@ -972,9 +972,7 @@ fn vm_goisland_transfer_txn_005_rejects_capture_box_allocation_drift_before_raw_
     state.external_island_transport = true;
     state.current_island_id = 4;
     let capture_meta = ValueMeta::new(0, ValueKind::Port);
-    let bad_box = state
-        .gc
-        .alloc(vo_runtime::island_msg::capture_box_meta(capture_meta), 0);
+    let bad_box = state.gc.alloc_value_slots(capture_meta, 0);
     unsafe { vo_runtime::gc::Gc::header_mut(bad_box) }.slots = 1;
     let result = GoIslandResult {
         island: core::ptr::null_mut(),
@@ -1213,7 +1211,7 @@ fn vm_island_heap_array_capture_materializes_packed_logical_values() {
 }
 
 #[test]
-fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_box() {
+fn vm_boxed_array_capture_transfer_006_accepts_typed_value_slots_box() {
     let mut state = crate::vm::VmState::new();
     state.external_island_transport = true;
     state.current_island_id = 4;
@@ -1233,7 +1231,9 @@ fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_bo
         1,
         0,
     );
-    let capture_box = state.gc.alloc(ValueMeta::new(0, ValueKind::Struct), 2);
+    let capture_box = state
+        .gc
+        .alloc_value_slots(ValueMeta::new(0, ValueKind::Array), 2);
     unsafe {
         Gc::write_slot(capture_box, 0, first as u64);
         Gc::write_slot(capture_box, 1, second as u64);
@@ -1251,7 +1251,7 @@ fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_bo
         slots: 2,
     }];
     let struct_metas = vec![StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase, SlotType::GcBase],
         fields: Vec::new(),
         field_index: HashMap::new(),
     }];
@@ -1279,7 +1279,7 @@ fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_bo
         &mut state,
         &mut island_effects,
     )
-    .expect("synthetic struct array capture boxes should use Array RTTID layout");
+    .expect("typed array capture boxes should use Array RTTID layout");
     pack_closure_for_island(
         &state.gc,
         &result,
@@ -1289,7 +1289,7 @@ fn vm_boxed_array_capture_transfer_006_accepts_synthetic_struct_array_capture_bo
         &[],
         &runtime_types,
     )
-    .expect("synthetic struct array capture boxes should pack as flattened arrays");
+    .expect("typed array capture boxes should pack as flattened arrays");
 
     assert!(queue::home_info(first).is_some());
     assert!(queue::home_info(second).is_some());
@@ -1329,7 +1329,7 @@ fn vm_direct_method_capture_protocol_006_transfers_raw_receiver_slots() {
     ];
     module
         .functions
-        .push(direct_method_function(vec![SlotType::GcRef]));
+        .push(direct_method_function(vec![SlotType::GcBase]));
     let receiver_type = direct_method_receiver_transfer_type(&module, 0, &module.functions[0], 1)
         .expect("method table should derive receiver transfer metadata");
     assert_eq!(
@@ -1514,7 +1514,7 @@ fn vm_iface_wrapper_suffix_authority_006_keeps_suffixed_one_slot_struct_receiver
     );
     let mut module = Module::new("direct-method-one-slot-struct-proof".to_string());
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase],
         fields: vec![FieldMeta {
             name: "out".to_string(),
             offset: 0,
@@ -1549,7 +1549,7 @@ fn vm_iface_wrapper_suffix_authority_006_keeps_suffixed_one_slot_struct_receiver
         },
         RuntimeType::Basic(ValueKind::Int64),
     ];
-    let mut func = direct_method_function(vec![SlotType::GcRef]);
+    let mut func = direct_method_function(vec![SlotType::GcBase]);
     func.name = "Receiver.Send$iface".to_string();
     module.functions.push(func);
 
@@ -1625,7 +1625,7 @@ fn vm_direct_method_capture_protocol_006_transfers_multi_slot_receiver_with_port
     );
     let mut module = Module::new("direct-method-multi-slot-proof".to_string());
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::Value],
+        slot_types: vec![SlotType::GcBase, SlotType::Value],
         fields: vec![
             FieldMeta {
                 name: "port".to_string(),
@@ -1671,7 +1671,7 @@ fn vm_direct_method_capture_protocol_006_transfers_multi_slot_receiver_with_port
         RuntimeType::Basic(ValueKind::Int64),
     ];
     module.functions.push(direct_method_function(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
     ]));
     let plan = direct_method_receiver_transfer_plan(&module, 0, &module.functions[0], 2)
@@ -1749,7 +1749,7 @@ fn vm_method_expression_param_metadata_006_prepends_receiver_transfer_type() {
     );
     let mut module = Module::new("method-expression-param-transfer-proof".to_string());
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::Value],
+        slot_types: vec![SlotType::GcBase, SlotType::Value],
         fields: vec![
             FieldMeta {
                 name: "port".to_string(),
@@ -1794,7 +1794,7 @@ fn vm_method_expression_param_metadata_006_prepends_receiver_transfer_type() {
         },
         RuntimeType::Basic(ValueKind::Int64),
     ];
-    let mut func = direct_method_function(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+    let mut func = direct_method_function(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.param_count = 2;
     func.recv_slots = 2;
     func.param_types = vec![TransferType {

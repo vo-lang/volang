@@ -3896,6 +3896,24 @@ impl<'a> ExternCallContext<'a> {
         let mut slot_idx = 0usize;
         while slot_idx < returns.slot_types.len() {
             match returns.slot_types[slot_idx] {
+                crate::SlotType::GcBase => {
+                    let raw = self.return_slot(slot_idx)?;
+                    if raw != 0 {
+                        let Some(canonical) = self.gc.canonicalize_ref(raw as GcRef) else {
+                            return Err(ExternContractError::new(format!(
+                                "extern_id={} returned invalid GcBase ret_slot={} raw=0x{raw:016x}",
+                                self.extern_id, slot_idx
+                            )));
+                        };
+                        if canonical as u64 != raw {
+                            return Err(ExternContractError::new(format!(
+                                "extern_id={} returned interior pointer for GcBase ret_slot={} raw=0x{raw:016x}",
+                                self.extern_id, slot_idx
+                            )));
+                        }
+                    }
+                    slot_idx += 1;
+                }
                 crate::SlotType::GcRef => {
                     let raw = self.return_slot(slot_idx)?;
                     if raw != 0 {

@@ -75,7 +75,9 @@ pub(super) fn handle_deopt_transition(
         let expected_kind = match func.slot_types.get(value.slot as usize) {
             Some(vo_runtime::SlotType::Value) => vo_jit::DeoptValueKind::Word,
             Some(vo_runtime::SlotType::Float) => vo_jit::DeoptValueKind::Float64,
-            Some(vo_runtime::SlotType::GcRef) => vo_jit::DeoptValueKind::GcRef,
+            Some(vo_runtime::SlotType::GcBase | vo_runtime::SlotType::GcRef) => {
+                vo_jit::DeoptValueKind::GcRef
+            }
             Some(vo_runtime::SlotType::Interface0) => vo_jit::DeoptValueKind::InterfaceHeader,
             Some(vo_runtime::SlotType::Interface1) => vo_jit::DeoptValueKind::InterfaceData,
             None => {

@@ -161,7 +161,7 @@ fn spawn_call_arg_count_mismatch_is_vm_error_instead_of_silent_zero_fill() {
 }
 
 #[test]
-fn spawn_call_rejects_invalid_gcref_arg_044() {
+fn spawn_call_rejects_invalid_gc_base_arg_044() {
     let mut module = gc_test_module_with_root_slots(1);
     module
         .runtime_types
@@ -169,7 +169,7 @@ fn spawn_call_rejects_invalid_gcref_arg_044() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].slot_types = vec![SlotType::GcRef];
+    module.functions[0].slot_types = vec![SlotType::GcBase];
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
         rttid_raw: vo_runtime::ValueRttid::new(0, ValueKind::String).to_raw(),
@@ -184,10 +184,10 @@ fn spawn_call_rejects_invalid_gcref_arg_044() {
 
     match result {
         Ok(Err(VmError::Jit(msg))) => {
-            assert!(msg.contains("spawn_call invalid GcRef"), "{msg}");
+            assert!(msg.contains("spawn_call invalid GcBase"), "{msg}");
         }
-        Ok(other) => panic!("spawn_call invalid GcRef should be a VM error, got {other:?}"),
-        Err(_) => panic!("spawn_call invalid GcRef must not panic"),
+        Ok(other) => panic!("spawn_call invalid GcBase should be a VM error, got {other:?}"),
+        Err(_) => panic!("spawn_call invalid GcBase must not panic"),
     }
     assert!(
         vm.scheduler.ready_queue.is_empty(),
@@ -204,7 +204,7 @@ fn spawn_call_transfer_contract_061_rejects_wrong_object_kind_before_enqueue() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].slot_types = vec![SlotType::GcRef];
+    module.functions[0].slot_types = vec![SlotType::GcBase];
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
         rttid_raw: vo_runtime::ValueRttid::new(0, ValueKind::String).to_raw(),
@@ -256,7 +256,7 @@ fn spawn_call_transfer_contract_061_rejects_empty_param_types_with_gcref_arg_no_
 }
 
 #[test]
-fn spawn_call_transfer_contract_061_stores_canonical_gcref_args() {
+fn spawn_call_transfer_contract_061_rejects_interior_gc_base_args() {
     let mut module = gc_test_module_with_root_slots(1);
     module
         .runtime_types
@@ -264,7 +264,7 @@ fn spawn_call_transfer_contract_061_stores_canonical_gcref_args() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].slot_types = vec![SlotType::GcRef];
+    module.functions[0].slot_types = vec![SlotType::GcBase];
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),
         rttid_raw: vo_runtime::ValueRttid::new(0, ValueKind::String).to_raw(),
@@ -276,12 +276,17 @@ fn spawn_call_transfer_contract_061_stores_canonical_gcref_args() {
     let text = string::create(&mut vm.state.gc, b"canon");
     let interior = unsafe { text.add(1) };
 
-    vm.spawn_call(0, &[interior as u64])
-        .expect("spawn_call should canonicalize valid interior refs");
+    let error = vm
+        .spawn_call(0, &[interior as u64])
+        .expect_err("exact managed-base parameters must reject interior pointers");
 
-    let fiber_id = *vm.scheduler.ready_queue.front().expect("spawned fiber");
-    let fiber = vm.scheduler.get_fiber(fiber_id);
-    assert_eq!(fiber.stack[0], text as u64);
+    match error {
+        VmError::Jit(message) => {
+            assert!(message.contains("interior pointer in GcBase"), "{message}")
+        }
+        other => panic!("interior managed-base argument returned {other:?}"),
+    }
+    assert!(vm.scheduler.ready_queue.is_empty());
 }
 
 #[test]
@@ -292,7 +297,7 @@ fn spawn_call_transfer_contract_061_rejects_empty_param_types_with_gcref_suffix(
     module.functions[0].param_slots = 2;
     module.functions[0].local_slots = 2;
     module.functions[0].recv_slots = 1;
-    module.functions[0].slot_types = vec![SlotType::GcRef, SlotType::GcRef];
+    module.functions[0].slot_types = vec![SlotType::GcBase, SlotType::GcBase];
     refresh_vm_test_function_metadata(&mut module.functions[0]);
     let mut vm = Vm::new();
     vm.module = Some(crate::vm::test_loaded_module(module));
@@ -342,7 +347,7 @@ fn spawn_closure_call_rejects_invalid_root_arg_047() {
     module.functions[0].param_count = 2;
     module.functions[0].param_slots = 2;
     module.functions[0].local_slots = 2;
-    module.functions[0].slot_types = vec![SlotType::GcRef, SlotType::GcRef];
+    module.functions[0].slot_types = vec![SlotType::GcBase, SlotType::GcRef];
     module.functions[0].is_closure = true;
     refresh_vm_test_function_metadata(&mut module.functions[0]);
     let mut vm = Vm::new();
@@ -375,9 +380,9 @@ fn vm_gc_001_spawn_call_marks_spawned_roots_dirty() {
     module.functions[0].param_count = 1;
     module.functions[0].param_slots = 1;
     module.functions[0].local_slots = 1;
-    module.functions[0].slot_types = vec![SlotType::GcRef];
+    module.functions[0].slot_types = vec![SlotType::GcBase];
     module.functions[0].ret_slots = 1;
-    module.functions[0].ret_slot_types = vec![SlotType::GcRef];
+    module.functions[0].ret_slot_types = vec![SlotType::GcBase];
     module.functions[0].code[0] = Instruction::new(Opcode::Return, 0, 1, 0);
     module.functions[0].param_types = vec![TransferType {
         meta_raw: ValueMeta::new(0, ValueKind::String).to_raw(),

@@ -37,6 +37,12 @@ pub(crate) struct FrameCallBuilder<'a> {
     itab_cache: Option<&'a ItabCache>,
 }
 
+#[derive(Clone, Copy)]
+enum ClosureReferenceProof {
+    Unverified,
+    ExactBase,
+}
+
 pub(crate) struct ValidClosureTarget<'a> {
     pub(crate) func_id: u32,
     pub(crate) closure_gcref: GcRef,
@@ -185,7 +191,12 @@ impl<'a> FrameCallBuilder<'a> {
         closure_value: u64,
         arg_start: usize,
     ) -> ExecResult {
-        self.call_closure_borrowed_impl(closure_value, arg_start, None)
+        self.call_closure_borrowed_impl(
+            closure_value,
+            arg_start,
+            None,
+            ClosureReferenceProof::Unverified,
+        )
     }
 
     /// Execute a closure call with the shared dynamic-call proof cache.
@@ -197,7 +208,29 @@ impl<'a> FrameCallBuilder<'a> {
         arg_start: usize,
         ic_entry: &mut vo_runtime::DynCallIC,
     ) -> ExecResult {
-        self.call_closure_borrowed_impl(closure_value, arg_start, Some(ic_entry))
+        self.call_closure_borrowed_impl(
+            closure_value,
+            arg_start,
+            Some(ic_entry),
+            ClosureReferenceProof::Unverified,
+        )
+    }
+
+    /// Execute a closure call whose callee slot is `GcBase` in a loaded,
+    /// verified module.  The slot proof makes the allocation header directly
+    /// accessible while all module-specific target checks remain unchanged.
+    pub(crate) fn call_verified_closure_borrowed_cached(
+        &mut self,
+        closure_value: u64,
+        arg_start: usize,
+        ic_entry: &mut vo_runtime::DynCallIC,
+    ) -> ExecResult {
+        self.call_closure_borrowed_impl(
+            closure_value,
+            arg_start,
+            Some(ic_entry),
+            ClosureReferenceProof::ExactBase,
+        )
     }
 
     fn call_closure_borrowed_impl(
@@ -205,6 +238,7 @@ impl<'a> FrameCallBuilder<'a> {
         closure_value: u64,
         arg_start: usize,
         mut ic_entry: Option<&mut vo_runtime::DynCallIC>,
+        reference_proof: ClosureReferenceProof,
     ) -> ExecResult {
         let stack = self.fiber.stack_ptr();
         if closure_value == 0 {
@@ -217,7 +251,17 @@ impl<'a> FrameCallBuilder<'a> {
             );
         }
 
-        let closure_object = match closure::validate_object(self.gc, closure_value as GcRef) {
+        let validation = match reference_proof {
+            ClosureReferenceProof::Unverified => {
+                closure::validate_object(self.gc, closure_value as GcRef)
+            }
+            // Safety: the only caller of this mode consumes a loaded module;
+            // its verifier requires CallClosure's callee slot to be GcBase.
+            ClosureReferenceProof::ExactBase => unsafe {
+                closure::validate_exact_base(closure_value as GcRef)
+            },
+        };
+        let closure_object = match validation {
             Ok(object) => object,
             Err(error) => {
                 return ExecResult::JitError(format!(
@@ -815,7 +859,7 @@ fn extern_replay_slot_types_require_transfer_metadata(slot_types: &[SlotType]) -
     slot_types.iter().any(|slot| {
         matches!(
             slot,
-            SlotType::GcRef | SlotType::Interface0 | SlotType::Interface1
+            SlotType::GcBase | SlotType::GcRef | SlotType::Interface0 | SlotType::Interface1
         )
     })
 }
@@ -905,6 +949,24 @@ pub(crate) fn validate_gc_visible_payload_values(
     let mut slot_idx = 0usize;
     while slot_idx < slot_types.len() {
         match slot_types[slot_idx] {
+            SlotType::GcBase => {
+                let raw = values[slot_idx];
+                if raw != 0 {
+                    let Some(canonical) = gc.canonicalize_ref(raw as GcRef) else {
+                        return Err(format!(
+                            "{context} invalid GcBase func_id={} name={} slot={} raw=0x{:016x}",
+                            func_id, func_name, slot_idx, raw
+                        ));
+                    };
+                    if canonical as u64 != raw {
+                        return Err(format!(
+                            "{context} interior pointer in GcBase func_id={} name={} slot={} raw=0x{:016x}",
+                            func_id, func_name, slot_idx, raw
+                        ));
+                    }
+                }
+                slot_idx += 1;
+            }
             SlotType::GcRef => {
                 let raw = values[slot_idx];
                 if raw != 0 {

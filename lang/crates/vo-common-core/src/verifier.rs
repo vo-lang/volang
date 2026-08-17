@@ -46,12 +46,14 @@ use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid, INVALID_META_ID};
 
 const RAW_I64_SLOTS: &[SlotType] = &[
     SlotType::Value,
+    SlotType::GcBase,
     SlotType::GcRef,
     SlotType::Interface0,
     SlotType::Interface1,
 ];
 const ANY_SINGLE_SLOT: &[SlotType] = &[
     SlotType::Value,
+    SlotType::GcBase,
     SlotType::GcRef,
     SlotType::Interface0,
     SlotType::Interface1,
@@ -1119,14 +1121,14 @@ fn dynamic_call_extern_param_prefix(name: &str) -> Option<&'static [SlotType]> {
         "dyn_call" => Some(&[
             SlotType::Interface0,
             SlotType::Interface1,
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
         ]),
         "dyn_method" => Some(&[
             SlotType::Interface0,
             SlotType::Interface1,
-            SlotType::GcRef,
-            SlotType::GcRef,
+            SlotType::GcBase,
+            SlotType::GcBase,
             SlotType::Value,
         ]),
         _ => None,
@@ -1221,7 +1223,7 @@ fn validate_named_method_receiver_abi(
                 named.underlying_meta.value_kind()
             )));
         }
-        vec![SlotType::GcRef]
+        vec![SlotType::GcBase]
     } else {
         module
             .slot_layout_for_value_rttid(named.underlying_rttid)
@@ -2049,7 +2051,7 @@ fn validate_global_metadata_refs(module: &Module) -> Result<(), ModuleVerificati
             // metadata identifies their logical value while the global frame
             // stores and scans exactly one canonical object reference.
             validate_value_meta_ref(module, value_meta, &label)?;
-            vec![SlotType::GcRef]
+            vec![SlotType::GcBase]
         } else {
             value_meta_slot_layout(module, value_meta, &label)?
         };
@@ -2242,10 +2244,10 @@ fn validate_error_well_known_contract(module: &Module) -> Result<(), ModuleVerif
             module_invariant("well_known error msg field has no canonical layout".to_string())
         })?;
     if msg_field.type_info.try_value_kind() != Some(ValueKind::String)
-        || msg_layout != [SlotType::GcRef]
+        || msg_layout != [SlotType::GcBase]
     {
         return Err(module_invariant(format!(
-            "well_known error msg field must be string/GcRef, got kind {:?} layout {msg_layout:?}",
+            "well_known error msg field must be string/GcBase, got kind {:?} layout {msg_layout:?}",
             msg_field.type_info.try_value_kind()
         )));
     }
@@ -2927,9 +2929,9 @@ fn verify_function_invariants(
             )));
         }
         for slot in func.heap_ret_gcref_start..end {
-            if func.slot_types[slot as usize] != SlotType::GcRef {
+            if func.slot_types[slot as usize] != SlotType::GcBase {
                 return Err(invariant(format!(
-                    "heap return slot {slot} must be GcRef, got {:?}",
+                    "heap return slot {slot} must be GcBase, got {:?}",
                     func.slot_types[slot as usize]
                 )));
             }
@@ -2985,10 +2987,10 @@ fn verify_function_invariants(
         }
     }
     if func.is_closure
-        && (func.param_slots == 0 || func.slot_types.first() != Some(&SlotType::GcRef))
+        && (func.param_slots == 0 || func.slot_types.first() != Some(&SlotType::GcBase))
     {
         return Err(invariant(
-            "closure functions must reserve GcRef slot 0".to_string(),
+            "closure functions must reserve GcBase slot 0".to_string(),
         ));
     }
     if func.is_closure && func.recv_slots > 0 {
@@ -3411,12 +3413,12 @@ fn verify_instruction_contract(
                 &[SlotType::GcRef],
                 "PtrAdd destination",
             )?;
-            verify_layout(
+            verify_one_of_single_slot_layout(
                 func,
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase, SlotType::GcRef],
                 "PtrAdd pointer",
             )?;
             verify_layout(
@@ -3571,7 +3573,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "StrLen source",
             )
         }
@@ -3584,7 +3586,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.a,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "StrConcat destination",
             )?;
             verify_layout(
@@ -3592,7 +3594,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "StrConcat lhs",
             )?;
             verify_layout(
@@ -3600,7 +3602,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.c,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "StrConcat rhs",
             )
         }
@@ -3610,7 +3612,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.a,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "StrSlice destination",
             )?;
             verify_layout(
@@ -3618,7 +3620,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "StrSlice source",
             )?;
             verify_value_range(func, pc, opcode, inst.c, 2, "StrSlice bounds")
@@ -3642,7 +3644,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "string compare lhs",
             )?;
             verify_layout(
@@ -3650,7 +3652,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.c,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "string compare rhs",
             )
         }
@@ -3728,7 +3730,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "Slice len/cap source",
             )
         }
@@ -3752,7 +3754,7 @@ fn verify_instruction_contract(
                 "MapLen destination",
             )?;
             verify_known_map_object(func, container_layout_facts, pc, opcode, inst.b, "MapLen")?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "MapLen map")
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcBase], "MapLen map")
         }
         Opcode::MapIterInit => {
             verify_layout(
@@ -3776,7 +3778,7 @@ fn verify_instruction_contract(
                 pc,
                 opcode,
                 inst.b,
-                &[SlotType::GcRef],
+                &[SlotType::GcBase],
                 "MapIterInit map",
             )
         }
@@ -3827,7 +3829,7 @@ fn verify_instruction_contract(
                 queue_slot,
                 access,
             )?;
-            verify_layout(func, pc, opcode, queue_slot, &[SlotType::GcRef], "queue")
+            verify_layout(func, pc, opcode, queue_slot, &[SlotType::GcBase], "queue")
         }
         Opcode::SelectBegin => Ok(()),
         Opcode::SelectSend => {
@@ -3931,7 +3933,7 @@ fn verify_instruction_contract(
             pc,
             opcode,
             inst.a,
-            &[SlotType::GcRef],
+            &[SlotType::GcBase],
             "IslandNew destination",
         ),
         Opcode::GoIsland => verify_go_island_contract(func, pc, opcode, inst),
@@ -5513,17 +5515,26 @@ fn verify_one_of_single_slot_layout(
     }
 }
 
-fn verify_local_layout_matches(
+fn layout_flows_to(source: &[SlotType], target: &[SlotType]) -> bool {
+    source.len() == target.len()
+        && source
+            .iter()
+            .zip(target)
+            .all(|(source, target)| source.can_flow_to(*target))
+}
+
+/// Verify that values read from a local range can flow into `target` storage.
+fn verify_local_layout_flows_to(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
     start: u16,
-    expected: &[SlotType],
+    target: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
-    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
+    let count = checked_layout_slot_count(func, pc, start, target.len(), access)?;
     let actual = local_layout(func, pc, start, count, access)?;
-    if actual == expected {
+    if layout_flows_to(actual, target) {
         Ok(())
     } else {
         if matches!(
@@ -5538,26 +5549,27 @@ fn verify_local_layout_matches(
             opcode,
             access,
             slot: start,
-            expected: expected.to_vec(),
+            expected: target.to_vec(),
             actual: actual.to_vec(),
         })
     }
 }
 
-fn verify_storage_layout_compatible(
+/// Verify that values with `source` layout can flow into a local destination.
+fn verify_layout_flows_to_local(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
     start: u16,
-    expected: &[SlotType],
+    source: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
-    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
+    let count = checked_layout_slot_count(func, pc, start, source.len(), access)?;
     let actual = local_layout(func, pc, start, count, access)?;
-    if actual == expected {
+    if layout_flows_to(source, actual) {
         return Ok(());
     }
-    verify_structural_layout(func, pc, opcode, start, expected, access)?;
+    verify_structural_layout(func, pc, opcode, start, source, access)?;
     verify_structural_layout(func, pc, opcode, start, actual, access)?;
     Err(ModuleVerificationError::SlotTypeMismatch {
         func: func.name.clone(),
@@ -5565,35 +5577,9 @@ fn verify_storage_layout_compatible(
         opcode,
         access,
         slot: start,
-        expected: expected.to_vec(),
+        expected: source.to_vec(),
         actual: actual.to_vec(),
     })
-}
-
-fn verify_raw_or_exact_layout_matches(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    start: u16,
-    expected: &[SlotType],
-    access: &'static str,
-) -> Result<(), ModuleVerificationError> {
-    let count = checked_layout_slot_count(func, pc, start, expected.len(), access)?;
-    let actual = local_layout(func, pc, start, count, access)?;
-    if actual == expected {
-        Ok(())
-    } else {
-        verify_structural_layout(func, pc, opcode, start, actual, access)?;
-        Err(ModuleVerificationError::SlotTypeMismatch {
-            func: func.name.clone(),
-            pc,
-            opcode,
-            access,
-            slot: start,
-            expected: expected.to_vec(),
-            actual: actual.to_vec(),
-        })
-    }
 }
 
 fn checked_layout_slot_count(
@@ -5866,12 +5852,12 @@ fn verify_ptr_new_contract(
         &[SlotType::Value],
         "PtrNew metadata",
     )?;
-    verify_layout(
+    verify_one_of_single_slot_layout(
         func,
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase, SlotType::GcRef],
         "PtrNew destination",
     )
 }
@@ -6285,7 +6271,7 @@ fn verify_copy_n_contract(
     let count = inst.c;
     let source = local_layout(func, pc, inst.b, count, "CopyN source")?;
     verify_structural_layout(func, pc, opcode, inst.b, source, "CopyN source")?;
-    verify_local_layout_matches(func, pc, opcode, inst.a, source, "CopyN destination")
+    verify_layout_flows_to_local(func, pc, opcode, inst.a, source, "CopyN destination")
 }
 
 fn verify_copy_contract(
@@ -6296,7 +6282,7 @@ fn verify_copy_contract(
 ) -> Result<(), ModuleVerificationError> {
     let source = local_layout(func, pc, inst.b, 1, "Copy source")?;
     let actual = local_layout(func, pc, inst.a, 1, "Copy destination")?;
-    if actual == source {
+    if layout_flows_to(source, actual) {
         Ok(())
     } else {
         Err(ModuleVerificationError::SlotTypeMismatch {
@@ -6356,7 +6342,7 @@ fn verify_slot_get_contract(
         &elem_layout,
         "SlotGet element span",
     )?;
-    verify_local_layout_matches(
+    verify_layout_flows_to_local(
         func,
         pc,
         opcode,
@@ -6411,7 +6397,7 @@ fn verify_slot_set_contract(
         &elem_layout,
         "SlotSet element span",
     )?;
-    verify_local_layout_matches(func, pc, opcode, src_start, &elem_layout, "SlotSet source")
+    verify_local_layout_flows_to(func, pc, opcode, src_start, &elem_layout, "SlotSet source")
 }
 
 fn verify_dynamic_slot_span(
@@ -6508,7 +6494,7 @@ fn verify_global_get_contract(
     }
     let expected = &globals[global_start as usize..end];
     verify_structural_layout(func, pc, opcode, global_start, expected, "GlobalGet source")?;
-    verify_local_layout_matches(
+    verify_layout_flows_to_local(
         func,
         pc,
         opcode,
@@ -6548,7 +6534,7 @@ fn verify_global_set_contract(
     }
     let expected = &globals[global_start as usize..end];
     verify_structural_layout(func, pc, opcode, global_start, expected, "GlobalSet target")?;
-    verify_local_layout_matches(func, pc, opcode, src_start, expected, "GlobalSet source")
+    verify_local_layout_flows_to(func, pc, opcode, src_start, expected, "GlobalSet source")
 }
 
 fn verify_ptr_get_contract(
@@ -6577,15 +6563,15 @@ fn verify_ptr_get_contract(
             ),
         ));
     }
-    verify_layout(
+    verify_one_of_single_slot_layout(
         func,
         pc,
         opcode,
         ptr_slot,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase, SlotType::GcRef],
         "PtrGet pointer",
     )?;
-    verify_local_layout_matches(
+    verify_layout_flows_to_local(
         func,
         pc,
         opcode,
@@ -6616,15 +6602,15 @@ fn verify_ptr_set_contract(
             ),
         ));
     }
-    verify_layout(
+    verify_one_of_single_slot_layout(
         func,
         pc,
         opcode,
         ptr_slot,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase, SlotType::GcRef],
         "PtrSet pointer",
     )?;
-    verify_raw_or_exact_layout_matches(func, pc, opcode, src_slot, &value_layout, "PtrSet source")?;
+    verify_local_layout_flows_to(func, pc, opcode, src_slot, &value_layout, "PtrSet source")?;
     Ok(())
 }
 
@@ -6636,22 +6622,19 @@ fn verify_ptr_set_n_contract(
 ) -> Result<(), ModuleVerificationError> {
     let value_layout = ptr_value_layout(func, pc, opcode)?;
     verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
-    verify_layout(
+    verify_one_of_single_slot_layout(
         func,
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase, SlotType::GcRef],
         "PtrSetN pointer",
     )?;
     let count =
         checked_metadata_layout_slots(func, pc, opcode, &value_layout, "PtrSetN source layout")?;
     let source = local_layout(func, pc, inst.c, count, "PtrSetN source")?;
-    verify_local_layout_matches(func, pc, opcode, inst.c, &value_layout, "PtrSetN source")?;
-    if source
-        .iter()
-        .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1))
-    {
+    verify_local_layout_flows_to(func, pc, opcode, inst.c, &value_layout, "PtrSetN source")?;
+    if source.iter().any(|slot| slot.needs_write_barrier()) {
         return Err(ModuleVerificationError::SlotTypeMismatch {
             func: func.name.clone(),
             pc,
@@ -6660,9 +6643,12 @@ fn verify_ptr_set_n_contract(
             slot: inst.c,
             expected: source
                 .iter()
-                .map(|st| match st {
-                    SlotType::GcRef | SlotType::Interface1 => SlotType::Value,
-                    other => *other,
+                .map(|slot| {
+                    if slot.needs_write_barrier() {
+                        SlotType::Value
+                    } else {
+                        *slot
+                    }
                 })
                 .collect(),
             actual: source.to_vec(),
@@ -6813,7 +6799,7 @@ fn verify_return_contract(
             pc,
             opcode,
             inst.a,
-            &vec![SlotType::GcRef; inst.b as usize],
+            &vec![SlotType::GcBase; inst.b as usize],
             "Return heap named returns",
         )?;
         return Ok(());
@@ -6831,7 +6817,7 @@ fn verify_return_contract(
         ));
     }
     let expected = &func.ret_slot_types[..inst.b as usize];
-    verify_local_layout_matches(func, pc, opcode, inst.a, expected, "Return values")?;
+    verify_local_layout_flows_to(func, pc, opcode, inst.a, expected, "Return values")?;
 
     if func.error_ret_slot >= 0 {
         let error_offset = func.error_ret_slot as u16;
@@ -6876,7 +6862,7 @@ fn verify_static_call_contract(
                 ),
             )
         })?;
-    verify_layout(
+    verify_local_layout_flows_to(
         func,
         pc,
         opcode,
@@ -6893,7 +6879,7 @@ fn verify_static_call_contract(
             access: "Call return buffer",
         }
     })?;
-    verify_local_layout_matches(
+    verify_layout_flows_to_local(
         func,
         pc,
         opcode,
@@ -6917,7 +6903,7 @@ fn verify_dynamic_call_contract(
             pc,
             opcode,
             inst.a,
-            &[SlotType::GcRef],
+            &[SlotType::GcBase],
             "CallClosure callee",
         )?;
         call_layout(func, pc, opcode)?
@@ -7001,8 +6987,8 @@ fn verify_dynamic_call_contract(
         arg_layout.len(),
         "dynamic call returns",
     )?;
-    verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "dynamic call args")?;
-    verify_local_layout_matches(
+    verify_local_layout_flows_to(func, pc, opcode, inst.b, &arg_layout, "dynamic call args")?;
+    verify_layout_flows_to_local(
         func,
         pc,
         opcode,
@@ -7132,8 +7118,8 @@ fn verify_call_extern_contract(
             ),
         ));
     }
-    verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "CallExtern args")?;
-    verify_local_layout_matches(func, pc, opcode, inst.a, &ret_layout, "CallExtern returns")
+    verify_local_layout_flows_to(func, pc, opcode, inst.c, &arg_layout, "CallExtern args")?;
+    verify_layout_flows_to_local(func, pc, opcode, inst.a, &ret_layout, "CallExtern returns")
 }
 
 fn verify_str_new_contract(
@@ -7158,7 +7144,7 @@ fn verify_str_new_contract(
         pc,
         Opcode::StrNew,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "StrNew destination",
     )
 }
@@ -7174,7 +7160,7 @@ fn verify_str_index_contract(
         pc,
         opcode,
         inst.b,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "string source",
     )?;
     verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "string index")?;
@@ -7227,7 +7213,7 @@ fn verify_array_new_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "ArrayNew destination",
     )?;
     verify_layout(
@@ -7277,7 +7263,7 @@ fn verify_slice_new_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "SliceNew destination",
     )?;
     verify_layout(
@@ -7338,12 +7324,12 @@ fn verify_indexed_get_contract(
     let inst = ctx.inst;
     verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let elem_layout = elem_layout_for_indexed(func, pc, opcode)?;
-    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], access.base)?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcBase], access.base)?;
     verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], access.index)?;
     if elem_layout.is_empty() {
         Ok(())
     } else {
-        verify_storage_layout_compatible(func, pc, opcode, inst.a, &elem_layout, access.value)
+        verify_layout_flows_to_local(func, pc, opcode, inst.a, &elem_layout, access.value)
     }
 }
 
@@ -7358,12 +7344,12 @@ fn verify_indexed_set_contract(
     let inst = ctx.inst;
     verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let elem_layout = elem_layout_for_indexed(func, pc, opcode)?;
-    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], access.base)?;
+    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcBase], access.base)?;
     verify_layout(func, pc, opcode, inst.b, &[SlotType::Value], access.index)?;
     if elem_layout.is_empty() {
         Ok(())
     } else {
-        verify_storage_layout_compatible(func, pc, opcode, inst.c, &elem_layout, access.value)
+        verify_local_layout_flows_to(func, pc, opcode, inst.c, &elem_layout, access.value)
     }
 }
 
@@ -7379,7 +7365,7 @@ fn verify_indexed_addr_contract(
     verify_reserved_zero(func, pc, opcode, inst.flags.into(), "flags")?;
     let _ = elem_layout_for_indexed(func, pc, opcode)?;
     verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], access.value)?;
-    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], access.base)?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcBase], access.base)?;
     verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], access.index)
 }
 
@@ -7411,7 +7397,7 @@ fn verify_slice_slice_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "SliceSlice destination",
     )?;
     if inline_view {
@@ -7436,7 +7422,7 @@ fn verify_slice_slice_contract(
             pc,
             opcode,
             inst.b,
-            &[SlotType::GcRef],
+            &[SlotType::GcBase],
             "SliceSlice source",
         )?;
     }
@@ -7464,7 +7450,7 @@ fn verify_slice_append_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "SliceAppend destination",
     )?;
     verify_layout(
@@ -7472,7 +7458,7 @@ fn verify_slice_append_contract(
         pc,
         opcode,
         inst.b,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "SliceAppend slice",
     )?;
     verify_layout(
@@ -7499,7 +7485,7 @@ fn verify_slice_append_contract(
     if elem_layout.is_empty() {
         Ok(())
     } else {
-        verify_storage_layout_compatible(
+        verify_local_layout_flows_to(
             func,
             pc,
             opcode,
@@ -7540,7 +7526,7 @@ fn verify_map_new_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "MapNew destination",
     )?;
     verify_layout(
@@ -8102,9 +8088,9 @@ fn verify_map_get_contract(
             access: "MapGet ok",
         });
     }
-    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "MapGet map")?;
-    verify_storage_layout_compatible(func, pc, opcode, inst.c, &key_layout, "MapGet key")?;
-    verify_storage_layout_compatible(func, pc, opcode, inst.a, &val_layout, "MapGet value")?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcBase], "MapGet map")?;
+    verify_local_layout_flows_to(func, pc, opcode, inst.c, &key_layout, "MapGet key")?;
+    verify_layout_flows_to_local(func, pc, opcode, inst.a, &val_layout, "MapGet value")?;
     if has_ok {
         verify_layout(
             func,
@@ -8142,9 +8128,9 @@ fn verify_map_set_contract(
             val_layout: &val_layout,
         },
     )?;
-    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], "MapSet map")?;
-    verify_storage_layout_compatible(func, pc, opcode, inst.b, &key_layout, "MapSet key")?;
-    verify_storage_layout_compatible(func, pc, opcode, inst.c, &val_layout, "MapSet value")
+    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcBase], "MapSet map")?;
+    verify_local_layout_flows_to(func, pc, opcode, inst.b, &key_layout, "MapSet key")?;
+    verify_local_layout_flows_to(func, pc, opcode, inst.c, &val_layout, "MapSet value")
 }
 
 fn verify_map_delete_contract(
@@ -8171,10 +8157,10 @@ fn verify_map_delete_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "MapDelete map",
     )?;
-    verify_storage_layout_compatible(func, pc, opcode, inst.b, &key_layout, "MapDelete key")
+    verify_local_layout_flows_to(func, pc, opcode, inst.b, &key_layout, "MapDelete key")
 }
 
 fn verify_map_iter_next_contract(
@@ -8347,7 +8333,7 @@ fn verify_queue_new_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "QueueNew destination",
     )?;
     verify_layout(
@@ -8391,10 +8377,10 @@ fn verify_queue_send_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "QueueSend queue",
     )?;
-    verify_local_layout_matches(func, pc, opcode, inst.b, &elem_layout, "QueueSend value")
+    verify_local_layout_flows_to(func, pc, opcode, inst.b, &elem_layout, "QueueSend value")
 }
 
 fn verify_queue_recv_contract(
@@ -8421,10 +8407,10 @@ fn verify_queue_recv_contract(
         pc,
         opcode,
         inst.b,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "QueueRecv queue",
     )?;
-    verify_local_layout_matches(func, pc, opcode, inst.a, &elem_layout, "QueueRecv value")?;
+    verify_layout_flows_to_local(func, pc, opcode, inst.a, &elem_layout, "QueueRecv value")?;
     if inst.recv_has_ok() {
         verify_layout(
             func,
@@ -8461,10 +8447,10 @@ fn verify_select_send_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "SelectSend queue",
     )?;
-    verify_local_layout_matches(func, pc, opcode, inst.b, &elem_layout, "SelectSend value")
+    verify_local_layout_flows_to(func, pc, opcode, inst.b, &elem_layout, "SelectSend value")
 }
 
 fn verify_select_recv_contract(
@@ -8491,10 +8477,10 @@ fn verify_select_recv_contract(
         pc,
         opcode,
         inst.b,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "SelectRecv queue",
     )?;
-    verify_local_layout_matches(func, pc, opcode, inst.a, &elem_layout, "SelectRecv value")?;
+    verify_layout_flows_to_local(func, pc, opcode, inst.a, &elem_layout, "SelectRecv value")?;
     if inst.recv_has_ok() {
         verify_layout(
             func,
@@ -8552,7 +8538,7 @@ fn verify_closure_new_contract(
         pc,
         Opcode::ClosureNew,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "ClosureNew destination",
     )?;
     Ok(())
@@ -8576,7 +8562,7 @@ fn verify_closure_get_contract(
         pc,
         Opcode::ClosureGet,
         0,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "ClosureGet closure",
     )?;
     let capture_slot = inst.b as usize;
@@ -8592,7 +8578,7 @@ fn verify_closure_get_contract(
             ),
         ));
     };
-    verify_layout(
+    verify_layout_flows_to_local(
         func,
         pc,
         Opcode::ClosureGet,
@@ -8616,7 +8602,7 @@ fn verify_shared_call_shape_contract(
             pc,
             opcode,
             inst.a,
-            &[SlotType::GcRef],
+            &[SlotType::GcBase],
             "closure callee",
         )?;
         let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
@@ -8632,7 +8618,7 @@ fn verify_shared_call_shape_contract(
                 ),
             ));
         }
-        verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "closure call args")
+        verify_local_layout_flows_to(func, pc, opcode, inst.b, &arg_layout, "closure call args")
     } else {
         let callee_id = inst.call_shape_static_func_id();
         let callee = module.functions.get(callee_id as usize).ok_or_else(|| {
@@ -8804,7 +8790,7 @@ fn verify_iface_assert_contract(
             ),
         ));
     }
-    verify_local_layout_matches(
+    verify_layout_flows_to_local(
         func,
         pc,
         opcode,
@@ -9071,9 +9057,16 @@ fn verify_iface_assign_source(
         | ValueKind::Map
         | ValueKind::Channel
         | ValueKind::Closure
-        | ValueKind::Pointer
         | ValueKind::Port
         | ValueKind::Island => verify_layout(
+            func,
+            pc,
+            opcode,
+            src_slot,
+            &[SlotType::GcBase],
+            "IfaceAssign source",
+        ),
+        ValueKind::Pointer => verify_layout(
             func,
             pc,
             opcode,
@@ -9112,7 +9105,7 @@ fn verify_go_island_contract(
         pc,
         opcode,
         inst.a,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "GoIsland island",
     )?;
     verify_layout(
@@ -9120,7 +9113,7 @@ fn verify_go_island_contract(
         pc,
         opcode,
         inst.b,
-        &[SlotType::GcRef],
+        &[SlotType::GcBase],
         "GoIsland closure",
     )?;
     let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
@@ -9136,7 +9129,7 @@ fn verify_go_island_contract(
             ),
         ));
     }
-    verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "GoIsland args")
+    verify_local_layout_flows_to(func, pc, opcode, inst.c, &arg_layout, "GoIsland args")
 }
 
 #[cfg(test)]

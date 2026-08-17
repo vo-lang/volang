@@ -155,7 +155,7 @@ fn expr_runtime_slot_types(
     ) || is_global_array_expr(expr, ctx, func, info)
         || is_captured_array_expr(expr, func, info)
     {
-        Ok(vec![SlotType::GcRef])
+        Ok(vec![SlotType::GcBase])
     } else {
         info.try_type_slot_types(info.expr_type(expr.id))
             .map_err(CodegenError::Internal)
@@ -198,7 +198,7 @@ fn is_global_array_expr(
     }
 }
 
-/// Get the GcRef slot from a StorageKind.
+/// Get the managed-reference slot from a heap-backed `StorageKind`.
 pub fn get_gcref_slot(storage: &StorageKind) -> Option<u16> {
     match storage {
         StorageKind::HeapBoxed { gcref_slot, .. } => Some(*gcref_slot),
@@ -385,7 +385,7 @@ pub fn compile_expr_to(
                         if info.is_array(type_key) {
                             func.emit_op(Opcode::ClosureGet, dst, capture_index, 0);
                         } else {
-                            let capture_ptr = func.alloc_slots(&[SlotType::GcRef]);
+                            let capture_ptr = func.alloc_slots(&[SlotType::GcBase]);
                             func.emit_op(Opcode::ClosureGet, capture_ptr, capture_index, 0);
                             let value_slots = info.type_slot_count(type_key);
                             func.emit_ptr_get(dst, capture_ptr, 0, value_slots);

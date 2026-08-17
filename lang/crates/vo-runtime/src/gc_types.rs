@@ -145,7 +145,7 @@ impl<'a> ClosureScanLayout<'a> {
 
 /// Type-safe write barrier for mixed-slot values.
 ///
-/// Only barriers slots that are actually GcRefs (SlotType::GcRef) or
+/// Only barriers slots that are managed references (`GcBase`/`GcRef`) or
 /// interface data slots (SlotType::Interface0 + data_is_gc_ref check).
 /// Avoids UB from passing non-pointer values (int, float, slot0 metadata)
 /// to write_barrier, which would dereference them as GcHeader pointers.
@@ -171,7 +171,7 @@ pub fn try_typed_write_barrier(
     let mut i = 0;
     while i < slot_types.len() {
         match slot_types[i] {
-            SlotType::GcRef => {
+            SlotType::GcBase | SlotType::GcRef => {
                 if vals[i] != 0 {
                     gc.write_barrier(parent, vals[i] as GcRef);
                 }
@@ -200,9 +200,12 @@ pub fn try_typed_write_barrier(
 
 #[inline]
 fn slot_types_may_contain_gc_refs(slot_types: &[SlotType]) -> bool {
-    slot_types
-        .iter()
-        .any(|slot_type| matches!(slot_type, SlotType::GcRef | SlotType::Interface0))
+    slot_types.iter().any(|slot_type| {
+        matches!(
+            slot_type,
+            SlotType::GcBase | SlotType::GcRef | SlotType::Interface0
+        )
+    })
 }
 
 /// Type-safe write barrier driven by ValueMeta (for JIT paths that don't have slot_types directly).
@@ -633,7 +636,9 @@ where
     V: FnMut(GcRef),
 {
     match slot_types.get(index).copied() {
-        Some(SlotType::GcRef) if slots[index] != 0 => visit(slots[index] as GcRef),
+        Some(SlotType::GcBase | SlotType::GcRef) if slots[index] != 0 => {
+            visit(slots[index] as GcRef)
+        }
         Some(SlotType::Interface1)
             if index > 0
                 && slot_types[index - 1] == SlotType::Interface0
@@ -902,8 +907,8 @@ pub unsafe fn trace_object_children_with_context<'a, F, V>(
 
         ValueKind::Map => {
             // Real maps: created by map::create with DATA_SLOTS=3 (MapData layout).
-            // PtrNew heap-boxed map variables: kind=Struct (fixed by get_boxing_meta),
-            // so they never reach this branch. Any Map with wrong slots is a bug.
+            // PtrNew boxes carry the value-slots allocation flag and return above,
+            // so every object reaching this branch has the runtime MapData layout.
             assert!(
                 gc_header.slots == map::DATA_SLOTS,
                 "scan_object: Map object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
@@ -1477,7 +1482,7 @@ unsafe fn trace_struct_children<V>(
     let mut i = 0;
     while i < meta.slot_types.len() {
         let st = meta.slot_types[i];
-        if st == SlotType::GcRef {
+        if st.is_managed_ref() {
             let child = unsafe { Gc::read_slot(obj, i) };
             if child != 0 {
                 visit(child as GcRef);

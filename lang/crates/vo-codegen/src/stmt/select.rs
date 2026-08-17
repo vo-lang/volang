@@ -78,7 +78,7 @@ pub(crate) fn compile_select(
             }
             Some(CommClause::Send(send)) => {
                 let queue_expr_reg = crate::expr::compile_expr(&send.chan, ctx, func, info)?;
-                let queue_reg = func.alloc_slots(&[SlotType::GcRef]);
+                let queue_reg = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_copy(queue_reg, queue_expr_reg, 1);
                 let queue_type = info.expr_type(send.chan.id);
                 let elem_type = info.queue_elem_type(queue_type);
@@ -102,7 +102,7 @@ pub(crate) fn compile_select(
             }
             Some(CommClause::Recv(recv)) => {
                 let queue_expr_reg = crate::expr::compile_expr(&recv.expr, ctx, func, info)?;
-                let queue_reg = func.alloc_slots(&[SlotType::GcRef]);
+                let queue_reg = func.alloc_slots(&[SlotType::GcBase]);
                 func.emit_copy(queue_reg, queue_expr_reg, 1);
                 let queue_type = info.expr_type(recv.expr.id);
                 let elem_slots = info.queue_elem_slots(queue_type);

@@ -41,7 +41,7 @@ fn module_verifier_rejects_map_read_layout_drift_from_map_new_034() {
     module.constants.push(Constant::Int((1 << 16) | (1 << 1)));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -60,7 +60,7 @@ fn module_verifier_rejects_map_read_layout_drift_from_map_new_034() {
         InstructionMetadata::None,
         InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::MapGet {
@@ -76,7 +76,7 @@ fn module_verifier_rejects_map_read_layout_drift_from_map_new_034() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("MapGet value layout [Value] does not match known map value layout [GcRef]"),
+        msg.contains("MapGet value layout [Value] does not match known map value layout [GcBase]"),
         "{msg}"
     );
 }
@@ -87,7 +87,7 @@ fn module_verifier_rejects_map_get_raw_value_layout_into_interface_destination_0
     module.constants.push(Constant::Int((1 << 16) | (2 << 1)));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Interface0,
         SlotType::Interface1,
         SlotType::Value,
@@ -136,7 +136,7 @@ fn module_verifier_rejects_map_iter_layout_drift_from_map_new_034() {
     module.constants.push(Constant::Int(0));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -145,7 +145,7 @@ fn module_verifier_rejects_map_iter_layout_drift_from_map_new_034() {
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
     ]);
@@ -161,7 +161,7 @@ fn module_verifier_rejects_map_iter_layout_drift_from_map_new_034() {
         InstructionMetadata::None,
         InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::MapIterNext {
@@ -177,7 +177,7 @@ fn module_verifier_rejects_map_iter_layout_drift_from_map_new_034() {
     let msg = err.to_string();
     assert!(
         msg.contains(
-            "MapIterNext value layout [Value] does not match known map value layout [GcRef]"
+            "MapIterNext value layout [Value] does not match known map value layout [GcBase]"
         ),
         "{msg}"
     );
@@ -228,7 +228,7 @@ fn module_verifier_preserves_map_iter_fact_across_iter_next_037() {
     module.constants.push(Constant::Int(0));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -237,9 +237,9 @@ fn module_verifier_preserves_map_iter_fact_across_iter_next_037() {
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -258,12 +258,12 @@ fn module_verifier_preserves_map_iter_fact_across_iter_next_037() {
         InstructionMetadata::None,
         InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::MapIterNext {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::MapIterNext {
             key_layout: vec![SlotType::Value],
@@ -278,7 +278,7 @@ fn module_verifier_preserves_map_iter_fact_across_iter_next_037() {
     let msg = err.to_string();
     assert!(
         msg.contains(
-            "MapIterNext value layout [Value] does not match known map value layout [GcRef]"
+            "MapIterNext value layout [Value] does not match known map value layout [GcBase]"
         ),
         "{msg}"
     );
@@ -286,7 +286,7 @@ fn module_verifier_preserves_map_iter_fact_across_iter_next_037() {
 
 #[test]
 fn module_verifier_rejects_map_iter_next_ok_slot_layout_drift_039() {
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend_from_slice(&MAP_ITER_SLOT_TYPES);
     slot_types.extend_from_slice(&[SlotType::Value, SlotType::Value, SlotType::GcRef]);
     let module = map_iter_next_module_039(
@@ -303,7 +303,7 @@ fn module_verifier_rejects_map_iter_next_ok_slot_layout_drift_039() {
 
 #[test]
 fn module_verifier_rejects_map_iter_next_ok_slot_aliases_iterator_039() {
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend_from_slice(&MAP_ITER_SLOT_TYPES);
     slot_types.extend_from_slice(&[SlotType::Value, SlotType::Value, SlotType::Value]);
     let module = map_iter_next_module_039(
@@ -321,7 +321,7 @@ fn module_verifier_rejects_map_iter_next_ok_slot_aliases_iterator_039() {
 
 #[test]
 fn module_verifier_rejects_map_iter_next_output_range_aliases_iterator_039() {
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend_from_slice(&MAP_ITER_SLOT_TYPES);
     slot_types.extend_from_slice(&[SlotType::Value, SlotType::Value, SlotType::Value]);
     let module = map_iter_next_module_039(
@@ -340,7 +340,7 @@ fn module_verifier_rejects_map_iter_next_output_range_aliases_iterator_039() {
 
 #[test]
 fn module_verifier_rejects_map_iter_next_ok_slot_aliases_key_output_039() {
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend_from_slice(&MAP_ITER_SLOT_TYPES);
     slot_types.extend_from_slice(&[SlotType::Value, SlotType::Value, SlotType::Value]);
     let module = map_iter_next_module_039(
@@ -359,7 +359,7 @@ fn module_verifier_rejects_map_iter_next_ok_slot_aliases_key_output_039() {
 
 #[test]
 fn module_verifier_rejects_map_iter_next_ok_slot_aliases_value_output_039() {
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend_from_slice(&MAP_ITER_SLOT_TYPES);
     slot_types.extend_from_slice(&[SlotType::Value, SlotType::Value, SlotType::Value]);
     let module = map_iter_next_module_039(
@@ -427,7 +427,7 @@ fn module_verifier_rejects_queue_recv_layout_drift_from_queue_new_034() {
     module.constants.push(Constant::Int(0));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -442,7 +442,7 @@ fn module_verifier_rejects_queue_recv_layout_drift_from_queue_new_034() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::QueueLayout {
-            elem_layout: vec![SlotType::GcRef],
+            elem_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::QueueLayout {
             elem_layout: vec![SlotType::Value],
@@ -456,7 +456,7 @@ fn module_verifier_rejects_queue_recv_layout_drift_from_queue_new_034() {
     let msg = err.to_string();
     assert!(
         msg.contains(
-            "QueueRecv element layout [Value] does not match known queue element layout [GcRef]"
+            "QueueRecv element layout [Value] does not match known queue element layout [GcBase]"
         ),
         "{msg}"
     );
@@ -467,7 +467,7 @@ fn module_verifier_accepts_wide_queue_layout_metadata() {
     const ELEM_SLOTS: usize = 300;
 
     let mut module = Module::new("wide-queue-metadata-width".to_string());
-    let mut slot_types = vec![SlotType::GcRef];
+    let mut slot_types = vec![SlotType::GcBase];
     slot_types.extend(core::iter::repeat_n(SlotType::Value, ELEM_SLOTS));
     let send_result = slot_types.len() as u16;
     slot_types.push(SlotType::Value);
@@ -531,7 +531,7 @@ fn module_verifier_rejects_map_len_on_known_queue_035() {
     module.constants.push(Constant::Int(0));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -546,7 +546,7 @@ fn module_verifier_rejects_map_len_on_known_queue_035() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::QueueLayout {
-            elem_layout: vec![SlotType::GcRef],
+            elem_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
     ];
@@ -571,7 +571,7 @@ fn module_verifier_rejects_map_iter_init_on_known_queue_035() {
     ));
     module.constants.push(Constant::Int(0));
 
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend_from_slice(&MAP_ITER_SLOT_TYPES);
     let mut func = function_with_slot_types(slot_types);
     func.code = vec![
@@ -584,7 +584,7 @@ fn module_verifier_rejects_map_iter_init_on_known_queue_035() {
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::QueueLayout {
-            elem_layout: vec![SlotType::GcRef],
+            elem_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
     ];
@@ -610,7 +610,7 @@ fn module_verifier_rejects_queue_close_on_known_map_035() {
     module.constants.push(Constant::Int(0));
 
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),
@@ -653,14 +653,14 @@ fn module_verifier_preserves_container_fact_across_zero_slot_select_recv_without
     module.constants.push(Constant::Int((1 << 16) | (1 << 1)));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
     ]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
@@ -677,7 +677,7 @@ fn module_verifier_preserves_container_fact_across_zero_slot_select_recv_without
         InstructionMetadata::None,
         InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::QueueLayout {
@@ -705,7 +705,7 @@ fn module_verifier_preserves_container_fact_across_zero_slot_select_recv_without
 
     let msg = err.to_string();
     assert!(
-        msg.contains("MapGet value layout [Value] does not match known map value layout [GcRef]"),
+        msg.contains("MapGet value layout [Value] does not match known map value layout [GcBase]"),
         "{msg}"
     );
 }
@@ -728,6 +728,7 @@ fn module_verifier_drops_container_fact_across_large_static_call_return_035() {
     module.constants.push(Constant::Int((1 << 16) | (1 << 1)));
 
     let mut caller_slots = vec![SlotType::GcRef; 256];
+    caller_slots[0] = SlotType::GcBase;
     caller_slots.extend_from_slice(&[
         SlotType::Value,
         SlotType::Value,
@@ -749,7 +750,7 @@ fn module_verifier_drops_container_fact_across_large_static_call_return_035() {
         InstructionMetadata::None,
         InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::None,
@@ -761,10 +762,12 @@ fn module_verifier_drops_container_fact_across_large_static_call_return_035() {
     ];
     caller.has_calls = true;
 
-    let mut callee = function_with_slot_types(vec![SlotType::GcRef; 256]);
+    let mut callee_slots = vec![SlotType::GcRef; 256];
+    callee_slots[0] = SlotType::GcBase;
+    let mut callee = function_with_slot_types(callee_slots.clone());
     callee.name = "large_ret".to_string();
     callee.ret_slots = 256;
-    callee.ret_slot_types = vec![SlotType::GcRef; 256];
+    callee.ret_slot_types = callee_slots;
 
     module.functions.push(caller);
     module.functions.push(callee);
@@ -790,11 +793,11 @@ fn module_verifier_drops_container_fact_across_slot_set_dynamic_write_038() {
     module.constants.push(Constant::Int((1 << 16) | (1 << 1)));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -815,14 +818,14 @@ fn module_verifier_drops_container_fact_across_slot_set_dynamic_write_038() {
         InstructionMetadata::None,
         InstructionMetadata::MapNew {
             key_layout: vec![SlotType::Value],
-            val_layout: vec![SlotType::GcRef],
+            val_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::None,
         InstructionMetadata::SlotLayout {
             array_len: 1,
-            elem_layout: vec![SlotType::GcRef],
+            elem_layout: vec![SlotType::GcBase],
         },
         InstructionMetadata::None,
         InstructionMetadata::MapGet {
@@ -849,7 +852,7 @@ fn module_verifier_rejects_dynamic_call_ret_start_overflow_without_panic_038() {
     module.constants.push(Constant::Int(0));
 
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),
@@ -864,8 +867,8 @@ fn module_verifier_rejects_dynamic_call_ret_start_overflow_without_panic_038() {
             val_layout: vec![SlotType::Value],
         },
         InstructionMetadata::CallLayout {
-            arg_layout: vec![SlotType::GcRef],
-            ret_layout: vec![SlotType::GcRef],
+            arg_layout: vec![SlotType::GcBase],
+            ret_layout: vec![SlotType::GcBase],
         },
     ];
     func.has_calls = true;
@@ -1021,7 +1024,7 @@ fn module_verifier_rejects_map_iter_gc_slot_layout_drift_033() {
 #[test]
 fn module_verifier_accepts_wide_map_set_key_layout_metadata() {
     let mut module = Module::new("map-set-key-abi-width".to_string());
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value];
     slot_types.extend(vec![SlotType::Value; 256]);
     slot_types.push(SlotType::Value);
     let mut func = function_with_slot_types(slot_types);
@@ -1044,7 +1047,7 @@ fn module_verifier_accepts_wide_map_set_key_layout_metadata() {
 #[test]
 fn module_verifier_accepts_wide_map_set_value_layout_metadata() {
     let mut module = Module::new("map-set-value-abi-width".to_string());
-    let mut slot_types = vec![SlotType::GcRef, SlotType::Value, SlotType::Value];
+    let mut slot_types = vec![SlotType::GcBase, SlotType::Value, SlotType::Value];
     slot_types.extend(vec![SlotType::Value; 256]);
     let mut func = function_with_slot_types(slot_types);
     func.code = vec![
@@ -1067,7 +1070,7 @@ fn module_verifier_accepts_wide_map_set_value_layout_metadata() {
 fn module_verifier_accepts_wide_map_get_value_layout_metadata() {
     let mut module = Module::new("map-get-value-abi-width".to_string());
     let mut slot_types = vec![SlotType::Value; 32768];
-    slot_types.push(SlotType::GcRef);
+    slot_types.push(SlotType::GcBase);
     slot_types.push(SlotType::Value);
     slot_types.push(SlotType::Value);
     let mut func = function_with_slot_types(slot_types);
@@ -1192,7 +1195,7 @@ fn module_verifier_rejects_retired_element_layout_flags_029() {
     module.constants.push(Constant::Int(16));
     let mut func = function_with_slot_types(vec![
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
     ]);
@@ -1222,7 +1225,7 @@ fn module_verifier_accepts_map_get_direct_key_operand_029() {
     module.constants.push(Constant::Int(7));
     let mut func = function_with_slot_types(vec![
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
     ]);
@@ -1248,7 +1251,7 @@ fn module_verifier_accepts_map_set_direct_key_operand_029() {
     let mut module = Module::new("map-set-direct-key".to_string());
     module.constants.push(Constant::Int(7));
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -1274,7 +1277,7 @@ fn module_verifier_accepts_map_delete_direct_key_operand_029() {
     let mut module = Module::new("map-delete-direct-key".to_string());
     module.constants.push(Constant::Int(7));
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::MapDelete, 0, 1, 0),
@@ -1296,7 +1299,7 @@ fn module_verifier_uses_elem_layout_without_auxiliary_register_030() {
     module.constants.push(Constant::Int(8));
     let mut func = function_with_slot_types(vec![
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
     ]);
@@ -1326,7 +1329,7 @@ fn module_verifier_allows_control_flow_merged_map_get_key_030() {
     module.constants.push(Constant::Int(11));
     let mut func = function_with_slot_types(vec![
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Value,
         SlotType::Value,
         SlotType::Value,
@@ -1358,7 +1361,7 @@ fn module_verifier_allows_ptr_get_n_to_produce_map_key_031() {
     module.constants.push(Constant::Int(7));
     let mut func = function_with_slot_types(vec![
         SlotType::Value,
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::GcRef,
         SlotType::Value,
         SlotType::Value,
@@ -1389,7 +1392,7 @@ fn module_verifier_allows_ptr_get_n_to_produce_map_key_031() {
 fn module_verifier_uses_precise_elem_metadata() {
     let mut module = Module::new("precise-element-layout".to_string());
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::GcRef, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcRef, SlotType::GcBase, SlotType::Value]);
     func.code = vec![Instruction::new(Opcode::SliceGet, 0, 1, 2)];
     func.instruction_metadata = vec![InstructionMetadata::ElemLayout {
         elem_bytes: 8,

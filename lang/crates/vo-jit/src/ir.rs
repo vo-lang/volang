@@ -89,6 +89,7 @@ impl ValueType {
         match slot_type {
             SlotType::Value => Self::Word,
             SlotType::Float => Self::Float64,
+            SlotType::GcBase => Self::GcRef(RootProvenance::ExactBase),
             SlotType::GcRef => Self::GcRef(provenance),
             SlotType::Interface0 => Self::InterfaceHeader,
             SlotType::Interface1 => Self::InterfaceData,
@@ -814,7 +815,7 @@ impl FunctionIr {
         let mut exact = func
             .ret_slot_types
             .iter()
-            .map(|slot_type| *slot_type == SlotType::GcRef)
+            .map(SlotType::is_managed_ref)
             .collect::<Vec<_>>();
         let mut saw_return = false;
         for (pc, instruction) in self.instructions.iter().copied().enumerate() {
@@ -1295,7 +1296,7 @@ fn compute_aliased_memory_live_out(
 #[inline]
 fn root_slot_for_cell(slot_types: &[SlotType], slot: u16) -> Option<u16> {
     match slot_types.get(usize::from(slot)).copied()? {
-        SlotType::GcRef | SlotType::Interface0 => Some(slot),
+        SlotType::GcBase | SlotType::GcRef | SlotType::Interface0 => Some(slot),
         SlotType::Interface1 => slot
             .checked_sub(1)
             .filter(|&header| slot_types.get(usize::from(header)) == Some(&SlotType::Interface0)),
@@ -1372,7 +1373,7 @@ fn compute_sparse_frame_liveness(
                     .iter()
                     .enumerate()
                     .filter(|(slot, ty)| {
-                        **ty == SlotType::GcRef
+                        ty.is_managed_ref()
                             && (live.contains(&(*slot as u16))
                                 || memory_live.contains(&(*slot as u16)))
                     })
@@ -1435,7 +1436,7 @@ fn compute_sparse_frame_liveness(
                 let direct_roots = Span::append(
                     &mut root_slots,
                     slot_types.iter().enumerate().filter_map(|(slot, ty)| {
-                        (*ty == SlotType::GcRef
+                        (ty.is_managed_ref()
                             && (live.contains(&(slot as u16))
                                 || memory_live.contains(&(slot as u16))))
                         .then_some(slot as u16)
@@ -1876,6 +1877,18 @@ mod tests {
             offset as u32 as u16,
             (offset as u32 >> 16) as u16,
         )
+    }
+
+    #[test]
+    fn gc_base_slots_seed_exact_ssa_provenance() {
+        assert_eq!(
+            ValueType::for_slot(SlotType::GcBase, RootProvenance::Unknown),
+            ValueType::GcRef(RootProvenance::ExactBase)
+        );
+        assert_eq!(
+            ValueType::for_slot(SlotType::GcRef, RootProvenance::Unknown),
+            ValueType::GcRef(RootProvenance::Unknown)
+        );
     }
 
     #[test]

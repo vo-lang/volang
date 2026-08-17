@@ -10,7 +10,7 @@ fn module_verifier_rejects_iface_assign_raw_pair_destination_root_layout_061() {
         .constants
         .push(Constant::Int(i64::from(IFACE_ASSIGN_NO_ITAB)));
     let mut func =
-        function_with_slot_types(vec![SlotType::Value, SlotType::Value, SlotType::GcRef]);
+        function_with_slot_types(vec![SlotType::Value, SlotType::Value, SlotType::GcBase]);
     func.code = vec![Instruction::with_flags(
         Opcode::IfaceAssign,
         ValueKind::String as u8,
@@ -55,7 +55,7 @@ fn module_verifier_rejects_iface_assert_value_result_root_layout_drift_061() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("IfaceAssert metadata layout [Value] does not match target layout [GcRef]"),
+        msg.contains("IfaceAssert metadata layout [Value] does not match target layout [GcBase]"),
         "{msg}"
     );
 }
@@ -142,7 +142,7 @@ fn module_verifier_accepts_full_width_iface_assert_target_identity() {
         .push(RuntimeType::Basic(ValueKind::String));
 
     let mut func = function_with_slot_types(vec![
-        SlotType::GcRef,
+        SlotType::GcBase,
         SlotType::Interface0,
         SlotType::Interface1,
     ]);
@@ -150,7 +150,7 @@ fn module_verifier_accepts_full_width_iface_assert_target_identity() {
     func.instruction_metadata = vec![InstructionMetadata::IfaceAssertLayout {
         assert_kind: 0,
         target_id: TARGET_ID,
-        result_layout: vec![SlotType::GcRef],
+        result_layout: vec![SlotType::GcBase],
     }];
     module.functions.push(func);
 

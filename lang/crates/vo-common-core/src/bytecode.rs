@@ -95,7 +95,7 @@ pub const MAP_ITER_SLOT_TYPES: [SlotType; MAP_ITER_SLOTS] = [
     SlotType::Value,
     SlotType::Value,
     SlotType::Value,
-    SlotType::GcRef,
+    SlotType::GcBase,
 ];
 
 /// IfaceAssign concrete-source metadata low word meaning "no itab".
@@ -442,8 +442,8 @@ impl ReturnShape {
 
 pub fn ext_slot_kind_matches_slot_type(kind: ExtSlotKind, slot_type: SlotType) -> bool {
     match kind {
-        ExtSlotKind::Value => slot_type != SlotType::GcRef,
-        ExtSlotKind::Bytes => slot_type == SlotType::GcRef,
+        ExtSlotKind::Value => !slot_type.is_managed_ref(),
+        ExtSlotKind::Bytes => slot_type.is_managed_ref(),
     }
 }
 
@@ -451,7 +451,7 @@ pub fn ext_slot_kinds_for_slot_types(slot_types: &[SlotType]) -> Vec<ExtSlotKind
     slot_types
         .iter()
         .map(|slot_type| {
-            if *slot_type == SlotType::GcRef {
+            if slot_type.is_managed_ref() {
                 ExtSlotKind::Bytes
             } else {
                 ExtSlotKind::Value
@@ -468,7 +468,7 @@ pub fn known_builtin_extern_param_slot_types(name: &str) -> Option<&'static [Slo
         "dyn_field" => Some(&[
             SlotType::Interface0,
             SlotType::Interface1,
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Value,
             SlotType::Value,
         ]),
@@ -483,7 +483,7 @@ pub fn known_builtin_extern_param_slot_types(name: &str) -> Option<&'static [Slo
         "dyn_set_field" => Some(&[
             SlotType::Interface0,
             SlotType::Interface1,
-            SlotType::GcRef,
+            SlotType::GcBase,
             SlotType::Interface0,
             SlotType::Interface1,
         ]),
@@ -496,11 +496,11 @@ pub fn known_builtin_extern_param_slot_types(name: &str) -> Option<&'static [Slo
             SlotType::Interface1,
         ]),
         "panic_with_error" => Some(&[SlotType::Interface0, SlotType::Interface1]),
-        "vo_copy" => Some(&[SlotType::GcRef, SlotType::GcRef]),
-        "vo_slice_append_slice" => Some(&[SlotType::GcRef, SlotType::GcRef, SlotType::Value]),
+        "vo_copy" => Some(&[SlotType::GcBase, SlotType::GcBase]),
+        "vo_slice_append_slice" => Some(&[SlotType::GcBase, SlotType::GcBase, SlotType::Value]),
         "vo_conv_int_str" => Some(&[SlotType::Value]),
         "vo_conv_bytes_str" | "vo_conv_runes_str" | "vo_conv_str_bytes" | "vo_conv_str_runes" => {
-            Some(&[SlotType::GcRef])
+            Some(&[SlotType::GcBase])
         }
         _ => None,
     }
@@ -523,10 +523,10 @@ pub fn known_builtin_extern_fixed_return_slot_types(name: &str) -> Option<&'stat
     }
     match name {
         "vo_copy" => Some(&[SlotType::Value]),
-        "vo_slice_append_slice" => Some(&[SlotType::GcRef]),
-        "vo_conv_int_str" => Some(&[SlotType::GcRef]),
+        "vo_slice_append_slice" => Some(&[SlotType::GcBase]),
+        "vo_conv_int_str" => Some(&[SlotType::GcBase]),
         "vo_conv_bytes_str" | "vo_conv_runes_str" | "vo_conv_str_bytes" | "vo_conv_str_runes" => {
-            Some(&[SlotType::GcRef])
+            Some(&[SlotType::GcBase])
         }
         _ => None,
     }
@@ -1547,7 +1547,7 @@ impl MethodInfo {
             return Err("pointer receiver target requires pointer interface receiver");
         }
         if self.receiver_is_iface_boxed {
-            Ok(SlotType::GcRef)
+            Ok(SlotType::GcBase)
         } else {
             Ok(slot_type_for_value_kind(source_kind))
         }
@@ -2524,14 +2524,16 @@ impl<'a> RuntimeTypeResolver<'a> {
                     let expected = slot_type_for_value_kind(*kind);
                     return Some(actual.iter().all(|&slot| slot == expected));
                 }
-                RuntimeType::Pointer(_)
-                | RuntimeType::Slice(_)
+                RuntimeType::Pointer(_) => {
+                    return Some(actual.iter().all(|&slot| slot == SlotType::GcRef));
+                }
+                RuntimeType::Slice(_)
                 | RuntimeType::Map { .. }
                 | RuntimeType::Chan { .. }
                 | RuntimeType::Port { .. }
                 | RuntimeType::Func { .. }
                 | RuntimeType::Island => {
-                    return Some(actual.iter().all(|&slot| slot == SlotType::GcRef));
+                    return Some(actual.iter().all(|&slot| slot == SlotType::GcBase));
                 }
                 RuntimeType::Interface { .. } => {
                     return Some(
@@ -2580,13 +2582,13 @@ impl<'a> RuntimeTypeResolver<'a> {
                 RuntimeType::Basic(kind) => {
                     return (index == 0).then(|| slot_type_for_value_kind(*kind));
                 }
-                RuntimeType::Pointer(_)
-                | RuntimeType::Slice(_)
+                RuntimeType::Pointer(_) => return (index == 0).then_some(SlotType::GcRef),
+                RuntimeType::Slice(_)
                 | RuntimeType::Map { .. }
                 | RuntimeType::Chan { .. }
                 | RuntimeType::Port { .. }
                 | RuntimeType::Func { .. }
-                | RuntimeType::Island => return (index == 0).then_some(SlotType::GcRef),
+                | RuntimeType::Island => return (index == 0).then_some(SlotType::GcBase),
                 RuntimeType::Interface { .. } => {
                     return match index {
                         0 => Some(SlotType::Interface0),
@@ -2728,7 +2730,7 @@ impl<'a> RuntimeTypeResolver<'a> {
                         | RuntimeType::Port { .. }
                         | RuntimeType::Func { .. }
                         | RuntimeType::Island => {
-                            push_layout_slot(&mut layout, SlotType::GcRef)?;
+                            push_layout_slot(&mut layout, SlotType::GcBase)?;
                             active.remove(&resolved_id);
                         }
                         RuntimeType::Interface { .. } => {
@@ -2849,8 +2851,8 @@ pub fn slot_type_for_value_kind(kind: ValueKind) -> SlotType {
         | ValueKind::Closure
         | ValueKind::Channel
         | ValueKind::Port
-        | ValueKind::Pointer
-        | ValueKind::Island => SlotType::GcRef,
+        | ValueKind::Island => SlotType::GcBase,
+        ValueKind::Pointer => SlotType::GcRef,
         ValueKind::Interface => SlotType::Interface0,
         _ => SlotType::Value,
     }

@@ -193,10 +193,10 @@ fn emit_box_value(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> u16 {
-    let meta_idx = ctx.get_boxing_meta(value_type, info);
+    let meta_idx = ctx.get_or_create_value_slots_meta(value_type, info);
     let meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-    let boxed = func.alloc_slots(&[SlotType::GcRef]);
+    let boxed = func.alloc_slots(&[SlotType::GcBase]);
     let slot_types = info.type_slot_types(value_type);
     assert_eq!(slots as usize, slot_types.len());
     func.emit_ptr_new(boxed, meta_reg, &slot_types);

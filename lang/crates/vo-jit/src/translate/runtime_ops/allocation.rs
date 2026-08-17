@@ -52,7 +52,7 @@ pub(in crate::translate) fn ptr_new<'a>(
         }
     }
 
-    let func = e.helper(HelperKind::gc_alloc);
+    let func = e.helper(HelperKind::gc_alloc_value_slots);
     let ctx = e.ctx_param();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -155,7 +155,7 @@ fn emit_jit_small_ptr_new<'a>(
     e.builder().switch_to_block(slow);
     e.builder().seal_block(slow);
     emit_gc_safepoint_poll(e);
-    let func = e.helper(HelperKind::gc_alloc);
+    let func = e.helper(HelperKind::gc_alloc_value_slots);
     let meta_value = e.builder().ins().iconst(types::I32, i64::from(meta_raw));
     let slots_value = e.builder().ins().iconst(types::I32, slots as i64);
     let ctx = e.ctx_param();

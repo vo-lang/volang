@@ -184,7 +184,7 @@ impl FrameRootMaps {
                 let encode_roots = |first_slot: usize| {
                     let mut encoded = Vec::new();
                     encoded.extend(func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
-                        (slot >= first_slot && *ty == SlotType::GcRef).then_some(slot as u16)
+                        (slot >= first_slot && ty.is_managed_ref()).then_some(slot as u16)
                     }));
                     let direct_count = encoded.len() as u16;
                     encoded.extend(func.slot_types.iter().enumerate().filter_map(|(slot, ty)| {
@@ -508,14 +508,18 @@ fn logical_root_slots(func: &FunctionDef) -> Vec<u16> {
         .iter()
         .enumerate()
         .filter_map(|(slot, ty)| {
-            matches!(ty, SlotType::GcRef | SlotType::Interface0).then_some(slot as u16)
+            matches!(
+                ty,
+                SlotType::GcBase | SlotType::GcRef | SlotType::Interface0
+            )
+            .then_some(slot as u16)
         })
         .collect()
 }
 
 fn root_slot_for_cell(func: &FunctionDef, slot: u16) -> Option<u16> {
     match func.slot_types.get(slot as usize).copied()? {
-        SlotType::GcRef | SlotType::Interface0 => Some(slot),
+        SlotType::GcBase | SlotType::GcRef | SlotType::Interface0 => Some(slot),
         SlotType::Interface1 => slot
             .checked_sub(1)
             .filter(|&header| func.slot_types.get(header as usize) == Some(&SlotType::Interface0)),
@@ -566,11 +570,11 @@ fn intern_root_set(
     let mut key = Vec::new();
     key.try_reserve_exact(live.len())
         .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root set"))?;
-    key.extend(
-        live.iter()
-            .copied()
-            .filter(|&slot| func.slot_types.get(slot as usize) == Some(&SlotType::GcRef)),
-    );
+    key.extend(live.iter().copied().filter(|&slot| {
+        func.slot_types
+            .get(slot as usize)
+            .is_some_and(SlotType::is_managed_ref)
+    }));
     let direct_count = u16::try_from(key.len())
         .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "direct roots"))?;
     key.extend(

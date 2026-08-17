@@ -148,6 +148,49 @@ pub fn validate_object(gc: &Gc, raw: GcRef) -> Result<ValidatedClosureObject, Cl
     })
 }
 
+/// Validate a closure whose live allocation-base identity has already been
+/// proven by verified bytecode or equivalent runtime authority.
+///
+/// This deliberately omits heap-span lookup: a live exact base makes the GC
+/// header authoritative for the allocation width.  The remaining checks keep
+/// object kind and closure-header shape defensive at the runtime boundary.
+///
+/// # Safety
+/// `raw` must be a non-null, live managed allocation base for the complete
+/// duration of this call.
+#[inline]
+pub unsafe fn validate_exact_base(
+    raw: GcRef,
+) -> Result<ValidatedClosureObject, ClosureObjectError> {
+    let header = unsafe { Gc::header(raw) };
+    if header.kind() != ValueKind::Closure {
+        return Err(ClosureObjectError::WrongKind(header.kind()));
+    }
+    let header_slots = usize::from(header.slots);
+    if header_slots < HEADER_SLOTS {
+        return Err(ClosureObjectError::ShortAllocation {
+            allocated_slots: header_slots,
+        });
+    }
+    let func_id = unsafe { func_id(raw) };
+    let capture_count = unsafe { capture_count(raw) };
+    let expected_slots = HEADER_SLOTS
+        .checked_add(capture_count)
+        .ok_or(ClosureObjectError::SlotCountOverflow)?;
+    if header_slots != expected_slots {
+        return Err(ClosureObjectError::LayoutMismatch {
+            expected_slots,
+            header_slots,
+            allocated_slots: header_slots,
+        });
+    }
+    Ok(ValidatedClosureObject {
+        reference: raw,
+        func_id,
+        capture_count,
+    })
+}
+
 pub fn try_create(
     gc: &mut Gc,
     func_id: u32,
@@ -253,6 +296,22 @@ mod tests {
         unsafe { *unrelated = 7 };
         assert_eq!(
             validate_object(&gc, unrelated),
+            Err(ClosureObjectError::WrongKind(ValueKind::Struct))
+        );
+    }
+
+    #[test]
+    fn exact_base_validation_uses_the_verified_allocation_header() {
+        let mut gc = Gc::new();
+        let closure = create(&mut gc, 11, 2);
+        let validated = unsafe { validate_exact_base(closure) }.expect("valid exact closure base");
+        assert_eq!(validated.reference, closure);
+        assert_eq!(validated.func_id, 11);
+        assert_eq!(validated.capture_count, 2);
+
+        let unrelated = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        assert_eq!(
+            unsafe { validate_exact_base(unrelated) },
             Err(ClosureObjectError::WrongKind(ValueKind::Struct))
         );
     }

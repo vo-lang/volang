@@ -242,7 +242,7 @@ fn compile_stmt_inner(
             let target_expr_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
             // Freeze the channel operand before evaluating the value. The
             // value expression may reassign the local that supplied it.
-            let target_reg = func.alloc_slots(&[SlotType::GcRef]);
+            let target_reg = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_copy(target_reg, target_expr_reg, 1);
             let target_type = info.expr_type(send_stmt.chan.id);
             let elem_type = info.queue_elem_type(target_type);

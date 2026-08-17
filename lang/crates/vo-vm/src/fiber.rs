@@ -1766,7 +1766,8 @@ impl Fiber {
         {
             if matches!(
                 ty,
-                vo_runtime::SlotType::GcRef
+                vo_runtime::SlotType::GcBase
+                    | vo_runtime::SlotType::GcRef
                     | vo_runtime::SlotType::Interface0
                     | vo_runtime::SlotType::Interface1
             ) {

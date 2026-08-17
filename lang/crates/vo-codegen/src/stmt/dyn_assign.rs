@@ -113,7 +113,7 @@ pub(crate) fn compile_dyn_field_assign(
     let args = func.alloc_slots(&[
         SlotType::Interface0,
         SlotType::Interface1, // base
-        SlotType::GcRef,      // name string
+        SlotType::GcBase,     // name string
         SlotType::Interface0,
         SlotType::Interface1, // value
     ]);

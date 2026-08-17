@@ -45,8 +45,8 @@ fn vm_direct_method_capture_protocol_006_spawn_allocates_multi_slot_receiver_cap
         .receiver_is_iface_boxed = true;
     module.runtime_types = pair_runtime_types();
     module.functions.push(direct_method_spawn_func(vec![
-        SlotType::GcRef,
-        SlotType::GcRef,
+        SlotType::GcBase,
+        SlotType::GcBase,
     ]));
 
     let receiver_type =
@@ -97,7 +97,7 @@ fn vm_direct_method_capture_protocol_006_value_receiver_wrapper_uses_boxed_captu
     module.runtime_types = pair_runtime_types();
     module
         .functions
-        .push(direct_method_spawn_func(vec![SlotType::GcRef]));
+        .push(direct_method_spawn_func(vec![SlotType::GcBase]));
     module.functions[0].name = "Pair.Send$iface".to_string();
 
     let plan =

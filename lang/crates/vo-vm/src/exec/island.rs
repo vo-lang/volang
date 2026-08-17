@@ -356,7 +356,7 @@ pub fn direct_method_receiver_transfer_plan(
                 ValueKind::Struct | ValueKind::Array
             )
             && receiver_capture_slots == 1
-            && frame_receiver_layout == [SlotType::GcRef];
+            && frame_receiver_layout == [SlotType::GcBase];
         let raw_capture_slots = if promoted_boxed_receiver_wrapper {
             receiver_capture_slots
         } else if boxed_value_receiver_wrapper {
@@ -1143,8 +1143,7 @@ fn validate_capture_box_ref(
     expected_slots: usize,
     context: &str,
 ) -> Result<vo_runtime::gc::GcRef, String> {
-    let expected_meta = vo_runtime::island_msg::capture_box_meta(value_meta);
-    validate_fixed_transfer_object_layout(gc, box_ref, expected_meta, expected_slots, context)
+    validate_fixed_transfer_object_layout(gc, box_ref, value_meta, expected_slots, context)
 }
 
 fn read_object_slots(
@@ -1308,46 +1307,6 @@ fn capture_value_slots_for_transfer(
             storage: vo_runtime::island_msg::SpawnCaptureStorage::HeapArray,
         });
     }
-    if value_meta.value_kind() == vo_runtime::ValueKind::Array
-        && header.kind() == vo_runtime::ValueKind::Struct
-    {
-        let array_rttid =
-            vo_runtime::ValueRttid::new(value_meta.meta_id(), vo_runtime::ValueKind::Array);
-        let expected_layout =
-            RuntimeTypeResolver::new(struct_metas, named_type_metas, runtime_types)
-                .slot_layout_for_value_rttid(array_rttid)
-                .ok_or_else(|| {
-                    format!(
-                        "{context} missing, cyclic, or oversized Array runtime type slot layout"
-                    )
-                })?;
-        if expected_layout.len() != expected_slots {
-            return Err(format!(
-                "{context} Array capture slot count mismatch: expected {expected_slots}, layout {}",
-                expected_layout.len()
-            ));
-        }
-        let struct_meta = header.value_meta();
-        let meta_id = struct_meta.meta_id() as usize;
-        let Some(meta) = struct_metas.get(meta_id) else {
-            return Err(format!(
-                "{context} synthetic Array capture box references missing StructMeta id {meta_id}"
-            ));
-        };
-        if meta.slot_types != expected_layout {
-            return Err(format!(
-                "{context} synthetic Array capture box layout {:?} does not match Array slot layout {:?}",
-                meta.slot_types, expected_layout
-            ));
-        }
-        let box_ref =
-            validate_fixed_transfer_object_layout(gc, base, struct_meta, expected_slots, context)?;
-        return Ok(CaptureTransferValue {
-            slots: read_object_slots(box_ref, expected_slots, context)?,
-            storage: vo_runtime::island_msg::SpawnCaptureStorage::ValueSlots,
-        });
-    }
-
     let box_ref = validate_capture_box_ref(gc, base, value_meta, expected_slots, context)?;
     Ok(CaptureTransferValue {
         slots: read_object_slots(box_ref, expected_slots, context)?,

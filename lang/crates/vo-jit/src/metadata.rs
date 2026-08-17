@@ -38,9 +38,7 @@ pub fn elem_layout_from_instruction(metadata: &InstructionMetadata) -> Option<El
 
 #[inline]
 pub fn slot_layout_needs_write_barrier(layout: &[SlotType]) -> bool {
-    layout
-        .iter()
-        .any(|slot| matches!(slot, SlotType::GcRef | SlotType::Interface1))
+    layout.iter().any(|slot| slot.needs_write_barrier())
 }
 
 #[inline]

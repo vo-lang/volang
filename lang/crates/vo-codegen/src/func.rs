@@ -113,7 +113,7 @@ impl StorageKind {
         }
     }
 
-    /// Get the slot where this storage starts (GcRef slot for heap types)
+    /// Get the slot where this storage starts (managed reference for heap storage).
     pub fn slot(&self) -> u16 {
         match self {
             StorageKind::StackValue { slot, .. } => *slot,
@@ -126,7 +126,7 @@ impl StorageKind {
         }
     }
 
-    /// Get the number of value slots (logical size, not physical GcRef slot count)
+    /// Get the logical value width, independent of the one-slot heap reference.
     pub fn value_slots(&self) -> u16 {
         match self {
             StorageKind::StackValue { slots, .. } => *slots,
@@ -291,8 +291,8 @@ impl FuncBuilder {
     /// Create a closure function builder (slot 0 reserved for closure ref)
     pub fn new_closure(name: &str) -> Self {
         let mut builder = Self::new(name);
-        // Reserve slot 0 for closure reference (counts as a param for JIT prologue)
-        builder.slot_types.push(SlotType::GcRef);
+        // Reserve slot 0 for the verified closure object base (counts as a param for JIT prologue).
+        builder.slot_types.push(SlotType::GcBase);
         builder.next_slot = 1;
         builder.param_slots = 1; // closure ref is the first param slot
         builder.is_closure = true;
@@ -504,7 +504,7 @@ impl FuncBuilder {
             _ => return,
         };
 
-        let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
+        let gcref_slot = self.alloc_slots(&[SlotType::GcBase]);
         self.locals.insert(
             sym,
             LocalVar {
@@ -668,7 +668,7 @@ impl FuncBuilder {
         self.bind_local(sym, StorageKind::StackValue { slot, slots });
     }
 
-    /// Heap allocation for struct/primitive/interface (1 slot GcRef, PtrGet/PtrSet access).
+    /// Heap allocation for struct/primitive/interface (one exact object-base slot).
     /// If stores_pointer is true, the HeapBoxed stores a pointer that needs dereferencing.
     pub fn define_local_heap_boxed(
         &mut self,
@@ -676,7 +676,7 @@ impl FuncBuilder {
         value_slots: u16,
         stores_pointer: bool,
     ) -> u16 {
-        let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
+        let gcref_slot = self.alloc_slots(&[SlotType::GcBase]);
         self.bind_local(
             sym,
             StorageKind::HeapBoxed {
@@ -688,7 +688,7 @@ impl FuncBuilder {
         gcref_slot
     }
 
-    /// Heap allocation for array (1 slot GcRef, ArrayGet/ArraySet access).
+    /// Heap allocation for array (one exact object-base slot).
     pub fn define_local_heap_array(
         &mut self,
         sym: Symbol,
@@ -696,7 +696,7 @@ impl FuncBuilder {
         elem_bytes: usize,
         elem_vk: vo_common_core::ValueKind,
     ) -> u16 {
-        let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
+        let gcref_slot = self.alloc_slots(&[SlotType::GcBase]);
         self.bind_local(
             sym,
             StorageKind::HeapArray {
@@ -709,9 +709,11 @@ impl FuncBuilder {
         gcref_slot
     }
 
-    /// Reference type (1 slot GcRef IS the value).
-    pub fn define_local_reference(&mut self, sym: Symbol) -> u16 {
-        let slot = self.alloc_slots(&[SlotType::GcRef]);
+    /// Single-slot managed language value; its semantic layout decides whether
+    /// it is an exact object base or may be an interior pointer.
+    pub fn define_local_reference(&mut self, sym: Symbol, slot_type: SlotType) -> u16 {
+        debug_assert!(slot_type.is_managed_ref());
+        let slot = self.alloc_slots(&[slot_type]);
         self.bind_local(sym, StorageKind::Reference { slot });
         slot
     }
@@ -853,9 +855,9 @@ impl FuncBuilder {
         self.checked_slot_add_or_record(base, prefix, "dynamic call argument start")
     }
 
-    /// Allocate a single GcRef slot (for closure refs, etc.)
-    pub fn alloc_gcref(&mut self) -> u16 {
-        self.alloc_slots(&[SlotType::GcRef])
+    /// Allocate a slot for an internal heap object whose allocation base is exact.
+    pub fn alloc_gc_base(&mut self) -> u16 {
+        self.alloc_slots(&[SlotType::GcBase])
     }
 
     /// Allocate an interface slot (2 slots: Interface0, Interface1)
@@ -1522,7 +1524,6 @@ impl FuncBuilder {
         src: u16,
         slot_types: &[vo_runtime::SlotType],
     ) {
-        use vo_runtime::SlotType;
         let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrSet value layout");
 
         if slots == 0 {
@@ -1537,7 +1538,7 @@ impl FuncBuilder {
         // Check if any slot needs a barrier.
         let has_gc_refs = slot_types
             .iter()
-            .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+            .any(|slot_type| slot_type.needs_write_barrier());
 
         if !has_gc_refs {
             // Plain values can use a single PtrSetN.
@@ -1629,7 +1630,7 @@ impl FuncBuilder {
                 self.emit_global_get(dst, index, slots);
             }
             StorageKind::GlobalBoxed { index, value_slots } => {
-                let object = self.alloc_slots(&[SlotType::GcRef]);
+                let object = self.alloc_slots(&[SlotType::GcBase]);
                 self.emit_global_get(object, index, 1);
                 self.emit_ptr_get(dst, object, 0, value_slots);
             }
@@ -1701,7 +1702,7 @@ impl FuncBuilder {
                 self.emit_global_set(index, src, slots);
             }
             StorageKind::GlobalBoxed { index, .. } => {
-                let object = self.alloc_slots(&[SlotType::GcRef]);
+                let object = self.alloc_slots(&[SlotType::GcBase]);
                 self.emit_global_get(object, index, 1);
                 self.emit_ptr_set_with_slot_types(object, 0, src, slot_types);
             }

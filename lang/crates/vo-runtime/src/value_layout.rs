@@ -59,8 +59,9 @@ pub fn value_meta_layout_matches(
         ValueKind::Float32 | ValueKind::Float64 => {
             Ok(actual.iter().all(|slot| *slot == SlotType::Float))
         }
+        ValueKind::Pointer => Ok(actual.iter().all(|slot| *slot == SlotType::GcRef)),
         kind if kind.may_contain_gc_refs() => {
-            Ok(actual.iter().all(|slot| *slot == SlotType::GcRef))
+            Ok(actual.iter().all(|slot| *slot == SlotType::GcBase))
         }
         _ => Ok(actual.iter().all(|slot| *slot == SlotType::Value)),
     }

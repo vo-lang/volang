@@ -109,7 +109,9 @@ fn function_needs_native_root_frame(func: &FunctionDef) -> bool {
     func.slot_types.iter().any(|slot| {
         matches!(
             slot,
-            vo_runtime::SlotType::GcRef | vo_runtime::SlotType::Interface0
+            vo_runtime::SlotType::GcBase
+                | vo_runtime::SlotType::GcRef
+                | vo_runtime::SlotType::Interface0
         )
     })
 }

@@ -90,7 +90,7 @@ pub fn compile_slot_comparison(
             SlotType::Interface1 => {
                 i += 1;
             }
-            SlotType::GcRef => {
+            SlotType::GcBase => {
                 // Check if this is a string
                 let vk = slot_vks
                     .get(i as usize)
@@ -102,6 +102,11 @@ pub fn compile_slot_comparison(
                     Opcode::EqI
                 };
                 func.emit_op(cmp_op, tmp_cmp, left_reg + i, right_reg + i);
+                mismatch_jumps.push(func.emit_jump(Opcode::JumpIfNot, tmp_cmp));
+                i += 1;
+            }
+            SlotType::GcRef => {
+                func.emit_op(Opcode::EqI, tmp_cmp, left_reg + i, right_reg + i);
                 mismatch_jumps.push(func.emit_jump(Opcode::JumpIfNot, tmp_cmp));
                 i += 1;
             }

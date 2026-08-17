@@ -1,8 +1,10 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData as MemFlags};
+use vo_runtime::gc::{JIT_GC_HEADER_SLOTS_OFFSET, JIT_GC_HEADER_VALUE_META_OFFSET};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::{JitContextField, JitResult};
-use vo_runtime::objects::closure::ClosureHeader;
+use vo_runtime::objects::closure::{ClosureHeader, HEADER_SLOTS};
+use vo_runtime::ValueKind;
 
 use crate::translator::{emit_runtime_helper_call, HelperKind, IrEmitter};
 
@@ -14,11 +16,10 @@ use super::DynamicCallLowering;
 /// CallClosure: inst.a = closure_slot, inst.b = arg_start, and the instruction's
 /// `c`/`flags` payload owns the module-global inline-cache identity.
 ///
-/// Allocation-level closure validation and canonicalization run through a
-/// non-materializing runtime helper on every call. The first call for a target
-/// additionally owns module-specific call-shape validation, frame push, and
-/// argument layout in the prepare callback. Captured state remains in slot 0
-/// on every hit.
+/// Verified `GcBase` identity makes the immutable allocation header directly
+/// readable. The first call for a target additionally owns module-specific
+/// call-shape validation, frame push, and argument layout in the prepare
+/// callback. Captured state remains in slot 0 on every hit.
 pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     inst: &Instruction,
@@ -52,34 +53,53 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
 
-    // SlotType::GcRef deliberately includes interior pointers and every
-    // managed object kind. Ask the collector authority to prove and
-    // canonicalize the allocation before reading a closure header.
-    let validate = emitter.helper(HelperKind::validate_closure);
-    let validation_call = emit_runtime_helper_call(emitter, validate, &[ctx, closure_ref]);
-    let closure_ref = emitter.builder().inst_results(validation_call)[0];
-    let invalid = emitter
-        .builder()
-        .ins()
-        .icmp(IntCC::Equal, closure_ref, zero);
+    // The shared verifier requires CallClosure's callee slot to be GcBase.
+    // Check kind before touching ClosureHeader because another exact-base
+    // object may have no data slots at all.
+    let value_meta = emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        closure_ref,
+        JIT_GC_HEADER_VALUE_META_OFFSET,
+    );
+    let value_kind = emitter.builder().ins().band_imm_u(value_meta, 0xff);
+    let wrong_kind =
+        emitter
+            .builder()
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, value_kind, ValueKind::Closure as i64);
     let invalid_block = crate::compile_common::cold_block(emitter.builder());
-    let valid_block = emitter.builder().create_block();
+    let shape_block = emitter.builder().create_block();
     emitter
         .builder()
         .ins()
-        .brif(invalid, invalid_block, &[], valid_block, &[]);
+        .brif(wrong_kind, invalid_block, &[], shape_block, &[]);
 
-    emitter.builder().switch_to_block(invalid_block);
-    emitter.builder().seal_block(invalid_block);
-    let jit_error = emitter
+    emitter.builder().switch_to_block(shape_block);
+    emitter.builder().seal_block(shape_block);
+    let header_slots_i16 = emitter.builder().ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        closure_ref,
+        JIT_GC_HEADER_SLOTS_OFFSET,
+    );
+    let header_slots_i32 = emitter
         .builder()
         .ins()
-        .iconst(types::I32, JitResult::JitError as i64);
-    emitter.builder().ins().return_(&[jit_error]);
+        .uextend(types::I32, header_slots_i16);
+    let short = emitter.builder().ins().icmp_imm_u(
+        IntCC::UnsignedLessThan,
+        header_slots_i32,
+        HEADER_SLOTS as i64,
+    );
+    let header_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(short, invalid_block, &[], header_block, &[]);
 
-    emitter.builder().switch_to_block(valid_block);
-    emitter.builder().seal_block(valid_block);
-
+    emitter.builder().switch_to_block(header_block);
+    emitter.builder().seal_block(header_block);
     let func_id_i32 = emitter.builder().ins().load(
         types::I32,
         MemFlags::trusted(),
@@ -92,6 +112,34 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         closure_ref,
         ClosureHeader::OFFSET_CAPTURE_COUNT,
     );
+    let expected_slots = emitter
+        .builder()
+        .ins()
+        .iadd_imm_u(capture_count_i32, HEADER_SLOTS as i64);
+    let malformed = emitter
+        .builder()
+        .ins()
+        .icmp(IntCC::NotEqual, header_slots_i32, expected_slots);
+    let valid_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(malformed, invalid_block, &[], valid_block, &[]);
+
+    emitter.builder().switch_to_block(invalid_block);
+    emitter.builder().seal_block(invalid_block);
+    // Preserve the established detailed runtime error contract on the cold
+    // malformed-object path without burdening valid dynamic calls.
+    let validate = emitter.helper(HelperKind::validate_closure);
+    let _ = emit_runtime_helper_call(emitter, validate, &[ctx, closure_ref]);
+    let jit_error = emitter
+        .builder()
+        .ins()
+        .iconst(types::I32, JitResult::JitError as i64);
+    emitter.builder().ins().return_(&[jit_error]);
+
+    emitter.builder().switch_to_block(valid_block);
+    emitter.builder().seal_block(valid_block);
     let func_id_key = emitter.builder().ins().uextend(types::I64, func_id_i32);
     let capture_count_key = emitter
         .builder()

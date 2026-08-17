@@ -356,7 +356,7 @@ pub(crate) fn exec_verified_call_closure_cached(
     let caller_bp = caller_frame.bp;
     let stack = fiber.stack_ptr();
     let closure_value = stack_get(stack, caller_bp + inst.a as usize);
-    FrameCallBuilder::new_loaded(gc, fiber, loaded_module).call_closure_borrowed_cached(
+    FrameCallBuilder::new_loaded(gc, fiber, loaded_module).call_verified_closure_borrowed_cached(
         closure_value,
         inst.b as usize,
         ic_entry,

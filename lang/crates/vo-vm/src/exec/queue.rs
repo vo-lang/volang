@@ -111,6 +111,13 @@ pub fn validate_queue_payload_layout(
 ) -> Result<(), String> {
     validate_queue_payload_slots(ch, payload_layout.len(), context)?;
     let elem_meta = unsafe { queue_state::elem_meta(ch) };
+    let flows_to = |expected: &[SlotType]| {
+        payload_layout.len() == expected.len()
+            && payload_layout
+                .iter()
+                .zip(expected)
+                .all(|(source, target)| source.can_flow_to(*target))
+    };
     let matches = match elem_meta.value_kind() {
         ValueKind::Struct => {
             let meta_id = elem_meta.meta_id() as usize;
@@ -121,19 +128,19 @@ pub fn validate_queue_payload_layout(
                         "select wake recv missing StructMeta id {meta_id} for payload root scan"
                     )
                 })?;
-            payload_layout == expected.slot_types.as_slice()
+            flows_to(expected.slot_types.as_slice())
         }
         ValueKind::Array => {
             let expected = select_woken_recv_slot_types(ch, module)?;
-            payload_layout == expected.as_slice()
+            flows_to(expected.as_slice())
         }
         ValueKind::Interface => payload_layout == [SlotType::Interface0, SlotType::Interface1],
         ValueKind::Float32 | ValueKind::Float64 => {
             payload_layout.iter().all(|slot| *slot == SlotType::Float)
         }
-        kind if kind.may_contain_gc_refs() => {
-            payload_layout.iter().all(|slot| *slot == SlotType::GcRef)
-        }
+        kind if kind.may_contain_gc_refs() => payload_layout
+            .iter()
+            .all(|slot| slot.can_flow_to(SlotType::GcRef)),
         _ => payload_layout.iter().all(|slot| *slot == SlotType::Value),
     };
     if !matches {
@@ -309,7 +316,12 @@ pub(crate) fn validate_select_woken_recv_payload_layout(
         return Ok(());
     }
     validate_select_woken_recv_payload_width(payload_len, slot_types.len())?;
-    if slot_types != expected_slot_types {
+    if slot_types.len() != expected_slot_types.len()
+        || !slot_types
+            .iter()
+            .zip(expected_slot_types)
+            .all(|(source, target)| source.can_flow_to(*target))
+    {
         return Err(format!(
             "select wake recv slot metadata {:?} does not match queue element layout {:?}",
             slot_types, expected_slot_types

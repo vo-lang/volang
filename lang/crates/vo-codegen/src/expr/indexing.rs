@@ -43,7 +43,7 @@ pub fn compile_index(
 
     if info.is_map(container_type) {
         let map_value = compile_expr(&idx.expr, ctx, func, info)?;
-        let map_reg = func.alloc_slots(&[SlotType::GcRef]);
+        let map_reg = func.alloc_slots(&[SlotType::GcBase]);
         func.emit_copy(map_reg, map_value, 1);
         let (key_type, val_type) = info.map_key_val_types(container_type);
         let key_slot_types = info.type_slot_types(key_type);
@@ -91,7 +91,7 @@ pub fn compile_slice_expr(
         || info.is_string(container_type)
     {
         let container_value = compile_expr(&slice_expr.expr, ctx, func, info)?;
-        let snapshot = func.alloc_slots(&[SlotType::GcRef]);
+        let snapshot = func.alloc_slots(&[SlotType::GcBase]);
         func.emit_copy(snapshot, container_value, 1);
         (snapshot, false)
     } else if info.is_array(container_type) {

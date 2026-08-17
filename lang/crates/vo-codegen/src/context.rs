@@ -425,10 +425,6 @@ pub struct CodegenContext {
     /// Type meta_id: TypeKey -> struct_meta_id
     struct_meta_ids: HashMap<TypeKey, u32>,
 
-    /// Box layout cache: physical slot layout -> synthetic struct_meta_id.
-    /// Used for PtrNew boxes whose object layout does not match the logical ValueKind.
-    box_struct_meta_ids: HashMap<Vec<u8>, u32>,
-
     /// Type meta_id: TypeKey -> interface_meta_id
     interface_meta_ids: HashMap<TypeKey, u32>,
 
@@ -488,12 +484,6 @@ impl CodegenContext {
 
     pub fn new(name: &str) -> Self {
         let mut module = Module::new(name.to_string());
-        // Index 0 is reserved for ref box (single GcRef slot for boxing reference types).
-        module.struct_metas.push(vo_runtime::bytecode::StructMeta {
-            slot_types: vec![vo_runtime::SlotType::GcRef],
-            fields: Vec::new(),
-            field_index: HashMap::new(),
-        });
         // Index 0 is reserved for empty interface{}.
         module
             .interface_metas
@@ -512,7 +502,6 @@ impl CodegenContext {
             const_float: HashMap::new(),
             const_string: HashMap::new(),
             struct_meta_ids: HashMap::new(),
-            box_struct_meta_ids: HashMap::from([(vec![vo_runtime::SlotType::GcRef as u8], 0)]),
             interface_meta_ids: HashMap::new(),
             named_type_ids: HashMap::new(),
             type_interner: TypeInterner::new(),
@@ -540,16 +529,6 @@ impl CodegenContext {
 
     pub(crate) fn record_layout_error(&mut self, error: impl Into<String>) {
         self.layout_errors.push(error.into());
-    }
-
-    fn next_packed_id_or_record(&mut self, table: &str, len: usize) -> Option<u32> {
-        match checked_next_packed_id(table, len) {
-            Ok(id) => Some(id),
-            Err(error) => {
-                self.record_layout_error(error);
-                None
-            }
-        }
     }
 
     fn next_function_id_or_record(&mut self) -> Option<u32> {
@@ -2046,8 +2025,6 @@ impl CodegenContext {
     /// Format: [meta_id:24 | value_kind:8]
     /// - Struct: meta_id = struct_metas[] index of the underlying struct
     /// - Pointer: meta_id = struct_metas[] index of the *pointee* struct
-    ///   (for PtrNew objects that hold full struct data; heap-boxed pointer
-    ///   variables use get_boxing_meta which returns ref box meta_id=0)
     /// - Interface: meta_id = interface_metas[] index
     /// - Others: meta_id = 0
     fn ensure_struct_meta_id(
@@ -2067,41 +2044,6 @@ impl CodegenContext {
             ));
             0
         })
-    }
-
-    fn box_layout_key(slot_types: &[vo_runtime::SlotType]) -> Vec<u8> {
-        slot_types
-            .iter()
-            .map(|&slot_type| slot_type as u8)
-            .collect()
-    }
-
-    fn get_or_create_box_struct_meta_id(&mut self, slot_types: &[vo_runtime::SlotType]) -> u32 {
-        if !self.layout_errors.is_empty() {
-            return 0;
-        }
-        let key = Self::box_layout_key(slot_types);
-        if let Some(&id) = self.box_struct_meta_ids.get(&key) {
-            if let Err(error) =
-                validate_packed_id("struct metadata", id, self.module.struct_metas.len())
-            {
-                self.record_layout_error(error);
-                return 0;
-            }
-            return id;
-        }
-
-        let len = self.module.struct_metas.len();
-        let Some(id) = self.next_packed_id_or_record("struct metadata", len) else {
-            return 0;
-        };
-        self.module.struct_metas.push(StructMeta {
-            slot_types: slot_types.to_vec(),
-            fields: Vec::new(),
-            field_index: HashMap::new(),
-        });
-        self.box_struct_meta_ids.insert(key, id);
-        id
     }
 
     pub fn compute_value_meta_raw(
@@ -2165,38 +2107,15 @@ impl CodegenContext {
         self.add_const(Constant::Int(value_meta as i64))
     }
 
-    /// Get ValueMeta for boxing a variable.
-    /// For boxed values whose physical object layout differs from the logical ValueKind,
-    /// returns a synthetic Struct meta matching the actual slot layout stored by PtrNew.
-    /// For inline value types whose object layout already matches their logical type
-    /// (e.g. structs), returns the actual type's ValueMeta.
-    pub fn get_boxing_meta(
+    /// Get the logical metadata stored in a `PtrNew` value-slots object.
+    /// The allocation flag distinguishes a flattened value box from an ordinary
+    /// runtime object, so the header can retain the value's canonical identity.
+    pub fn get_or_create_value_slots_meta(
         &mut self,
         type_key: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u16 {
-        // Reference types, arrays, and interfaces are boxed as raw slot sequences.
-        // Their PtrNew object layout must therefore be described by box-local slot_types,
-        // not by the logical ValueKind's runtime object layout.
-        if info.is_reference_type(type_key)
-            || info.is_array(type_key)
-            || info.is_interface(type_key)
-        {
-            use vo_runtime::ValueKind;
-            let meta_id = self.get_or_create_box_struct_meta_id(&info.type_slot_types(type_key));
-            let value_meta = vo_runtime::ValueMeta::try_new(meta_id, ValueKind::Struct)
-                .unwrap_or_else(|| {
-                    self.record_layout_error(format!(
-                        "boxing metadata id {meta_id} exceeds the packed 24-bit ID domain or uses reserved id 0x{:06x}",
-                        vo_runtime::INVALID_META_ID
-                    ));
-                    vo_runtime::ValueMeta::VOID
-                })
-                .to_raw();
-            self.add_const(Constant::Int(value_meta as i64))
-        } else {
-            self.get_or_create_value_meta(type_key, info)
-        }
+        self.get_or_create_value_meta(type_key, info)
     }
 
     /// Get or create element ValueMeta for ArrayNew
@@ -2362,9 +2281,9 @@ impl CodegenContext {
             capture_type.rttid_raw,
             capture_type.slots,
         );
-        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
+        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcBase]);
 
-        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
         builder.emit_op(
             vo_runtime::instruction::Opcode::ClosureGet,
             capture_box,
@@ -2435,9 +2354,9 @@ impl CodegenContext {
             capture_type.rttid_raw,
             capture_type.slots,
         );
-        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
+        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcBase]);
 
-        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
         builder.emit_op(
             vo_runtime::instruction::Opcode::ClosureGet,
             capture_box,

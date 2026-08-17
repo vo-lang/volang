@@ -331,7 +331,7 @@ fn struct_key_map_new_module(key_meta: ValueMeta, key_rttid_const: i64) -> Modul
     module.constants.push(Constant::Int(key_rttid_const));
 
     let mut func =
-        function_with_slot_types(vec![SlotType::GcRef, SlotType::Value, SlotType::Value]);
+        function_with_slot_types(vec![SlotType::GcBase, SlotType::Value, SlotType::Value]);
     func.code = vec![
         Instruction::new(Opcode::LoadConst, 1, 0, 0),
         Instruction::new(Opcode::LoadConst, 2, 1, 0),

@@ -655,7 +655,7 @@ pub fn try_type_slot_types_with_facts(
             Type::Basic(detail) => {
                 let slot_type = if matches!(detail.typ(), BasicType::Str | BasicType::UntypedString)
                 {
-                    SlotType::GcRef
+                    SlotType::GcBase
                 } else if matches!(
                     detail.typ(),
                     BasicType::Float64 | BasicType::Float32 | BasicType::UntypedFloat
@@ -666,13 +666,13 @@ pub fn try_type_slot_types_with_facts(
                 };
                 result.push(slot_type);
             }
-            Type::Pointer(_)
-            | Type::Slice(_)
+            Type::Pointer(_) => result.push(SlotType::GcRef),
+            Type::Slice(_)
             | Type::Map(_)
             | Type::Chan(_)
             | Type::Port(_)
             | Type::Signature(_)
-            | Type::Island => result.push(SlotType::GcRef),
+            | Type::Island => result.push(SlotType::GcBase),
             Type::Interface(_) => {
                 result.push(SlotType::Interface0);
                 result.push(SlotType::Interface1);

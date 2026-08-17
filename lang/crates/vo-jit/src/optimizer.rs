@@ -2204,7 +2204,7 @@ fn returned_closure_target(
     summaries: &[u32],
 ) -> Option<u32> {
     if function.ret_slots == 0
-        || function.ret_slot_types.first() != Some(&vo_runtime::SlotType::GcRef)
+        || function.ret_slot_types.first() != Some(&vo_runtime::SlotType::GcBase)
         || function.code.iter().any(|instruction| {
             matches!(
                 instruction.opcode(),
@@ -2652,7 +2652,7 @@ mod tests {
                 Instruction::new(Opcode::CallClosure, 0, 1, 0),
                 Instruction::new(Opcode::Return, 1, 1, 0),
             ],
-            vec![SlotType::GcRef, SlotType::Value],
+            vec![SlotType::GcBase, SlotType::Value],
             0,
             0,
             1,
@@ -2668,19 +2668,19 @@ mod tests {
                 Instruction::new(Opcode::ClosureNew, 0, 2, 0),
                 Instruction::new(Opcode::Return, 0, 1, 0),
             ],
-            vec![SlotType::GcRef],
+            vec![SlotType::GcBase],
             0,
             0,
             1,
         );
-        factory.ret_slot_types = vec![SlotType::GcRef];
+        factory.ret_slot_types = vec![SlotType::GcBase];
 
         let mut closure = function_with_slot_types_and_sig(
             vec![
                 Instruction::new(Opcode::LoadInt, 1, 7, 0),
                 Instruction::new(Opcode::Return, 1, 1, 0),
             ],
-            vec![SlotType::GcRef, SlotType::Value],
+            vec![SlotType::GcBase, SlotType::Value],
             1,
             1,
             1,
@@ -2707,15 +2707,15 @@ mod tests {
                 Instruction::new(Opcode::Return, 0, 1, 0),
                 Instruction::new(Opcode::Return, 0, 1, 0),
             ],
-            vec![SlotType::GcRef, SlotType::Value],
+            vec![SlotType::GcBase, SlotType::Value],
             0,
             0,
             1,
         );
-        factory.ret_slot_types = vec![SlotType::GcRef];
+        factory.ret_slot_types = vec![SlotType::GcBase];
         let target = function_with_slot_types_and_sig(
             vec![Instruction::new(Opcode::Return, 0, 0, 0)],
-            vec![SlotType::GcRef],
+            vec![SlotType::GcBase],
             1,
             1,
             0,

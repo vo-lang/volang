@@ -319,7 +319,7 @@ fn vm_closure_call_signature_002_call_closure_rejects_arg_slot_metadata_drift_be
     let mut fiber = Fiber::new(0);
     let caller = caller_with_call_layout(4, vec![SlotType::Value], Vec::new());
     let mut callee = test_function(2, 2, true);
-    callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
+    callee.slot_types = vec![SlotType::GcBase, SlotType::GcRef];
     let mut module = Module::new("closure-call-arg-metadata-test".to_string());
     module.functions.push(caller);
     module.functions.push(callee);
@@ -485,7 +485,7 @@ fn vm_extern_replay_transfer_contract_061_accepts_explicit_receiver_prefix() {
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
-    callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
+    callee.slot_types = vec![SlotType::GcBase, SlotType::GcBase];
     callee.param_types = vec![string_transfer()];
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
@@ -517,7 +517,7 @@ fn vm_extern_replay_transfer_contract_061_validates_synthesized_receiver_prefix(
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
-    callee.slot_types = vec![SlotType::GcRef, SlotType::GcRef];
+    callee.slot_types = vec![SlotType::GcBase, SlotType::GcBase];
     callee.param_types = vec![string_transfer()];
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
@@ -542,7 +542,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_with_empty_param_ty
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function_with_recv(2, 2, 1, false);
-    callee.slot_types = vec![SlotType::GcRef, SlotType::Value];
+    callee.slot_types = vec![SlotType::GcBase, SlotType::Value];
     let module = module_with_named_string_receiver_callee(callee);
     let closure_ref = closure::create(&mut gc, 0, 0);
     let wrong_receiver = closure_ref;
@@ -559,7 +559,7 @@ fn vm_extern_replay_transfer_contract_061_validates_receiver_with_empty_param_ty
 
     let args = TypedSlotPayload::try_new(
         vec![wrong_receiver as u64, 7],
-        vec![SlotType::GcRef, SlotType::Value],
+        vec![SlotType::GcBase, SlotType::Value],
     )
     .expect("typed payload");
     let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
@@ -742,7 +742,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_wrong_object_kind_before_frame
     let mut fiber = Fiber::new(0);
     fiber.push_frame(0, 1, 0, 0);
     let mut callee = test_function(1, 1, false);
-    callee.slot_types = vec![SlotType::GcRef];
+    callee.slot_types = vec![SlotType::GcBase];
     callee.param_types = vec![string_transfer()];
     let mut module = module_with_callee(callee);
     module
@@ -762,7 +762,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_wrong_object_kind_before_frame
 
     assert!(err.contains("object kind"), "{err}");
 
-    let args = TypedSlotPayload::try_new(vec![wrong_kind as u64], vec![SlotType::GcRef])
+    let args = TypedSlotPayload::try_new(vec![wrong_kind as u64], vec![SlotType::GcBase])
         .expect("typed payload");
     let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
         .call_extern_replay_closure(closure_ref, args);
@@ -967,7 +967,7 @@ fn vm_extern_replay_transfer_contract_061_accepts_interface_array_value_slot_box
         elem: ValueRttid::new(1, ValueKind::String),
     });
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase, SlotType::GcBase],
         fields: Vec::new(),
         field_index: HashMap::new(),
     });
@@ -1020,7 +1020,7 @@ fn vm_extern_replay_transfer_contract_061_rejects_interface_array_value_slot_box
         elem: ValueRttid::new(1, ValueKind::String),
     });
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef, SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase, SlotType::GcBase],
         fields: Vec::new(),
         field_index: HashMap::new(),
     });

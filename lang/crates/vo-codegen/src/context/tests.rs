@@ -565,7 +565,7 @@ fn transfer_metadata_slot_width_047_uses_slot_count_contract() {
         .type_interner
         .intern(RuntimeType::Struct {
             fields: Vec::new(),
-            meta_id: 1,
+            meta_id: 0,
         })
         .unwrap();
     ctx.module.struct_metas.push(StructMeta {

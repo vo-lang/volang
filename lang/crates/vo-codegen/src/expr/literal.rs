@@ -109,7 +109,7 @@ fn compile_ident_as_map_key(
         }
     } else if let Some(global_idx) = ctx.get_global_index(obj_key) {
         if info.is_array(src_type) {
-            let array_ref = func.alloc_slots(&[SlotType::GcRef]);
+            let array_ref = func.alloc_slots(&[SlotType::GcBase]);
             func.emit_global_get(array_ref, global_idx, 1);
             crate::assign::AssignSource::ArrayRef {
                 slot: array_ref,
@@ -128,7 +128,7 @@ fn compile_ident_as_map_key(
             }
         }
     } else if let Some(capture_index) = func.lookup_capture(ident.symbol).map(|c| c.index) {
-        let capture_ref = func.alloc_slots(&[SlotType::GcRef]);
+        let capture_ref = func.alloc_slots(&[SlotType::GcBase]);
         func.emit_op(Opcode::ClosureGet, capture_ref, capture_index, 0);
         if info.is_array(src_type) {
             crate::assign::AssignSource::ArrayRef {
@@ -600,7 +600,7 @@ pub fn compile_func_lit(
                 parent_func.emit_ptr_set(dst, offset, local.storage.slot(), 1);
             } else if let Some(capture) = parent_func.lookup_capture(sym) {
                 let capture_index = capture.index;
-                let temp = parent_func.alloc_slots(&[SlotType::GcRef]);
+                let temp = parent_func.alloc_slots(&[SlotType::GcBase]);
                 parent_func.emit_op(Opcode::ClosureGet, temp, capture_index, 0);
                 parent_func.emit_ptr_set(dst, offset, temp, 1);
             }
@@ -661,8 +661,8 @@ pub(crate) fn lower_func_lit(
         let meta_raw = ctx.compute_value_meta_raw(type_key, info);
         let rttid_raw = ctx.compute_value_rttid_raw(type_key, info);
         closure_builder.add_capture_type(meta_raw, rttid_raw, slots);
-        // All regular closure captures are GcRef (pointers to heap-boxed escaped vars)
-        closure_builder.add_capture_slot_types(&[SlotType::GcRef]);
+        // Regular captures point at the exact allocation base of their escape box.
+        closure_builder.add_capture_slot_types(&[SlotType::GcBase]);
     }
 
     // Define parameters and collect escaped ones for boxing
@@ -722,7 +722,7 @@ pub(crate) fn lower_func_lit(
                 info,
             )?;
         } else {
-            let meta_idx = ctx.get_boxing_meta(type_key, info);
+            let meta_idx = ctx.get_or_create_value_slots_meta(type_key, info);
             closure_builder.emit_box_escaped_param(
                 sym,
                 slots,
@@ -857,7 +857,7 @@ pub(crate) fn lower_func_lit(
             )?;
             continue;
         }
-        let meta_idx = ctx.get_boxing_meta(er.result_type, info);
+        let meta_idx = ctx.get_or_create_value_slots_meta(er.result_type, info);
         let meta_reg = closure_builder.alloc_slots(&[SlotType::Value]);
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         assert_eq!(er.slots as usize, er.slot_types.len());

@@ -52,10 +52,12 @@ impl SmallPureLeafInline {
             || param_slots > local_slots
             || func.slot_types.len() != local_slots
             || func.ret_slot_types.len() != ret_slots
-            || func
-                .slot_types
-                .iter()
-                .any(|ty| !matches!(ty, SlotType::Value | SlotType::Float | SlotType::GcRef))
+            || func.slot_types.iter().any(|ty| {
+                !matches!(
+                    ty,
+                    SlotType::Value | SlotType::Float | SlotType::GcBase | SlotType::GcRef
+                )
+            })
         {
             return None;
         }
@@ -695,8 +697,8 @@ fn validate_instruction(
         Opcode::ClosureGet
             if is_closure
                 && in_range(inst.a)
-                && slot_types[inst.a as usize] == SlotType::GcRef
-                && slot_types.first() == Some(&SlotType::GcRef) =>
+                && slot_types[inst.a as usize] == SlotType::GcBase
+                && slot_types.first() == Some(&SlotType::GcBase) =>
         {
             integer_constants[inst.a as usize] = None;
         }
@@ -704,7 +706,7 @@ fn validate_instruction(
             if in_range(inst.a)
                 && in_range(inst.b)
                 && !is_float(inst.a)
-                && slot_types[inst.b as usize] == SlotType::GcRef =>
+                && slot_types[inst.b as usize].is_managed_ref() =>
         {
             integer_constants[inst.a as usize] = None;
         }
