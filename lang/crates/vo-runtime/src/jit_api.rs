@@ -1606,16 +1606,10 @@ fn jit_gc_alloc_value_slots_inner(gc: &mut Gc, meta: u32, slots: u32) -> u64 {
     let Ok(slots) = u16::try_from(slots) else {
         return 0;
     };
-    let object = gc.alloc_value_slots(value_meta, slots);
-    if !object.is_null() {
-        if let Some(size) = usize::from(slots)
-            .checked_mul(crate::slot::SLOT_BYTES)
-            .and_then(|bytes| crate::gc::GcHeader::SIZE.checked_add(bytes))
-        {
-            gc.prepare_jit_value_slots_allocation_region(size, value_meta, slots);
-        }
+    match gc.try_alloc_value_slots_in_region(value_meta, slots) {
+        Ok(object) => object as u64,
+        Err(error) => gc.sticky_allocation_failure(error) as u64,
     }
-    object as u64
 }
 
 /// Poll the VM before a JIT helper that may allocate managed memory.
@@ -1627,7 +1621,7 @@ pub extern "C" fn vo_jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
         return JitResult::JitError;
     };
     if let Some(gc) = unsafe { ctx_ref.gc.as_mut() } {
-        gc.close_jit_allocation_region_for_boundary();
+        gc.close_value_slot_allocation_region_for_boundary();
     }
     match ctx_ref.gc_safepoint_fn {
         Some(callback) => callback(ctx),

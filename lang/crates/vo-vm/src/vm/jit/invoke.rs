@@ -109,9 +109,11 @@ fn invoke_jit_and_handle(
             param_slots,
         )
     };
-    // Native allocation regions pre-admit a bounded run of cells. Close the
-    // run before the VM observes telemetry, object limits, or a side exit.
-    vm.state.gc.close_jit_allocation_region_for_boundary();
+    // Value-slot allocation regions pre-admit a bounded run of cells. Close
+    // the run before the VM observes telemetry, object limits, or a side exit.
+    vm.state
+        .gc
+        .close_value_slot_allocation_region_for_boundary();
     let budget_after = ctx.ctx.execution_budget;
     let work_consumed = u64::from(budget_before)
         .saturating_add(ctx.ctx.execution_budget_refilled)

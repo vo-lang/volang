@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{
     condcodes::IntCC, types, InstBuilder, MemFlagsData as MemFlags, StackSlotData, StackSlotKind,
 };
 use vo_runtime::bytecode::Constant;
-use vo_runtime::gc::{JitAllocationRegionField, JIT_GC_HEADER_MARKED_OFFSET};
+use vo_runtime::gc::{ValueSlotAllocationRegionField, JIT_GC_HEADER_MARKED_OFFSET};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::ValueMeta;
 
@@ -43,7 +43,7 @@ pub(in crate::translate) fn ptr_new<'a>(
         .and_then(ValueMeta::try_from_raw);
 
     if let (Some(total_size), Some(value_meta)) = (total_size, constant_meta) {
-        if JitAllocationRegionField::Cursor
+        if ValueSlotAllocationRegionField::Cursor
             .offset_for_size(total_size)
             .is_some()
         {
@@ -73,17 +73,17 @@ fn emit_jit_small_ptr_new<'a>(
 ) {
     let _ = slots;
     let gc = e.gc_ptr();
-    let region_offset = |field: JitAllocationRegionField| {
+    let region_offset = |field: ValueSlotAllocationRegionField| {
         field
             .offset_for_size(total_size)
-            .expect("verified small allocation must have a JIT region")
+            .expect("verified small allocation must have a value-slot region")
     };
-    let expected_shape = JitAllocationRegionField::shape(total_size, meta_raw);
+    let expected_shape = ValueSlotAllocationRegionField::shape(total_size, meta_raw);
     let active_shape = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        region_offset(JitAllocationRegionField::Shape),
+        region_offset(ValueSlotAllocationRegionField::Shape),
     );
     let region_matches =
         e.builder()
@@ -93,13 +93,13 @@ fn emit_jit_small_ptr_new<'a>(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        region_offset(JitAllocationRegionField::Cursor),
+        region_offset(ValueSlotAllocationRegionField::Cursor),
     );
     let limit = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        region_offset(JitAllocationRegionField::Limit),
+        region_offset(ValueSlotAllocationRegionField::Limit),
     );
     let cursor_available = e
         .builder()
@@ -120,23 +120,28 @@ fn emit_jit_small_ptr_new<'a>(
         JitMemoryRegion::Gc,
         next_cursor,
         gc,
-        region_offset(JitAllocationRegionField::Cursor),
+        region_offset(ValueSlotAllocationRegionField::Cursor),
     );
 
     let bitmap_word = e.load_trusted(
         JitMemoryRegion::Gc,
         types::I64,
         gc,
-        region_offset(JitAllocationRegionField::BitmapWord),
+        region_offset(ValueSlotAllocationRegionField::BitmapWord),
     );
-    let class_size = total_size.max(16).next_power_of_two();
-    let cell_index = e
-        .builder()
-        .ins()
-        .ushr_imm_u(cursor, class_size.trailing_zeros() as i64);
-    let bit_index = e.builder().ins().band_imm_u(cell_index, 63);
-    let one = e.builder().ins().iconst(types::I64, 1);
-    let allocated_bit = e.builder().ins().ishl(one, bit_index);
+    let allocated_bit = e.load_trusted(
+        JitMemoryRegion::Gc,
+        types::I64,
+        gc,
+        region_offset(ValueSlotAllocationRegionField::BitmapBit),
+    );
+    let next_allocated_bit = e.builder().ins().ishl_imm_u(allocated_bit, 1);
+    e.store_trusted(
+        JitMemoryRegion::Gc,
+        next_allocated_bit,
+        gc,
+        region_offset(ValueSlotAllocationRegionField::BitmapBit),
+    );
     let allocated = e
         .builder()
         .ins()

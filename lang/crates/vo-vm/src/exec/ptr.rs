@@ -25,7 +25,7 @@ pub fn exec_ptr_new(
     let value_meta = ValueMeta::from_raw(meta_raw);
     let slots = u16::try_from(value_layout.len())
         .map_err(|_| "PtrNew value layout exceeds u16 slots".to_string())?;
-    let ptr = gc.try_alloc_value_slots(value_meta, slots)?;
+    let ptr = gc.try_alloc_value_slots_in_region(value_meta, slots)?;
     stack_set(stack, bp + inst.a as usize, ptr as u64);
     Ok(())
 }

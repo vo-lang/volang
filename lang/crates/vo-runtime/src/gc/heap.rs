@@ -228,15 +228,18 @@ pub struct LocatedAllocation {
     pub logical_bytes: usize,
 }
 
-/// Runtime-owned pointers for a single-mutator JIT bump lane. The lane covers
+/// Runtime-owned pointers for a single-mutator bump lane. The lane covers
 /// fresh cells in one allocation-bitmap word; collection invalidates every
 /// lane before it can mutate the referenced block metadata.
 #[derive(Debug, Clone, Copy)]
 #[cfg(any(test, not(feature = "gc-debug")))]
-pub struct HeapAllocLane {
+pub struct HeapBumpLane {
     pub cursor: *mut u8,
     pub limit: *mut u8,
     pub bitmap_word: *mut u64,
+    /// One-hot allocation bit corresponding to `cursor`. The lane never
+    /// crosses a bitmap word, so consumers can advance this with a left shift.
+    pub bitmap_bit: u64,
     pub logical_size_cursor: *mut u16,
     pub live_cells: *mut u16,
     pub logical_bytes: *mut usize,
@@ -388,16 +391,16 @@ impl SpanHeap {
         }
     }
 
-    /// Reserve fresh, contiguous small cells for JIT inline allocation. The
+    /// Reserve fresh, contiguous small cells for inline allocation. The
     /// cells remain absent from the allocation bitmap until generated code
     /// commits each object, so unconsumed lane capacity is never observable as
     /// a managed allocation.
     #[cfg(any(test, not(feature = "gc-debug")))]
-    pub fn reserve_jit_bump_lane(
+    pub fn reserve_bump_lane(
         &mut self,
         size: usize,
         max_cells: usize,
-    ) -> Result<Option<HeapAllocLane>, HeapError> {
+    ) -> Result<Option<HeapBumpLane>, HeapError> {
         if !self.allocation_allowed {
             return Err(HeapError::AllocationForbidden);
         }
@@ -430,7 +433,7 @@ impl SpanHeap {
         let block_base = self.segments[segment_index].base + block_index * HEAP_BLOCK_SIZE;
         let block = match &mut self.segments[segment_index].blocks[block_index] {
             BlockState::Small(block) => block,
-            _ => unreachable!("JIT bump lane must reference a small block"),
+            _ => unreachable!("bump lane must reference a small block"),
         };
         let start = usize::from(block.bump_cells);
         let word_end = ((start / 64) + 1).saturating_mul(64);
@@ -452,10 +455,11 @@ impl SpanHeap {
             cursor.write_bytes(0, (end - start) * class_size);
         }
         let word = start / 64;
-        Ok(Some(HeapAllocLane {
+        Ok(Some(HeapBumpLane {
             cursor,
             limit,
             bitmap_word: unsafe { block.allocated.as_mut_ptr().add(word) },
+            bitmap_bit: 1_u64 << (start % 64),
             logical_size_cursor: unsafe { block.logical_sizes.as_mut_ptr().add(start) },
             live_cells: &mut block.live_cells,
             logical_bytes: &mut block.logical_bytes,
@@ -463,7 +467,7 @@ impl SpanHeap {
         }))
     }
 
-    pub fn release_jit_bump_lane(&mut self, cursor: *mut u8, limit: *mut u8) {
+    pub fn release_bump_lane(&mut self, cursor: *mut u8, limit: *mut u8) {
         if cursor.is_null() || limit.is_null() || cursor >= limit {
             return;
         }
@@ -490,16 +494,17 @@ impl SpanHeap {
         self.active_small[class_index] = Some((segment_index, block_index));
     }
 
-    /// Account cells admitted to a JIT allocation region before generated
-    /// code publishes their bitmap bits. A region is closed before any heap
-    /// walk; unused cells are refunded through the matching release method.
-    pub(super) fn admit_jit_region_cells(&mut self, cells: usize, class_size: usize) {
+    /// Account cells admitted to an allocation region before the mutator
+    /// publishes their bitmap bits. A region is closed before any heap walk;
+    /// unused cells are refunded through the matching release method.
+    #[cfg(not(feature = "gc-debug"))]
+    pub(super) fn admit_region_cells(&mut self, cells: usize, class_size: usize) {
         self.allocated_span_bytes = self
             .allocated_span_bytes
             .saturating_add(cells.saturating_mul(class_size));
     }
 
-    pub(super) fn refund_jit_region_cells(&mut self, cells: usize, class_size: usize) {
+    pub(super) fn refund_region_cells(&mut self, cells: usize, class_size: usize) {
         self.allocated_span_bytes = self
             .allocated_span_bytes
             .saturating_sub(cells.saturating_mul(class_size));
@@ -1599,19 +1604,18 @@ mod tests {
     }
 
     #[test]
-    fn jit_bump_lane_commits_cells_and_returns_unused_tail() {
+    fn bump_lane_commits_cells_and_returns_unused_tail() {
         let mut heap = SpanHeap::new(Some(HEAP_BLOCK_SIZE));
         heap.reserve(HEAP_BLOCK_SIZE).unwrap();
         heap.set_growth_allowed(false);
         let lane = heap
-            .reserve_jit_bump_lane(24, 8)
+            .reserve_bump_lane(24, 8)
             .unwrap()
             .expect("small allocation lane");
 
         for cell in 0..3usize {
             unsafe {
-                let first_cell = (lane.cursor as usize & (HEAP_BLOCK_SIZE - 1)) / lane.class_size;
-                *lane.bitmap_word |= 1_u64 << ((first_cell + cell) % 64);
+                *lane.bitmap_word |= lane.bitmap_bit << cell;
                 *lane.logical_size_cursor.add(cell) = 24;
                 *lane.live_cells += 1;
                 *lane.logical_bytes += 24;
@@ -1619,7 +1623,7 @@ mod tests {
             heap.allocated_span_bytes += lane.class_size;
         }
         let unused = unsafe { lane.cursor.add(3 * lane.class_size) };
-        heap.release_jit_bump_lane(unused, lane.limit);
+        heap.release_bump_lane(unused, lane.limit);
         for cell in 0..3usize {
             let object = unsafe { lane.cursor.add(cell * lane.class_size + 8) };
             assert_eq!(heap.locate(object as usize, 8).unwrap().logical_bytes, 24);

@@ -658,7 +658,7 @@ fn explicit_max_objects_keeps_its_earlier_admission_limit() {
 }
 
 #[test]
-fn runtime_allocation_returns_unconsumed_jit_region_admission() {
+fn runtime_allocation_returns_unconsumed_value_slot_region_admission() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
         growth_allowed: false,
@@ -669,10 +669,10 @@ fn runtime_allocation_returns_unconsumed_jit_region_admission() {
     let meta = ValueMeta::new(0, ValueKind::Struct);
     assert!(!gc.alloc(meta, 0).is_null());
 
-    gc.prepare_jit_value_slots_allocation_region(GcHeader::SIZE, meta, 0);
-    let region = gc.jit_allocation_regions[0];
+    gc.prepare_value_slot_allocation_region(GcHeader::SIZE, meta, 0);
+    let region = gc.value_slot_allocation_regions[0];
     assert!(region.cursor < region.limit);
-    assert_eq!(gc.jit_active_allocation_region, 0);
+    assert_eq!(gc.active_value_slot_allocation_region, 0);
 
     let second = gc.alloc(meta, 1);
     assert_eq!(
@@ -681,16 +681,120 @@ fn runtime_allocation_returns_unconsumed_jit_region_admission() {
         "ordinary allocation must reuse the returned region tail"
     );
     assert!(gc
-        .jit_allocation_regions
+        .value_slot_allocation_regions
         .iter()
         .all(|lane| lane.cursor.is_null() && lane.limit.is_null()));
-    assert_eq!(gc.jit_active_allocation_region, u8::MAX);
+    assert_eq!(gc.active_value_slot_allocation_region, u8::MAX);
     assert!(gc.alloc(meta, 0).is_null());
     assert_eq!(gc.object_count(), 2);
 }
 
 #[test]
-fn jit_region_admission_is_exact_at_close_and_respects_object_limit() {
+fn value_slot_allocations_consume_one_shared_admitted_region() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
+        growth_allowed: false,
+        max_objects: Some(4),
+        ..VmMemoryConfig::default()
+    })
+    .expect("bounded collector");
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+
+    let first = gc
+        .try_alloc_value_slots_in_region(meta, 0)
+        .expect("first allocation prepares the region");
+    assert!(!first.is_null());
+    let region = gc.value_slot_allocation_regions[0];
+    assert_eq!(gc.object_count(), 1);
+    assert_eq!(gc.total_bytes(), GcHeader::SIZE);
+
+    let second = gc
+        .try_alloc_value_slots_in_region(meta, 0)
+        .expect("second allocation consumes the prepared region");
+    assert_eq!(
+        unsafe { (second as *mut u8).sub(GcHeader::SIZE) },
+        region.cursor
+    );
+    assert_eq!(gc.object_count(), 2);
+    assert_eq!(gc.total_bytes(), 2 * GcHeader::SIZE);
+
+    assert!(!gc
+        .try_alloc_value_slots_in_region(meta, 0)
+        .unwrap()
+        .is_null());
+    assert!(!gc
+        .try_alloc_value_slots_in_region(meta, 0)
+        .unwrap()
+        .is_null());
+    assert_eq!(
+        gc.try_alloc_value_slots_in_region(meta, 0),
+        Err(MemoryError::MetadataExhausted)
+    );
+    assert_eq!(gc.object_count(), 4);
+}
+
+#[test]
+fn value_slot_region_bitmap_cursor_is_relative_to_its_heap_block() {
+    let mut gc = Gc::with_memory_config(VmMemoryConfig {
+        initial_reserve_bytes: 2 * heap::HEAP_BLOCK_SIZE,
+        growth_allowed: false,
+        ..VmMemoryConfig::default()
+    })
+    .expect("two-block collector");
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    let full_block_slots = (heap::HEAP_BLOCK_SIZE - GcHeader::SIZE) / SLOT_BYTES;
+    assert!(!gc
+        .try_alloc(meta, full_block_slots as u16)
+        .expect("prefix allocation occupies heap block zero")
+        .is_null());
+
+    // A 2048-byte cell has 32 cells per heap block. On block one, deriving
+    // its bitmap bit from the absolute address would add a false 32-cell
+    // offset. The region-owned one-hot cursor must still publish cell one.
+    let region_slots = (2048 - GcHeader::SIZE) / SLOT_BYTES;
+    assert!(!gc
+        .try_alloc_value_slots_in_region(meta, region_slots as u16)
+        .unwrap()
+        .is_null());
+    let second = gc
+        .try_alloc_value_slots_in_region(meta, region_slots as u16)
+        .unwrap();
+    assert_eq!(gc.canonicalize_ref(second), Some(second));
+    assert_eq!(gc.object_count(), 3);
+}
+
+#[test]
+fn one_off_value_slot_allocation_does_not_open_a_region() {
+    let mut gc = Gc::new();
+    let object = gc
+        .try_alloc_value_slots(ValueMeta::new(0, ValueKind::Struct), 0)
+        .unwrap();
+    assert!(!object.is_null());
+    assert_eq!(gc.active_value_slot_allocation_region, u8::MAX);
+    assert_eq!(gc.object_count(), 1);
+}
+
+#[test]
+fn enabling_stress_closes_and_disables_value_slot_regions() {
+    let mut gc = Gc::new();
+    let meta = ValueMeta::new(0, ValueKind::Struct);
+    assert!(!gc
+        .try_alloc_value_slots_in_region(meta, 0)
+        .unwrap()
+        .is_null());
+    assert_ne!(gc.active_value_slot_allocation_region, u8::MAX);
+
+    gc.set_stress_every_step(true);
+    assert_eq!(gc.active_value_slot_allocation_region, u8::MAX);
+    assert!(!gc
+        .try_alloc_value_slots_in_region(meta, 0)
+        .unwrap()
+        .is_null());
+    assert_eq!(gc.active_value_slot_allocation_region, u8::MAX);
+}
+
+#[test]
+fn value_slot_region_admission_is_exact_at_close_and_respects_object_limit() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: heap::HEAP_BLOCK_SIZE,
         growth_allowed: false,
@@ -700,8 +804,8 @@ fn jit_region_admission_is_exact_at_close_and_respects_object_limit() {
     .expect("bounded collector");
 
     let meta = ValueMeta::new(0, ValueKind::Struct);
-    gc.prepare_jit_value_slots_allocation_region(GcHeader::SIZE, meta, 0);
-    let region = gc.jit_allocation_regions[0];
+    gc.prepare_value_slot_allocation_region(GcHeader::SIZE, meta, 0);
+    let region = gc.value_slot_allocation_regions[0];
     assert_eq!(
         gc.live_object_count, 4,
         "region must pre-admit the hard limit"
@@ -710,23 +814,23 @@ fn jit_region_admission_is_exact_at_close_and_respects_object_limit() {
     assert_eq!(gc.memory_stats().managed_live_bytes, 0);
     let class_size = region.class_size as usize;
     unsafe {
-        let cell = (region.cursor as usize & (heap::HEAP_BLOCK_SIZE - 1)) / class_size;
-        *region.bitmap_word |= 1_u64 << (cell % 64);
-        gc.jit_allocation_regions[0].cursor = region.cursor.add(class_size);
+        *region.bitmap_word |= region.bitmap_bit;
+        gc.value_slot_allocation_regions[0].cursor = region.cursor.add(class_size);
+        gc.value_slot_allocation_regions[0].bitmap_bit <<= 1;
     }
 
-    gc.close_jit_allocation_region_for_boundary();
+    gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(gc.object_count(), 1);
     assert_eq!(gc.total_bytes(), GcHeader::SIZE);
     assert_eq!(gc.objects().count(), 1);
     assert!(gc
-        .jit_allocation_regions
+        .value_slot_allocation_regions
         .iter()
         .all(|region| { region.cursor.is_null() && region.limit.is_null() }));
 }
 
 #[test]
-fn jit_region_switch_refunds_the_previous_size_class() {
+fn value_slot_region_switch_refunds_the_previous_size_class() {
     let mut gc = Gc::with_memory_config(VmMemoryConfig {
         initial_reserve_bytes: 2 * heap::HEAP_BLOCK_SIZE,
         growth_allowed: false,
@@ -736,21 +840,21 @@ fn jit_region_switch_refunds_the_previous_size_class() {
     .expect("bounded collector");
 
     let meta = ValueMeta::new(0, ValueKind::Struct);
-    gc.prepare_jit_value_slots_allocation_region(GcHeader::SIZE, meta, 0);
+    gc.prepare_value_slot_allocation_region(GcHeader::SIZE, meta, 0);
     assert_eq!(gc.live_object_count, 8);
     assert_eq!(gc.object_count(), 0);
     let second_size = GcHeader::SIZE + 2 * SLOT_BYTES;
-    gc.prepare_jit_value_slots_allocation_region(second_size, meta, 2);
+    gc.prepare_value_slot_allocation_region(second_size, meta, 2);
 
     let second_class = heap::allocation_class(second_size).expect("small class").0;
-    assert_eq!(gc.jit_active_allocation_region, second_class as u8);
+    assert_eq!(gc.active_value_slot_allocation_region, second_class as u8);
     assert_eq!(
         gc.live_object_count, 8,
         "the old admission must be refunded"
     );
     assert_eq!(gc.object_count(), 0);
-    assert!(gc.jit_allocation_regions[0].cursor.is_null());
-    gc.close_jit_allocation_region_for_boundary();
+    assert!(gc.value_slot_allocation_regions[0].cursor.is_null());
+    gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(gc.object_count(), 0);
     assert_eq!(gc.memory_stats().allocated_span_bytes, 0);
 }

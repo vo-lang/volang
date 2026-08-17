@@ -590,10 +590,11 @@ impl GcTraceEdge {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct JitAllocationRegion {
+struct ValueSlotAllocationRegion {
     cursor: *mut u8,
     limit: *mut u8,
     bitmap_word: *mut u64,
+    bitmap_bit: u64,
     live_cells: *mut u16,
     logical_bytes: *mut usize,
     shape: u64,
@@ -601,12 +602,13 @@ struct JitAllocationRegion {
     logical_size: u32,
 }
 
-impl Default for JitAllocationRegion {
+impl Default for ValueSlotAllocationRegion {
     fn default() -> Self {
         Self {
             cursor: core::ptr::null_mut(),
             limit: core::ptr::null_mut(),
             bitmap_word: core::ptr::null_mut(),
+            bitmap_bit: 0,
             live_cells: core::ptr::null_mut(),
             logical_bytes: core::ptr::null_mut(),
             shape: 0,
@@ -616,7 +618,7 @@ impl Default for JitAllocationRegion {
     }
 }
 
-impl JitAllocationRegion {
+impl ValueSlotAllocationRegion {
     #[inline]
     fn unused_cells(self) -> usize {
         let class_size = self.class_size as usize;
@@ -633,31 +635,34 @@ impl JitAllocationRegion {
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JitAllocationRegionField {
+pub enum ValueSlotAllocationRegionField {
     Cursor,
     Limit,
     BitmapWord,
+    BitmapBit,
     Shape,
 }
 
-impl JitAllocationRegionField {
+impl ValueSlotAllocationRegionField {
     /// Resolve one region field for a small allocation size. Returning `None`
     /// keeps unsupported/large shapes on the runtime helper path.
     pub fn offset_for_size(self, size: usize) -> Option<i32> {
         let (class_index, _) = heap::allocation_class(size)?;
-        let region = core::mem::offset_of!(Gc, jit_allocation_regions)
-            .checked_add(class_index.checked_mul(core::mem::size_of::<JitAllocationRegion>())?)?;
+        let region = core::mem::offset_of!(Gc, value_slot_allocation_regions).checked_add(
+            class_index.checked_mul(core::mem::size_of::<ValueSlotAllocationRegion>())?,
+        )?;
         let field = match self {
-            Self::Cursor => core::mem::offset_of!(JitAllocationRegion, cursor),
-            Self::Limit => core::mem::offset_of!(JitAllocationRegion, limit),
-            Self::BitmapWord => core::mem::offset_of!(JitAllocationRegion, bitmap_word),
-            Self::Shape => core::mem::offset_of!(JitAllocationRegion, shape),
+            Self::Cursor => core::mem::offset_of!(ValueSlotAllocationRegion, cursor),
+            Self::Limit => core::mem::offset_of!(ValueSlotAllocationRegion, limit),
+            Self::BitmapWord => core::mem::offset_of!(ValueSlotAllocationRegion, bitmap_word),
+            Self::BitmapBit => core::mem::offset_of!(ValueSlotAllocationRegion, bitmap_bit),
+            Self::Shape => core::mem::offset_of!(ValueSlotAllocationRegion, shape),
         };
         i32::try_from(region.checked_add(field)?).ok()
     }
 
     #[inline]
-    pub fn class_index_for_size(size: usize) -> Option<u8> {
+    pub(crate) fn class_index_for_size(size: usize) -> Option<u8> {
         u8::try_from(heap::allocation_class(size)?.0).ok()
     }
 
@@ -676,11 +681,11 @@ pub struct Gc {
 
     // ========== Island Heap ==========
     heap: SpanHeap,
-    jit_allocation_regions: [JitAllocationRegion; heap::CLASS_COUNT],
-    /// Only one region may own object-count admission at a time. Generated
-    /// code validates this tag before consuming a cached cursor, so changing
-    /// size class can never revive a stale reservation.
-    jit_active_allocation_region: u8,
+    value_slot_allocation_regions: [ValueSlotAllocationRegion; heap::CLASS_COUNT],
+    /// Only one region may own object-count admission at a time. Every
+    /// consumer validates this tag before advancing a cached cursor, so
+    /// changing size class can never revive a stale reservation.
+    active_value_slot_allocation_region: u8,
     initial_reserve_bytes: usize,
     gc_mode: GcMode,
     automatic_gc: bool,
@@ -864,8 +869,9 @@ impl Gc {
         Ok(Self {
             owner_dispatch: None,
             heap,
-            jit_allocation_regions: [JitAllocationRegion::default(); heap::CLASS_COUNT],
-            jit_active_allocation_region: u8::MAX,
+            value_slot_allocation_regions: [ValueSlotAllocationRegion::default();
+                heap::CLASS_COUNT],
+            active_value_slot_allocation_region: u8::MAX,
             initial_reserve_bytes: config.initial_reserve_bytes,
             gc_mode: config.gc_mode,
             automatic_gc: config.automatic_gc,
@@ -986,10 +992,10 @@ impl Gc {
         Ok(())
     }
 
-    fn close_jit_allocation_region(&mut self) {
-        let class_index = usize::from(self.jit_active_allocation_region);
-        self.jit_active_allocation_region = u8::MAX;
-        let Some(region) = self.jit_allocation_regions.get_mut(class_index) else {
+    fn close_value_slot_allocation_region(&mut self) {
+        let class_index = usize::from(self.active_value_slot_allocation_region);
+        self.active_value_slot_allocation_region = u8::MAX;
+        let Some(region) = self.value_slot_allocation_regions.get_mut(class_index) else {
             return;
         };
         let region = core::mem::take(region);
@@ -1004,21 +1010,21 @@ impl Gc {
                 .saturating_sub(logical_bytes as u64);
             self.debt = self.debt.saturating_sub(logical_bytes as i64);
             self.heap
-                .refund_jit_region_cells(unused_cells, region.class_size as usize);
+                .refund_region_cells(unused_cells, region.class_size as usize);
             unsafe {
                 *region.live_cells = region.live_cells.read().saturating_sub(unused_cells as u16);
                 *region.logical_bytes = region.logical_bytes.read().saturating_sub(logical_bytes);
             }
         }
-        self.heap.release_jit_bump_lane(region.cursor, region.limit);
+        self.heap.release_bump_lane(region.cursor, region.limit);
         self.refresh_jit_poll_required();
     }
 
     #[inline]
-    fn active_jit_region_unused(&self) -> (usize, usize, usize) {
+    fn active_value_slot_region_unused(&self) -> (usize, usize, usize) {
         let Some(region) = self
-            .jit_allocation_regions
-            .get(usize::from(self.jit_active_allocation_region))
+            .value_slot_allocation_regions
+            .get(usize::from(self.active_value_slot_allocation_region))
         else {
             return (0, 0, 0);
         };
@@ -1030,19 +1036,19 @@ impl Gc {
         )
     }
 
-    /// Close the current native allocation region before a VM/GC observation.
-    /// Generated objects are already published in the heap bitmap; this only
-    /// refunds the unconsumed admission and makes telemetry exact.
-    pub fn close_jit_allocation_region_for_boundary(&mut self) {
-        self.reject_owner_proxy_api("close_jit_allocation_region_for_boundary");
-        self.close_jit_allocation_region();
+    /// Close the current allocation region before a runtime/GC observation.
+    /// Consumed objects are already published in the heap bitmap; this only
+    /// refunds the unused admission and makes telemetry exact.
+    pub fn close_value_slot_allocation_region_for_boundary(&mut self) {
+        self.reject_owner_proxy_api("close_value_slot_allocation_region_for_boundary");
+        self.close_value_slot_allocation_region();
     }
 
-    /// Prepare a bounded allocation region for generated code. All resource
-    /// admission is charged here, before generated code can expose the first
-    /// object. The region publishes cells without fallible work and refunds
-    /// its unused suffix at the next VM/GC boundary.
-    pub(crate) fn prepare_jit_value_slots_allocation_region(
+    /// Prepare a bounded region for VM or native instruction execution. All
+    /// resource admission is charged here, before either backend can expose
+    /// the first object. Consumption is infallible and the unused suffix is
+    /// refunded at the next runtime/GC boundary.
+    fn prepare_value_slot_allocation_region(
         &mut self,
         size: usize,
         value_meta: ValueMeta,
@@ -1055,14 +1061,15 @@ impl Gc {
 
         #[cfg(not(feature = "gc-debug"))]
         {
-            self.close_jit_allocation_region();
+            self.close_value_slot_allocation_region();
             if self.owner_dispatch.is_some() || self.state != GcState::Pause {
                 return;
             }
             let Some((class_index, class_size)) = heap::allocation_class(size) else {
                 return;
             };
-            // Stress mode intentionally retains one poll per allocation.
+            // Stress mode intentionally retains one general allocation per
+            // object so every object remains an independent collector event.
             if self.stress_every_step {
                 return;
             }
@@ -1084,7 +1091,7 @@ impl Gc {
             {
                 return;
             }
-            let Ok(Some(lane)) = self.heap.reserve_jit_bump_lane(size, remaining_objects) else {
+            let Ok(Some(lane)) = self.heap.reserve_bump_lane(size, remaining_objects) else {
                 return;
             };
             debug_assert_eq!(lane.class_size, heap::allocation_class(size).unwrap().1);
@@ -1107,7 +1114,7 @@ impl Gc {
                 *lane.logical_bytes = lane.logical_bytes.read().saturating_add(admitted_bytes);
             }
             self.heap
-                .admit_jit_region_cells(admitted_cells, lane.class_size);
+                .admit_region_cells(admitted_cells, lane.class_size);
             self.total_bytes = self.total_bytes.saturating_add(admitted_bytes);
             self.live_object_count = self.live_object_count.saturating_add(admitted_cells);
             self.young_live_bytes = self.young_live_bytes.saturating_add(admitted_bytes);
@@ -1116,17 +1123,18 @@ impl Gc {
                 .saturating_add(admitted_bytes as u64);
             self.debt = self.debt.saturating_add(admitted_bytes as i64);
             self.refresh_jit_poll_required();
-            self.jit_allocation_regions[class_index] = JitAllocationRegion {
+            self.value_slot_allocation_regions[class_index] = ValueSlotAllocationRegion {
                 cursor: lane.cursor,
                 limit: lane.limit,
                 bitmap_word: lane.bitmap_word,
+                bitmap_bit: lane.bitmap_bit,
                 live_cells: lane.live_cells,
                 logical_bytes: lane.logical_bytes,
-                shape: JitAllocationRegionField::shape(size, value_meta.to_raw()),
+                shape: ValueSlotAllocationRegionField::shape(size, value_meta.to_raw()),
                 class_size: class_size as u32,
                 logical_size: size as u32,
             };
-            self.jit_active_allocation_region = class_index as u8;
+            self.active_value_slot_allocation_region = class_index as u8;
         }
     }
 
@@ -1172,7 +1180,7 @@ impl Gc {
     pub fn memory_set_allocation_allowed(&mut self, allowed: bool) {
         self.reject_owner_proxy_api("memory_set_allocation_allowed");
         if !allowed {
-            self.close_jit_allocation_region();
+            self.close_value_slot_allocation_region();
         }
         self.heap.set_allocation_allowed(allowed);
     }
@@ -1406,7 +1414,7 @@ impl Gc {
             free_blocks,
         } = self.heap.stats();
         let (reserved_cells, reserved_logical_bytes, reserved_span_bytes) =
-            self.active_jit_region_unused();
+            self.active_value_slot_region_unused();
         let allocated_span_bytes = allocated_span_bytes.saturating_sub(reserved_span_bytes);
         let total_bytes = self.total_bytes.saturating_sub(reserved_logical_bytes);
         let live_object_count = self.live_object_count.saturating_sub(reserved_cells);
@@ -1539,6 +1547,70 @@ impl Gc {
         Ok(object)
     }
 
+    /// Allocate through the bounded single-mutator region shared by the VM
+    /// and native backend. The ordinary value-slot API stays latency-neutral
+    /// for one-off runtime/FFI allocations; instruction engines opt into this
+    /// amortized path because they commonly repeat the same allocation shape.
+    pub fn try_alloc_value_slots_in_region(
+        &mut self,
+        value_meta: ValueMeta,
+        slots: u16,
+    ) -> Result<GcRef, MemoryError> {
+        if self.owner_dispatch.is_some() {
+            return self.try_alloc_value_slots(value_meta, slots);
+        }
+        let size = GcHeader::SIZE
+            .checked_add(
+                usize::from(slots)
+                    .checked_mul(SLOT_BYTES)
+                    .ok_or(MemoryError::AllocationSizeOverflow)?,
+            )
+            .ok_or(MemoryError::AllocationSizeOverflow)?;
+        if let Some(object) = self.take_value_slot_allocation(size, value_meta) {
+            return Ok(object);
+        }
+        let object = self.try_alloc_value_slots(value_meta, slots)?;
+        self.prepare_value_slot_allocation_region(size, value_meta, slots);
+        Ok(object)
+    }
+
+    /// Consume one already-admitted value-slot object without re-entering the
+    /// general heap allocator. Admission initialized every header and charged
+    /// all collector/accounting state up front; consumption only publishes the
+    /// cell in the allocation bitmap.
+    #[inline]
+    fn take_value_slot_allocation(&mut self, size: usize, value_meta: ValueMeta) -> Option<GcRef> {
+        #[cfg(feature = "gc-debug")]
+        {
+            let _ = (size, value_meta);
+            None
+        }
+
+        #[cfg(not(feature = "gc-debug"))]
+        {
+            let class_index =
+                usize::from(ValueSlotAllocationRegionField::class_index_for_size(size)?);
+            if usize::from(self.active_value_slot_allocation_region) != class_index {
+                return None;
+            }
+            let region = self.value_slot_allocation_regions.get_mut(class_index)?;
+            if region.shape != ValueSlotAllocationRegionField::shape(size, value_meta.to_raw())
+                || region.cursor.is_null()
+                || region.cursor >= region.limit
+            {
+                return None;
+            }
+
+            let raw = region.cursor;
+            region.cursor = unsafe { raw.add(region.class_size as usize) };
+            unsafe {
+                *region.bitmap_word |= region.bitmap_bit;
+            }
+            region.bitmap_bit <<= 1;
+            Some(unsafe { raw.add(GcHeader::SIZE) as GcRef })
+        }
+    }
+
     /// Allocate a large array. For arrays with total_slots > u16::MAX,
     /// GcHeader.slots is set to 0, and the actual size is read from ArrayHeader.
     pub fn alloc_array(&mut self, value_meta: ValueMeta, total_slots: usize) -> GcRef {
@@ -1630,7 +1702,7 @@ impl Gc {
         // A runtime allocation can occur between two generated allocations
         // of another size class. Return every unconsumed lane tail first so a
         // single mutator never holds overlapping object-capacity admissions.
-        self.close_jit_allocation_region();
+        self.close_value_slot_allocation_region();
 
         let header_size = GcHeader::SIZE;
         let data_size = match slots.checked_mul(SLOT_BYTES) {
@@ -2218,6 +2290,9 @@ impl Gc {
     #[inline]
     pub fn set_stress_every_step(&mut self, enabled: bool) {
         self.reject_owner_proxy_api("set_stress_every_step");
+        if enabled {
+            self.close_value_slot_allocation_region();
+        }
         self.stress_every_step = enabled;
         self.refresh_jit_poll_required();
     }
@@ -2425,7 +2500,7 @@ impl Gc {
         if work_unit_limit == 0 {
             return 0;
         }
-        self.close_jit_allocation_region();
+        self.close_value_slot_allocation_region();
         let mut work = 0usize;
         let requested_limit = work_unit_limit.saturating_mul(SLOT_BYTES);
         let base = self.stepsize * self.stepmul as usize / 100;
@@ -3012,13 +3087,13 @@ impl Gc {
 
     pub fn total_bytes(&self) -> usize {
         self.reject_owner_proxy_api("total_bytes");
-        let (_, reserved_logical_bytes, _) = self.active_jit_region_unused();
+        let (_, reserved_logical_bytes, _) = self.active_value_slot_region_unused();
         self.total_bytes.saturating_sub(reserved_logical_bytes)
     }
 
     pub fn object_count(&self) -> usize {
         self.reject_owner_proxy_api("object_count");
-        let (reserved_cells, _, _) = self.active_jit_region_unused();
+        let (reserved_cells, _, _) = self.active_value_slot_region_unused();
         self.live_object_count.saturating_sub(reserved_cells)
     }
 
@@ -3038,7 +3113,7 @@ impl Gc {
 
     pub fn debt(&self) -> i64 {
         self.reject_owner_proxy_api("debt");
-        let (_, reserved_logical_bytes, _) = self.active_jit_region_unused();
+        let (_, reserved_logical_bytes, _) = self.active_value_slot_region_unused();
         self.debt.saturating_sub(reserved_logical_bytes as i64)
     }
 

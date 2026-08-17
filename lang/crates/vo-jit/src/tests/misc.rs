@@ -502,7 +502,7 @@ fn optimizing_scalar_replacement_preserves_allocation_admission() {
         JitResult::Ok
     );
     assert_eq!(ret[0], 42);
-    gc.close_jit_allocation_region_for_boundary();
+    gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(
         gc.object_count(),
         1,
@@ -726,7 +726,7 @@ fn optimizing_fresh_shape_construction_preserves_managed_children() {
         unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
         JitResult::Ok
     );
-    gc.close_jit_allocation_region_for_boundary();
+    gc.close_value_slot_allocation_region_for_boundary();
     let child = gc
         .canonicalize_ref(ret[0] as vo_runtime::gc::GcRef)
         .expect("returned child remains a published object");
@@ -795,7 +795,7 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
         unsafe { crate::invoke_test_jit(entry, &mut exact_ctx, &mut exact_frame, &mut exact_ret) },
         JitResult::Ok
     );
-    exact_gc.close_jit_allocation_region_for_boundary();
+    exact_gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(exact_gc.object_count(), 5);
     assert_eq!(exact_gc.objects().count(), 5);
     assert!(exact_gc
@@ -818,7 +818,7 @@ fn native_allocation_region_publishes_exact_cells_and_fails_at_the_hard_limit() 
         },
         JitResult::JitError
     );
-    limited_gc.close_jit_allocation_region_for_boundary();
+    limited_gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(limited_gc.object_count(), 4);
     assert_eq!(limited_gc.objects().count(), 4);
     assert_eq!(
