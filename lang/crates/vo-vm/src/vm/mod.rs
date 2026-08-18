@@ -47,7 +47,9 @@ pub(crate) use extern_call::prepare_extern_closure_replay_call;
 #[cfg(feature = "jit")]
 pub(crate) use extern_call::prepare_typed_extern_closure_replay_setup;
 pub(crate) use helpers::{stack_get, stack_set};
-pub(crate) use island_shared::endpoint_response_from_authorized_source;
+pub(crate) use island_shared::{
+    endpoint_response_from_authorized_source, handle_endpoint_request_response_command,
+};
 pub use jit_stats::{JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
 pub use types::EndpointRegistry;
 pub(crate) use types::EndpointRegistryUndo;
@@ -65,8 +67,8 @@ use extern_call::{
     ExternResultTransition,
 };
 use helpers::{
-    runtime_panic, runtime_panic_msg, runtime_trap, slice_cap, slice_data_ptr, slice_len,
-    string_index, string_len, user_panic,
+    runtime_panic, runtime_panic_msg, runtime_panic_msg_at, runtime_trap, slice_cap,
+    slice_data_ptr, slice_len, string_index, string_len, user_panic,
 };
 
 use crate::bytecode::{ExternJitRoute, FunctionDef, Module, TransferType};
@@ -1117,8 +1119,15 @@ fn execute_verified_extern_boundary(
             InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::Exit(code))
         }
         ExternBoundary::Panic(msg) => {
-            let result =
-                runtime_panic_msg(&mut vm.state.gc, fiber, stack, loaded_module.module(), msg);
+            let result = runtime_panic_msg_at(
+                &mut vm.state.gc,
+                fiber,
+                stack,
+                loaded_module.module(),
+                func_id,
+                fetched_pc as u32,
+                msg,
+            );
             if matches!(result, ExecResult::FrameChanged) {
                 InterpreterExternOutcome::FrameChanged
             } else {

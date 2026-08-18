@@ -429,7 +429,7 @@ fn reject_endpoint_request(
     );
     transition
         .island_commands
-        .push(IslandCommandEffect::endpoint_response(
+        .push(IslandCommandEffect::endpoint_request_response(
             from_island,
             endpoint_id,
             response.with_wait_key(wait_key),
@@ -635,7 +635,7 @@ pub(crate) fn handle_endpoint_request_command(
             );
             transition
                 .island_commands
-                .push(IslandCommandEffect::endpoint_response(
+                .push(IslandCommandEffect::endpoint_request_response(
                     from_island,
                     endpoint_id,
                     resp.with_wait_key(wait_key),
@@ -1298,10 +1298,36 @@ pub(crate) fn handle_endpoint_response_command(
     kind: EndpointResponseKind,
     from_island: u32,
 ) -> Result<(), VmError> {
-    if !endpoint_response_from_authorized_source(vm, endpoint_id, from_island) {
+    handle_endpoint_response_command_inner(vm, endpoint_id, kind, from_island, false)
+}
+
+pub(crate) fn handle_endpoint_request_response_command(
+    vm: &mut Vm,
+    endpoint_id: u64,
+    kind: EndpointResponseKind,
+    from_island: u32,
+) -> Result<(), VmError> {
+    handle_endpoint_response_command_inner(vm, endpoint_id, kind, from_island, true)
+}
+
+fn handle_endpoint_response_command_inner(
+    vm: &mut Vm,
+    endpoint_id: u64,
+    kind: EndpointResponseKind,
+    from_island: u32,
+    source_authorized_by_request: bool,
+) -> Result<(), VmError> {
+    if !source_authorized_by_request
+        && !endpoint_response_from_authorized_source(vm, endpoint_id, from_island)
+    {
         return Ok(());
     }
     let (outcome, closes_endpoint, context) = match kind {
+        EndpointResponseKind::Closed if source_authorized_by_request => {
+            return Err(VmError::Jit(
+                "endpoint request reply cannot use an unsolicited close response".to_string(),
+            ));
+        }
         EndpointResponseKind::Closed => (
             vm.apply_runtime_command(RuntimeCommand::endpoint_closed_response(
                 endpoint_id,
@@ -1310,21 +1336,30 @@ pub(crate) fn handle_endpoint_response_command(
             true,
             "closed",
         ),
-        kind @ EndpointResponseKind::SendAck { closed, .. } => (
-            resume_endpoint_response(vm, endpoint_id, from_island, kind),
-            closed,
-            "send",
-        ),
-        kind @ EndpointResponseKind::RecvData { closed, .. } => (
-            resume_endpoint_response(vm, endpoint_id, from_island, kind),
-            closed,
-            "recv",
-        ),
-        kind @ EndpointResponseKind::RecvError { .. } => (
-            resume_endpoint_response(vm, endpoint_id, from_island, kind),
-            false,
-            "recv error",
-        ),
+        kind @ EndpointResponseKind::SendAck { closed, .. } => {
+            let outcome = if source_authorized_by_request {
+                vm.apply_endpoint_request_response_command(endpoint_id, from_island, kind)
+            } else {
+                resume_endpoint_response(vm, endpoint_id, from_island, kind)
+            };
+            (outcome, closed, "send")
+        }
+        kind @ EndpointResponseKind::RecvData { closed, .. } => {
+            let outcome = if source_authorized_by_request {
+                vm.apply_endpoint_request_response_command(endpoint_id, from_island, kind)
+            } else {
+                resume_endpoint_response(vm, endpoint_id, from_island, kind)
+            };
+            (outcome, closed, "recv")
+        }
+        kind @ EndpointResponseKind::RecvError { .. } => {
+            let outcome = if source_authorized_by_request {
+                vm.apply_endpoint_request_response_command(endpoint_id, from_island, kind)
+            } else {
+                resume_endpoint_response(vm, endpoint_id, from_island, kind)
+            };
+            (outcome, false, "recv error")
+        }
     };
     if closes_endpoint && outcome.payload_accepted {
         mark_remote_endpoint_closed(vm, endpoint_id);

@@ -1529,12 +1529,12 @@ mod tests {
         func.param_slots = 3;
         func.local_slots = 4;
         func.ret_slots = 1;
-        func.ret_slot_types = vec![vo_runtime::SlotType::GcRef];
+        func.ret_slot_types = vec![vo_runtime::SlotType::GcBase];
         func.slot_types = vec![
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
             vo_runtime::SlotType::Value,
             vo_runtime::SlotType::Value,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
         ];
         func
     }
@@ -1949,7 +1949,7 @@ mod tests {
             ],
         );
         caller.local_slots = 5;
-        caller.slot_types.push(vo_runtime::SlotType::GcRef);
+        caller.slot_types.push(vo_runtime::SlotType::GcBase);
 
         let mut interpreted_callee = string_slice_func(
             "interpreted",
@@ -2026,10 +2026,10 @@ mod tests {
         func.slot_types = vec![
             vo_runtime::SlotType::Interface0,
             vo_runtime::SlotType::Interface1,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
             vo_runtime::SlotType::Value,
             vo_runtime::SlotType::Value,
-            vo_runtime::SlotType::GcRef,
+            vo_runtime::SlotType::GcBase,
         ];
         let mut module = VoModule::new("jit-native-interface-root".to_string());
         module.functions.push(func);

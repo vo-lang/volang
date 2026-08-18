@@ -5,6 +5,48 @@ fn endpoint_wait_key(fiber_key: u64, wait_id: u64) -> EndpointWaitKey {
 }
 
 #[test]
+fn vm_endpoint_request_missing_endpoint_061_routes_closed_response_to_requester() {
+    let mut vm = Vm::new();
+    vm.state.current_island_id = 7;
+    vm.state.external_island_transport = true;
+    let endpoint_id = 42;
+    let wait_key = endpoint_wait_key(0x0000_0001_0000_0004, 5);
+
+    handle_endpoint_request_command(
+        &mut vm,
+        endpoint_id,
+        EndpointRequestKind::Recv { wait_key },
+        13,
+    )
+    .expect("missing endpoint should reply that the receive side is closed");
+
+    let (target_island, envelope) = vm
+        .state
+        .outbound_commands
+        .pop_front()
+        .expect("missing endpoint should produce a response");
+    assert_eq!(target_island, 13);
+    assert_eq!(envelope.source_island_id, 7);
+    assert!(vm.state.outbound_commands.is_empty());
+    let vo_runtime::island::IslandCommand::EndpointResponse {
+        endpoint_id: response_endpoint_id,
+        kind:
+            EndpointResponseKind::RecvData {
+                data,
+                closed,
+                wait_key: response_wait_key,
+            },
+    } = envelope.command
+    else {
+        panic!("expected a closed receive response for the missing endpoint");
+    };
+    assert_eq!(response_endpoint_id, endpoint_id);
+    assert!(data.is_empty());
+    assert!(closed);
+    assert_eq!(response_wait_key, wait_key);
+}
+
+#[test]
 fn vm_endpoint_request_route_preflight_058_close_missing_peer_route_preserves_queue() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;

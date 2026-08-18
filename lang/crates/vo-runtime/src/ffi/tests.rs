@@ -3314,9 +3314,10 @@ fn wasm_extension_bridge_call_061_requires_resolved_abi_before_provider() {
     let err = call_unresolved_extern_with_stack(&registry, &mut stack, invoke)
         .expect_err("wasm extension bridge direct dispatch must be rejected");
 
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("wasm extension bridge") && err.to_string().contains("resolved"),
-        "{err}"
+        message.contains("WASM extension bridge") && message.contains("resolved ABI metadata"),
+        "{message}"
     );
     assert!(
         !DIRECT_WASM_BRIDGE_PROVIDER_RAN_061.load(core::sync::atomic::Ordering::SeqCst),

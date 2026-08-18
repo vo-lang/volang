@@ -738,6 +738,13 @@ enum WakeActivationKey {
 pub struct IslandCommandEffect {
     pub island_id: u32,
     pub command: IslandCommand,
+    endpoint_response_origin: EndpointResponseOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointResponseOrigin {
+    Registry,
+    EndpointRequest,
 }
 
 impl IslandCommandEffect {
@@ -746,10 +753,16 @@ impl IslandCommandEffect {
         island_command_expects_response(&self.command)
     }
 
+    #[inline]
+    fn is_endpoint_request_response(&self) -> bool {
+        self.endpoint_response_origin == EndpointResponseOrigin::EndpointRequest
+    }
+
     pub fn spawn_fiber(island_id: u32, closure_data: vo_runtime::pack::PackedValue) -> Self {
         Self {
             island_id,
             command: IslandCommand::SpawnFiber { closure_data },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
         }
     }
 
@@ -765,6 +778,7 @@ impl IslandCommandEffect {
                 endpoint_id,
                 kind: EndpointRequestKind::Send { data, wait_key },
             },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
         }
     }
 
@@ -779,6 +793,7 @@ impl IslandCommandEffect {
                 endpoint_id,
                 kind: EndpointRequestKind::Recv { wait_key },
             },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
         }
     }
 
@@ -789,6 +804,7 @@ impl IslandCommandEffect {
                 endpoint_id,
                 kind: EndpointRequestKind::Transfer { new_peer },
             },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
         }
     }
 
@@ -799,6 +815,7 @@ impl IslandCommandEffect {
                 endpoint_id,
                 kind: EndpointRequestKind::Close,
             },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
         }
     }
 
@@ -806,6 +823,19 @@ impl IslandCommandEffect {
         Self {
             island_id,
             command: IslandCommand::EndpointResponse { endpoint_id, kind },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
+        }
+    }
+
+    pub(crate) fn endpoint_request_response(
+        island_id: u32,
+        endpoint_id: u64,
+        kind: EndpointResponseKind,
+    ) -> Self {
+        Self {
+            island_id,
+            command: IslandCommand::EndpointResponse { endpoint_id, kind },
+            endpoint_response_origin: EndpointResponseOrigin::EndpointRequest,
         }
     }
 
@@ -825,6 +855,7 @@ impl IslandCommandEffect {
                     wait_key,
                 },
             },
+            endpoint_response_origin: EndpointResponseOrigin::Registry,
         }
     }
 }
@@ -1486,105 +1517,7 @@ impl Vm {
                 from_island,
                 kind,
             } => {
-                let Some(wait_key) = kind.wait_key() else {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                };
-                let fiber_key = wait_key.fiber_key();
-                if self.state.pending_island_responses == 0 {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                if !crate::vm::endpoint_response_from_authorized_source(
-                    self,
-                    endpoint_id,
-                    from_island,
-                ) {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                }
-                // Rejected endpoint responses do not satisfy the live
-                // obligation, so the pending count changes only after all
-                // source, generation, endpoint, and operation checks pass.
-                let Some(fid) = ({
-                    let Some(fiber) = self
-                        .scheduler
-                        .try_get_fiber_mut_by_endpoint_response_key(fiber_key)
-                    else {
-                        return RuntimeCommandOutcome {
-                            applied: false,
-                            payload_accepted: false,
-                        };
-                    };
-                    if !matches!(
-                        fiber.state,
-                        crate::fiber::FiberState::Blocked(BlockReason::Queue)
-                    ) {
-                        return RuntimeCommandOutcome {
-                            applied: false,
-                            payload_accepted: false,
-                        };
-                    }
-                    let replay_closed_send = match &kind {
-                        EndpointResponseKind::SendAck { closed, .. } => *closed,
-                        _ => false,
-                    };
-                    let resume = if replay_closed_send {
-                        match replay_current_instruction_policy(
-                            fiber,
-                            "endpoint closed send response",
-                        ) {
-                            Ok(resume) => Some(resume),
-                            Err(_) => {
-                                return RuntimeCommandOutcome {
-                                    applied: false,
-                                    payload_accepted: false,
-                                };
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    if !fiber.apply_endpoint_response(endpoint_id, kind) {
-                        return RuntimeCommandOutcome {
-                            applied: false,
-                            payload_accepted: false,
-                        };
-                    }
-                    if let Some(resume) = resume {
-                        if set_current_frame_pc_for_resume(
-                            fiber,
-                            resume,
-                            "endpoint closed send response",
-                        )
-                        .is_err()
-                        {
-                            return RuntimeCommandOutcome {
-                                applied: false,
-                                payload_accepted: false,
-                            };
-                        }
-                    }
-                    Some(FiberId::from_raw(fiber.id))
-                }) else {
-                    return RuntimeCommandOutcome {
-                        applied: false,
-                        payload_accepted: false,
-                    };
-                };
-                self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
-                self.state.pending_island_responses -= 1;
-                let applied = self.scheduler.try_wake_fiber(fid);
-                RuntimeCommandOutcome {
-                    applied,
-                    payload_accepted: applied,
-                }
+                self.apply_endpoint_response_runtime_command(endpoint_id, from_island, kind, false)
             }
             RuntimeCommand::EndpointClosed {
                 endpoint_id,
@@ -1614,6 +1547,114 @@ impl Vm {
                     payload_accepted: true,
                 }
             }
+        }
+    }
+
+    pub(crate) fn apply_endpoint_request_response_command(
+        &mut self,
+        endpoint_id: u64,
+        from_island: u32,
+        kind: EndpointResponseKind,
+    ) -> RuntimeCommandOutcome {
+        self.apply_endpoint_response_runtime_command(endpoint_id, from_island, kind, true)
+    }
+
+    fn apply_endpoint_response_runtime_command(
+        &mut self,
+        endpoint_id: u64,
+        from_island: u32,
+        kind: EndpointResponseKind,
+        source_authorized_by_request: bool,
+    ) -> RuntimeCommandOutcome {
+        let Some(wait_key) = kind.wait_key() else {
+            return RuntimeCommandOutcome {
+                applied: false,
+                payload_accepted: false,
+            };
+        };
+        let fiber_key = wait_key.fiber_key();
+        if self.state.pending_island_responses == 0 {
+            return RuntimeCommandOutcome {
+                applied: false,
+                payload_accepted: false,
+            };
+        }
+        if !source_authorized_by_request
+            && !crate::vm::endpoint_response_from_authorized_source(self, endpoint_id, from_island)
+        {
+            return RuntimeCommandOutcome {
+                applied: false,
+                payload_accepted: false,
+            };
+        }
+        // Rejected endpoint responses do not satisfy the live obligation, so
+        // the pending count changes only after all source, generation,
+        // endpoint, and operation checks pass.
+        let Some(fid) = ({
+            let Some(fiber) = self
+                .scheduler
+                .try_get_fiber_mut_by_endpoint_response_key(fiber_key)
+            else {
+                return RuntimeCommandOutcome {
+                    applied: false,
+                    payload_accepted: false,
+                };
+            };
+            if !matches!(
+                fiber.state,
+                crate::fiber::FiberState::Blocked(BlockReason::Queue)
+            ) {
+                return RuntimeCommandOutcome {
+                    applied: false,
+                    payload_accepted: false,
+                };
+            }
+            let replay_closed_send = match &kind {
+                EndpointResponseKind::SendAck { closed, .. } => *closed,
+                _ => false,
+            };
+            let resume = if replay_closed_send {
+                match replay_current_instruction_policy(fiber, "endpoint closed send response") {
+                    Ok(resume) => Some(resume),
+                    Err(_) => {
+                        return RuntimeCommandOutcome {
+                            applied: false,
+                            payload_accepted: false,
+                        };
+                    }
+                }
+            } else {
+                None
+            };
+            if !fiber.apply_endpoint_response(endpoint_id, kind) {
+                return RuntimeCommandOutcome {
+                    applied: false,
+                    payload_accepted: false,
+                };
+            }
+            if let Some(resume) = resume {
+                if set_current_frame_pc_for_resume(fiber, resume, "endpoint closed send response")
+                    .is_err()
+                {
+                    return RuntimeCommandOutcome {
+                        applied: false,
+                        payload_accepted: false,
+                    };
+                }
+            }
+            Some(FiberId::from_raw(fiber.id))
+        }) else {
+            return RuntimeCommandOutcome {
+                applied: false,
+                payload_accepted: false,
+            };
+        };
+        self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
+        self.state.pending_island_responses -= 1;
+        let applied = self.scheduler.try_wake_fiber(fid);
+        RuntimeCommandOutcome {
+            applied,
+            payload_accepted: applied,
         }
     }
 
@@ -1797,6 +1838,7 @@ impl Vm {
         };
         let wait_key = kind.wait_key()?;
         if effect.island_id != self.state.current_island_id
+            && !effect.is_endpoint_request_response()
             && !crate::vm::endpoint_response_from_authorized_source(
                 self,
                 *endpoint_id,
@@ -1840,11 +1882,12 @@ impl Vm {
         };
         if effect.island_id != self.state.current_island_id
             || matches!(kind, EndpointResponseKind::Closed)
-            || !crate::vm::endpoint_response_from_authorized_source(
-                self,
-                *endpoint_id,
-                self.state.current_island_id,
-            )
+            || (!effect.is_endpoint_request_response()
+                && !crate::vm::endpoint_response_from_authorized_source(
+                    self,
+                    *endpoint_id,
+                    self.state.current_island_id,
+                ))
         {
             return None;
         }
@@ -1995,6 +2038,9 @@ impl Vm {
         &self,
         effect: &IslandCommandEffect,
     ) -> Option<EndpointResponseAuthorizationSource> {
+        if effect.is_endpoint_request_response() {
+            return None;
+        }
         let IslandCommand::EndpointResponse { endpoint_id, .. } = &effect.command else {
             return None;
         };
@@ -2292,14 +2338,17 @@ impl Vm {
 
     fn preflight_same_island_endpoint_response_command(
         &self,
+        effect: &IslandCommandEffect,
         endpoint_id: u64,
         kind: &EndpointResponseKind,
     ) -> Result<(), VmError> {
-        if !crate::vm::endpoint_response_from_authorized_source(
-            self,
-            endpoint_id,
-            self.state.current_island_id,
-        ) {
+        if !effect.is_endpoint_request_response()
+            && !crate::vm::endpoint_response_from_authorized_source(
+                self,
+                endpoint_id,
+                self.state.current_island_id,
+            )
+        {
             return Ok(());
         }
         if matches!(kind, EndpointResponseKind::Closed) {
@@ -2340,7 +2389,11 @@ impl Vm {
                     )?;
                 }
                 IslandCommand::EndpointResponse { endpoint_id, kind } => {
-                    self.preflight_same_island_endpoint_response_command(*endpoint_id, kind)?;
+                    self.preflight_same_island_endpoint_response_command(
+                        effect,
+                        *endpoint_id,
+                        kind,
+                    )?;
                 }
                 IslandCommand::Shutdown => {}
             }
@@ -2367,11 +2420,13 @@ impl Vm {
                         "remote EndpointResponse command",
                     )
                     .is_err()
-                })) || !crate::vm::endpoint_response_from_authorized_source(
-                    self,
-                    *endpoint_id,
-                    self.state.current_island_id,
-                ) {
+                })) || (!effect.is_endpoint_request_response()
+                    && !crate::vm::endpoint_response_from_authorized_source(
+                        self,
+                        *endpoint_id,
+                        self.state.current_island_id,
+                    ))
+                {
                     return Err(VmError::Jit(
                         "remote EndpointResponse command was rejected".to_string(),
                     ));
@@ -2859,6 +2914,7 @@ impl Vm {
 
     fn apply_island_command_effect(&mut self, effect: IslandCommandEffect) -> Result<(), VmError> {
         let expects_response = effect.expects_response();
+        let endpoint_request_response = effect.is_endpoint_request_response();
         if effect.island_id == self.state.current_island_id {
             if expects_response {
                 self.state.pending_island_responses = self
@@ -2872,7 +2928,24 @@ impl Vm {
                         )
                     })?;
             }
-            let result = self.dispatch_island_command(effect.command);
+            let response_source = self.state.current_island_id;
+            let result = if endpoint_request_response {
+                match effect.command {
+                    IslandCommand::EndpointResponse { endpoint_id, kind } => {
+                        crate::vm::handle_endpoint_request_response_command(
+                            self,
+                            endpoint_id,
+                            kind,
+                            response_source,
+                        )
+                    }
+                    _ => Err(VmError::Jit(
+                        "endpoint request reply origin requires an endpoint response".to_string(),
+                    )),
+                }
+            } else {
+                self.dispatch_island_command(effect.command)
+            };
             if result.is_err() && expects_response {
                 self.state.pending_island_responses =
                     self.state.pending_island_responses.saturating_sub(1);

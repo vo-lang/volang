@@ -182,6 +182,31 @@ pub fn runtime_panic_msg(
     msg: String,
 ) -> ExecResult {
     fiber.capture_panic_source_loc();
+    runtime_panic_msg_after_source_capture(gc, fiber, stack, module, msg)
+}
+
+#[inline]
+pub fn runtime_panic_msg_at(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    stack: *mut Slot,
+    module: &Module,
+    func_id: u32,
+    pc: u32,
+    msg: String,
+) -> ExecResult {
+    fiber.panic_source_loc = Some((func_id, pc));
+    runtime_panic_msg_after_source_capture(gc, fiber, stack, module, msg)
+}
+
+#[inline]
+fn runtime_panic_msg_after_source_capture(
+    gc: &mut Gc,
+    fiber: &mut Fiber,
+    stack: *mut Slot,
+    module: &Module,
+    msg: String,
+) -> ExecResult {
     let panic_str = string::new_from_string(gc, msg);
     let slot0 = vo_runtime::objects::interface::pack_slot0(0, 0, vo_runtime::ValueKind::String);
     fiber.set_recoverable_panic(InterfaceSlot::new(slot0, panic_str as u64));

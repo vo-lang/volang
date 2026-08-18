@@ -123,7 +123,7 @@ fn direct_method_one_slot_struct_func() -> FunctionDef {
         has_call_extern: false,
         code: Vec::new(),
         instruction_metadata: Vec::new(),
-        slot_types: vec![SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase],
         capture_types: Vec::new(),
         capture_slot_types: Vec::new(),
         param_types: Vec::new(),
@@ -143,7 +143,7 @@ fn direct_method_one_slot_struct_module() -> Module {
     );
     let mut module = Module::new("jit-direct-method-one-slot-struct".to_string());
     module.struct_metas.push(StructMeta {
-        slot_types: vec![SlotType::GcRef],
+        slot_types: vec![SlotType::GcBase],
         fields: vec![FieldMeta {
             name: "out".to_string(),
             offset: 0,
