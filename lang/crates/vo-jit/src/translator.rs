@@ -677,6 +677,16 @@ pub trait CallBoundary<'a>: IrBuilder<'a> {
 
     /// Compile-time identity of the caller activation.
     fn call_caller_func_id(&mut self) -> Value;
+
+    /// Emit a static call retained inside a bounded inline expansion.
+    ///
+    /// Inline recipes use this boundary to stop recursive expansion after the
+    /// planned depth while preserving the ordinary native call semantics.
+    fn emit_residual_inline_call(
+        &mut self,
+        inst: &Instruction,
+        arguments: &[(Value, bool)],
+    ) -> Result<(), JitError>;
 }
 
 /// Stack base refresh after callbacks or calls that may reallocate fiber.stack.

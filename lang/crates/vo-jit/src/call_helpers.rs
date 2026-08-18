@@ -31,12 +31,13 @@ pub use callback_abi::{
 };
 pub use dynamic::{emit_call_closure, emit_call_iface};
 pub use externs::{emit_call_extern, CallExternConfig};
-pub(crate) use leaf_inline::{SmallPureLeafInline, SMALL_LEAF_INLINE_BUDGET};
+pub(crate) use leaf_inline::{SmallFunctionInline, SMALL_INLINE_BUDGET};
 pub use plan::{CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan};
 pub use result_flow::{
     check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
     NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK, JIT_RESULT_REPLAY,
 };
+pub(crate) use vm_materialization::emit_jit_call_with_explicit_arguments;
 pub use vm_materialization::{emit_call_via_vm, emit_jit_call_with_vm_materialization};
 
 /// Maximum callee local-slot width for direct static JIT calls.

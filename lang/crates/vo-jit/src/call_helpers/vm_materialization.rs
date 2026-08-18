@@ -91,16 +91,63 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     direct_native: Option<cranelift_codegen::ir::FuncRef>,
     recursive_edge: bool,
 ) -> Result<(), crate::JitError> {
+    let mut arg_values = Vec::with_capacity(plan.arg_slots);
+    for i in 0..plan.arg_slots {
+        arg_values.push(emitter.read_var((plan.arg_start + i) as u16));
+    }
+    emit_jit_call_with_arguments(
+        emitter,
+        plan,
+        direct_native,
+        recursive_edge,
+        &arg_values,
+        false,
+    )
+}
+
+/// Lower the ordinary static-call boundary with explicit native argument
+/// values while retaining `plan` as the authoritative VM recovery boundary.
+/// Bounded inline expansions use this split so synthetic values never replace
+/// the source instruction's frame-state inputs.
+pub(crate) fn emit_jit_call_with_explicit_arguments<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    plan: CallPlan,
+    direct_native: Option<cranelift_codegen::ir::FuncRef>,
+    recursive_edge: bool,
+    arg_values: &[cranelift_codegen::ir::Value],
+) -> Result<(), crate::JitError> {
+    emit_jit_call_with_arguments(
+        emitter,
+        plan,
+        direct_native,
+        recursive_edge,
+        arg_values,
+        true,
+    )
+}
+
+fn emit_jit_call_with_arguments<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    plan: CallPlan,
+    direct_native: Option<cranelift_codegen::ir::FuncRef>,
+    recursive_edge: bool,
+    arg_values: &[cranelift_codegen::ir::Value],
+    replay_yield_at_source: bool,
+) -> Result<(), crate::JitError> {
+    if arg_values.len() != plan.arg_slots {
+        return Err(crate::JitError::Internal(format!(
+            "explicit static call has {} arguments for {} slots",
+            arg_values.len(),
+            plan.arg_slots
+        )));
+    }
+
     let ctx = emitter.ctx_param();
 
     let caller_bp = emitter.call_caller_bp();
     let old_fiber_sp = emitter.call_old_fiber_sp();
     let caller_func_id = emitter.call_caller_func_id();
 
-    let mut arg_values = Vec::with_capacity(plan.arg_slots);
-    for i in 0..plan.arg_slots {
-        arg_values.push(emitter.read_var((plan.arg_start + i) as u16));
-    }
     let ret_slot = emitter.native_scratch_slot(
         NativeScratchKind::StaticReturns,
         plan.call_ret_slots.max(1) * 8,
@@ -278,6 +325,47 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(jit_non_ok_block);
     emitter.builder().seal_block(jit_non_ok_block);
+
+    if replay_yield_at_source {
+        // Bounded recursive inlines are admitted only for scalar, side-effect-free
+        // recipes. A cooperative yield can therefore discard the partially
+        // expanded computation and resume at the original bytecode Call. Keeping
+        // that source boundary intact avoids materializing synthetic inline locals
+        // as a VM frame while preserving the exact GC-visible caller state.
+        let call = emitter.builder().ins().icmp_imm_u(
+            IntCC::Equal,
+            jit_result_indirect,
+            JIT_RESULT_CALL as i64,
+        );
+        let call_kind = emitter.load_context_field(types::I8, JitContextField::CallKind);
+        let yield_kind = emitter.builder().ins().icmp_imm_u(
+            IntCC::Equal,
+            call_kind,
+            i64::from(JitContext::CALL_KIND_YIELD),
+        );
+        let replay = emitter.builder().ins().band(call, yield_kind);
+        let replay_block = crate::compile_common::cold_block(emitter.builder());
+        let materialize_block = crate::compile_common::cold_block(emitter.builder());
+        emitter
+            .builder()
+            .ins()
+            .brif(replay, replay_block, &[], materialize_block, &[]);
+
+        emitter.builder().switch_to_block(replay_block);
+        emitter.builder().seal_block(replay_block);
+        restore_caller_execution_context(emitter, caller_bp, old_fiber_sp, caller_func_id);
+        emitter.refresh_stack_base_after_reallocation();
+        emitter.publish_current_frame_state();
+        let replay_pc = emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, current_pc as i64);
+        emitter.store_context_field(replay_pc, JitContextField::CallResumePc);
+        emitter.builder().ins().return_(&[jit_result_indirect]);
+
+        emitter.builder().switch_to_block(materialize_block);
+        emitter.builder().seal_block(materialize_block);
+    }
 
     emit_non_ok_slow_path(
         emitter,

@@ -5034,6 +5034,16 @@ reason = "targets GC-JIT frame metadata without the GC-VM comparison path"
 expect = "pass"
 
 [[case]]
+id = "jit-recursive-inline-gc-yield"
+kind = "file"
+path = "cases/gc/jit_recursive_inline_gc_yield.vo"
+matrix = "default-gc-jit-only"
+tags = ["jit", "gc", "contract", "regression"]
+owner = "runtime-gc"
+reason = "forces an optimizing scalar-recursive inline to cross a pending GC cooperative yield and validates source-call replay"
+expect = "pass"
+
+[[case]]
 id = "jit-panic-func-call"
 kind = "file"
 path = "cases/jit/jit_panic_func_call.vo"

@@ -6,7 +6,7 @@ use vo_runtime::bytecode::{Constant, FunctionDef, Module, IFACE_ASSIGN_NO_ITAB};
 use vo_runtime::instruction::Opcode;
 
 use crate::call_graph::ModuleCallGraph;
-use crate::call_helpers::{SmallPureLeafInline, SMALL_LEAF_INLINE_BUDGET};
+use crate::call_helpers::{SmallFunctionInline, SMALL_INLINE_BUDGET};
 use crate::JitError;
 
 /// The canonical optimized form of one function or OSR region.
@@ -513,7 +513,7 @@ impl OptimizedFunction {
         let pc_range = 0..ir.instruction_count();
         let dynamic_targets = vec![NO_DYNAMIC_TARGET; ir.instruction_count()];
         let (inline_targets, inline_costs) =
-            plan_inlines(ir, &pc_range, module, caller_id, &dynamic_targets);
+            plan_inlines(ir, &pc_range, module, caller_id, &dynamic_targets, false);
         let instructions = (0..ir.instruction_count())
             .map(|pc| {
                 let typed = *ir
@@ -580,6 +580,7 @@ impl OptimizedFunction {
                 &module.inline_plan,
                 caller_id,
                 &dynamic_call_targets,
+                true,
             ),
             _ => (
                 vec![NO_DYNAMIC_TARGET; ir.instruction_count()],
@@ -1960,6 +1961,7 @@ fn plan_inlines(
     module: &ModuleInlinePlan,
     caller_id: u32,
     dynamic_targets: &[u32],
+    allow_self_recursion: bool,
 ) -> (Vec<u32>, Vec<u32>) {
     let mut targets = vec![NO_DYNAMIC_TARGET; ir.instruction_count()];
     let mut costs = vec![0_u32; ir.instruction_count()];
@@ -1983,7 +1985,12 @@ fn plan_inlines(
             }
             _ => continue,
         };
-        let Some(recipe) = module.pure_leaf_inline(caller_id, target) else {
+        let recipe = if source.opcode() == Opcode::Call && allow_self_recursion {
+            module.static_inline(caller_id, target)
+        } else {
+            module.pure_leaf_inline(caller_id, target)
+        };
+        let Some(recipe) = recipe else {
             continue;
         };
         if matches!(source.opcode(), Opcode::CallClosure | Opcode::CallIface) {
@@ -2000,7 +2007,7 @@ fn plan_inlines(
         let Some(next_cost) = retained_cost.checked_add(recipe.cost()) else {
             continue;
         };
-        if next_cost > SMALL_LEAF_INLINE_BUDGET {
+        if next_cost > SMALL_INLINE_BUDGET {
             continue;
         }
         retained_cost = next_cost;
@@ -2318,7 +2325,7 @@ fn trace_returned_closure(
 
 pub(crate) struct ModuleInlinePlan {
     graph: Arc<ModuleCallGraph>,
-    pure_leaf_inlines: Box<[Option<Arc<SmallPureLeafInline>>]>,
+    small_inlines: Box<[Option<Arc<SmallFunctionInline>>]>,
 }
 
 impl ModuleInlinePlan {
@@ -2331,7 +2338,7 @@ impl ModuleInlinePlan {
             module
                 .functions
                 .len()
-                .saturating_mul(core::mem::size_of::<Option<Arc<SmallPureLeafInline>>>()),
+                .saturating_mul(core::mem::size_of::<Option<Arc<SmallFunctionInline>>>()),
         );
         if fixed_bytes > limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {
@@ -2340,19 +2347,27 @@ impl ModuleInlinePlan {
             });
         }
         let mut retained_bytes = fixed_bytes;
-        let mut pure_leaf_inlines = Vec::new();
-        pure_leaf_inlines
+        let mut small_inlines = Vec::new();
+        small_inlines
             .try_reserve_exact(module.functions.len())
             .map_err(|_| JitError::AnalysisResourceLimitExceeded {
                 limit_bytes,
                 requested_bytes: fixed_bytes,
             })?;
-        for function in &module.functions {
-            let inline = SmallPureLeafInline::analyze(function, module).map(Arc::new);
+        for (func_id, function) in module.functions.iter().enumerate() {
+            let inline = SmallFunctionInline::analyze_leaf(function, module)
+                .or_else(|| {
+                    SmallFunctionInline::analyze_self_recursive(
+                        u32::try_from(func_id).ok()?,
+                        function,
+                        module,
+                    )
+                })
+                .map(Arc::new);
             retained_bytes = retained_bytes.saturating_add(
                 inline
                     .as_deref()
-                    .map_or(0, SmallPureLeafInline::retained_bytes),
+                    .map_or(0, SmallFunctionInline::retained_bytes),
             );
             if retained_bytes > limit_bytes {
                 return Err(JitError::AnalysisResourceLimitExceeded {
@@ -2360,23 +2375,23 @@ impl ModuleInlinePlan {
                     requested_bytes: retained_bytes,
                 });
             }
-            pure_leaf_inlines.push(inline);
+            small_inlines.push(inline);
         }
         Ok(Self {
             graph,
-            pure_leaf_inlines: pure_leaf_inlines.into_boxed_slice(),
+            small_inlines: small_inlines.into_boxed_slice(),
         })
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             .saturating_add(
-                self.pure_leaf_inlines
+                self.small_inlines
                     .len()
-                    .saturating_mul(core::mem::size_of::<Option<Arc<SmallPureLeafInline>>>()),
+                    .saturating_mul(core::mem::size_of::<Option<Arc<SmallFunctionInline>>>()),
             )
             .saturating_add(
-                self.pure_leaf_inlines
+                self.small_inlines
                     .iter()
                     .flatten()
                     .map(|inline| inline.retained_bytes())
@@ -2388,13 +2403,32 @@ impl ModuleInlinePlan {
         &self,
         caller_id: u32,
         callee_id: u32,
-    ) -> Option<&SmallPureLeafInline> {
+    ) -> Option<&SmallFunctionInline> {
         let caller = caller_id as usize;
         let callee = callee_id as usize;
         if self.graph.is_recursive_edge(caller, callee) {
             return None;
         }
-        self.pure_leaf_inlines.get(callee)?.as_deref()
+        let inline = self.small_inlines.get(callee)?.as_deref()?;
+        (!inline.is_self_recursive(callee_id)).then_some(inline)
+    }
+
+    pub(crate) fn static_inline(
+        &self,
+        caller_id: u32,
+        callee_id: u32,
+    ) -> Option<&SmallFunctionInline> {
+        if self
+            .graph
+            .is_recursive_edge(caller_id as usize, callee_id as usize)
+        {
+            if caller_id != callee_id {
+                return None;
+            }
+            let inline = self.small_inlines.get(callee_id as usize)?.as_deref()?;
+            return inline.is_self_recursive(callee_id).then_some(inline);
+        }
+        self.pure_leaf_inline(caller_id, callee_id)
     }
 
     pub(crate) fn is_recursive_edge(&self, caller_id: u32, callee_id: u32) -> bool {
@@ -2532,8 +2566,16 @@ impl ModuleOptimizationPlan {
         &self,
         caller_id: u32,
         callee_id: u32,
-    ) -> Option<&SmallPureLeafInline> {
+    ) -> Option<&SmallFunctionInline> {
         self.inline_plan.pure_leaf_inline(caller_id, callee_id)
+    }
+
+    pub(crate) fn static_inline(
+        &self,
+        caller_id: u32,
+        callee_id: u32,
+    ) -> Option<&SmallFunctionInline> {
+        self.inline_plan.static_inline(caller_id, callee_id)
     }
 
     pub(crate) fn direct_self_call(&self, caller_id: u32, callee_id: u32) -> bool {
@@ -2595,7 +2637,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_separates_pure_leaf_inlining_from_recursive_direct_calls() {
+    fn plan_selects_bounded_self_recursion_separately_from_leaf_inlining() {
         let mut module = Module::new("optimizer-plan".into());
         module.functions = vec![
             function_with_sig(
@@ -2614,7 +2656,14 @@ mod tests {
         let plan = ModuleOptimizationPlan::build(&module);
         assert!(plan.direct_self_call(0, 0));
         assert!(plan.pure_leaf_inline(0, 0).is_none());
+        assert!(plan.static_inline(0, 0).is_some());
         assert!(plan.pure_leaf_inline(0, 1).is_some());
+
+        let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
+        let baseline = OptimizedFunction::baseline_with_module(&ir, &plan.inline_plan, 0);
+        let optimized = OptimizedFunction::analyze_with_module(&ir, &module.functions[0], &plan, 0);
+        assert_eq!(baseline.inline_target(0), None);
+        assert_eq!(optimized.inline_target(0), Some(0));
     }
 
     #[test]

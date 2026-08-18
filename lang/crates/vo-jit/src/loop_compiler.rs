@@ -368,7 +368,7 @@ impl<'a> LoopCompiler<'a> {
             _ => unreachable!("dynamic inline was filtered by opcode"),
         };
         let arg_start = usize::from(inst.b);
-        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots);
+        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots)?;
         Ok(true)
     }
 
@@ -564,10 +564,10 @@ impl<'a> LoopCompiler<'a> {
             .filter(|target| *target == func_id)
             .and_then(|_| {
                 self.optimization_plan
-                    .pure_leaf_inline(self.core.func_id, func_id)
+                    .static_inline(self.core.func_id, func_id)
             });
         if let Some(inline) = planned_inline {
-            inline.emit(self, call_plan.arg_start);
+            inline.emit(self, call_plan.arg_start)?;
             return Ok(false);
         }
 
@@ -857,6 +857,15 @@ impl<'a> crate::translator::CallBoundary<'a> for LoopCompiler<'a> {
         self.builder
             .ins()
             .iconst(types::I32, i64::from(self.core.func_id))
+    }
+    fn emit_residual_inline_call(
+        &mut self,
+        _inst: &Instruction,
+        _arguments: &[(Value, bool)],
+    ) -> Result<(), JitError> {
+        Err(JitError::Internal(
+            "acyclic recursive inline recipe reached OSR lowering".into(),
+        ))
     }
 }
 

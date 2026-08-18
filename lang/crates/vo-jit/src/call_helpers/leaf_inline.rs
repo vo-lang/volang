@@ -7,19 +7,19 @@ use vo_runtime::SlotType;
 
 use crate::translator::IrEmitter;
 
-const MAX_SMALL_LEAF_INSTRUCTIONS: usize = 48;
-const MAX_SMALL_LEAF_LOCAL_SLOTS: usize = 32;
-const MAX_SMALL_LEAF_RETURN_SLOTS: usize = 2;
-const MAX_SMALL_LEAF_BLOCKS: usize = 8;
+const MAX_SMALL_INLINE_INSTRUCTIONS: usize = 48;
+const MAX_SMALL_INLINE_LOCAL_SLOTS: usize = 32;
+const MAX_SMALL_INLINE_RETURN_SLOTS: usize = 2;
+const MAX_SMALL_INLINE_BLOCKS: usize = 8;
 
 /// Total bytecode instructions that one compiled artifact may duplicate through
-/// leaf inlining. This keeps the optimization within the compiler's existing
-/// work and native-frame budgets even for call-dense generated functions.
-pub(crate) const SMALL_LEAF_INLINE_BUDGET: usize = 256;
+/// small-function inlining. This keeps the optimization within the compiler's
+/// existing work and native-frame budgets even for call-dense generated code.
+pub(crate) const SMALL_INLINE_BUDGET: usize = 256;
 
 /// Fully validated, owned inline plan. Analysis is deliberately separated from
 /// emission so an unsupported candidate cannot leave partially emitted IR.
-pub(crate) struct SmallPureLeafInline {
+pub(crate) struct SmallFunctionInline {
     code: Box<[Instruction]>,
     blocks: Box<[InlineBlock]>,
     pc_to_block: Box<[u16]>,
@@ -30,6 +30,7 @@ pub(crate) struct SmallPureLeafInline {
     hidden_param_slots: usize,
     ret_slots: usize,
     cost: usize,
+    recursive_func_id: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -38,25 +39,48 @@ struct InlineBlock {
     end: u16,
 }
 
-impl SmallPureLeafInline {
-    pub(crate) fn analyze(func: &FunctionDef, module: &Module) -> Option<Self> {
+impl SmallFunctionInline {
+    pub(crate) fn analyze_leaf(func: &FunctionDef, module: &Module) -> Option<Self> {
+        Self::analyze(func, module, None)
+    }
+
+    /// Build a one-level expansion for a small scalar self-recursive function.
+    /// Recursive calls inside the recipe remain ordinary native calls, which
+    /// gives a finite and predictable expansion independent of input depth.
+    pub(crate) fn analyze_self_recursive(
+        func_id: u32,
+        func: &FunctionDef,
+        module: &Module,
+    ) -> Option<Self> {
+        Self::analyze(func, module, Some(func_id))
+    }
+
+    fn analyze(
+        func: &FunctionDef,
+        module: &Module,
+        recursive_func_id: Option<u32>,
+    ) -> Option<Self> {
         let local_slots = func.local_slots as usize;
         let param_slots = func.param_slots as usize;
         let ret_slots = func.ret_slots as usize;
-        if func.has_calls
+        if func.has_calls != recursive_func_id.is_some()
             || func.has_call_extern
             || func.has_defer
             || func.heap_ret_gcref_count != 0
-            || local_slots > MAX_SMALL_LEAF_LOCAL_SLOTS
-            || ret_slots > MAX_SMALL_LEAF_RETURN_SLOTS
+            || local_slots > MAX_SMALL_INLINE_LOCAL_SLOTS
+            || ret_slots > MAX_SMALL_INLINE_RETURN_SLOTS
             || param_slots > local_slots
             || func.slot_types.len() != local_slots
             || func.ret_slot_types.len() != ret_slots
             || func.slot_types.iter().any(|ty| {
-                !matches!(
-                    ty,
-                    SlotType::Value | SlotType::Float | SlotType::GcBase | SlotType::GcRef
-                )
+                if recursive_func_id.is_some() {
+                    !matches!(ty, SlotType::Value | SlotType::Float)
+                } else {
+                    !matches!(
+                        ty,
+                        SlotType::Value | SlotType::Float | SlotType::GcBase | SlotType::GcRef
+                    )
+                }
             })
         {
             return None;
@@ -74,12 +98,13 @@ impl SmallPureLeafInline {
         }
 
         let (blocks, pc_to_block, cost) = inline_cfg(&func.code)?;
-        if cost > MAX_SMALL_LEAF_INSTRUCTIONS || blocks.len() > MAX_SMALL_LEAF_BLOCKS {
+        if cost > MAX_SMALL_INLINE_INSTRUCTIONS || blocks.len() > MAX_SMALL_INLINE_BLOCKS {
             return None;
         }
 
         let mut constant_loads = vec![None; func.code.len()];
         let mut saw_return = false;
+        let mut saw_recursive_call = false;
         for block in &blocks {
             let mut integer_constants = vec![None; local_slots];
             for (pc, constant_load) in constant_loads
@@ -106,6 +131,20 @@ impl SmallPureLeafInline {
                         }
                         saw_return = true;
                     }
+                    Opcode::Call
+                        if recursive_func_id.is_some_and(|func_id| {
+                            validate_self_recursive_call(
+                                func_id,
+                                inst,
+                                &func.slot_types,
+                                param_slots,
+                                &func.ret_slot_types,
+                                &mut integer_constants,
+                            )
+                        }) =>
+                    {
+                        saw_recursive_call = true;
+                    }
                     _ if validate_instruction(
                         inst,
                         &func.slot_types,
@@ -121,6 +160,9 @@ impl SmallPureLeafInline {
         if !saw_return {
             return None;
         }
+        if recursive_func_id.is_some() && !saw_recursive_call {
+            return None;
+        }
 
         Some(Self {
             code: func.code.clone().into(),
@@ -133,7 +175,12 @@ impl SmallPureLeafInline {
             hidden_param_slots,
             ret_slots,
             cost,
+            recursive_func_id,
         })
+    }
+
+    pub(crate) fn is_self_recursive(&self, func_id: u32) -> bool {
+        self.recursive_func_id == Some(func_id)
     }
 
     pub(crate) fn cost(&self) -> usize {
@@ -176,12 +223,16 @@ impl SmallPureLeafInline {
         &self,
         emitter: &mut E,
         arg_start: usize,
-    ) {
-        self.emit(emitter, arg_start);
+    ) -> Result<(), crate::JitError> {
+        self.emit(emitter, arg_start)
     }
 
-    pub(crate) fn emit<'a, E: IrEmitter<'a>>(&self, emitter: &mut E, arg_start: usize) {
-        self.emit_with_layout(emitter, None, arg_start, arg_start + self.param_slots);
+    pub(crate) fn emit<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        arg_start: usize,
+    ) -> Result<(), crate::JitError> {
+        self.emit_with_layout(emitter, None, arg_start, arg_start + self.param_slots)
     }
 
     pub(crate) fn supports_dynamic_layout(&self, arg_slots: usize, ret_slots: usize) -> bool {
@@ -196,9 +247,9 @@ impl SmallPureLeafInline {
         slot0: Value,
         arg_start: usize,
         ret_start: usize,
-    ) {
+    ) -> Result<(), crate::JitError> {
         debug_assert_eq!(self.hidden_param_slots, 1);
-        self.emit_with_layout(emitter, Some(slot0), arg_start, ret_start);
+        self.emit_with_layout(emitter, Some(slot0), arg_start, ret_start)
     }
 
     fn emit_with_layout<'a, E: IrEmitter<'a>>(
@@ -207,7 +258,7 @@ impl SmallPureLeafInline {
         slot0: Option<Value>,
         arg_start: usize,
         ret_start: usize,
-    ) {
+    ) -> Result<(), crate::JitError> {
         let zero_i64 = emitter.builder().ins().iconst(types::I64, 0);
         let zero_f64 = emitter.builder().ins().f64const(0.0);
         let locals = self
@@ -481,7 +532,41 @@ impl SmallPureLeafInline {
                             .collect::<Vec<BlockArg>>();
                         emitter.builder().ins().jump(return_block, &values);
                     }
-                    _ => unreachable!("unsupported opcode entered validated leaf inline plan"),
+                    Opcode::Call => {
+                        let recursive_func_id = self
+                            .recursive_func_id
+                            .expect("validated recursive call entered inline plan");
+                        debug_assert_eq!(inst.static_call_func_id(), recursive_func_id);
+                        let mut arguments = Vec::with_capacity(self.param_slots);
+                        for offset in 0..self.param_slots {
+                            let source = inst.b + offset as u16;
+                            let value = read(emitter, source);
+                            arguments.push((
+                                value,
+                                self.slot_types[usize::from(source)] == SlotType::Float,
+                            ));
+                        }
+                        let mut residual = inst;
+                        residual.b = u16::try_from(arg_start).map_err(|_| {
+                            crate::JitError::Internal(
+                                "bounded inline argument window exceeds bytecode slot range".into(),
+                            )
+                        })?;
+                        emitter.emit_residual_inline_call(&residual, &arguments)?;
+                        let local_ret_start = usize::from(inst.b) + self.param_slots;
+                        let outer_ret_start = arg_start + self.param_slots;
+                        for (offset, ret_type) in self.ret_types.iter().copied().enumerate() {
+                            let value = if ret_type == SlotType::Float {
+                                emitter.read_var_f64((outer_ret_start + offset) as u16)
+                            } else {
+                                emitter.read_var((outer_ret_start + offset) as u16)
+                            };
+                            emitter
+                                .builder()
+                                .def_var(locals[local_ret_start + offset], value);
+                        }
+                    }
+                    _ => unreachable!("unsupported opcode entered validated small inline plan"),
                 }
             }
             let terminal = self.code[usize::from(block.end) - 1].opcode();
@@ -507,6 +592,7 @@ impl SmallPureLeafInline {
                 emitter.write_var((ret_start + index) as u16, value);
             }
         }
+        Ok(())
     }
 }
 
@@ -650,6 +736,34 @@ fn inline_cfg(code: &[Instruction]) -> Option<(Vec<InlineBlock>, Vec<u16>, usize
         .map(|block| usize::from(block.end - block.start))
         .sum();
     Some((blocks, pc_to_block, cost))
+}
+
+fn validate_self_recursive_call(
+    func_id: u32,
+    inst: &Instruction,
+    slot_types: &[SlotType],
+    param_slots: usize,
+    ret_types: &[SlotType],
+    integer_constants: &mut [Option<i64>],
+) -> bool {
+    if inst.static_call_func_id() != func_id || inst.c != 0 {
+        return false;
+    }
+    let arg_start = usize::from(inst.b);
+    let Some(ret_start) = arg_start.checked_add(param_slots) else {
+        return false;
+    };
+    let Some(end) = ret_start.checked_add(ret_types.len()) else {
+        return false;
+    };
+    if end > slot_types.len()
+        || slot_types[arg_start..ret_start] != slot_types[..param_slots]
+        || slot_types[ret_start..end] != *ret_types
+    {
+        return false;
+    }
+    integer_constants[ret_start..end].fill(None);
+    true
 }
 
 fn validate_instruction(
@@ -835,7 +949,7 @@ mod tests {
         let func = spectral_leaf(2);
         let mut module = Module::new("inline-test".into());
         module.constants.push(Constant::Float(1.0));
-        assert!(SmallPureLeafInline::analyze(&func, &module).is_some());
+        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_some());
     }
 
     #[test]
@@ -843,7 +957,7 @@ mod tests {
         let func = spectral_leaf(0);
         let mut module = Module::new("inline-test".into());
         module.constants.push(Constant::Float(1.0));
-        assert!(SmallPureLeafInline::analyze(&func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
     }
 
     #[test]
@@ -869,7 +983,8 @@ mod tests {
         );
         func.ret_slot_types = vec![SlotType::Value];
         let module = Module::new("graph-inline-test".into());
-        let inline = SmallPureLeafInline::analyze(&func, &module).expect("acyclic inline graph");
+        let inline =
+            SmallFunctionInline::analyze_leaf(&func, &module).expect("acyclic inline graph");
         assert_eq!(inline.blocks.len(), 4);
         assert_eq!(inline.cost(), 6);
     }
@@ -887,6 +1002,50 @@ mod tests {
             0,
         );
         let module = Module::new("cyclic-inline-test".into());
-        assert!(SmallPureLeafInline::analyze(&func, &module).is_none());
+        assert!(SmallFunctionInline::analyze_leaf(&func, &module).is_none());
+    }
+
+    #[test]
+    fn accepts_one_level_scalar_self_recursion() {
+        let mut func = function_with_slot_types_and_sig(
+            vec![
+                Instruction::new(Opcode::LoadInt, 1, 2, 0),
+                Instruction::new(Opcode::LtI, 2, 0, 1),
+                branch(Opcode::JumpIf, 2, 5),
+                Instruction::new(Opcode::LoadInt, 1, 1, 0),
+                Instruction::new(Opcode::SubI, 3, 0, 1),
+                Instruction::new(Opcode::Call, 0, 3, 0),
+                Instruction::new(Opcode::Return, 4, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            vec![SlotType::Value; 5],
+            1,
+            1,
+            1,
+        );
+        func.ret_slot_types = vec![SlotType::Value];
+        let module = Module::new("recursive-inline-test".into());
+
+        let inline = SmallFunctionInline::analyze_self_recursive(0, &func, &module)
+            .expect("bounded scalar recursion");
+        assert!(inline.is_self_recursive(0));
+        assert_eq!(inline.cost(), 8);
+    }
+
+    #[test]
+    fn rejects_recursive_inline_with_managed_locals() {
+        let mut func = function_with_slot_types_and_sig(
+            vec![
+                Instruction::new(Opcode::Call, 0, 0, 0),
+                Instruction::new(Opcode::Return, 1, 0, 0),
+            ],
+            vec![SlotType::GcRef, SlotType::GcRef],
+            1,
+            1,
+            1,
+        );
+        func.ret_slot_types = vec![SlotType::GcRef];
+        let module = Module::new("recursive-inline-roots".into());
+        assert!(SmallFunctionInline::analyze_self_recursive(0, &func, &module).is_none());
     }
 }

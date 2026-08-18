@@ -382,7 +382,7 @@ impl ModuleJitAnalysis {
             .saturating_add(core::mem::size_of::<optimizer::ModuleInlinePlan>())
             .saturating_add(module.functions.len().saturating_mul(
                 core::mem::size_of::<JitFrameEntryEligibility>()
-                    + core::mem::size_of::<Option<Arc<call_helpers::SmallPureLeafInline>>>(),
+                    + core::mem::size_of::<Option<Arc<call_helpers::SmallFunctionInline>>>(),
             ));
         if minimum_bytes > limit_bytes {
             return Err(JitError::AnalysisResourceLimitExceeded {

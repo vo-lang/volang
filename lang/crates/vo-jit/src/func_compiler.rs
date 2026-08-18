@@ -133,7 +133,7 @@ impl<'a> FunctionCompiler<'a> {
     pub(crate) fn compile_inline_probe(
         mut self,
         frontend_config: TargetFrontendConfig,
-        inline: &crate::call_helpers::SmallPureLeafInline,
+        inline: &crate::call_helpers::SmallFunctionInline,
     ) -> Result<(), JitError> {
         self.core.declare_variables(&mut self.builder);
         let policy =
@@ -156,7 +156,7 @@ impl<'a> FunctionCompiler<'a> {
         if let Some(cost) = self.core.execution_budget_regions.get(&0).copied() {
             self.emit_execution_budget_checkpoint(0, cost);
         }
-        inline.emit_into_for_test(&mut self, 0);
+        inline.emit_into_for_test(&mut self, 0)?;
         let value = self.load_local(0);
         let ret_ptr = self.builder.block_params(self.core.entry_block)[2];
         self.builder
@@ -796,7 +796,7 @@ impl<'a> FunctionCompiler<'a> {
             _ => unreachable!("dynamic inline was filtered by opcode"),
         };
         let arg_start = usize::from(inst.b);
-        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots);
+        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots)?;
         Ok(true)
     }
 
@@ -1137,10 +1137,10 @@ impl<'a> FunctionCompiler<'a> {
             .filter(|target| *target == target_func_id)
             .and_then(|_| {
                 self.inline_plan
-                    .pure_leaf_inline(self.core.func_id, target_func_id)
+                    .static_inline(self.core.func_id, target_func_id)
             });
         if let Some(inline) = selected_inline {
-            inline.emit(self, call_plan.arg_start);
+            inline.emit(self, call_plan.arg_start)?;
             return Ok(false);
         }
 
@@ -1397,6 +1397,68 @@ impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
         self.builder
             .ins()
             .iconst(types::I32, i64::from(self.core.func_id))
+    }
+    fn emit_residual_inline_call(
+        &mut self,
+        inst: &Instruction,
+        arguments: &[(Value, bool)],
+    ) -> Result<(), JitError> {
+        let target_func_id = inst.static_call_func_id();
+        let target_func = self
+            .core
+            .vo_module
+            .functions
+            .get(target_func_id as usize)
+            .ok_or(JitError::FunctionNotFound(target_func_id))?;
+        let eligibility = self
+            .core
+            .entry_eligibility
+            .get(target_func_id as usize)
+            .copied()
+            .ok_or(JitError::FunctionNotFound(target_func_id))?;
+        let call_plan = crate::call_helpers::CallPlan::with_eligibility(
+            target_func_id,
+            usize::from(inst.b),
+            target_func,
+            eligibility,
+        );
+        let direct_self = self
+            .optimization_plan
+            .is_some_and(|plan| plan.direct_self_call(self.core.func_id, target_func_id));
+        let direct_native = direct_self.then_some(self.self_native_ref).flatten();
+        let recursive_edge = self
+            .inline_plan
+            .is_recursive_edge(self.core.func_id, target_func_id);
+        if direct_native.is_none()
+            || !matches!(
+                call_plan.route_for_full_function(self.core.func_id),
+                crate::call_helpers::CallRoute::DynamicJitTable
+                    | crate::call_helpers::CallRoute::PreparedJitTable
+            )
+        {
+            return Err(JitError::Internal(
+                "bounded recursive inline requires a stable native self entry".into(),
+            ));
+        }
+        let abi_arguments = arguments
+            .iter()
+            .map(|&(value, is_float)| {
+                if is_float {
+                    self.builder
+                        .ins()
+                        .bitcast(types::I64, MemFlags::new(), value)
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>();
+        crate::call_helpers::emit_jit_call_with_explicit_arguments(
+            self,
+            call_plan,
+            direct_native,
+            recursive_edge,
+            &abi_arguments,
+        )
     }
 }
 

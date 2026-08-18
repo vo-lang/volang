@@ -1,0 +1,27 @@
+package main
+
+func fibonacci(n int) int {
+	if n <= 1 {
+		return n
+	}
+	return fibonacci(n-1) + fibonacci(n-2)
+}
+
+func main() {
+	total := 0
+	checksum := 0
+	for i := 0; i < 256; i++ {
+		// Leave a collection request pending before entering the scalar recursive
+		// function. Once fibonacci reaches the optimizing tier, a cooperative
+		// yield may interrupt its bounded inline expansion and must replay the
+		// original source Call without exposing partial native state.
+		garbage := make([]int, 256)
+		garbage[0] = i
+		checksum += garbage[0]
+		total += fibonacci(10)
+	}
+
+	assert(total == 14080, "recursive inline result survived GC yield")
+	assert(checksum == 32640, "allocation checksum survived GC yield")
+	println("jit_recursive_inline_gc_yield: ok")
+}
