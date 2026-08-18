@@ -936,11 +936,19 @@ struct InvokedExtern {
     staged_io_roots_added: bool,
 }
 
+enum InterpreterExternOutcome {
+    ContinueAtNextPc,
+    FrameChanged,
+    ReturnAtCurrentPc(ExecResult),
+    ReturnAtNextPc(ExecResult),
+}
+
 /// Cross the general provider boundary outside the interpreter dispatch body.
 ///
 /// Intrinsics never enter this function. Keeping world construction, replay
 /// input plumbing, provider dispatch, and return validation out of line makes
 /// unrelated opcode layout stable as the external ABI evolves.
+#[cold]
 #[inline(never)]
 fn invoke_verified_extern(
     vm: &mut Vm,
@@ -1055,6 +1063,131 @@ fn invoke_verified_extern(
         #[cfg(feature = "std")]
         staged_io_roots_added,
     })
+}
+
+/// Complete a general provider call after the interpreter has published the
+/// instruction-entry PC. Intrinsic externs stay in the scalar dispatch loop;
+/// every route handled here crosses a runtime boundary and can therefore keep
+/// its recovery-state fan-out out of line.
+#[cold]
+#[inline(never)]
+fn execute_verified_extern_boundary(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    loaded_module: &LoadedModule,
+    func: &FunctionDef,
+    fiber_id: crate::scheduler::FiberId,
+    func_id: u32,
+    bp: usize,
+    inst: Instruction,
+    fetched_pc: usize,
+) -> InterpreterExternOutcome {
+    let invoked = match invoke_verified_extern(
+        vm,
+        fiber,
+        loaded_module,
+        func,
+        fiber_id,
+        func_id,
+        bp,
+        inst,
+        fetched_pc,
+    ) {
+        Ok(invoked) => invoked,
+        Err(message) => {
+            return InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::JitError(message));
+        }
+    };
+    let stack = fiber.stack_ptr();
+    let transition = invoked.transition;
+    #[cfg(feature = "std")]
+    let staged_io_roots_added = invoked.staged_io_roots_added;
+    apply_extern_replay_scope_effect(fiber, transition.replay_scope);
+    match transition.boundary {
+        ExternBoundary::Continue => {
+            if vm.state.gc.last_memory_error().is_some() {
+                InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::JitError(
+                    "Island managed-memory allocation failed".to_string(),
+                ))
+            } else {
+                InterpreterExternOutcome::ContinueAtNextPc
+            }
+        }
+        ExternBoundary::Exit(code) => {
+            InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::Exit(code))
+        }
+        ExternBoundary::Panic(msg) => {
+            let result =
+                runtime_panic_msg(&mut vm.state.gc, fiber, stack, loaded_module.module(), msg);
+            if matches!(result, ExecResult::FrameChanged) {
+                InterpreterExternOutcome::FrameChanged
+            } else {
+                InterpreterExternOutcome::ReturnAtCurrentPc(result)
+            }
+        }
+        ExternBoundary::FatalInfra(msg) => {
+            InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::JitError(msg))
+        }
+        ExternBoundary::Yield => {
+            InterpreterExternOutcome::ReturnAtNextPc(ExecResult::TimesliceExpired)
+        }
+        ExternBoundary::QueueBlock => InterpreterExternOutcome::ReturnAtNextPc(ExecResult::Block(
+            crate::fiber::BlockReason::Queue,
+        )),
+        ExternBoundary::HostEventWait { token, delay_ms } => {
+            InterpreterExternOutcome::ReturnAtNextPc(ExecResult::Block(
+                crate::fiber::BlockReason::HostEvent { token, delay_ms },
+            ))
+        }
+        ExternBoundary::HostEventWaitAndReplay { token, source } => {
+            InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::Transition(
+                RuntimeTransition::new(
+                    RuntimeBoundary::Block(crate::fiber::BlockReason::HostEventReplay {
+                        token,
+                        source,
+                    }),
+                    transition.resume,
+                    GcRootEffect::CurrentFiberDirty,
+                ),
+            ))
+        }
+        ExternBoundary::WaitIo(token) => {
+            #[cfg(feature = "std")]
+            {
+                InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::Transition(
+                    RuntimeTransition::new(
+                        RuntimeBoundary::Block(crate::fiber::BlockReason::Io(token)),
+                        transition.resume,
+                        wait_io_gc_root_effect(staged_io_roots_added),
+                    ),
+                ))
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                let _ = token;
+                InterpreterExternOutcome::ReturnAtCurrentPc(ExecResult::JitError(
+                    "extern requested I/O wait from a VM without I/O support".to_string(),
+                ))
+            }
+        }
+        ExternBoundary::CallClosure { closure_ref, args } => {
+            let result = prepare_extern_closure_replay_call(
+                &mut vm.state.gc,
+                fiber,
+                loaded_module.module(),
+                &vm.state.itab_cache,
+                closure_ref,
+                args,
+                transition.resume,
+            );
+            if matches!(result, ExecResult::FrameChanged) {
+                InterpreterExternOutcome::FrameChanged
+            } else {
+                fiber.closure_replay.finish_extern_terminal();
+                InterpreterExternOutcome::ReturnAtCurrentPc(result)
+            }
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -3206,6 +3339,215 @@ impl Vm {
         }
     }
 
+    /// Execute the cross-island spawn boundary outside the interpreter body.
+    ///
+    /// Every successful `GoIsland` leaves the current scheduling lease and all
+    /// failure paths either trap or report malformed bytecode/runtime state.
+    /// Keeping this large, allocation-heavy transaction cold prevents it from
+    /// inflating the scalar dispatch loop's frame and register pressure.
+    #[cold]
+    #[inline(never)]
+    fn execute_go_island_boundary(
+        &mut self,
+        fiber: &mut Fiber,
+        stack: *mut u64,
+        frame_base: *mut u64,
+        bp: usize,
+        inst: Instruction,
+        module: &Module,
+        func: &FunctionDef,
+        fetched_pc: usize,
+    ) -> ExecResult {
+        let island_ref = stack_get(frame_base, inst.a as usize) as GcRef;
+        if island_ref.is_null() {
+            return runtime_trap(
+                &mut self.state.gc,
+                fiber,
+                stack,
+                module,
+                RuntimeTrapKind::NilPointerDereference,
+            );
+        }
+        let closure_ref = stack_get(frame_base, inst.b as usize) as GcRef;
+        if closure_ref.is_null() {
+            return runtime_trap(
+                &mut self.state.gc,
+                fiber,
+                stack,
+                module,
+                RuntimeTrapKind::NilFuncCall,
+            );
+        }
+        let island_handle = match crate::frame_call::validate_island_handle(
+            &self.state.gc,
+            island_ref as u64,
+            "GoIsland",
+        ) {
+            Ok(island_handle) => island_handle,
+            Err(err) => return ExecResult::JitError(err),
+        };
+        let closure_target = match crate::frame_call::validate_closure_target(
+            &self.state.gc,
+            module,
+            closure_ref as u64,
+            "GoIsland",
+        ) {
+            Ok(target) => target,
+            Err(err) => return ExecResult::JitError(err),
+        };
+        let (callsite_arg_layout, callsite_ret_layout) =
+            match crate::frame_call::call_layout_for_callsite(func, fetched_pc, "GoIsland") {
+                Ok(layout) => layout,
+                Err(err) => return ExecResult::JitError(err),
+            };
+        if !callsite_ret_layout.is_empty() {
+            return ExecResult::JitError(format!(
+                "GoIsland callsite return layout must be empty, got {callsite_ret_layout:?}"
+            ));
+        }
+        if let Err(err) = crate::frame_call::validate_closure_arg_shape(
+            "GoIsland",
+            &closure_target,
+            callsite_arg_layout.len(),
+        ) {
+            return ExecResult::JitError(err);
+        }
+        if let Err(err) = crate::frame_call::validate_closure_callsite_arg_layout(
+            "GoIsland",
+            &closure_target,
+            callsite_arg_layout,
+        ) {
+            return ExecResult::JitError(err);
+        }
+        let result = exec::exec_go_island(
+            stack,
+            bp,
+            &inst,
+            callsite_arg_layout.len(),
+            island_handle,
+            &closure_target,
+        );
+        // Safety: `island_handle` was validated above.
+        let island_id = unsafe { vo_runtime::island::id(island_handle) };
+
+        if island_id == self.state.current_island_id {
+            let spawn = match unsafe {
+                helpers::try_build_validated_closure_pending_spawn_from_args_ptr(
+                    &closure_target,
+                    stack.add(bp + inst.c as usize),
+                    u32::try_from(callsite_arg_layout.len()).unwrap_or(u32::MAX),
+                )
+            } {
+                Ok(spawn) => spawn,
+                Err(helpers::ClosureFiberBuildError::Trap(RuntimeTrapKind::StackOverflow)) => {
+                    return runtime_trap(
+                        &mut self.state.gc,
+                        fiber,
+                        stack,
+                        module,
+                        RuntimeTrapKind::StackOverflow,
+                    );
+                }
+                Err(helpers::ClosureFiberBuildError::Trap(_)) => {
+                    return runtime_trap(
+                        &mut self.state.gc,
+                        fiber,
+                        stack,
+                        module,
+                        RuntimeTrapKind::NilFuncCall,
+                    );
+                }
+                Err(helpers::ClosureFiberBuildError::Malformed(msg)) => {
+                    return ExecResult::JitError(msg);
+                }
+            };
+            let mut transition = RuntimeTransition::new(
+                RuntimeBoundary::Yield,
+                ResumePolicy::PreserveFramePc,
+                GcRootEffect::AllRootsDirty,
+            );
+            transition.spawns.push(spawn);
+            ExecResult::Transition(transition)
+        } else {
+            let func_def = closure_target.func;
+            let (result, capture_types) = if result.receiver_capture_slots == 0 {
+                (result, func_def.capture_types.clone())
+            } else {
+                match exec::direct_method_receiver_transfer_plan(
+                    module,
+                    result.func_id,
+                    func_def,
+                    result.receiver_capture_slots,
+                ) {
+                    Ok(plan) => (
+                        exec::apply_direct_method_receiver_transfer_plan(result, plan),
+                        vec![plan.transfer_type],
+                    ),
+                    Err(msg) => return ExecResult::JitError(msg),
+                }
+            };
+            let param_types = match exec::go_island_sender_param_transfer_types(
+                module,
+                result.func_id,
+                func_def,
+                result.arg_data.len(),
+            ) {
+                Ok(param_types) => param_types,
+                Err(msg) => return ExecResult::JitError(msg),
+            };
+            let mut island_effects = Vec::new();
+            let transfer_commit = match exec::prepare_queue_handles_for_transfer(
+                &result,
+                island_id,
+                &capture_types,
+                &param_types,
+                &module.struct_metas,
+                &module.named_type_metas,
+                &module.runtime_types,
+                &mut self.state,
+                &mut island_effects,
+            ) {
+                Ok(commit) => commit,
+                Err(msg) => {
+                    return ExecResult::JitError(format!(
+                        "GoIsland queue-transfer metadata contract error: {msg}"
+                    ));
+                }
+            };
+            let data = exec::pack_closure_for_island(
+                &self.state.gc,
+                &result,
+                &capture_types,
+                &param_types,
+                &module.struct_metas,
+                &module.named_type_metas,
+                &module.runtime_types,
+            )
+            .map_err(|msg| format!("GoIsland closure pack metadata contract error: {msg}"));
+            let data = match data {
+                Ok(data) => data,
+                Err(msg) => {
+                    transfer_commit.restore_committed_local_endpoint_state(&mut self.state);
+                    return ExecResult::JitError(msg);
+                }
+            };
+            let closure_data = vo_runtime::pack::PackedValue::from_data(data);
+            let mut transition = RuntimeTransition::new(
+                RuntimeBoundary::Continue,
+                ResumePolicy::PreserveFramePc,
+                GcRootEffect::None,
+            );
+            transition.island_commands.append(&mut island_effects);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::spawn_fiber(island_id, closure_data));
+            if let Some(rollback) = transfer_commit.into_runtime_rollback() {
+                transition.set_rollback(rollback);
+            }
+            ExecResult::Transition(transition)
+        }
+    }
+
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
@@ -4204,7 +4546,7 @@ impl Vm {
                     // producing outputs. Keep GC on the instruction-entry root
                     // state until the boundary has committed its outcome.
                     unsafe { (*frame_ptr).pc = fetched_pc };
-                    let invoked = match invoke_verified_extern(
+                    let outcome = execute_verified_extern_boundary(
                         self,
                         fiber,
                         loaded_module,
@@ -4214,99 +4556,19 @@ impl Vm {
                         bp,
                         inst,
                         fetched_pc,
-                    ) {
-                        Ok(invoked) => invoked,
-                        Err(message) => return ExecResult::JitError(message),
-                    };
-                    stack = fiber.stack_ptr();
-                    let transition = invoked.transition;
-                    #[cfg(feature = "std")]
-                    let staged_io_roots_added = invoked.staged_io_roots_added;
-                    apply_extern_replay_scope_effect(fiber, transition.replay_scope);
-                    match transition.boundary {
-                        ExternBoundary::Continue => {
-                            if self.state.gc.last_memory_error().is_some() {
-                                return ExecResult::JitError(
-                                    "Island managed-memory allocation failed".to_string(),
-                                );
-                            }
+                    );
+                    match outcome {
+                        InterpreterExternOutcome::ContinueAtNextPc => {
                             sync_frame_pc!();
                             refetch!();
                         }
-                        ExternBoundary::Exit(code) => {
-                            return ExecResult::Exit(code);
+                        InterpreterExternOutcome::FrameChanged => {
+                            refetch_after_frame_change!();
                         }
-                        ExternBoundary::Panic(msg) => {
-                            let r =
-                                runtime_panic_msg(&mut self.state.gc, fiber, stack, module, msg);
-                            if matches!(r, ExecResult::FrameChanged) {
-                                refetch_after_frame_change!();
-                            } else {
-                                return r;
-                            }
-                        }
-                        ExternBoundary::FatalInfra(msg) => {
-                            return ExecResult::JitError(msg);
-                        }
-                        ExternBoundary::Yield => {
+                        InterpreterExternOutcome::ReturnAtCurrentPc(result) => return result,
+                        InterpreterExternOutcome::ReturnAtNextPc(result) => {
                             sync_frame_pc!();
-                            return ExecResult::TimesliceExpired;
-                        }
-                        ExternBoundary::QueueBlock => {
-                            sync_frame_pc!();
-                            return ExecResult::Block(crate::fiber::BlockReason::Queue);
-                        }
-                        ExternBoundary::HostEventWait { token, delay_ms } => {
-                            sync_frame_pc!();
-                            return ExecResult::Block(crate::fiber::BlockReason::HostEvent {
-                                token,
-                                delay_ms,
-                            });
-                        }
-                        ExternBoundary::HostEventWaitAndReplay { token, source } => {
-                            return ExecResult::Transition(RuntimeTransition::new(
-                                RuntimeBoundary::Block(
-                                    crate::fiber::BlockReason::HostEventReplay { token, source },
-                                ),
-                                transition.resume,
-                                GcRootEffect::CurrentFiberDirty,
-                            ));
-                        }
-                        ExternBoundary::WaitIo(token) => {
-                            #[cfg(feature = "std")]
-                            {
-                                return ExecResult::Transition(RuntimeTransition::new(
-                                    RuntimeBoundary::Block(crate::fiber::BlockReason::Io(token)),
-                                    transition.resume,
-                                    wait_io_gc_root_effect(staged_io_roots_added),
-                                ));
-                            }
-                            #[cfg(not(feature = "std"))]
-                            {
-                                let _ = token;
-                                return ExecResult::JitError(
-                                    "extern requested I/O wait from a VM without I/O support"
-                                        .to_string(),
-                                );
-                            }
-                        }
-                        ExternBoundary::CallClosure { closure_ref, args } => {
-                            let result = prepare_extern_closure_replay_call(
-                                &mut self.state.gc,
-                                fiber,
-                                module,
-                                &self.state.itab_cache,
-                                closure_ref,
-                                args,
-                                transition.resume,
-                            );
-                            match result {
-                                ExecResult::FrameChanged => refetch_after_frame_change!(),
-                                other => {
-                                    fiber.closure_replay.finish_extern_terminal();
-                                    return other;
-                                }
-                            }
+                            return result;
                         }
                     }
                 }
@@ -5706,204 +5968,9 @@ impl Vm {
                     }
                 }
                 Opcode::GoIsland => {
-                    sync_frame_pc!();
-                    let island_ref =
-                        stack_get(frame_base, inst.a as usize) as vo_runtime::gc::GcRef;
-                    if island_ref.is_null() {
-                        handle_panic_result!(runtime_trap(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::NilPointerDereference
-                        ));
-                    }
-                    let closure_ref =
-                        stack_get(frame_base, inst.b as usize) as vo_runtime::gc::GcRef;
-                    if closure_ref.is_null() {
-                        handle_panic_result!(runtime_trap(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::NilFuncCall
-                        ));
-                    }
-                    let island_handle = match crate::frame_call::validate_island_handle(
-                        &self.state.gc,
-                        island_ref as u64,
-                        "GoIsland",
-                    ) {
-                        Ok(island_handle) => island_handle,
-                        Err(err) => return ExecResult::JitError(err),
-                    };
-                    let closure_target = match crate::frame_call::validate_closure_target(
-                        &self.state.gc,
-                        module,
-                        closure_ref as u64,
-                        "GoIsland",
-                    ) {
-                        Ok(target) => target,
-                        Err(err) => return ExecResult::JitError(err),
-                    };
-                    let (callsite_arg_layout, callsite_ret_layout) =
-                        match crate::frame_call::call_layout_for_callsite(
-                            func, fetched_pc, "GoIsland",
-                        ) {
-                            Ok(layout) => layout,
-                            Err(err) => return ExecResult::JitError(err),
-                        };
-                    if !callsite_ret_layout.is_empty() {
-                        return ExecResult::JitError(format!(
-                            "GoIsland callsite return layout must be empty, got {callsite_ret_layout:?}"
-                        ));
-                    }
-                    if let Err(err) = crate::frame_call::validate_closure_arg_shape(
-                        "GoIsland",
-                        &closure_target,
-                        callsite_arg_layout.len(),
-                    ) {
-                        return ExecResult::JitError(err);
-                    }
-                    if let Err(err) = crate::frame_call::validate_closure_callsite_arg_layout(
-                        "GoIsland",
-                        &closure_target,
-                        callsite_arg_layout,
-                    ) {
-                        return ExecResult::JitError(err);
-                    }
-                    let result = exec::exec_go_island(
-                        stack,
-                        bp,
-                        &inst,
-                        callsite_arg_layout.len(),
-                        island_handle,
-                        &closure_target,
-                    );
-                    // Safety: `island_handle` was validated by the call target above.
-                    let island_id = unsafe { vo_runtime::island::id(island_handle) };
-
-                    if island_id == self.state.current_island_id {
-                        let spawn = match unsafe {
-                            helpers::try_build_validated_closure_pending_spawn_from_args_ptr(
-                                &closure_target,
-                                stack.add(bp + inst.c as usize),
-                                u32::try_from(callsite_arg_layout.len()).unwrap_or(u32::MAX),
-                            )
-                        } {
-                            Ok(spawn) => spawn,
-                            Err(helpers::ClosureFiberBuildError::Trap(
-                                RuntimeTrapKind::StackOverflow,
-                            )) => {
-                                handle_panic_result!(runtime_trap(
-                                    &mut self.state.gc,
-                                    fiber,
-                                    stack,
-                                    module,
-                                    RuntimeTrapKind::StackOverflow
-                                ));
-                            }
-                            Err(helpers::ClosureFiberBuildError::Trap(_)) => {
-                                handle_panic_result!(runtime_trap(
-                                    &mut self.state.gc,
-                                    fiber,
-                                    stack,
-                                    module,
-                                    RuntimeTrapKind::NilFuncCall
-                                ));
-                            }
-                            Err(helpers::ClosureFiberBuildError::Malformed(msg)) => {
-                                return ExecResult::JitError(msg);
-                            }
-                        };
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Yield,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::AllRootsDirty,
-                        );
-                        transition.spawns.push(spawn);
-                        return ExecResult::Transition(transition);
-                    } else {
-                        let func_def = closure_target.func;
-                        let (result, capture_types) = if result.receiver_capture_slots == 0 {
-                            (result, func_def.capture_types.clone())
-                        } else {
-                            match exec::direct_method_receiver_transfer_plan(
-                                module,
-                                result.func_id,
-                                func_def,
-                                result.receiver_capture_slots,
-                            ) {
-                                Ok(plan) => (
-                                    exec::apply_direct_method_receiver_transfer_plan(result, plan),
-                                    vec![plan.transfer_type],
-                                ),
-                                Err(msg) => return ExecResult::JitError(msg),
-                            }
-                        };
-                        let param_types = match exec::go_island_sender_param_transfer_types(
-                            module,
-                            result.func_id,
-                            func_def,
-                            result.arg_data.len(),
-                        ) {
-                            Ok(param_types) => param_types,
-                            Err(msg) => return ExecResult::JitError(msg),
-                        };
-                        let mut island_effects = Vec::new();
-                        let transfer_commit = match exec::prepare_queue_handles_for_transfer(
-                            &result,
-                            island_id,
-                            &capture_types,
-                            &param_types,
-                            &module.struct_metas,
-                            &module.named_type_metas,
-                            &module.runtime_types,
-                            &mut self.state,
-                            &mut island_effects,
-                        ) {
-                            Ok(commit) => commit,
-                            Err(msg) => {
-                                return ExecResult::JitError(format!(
-                                    "GoIsland queue-transfer metadata contract error: {msg}"
-                                ));
-                            }
-                        };
-                        let data = exec::pack_closure_for_island(
-                            &self.state.gc,
-                            &result,
-                            &capture_types,
-                            &param_types,
-                            &module.struct_metas,
-                            &module.named_type_metas,
-                            &module.runtime_types,
-                        )
-                        .map_err(|msg| {
-                            format!("GoIsland closure pack metadata contract error: {msg}")
-                        });
-                        let data = match data {
-                            Ok(data) => data,
-                            Err(msg) => {
-                                transfer_commit
-                                    .restore_committed_local_endpoint_state(&mut self.state);
-                                return ExecResult::JitError(msg);
-                            }
-                        };
-                        let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-                        let mut transition = RuntimeTransition::new(
-                            RuntimeBoundary::Continue,
-                            ResumePolicy::PreserveFramePc,
-                            GcRootEffect::None,
-                        );
-                        transition.island_commands.append(&mut island_effects);
-                        transition
-                            .island_commands
-                            .push(IslandCommandEffect::spawn_fiber(island_id, closure_data));
-                        if let Some(rollback) = transfer_commit.into_runtime_rollback() {
-                            transition.set_rollback(rollback);
-                        }
-                        return ExecResult::Transition(transition);
-                    }
+                    handle_panic_result!(self.execute_go_island_boundary(
+                        fiber, stack, frame_base, bp, inst, module, func, fetched_pc,
+                    ));
                 }
 
                 Opcode::Invalid => {
