@@ -789,9 +789,9 @@ fn value_slot_region_bitmap_cursor_is_relative_to_its_heap_block() {
         .expect("prefix allocation occupies heap block zero")
         .is_null());
 
-    // A 2048-byte cell has 32 cells per heap block. On block one, deriving
-    // its bitmap bit from the absolute address would add a false 32-cell
-    // offset. The region-owned one-hot cursor must still publish cell one.
+    // A 2048-byte cell has 32 cells per heap block. Derivation from the
+    // absolute address would add a false 32-cell offset on block one, so the
+    // fast path must first reduce the cursor to its heap-block-relative offset.
     let region_slots = (2048 - GcHeader::SIZE) / SLOT_BYTES;
     assert!(!gc
         .try_alloc_value_slots_in_region(meta, region_slots as u16)
@@ -846,19 +846,15 @@ fn value_slot_region_admission_is_exact_at_close_and_respects_object_limit() {
 
     let meta = ValueMeta::new(0, ValueKind::Struct);
     gc.prepare_value_slot_allocation_region(GcHeader::SIZE, meta, 0);
-    let region = gc.value_slot_allocation_regions[0];
     assert_eq!(
         gc.live_object_count, 4,
         "region must pre-admit the hard limit"
     );
     assert_eq!(gc.object_count(), 0, "unused admission is not observable");
     assert_eq!(gc.memory_stats().managed_live_bytes, 0);
-    let class_size = region.class_size as usize;
-    unsafe {
-        *region.bitmap_word |= region.bitmap_bit;
-        gc.value_slot_allocation_regions[0].cursor = region.cursor.add(class_size);
-        gc.value_slot_allocation_regions[0].bitmap_bit <<= 1;
-    }
+    assert!(gc
+        .take_value_slot_allocation(GcHeader::SIZE, meta)
+        .is_some());
 
     gc.close_value_slot_allocation_region_for_boundary();
     assert_eq!(gc.object_count(), 1);

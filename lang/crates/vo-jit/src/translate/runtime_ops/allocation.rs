@@ -2,7 +2,9 @@ use cranelift_codegen::ir::{
     condcodes::IntCC, types, InstBuilder, MemFlagsData as MemFlags, StackSlotData, StackSlotKind,
 };
 use vo_runtime::bytecode::Constant;
-use vo_runtime::gc::{ValueSlotAllocationRegionField, JIT_GC_HEADER_MARKED_OFFSET};
+use vo_runtime::gc::{
+    ValueSlotAllocationRegionField, JIT_GC_HEADER_MARKED_OFFSET, JIT_GC_HEAP_BLOCK_SIZE,
+};
 use vo_runtime::instruction::Instruction;
 use vo_runtime::ValueMeta;
 
@@ -129,19 +131,17 @@ fn emit_jit_small_ptr_new<'a>(
         gc,
         region_offset(ValueSlotAllocationRegionField::BitmapWord),
     );
-    let allocated_bit = e.load_trusted(
-        JitMemoryRegion::Gc,
-        types::I64,
-        gc,
-        region_offset(ValueSlotAllocationRegionField::BitmapBit),
-    );
-    let next_allocated_bit = e.builder().ins().ishl_imm_u(allocated_bit, 1);
-    e.store_trusted(
-        JitMemoryRegion::Gc,
-        next_allocated_bit,
-        gc,
-        region_offset(ValueSlotAllocationRegionField::BitmapBit),
-    );
+    let block_offset = e
+        .builder()
+        .ins()
+        .band_imm_u(cursor, (JIT_GC_HEAP_BLOCK_SIZE - 1) as i64);
+    let cell_index = e
+        .builder()
+        .ins()
+        .ushr_imm_u(block_offset, class_size.trailing_zeros() as i64);
+    let bit_index = e.builder().ins().band_imm_u(cell_index, 63);
+    let one = e.builder().ins().iconst(types::I64, 1);
+    let allocated_bit = e.builder().ins().ishl(one, bit_index);
     let allocated = e
         .builder()
         .ins()

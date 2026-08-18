@@ -237,9 +237,6 @@ pub struct HeapBumpLane {
     pub cursor: *mut u8,
     pub limit: *mut u8,
     pub bitmap_word: *mut u64,
-    /// One-hot allocation bit corresponding to `cursor`. The lane never
-    /// crosses a bitmap word, so consumers can advance this with a left shift.
-    pub bitmap_bit: u64,
     pub logical_size_cursor: *mut u16,
     pub live_cells: *mut u16,
     pub logical_bytes: *mut usize,
@@ -459,7 +456,6 @@ impl SpanHeap {
             cursor,
             limit,
             bitmap_word: unsafe { block.allocated.as_mut_ptr().add(word) },
-            bitmap_bit: 1_u64 << (start % 64),
             logical_size_cursor: unsafe { block.logical_sizes.as_mut_ptr().add(start) },
             live_cells: &mut block.live_cells,
             logical_bytes: &mut block.logical_bytes,
@@ -1449,6 +1445,14 @@ pub(super) fn allocation_class(size: usize) -> Option<(usize, usize)> {
     Some((shift - MIN_CLASS_SHIFT, class_size))
 }
 
+#[inline]
+pub(super) fn allocation_bit(cursor: *mut u8, class_size: usize) -> u64 {
+    debug_assert!(class_size.is_power_of_two());
+    let block_offset = cursor as usize & (HEAP_BLOCK_SIZE - 1);
+    let cell_index = block_offset >> class_size.trailing_zeros();
+    1_u64 << (cell_index % 64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1615,7 +1619,7 @@ mod tests {
 
         for cell in 0..3usize {
             unsafe {
-                *lane.bitmap_word |= lane.bitmap_bit << cell;
+                *lane.bitmap_word |= allocation_bit(lane.cursor, lane.class_size) << cell;
                 *lane.logical_size_cursor.add(cell) = 24;
                 *lane.live_cells += 1;
                 *lane.logical_bytes += 24;

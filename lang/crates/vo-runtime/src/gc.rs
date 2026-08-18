@@ -83,6 +83,7 @@ pub const JIT_GC_HEADER_VALUE_META_OFFSET: i32 =
 pub const JIT_GC_AGE_MASK: u8 = AGE_MASK;
 pub const JIT_GC_WHITE_BITS: u8 = WHITE_BITS;
 pub const JIT_GC_BLACK_BIT: u8 = BLACK_BIT;
+pub const JIT_GC_HEAP_BLOCK_SIZE: usize = heap::HEAP_BLOCK_SIZE;
 pub(crate) const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
 pub(crate) const RUNTIME_BACKING_OBJECT_BIT: u8 = 1 << 1;
 
@@ -594,7 +595,6 @@ struct ValueSlotAllocationRegion {
     cursor: *mut u8,
     limit: *mut u8,
     bitmap_word: *mut u64,
-    bitmap_bit: u64,
     live_cells: *mut u16,
     logical_bytes: *mut usize,
     shape: u64,
@@ -608,7 +608,6 @@ impl Default for ValueSlotAllocationRegion {
             cursor: core::ptr::null_mut(),
             limit: core::ptr::null_mut(),
             bitmap_word: core::ptr::null_mut(),
-            bitmap_bit: 0,
             live_cells: core::ptr::null_mut(),
             logical_bytes: core::ptr::null_mut(),
             shape: 0,
@@ -639,7 +638,6 @@ pub enum ValueSlotAllocationRegionField {
     Cursor,
     Limit,
     BitmapWord,
-    BitmapBit,
     Shape,
 }
 
@@ -655,7 +653,6 @@ impl ValueSlotAllocationRegionField {
             Self::Cursor => core::mem::offset_of!(ValueSlotAllocationRegion, cursor),
             Self::Limit => core::mem::offset_of!(ValueSlotAllocationRegion, limit),
             Self::BitmapWord => core::mem::offset_of!(ValueSlotAllocationRegion, bitmap_word),
-            Self::BitmapBit => core::mem::offset_of!(ValueSlotAllocationRegion, bitmap_bit),
             Self::Shape => core::mem::offset_of!(ValueSlotAllocationRegion, shape),
         };
         i32::try_from(region.checked_add(field)?).ok()
@@ -1127,7 +1124,6 @@ impl Gc {
                 cursor: lane.cursor,
                 limit: lane.limit,
                 bitmap_word: lane.bitmap_word,
-                bitmap_bit: lane.bitmap_bit,
                 live_cells: lane.live_cells,
                 logical_bytes: lane.logical_bytes,
                 shape: ValueSlotAllocationRegionField::shape(size, value_meta.to_raw()),
@@ -1603,10 +1599,10 @@ impl Gc {
 
             let raw = region.cursor;
             region.cursor = unsafe { raw.add(region.class_size as usize) };
+            let allocated_bit = heap::allocation_bit(raw, region.class_size as usize);
             unsafe {
-                *region.bitmap_word |= region.bitmap_bit;
+                *region.bitmap_word |= allocated_bit;
             }
-            region.bitmap_bit <<= 1;
             Some(unsafe { raw.add(GcHeader::SIZE) as GcRef })
         }
     }
