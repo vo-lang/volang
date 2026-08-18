@@ -3079,7 +3079,7 @@ func main() {}
 }
 
 #[test]
-fn generated_jump_conditions_are_value_slots_for_jit() {
+fn generated_jump_conditions_preserve_typed_nilable_slots() {
     let source = r#"
 package main
 
@@ -3106,20 +3106,34 @@ func main() int {
 "#;
 
     let module = compile_source(source);
-    for func in &module.functions {
-        for inst in &func.code {
-            if matches!(inst.opcode(), Opcode::JumpIf | Opcode::JumpIfNot) {
-                assert_eq!(
-                    func.slot_types[inst.a as usize],
-                    SlotType::Value,
-                    "{} {:?} condition must be a Value slot, got {:?}",
-                    func.name,
-                    inst.opcode(),
-                    func.slot_types[inst.a as usize]
-                );
-            }
-        }
-    }
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let branch_slot_types = main
+        .code
+        .iter()
+        .filter(|inst| matches!(inst.opcode(), Opcode::JumpIf | Opcode::JumpIfNot))
+        .map(|inst| main.slot_types[inst.a as usize])
+        .collect::<Vec<_>>();
+
+    assert!(
+        branch_slot_types.contains(&SlotType::GcRef),
+        "pointer nil checks should branch directly on their typed root slot"
+    );
+    assert!(
+        branch_slot_types.contains(&SlotType::Interface0),
+        "interface nil checks should branch directly on their typed header slot"
+    );
+    assert!(branch_slot_types.iter().all(|slot_type| matches!(
+        slot_type,
+        SlotType::Value | SlotType::GcBase | SlotType::GcRef | SlotType::Interface0
+    )));
+    assert!(
+        main.code.iter().all(|inst| inst.opcode() != Opcode::NeI),
+        "nil branches should not materialize a temporary boolean"
+    );
 }
 
 #[test]

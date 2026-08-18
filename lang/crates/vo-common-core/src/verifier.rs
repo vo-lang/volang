@@ -60,6 +60,17 @@ const ANY_SINGLE_SLOT: &[SlotType] = &[
     SlotType::Float,
 ];
 const FLOAT_STORAGE_SLOTS: &[SlotType] = &[SlotType::Float, SlotType::Value];
+// Conditional branches test the raw machine word for zero. Besides ordinary
+// booleans, this admits the leading word of every nilable runtime value so the
+// compiler can lower `x == nil` without first materializing a temporary bool.
+// Interface1 is deliberately excluded: an interface's nil identity belongs to
+// its Interface0 header.
+const TRUTHY_STORAGE_SLOTS: &[SlotType] = &[
+    SlotType::Value,
+    SlotType::GcBase,
+    SlotType::GcRef,
+    SlotType::Interface0,
+];
 
 // Verification runs on untrusted modules before the VM or JIT may execute
 // them.  Keep derived data and fixed-point work bounded independently from the
@@ -3578,12 +3589,12 @@ fn verify_instruction_contract(
             verify_jump_target_contract(func, pc, opcode, jump_target_i64(pc, inst.imm32()))
         }
         Opcode::JumpIf | Opcode::JumpIfNot => {
-            verify_layout(
+            verify_one_of_single_slot_layout(
                 func,
                 pc,
                 opcode,
                 inst.a,
-                &[SlotType::Value],
+                TRUTHY_STORAGE_SLOTS,
                 if opcode == Opcode::JumpIf {
                     "JumpIf condition"
                 } else {

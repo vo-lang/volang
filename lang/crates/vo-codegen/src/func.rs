@@ -1972,7 +1972,14 @@ impl FuncBuilder {
                 self.slot_types.len()
             );
         };
-        if slot_type == SlotType::Value {
+        // JumpIf/JumpIfNot compare one raw word with zero. Nilable roots and
+        // interface headers therefore already are canonical branch inputs;
+        // preserving them avoids a LoadInt+NeI pair in every nil check while
+        // keeping their precise slot type visible to GC and typed JIT IR.
+        if matches!(
+            slot_type,
+            SlotType::Value | SlotType::GcBase | SlotType::GcRef | SlotType::Interface0
+        ) {
             return cond_reg;
         }
 
@@ -2641,26 +2648,40 @@ mod tests {
     }
 
     #[test]
-    fn jump_conditions_are_canonicalized_to_scalar_value_slots_061() {
-        let mut builder = FuncBuilder::new("jump-condition-contract");
-        let iface_slot = builder.alloc_slots(&[SlotType::Interface0]);
-
-        builder.emit_jump(Opcode::JumpIfNot, iface_slot);
-
-        let jump = builder
-            .code
-            .iter()
-            .find(|inst| inst.opcode() == Opcode::JumpIfNot)
-            .expect("jump should be emitted");
-        assert_ne!(
-            jump.a, iface_slot,
-            "non-scalar branch conditions must be lowered through a generated scalar condition"
-        );
-        assert_eq!(
-            builder.slot_types[jump.a as usize],
+    fn jump_conditions_preserve_zero_testable_slots_061() {
+        for slot_type in [
             SlotType::Value,
-            "branch condition entering bytecode must satisfy verifier/JIT scalar branch contract"
-        );
+            SlotType::GcBase,
+            SlotType::GcRef,
+            SlotType::Interface0,
+        ] {
+            let mut builder = FuncBuilder::new("direct-jump-condition-contract");
+            let input = builder.alloc_slots(&[slot_type]);
+
+            builder.emit_jump(Opcode::JumpIfNot, input);
+
+            let jump = builder.code.last().expect("jump should be emitted");
+            assert_eq!(jump.opcode(), Opcode::JumpIfNot);
+            assert_eq!(
+                jump.a, input,
+                "zero-testable {slot_type:?} condition should branch directly"
+            );
+        }
+
+        for slot_type in [SlotType::Float, SlotType::Interface1] {
+            let mut builder = FuncBuilder::new("canonical-jump-condition-contract");
+            let input = builder.alloc_slots(&[slot_type]);
+
+            builder.emit_jump(Opcode::JumpIfNot, input);
+
+            let jump = builder.code.last().expect("jump should be emitted");
+            assert_eq!(jump.opcode(), Opcode::JumpIfNot);
+            assert_ne!(
+                jump.a, input,
+                "{slot_type:?} condition must use a generated scalar condition"
+            );
+            assert_eq!(builder.slot_types[jump.a as usize], SlotType::Value);
+        }
     }
 
     #[test]
