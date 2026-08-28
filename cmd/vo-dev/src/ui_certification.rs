@@ -90,6 +90,8 @@ const PRODUCT_DOCUMENTS: [&str; 8] = [
     "ui/docs/contributing-support.md",
     "ui/docs/release-notes-1.0.md",
 ];
+const GENERATED_EVIDENCE_PREFIX: &str = "generated:";
+const GENERATED_EVIDENCE_ROOT: &str = "target/rewrite-validation/";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -823,15 +825,7 @@ fn validate_quality_matrix(root: &Path, certification: &CertificationFile) -> Re
             }
         }
         for evidence in &suite.evidence {
-            let evidence_path = evidence
-                .split_once('#')
-                .map_or(evidence.as_str(), |pair| pair.0);
-            if !checked_repo_path(root, evidence_path, "quality suite evidence")?.exists() {
-                bail!(
-                    "UI quality suite {} references missing evidence {evidence_path}",
-                    suite.id
-                );
-            }
+            validate_evidence_reference(root, evidence, &format!("UI quality suite {}", suite.id))?;
         }
     }
     Ok(())
@@ -872,18 +866,11 @@ fn validate_certification(root: &Path, certification: &CertificationFile) -> Res
             }
         }
         for evidence in &gate.evidence {
-            validate_text("gate evidence", evidence)?;
-            let path = evidence
-                .split_once('#')
-                .map_or(evidence.as_str(), |pair| pair.0);
-            let resolved = checked_repo_path(root, path, "gate evidence")?;
-            if !resolved.exists() {
-                bail!(
-                    "UI certification gate {} references missing evidence {}",
-                    gate.id,
-                    path
-                );
-            }
+            validate_evidence_reference(
+                root,
+                evidence,
+                &format!("UI certification gate {}", gate.id),
+            )?;
         }
     }
     Ok(())
@@ -1093,10 +1080,7 @@ fn validate_completion_evidence(
         }
     }
     for item in evidence {
-        let path = item.split_once('#').map_or(item.as_str(), |pair| pair.0);
-        if !checked_repo_path(root, path, &format!("{kind} evidence"))?.exists() {
-            bail!("UI {kind} {id} references missing evidence {path}");
-        }
+        validate_evidence_reference(root, item, &format!("UI {kind} {id}"))?;
     }
     Ok(())
 }
@@ -1214,14 +1198,11 @@ fn validate_uikit_catalog(
             );
         }
         for evidence in &component.evidence {
-            let resolved = checked_repo_path(root, evidence, "UIKit component evidence")?;
-            if !resolved.exists() {
-                bail!(
-                    "UIKit component {} references missing evidence {}",
-                    component.id,
-                    evidence
-                );
-            }
+            validate_evidence_reference(
+                root,
+                evidence,
+                &format!("UIKit component {}", component.id),
+            )?;
         }
     }
     if represented_families.len() != required_families.len() {
@@ -1356,16 +1337,11 @@ fn validate_capability_catalog(
             );
         }
         for evidence in &capability.evidence {
-            let path = evidence
-                .split_once('#')
-                .map_or(evidence.as_str(), |pair| pair.0);
-            let resolved = checked_repo_path(root, path, "capability evidence")?;
-            if !resolved.exists() {
-                bail!(
-                    "UI capability {} references missing evidence {path}",
-                    capability.id
-                );
-            }
+            validate_evidence_reference(
+                root,
+                evidence,
+                &format!("UI capability {}", capability.id),
+            )?;
         }
     }
     if domains_with_required_capabilities != *required_domains {
@@ -1660,6 +1636,30 @@ fn checked_repo_path(root: &Path, relative: &str, field: &str) -> Result<std::pa
     Ok(root.join(path))
 }
 
+fn validate_evidence_reference(root: &Path, reference: &str, field: &str) -> Result<()> {
+    validate_text("evidence reference", reference)?;
+    let (generated, reference) = reference
+        .strip_prefix(GENERATED_EVIDENCE_PREFIX)
+        .map_or((false, reference), |path| (true, path));
+    let path = reference
+        .split_once('#')
+        .map_or(reference, |(path, _fragment)| path);
+    let resolved = checked_repo_path(root, path, "evidence reference")?;
+    if generated {
+        if !path.starts_with(GENERATED_EVIDENCE_ROOT)
+            || !path.ends_with(".json")
+            || reference.contains('#')
+        {
+            bail!(
+                "{field} has invalid generated evidence {reference}; expected a JSON report under {GENERATED_EVIDENCE_ROOT}"
+            );
+        }
+    } else if !resolved.exists() {
+        bail!("{field} references missing evidence {path}");
+    }
+    Ok(())
+}
+
 fn validate_token(field: &str, value: &str) -> Result<()> {
     validate_text(field, value)?;
     if !value
@@ -1760,5 +1760,28 @@ mod tests {
     fn repository_ui_foundation_and_product_roadmaps_are_consistent() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         load_and_validate(&root).unwrap();
+    }
+
+    #[test]
+    fn generated_evidence_is_declarative_and_path_constrained() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert!(validate_evidence_reference(
+            &root,
+            "generated:target/rewrite-validation/browser-report.json",
+            "test gate",
+        )
+        .is_ok());
+        assert!(validate_evidence_reference(
+            &root,
+            "generated:docs/browser-report.json",
+            "test gate",
+        )
+        .is_err());
+        assert!(validate_evidence_reference(
+            &root,
+            "generated:target/rewrite-validation/browser-report.txt",
+            "test gate",
+        )
+        .is_err());
     }
 }
