@@ -2012,100 +2012,100 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     Ok(artifact.bytes.len())
 }
 
-fn collect_web_compiler_workspace_files(
-    source_root: &Path,
-    directory: &Path,
-    asset_root: &str,
-    depth: usize,
-    files: &mut Vec<WebCompilerWorkspaceFile>,
-    assets: &mut BTreeMap<String, Vec<u8>>,
-    total_files: &mut usize,
-    total_bytes: &mut u64,
-) -> Result<(), String> {
-    if depth > MAX_WEB_COMPILER_WORKSPACE_DEPTH {
-        return Err(format!(
-            "Web compiler workspace module exceeds {} directory levels",
-            MAX_WEB_COMPILER_WORKSPACE_DEPTH
-        ));
-    }
-    let entries = fs::read_dir(directory).map_err(|error| {
-        format!(
-            "cannot read workspace module {}: {error}",
-            directory.display()
-        )
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
-        let path = entry.path();
-        if file_type.is_symlink() {
+#[derive(Default)]
+struct WebCompilerWorkspaceTotals {
+    files: usize,
+    bytes: u64,
+}
+
+struct WebCompilerWorkspaceCollector<'a> {
+    source_root: &'a Path,
+    asset_root: &'a str,
+    files: Vec<WebCompilerWorkspaceFile>,
+    assets: &'a mut BTreeMap<String, Vec<u8>>,
+    totals: &'a mut WebCompilerWorkspaceTotals,
+}
+
+impl WebCompilerWorkspaceCollector<'_> {
+    fn collect(&mut self, directory: &Path, depth: usize) -> Result<(), String> {
+        if depth > MAX_WEB_COMPILER_WORKSPACE_DEPTH {
             return Err(format!(
-                "Web compiler workspace module cannot contain symbolic link {}",
-                path.display()
+                "Web compiler workspace module exceeds {} directory levels",
+                MAX_WEB_COMPILER_WORKSPACE_DEPTH
             ));
         }
-        if file_type.is_dir() {
-            let name = entry.file_name();
-            if matches!(
-                name.to_string_lossy().as_ref(),
-                ".git" | ".volang" | "target" | "node_modules"
-            ) {
-                continue;
-            }
-            collect_web_compiler_workspace_files(
-                source_root,
-                &path,
-                asset_root,
-                depth + 1,
-                files,
-                assets,
-                total_files,
-                total_bytes,
-            )?;
-            continue;
-        }
-        if !file_type.is_file()
-            || (path.file_name() != Some(OsStr::new("vo.mod"))
-                && path.extension() != Some(OsStr::new("vo")))
-        {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(source_root)
-            .map_err(|_| format!("workspace module file {} escaped its root", path.display()))?;
-        vo_module::schema::portable_relative_path_from_path(relative)
-            .map_err(|error| error.to_string())?;
-        if *total_files >= MAX_WEB_COMPILER_WORKSPACE_FILES {
-            return Err(format!(
-                "Web compiler workspace contains more than {} source files",
-                MAX_WEB_COMPILER_WORKSPACE_FILES
-            ));
-        }
-        let bytes = fs::read(&path).map_err(|error| {
+        let entries = fs::read_dir(directory).map_err(|error| {
             format!(
-                "cannot read workspace module file {}: {error}",
-                path.display()
+                "cannot read workspace module {}: {error}",
+                directory.display()
             )
         })?;
-        *total_bytes = total_bytes
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| "Web compiler workspace module byte count overflowed".to_string())?;
-        if *total_bytes > MAX_WEB_COMPILER_WORKSPACE_BYTES {
-            return Err("Web compiler workspace modules exceed 128 MiB".to_string());
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            let path = entry.path();
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "Web compiler workspace module cannot contain symbolic link {}",
+                    path.display()
+                ));
+            }
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                if matches!(
+                    name.to_string_lossy().as_ref(),
+                    ".git" | ".volang" | "target" | "node_modules"
+                ) {
+                    continue;
+                }
+                self.collect(&path, depth + 1)?;
+                continue;
+            }
+            if !file_type.is_file()
+                || (path.file_name() != Some(OsStr::new("vo.mod"))
+                    && path.extension() != Some(OsStr::new("vo")))
+            {
+                continue;
+            }
+            let relative = path.strip_prefix(self.source_root).map_err(|_| {
+                format!("workspace module file {} escaped its root", path.display())
+            })?;
+            vo_module::schema::portable_relative_path_from_path(relative)
+                .map_err(|error| error.to_string())?;
+            if self.totals.files >= MAX_WEB_COMPILER_WORKSPACE_FILES {
+                return Err(format!(
+                    "Web compiler workspace contains more than {} source files",
+                    MAX_WEB_COMPILER_WORKSPACE_FILES
+                ));
+            }
+            let bytes = fs::read(&path).map_err(|error| {
+                format!(
+                    "cannot read workspace module file {}: {error}",
+                    path.display()
+                )
+            })?;
+            self.totals.bytes = self
+                .totals
+                .bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| "Web compiler workspace module byte count overflowed".to_string())?;
+            if self.totals.bytes > MAX_WEB_COMPILER_WORKSPACE_BYTES {
+                return Err("Web compiler workspace modules exceed 128 MiB".to_string());
+            }
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let asset_path = format!("{}/{relative}", self.asset_root);
+            if self.assets.insert(asset_path, bytes.clone()).is_some() {
+                return Err("Web compiler workspace contains a duplicate asset path".to_string());
+            }
+            self.totals.files += 1;
+            self.files.push(WebCompilerWorkspaceFile {
+                path: relative,
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            });
         }
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        let asset_path = format!("{asset_root}/{relative}");
-        if assets.insert(asset_path, bytes.clone()).is_some() {
-            return Err("Web compiler workspace contains a duplicate asset path".to_string());
-        }
-        *total_files += 1;
-        files.push(WebCompilerWorkspaceFile {
-            path: relative,
-            bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-        });
+        Ok(())
     }
-    Ok(())
 }
 
 fn web_compiler_workspace_assets(project: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
@@ -2116,8 +2116,7 @@ fn web_compiler_workspace_assets(project: &Path) -> Result<BTreeMap<String, Vec<
     modules.sort_by(|left, right| left.module().cmp(right.module()));
     let mut assets = BTreeMap::new();
     let mut bundled = Vec::with_capacity(modules.len());
-    let mut total_files = 0_usize;
-    let mut total_bytes = 0_u64;
+    let mut totals = WebCompilerWorkspaceTotals::default();
     for (index, module) in modules.iter().enumerate() {
         let source_root = module.directory().canonicalize().map_err(|error| {
             format!(
@@ -2128,17 +2127,15 @@ fn web_compiler_workspace_assets(project: &Path) -> Result<BTreeMap<String, Vec<
         })?;
         let relative_root = index.to_string();
         let asset_root = format!("/runtime/workspace-modules/{relative_root}");
-        let mut files = Vec::new();
-        collect_web_compiler_workspace_files(
-            &source_root,
-            &source_root,
-            &asset_root,
-            0,
-            &mut files,
-            &mut assets,
-            &mut total_files,
-            &mut total_bytes,
-        )?;
+        let mut collector = WebCompilerWorkspaceCollector {
+            source_root: &source_root,
+            asset_root: &asset_root,
+            files: Vec::new(),
+            assets: &mut assets,
+            totals: &mut totals,
+        };
+        collector.collect(&source_root, 0)?;
+        let mut files = collector.files;
         files.sort_by(|left, right| left.path.cmp(&right.path));
         bundled.push(WebCompilerWorkspaceModule {
             path: module.module().as_str().to_string(),
@@ -3249,7 +3246,7 @@ fn cmd_inspect(args: &[OsString]) -> i32 {
             found_project = true;
         }
     }
-    let runtime = runtime.then_some((mode, viewport));
+    let runtime = runtime.then_some(UiRuntimeInspectionRequest { mode, viewport });
     match inspect_project(&project, format, target, runtime) {
         Ok(report) => {
             print!("{report}");
@@ -3432,6 +3429,12 @@ enum InspectionTarget {
     Native,
 }
 
+#[derive(Clone, Copy)]
+struct UiRuntimeInspectionRequest {
+    mode: vo_engine::RunMode,
+    viewport: Option<(f64, f64, f64)>,
+}
+
 #[derive(Serialize)]
 struct ComponentInspection {
     identity: String,
@@ -3536,7 +3539,7 @@ fn inspect_project(
     project: &Path,
     format: InspectionFormat,
     target: InspectionTarget,
-    runtime: Option<(vo_engine::RunMode, Option<(f64, f64, f64)>)>,
+    runtime: Option<UiRuntimeInspectionRequest>,
 ) -> Result<String, String> {
     let output = super::compile_cli_path(project)?;
     let module = output.module.module();
@@ -3612,7 +3615,7 @@ fn inspect_project(
         }
     };
     let runtime = runtime
-        .map(|(mode, viewport)| test_ui_with_output(output, mode, viewport, &[]))
+        .map(|request| test_ui_with_output(output, request.mode, request.viewport, &[]))
         .transpose()?
         .map(|result| result.runtime);
     let report = UiInspection {

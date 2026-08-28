@@ -82,11 +82,11 @@ impl HostInvocation {
             || self
                 .service
                 .bytes()
-                .any(|value| value < 0x21 || value > 0x7e)
+                .any(|value| !(0x21..=0x7e).contains(&value))
             || self
                 .operation
                 .bytes()
-                .any(|value| value < 0x21 || value > 0x7e)
+                .any(|value| !(0x21..=0x7e).contains(&value))
         {
             return Err(SystemContractError::InvalidHostInvocation);
         }

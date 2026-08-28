@@ -1984,7 +1984,7 @@ fn move_text_caret(
                 .rfind('\n')
                 .map_or(0, |index| index + 1);
             let Some(line_end_relative) = value[current_byte..].find('\n') else {
-                return Some(u32::try_from(value.encode_utf16().count()).ok()?);
+                return u32::try_from(value.encode_utf16().count()).ok();
             };
             let next_start = current_byte + line_end_relative + 1;
             let next_end = value[next_start..]

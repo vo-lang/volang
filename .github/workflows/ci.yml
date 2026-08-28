@@ -219,7 +219,7 @@ jobs:
           ./target/debug/vo ui build ui/showcases/studio-workbench \
             -o target/studio-workbench-aot \
             --runtime-dir=lang/crates/vo-web
-          ./target/debug/vo ui build apps/studio \
+          VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui build apps/studio \
             -o target/studio-aot \
             --runtime-dir=lang/crates/vo-web
 
@@ -382,6 +382,8 @@ jobs:
         run: cargo test --locked -p vo-ui-shell-native --features desktop-window
 
       - name: Run VM and JIT native UI differential
+        env:
+          VOWORK: ${{ github.workspace }}/vo.work
         run: cargo test --locked -p vo-engine official_ui_native_vm_jit
 
       - name: Enforce UI performance budgets
@@ -417,7 +419,7 @@ jobs:
             studio_runtime=target/release/libvo_studio_native.a
             ui_runtime=target/release/libvo_ui_aot_runtime_native.a
           fi
-          ./target/debug/vo ui package apps/studio \
+          VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui package apps/studio \
             -o target/studio-native-aot \
             --runtime="$studio_runtime"
           ./target/debug/vo ui package ui/showcases/component-gallery \

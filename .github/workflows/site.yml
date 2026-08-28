@@ -81,7 +81,7 @@ jobs:
       - name: Build Volang Studio AOT site
         run: |
           cargo build --locked -p vo --no-default-features
-          ./target/debug/vo ui build apps/studio \
+          VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui build apps/studio \
             -o target/volang-dev \
             --runtime-dir=lang/crates/vo-web
           test -s target/volang-dev/app.wasm

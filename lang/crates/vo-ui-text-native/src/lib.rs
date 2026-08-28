@@ -180,29 +180,17 @@ impl SoftwareSurface {
         }
     }
 
-    fn blend_rounded_rect(
-        &mut self,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        radius: f32,
-        color: u32,
-        clip: PixelClip,
-    ) {
+    fn blend_rounded_rect(&mut self, rect: PixelRect, radius: f32, color: u32, clip: PixelClip) {
         if radius <= 0.0 || !radius.is_finite() {
-            self.blend_rect(x, y, width, height, color, clip);
+            self.blend_rect(rect.x, rect.y, rect.width, rect.height, color, clip);
             return;
         }
-        self.blend_rounded_shape(x, y, width, height, radius, 0.0, color, clip);
+        self.blend_rounded_shape(rect, radius, 0.0, color, clip);
     }
 
     fn blend_rounded_border(
         &mut self,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
+        rect: PixelRect,
         radius: f32,
         stroke_width: f32,
         color: u32,
@@ -211,34 +199,21 @@ impl SoftwareSurface {
         if stroke_width <= 0.0 || !stroke_width.is_finite() {
             return;
         }
-        self.blend_rounded_shape(
-            x,
-            y,
-            width,
-            height,
-            radius.max(0.0),
-            stroke_width,
-            color,
-            clip,
-        );
+        self.blend_rounded_shape(rect, radius.max(0.0), stroke_width, color, clip);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn blend_rounded_shape(
         &mut self,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
+        rect: PixelRect,
         radius: f32,
         inset: f32,
         color: u32,
         clip: PixelClip,
     ) {
-        let right = i64::from(x).saturating_add(i64::from(width));
-        let bottom = i64::from(y).saturating_add(i64::from(height));
-        let left = i64::from(x).max(i64::from(clip.left)).max(0);
-        let top = i64::from(y).max(i64::from(clip.top)).max(0);
+        let right = i64::from(rect.x).saturating_add(i64::from(rect.width));
+        let bottom = i64::from(rect.y).saturating_add(i64::from(rect.height));
+        let left = i64::from(rect.x).max(i64::from(clip.left)).max(0);
+        let top = i64::from(rect.y).max(i64::from(clip.top)).max(0);
         let right = right.min(i64::from(clip.right)).min(i64::from(self.width));
         let bottom = bottom
             .min(i64::from(clip.bottom))
@@ -246,16 +221,16 @@ impl SoftwareSurface {
         if left >= right || top >= bottom {
             return;
         }
-        let width_f = width as f32;
-        let height_f = height as f32;
+        let width_f = rect.width as f32;
+        let height_f = rect.height as f32;
         let outer_radius = radius.min(width_f * 0.5).min(height_f * 0.5);
         let inner_width = (width_f - inset * 2.0).max(0.0);
         let inner_height = (height_f - inset * 2.0).max(0.0);
         let inner_radius = (outer_radius - inset).max(0.0);
         for pixel_y in top..bottom {
             for pixel_x in left..right {
-                let local_x = pixel_x as f32 + 0.5 - x as f32;
-                let local_y = pixel_y as f32 + 0.5 - y as f32;
+                let local_x = pixel_x as f32 + 0.5 - rect.x as f32;
+                let local_y = pixel_y as f32 + 0.5 - rect.y as f32;
                 if !inside_rounded_rect(local_x, local_y, width_f, height_f, outer_radius) {
                     continue;
                 }
@@ -335,6 +310,14 @@ impl PreparedPaintScene {
     pub fn scale(&self) -> f32 {
         f32::from_bits(self.scale_bits)
     }
+}
+
+#[derive(Clone, Copy)]
+struct PixelRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -542,10 +525,12 @@ impl NativeTextSystem {
                     let width = u32::try_from(right.saturating_sub(x)).unwrap_or(0);
                     let height = u32::try_from(bottom.saturating_sub(y)).unwrap_or(0);
                     surface.blend_rounded_rect(
-                        x,
-                        y,
-                        width,
-                        height,
+                        PixelRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        },
                         *radius as f32 * scale,
                         *color,
                         clip,
@@ -569,10 +554,12 @@ impl NativeTextSystem {
                     let width = u32::try_from(right.saturating_sub(x)).unwrap_or(0);
                     let height = u32::try_from(bottom.saturating_sub(y)).unwrap_or(0);
                     surface.blend_rounded_border(
-                        x,
-                        y,
-                        width,
-                        height,
+                        PixelRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        },
                         *radius as f32 * scale,
                         *stroke_width as f32 * scale,
                         *color,
@@ -1073,14 +1060,20 @@ mod tests {
     fn rounded_fill_and_border_preserve_corner_and_center_geometry() {
         let clip = PixelClip::surface(12, 12);
         let mut fill = SoftwareSurface::new(12, 12).unwrap();
-        fill.blend_rounded_rect(0, 0, 12, 12, 4.0, 0xffffffff, clip);
+        let rect = PixelRect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 12,
+        };
+        fill.blend_rounded_rect(rect, 4.0, 0xffffffff, clip);
         assert_eq!(fill.pixels_rgba8()[3], 0);
         assert_ne!(fill.pixels_rgba8()[(6 * 12 + 6) * 4 + 3], 0);
 
         let mut border = SoftwareSurface::new(12, 12).unwrap();
-        border.blend_rounded_border(0, 0, 12, 12, 4.0, 2.0, 0xffffffff, clip);
+        border.blend_rounded_border(rect, 4.0, 2.0, 0xffffffff, clip);
         assert_eq!(border.pixels_rgba8()[3], 0);
-        assert_ne!(border.pixels_rgba8()[(1 * 12 + 6) * 4 + 3], 0);
+        assert_ne!(border.pixels_rgba8()[(12 + 6) * 4 + 3], 0);
         assert_eq!(border.pixels_rgba8()[(6 * 12 + 6) * 4 + 3], 0);
     }
 

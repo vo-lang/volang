@@ -1128,6 +1128,14 @@ func main() {
         fn app(&self) -> std::path::PathBuf {
             self.0.join("app")
         }
+
+        fn compile(&self) -> crate::CompileOutput {
+            let workfile = self.0.join("vo.work").canonicalize().unwrap();
+            let options = vo_module::project::ProjectContextOptions::new(
+                vo_module::workspace::WorkspaceDiscovery::Explicit(workfile),
+            );
+            crate::compile_with_options(self.app().to_string_lossy().as_ref(), &options).unwrap()
+        }
     }
 
     impl Drop for UiTestWorkspace {
@@ -1460,7 +1468,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .module()
@@ -1507,7 +1515,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .module()
@@ -1576,7 +1584,7 @@ func Counter(label string) ui.View {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let artifact = compiled
             .module
             .module()
@@ -1643,7 +1651,7 @@ func Counter(label string) ui.View {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .module()
@@ -1699,7 +1707,7 @@ func Counter(label string) ui.View {
     #[test]
     fn official_ui_mount_is_vm_jit_protocol_equivalent() {
         let workspace = UiTestWorkspace::create();
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let (vm_initial, vm_update) = ui_batches_for(compiled.module.clone(), RunMode::Vm);
         let (jit_initial, jit_update) = ui_batches_for(compiled.module, RunMode::Jit);
 
@@ -1743,7 +1751,7 @@ func main() {
 "#,
         );
         for mode in [RunMode::Vm, RunMode::Jit] {
-            let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let compiled = workspace.compile();
             let vm = build_native_gui_vm_for_mode(compiled, mode).unwrap();
             let window = vo_app_protocol::GenerationalHandle {
                 index: 1,
@@ -1802,7 +1810,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let mut snapshots = Vec::new();
         for mode in [RunMode::Vm, RunMode::Jit] {
             let vm = build_native_gui_vm_for_mode(compiled.clone(), mode).unwrap();
@@ -1881,7 +1889,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let (vm_initial, vm_update) = ui_single_event_batches_for(
             compiled.module.clone(),
             RunMode::Vm,
@@ -1938,7 +1946,7 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
 "#,
         );
         for mode in [RunMode::Vm, RunMode::Jit] {
-            let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let compiled = workspace.compile();
             let vm = build_native_gui_vm_for_mode(compiled, mode).unwrap();
             let window = vo_app_protocol::GenerationalHandle {
                 index: 1,
@@ -2030,7 +2038,7 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
 "#,
         );
         for mode in [RunMode::Vm, RunMode::Jit] {
-            let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let compiled = workspace.compile();
             let vm = build_native_gui_vm_for_mode(compiled, mode).unwrap();
             let window = vo_app_protocol::GenerationalHandle {
                 index: 1,
@@ -2134,7 +2142,7 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
         let workspace = UiTestWorkspace::create_with_main(INITIAL);
         for mode in [RunMode::Vm, RunMode::Jit] {
             std::fs::write(workspace.app().join("main.vo"), INITIAL).unwrap();
-            let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let compiled = workspace.compile();
             let vm = build_native_gui_vm_for_mode(compiled, mode).unwrap();
             let window = vo_app_protocol::GenerationalHandle {
                 index: 1,
@@ -2159,7 +2167,7 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
             );
 
             std::fs::write(workspace.app().join("main.vo"), UPDATED).unwrap();
-            let updated = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let updated = workspace.compile();
             let prepared = prepare_native_gui_reload_for_mode(updated, mode).unwrap();
             let previous_epoch = session.renderer().host().session_epoch();
             let reloaded = session.reload(prepared, now).unwrap();
@@ -2173,7 +2181,7 @@ func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
                 .any(|node| node.text == "Value 1"));
 
             std::fs::write(workspace.app().join("main.vo"), PANICKING).unwrap();
-            let panicking = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let panicking = workspace.compile();
             let prepared = prepare_native_gui_reload_for_mode(panicking, mode).unwrap();
             let failed = session.reload(prepared, now);
             assert!(
@@ -2232,7 +2240,7 @@ func main() {
 "#,
         );
         for mode in [RunMode::Vm, RunMode::Jit] {
-            let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let compiled = workspace.compile();
             let vm = build_native_gui_vm_for_mode(compiled, mode).unwrap();
             let window = vo_app_protocol::GenerationalHandle {
                 index: 1,
@@ -2288,7 +2296,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let mut final_values = Vec::new();
         for mode in [RunMode::Vm, RunMode::Jit] {
             let vm = build_native_gui_vm_for_mode(compiled.clone(), mode).unwrap();
@@ -2362,7 +2370,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let artifact = compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -2447,7 +2455,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let artifact = compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -2519,7 +2527,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let artifact = compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -2594,7 +2602,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -2642,7 +2650,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
         let image = crate::compile_wasm_aot_image(&compiled, &target).unwrap();
         assert!(image.bytes.starts_with(b"\0asm"));
@@ -2673,7 +2681,7 @@ func App() ui.View { return ui.Column(Counter("A"), ui.Key(Counter("B"), "b")) }
 func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .module()
@@ -2709,7 +2717,7 @@ func App() ui.View {
 func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .module()
@@ -2759,7 +2767,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let wasm_target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
         let image = crate::compile_wasm_aot_image(&compiled, &wasm_target).unwrap();
         assert!(image.bytes.starts_with(b"\0asm"));
@@ -2855,7 +2863,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let key_modifiers = vo_ui_core::EventModifiers {
             shift: true,
             ..vo_ui_core::EventModifiers::default()
@@ -2909,7 +2917,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let modifiers = vo_ui_core::EventModifiers {
             shift: true,
             meta: true,
@@ -3016,7 +3024,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let vm = ui_composition_update_for(compiled.module.clone(), RunMode::Vm);
         let jit = ui_composition_update_for(compiled.module, RunMode::Jit);
         assert_eq!(vm.mutations, jit.mutations);
@@ -3050,7 +3058,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -3125,7 +3133,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -3192,7 +3200,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)
@@ -3248,7 +3256,7 @@ func main() {
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/showcases/data-application/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let vm = ui_initial_batch_for(compiled.module.clone(), RunMode::Vm);
         let jit = ui_initial_batch_for(compiled.module.clone(), RunMode::Jit);
         assert_eq!(vm.mutations, jit.mutations);
@@ -3284,7 +3292,7 @@ func main() {
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/tests/application-platform/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         for mode in [RunMode::Vm, RunMode::Jit] {
             let mut vm = match mode {
                 RunMode::Vm => Vm::new(),
@@ -3311,7 +3319,7 @@ func main() {
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/tests/web-desktop-product/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         for mode in [RunMode::Vm, RunMode::Jit] {
             let mut vm = match mode {
                 RunMode::Vm => Vm::new(),
@@ -3342,7 +3350,7 @@ import "github.com/vo-lang/ui/web/server"
 func main() { _ = server.NewAuthority(nil, nil, nil) }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).unwrap();
         let error = crate::compile_wasm_aot_image(&compiled, &target).unwrap_err();
         assert!(
@@ -3359,7 +3367,7 @@ func main() { _ = server.NewAuthority(nil, nil, nil) }
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/showcases/content-site/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let metadata = vo_ui_web::DocumentMetadata {
             language: "en".to_string(),
             direction: "ltr".to_string(),
@@ -3402,7 +3410,7 @@ func main() { _ = server.NewAuthority(nil, nil, nil) }
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/tests/advanced-packs/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let vm_initial = ui_initial_batch_for(compiled.module.clone(), RunMode::Vm);
         let jit_initial = ui_initial_batch_for(compiled.module.clone(), RunMode::Jit);
         assert_eq!(vm_initial.mutations, jit_initial.mutations);
@@ -3445,7 +3453,7 @@ func main() { _ = server.NewAuthority(nil, nil, nil) }
             ),
         ] {
             let workspace = UiTestWorkspace::create_with_main(source);
-            let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+            let compiled = workspace.compile();
             let vm = ui_initial_batch_for(compiled.module.clone(), RunMode::Vm);
             let jit = ui_initial_batch_for(compiled.module.clone(), RunMode::Jit);
             assert_eq!(vm.mutations, jit.mutations, "{name} VM/JIT tree");
@@ -3464,7 +3472,7 @@ func main() { _ = server.NewAuthority(nil, nil, nil) }
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/tests/multi-window-editor/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let vm = ui_initial_batch_for(compiled.module.clone(), RunMode::Vm);
         let jit = ui_initial_batch_for(compiled.module.clone(), RunMode::Jit);
         assert_eq!(vm.mutations, jit.mutations);
@@ -3482,7 +3490,7 @@ func main() { _ = server.NewAuthority(nil, nil, nil) }
         let workspace = UiTestWorkspace::create_with_main(include_str!(
             "../../../../ui/tests/tooling-resilience/main.vo"
         ));
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         let vm = ui_initial_batch_for(compiled.module.clone(), RunMode::Vm);
         let jit = ui_initial_batch_for(compiled.module.clone(), RunMode::Jit);
         assert_eq!(vm.mutations, jit.mutations);
@@ -3522,7 +3530,7 @@ func main() {
 }
 "#,
         );
-        let compiled = crate::compile(workspace.app().to_string_lossy().as_ref()).unwrap();
+        let compiled = workspace.compile();
         assert!(compiled
             .module
             .artifact(vo_ui_artifact::COMPONENT_ARTIFACT_NAME)

@@ -286,7 +286,7 @@ impl SceneBuilder<'_> {
             let bounds = layout.content;
             let role = string_property(&node, PropertyId::ROLE, id)?.unwrap_or_default();
             if role == "checkbox" || role == "menuitemcheckbox" {
-                let size = bounds.width.min(bounds.height).min(20.0).max(1.0);
+                let size = bounds.width.min(bounds.height).clamp(1.0, 20.0);
                 let indicator = Rect::new(
                     bounds.x,
                     bounds.y + (bounds.height - size) / 2.0,
@@ -338,7 +338,7 @@ impl SceneBuilder<'_> {
                     })?;
                 }
             } else {
-                let track_height = bounds.height.min(24.0).max(1.0);
+                let track_height = bounds.height.clamp(1.0, 24.0);
                 let track_width = bounds.width.min(40.0).max(track_height);
                 let track = Rect::new(
                     bounds.x,
