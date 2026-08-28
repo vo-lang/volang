@@ -4724,6 +4724,7 @@ name = "vo-embed"
 version = "0.1.4"
 dependencies = [
  "vo-common-core",
+ "vo-runtime",
  "vo-vm",
 ]
 

@@ -1210,6 +1210,7 @@ impl Vm {
         let mut cursor = NativeRootScanCursor::new(native_frame, ctx);
         let mut scan_error = None;
         let mut native_work_bytes = 0usize;
+        let stress_every_step = self.state.gc.stress_every_step();
         loop {
             self.gc_step_with_root_source(
                 None,
@@ -1279,7 +1280,14 @@ impl Vm {
             // native frame again.
             cursor_kind = None;
             cursor = NativeRootScanCursor::new(native_frame, ctx);
-            if native_work_bytes >= MAX_INCREMENTAL_SLICE_BYTES || !self.state.gc.should_step() {
+            // Stress mode deliberately requests another slice at every boundary,
+            // including while paused. Yield after this boundary's complete root
+            // pass so an empty cycle cannot spin here and allocation-heavy JIT
+            // code still stresses every subsequent safepoint.
+            if stress_every_step
+                || native_work_bytes >= MAX_INCREMENTAL_SLICE_BYTES
+                || !self.state.gc.should_step()
+            {
                 break;
             }
         }

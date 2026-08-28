@@ -11,7 +11,33 @@ use std::path::PathBuf;
 use std::process;
 
 use vo_common_core::bytecode::Module;
+use vo_runtime::bytecode::ExternEffects;
+use vo_runtime::ffi::{ExternCallContext, ExternResult};
 use vo_vm::vm::{SchedulingOutcome, Vm};
+
+fn embedded_read_line(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_string_bytes(0, b"");
+    call.ret_error_msg(1, "EOF");
+    ExternResult::Ok
+}
+
+fn register_embedder_externs(vm: &mut Vm, module: &Module) -> Result<(), String> {
+    let name = vo_runtime::vo_extern_name!("fmt", "nativeReadLine");
+    let provider =
+        vo_runtime::ffi::unique_extern_providers(&module.externs).find(|(_, def)| def.name == name);
+    let Some((id, def)) = provider else {
+        return Ok(());
+    };
+    vm.extern_registry_mut()
+        .map_err(|error| format!("{error:?}"))?
+        .try_register_named_with_effects(
+            id as u32,
+            def.name.clone(),
+            embedded_read_line,
+            ExternEffects::NONE,
+        )
+        .map_err(|error| error.to_string())
+}
 
 fn main() {
     let args: Vec<OsString> = env::args_os().collect();
@@ -43,6 +69,10 @@ fn main() {
 
     // Create VM and run
     let mut vm = Vm::new();
+    if let Err(error) = register_embedder_externs(&mut vm, &module) {
+        eprintln!("Runtime configuration error: {error}");
+        process::exit(1);
+    }
 
     // Pass remaining args as program args
     let program_args = args

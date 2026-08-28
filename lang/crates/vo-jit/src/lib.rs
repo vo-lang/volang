@@ -103,7 +103,11 @@ unsafe fn invoke_test_jit(
 /// Default persistent native-code budget for one JIT module / Island family.
 pub const DEFAULT_JIT_CODE_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum explicit native stack storage reserved by one compiled artifact.
-pub const MAX_JIT_NATIVE_FRAME_BYTES: usize = 256 * 1024;
+///
+/// Large generated UI render functions can require more than 256 KiB while
+/// remaining well within the compiler and code-memory budgets. Keep a strict
+/// ceiling with enough headroom for production application shells.
+pub const MAX_JIT_NATIVE_FRAME_BYTES: usize = 384 * 1024;
 /// Default persistent budget for shared JIT analysis state.
 pub const MAX_JIT_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum retained native stack-map and frame-state metadata per JIT family.

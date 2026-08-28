@@ -302,6 +302,35 @@ fn vm_ver_002_fast_heap_return_rejects_nil_gcref_before_deref() {
 }
 
 #[test]
+fn fast_heap_return_reads_borrowed_frame_before_clearing_its_window() {
+    let mut func = func_with_slot_types(vec![SlotType::GcBase]);
+    func.ret_slots = 1;
+    func.ret_slot_types = vec![SlotType::Value];
+    func.heap_ret_gcref_count = 1;
+    func.heap_ret_gcref_start = 0;
+    func.heap_ret_slots = vec![1];
+
+    let mut gc = Gc::new();
+    let value = gc.alloc(
+        vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Struct),
+        1,
+    );
+    unsafe { Gc::write_slot(value, 0, 42) };
+
+    let mut fiber = Fiber::new(0);
+    fiber.push_frame(1, 4, 0, 0);
+    let callee_bp = fiber.push_borrowed_call_frame(0, 2, 3, 1, 1);
+    fiber.stack[callee_bp] = value as u64;
+    let inst = Instruction::new(Opcode::Return, 0, 1, 0);
+
+    let result = fast_complete_heap_return(&gc, &mut fiber, &func, &inst);
+
+    assert!(matches!(result, ExecResult::FrameChanged));
+    assert_eq!(fiber.frames.len(), 1);
+    assert_eq!(fiber.stack[3], 42);
+}
+
+#[test]
 fn jit_ok_return_missing_stack_metadata_is_jit_error_instead_of_panic() {
     let mut gc = Gc::new();
     let module = Module::new("jit-return-metadata-test".to_string());

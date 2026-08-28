@@ -1609,8 +1609,8 @@ fn fast_complete_heap_return(
 ) -> ExecResult {
     let gcref_start = inst.a as usize;
     let gcref_count = inst.b as usize;
-    let frame = match pop_frame(fiber) {
-        Some(f) => f,
+    let frame = match fiber.frames.last().copied() {
+        Some(frame) => frame,
         None => return ExecResult::Done,
     };
 
@@ -1640,6 +1640,7 @@ fn fast_complete_heap_return(
         Err(result) => return result,
     };
 
+    let _ = pop_frame(fiber);
     write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize)
 }
 

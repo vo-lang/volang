@@ -3021,6 +3021,7 @@ mod tests {
         assert_eq!(
             cmd_build(&[
                 project_arg.clone(),
+                OsString::from("--kind=bytecode"),
                 OsString::from("-o"),
                 build_output.clone().into_os_string(),
             ]),

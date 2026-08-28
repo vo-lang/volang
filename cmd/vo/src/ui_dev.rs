@@ -4665,7 +4665,19 @@ mod tests {
             )),
             UiTestStep::WaitAbsentText("● renamed-counter".to_string()),
         ];
-        let result = test_ui(&project, vo_engine::RunMode::Vm, None, &steps)
+        let workfile = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vo.work")
+            .canonicalize()
+            .expect("repository workspace file");
+        let options = vo_module::project::ProjectContextOptions::new(
+            vo_module::workspace::WorkspaceDiscovery::Explicit(workfile),
+        );
+        let output = vo_engine::compile_with_auto_install_with_options(
+            project.to_str().expect("repository paths are UTF-8"),
+            &options,
+        )
+        .expect("Studio starter should compile in the repository workspace");
+        let result = test_ui_with_output(output, vo_engine::RunMode::Vm, None, &steps)
             .expect("Studio starter workflow should remain executable");
         assert!(
             result.report.contains("interactions=19"),

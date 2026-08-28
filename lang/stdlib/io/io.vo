@@ -32,23 +32,11 @@ var (
 )
 
 func init() {
-	EOF = errors.New("EOF")
-	ErrUnexpectedEOF = errors.New("unexpected EOF")
-	ErrShortWrite = errors.New("short write")
-	ErrShortBuffer = errors.New("short buffer")
-	ErrNoProgress = errors.New("multiple Read calls return no data or error")
-	ErrClosedPipe = errors.New("io: read/write on closed pipe")
-	ErrInvalidRead = errors.New("invalid read result")
-	ErrInvalidWrite = errors.New("invalid write result")
-	ErrWhence = errors.New("invalid whence")
-	ErrOffset = errors.New("invalid offset")
-	ErrNegativeRead = errors.New("negative read count")
-	ErrNegativeCount = errors.New("negative count")
+	EOF, ErrUnexpectedEOF, ErrShortWrite, ErrShortBuffer, ErrNoProgress, ErrClosedPipe, ErrInvalidRead, ErrInvalidWrite, ErrWhence, ErrOffset, ErrNegativeRead, ErrNegativeCount = getIoErrors()
 }
 
-// Retained as the native provider contract for older bytecode and embedders.
-// Portable source initialization above keeps new programs independent of a
-// host-owned sentinel registry while preserving stable package identities.
+// The runtime and source package share these exact identities so errors.Is can
+// recognize EOF and the other sentinels across asynchronous host boundaries.
 func getIoErrors() (error, error, error, error, error, error, error, error, error, error, error, error)
 
 func readCountError(n, max int) error {

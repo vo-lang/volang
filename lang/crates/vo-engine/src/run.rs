@@ -1130,7 +1130,9 @@ func main() {
         }
 
         fn compile(&self) -> crate::CompileOutput {
-            let workfile = self.0.join("vo.work").canonicalize().unwrap();
+            let workfile = self.0.join("vo.work");
+            #[cfg(not(windows))]
+            let workfile = workfile.canonicalize().unwrap();
             let options = vo_module::project::ProjectContextOptions::new(
                 vo_module::workspace::WorkspaceDiscovery::Explicit(workfile),
             );
