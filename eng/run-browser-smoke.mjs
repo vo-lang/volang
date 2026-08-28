@@ -75,7 +75,12 @@ try {
   if (server !== undefined) {
     await new Promise((done) => server.close(done));
   }
-  await rm(temporaryRoot, { recursive: true, force: true });
+  await rm(temporaryRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
 }
 
 function parseArguments(arguments_) {
@@ -393,7 +398,12 @@ async function launchChrome(binary, userDataDirectory) {
     diagnostics: () => diagnostics,
     close: async () => {
       child.kill("SIGTERM");
-      await waitForExit(child, 2_000).catch(() => child.kill("SIGKILL"));
+      try {
+        await waitForExit(child, 2_000);
+      } catch {
+        child.kill("SIGKILL");
+        await waitForExit(child, 2_000);
+      }
     },
   };
 }
