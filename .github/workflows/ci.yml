@@ -240,6 +240,9 @@ jobs:
           path: target/ui-certification/web-size/*.json
           if-no-files-found: error
 
+      - name: Build VM and JIT UI test tooling
+        run: cargo build --locked -p vo --no-default-features --features jit
+
       - name: Run official UIKit VM and JIT interaction matrix
         run: |
           ./eng/run-uikit-gallery-contracts.sh
