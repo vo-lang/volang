@@ -1681,6 +1681,16 @@ async function runUikitGallerySmoke(browser, sessionId, timeoutMilliseconds) {
 }
 
 async function runComponentStateSmoke(browser, sessionId, timeoutMilliseconds) {
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      interactive: performance.getEntriesByName("volang-aot-interactive", "mark").length > 0,
+      diagnostic: document.getElementById("volang-diagnostic")?.textContent ?? "",
+    })`,
+    (value) => value?.interactive === true && value?.diagnostic === "",
+    timeoutMilliseconds,
+  );
   const buttonTexts = `Array.from(document.querySelectorAll("button"), (button) =>
     (button.textContent ?? "").trim())`;
   const expectButtons = async (expected) => {
