@@ -410,6 +410,22 @@ jobs:
       - name: Build production Studio desktop host
         run: cargo build --locked -p vo-studio-native
 
+      - name: Link a production Native AOT UI application
+        shell: bash
+        run: |
+          cargo build --locked -p vo-ui-aot-runtime-native
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            runtime=target/debug/vo_ui_aot_runtime_native.lib
+            output=target/component-ui-aot.exe
+          else
+            runtime=target/debug/libvo_ui_aot_runtime_native.a
+            output=target/component-ui-aot
+          fi
+          VOWORK=off ./target/debug/vo build ui/tests/nested-component-list \
+            --runtime="$runtime" \
+            --no-cache \
+            -o "$output"
+
       - name: Package production Native AOT applications
         shell: bash
         run: |
@@ -439,22 +455,6 @@ jobs:
           ./target/debug/vo ui package ui/showcases/studio-workbench \
             -o target/studio-workbench-native-aot \
             --runtime="$ui_runtime"
-
-      - name: Link a production Native AOT UI application
-        shell: bash
-        run: |
-          cargo build --locked -p vo-ui-aot-runtime-native
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            runtime=target/debug/vo_ui_aot_runtime_native.lib
-            output=target/component-ui-aot.exe
-          else
-            runtime=target/debug/libvo_ui_aot_runtime_native.a
-            output=target/component-ui-aot
-          fi
-          VOWORK=off ./target/debug/vo build ui/tests/nested-component-list \
-            --runtime="$runtime" \
-            --no-cache \
-            -o "$output"
 
       - name: Present one real Linux Native AOT window frame
         if: runner.os == 'Linux'
