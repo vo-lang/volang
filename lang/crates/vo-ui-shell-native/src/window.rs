@@ -1340,16 +1340,20 @@ fn display_paths(paths: &[PathBuf]) -> Vec<String> {
 }
 
 fn desktop_system_backend(window: &Arc<Window>) -> DesktopSystemBackend {
-    let mut backend = DesktopSystemBackend::new();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
+    let backend = {
+        let mut backend = DesktopSystemBackend::new();
         let window = Arc::clone(window);
         backend.set_file_drag_starter(Box::new(move |request| {
             start_native_file_drag(window.as_ref(), request)
         }));
-    }
+        backend
+    };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let _ = window;
+    let backend = {
+        let _ = window;
+        DesktopSystemBackend::new()
+    };
     backend
 }
 
