@@ -41,6 +41,21 @@ const NET_ERROR_MESSAGES = [
 
 const HTTP_TIMEOUT_MESSAGE = 'request timeout';
 
+const IO_ERROR_MESSAGES = [
+  'EOF',
+  'unexpected EOF',
+  'short write',
+  'short buffer',
+  'multiple Read calls return no data or error',
+  'io: read/write on closed pipe',
+  'invalid read result',
+  'invalid write result',
+  'invalid whence',
+  'invalid offset',
+  'negative read count',
+  'negative count',
+] as const;
+
 const OS_OPERATIONS = new Set([
   'getOsErrors', 'getOsConsts', 'getPathSeparators',
   'fileRead', 'blocking_fileRead', 'fileWrite', 'blocking_fileWrite',
@@ -106,6 +121,10 @@ function operationInPackage(
 }
 
 function operation(descriptor: AotExternDescriptor): { packageName: string; name: string } | undefined {
+  if (descriptor.source === 1
+    && descriptor.name === canonicalExternName('io', 'getIoErrors')) {
+    return { packageName: 'io', name: 'getIoErrors' };
+  }
   const os = operationInPackage(descriptor, 'os', OS_OPERATIONS);
   if (os !== undefined) return { packageName: 'os', name: os };
   if (descriptor.source === 1
@@ -175,6 +194,7 @@ interface HttpRequestState {
  * explicitly replayable extern operation.
  */
 export class AotPlatformHost {
+  private readonly ioErrors: Array<readonly [bigint, bigint]> = [];
   private readonly osErrors: Array<readonly [bigint, bigint]> = [];
   private readonly environment = new Map<string, EnvironmentEntry>();
   private readonly httpRequests = new Map<number, HttpRequestState | undefined>();
@@ -214,6 +234,7 @@ export class AotPlatformHost {
   handle(call: AotExternCall): number | void | Promise<number | void> {
     const resolved = operation(call.descriptor);
     if (resolved === undefined) throw new Error(`unsupported AOT platform extern ${call.name}`);
+    if (resolved.packageName === 'io') return this.handleIo(call, resolved.name);
     if (resolved.packageName === 'os') return this.handleOs(call, resolved.name);
     if (resolved.packageName === 'net') return this.handleNet(call, resolved.name);
     if (resolved.packageName === 'path/filepath') return this.handleFilepath(call, resolved.name);
@@ -267,6 +288,24 @@ export class AotPlatformHost {
   private rememberError(call: AotExternCall, slot: number, message: string): readonly [bigint, bigint] {
     call.writeError(slot, message);
     return [call.readSlot(slot), call.readSlot(slot + 1)];
+  }
+
+  writeIoError(call: AotExternCall, slot: number, message: string): void {
+    const index = IO_ERROR_MESSAGES.indexOf(message as typeof IO_ERROR_MESSAGES[number]);
+    const error = index >= 0 ? this.ioErrors[index] : undefined;
+    if (error === undefined) call.writeError(slot, message);
+    else {
+      call.writeSlot(slot, error[0]);
+      call.writeSlot(slot + 1, error[1]);
+    }
+  }
+
+  private handleIo(call: AotExternCall, name: string): void {
+    if (name !== 'getIoErrors') return;
+    this.ioErrors.length = 0;
+    IO_ERROR_MESSAGES.forEach((message, index) => {
+      this.ioErrors.push(this.rememberError(call, call.destination + index * 2, message));
+    });
   }
 
   private writeOsError(call: AotExternCall, slot: number, message: string | null): void {
@@ -324,7 +363,7 @@ export class AotPlatformHost {
     write(call, 0, BigInt(count));
     if (error !== null) this.writeOsError(call, call.destination + 1, error);
     else if (requested > 0 && (count === 0 || (requireFull && count < requested))) {
-      call.writeError(call.destination + 1, 'EOF');
+      this.writeIoError(call, call.destination + 1, 'EOF');
     } else call.clearError(call.destination + 1);
   }
 
@@ -341,7 +380,7 @@ export class AotPlatformHost {
     }
     write(call, 0, BigInt(written));
     if (error !== null) this.writeOsError(call, call.destination + 1, error);
-    else if (written < requested) call.writeError(call.destination + 1, 'short write');
+    else if (written < requested) this.writeIoError(call, call.destination + 1, 'short write');
     else call.clearError(call.destination + 1);
   }
 

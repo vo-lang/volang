@@ -164,6 +164,7 @@ fn register_wasm_platform_externs(
     vo_web_runtime_wasm::time::register_externs(reg, exts)?;
     vo_web_runtime_wasm::filepath::register_externs(reg, exts)?;
     vo_web_runtime_wasm::fmt::register_externs(reg, exts)?;
+    vo_web_runtime_wasm::io::register_externs(reg, exts)?;
     vo_web_runtime_wasm::net_http::register_externs(reg, exts)?;
     Ok(())
 }

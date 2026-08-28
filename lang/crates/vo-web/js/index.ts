@@ -2567,7 +2567,7 @@ export async function runAot(
         if (isStdlibExtern(descriptor, 'fmt', 'nativeReadLine')) {
           if (stdinOffset >= stdin.byteLength) {
             writeSlot(frame, destination, allocateStringBytes(new Uint8Array()));
-            writeGuestError(frame, destination + 1, 'EOF');
+            platformHost.writeIoError(call, destination + 1, 'EOF');
             return 0;
           }
           const relativeNewline = stdin.subarray(stdinOffset).indexOf(0x0a);

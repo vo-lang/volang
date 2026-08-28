@@ -4,6 +4,7 @@ pub mod exec;
 pub mod ext_bridge;
 pub mod filepath;
 pub mod fmt;
+pub mod io;
 pub mod net_http;
 pub mod os;
 mod text;
@@ -49,6 +50,7 @@ mod tests {
         crate::filepath::register_externs(&mut registry, &externs)
             .expect("register WASM path/filepath providers");
         crate::fmt::register_externs(&mut registry, &externs).expect("register WASM fmt providers");
+        crate::io::register_externs(&mut registry, &externs).expect("register WASM io providers");
         crate::time::register_externs(&mut registry, &externs)
             .expect("register WASM time providers");
         crate::net_http::register_externs(&mut registry, &externs)
@@ -85,6 +87,7 @@ mod tests {
             vo_runtime::vo_extern_name!("os", "nativeExit"),
             vo_runtime::vo_extern_name!("path/filepath", "evalSymlinks"),
             vo_runtime::vo_extern_name!("fmt", "nativeReadLine"),
+            vo_runtime::vo_extern_name!("io", "getIoErrors"),
             vo_runtime::vo_extern_name!("time", "blocking_sleepNano"),
             vo_runtime::vo_extern_name!("net/http", "nativeNewClientRequest"),
             vo_runtime::vo_extern_name!("net/http", "nativeCancelClientRequest"),

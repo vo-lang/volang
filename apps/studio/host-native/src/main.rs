@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use vo_engine::RunMode;
 use vo_studio_native::{
-    apply_studio_automation, launch_preview_artifact, preview_artifact_argument, NativeStudioHost,
+    apply_studio_automation, compile_studio_application, launch_preview_artifact,
+    preview_artifact_argument, NativeStudioHost,
 };
 
 fn main() {
@@ -23,14 +24,22 @@ fn launch() -> Result<(), String> {
             argument.to_string_lossy()
         ));
     }
-    let application = std::env::var_os("VOLANG_STUDIO_APP")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../entry/host"));
+    let (application, repository_owned_application) = match std::env::var_os("VOLANG_STUDIO_APP") {
+        Some(application) => (PathBuf::from(application), false),
+        None => (
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../entry/host"),
+            true,
+        ),
+    };
     let workspace = std::env::var_os("VOLANG_STUDIO_WORKSPACE")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?);
-    let output = vo_engine::compile_path_with_auto_install(&application)
-        .map_err(|error| format!("Studio application compilation failed: {error}"))?;
+    let output = if repository_owned_application {
+        compile_studio_application(&application)?
+    } else {
+        vo_engine::compile_path_with_auto_install(&application)
+            .map_err(|error| format!("Studio application compilation failed: {error}"))?
+    };
     let vm = vo_engine::build_native_gui_vm_for_mode(output, RunMode::Jit)?;
     let host = NativeStudioHost::open(workspace).map_err(|error| error.to_string())?;
     let mut config = vo_ui_shell_native::NativeDesktopConfig {

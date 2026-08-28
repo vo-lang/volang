@@ -4917,6 +4917,7 @@ dependencies = [
  "vo-app-host-native",
  "vo-app-protocol",
  "vo-engine",
+ "vo-module",
  "vo-runtime",
  "vo-ui-core",
  "vo-ui-protocol",

@@ -303,7 +303,22 @@ fn load_workspace_members_in_with_generation<F: FileSystem>(
     };
     let (generation, members) = load_workspace_members_from_file(fs, project_dir, &workfile_path)?;
     let active_root = normalize_fs_path(project_dir);
-    if members.iter().any(|member| member.local_dir == active_root) {
+    let lists_active_root = members.iter().any(|member| member.local_dir == active_root);
+    let lists_active_root = if lists_active_root {
+        true
+    } else {
+        let namespace_anchor = filesystem_namespace_anchor(&workfile_path, "workspace file")?;
+        let active_identity = workspace_directory_identity(
+            fs,
+            &namespace_anchor,
+            &active_root,
+            "active workspace root",
+        )?;
+        members
+            .iter()
+            .any(|member| member.directory_identity == active_identity)
+    };
+    if lists_active_root {
         return Ok((Some(generation), members));
     }
     match discovery {
@@ -3821,6 +3836,36 @@ mod tests {
         .unwrap();
 
         assert!(members.is_empty());
+    }
+
+    #[test]
+    fn explicit_workspace_accepts_an_active_root_host_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("target")).unwrap();
+        std::fs::write(
+            temp.path().join("vo.work"),
+            "format = 1\nmembers = [\"two\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("target/vo.mod"),
+            "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let fs = HostAliasFs {
+            root: temp.path().to_path_buf(),
+        };
+
+        let (selected, members) = load_workspace_members_in_with_provenance(
+            &fs,
+            Path::new("one"),
+            &WorkspaceDiscovery::Explicit(PathBuf::from("../vo.work")),
+        )
+        .unwrap();
+
+        assert_eq!(selected, Some(PathBuf::from("vo.work")));
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].local_dir, PathBuf::from("two"));
     }
 
     #[test]

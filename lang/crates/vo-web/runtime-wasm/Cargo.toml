@@ -15,13 +15,13 @@ crate-type = ["rlib"]
 [dependencies]
 vo-common-core = { path = "../../vo-common-core", default-features = false }
 vo-runtime = { path = "../../vo-runtime", default-features = false }
+vo-stdlib = { path = "../../vo-stdlib", default-features = false }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 vo-runtime = { path = "../../vo-runtime", default-features = false, features = ["std"] }
-vo-stdlib = { path = "../../vo-stdlib", default-features = false }
 
 [dependencies.web-sys]
 version = "0.3"

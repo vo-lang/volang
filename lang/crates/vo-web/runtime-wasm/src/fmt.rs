@@ -5,7 +5,7 @@ use vo_runtime::ffi::{ExternCallContext, ExternContractError, ExternRegistry, Ex
 
 fn native_read_line(call: &mut ExternCallContext) -> ExternResult {
     call.ret_string_bytes(0, b"");
-    call.ret_error_msg(1, "EOF");
+    crate::io::write_sentinel_error(call, 1, vo_stdlib::io::IoErrorKind::EOF);
     ExternResult::Ok
 }
 

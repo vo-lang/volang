@@ -1231,6 +1231,19 @@ pub fn launch_preview_artifact(artifact: PathBuf) -> Result<(), String> {
     vo_ui_shell_native::run_desktop(vm, config).map_err(|error| error.to_string())
 }
 
+/// Compile the repository-owned Studio application with nearest-workspace
+/// discovery, independent of a caller's `VOWORK` policy for user projects.
+pub fn compile_studio_application(application: &Path) -> Result<vo_engine::CompileOutput, String> {
+    let application = application
+        .to_str()
+        .ok_or_else(|| "Studio application path must be UTF-8".to_string())?;
+    let options = vo_module::project::ProjectContextOptions::new(
+        vo_module::workspace::WorkspaceDiscovery::Auto,
+    );
+    vo_engine::compile_with_auto_install_with_options(application, &options)
+        .map_err(|error| format!("Studio application compilation failed: {error}"))
+}
+
 #[cfg(not(test))]
 unsafe fn run_embedded_studio_aot(
     argc: i32,
@@ -2583,7 +2596,7 @@ mod tests {
         .unwrap();
         fs::write(project.join("main.vo"), "package main\n\nfunc main() {}\n").unwrap();
         let application = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../entry/host");
-        let output = vo_engine::compile_path_with_auto_install(&application).unwrap();
+        let output = compile_studio_application(&application).unwrap();
         let vm = vo_engine::build_native_gui_vm_for_mode(output, RunMode::Vm).unwrap();
         let host = NativeStudioHost::open(&workspace).unwrap();
         let handle = GenerationalHandle {

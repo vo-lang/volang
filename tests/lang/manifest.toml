@@ -6449,6 +6449,8 @@ path = "cases/runtime/scheduler/select_receiver_first_rendezvous.vo"
 matrix = "default"
 tags = ["scheduler", "select", "channel", "wasm-aot", "regression"]
 owner = "runtime"
+skip = ["nostd"]
+reason = "time.Sleep requires a timer host; the no_std embed target intentionally supplies no clock or timer providers"
 expect = "pass"
 
 [[case]]

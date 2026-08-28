@@ -373,7 +373,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes mesa-vulkan-drivers xvfb
+          sudo apt-get install --yes libxkbcommon-x11-0 mesa-vulkan-drivers xvfb
 
       - name: Compile the production desktop shell
         run: cargo check --locked -p vo-ui-shell-native --features desktop-window

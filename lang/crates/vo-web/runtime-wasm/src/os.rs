@@ -58,15 +58,6 @@ fn os_error_index(message: &str) -> Option<usize> {
         })
 }
 
-fn io_error_index(message: &str) -> Option<usize> {
-    match message {
-        "EOF" => Some(0),
-        "unexpected EOF" => Some(1),
-        "short write" => Some(2),
-        _ => None,
-    }
-}
-
 fn sentinel_pair(call: &ExternCallContext<'_>, package: &str, index: usize) -> Option<(u64, u64)> {
     call.sentinel_errors()
         .get(package)
@@ -75,11 +66,8 @@ fn sentinel_pair(call: &ExternCallContext<'_>, package: &str, index: usize) -> O
 }
 
 fn write_host_error(call: &mut ExternCallContext<'_>, slot: u16, message: &str) {
-    if let Some(index) = io_error_index(message) {
-        if let Some(pair) = sentinel_pair(call, "io", index) {
-            call.ret_interface_pair(slot, pair);
-            return;
-        }
+    if crate::io::write_matching_sentinel_error(call, slot, message) {
+        return;
     }
 
     if let Some(index) = os_error_index(message) {
