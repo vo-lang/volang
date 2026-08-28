@@ -86,14 +86,19 @@ async function runBrowserSmoke(): Promise<BrowserSmokeReport> {
     );
 
     input.value = 'typed';
+    const expectedInputSelectionStart = input.selectionStart ?? 0;
+    const expectedInputSelectionEnd = input.selectionEnd ?? expectedInputSelectionStart;
     input.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'd' }));
     const inputFrame = adapter.shiftEventFrame();
     const inputEvent = inputFrame === undefined ? undefined : decodeUiEvent(inputFrame);
     requireCheck(
       inputEvent?.handler.index === 20
         && inputEvent.event === 2
-        && inputEvent.payload.type === 'text'
-        && inputEvent.payload.value === 'typed',
+        && inputEvent.payload.type === 'text-input'
+        && inputEvent.payload.value === 'typed'
+        && inputEvent.payload.selectionStartUtf16 === expectedInputSelectionStart
+        && inputEvent.payload.selectionLengthUtf16
+          === expectedInputSelectionEnd - expectedInputSelectionStart,
       'typed browser input event encoding',
       checks,
     );
