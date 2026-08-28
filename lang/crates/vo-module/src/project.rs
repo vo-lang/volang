@@ -2076,13 +2076,14 @@ fn validate_workspace_selection_generation<F: FileSystem>(
     discovery: &WorkspaceDiscovery,
     expected: Option<&crate::workspace::SelectedWorkfileGeneration>,
 ) -> Result<(), ProjectPlanError> {
-    let (selected, _) = crate::workspace::discover_workspace_candidates_in_with_generation(
+    let selected = crate::workspace::discover_workspace_candidates_in_with_generation(
         fs,
         project_root,
         None,
         discovery,
     )
-    .map_err(project_workspace_error)?;
+    .map_err(project_workspace_error)?
+    .workfile;
     let selected = selected.map(|generation| generation.path().to_path_buf());
     let expected_path = expected.map(crate::workspace::SelectedWorkfileGeneration::path);
     if selected.as_deref().map(normalize_fs_path) != expected_path.map(normalize_fs_path) {
@@ -2283,14 +2284,16 @@ fn load_project_context_snapshot<F: FileSystem>(
     ProjectPlanError,
 > {
     let root_mod = parse_root_mod_file(root_metadata, &project_root)?;
-    let (selected_workfile, workspace_candidates) =
-        crate::workspace::discover_workspace_candidates_in_with_generation(
-            fs,
-            &project_root,
-            root_mod.as_ref().map(|mf| &mf.module),
-            &options.workspace,
-        )
-        .map_err(project_workspace_error)?;
+    let discovered = crate::workspace::discover_workspace_candidates_in_with_generation(
+        fs,
+        &project_root,
+        root_mod.as_ref().map(|mf| &mf.module),
+        &options.workspace,
+    )
+    .map_err(project_workspace_error)?;
+    let selected_workfile = discovered.workfile;
+    let workspace_candidates = discovered.members;
+    let workspace_member_manifest_paths = discovered.member_manifest_paths;
     let workspace_file = selected_workfile
         .as_ref()
         .map(|generation| generation.path().to_path_buf());
@@ -2404,6 +2407,7 @@ fn load_project_context_snapshot<F: FileSystem>(
             .iter()
             .map(|candidate| normalize_fs_path(&candidate.local_dir.join("vo.mod"))),
     );
+    validated_input_files.extend(workspace_member_manifest_paths);
     validated_input_files.extend(validated_source_files);
     let workspace_generation = calculate_workspace_generation(
         &project_root,

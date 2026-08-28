@@ -555,12 +555,14 @@ pub fn work_sync(project_dir: &Path, registry: &dyn Registry) -> Result<LockFile
         return Ok(LockFileStatus::NotRequired);
     }
     let existing_lock = read_optional_selection_lock_file(project_dir, &root)?;
-    let (workfile, members) = crate::workspace::discover_workspace_candidates_in_with_generation(
+    let discovered = crate::workspace::discover_workspace_candidates_in_with_generation(
         &RealFs::new("."),
         project_dir,
         Some(&root.module),
         &crate::workspace::WorkspaceDiscovery::Auto,
     )?;
+    let workfile = discovered.workfile;
+    let members = discovered.members;
     let Some(workfile) = workfile else {
         return Err(Error::WorkspaceValidation(
             "vo work sync requires an applicable vo.work containing the active project".to_string(),
@@ -675,12 +677,13 @@ pub fn work_materialize(
     let root = project::read_mod_file_stable(project_dir)?;
     let lock = project::read_lock_file_stable(project_dir)?;
     crate::lock::verify_root_consistency(&root, &lock)?;
-    let (_, members) = crate::workspace::discover_workspace_candidates_in_with_generation(
+    let members = crate::workspace::discover_workspace_candidates_in_with_generation(
         &RealFs::new("."),
         project_dir,
         Some(&root.module),
         &crate::workspace::WorkspaceDiscovery::Auto,
-    )?;
+    )?
+    .members;
     let mut module_count = 0usize;
     let mut artifact_count = 0usize;
     for locked in &lock.modules {

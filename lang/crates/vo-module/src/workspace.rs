@@ -242,12 +242,20 @@ pub fn discover_workspace_candidates_in_with_provenance<F: FileSystem>(
     root_module: Option<&ModIdentity>,
     discovery: &WorkspaceDiscovery,
 ) -> Result<(Option<PathBuf>, Vec<WorkspaceMember>), Error> {
-    let (workfile_generation, members) =
+    let discovered =
         discover_workspace_candidates_in_with_generation(fs, project_dir, root_module, discovery)?;
     Ok((
-        workfile_generation.map(|generation| generation.path().to_path_buf()),
-        members,
+        discovered
+            .workfile
+            .map(|generation| generation.path().to_path_buf()),
+        discovered.members,
     ))
+}
+
+pub(crate) struct WorkspaceCandidateGeneration {
+    pub(crate) workfile: Option<SelectedWorkfileGeneration>,
+    pub(crate) members: Vec<WorkspaceMember>,
+    pub(crate) member_manifest_paths: Vec<PathBuf>,
 }
 
 pub(crate) fn discover_workspace_candidates_in_with_generation<F: FileSystem>(
@@ -255,9 +263,13 @@ pub(crate) fn discover_workspace_candidates_in_with_generation<F: FileSystem>(
     project_dir: &Path,
     root_module: Option<&ModIdentity>,
     discovery: &WorkspaceDiscovery,
-) -> Result<(Option<SelectedWorkfileGeneration>, Vec<WorkspaceMember>), Error> {
+) -> Result<WorkspaceCandidateGeneration, Error> {
     let (workfile_generation, members) =
         load_workspace_members_in_with_generation(fs, project_dir, discovery)?;
+    let member_manifest_paths = members
+        .iter()
+        .map(|member| normalize_fs_path(&member.local_dir.join("vo.mod")))
+        .collect::<Vec<_>>();
     let normalized_project_dir = normalize_fs_path(project_dir);
     let inferred_root_module;
     let root_module = match root_module {
@@ -275,7 +287,11 @@ pub(crate) fn discover_workspace_candidates_in_with_generation<F: FileSystem>(
         None => None,
     };
     let members = exclude_active_module(fs, members, project_dir, root_module)?;
-    Ok((workfile_generation, members))
+    Ok(WorkspaceCandidateGeneration {
+        workfile: workfile_generation,
+        members,
+        member_manifest_paths,
+    })
 }
 
 /// Load and validate the complete member set together with the exact selected
@@ -3592,14 +3608,20 @@ mod tests {
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         );
         let root: ModIdentity = ModulePath::parse("github.com/acme/app").unwrap().into();
-        let (generation, members) = discover_workspace_candidates_in_with_generation(
+        let discovered = discover_workspace_candidates_in_with_generation(
             &fs,
             Path::new("workspace/app"),
             Some(&root),
             &WorkspaceDiscovery::Auto,
         )
         .unwrap();
+        let generation = discovered.workfile;
+        let members = discovered.members;
         assert!(members.is_empty());
+        assert_eq!(
+            discovered.member_manifest_paths,
+            vec![PathBuf::from("workspace/app/vo.mod")]
+        );
         let generation = generation.unwrap();
         generation.validate(&fs).unwrap();
         let original_key = generation.generation_key();
@@ -3614,13 +3636,14 @@ mod tests {
             "{error}"
         );
 
-        let (replacement, _) = discover_workspace_candidates_in_with_generation(
+        let replacement = discover_workspace_candidates_in_with_generation(
             &fs,
             Path::new("workspace/app"),
             Some(&root),
             &WorkspaceDiscovery::Auto,
         )
-        .unwrap();
+        .unwrap()
+        .workfile;
         assert_ne!(replacement.unwrap().generation_key(), original_key);
     }
 
