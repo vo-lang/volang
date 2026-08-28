@@ -581,6 +581,9 @@ async function runSmoke(browserWebSocketUrl, url, smokeOptions) {
       (value) => value === true,
       smokeOptions.timeout,
     );
+    if (smokeOptions.staticRoot !== null) {
+      await waitForAotInteractive(browser, sessionId, smokeOptions.timeout);
+    }
 
     if (smokeOptions.componentStateSmoke) {
       // Keep the CDP connection alive until every component interaction has
@@ -1691,16 +1694,6 @@ async function runUikitGallerySmoke(browser, sessionId, timeoutMilliseconds) {
 }
 
 async function runComponentStateSmoke(browser, sessionId, timeoutMilliseconds) {
-  await pollEvaluation(
-    browser,
-    sessionId,
-    `({
-      interactive: performance.getEntriesByName("volang-aot-interactive", "mark").length > 0,
-      diagnostic: document.getElementById("volang-diagnostic")?.textContent ?? "",
-    })`,
-    (value) => value?.interactive === true && value?.diagnostic === "",
-    timeoutMilliseconds,
-  );
   const buttonTexts = `Array.from(document.querySelectorAll("button"), (button) =>
     (button.textContent ?? "").trim())`;
   const expectButtons = async (expected) => {
@@ -1766,6 +1759,19 @@ async function runComponentStateSmoke(browser, sessionId, timeoutMilliseconds) {
     passed: true,
     checkpoints,
   };
+}
+
+async function waitForAotInteractive(browser, sessionId, timeoutMilliseconds) {
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      interactive: performance.getEntriesByName("volang-aot-interactive", "mark").length > 0,
+      diagnostic: document.getElementById("volang-diagnostic")?.textContent ?? "",
+    })`,
+    (value) => value?.interactive === true && value?.diagnostic === "",
+    timeoutMilliseconds,
+  );
 }
 
 async function runStudioWorkbenchSmoke(browser, sessionId, timeoutMilliseconds) {
@@ -2211,8 +2217,9 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       text: document.body.textContent ?? "",
       search: document.querySelector('input[aria-label="Search documentation"]') instanceof HTMLInputElement,
     })`,
-    (value) => value?.search === true && value.text.includes("Build your first application")
-      && value.text.includes("Run with VM for the shortest startup path"),
+    (value) => value?.search === true && value.text.includes("The working model")
+      && value.text.includes("Development and release")
+      && value.text.includes("Canonical source · lang/docs/guides/introduction.md"),
     timeoutMilliseconds,
   );
 
@@ -2226,15 +2233,15 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     })()`,
     returnByValue: true,
   }, sessionId);
-  await activateButton("Open documentation Goroutines in UI");
+  await activateButton("Goroutines, channels, and islands");
   checkpoints.documentation = await pollEvaluation(
     browser,
     sessionId,
     `({ path: location.pathname, text: document.body.textContent ?? "" })`,
-    (value) => value?.path === "/docs/goroutines-ui"
-      && value.text.includes("Goroutines in UI")
-      && value.text.includes("Latest-wins work")
-      && !value.text.includes("Components and state"),
+    (value) => value?.path === "/docs/concurrency"
+      && value.text.includes("Goroutines, channels, and islands")
+      && value.text.includes("Islands and ports")
+      && value.text.includes("Canonical source · lang/docs/guides/concurrency.md"),
     timeoutMilliseconds,
   );
   await clickPoint(`(() => {
@@ -2370,6 +2377,7 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     timeoutMilliseconds,
   );
   await browser.call("Page.reload", { ignoreCache: true }, sessionId);
+  await waitForAotInteractive(browser, sessionId, timeoutMilliseconds);
   checkpoints.runnerColdStart = await pollEvaluation(
     browser,
     sessionId,
@@ -2411,7 +2419,7 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     expression: "location.origin", returnByValue: true,
   }, sessionId);
   await browser.call("Page.navigate", {
-    url: `${origin.result?.value}/docs/goroutines-ui`,
+    url: `${origin.result?.value}/docs/concurrency`,
   }, sessionId);
   checkpoints.documentationColdStart = await pollEvaluation(
     browser,
@@ -2421,9 +2429,10 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       text: document.body.textContent ?? "",
       diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? "",
     })`,
-    (value) => value?.path === "/docs/goroutines-ui"
-      && value?.text.includes("Goroutines in UI")
-      && value?.text.includes("Latest-wins work")
+    (value) => value?.path === "/docs/concurrency"
+      && value?.text.includes("Goroutines, channels, and islands")
+      && value?.text.includes("Islands and ports")
+      && value?.text.includes("Canonical source · lang/docs/guides/concurrency.md")
       && value?.diagnostic === "",
     timeoutMilliseconds,
   );
