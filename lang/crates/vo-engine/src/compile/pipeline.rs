@@ -1026,9 +1026,11 @@ fn validate_captured_project_context_with_generated_inputs<F: FileSystem>(
             "vo.work provenance",
         ));
     }
-    if normalized_workspace_sources(captured_context.workspace_sources())
-        != normalized_workspace_sources(workspace_sources)
-    {
+    if !workspace_source_maps_match(
+        snapshot_fs,
+        captured_context.workspace_sources(),
+        workspace_sources,
+    )? {
         return Err(captured_context_mismatch(
             ModuleSystemStage::Workspace,
             "vo.work source map",
@@ -1188,15 +1190,62 @@ fn normalized_optional_path(path: Option<&Path>) -> Option<PathBuf> {
     path.map(normalize_fs_path)
 }
 
-fn normalized_workspace_sources(
-    workspace_sources: &HashMap<String, PathBuf>,
-) -> Vec<(String, PathBuf)> {
-    let mut entries = workspace_sources
-        .iter()
-        .map(|(module, path)| (module.clone(), normalize_fs_path(path)))
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries
+fn workspace_source_maps_match<F: FileSystem>(
+    snapshot_fs: &F,
+    captured: &HashMap<String, PathBuf>,
+    expected: &HashMap<String, PathBuf>,
+) -> Result<bool, CompileError> {
+    if captured.len() != expected.len() {
+        return Ok(false);
+    }
+    for (module, expected_path) in expected {
+        let Some(captured_path) = captured.get(module) else {
+            return Ok(false);
+        };
+        let captured_path = normalize_fs_path(captured_path);
+        let expected_path = normalize_fs_path(expected_path);
+        if captured_path == expected_path {
+            continue;
+        }
+        let captured_identity = snapshot_workspace_directory_identity(snapshot_fs, &captured_path)?;
+        let expected_identity = snapshot_workspace_directory_identity(snapshot_fs, &expected_path)?;
+        if captured_identity.is_none() || captured_identity != expected_identity {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn snapshot_workspace_directory_identity<F: FileSystem>(
+    snapshot_fs: &F,
+    path: &Path,
+) -> Result<Option<Vec<u8>>, CompileError> {
+    let identity = snapshot_fs
+        .opaque_directory_identity(path)
+        .map_err(|error| {
+            CompileError::ModuleSystem(ModuleSystemError::new(
+                ModuleSystemStage::Workspace,
+                ModuleSystemErrorKind::ReadFailed,
+                format!(
+                    "failed to read captured workspace source directory identity for {}: {error}",
+                    path.display()
+                ),
+            ))
+        })?;
+    if identity
+        .as_ref()
+        .is_some_and(|identity| identity.is_empty() || identity.len() > 64)
+    {
+        return Err(CompileError::ModuleSystem(ModuleSystemError::new(
+            ModuleSystemStage::Workspace,
+            ModuleSystemErrorKind::ValidationFailed,
+            format!(
+                "captured workspace source directory {} has an invalid identity",
+                path.display()
+            ),
+        )));
+    }
+    Ok(identity)
 }
 
 fn normalized_workspace_modules(
@@ -1294,4 +1343,90 @@ fn project_input_closure_mismatch(captured: &[PathBuf], expected: &[PathBuf]) ->
             "captured project authority input closure does not match the project context loaded before snapshot capture (added: {added:?}; missing: {missing:?}); retry the build after concurrent project metadata updates finish"
         ),
     ))
+}
+
+#[cfg(test)]
+mod workspace_source_map_tests {
+    use super::*;
+    use std::io;
+
+    #[derive(Default)]
+    struct IdentityFs {
+        identities: HashMap<PathBuf, Vec<u8>>,
+    }
+
+    impl FileSystem for IdentityFs {
+        fn read_file(&self, path: &Path) -> io::Result<String> {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is unavailable", path.display()),
+            ))
+        }
+
+        fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is unavailable", path.display()),
+            ))
+        }
+
+        fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} is unavailable", path.display()),
+            ))
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.identities.contains_key(&normalize_fs_path(path))
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.exists(path)
+        }
+
+        fn opaque_directory_identity(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            Ok(self.identities.get(&normalize_fs_path(path)).cloned())
+        }
+    }
+
+    fn source_map(path: &str) -> HashMap<String, PathBuf> {
+        HashMap::from([("github.com/vo-lang/ui".to_string(), PathBuf::from(path))])
+    }
+
+    #[test]
+    fn workspace_source_map_accepts_authenticated_path_aliases() {
+        let mut fs = IdentityFs::default();
+        fs.identities
+            .insert(PathBuf::from("C:/RUNNER~1/workspace/ui"), vec![7; 24]);
+        fs.identities.insert(
+            PathBuf::from("C:/Users/runneradmin/workspace/ui"),
+            vec![7; 24],
+        );
+
+        assert!(workspace_source_maps_match(
+            &fs,
+            &source_map("C:/RUNNER~1/workspace/ui"),
+            &source_map("C:/Users/runneradmin/workspace/ui"),
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn workspace_source_map_rejects_unauthenticated_path_changes() {
+        let mut fs = IdentityFs::default();
+        fs.identities
+            .insert(PathBuf::from("C:/RUNNER~1/workspace/ui"), vec![7; 24]);
+        fs.identities.insert(
+            PathBuf::from("C:/Users/runneradmin/workspace/ui"),
+            vec![8; 24],
+        );
+
+        assert!(!workspace_source_maps_match(
+            &fs,
+            &source_map("C:/RUNNER~1/workspace/ui"),
+            &source_map("C:/Users/runneradmin/workspace/ui"),
+        )
+        .unwrap());
+    }
 }
