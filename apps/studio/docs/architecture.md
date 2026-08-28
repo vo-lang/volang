@@ -46,8 +46,9 @@ the reachable official workspace modules with sizes and SHA-256 digests; the
 host verifies them, writes a local `vo.work`, and asks the compiler runtime to
 derive a deterministic workspace-origin `vo.lock` without registry authority.
 
-Native AOT links the compiled Studio image against the `vo-studio-native`
-static runtime. That runtime installs the same versioned invocation handler as
+Native AOT links the compiled Studio image against the dedicated
+`vo-studio-aot-runtime-native` static runtime. It reuses the capability host
+from `vo-studio-native` and installs the same versioned invocation handler as
 the VM/JIT launcher before entering the desktop event loop, preserving host
 capabilities across development and release backends. The packaged executable
 also recognizes the bounded `--studio-preview-artifact` child mode, verifies

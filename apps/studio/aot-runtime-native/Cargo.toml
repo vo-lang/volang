@@ -1,0 +1,19 @@
+[package]
+name = "vo-studio-aot-runtime-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Statically linked Native AOT entry for Volang Studio"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+vo-aot-runtime-core = { path = "../../../lang/crates/vo-aot-runtime-core" }
+vo-studio-native = { path = "../host-native" }
+vo-ui-shell-native = { workspace = true, features = ["desktop-window"] }
+vo-ui-vm.workspace = true

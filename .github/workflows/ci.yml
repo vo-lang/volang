@@ -413,13 +413,13 @@ jobs:
       - name: Package production Native AOT applications
         shell: bash
         run: |
-          cargo build --locked -p vo-studio-native --lib --release
+          cargo build --locked -p vo-studio-aot-runtime-native --release
           cargo build --locked -p vo-ui-aot-runtime-native --release
           if [ "$RUNNER_OS" = "Windows" ]; then
-            studio_runtime=target/release/vo_studio_native.lib
+            studio_runtime=target/release/vo_studio_aot_runtime_native.lib
             ui_runtime=target/release/vo_ui_aot_runtime_native.lib
           else
-            studio_runtime=target/release/libvo_studio_native.a
+            studio_runtime=target/release/libvo_studio_aot_runtime_native.a
             ui_runtime=target/release/libvo_ui_aot_runtime_native.a
           fi
           VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui package apps/studio \

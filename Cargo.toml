@@ -9,6 +9,7 @@ members = [
   "cmd/vo-embed",
   "cmd/vo-test",
   "apps/studio/host-native",
+  "apps/studio/aot-runtime-native",
   "ui",
   "ui/crates/*",
 ]

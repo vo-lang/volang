@@ -63,8 +63,8 @@ vo ui test apps/studio/entry/memory --mode=vm
 vo ui test apps/studio/entry/memory --mode=jit
 cargo run -p vo-studio-native
 vo ui build apps/studio -o dist/studio-web
-cargo build -p vo-studio-native --lib --release
-vo ui package apps/studio -o dist/studio-native --runtime=target/release/libvo_studio_native.a
+cargo build -p vo-studio-aot-runtime-native --release
+vo ui package apps/studio -o dist/studio-native --runtime=target/release/libvo_studio_aot_runtime_native.a
 ```
 
 The Web release gate builds the complete Core Wasm AOT Studio and drives a

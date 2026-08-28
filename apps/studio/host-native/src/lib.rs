@@ -1244,62 +1244,6 @@ pub fn compile_studio_application(application: &Path) -> Result<vo_engine::Compi
         .map_err(|error| format!("Studio application compilation failed: {error}"))
 }
 
-#[cfg(not(test))]
-unsafe fn run_embedded_studio_aot(
-    argc: i32,
-    argv: *const *const std::ffi::c_char,
-) -> Result<i32, String> {
-    if let Some(artifact) = preview_artifact_argument(std::env::args_os().skip(1))? {
-        launch_preview_artifact(artifact)?;
-        return Ok(0);
-    }
-    let vm = unsafe {
-        vo_aot_runtime_core::load_embedded_vm(argc, argv, |vm, module| {
-            let registry = vm.extern_registry_mut().map_err(|error| {
-                format!("failed to configure Studio AOT UI providers: {error:?}")
-            })?;
-            vo_ui_vm::register_module(registry, module.module())
-                .map_err(|error| format!("failed to register Studio AOT UI providers: {error}"))
-        })
-    }?;
-    let workspace = std::env::var_os("VOLANG_STUDIO_WORKSPACE")
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir().map_err(|error| error.to_string())?);
-    let host = NativeStudioHost::open(workspace).map_err(|error| error.to_string())?;
-    let mut config = vo_ui_shell_native::NativeDesktopConfig {
-        title: "Volang Studio".to_string(),
-        width_points: 1440.0,
-        height_points: 900.0,
-        min_width_points: 720.0,
-        min_height_points: 480.0,
-        ..vo_ui_shell_native::NativeDesktopConfig::default()
-    };
-    config.runtime.max_system_requests_per_pump = 4_096;
-    apply_studio_automation(&mut config)?;
-    vo_ui_shell_native::run_desktop_with_host_invocation(vm, config, host.handler())
-        .map_err(|error| error.to_string())?;
-    Ok(0)
-}
-
-/// Native AOT process entry for the Studio-specific application host.
-///
-/// # Safety
-///
-/// `argv` must follow the platform process-entry ABI for at least `argc`
-/// valid C-string pointers.
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vo_aot_start(argc: i32, argv: *const *const std::ffi::c_char) -> i32 {
-    match std::panic::catch_unwind(|| unsafe { run_embedded_studio_aot(argc, argv) }) {
-        Ok(Ok(code)) => code,
-        Ok(Err(error)) => {
-            eprintln!("Volang Studio AOT runtime error: {error}");
-            1
-        }
-        Err(_) => 101,
-    }
-}
-
 struct ChannelSink {
     sender: mpsc::SyncSender<Value>,
 }
@@ -1580,6 +1524,8 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     {
         fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

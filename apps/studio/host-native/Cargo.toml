@@ -23,7 +23,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vo-engine.workspace = true
 vo-module.workspace = true
-vo-aot-runtime-core = { path = "../../../lang/crates/vo-aot-runtime-core" }
 vo-runtime = { path = "../../../lang/crates/vo-runtime", features = ["std"] }
 vo-ui-shell-native = { workspace = true, features = ["desktop-window"] }
 vo-ui-system.workspace = true

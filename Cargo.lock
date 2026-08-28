@@ -4908,12 +4908,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-studio-aot-runtime-native"
+version = "0.1.4"
+dependencies = [
+ "vo-aot-runtime-core",
+ "vo-studio-native",
+ "vo-ui-shell-native",
+ "vo-ui-vm",
+]
+
+[[package]]
 name = "vo-studio-native"
 version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
- "vo-aot-runtime-core",
  "vo-app-host-native",
  "vo-app-protocol",
  "vo-engine",
