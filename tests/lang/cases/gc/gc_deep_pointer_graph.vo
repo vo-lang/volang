@@ -1,0 +1,31 @@
+package main
+
+type DeepGcNode struct {
+	Next *DeepGcNode
+	Value int
+}
+
+func main() {
+	const nodeCount = 50000
+	var head *DeepGcNode
+	for i := 0; i < nodeCount; i++ {
+		head = &DeepGcNode{Next: head, Value: i}
+	}
+	// Force a scheduler boundary after the allocation debt threshold. The
+	// collector must retain the entire graph without consuming one Wasm call
+	// frame per node.
+	done := make(chan bool)
+	go func() {
+		done <- true
+	}()
+	assert(<-done, "scheduler boundary completion")
+	count := 0
+	checksum := 0
+	for node := head; node != nil; node = node.Next {
+		count++
+		checksum += node.Value
+	}
+	assert(count == nodeCount, "deep graph node count")
+	assert(checksum == (nodeCount - 1) * nodeCount / 2, "deep graph checksum")
+	println("gc-deep-pointer-graph: PASS")
+}

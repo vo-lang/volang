@@ -1,0 +1,3475 @@
+// Package app composes Studio's product state and views. Every renderer and
+// host runs this same typed Volang application.
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/vo-lang/studio/design"
+	"github.com/vo-lang/studio/documentation"
+	"github.com/vo-lang/studio/domain"
+	studioexamples "github.com/vo-lang/studio/examples"
+	"github.com/vo-lang/studio/protocol"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/commands"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/editor"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/kit/icons"
+	"github.com/vo-lang/ui/language"
+	uisystem "github.com/vo-lang/ui/system"
+	"github.com/vo-lang/ui/workspace"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+func preferredRuntimeMode(host domain.HostInfo) domain.RuntimeMode {
+	for _, mode := range host.RuntimeModes {
+		if mode == domain.RuntimeJIT {
+			return mode
+		}
+	}
+	if len(host.RuntimeModes) > 0 {
+		return host.RuntimeModes[0]
+	}
+	return domain.RuntimeVM
+}
+
+func supportsRuntimeMode(host domain.HostInfo, mode domain.RuntimeMode) bool {
+	for _, available := range host.RuntimeModes {
+		if available == mode {
+			return true
+		}
+	}
+	return false
+}
+
+func applicationPath(location string) string {
+	path := location
+	if index := strings.Index(path, "?"); index >= 0 {
+		path = path[:index]
+	}
+	if index := strings.Index(path, "#"); index >= 0 {
+		path = path[:index]
+	}
+	return path
+}
+
+func locationFragment(location string) string {
+	index := strings.Index(location, "#")
+	if index < 0 || index + 1 >= len(location) {
+		return ""
+	}
+	fragment := location[index + 1:]
+	if query := strings.Index(fragment, "?"); query >= 0 {
+		fragment = fragment[:query]
+	}
+	return fragment
+}
+
+func runnerRoute(location string) bool {
+	return applicationPath(location) == "/runner"
+}
+
+func documentationRoute(location string) (string, bool) {
+	path := applicationPath(location)
+	if !strings.HasPrefix(path, "/docs/") {
+		return "", false
+	}
+	id := strings.TrimPrefix(path, "/docs/")
+	for _, page := range documentationPages() {
+		if page.ID == id {
+			return id, true
+		}
+	}
+	return "introduction", true
+}
+
+const (
+	MaxConsoleEntries = 4000
+	MaxOpenBuffers = 256
+	MaxSearchResults = 500
+)
+
+type Activity int64
+
+const (
+	ActivityHome Activity = iota
+	ActivityExplorer
+	ActivitySearch
+	ActivitySourceControl
+	ActivityDocs
+)
+
+type State struct {
+	mu sync.RWMutex
+	services protocol.Services
+	host domain.HostInfo
+	projects []domain.Project
+	current domain.Project
+	hasProject bool
+	files []domain.FileEntry
+	activePath string
+	editor *editor.Model
+	buffers map[string]*editor.Model
+	openPaths []string
+	openGeneration uint64
+	dirty map[string]bool
+	diagnostics []domain.Diagnostic
+	diagnosticsByPath map[string][]domain.Diagnostic
+	console []domain.ConsoleEntry
+	consoleSequence uint64
+	activity Activity
+	searchQuery string
+	searchResults []string
+	searchGeneration uint64
+	searchCancel context.CancelFunc
+	findVisible bool
+	findQuery string
+	paletteVisible bool
+	paletteQuery string
+	paletteSelected int64
+	paletteFocusToken int64
+	projectCreatorVisible bool
+	openingExample string
+	renameProjectVisible bool
+	renameProject domain.Project
+	renameProjectName string
+	deleteProjectVisible bool
+	deleteProject domain.Project
+	projectMutationBusy bool
+	shareVisible bool
+	shareLoading bool
+	share domain.ProjectShare
+	accountVisible bool
+	accountLoading bool
+	accountLoaded bool
+	account domain.AccountState
+	newProjectName string
+	projectSearchQuery string
+	newFilePath string
+	newFileVisible bool
+	renamePath string
+	renameFileVisible bool
+	running bool
+	runMode domain.RuntimeMode
+	runGeneration uint64
+	runCancel context.CancelFunc
+	analysisGeneration uint64
+	analysisCancel context.CancelFunc
+	previewState domain.PreviewState
+	previewSurface string
+	remote domain.RemoteState
+	remoteLoaded bool
+	remoteLoading bool
+	remoteBusy bool
+	remoteCancel context.CancelFunc
+	remoteGeneration uint64
+	remoteDiff domain.RemoteDiff
+	remoteDiffLoading bool
+	remoteDeleteVisible bool
+	remoteDeleteConfirmation string
+	remoteDeleteBusy bool
+	commitMessage string
+	docQuery string
+	docPageID string
+	docExpanded map[string]bool
+	docHeadingID string
+	docFocusToken int64
+	status string
+	layout *workspace.Model
+}
+
+func New(services protocol.Services) *State {
+	services.Validate()
+	state := &State{
+		services: services, buffers: make(map[string]*editor.Model), dirty: make(map[string]bool),
+		diagnosticsByPath: make(map[string][]domain.Diagnostic), docPageID: "introduction",
+		docExpanded: make(map[string]bool), status: "Ready",
+	}
+	sections := documentation.Sections()
+	if len(sections) > 0 {
+		state.docExpanded[sections[0].ID] = true
+	}
+	var err error
+	state.layout, err = workspace.New(workspace.Split("studio-root", workspace.Horizontal, 0.19, workspace.PanelLayout("side-panel", "side-panel"), workspace.Split("studio-main", workspace.Vertical, 0.72, workspace.Tabs("documents", 0, workspace.PanelLayout("editor-panel", "editor"), workspace.PanelLayout("docs-panel", "docs")), workspace.Tabs("bottom", 0, workspace.PanelLayout("console-panel", "console"), workspace.PanelLayout("preview-panel", "preview"), workspace.PanelLayout("problems-panel", "problems"), workspace.PanelLayout("changes-panel", "changes")))), []workspace.Panel{
+		{ID: "side-panel", Title: "Navigation", Content: state.SidePanel},
+		{ID: "editor", Title: "Editor", Content: state.EditorPanel},
+		{ID: "docs", Title: "Documentation", Content: state.DocsPanel},
+		{ID: "console", Title: "Console", Content: state.ConsolePanel},
+		{ID: "preview", Title: "Preview", Content: state.PreviewPanel},
+		{ID: "problems", Title: "Problems", Content: state.ProblemsPanel},
+		{ID: "changes", Title: "Changes", Content: state.RemoteDiffPanel},
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	return state
+}
+
+func (state *State) appendConsoleLocked(level domain.ConsoleLevel, source string, text string) {
+	state.consoleSequence++
+	state.console = append(state.console, domain.ConsoleEntry{
+		Sequence: state.consoleSequence, Time: time.Now(), Level: level, Source: source, Text: text,
+	})
+	if len(state.console) > MaxConsoleEntries {
+		state.console = append([]domain.ConsoleEntry(nil), state.console[len(state.console) -
+			MaxConsoleEntries:]...)
+	}
+}
+
+func (state *State) log(level domain.ConsoleLevel, source string, text string) {
+	state.mu.Lock()
+	state.appendConsoleLocked(level, source, text)
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+// ReportFailure makes launcher and host lifecycle errors visible inside the
+// product while preserving the mounted shell for recovery actions.
+func (state *State) ReportFailure(source string, err error) {
+	if err == nil {
+		return
+	}
+	state.mu.Lock()
+	state.status = "Action failed"
+	state.appendConsoleLocked(domain.ConsoleError, source, err.Error())
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) Bootstrap(ctx context.Context) error {
+	location := ui.LocationPath()
+	host, err := state.services.Host.Info(ctx)
+	if err != nil {
+		return err
+	}
+	if host.Platform == "" || len(host.RuntimeModes) == 0 {
+		return errors.New("Studio host returned incomplete capabilities")
+	}
+	state.mu.Lock()
+	state.host = host
+	state.mu.Unlock()
+	projects, err := state.services.Files.Projects(ctx)
+	if err != nil {
+		return err
+	}
+	state.mu.Lock()
+	state.projects = projects
+	state.mu.Unlock()
+	pageID, hasDocumentationRoute := documentationRoute(location)
+	if len(projects) == 0 {
+		if hasDocumentationRoute {
+			state.mu.Lock()
+			state.activity = ActivityDocs
+			state.docPageID = pageID
+			state.expandDocPageLocked(pageID)
+			state.docHeadingID = locationFragment(location)
+			if state.docHeadingID != "" {
+				state.docFocusToken++
+			}
+			state.mu.Unlock()
+			_ = state.layout.Activate("documents", 1)
+		}
+		ui.Invalidate()
+		return nil
+	}
+	if err := state.loadProject(ctx, projects[0]); err != nil {
+		return err
+	}
+	if hasDocumentationRoute {
+		state.mu.Lock()
+		state.activity = ActivityDocs
+		state.docPageID = pageID
+		state.expandDocPageLocked(pageID)
+		state.docHeadingID = locationFragment(location)
+		if state.docHeadingID != "" {
+			state.docFocusToken++
+		}
+		state.mu.Unlock()
+		_ = state.layout.Activate("documents", 1)
+	}
+	if runnerRoute(location) {
+		state.StartRun(preferredRuntimeMode(host), true)
+	}
+	return nil
+}
+
+func preferredFile(files []domain.FileEntry) string {
+	for _, file := range files {
+		if file.Path == "main.vo" {
+			return file.Path
+		}
+	}
+	for _, file := range files {
+		if file.Kind == domain.SourceFile {
+			return file.Path
+		}
+	}
+	if len(files) > 0 {
+		return files[0].Path
+	}
+	return ""
+}
+
+func newEditor(project domain.Project, path string, text string) *editor.Model {
+	return editor.New(document.NewText(text), "file://" + project.Root + "/" + path, "volang")
+}
+
+func (state *State) activateBufferLocked(path string, code *editor.Model) {
+	state.activePath = path
+	state.renamePath = path
+	state.editor = code
+	state.diagnostics = append([]domain.Diagnostic(nil), state.diagnosticsByPath[path]...)
+	state.status = path
+}
+
+func (state *State) loadProject(ctx context.Context, project domain.Project) error {
+	files, err := state.services.Files.Files(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	path := preferredFile(files)
+	var code *editor.Model
+	if path != "" {
+		text, readErr := state.services.Files.ReadFile(ctx, project.ID, path)
+		if readErr != nil {
+			return readErr
+		}
+		code = newEditor(project, path, text)
+	}
+	state.mu.Lock()
+	previousPreview := state.previewSurface
+	if state.runCancel != nil {
+		state.runCancel()
+		state.runCancel = nil
+	}
+	if state.analysisCancel != nil {
+		state.analysisCancel()
+		state.analysisCancel = nil
+	}
+	if state.searchCancel != nil {
+		state.searchCancel()
+		state.searchCancel = nil
+	}
+	if state.remoteCancel != nil {
+		state.remoteCancel()
+		state.remoteCancel = nil
+	}
+	state.remoteGeneration++
+	state.current = project
+	state.hasProject = true
+	state.files = files
+	state.buffers = make(map[string]*editor.Model)
+	state.openPaths = nil
+	state.openGeneration++
+	state.dirty = make(map[string]bool)
+	state.diagnosticsByPath = make(map[string][]domain.Diagnostic)
+	if code != nil {
+		state.buffers[path] = code
+		state.openPaths = append(state.openPaths, path)
+	}
+	state.activePath = ""
+	state.renamePath = ""
+	state.editor = nil
+	if code != nil {
+		state.activateBufferLocked(path, code)
+	}
+	state.diagnostics = nil
+	state.findVisible = false
+	state.findQuery = ""
+	state.paletteVisible = false
+	state.paletteQuery = ""
+	state.paletteSelected = 0
+	state.previewState = domain.PreviewIdle
+	state.previewSurface = ""
+	state.remote = domain.RemoteState{}
+	state.remoteLoaded = false
+	state.remoteLoading = false
+	state.remoteBusy = false
+	state.remoteDiff = domain.RemoteDiff{}
+	state.remoteDiffLoading = false
+	state.commitMessage = "Update from Volang Studio"
+	state.status = "Ready"
+	state.appendConsoleLocked(domain.ConsoleSuccess, "workspace", "Opened " + project.Name)
+	state.mu.Unlock()
+	_ = state.layout.Activate("documents", 0)
+	if previousPreview != "" {
+		_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
+	}
+	if code != nil {
+		state.scheduleAnalysis(code.Document.Version())
+	}
+	return nil
+}
+
+func (state *State) SelectProject(id domain.ProjectID) {
+	state.mu.RLock()
+	projects := append([]domain.Project(nil), state.projects...)
+	state.mu.RUnlock()
+	for _, project := range projects {
+		if project.ID == id {
+			state.mu.Lock()
+			state.activity = ActivityExplorer
+			state.mu.Unlock()
+			go func() {
+				if err := state.loadProject(context.Background(), project); err != nil {
+					state.log(domain.ConsoleError, "workspace", err.Error())
+				}
+				ui.Invalidate()
+			}()
+			return
+		}
+	}
+}
+
+func (state *State) OpenExample(id string) {
+	example, ok := studioexamples.Find(id)
+	if !ok {
+		state.log(domain.ConsoleError, "examples", "Example was not found")
+		return
+	}
+	state.mu.Lock()
+	if state.openingExample != "" {
+		state.mu.Unlock()
+		return
+	}
+	for _, project := range state.projects {
+		if project.Name == example.ProjectName {
+			state.activity = ActivityExplorer
+			state.status = "Opening " + example.Title
+			state.mu.Unlock()
+			state.SelectProject(project.ID)
+			return
+		}
+	}
+	state.openingExample = example.ID
+	state.status = "Creating editable " + example.Title + " project"
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		project, err := state.services.Files.CreateProject(context.Background(), protocol.CreateProjectRequest{
+			Name: example.ProjectName, Template: "studio-example/" + example.ID, Files: example.Files,
+		})
+		if err != nil {
+			state.mu.Lock()
+			state.openingExample = ""
+			state.status = "Example failed to open"
+			state.appendConsoleLocked(domain.ConsoleError, "examples", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
+			return
+		}
+		state.mu.Lock()
+		state.projects = append(state.projects, project)
+		state.openingExample = ""
+		state.activity = ActivityExplorer
+		state.status = "Opened " + example.Title
+		state.mu.Unlock()
+		if err := state.loadProject(context.Background(), project); err != nil {
+			state.log(domain.ConsoleError, "examples", err.Error())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) ShowHome() {
+	state.mu.Lock()
+	state.activity = ActivityHome
+	state.status = "Starter projects and recent workspaces"
+	state.mu.Unlock()
+	ui.Navigate("/")
+	ui.Invalidate()
+}
+
+func (state *State) ShowShareProject() {
+	state.mu.Lock()
+	if !state.hasProject || state.shareLoading {
+		state.mu.Unlock()
+		return
+	}
+	state.shareVisible = true
+	state.share = domain.ProjectShare{}
+	if len(state.dirty) > 0 {
+		state.share = domain.ProjectShare{
+			Reason: "Save all edited files before creating an immutable project link.",
+		}
+		state.status = "Save changes before sharing"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.shareLoading = true
+	project := state.current
+	state.status = "Creating portable project links"
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		result, err := state.services.Share.Share(context.Background(), project.ID)
+		state.mu.Lock()
+		state.shareLoading = false
+		if err != nil {
+			state.share = domain.ProjectShare{Reason: err.Error()}
+			state.status = "Project link failed"
+			state.appendConsoleLocked(domain.ConsoleError, "share", err.Error())
+		} else {
+			state.share = result
+			if result.Shareable {
+				state.status = "Portable project links ready"
+				state.appendConsoleLocked(domain.ConsoleSuccess, "share", "Created Studio and Runner links for " +
+					project.Name)
+			} else {
+				state.status = "Project link unavailable"
+			}
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) HideShareProject() {
+	state.mu.Lock()
+	if !state.shareLoading {
+		state.shareVisible = false
+		state.share = domain.ProjectShare{}
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ShowAccount() {
+	state.mu.Lock()
+	state.accountVisible = true
+	if state.accountLoading || state.accountLoaded {
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.accountLoading = true
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		account, err := state.services.Account.Account(context.Background())
+		state.mu.Lock()
+		state.accountLoading = false
+		if err != nil {
+			state.appendConsoleLocked(domain.ConsoleError, "account", err.Error())
+		} else {
+			state.account = account
+			state.accountLoaded = true
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) HideAccount() {
+	state.mu.Lock()
+	if !state.accountLoading {
+		state.accountVisible = false
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ConnectAccount() {
+	state.mu.Lock()
+	if state.accountLoading {
+		state.mu.Unlock()
+		return
+	}
+	state.accountLoading = true
+	state.status = "Connecting GitHub account"
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		account, err := state.services.Account.ConnectAccount(context.Background())
+		state.mu.Lock()
+		state.accountLoading = false
+		if err != nil {
+			state.status = "GitHub connection failed"
+			state.appendConsoleLocked(domain.ConsoleError, "account", err.Error())
+		} else {
+			state.account = account
+			state.accountLoaded = true
+			state.status = "Connected as " + account.Login
+			state.appendConsoleLocked(domain.ConsoleSuccess, "account", "Connected GitHub account " +
+				account.Login)
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) DisconnectAccount() {
+	state.mu.Lock()
+	if state.accountLoading {
+		state.mu.Unlock()
+		return
+	}
+	state.accountLoading = true
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		err := state.services.Account.DisconnectAccount(context.Background())
+		state.mu.Lock()
+		state.accountLoading = false
+		if err != nil {
+			state.status = "GitHub disconnect failed"
+			state.appendConsoleLocked(domain.ConsoleError, "account", err.Error())
+		} else {
+			state.account = domain.AccountState{Provider: "github"}
+			state.accountLoaded = true
+			state.status = "GitHub account disconnected"
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) copyProjectLink(value string, label string) {
+	if value == "" {
+		return
+	}
+	if err := uisystem.WriteClipboardText(value); err != nil {
+		state.log(domain.ConsoleError, "share", err.Error())
+		return
+	}
+	state.mu.Lock()
+	state.status = label + " copied"
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) BeginRenameProject(project domain.Project) {
+	state.mu.Lock()
+	if state.projectMutationBusy {
+		state.mu.Unlock()
+		return
+	}
+	state.renameProject = project
+	state.renameProjectName = project.Name
+	state.renameProjectVisible = true
+	state.status = "Rename " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetRenameProjectName(value string) {
+	state.mu.Lock()
+	state.renameProjectName = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideRenameProject() {
+	state.mu.Lock()
+	if !state.projectMutationBusy {
+		state.renameProjectVisible = false
+		state.renameProjectName = ""
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) RenameProject() {
+	state.mu.Lock()
+	name := strings.TrimSpace(state.renameProjectName)
+	project := state.renameProject
+	if !state.renameProjectVisible || state.projectMutationBusy || name == "" {
+		state.mu.Unlock()
+		return
+	}
+	state.projectMutationBusy = true
+	state.status = "Renaming " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		renamed, err := state.services.Files.RenameProject(context.Background(), project.ID, name)
+		state.mu.Lock()
+		state.projectMutationBusy = false
+		if err != nil {
+			state.status = "Project rename failed"
+			state.appendConsoleLocked(domain.ConsoleError, "project", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
+			return
+		}
+		wasCurrent := state.hasProject && state.current.ID == project.ID
+		for index, existing := range state.projects {
+			if existing.ID == project.ID {
+				state.projects[index] = renamed
+				break
+			}
+		}
+		state.renameProjectVisible = false
+		state.renameProjectName = ""
+		state.status = "Renamed project to " + renamed.Name
+		state.appendConsoleLocked(domain.ConsoleSuccess, "project", "Renamed " + project.Name + " to " +
+			renamed.Name)
+		state.mu.Unlock()
+		if wasCurrent {
+			if err := state.loadProject(context.Background(), renamed); err != nil {
+				state.log(domain.ConsoleError, "project", err.Error())
+			}
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) BeginDeleteProject(project domain.Project) {
+	state.mu.Lock()
+	if state.projectMutationBusy {
+		state.mu.Unlock()
+		return
+	}
+	state.deleteProject = project
+	state.deleteProjectVisible = true
+	state.status = "Confirm removal of " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideDeleteProject() {
+	state.mu.Lock()
+	if !state.projectMutationBusy {
+		state.deleteProjectVisible = false
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ConfirmDeleteProject() {
+	state.mu.Lock()
+	project := state.deleteProject
+	if !state.deleteProjectVisible || state.projectMutationBusy {
+		state.mu.Unlock()
+		return
+	}
+	state.projectMutationBusy = true
+	state.status = "Removing " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		var err error
+		if project.Managed {
+			err = state.services.Files.DeleteProject(context.Background(), project.ID)
+		} else {
+			err = state.services.Files.ForgetProject(context.Background(), project.ID)
+		}
+		if err != nil {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "Project removal failed"
+			state.appendConsoleLocked(domain.ConsoleError, "project", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
+			return
+		}
+		verb := "Forgot "
+		if project.Managed {
+			verb = "Deleted "
+		}
+		state.completeProjectRemoval(project, verb)
+	}()
+}
+
+func (state *State) completeProjectRemoval(project domain.Project, verb string) {
+	state.mu.Lock()
+	remaining := make([]domain.Project, 0, len(state.projects) - 1)
+	for _, existing := range state.projects {
+		if existing.ID != project.ID {
+			remaining = append(remaining, existing)
+		}
+	}
+	state.projects = remaining
+	wasCurrent := state.hasProject && state.current.ID == project.ID
+	previousPreview := ""
+	if wasCurrent && len(remaining) == 0 {
+		previousPreview = state.previewSurface
+		if state.runCancel != nil {
+			state.runCancel()
+			state.runCancel = nil
+		}
+		if state.analysisCancel != nil {
+			state.analysisCancel()
+			state.analysisCancel = nil
+		}
+		if state.searchCancel != nil {
+			state.searchCancel()
+			state.searchCancel = nil
+		}
+		state.hasProject = false
+		state.current = domain.Project{}
+		state.files = nil
+		state.activePath = ""
+		state.editor = nil
+		state.buffers = make(map[string]*editor.Model)
+		state.openPaths = nil
+		state.dirty = make(map[string]bool)
+		state.diagnostics = nil
+		state.diagnosticsByPath = make(map[string][]domain.Diagnostic)
+		state.running = false
+		state.previewState = domain.PreviewIdle
+		state.previewSurface = ""
+	}
+	state.projectMutationBusy = false
+	state.deleteProjectVisible = false
+	state.remoteDeleteBusy = false
+	state.remoteDeleteVisible = false
+	state.remoteDeleteConfirmation = ""
+	state.status = verb + project.Name
+	state.appendConsoleLocked(domain.ConsoleSuccess, "project", verb + project.Name)
+	state.mu.Unlock()
+	if wasCurrent && len(remaining) > 0 {
+		if err := state.loadProject(context.Background(), remaining[0]); err != nil {
+			state.log(domain.ConsoleError, "project", err.Error())
+		}
+	} else if previousPreview != "" {
+		_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
+	}
+	ui.Invalidate()
+}
+
+func (state *State) CreateProject() {
+	state.mu.RLock()
+	name := strings.TrimSpace(state.newProjectName)
+	state.mu.RUnlock()
+	if name == "" {
+		state.mu.Lock()
+		state.projectCreatorVisible = true
+		state.status = "Enter a project name"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	go func() {
+		project, err := state.services.Files.CreateProject(context.Background(), protocol.CreateProjectRequest{
+			Name: name, Template: "ui",
+		})
+		if err != nil {
+			state.log(domain.ConsoleError, "project", err.Error())
+			return
+		}
+		state.mu.Lock()
+		state.projects = append(state.projects, project)
+		state.newProjectName = ""
+		state.projectCreatorVisible = false
+		state.activity = ActivityExplorer
+		state.mu.Unlock()
+		if err := state.loadProject(context.Background(), project); err != nil {
+			state.log(domain.ConsoleError, "project", err.Error())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) ToggleProjectCreator() {
+	state.mu.Lock()
+	state.projectCreatorVisible = !state.projectCreatorVisible
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetNewProjectName(value string) {
+	state.mu.Lock()
+	state.newProjectName = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetProjectSearchQuery(value string) {
+	state.mu.Lock()
+	state.projectSearchQuery = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) OpenLocalProject() {
+	state.mu.RLock()
+	canOpen := state.host.CanOpenLocal
+	state.mu.RUnlock()
+	if !canOpen {
+		return
+	}
+	go func() {
+		root, selected, err := uisystem.OpenFolder(uisystem.FileDialogOptions{
+			Title: "Open Volang project", CanCreateDirectories: false,
+		})
+		if err != nil {
+			state.log(domain.ConsoleError, "project", err.Error())
+			return
+		}
+		if !selected {
+			return
+		}
+		project, err := state.services.Files.OpenProject(context.Background(), root)
+		if err != nil {
+			state.log(domain.ConsoleError, "project", err.Error())
+			return
+		}
+		state.mu.Lock()
+		present := false
+		for _, existing := range state.projects {
+			if existing.ID == project.ID {
+				present = true
+				break
+			}
+		}
+		if !present {
+			state.projects = append(state.projects, project)
+		}
+		state.mu.Unlock()
+		if err := state.loadProject(context.Background(), project); err != nil {
+			state.log(domain.ConsoleError, "project", err.Error())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) OpenFile(path string) {
+	state.mu.Lock()
+	project := state.current
+	hasProject := state.hasProject
+	if code, present := state.buffers[path]; present {
+		state.openGeneration++
+		state.activateBufferLocked(path, code)
+		version := code.Document.Version()
+		state.mu.Unlock()
+		_ = state.layout.Activate("documents", 0)
+		state.scheduleAnalysis(version)
+		ui.Invalidate()
+		return
+	}
+	if len(state.openPaths) >= MaxOpenBuffers {
+		state.status = "Open editor limit reached"
+		state.mu.Unlock()
+		state.log(domain.ConsoleError, "editor", "Close an editor before opening another file")
+		return
+	}
+	state.openGeneration++
+	generation := state.openGeneration
+	state.mu.Unlock()
+	if !hasProject {
+		return
+	}
+	go func() {
+		text, err := state.services.Files.ReadFile(context.Background(), project.ID, path)
+		if err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		code := newEditor(project, path, text)
+		state.mu.Lock()
+		if state.current.ID != project.ID {
+			state.mu.Unlock()
+			return
+		}
+		if existing, present := state.buffers[path]; present {
+			code = existing
+		} else {
+			state.buffers[path] = code
+			state.openPaths = append(state.openPaths, path)
+		}
+		active := generation == state.openGeneration
+		if active {
+			state.activateBufferLocked(path, code)
+		}
+		state.mu.Unlock()
+		if active {
+			_ = state.layout.Activate("documents", 0)
+			state.scheduleAnalysis(code.Document.Version())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) closeBufferLocked(path string) *editor.Model {
+	removedIndex := -1
+	nextPaths := make([]string, 0, len(state.openPaths))
+	for index, candidate := range state.openPaths {
+		if candidate == path {
+			removedIndex = index
+			continue
+		}
+		nextPaths = append(nextPaths, candidate)
+	}
+	if removedIndex < 0 {
+		return state.editor
+	}
+	state.openPaths = nextPaths
+	delete(state.buffers, path)
+	delete(state.dirty, path)
+	delete(state.diagnosticsByPath, path)
+	state.openGeneration++
+	if state.activePath != path {
+		return nil
+	}
+	state.activePath = ""
+	state.renamePath = ""
+	state.editor = nil
+	state.diagnostics = nil
+	if len(nextPaths) == 0 {
+		state.status = "No open editors"
+		return nil
+	}
+	if removedIndex >= len(nextPaths) {
+		removedIndex = len(nextPaths) - 1
+	}
+	nextPath := nextPaths[removedIndex]
+	code := state.buffers[nextPath]
+	state.activateBufferLocked(nextPath, code)
+	return code
+}
+
+func (state *State) CloseFile(path string) {
+	state.mu.RLock()
+	dirty := state.dirty[path]
+	state.mu.RUnlock()
+	go func() {
+		if dirty {
+			result, err := uisystem.ShowMessage(uisystem.MessageDialogOptions{
+				Level: uisystem.MessageWarning, Buttons: uisystem.MessageOKCancel, Title: "Close " + path,
+				Description: "Unsaved changes in this editor will be discarded.",
+			})
+			if err != nil {
+				state.log(domain.ConsoleError, "editor", err.Error())
+				return
+			}
+			if result != uisystem.MessageResultOK {
+				return
+			}
+		}
+		state.mu.Lock()
+		code := state.closeBufferLocked(path)
+		state.mu.Unlock()
+		if code != nil {
+			state.scheduleAnalysis(code.Document.Version())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) CloseActiveFile() {
+	state.mu.RLock()
+	path := state.activePath
+	state.mu.RUnlock()
+	if path != "" {
+		state.CloseFile(path)
+	}
+}
+
+type saveSnapshot struct {
+	Path string
+	Code *editor.Model
+	Text string
+	Version uint64
+}
+
+func (state *State) saveSnapshots(project domain.Project, snapshots []saveSnapshot) {
+	go func() {
+		for _, snapshot := range snapshots {
+			if err := state.services.Files.WriteFile(context.Background(), project.ID, snapshot.Path, snapshot.Text); err !=
+				nil {
+				state.log(domain.ConsoleError, "save", err.Error())
+				continue
+			}
+			state.mu.Lock()
+			current, present := state.buffers[snapshot.Path]
+			if present && current == snapshot.Code && current.Document.Version() == snapshot.Version {
+				state.dirty[snapshot.Path] = false
+			}
+			state.status = "Saved " + snapshot.Path
+			state.appendConsoleLocked(domain.ConsoleSuccess, "save", "Saved " + snapshot.Path)
+			state.mu.Unlock()
+			ui.Invalidate()
+		}
+	}()
+}
+
+func (state *State) Save() {
+	state.mu.RLock()
+	project := state.current
+	path := state.activePath
+	code := state.editor
+	state.mu.RUnlock()
+	if code == nil || path == "" {
+		return
+	}
+	text, version := code.Document.Snapshot()
+	state.saveSnapshots(project, []saveSnapshot{{Path: path, Code: code, Text: text, Version: version}})
+}
+
+func (state *State) SaveAll() {
+	state.mu.RLock()
+	project := state.current
+	paths := append([]string(nil), state.openPaths...)
+	dirty := make(map[string]bool)
+	for path, value := range state.dirty {
+		dirty[path] = value
+	}
+	buffers := make(map[string]*editor.Model)
+	for path, code := range state.buffers {
+		buffers[path] = code
+	}
+	state.mu.RUnlock()
+	snapshots := make([]saveSnapshot, 0, len(paths))
+	for _, path := range paths {
+		code := buffers[path]
+		if !dirty[path] || code == nil {
+			continue
+		}
+		text, version := code.Document.Snapshot()
+		snapshots = append(snapshots, saveSnapshot{Path: path, Code: code, Text: text, Version: version})
+	}
+	if len(snapshots) == 0 {
+		return
+	}
+	state.saveSnapshots(project, snapshots)
+}
+
+func (state *State) SetNewFilePath(value string) {
+	state.mu.Lock()
+	state.newFilePath = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetRenamePath(value string) {
+	state.mu.Lock()
+	state.renamePath = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ShowNewFileDialog() {
+	state.mu.Lock()
+	state.newFileVisible = true
+	state.newFilePath = ""
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideNewFileDialog() {
+	state.mu.Lock()
+	state.newFileVisible = false
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ShowRenameFileDialog() {
+	state.mu.Lock()
+	if state.activePath != "" {
+		state.renameFileVisible = true
+		state.renamePath = state.activePath
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideRenameFileDialog() {
+	state.mu.Lock()
+	state.renameFileVisible = false
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) refreshFiles(ctx context.Context, project domain.Project) error {
+	files, err := state.services.Files.Files(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	state.mu.Lock()
+	if state.current.ID == project.ID {
+		state.files = files
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+	return nil
+}
+
+func (state *State) CreateFile() {
+	state.mu.RLock()
+	project := state.current
+	path := strings.TrimSpace(state.newFilePath)
+	state.mu.RUnlock()
+	if path == "" {
+		return
+	}
+	go func() {
+		content := ""
+		if strings.HasSuffix(path, ".vo") {
+			content = "package main\n"
+		}
+		if err := state.services.Files.WriteFile(context.Background(), project.ID, path, content); err !=
+			nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		state.mu.Lock()
+		state.newFilePath = ""
+		state.newFileVisible = false
+		state.mu.Unlock()
+		if err := state.refreshFiles(context.Background(), project); err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		state.OpenFile(path)
+	}()
+}
+
+func (state *State) RenameActiveFile() {
+	state.mu.RLock()
+	project := state.current
+	from := state.activePath
+	to := strings.TrimSpace(state.renamePath)
+	state.mu.RUnlock()
+	if from == "" || to == "" || from == to {
+		return
+	}
+	go func() {
+		if err := state.services.Files.RenameEntry(context.Background(), project.ID, from, to); err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		state.mu.Lock()
+		code := state.buffers[from]
+		if code != nil {
+			delete(state.buffers, from)
+			state.buffers[to] = code
+			for index, path := range state.openPaths {
+				if path == from {
+					state.openPaths[index] = to
+				}
+			}
+			state.dirty[to] = state.dirty[from]
+			state.diagnosticsByPath[to] = state.diagnosticsByPath[from]
+		}
+		delete(state.dirty, from)
+		delete(state.diagnosticsByPath, from)
+		if state.activePath == from {
+			state.activePath = to
+			state.renamePath = to
+			state.diagnostics = nil
+		}
+		state.renameFileVisible = false
+		state.mu.Unlock()
+		if code != nil {
+			if err := code.Rebind("file://" + project.Root + "/" + to, "volang"); err != nil {
+				state.log(domain.ConsoleError, "editor", err.Error())
+			}
+		}
+		if err := state.refreshFiles(context.Background(), project); err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		if code != nil {
+			state.scheduleAnalysis(code.Document.Version())
+		} else {
+			state.OpenFile(to)
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) DeleteActiveFile() {
+	state.mu.RLock()
+	project := state.current
+	path := state.activePath
+	state.mu.RUnlock()
+	if path == "" {
+		return
+	}
+	go func() {
+		result, err := uisystem.ShowMessage(uisystem.MessageDialogOptions{
+			Level: uisystem.MessageWarning, Buttons: uisystem.MessageOKCancel, Title: "Delete " + path,
+			Description: "This removes the file from the project.",
+		})
+		if err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		if result != uisystem.MessageResultOK {
+			return
+		}
+		if err := state.services.Files.DeleteEntry(context.Background(), project.ID, path); err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		if err := state.refreshFiles(context.Background(), project); err != nil {
+			state.log(domain.ConsoleError, "files", err.Error())
+			return
+		}
+		state.mu.Lock()
+		code := state.closeBufferLocked(path)
+		state.mu.Unlock()
+		if code != nil {
+			state.scheduleAnalysis(code.Document.Version())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func toLanguageSeverity(value domain.DiagnosticSeverity) language.Severity {
+	if value == domain.DiagnosticError {
+		return language.Error
+	}
+	if value == domain.DiagnosticWarning {
+		return language.Warning
+	}
+	if value == domain.DiagnosticInfo {
+		return language.Information
+	}
+	return language.Hint
+}
+
+func toLanguageDiagnostics(values []domain.Diagnostic) []language.Diagnostic {
+	result := make([]language.Diagnostic, 0, len(values))
+	for _, value := range values {
+		line := value.Line - 1
+		if line < 0 {
+			line = 0
+		}
+		column := value.Column - 1
+		if column < 0 {
+			column = 0
+		}
+		endLine := value.EndLine - 1
+		if endLine < line {
+			endLine = line
+		}
+		endColumn := value.EndColumn - 1
+		if endColumn < 0 || (endLine == line && endColumn < column) {
+			endColumn = column
+		}
+		result = append(result, language.Diagnostic{
+			Range: language.Range{
+				Start: language.Position{Line: line, CharacterUTF16: column},
+				End: language.Position{Line: endLine, CharacterUTF16: endColumn},
+			},
+			Severity: toLanguageSeverity(value.Severity), Code: value.Code, Message: value.Message,
+			Source: "volang",
+		})
+	}
+	return result
+}
+
+func (state *State) scheduleAnalysis(version uint64) {
+	state.mu.Lock()
+	if state.analysisCancel != nil {
+		state.analysisCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	state.analysisCancel = cancel
+	state.analysisGeneration++
+	generation := state.analysisGeneration
+	runGeneration := state.runGeneration
+	project := state.current
+	path := state.activePath
+	code := state.editor
+	state.status = "Analyzing " + path
+	state.mu.Unlock()
+	if code == nil {
+		cancel()
+		return
+	}
+	text, currentVersion := code.Document.Snapshot()
+	if currentVersion != version {
+		version = currentVersion
+	}
+	go func() {
+		select {
+			case <-ctx.Done():
+				return
+			case <-time.After(160 * time.Millisecond):
+		}
+		values, err := state.services.Language.Analyze(ctx, protocol.AnalyzeRequest{
+			ProjectID: project.ID, Path: path, Version: version, Text: text,
+		})
+		if err != nil {
+			if ctx.Err() == nil {
+				state.log(domain.ConsoleError, "analyzer", err.Error())
+			}
+			return
+		}
+		state.mu.Lock()
+		if generation != state.analysisGeneration || state.editor != code ||
+			code.Document.Version() != version {
+			state.mu.Unlock()
+			return
+		}
+		state.diagnostics = values
+		state.diagnosticsByPath[path] = append([]domain.Diagnostic(nil), values...)
+		if state.runGeneration == runGeneration && !state.running {
+			state.status = strconv.Itoa(len(values)) + " problems"
+		}
+		state.analysisCancel = nil
+		state.mu.Unlock()
+		_ = code.PublishLanguage(version, toLanguageDiagnostics(values), nil)
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) DocumentChanged(edit document.Edit, version uint64) {
+	state.mu.Lock()
+	path := state.activePath
+	state.dirty[path] = true
+	state.status = "Modified " + path
+	state.mu.Unlock()
+	state.scheduleAnalysis(version)
+}
+
+func (state *State) changeHistory(redo bool) {
+	state.mu.RLock()
+	path := state.activePath
+	code := state.editor
+	state.mu.RUnlock()
+	if code == nil || path == "" {
+		return
+	}
+	changed := false
+	label := "Undo"
+	if redo {
+		changed = code.Document.Redo()
+		label = "Redo"
+	} else {
+		changed = code.Document.Undo()
+	}
+	if !changed {
+		return
+	}
+	version := code.Document.Version()
+	state.mu.Lock()
+	current, present := state.buffers[path]
+	if present && current == code {
+		state.dirty[path] = true
+		state.status = label + " " + path
+	}
+	active := state.editor == code && state.activePath == path
+	state.mu.Unlock()
+	if active {
+		state.scheduleAnalysis(version)
+	}
+	ui.Invalidate()
+}
+
+func (state *State) Undo() {
+	state.changeHistory(false)
+}
+
+func (state *State) Redo() {
+	state.changeHistory(true)
+}
+
+func (state *State) StartRun(mode domain.RuntimeMode, preview bool) {
+	state.mu.Lock()
+	if !supportsRuntimeMode(state.host, mode) {
+		state.status = mode.String() + " is unavailable on " + state.host.Platform
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if !state.hasProject || state.activePath == "" || state.editor == nil {
+		state.status = "Open a source file to run"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if state.runCancel != nil {
+		state.runCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	state.runCancel = cancel
+	state.runGeneration++
+	generation := state.runGeneration
+	state.running = true
+	state.runMode = mode
+	state.status = "Building"
+	if preview {
+		state.previewState = domain.PreviewBuilding
+	}
+	project := state.current
+	path := state.activePath
+	overlays := make([]protocol.FileOverlay, 0, len(state.openPaths))
+	for _, openPath := range state.openPaths {
+		code := state.buffers[openPath]
+		if code == nil || !state.dirty[openPath] {
+			continue
+		}
+		text, version := code.Document.Snapshot()
+		overlays = append(overlays, protocol.FileOverlay{Path: openPath, Text: text, Version: version})
+	}
+	state.appendConsoleLocked(domain.ConsoleInfo, "runner", "Building " + path + " for " +
+		mode.String())
+	state.mu.Unlock()
+	ui.Invalidate()
+	go state.execute(ctx, generation, project, path, overlays, mode, preview)
+}
+
+func (state *State) failRun(generation uint64, source string, err error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if generation != state.runGeneration {
+		return
+	}
+	state.running = false
+	state.status = err.Error()
+	state.previewState = domain.PreviewFailed
+	state.runCancel = nil
+	state.appendConsoleLocked(domain.ConsoleError, source, err.Error())
+	ui.Invalidate()
+}
+
+func (state *State) execute(ctx context.Context, generation uint64, project domain.Project, path string, overlays []protocol.FileOverlay, mode domain.RuntimeMode, preview bool) {
+	artifact, err := state.services.Compiler.Compile(ctx, protocol.CompileRequest{
+		ProjectID: project.ID, Entry: path, Mode: mode, ForPreview: preview, Overlays: overlays,
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			state.failRun(generation, "compiler", err)
+		}
+		return
+	}
+	if preview {
+		surface, openErr := state.services.Preview.OpenPreview(ctx, artifact)
+		if openErr != nil {
+			if ctx.Err() == nil {
+				state.failRun(generation, "preview", openErr)
+			}
+			return
+		}
+		state.mu.Lock()
+		previousPreview := ""
+		acceptedPreview := false
+		if generation == state.runGeneration {
+			previousPreview = state.previewSurface
+			state.previewSurface = surface
+			state.previewState = domain.PreviewReady
+			acceptedPreview = true
+		}
+		state.mu.Unlock()
+		if !acceptedPreview {
+			_ = state.services.Preview.ClosePreview(context.Background(), surface)
+			return
+		}
+		if previousPreview != "" && previousPreview != surface {
+			_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
+		}
+		ui.Invalidate()
+	}
+	events, err := state.services.Runner.Run(ctx, protocol.RunRequest{
+		ProjectID: project.ID, Artifact: artifact, Mode: mode,
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			state.failRun(generation, "runner", err)
+		}
+		return
+	}
+	for event := range events {
+		state.mu.Lock()
+		if generation != state.runGeneration {
+			state.mu.Unlock()
+			return
+		}
+		level := domain.ConsoleInfo
+		if event.Kind == domain.RunStderr || event.Kind == domain.RunDiagnostic {
+			level = domain.ConsoleError
+		}
+		if event.Kind == domain.RunFinished && event.ExitCode == 0 {
+			level = domain.ConsoleSuccess
+		}
+		state.appendConsoleLocked(level, "run", event.Text)
+		if event.Kind == domain.RunFinished {
+			state.running = false
+			state.runCancel = nil
+			state.status = "Run finished"
+			state.appendConsoleLocked(domain.ConsoleInfo, "runner", fmt.Sprintf("Duration %v", event.Duration))
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}
+}
+
+func (state *State) StopRun() {
+	state.mu.Lock()
+	if state.runCancel != nil {
+		state.runCancel()
+		state.runCancel = nil
+	}
+	state.runGeneration++
+	state.running = false
+	state.status = "Stopped"
+	state.appendConsoleLocked(domain.ConsoleWarning, "runner", "Run cancelled")
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetActivity(activity Activity) {
+	state.mu.Lock()
+	state.activity = activity
+	state.mu.Unlock()
+	if activity != ActivityDocs {
+		ui.Navigate("/")
+	}
+	if activity == ActivitySourceControl {
+		state.RefreshRemote()
+	}
+	ui.Invalidate()
+}
+
+func (state *State) RefreshRemote() {
+	state.mu.Lock()
+	if !state.hasProject || state.remoteLoading {
+		state.mu.Unlock()
+		return
+	}
+	project := state.current
+	state.remoteLoading = true
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		remote, err := state.services.Remote.State(context.Background(), project.ID)
+		state.mu.Lock()
+		if state.current.ID != project.ID {
+			state.mu.Unlock()
+			return
+		}
+		state.remoteLoading = false
+		if err == nil {
+			state.remote = remote
+			state.remoteLoaded = true
+		}
+		state.mu.Unlock()
+		if err != nil {
+			state.log(domain.ConsoleError, "git", err.Error())
+		} else {
+			ui.Invalidate()
+		}
+	}()
+}
+
+func (state *State) SetCommitMessage(value string) {
+	state.mu.Lock()
+	state.commitMessage = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) PullRemote() {
+	state.startRemoteOperation("Pull", func(ctx context.Context, id domain.ProjectID, progress func(string)) error {
+		return state.services.Remote.Pull(ctx, id, progress)
+	})
+}
+
+func (state *State) PushRemote() {
+	state.mu.RLock()
+	message := state.commitMessage
+	state.mu.RUnlock()
+	state.startRemoteOperation("Commit & Push", func(ctx context.Context, id domain.ProjectID, progress func(string)) error {
+		return state.services.Remote.Push(ctx, id, message, progress)
+	})
+}
+
+func (state *State) startRemoteOperation(label string, action func(context.Context, domain.ProjectID, func(string)) error) {
+	state.mu.Lock()
+	if !state.hasProject || state.remoteBusy {
+		state.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	state.remoteBusy = true
+	state.remoteCancel = cancel
+	state.remoteGeneration++
+	generation := state.remoteGeneration
+	project := state.current
+	state.status = label + " in progress"
+	state.appendConsoleLocked(domain.ConsoleInfo, "git", label + " started")
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		progress := func(message string) {
+			state.mu.Lock()
+			if generation == state.remoteGeneration && state.current.ID == project.ID && ctx.Err() == nil {
+				state.status = label + ": " + message
+				state.appendConsoleLocked(domain.ConsoleInfo, "git", message)
+			}
+			state.mu.Unlock()
+			ui.Invalidate()
+		}
+		err := action(ctx, project.ID, progress)
+		state.mu.Lock()
+		if generation != state.remoteGeneration || state.current.ID != project.ID {
+			state.mu.Unlock()
+			return
+		}
+		state.remoteBusy = false
+		state.remoteCancel = nil
+		if err != nil {
+			state.status = label + " failed"
+			state.appendConsoleLocked(domain.ConsoleError, "git", err.Error())
+		} else {
+			state.status = label + " complete"
+			state.appendConsoleLocked(domain.ConsoleSuccess, "git", label + " complete")
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+		if err == nil {
+			state.RefreshRemote()
+		}
+	}()
+}
+
+func (state *State) CancelRemote() {
+	state.mu.Lock()
+	if state.remoteCancel != nil {
+		state.remoteCancel()
+		state.remoteCancel = nil
+	}
+	state.remoteGeneration++
+	state.remoteBusy = false
+	state.status = "Source control operation cancelled"
+	state.appendConsoleLocked(domain.ConsoleWarning, "git", "Operation cancelled")
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ShowRemoteDelete() {
+	state.mu.Lock()
+	if !state.hasProject || state.remote.DeleteTarget == "" || state.remoteBusy ||
+		state.remoteDeleteBusy {
+		state.mu.Unlock()
+		return
+	}
+	state.remoteDeleteVisible = true
+	state.remoteDeleteConfirmation = ""
+	state.status = "Confirm cloud repository deletion"
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetRemoteDeleteConfirmation(value string) {
+	state.mu.Lock()
+	state.remoteDeleteConfirmation = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideRemoteDelete() {
+	state.mu.Lock()
+	if !state.remoteDeleteBusy {
+		state.remoteDeleteVisible = false
+		state.remoteDeleteConfirmation = ""
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) DeleteRemote(deleteLocal bool) {
+	state.mu.Lock()
+	project := state.current
+	target := state.remote.DeleteTarget
+	confirmation := strings.TrimSpace(state.remoteDeleteConfirmation)
+	if !state.remoteDeleteVisible || state.remoteDeleteBusy || target == "" || confirmation != target {
+		state.mu.Unlock()
+		return
+	}
+	state.remoteDeleteBusy = true
+	state.status = "Deleting " + target
+	state.appendConsoleLocked(domain.ConsoleWarning, "github", "Deleting cloud repository " + target)
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		if err := state.services.Remote.DeleteRepository(context.Background(), project.ID, target); err !=
+			nil {
+			state.mu.Lock()
+			state.remoteDeleteBusy = false
+			state.status = "Cloud repository deletion failed"
+			state.appendConsoleLocked(domain.ConsoleError, "github", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
+			return
+		}
+		if deleteLocal {
+			var err error
+			if project.Managed {
+				err = state.services.Files.DeleteProject(context.Background(), project.ID)
+			} else {
+				err = state.services.Files.ForgetProject(context.Background(), project.ID)
+			}
+			if err != nil {
+				state.mu.Lock()
+				state.remoteDeleteBusy = false
+				state.remoteDeleteVisible = false
+				state.remoteDeleteConfirmation = ""
+				state.remote = domain.RemoteState{}
+				state.status = "Cloud deleted; local removal failed"
+				state.appendConsoleLocked(domain.ConsoleError, "project", err.Error())
+				state.mu.Unlock()
+				ui.Invalidate()
+				return
+			}
+			verb := "Deleted cloud repository and forgot "
+			if project.Managed {
+				verb = "Deleted cloud repository and local project "
+			}
+			state.completeProjectRemoval(project, verb)
+			return
+		}
+		state.mu.Lock()
+		if state.current.ID == project.ID {
+			state.remote = domain.RemoteState{}
+			state.remoteLoaded = true
+		}
+		state.remoteDeleteBusy = false
+		state.remoteDeleteVisible = false
+		state.remoteDeleteConfirmation = ""
+		state.status = "Deleted cloud repository " + target
+		state.appendConsoleLocked(domain.ConsoleSuccess, "github", "Deleted cloud repository " + target +
+			"; local files were kept")
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) OpenRemoteDiff(path string) {
+	state.mu.Lock()
+	if !state.hasProject || state.remoteDiffLoading {
+		state.mu.Unlock()
+		return
+	}
+	project := state.current
+	state.remoteDiffLoading = true
+	state.remoteDiff = domain.RemoteDiff{Path: path}
+	state.status = "Loading changes for " + path
+	state.mu.Unlock()
+	_ = state.layout.Activate("bottom", 3)
+	ui.Invalidate()
+	go func() {
+		diff, err := state.services.Remote.Diff(context.Background(), project.ID, path)
+		state.mu.Lock()
+		if state.current.ID != project.ID {
+			state.mu.Unlock()
+			return
+		}
+		state.remoteDiffLoading = false
+		if err != nil {
+			state.status = "Diff failed"
+			state.appendConsoleLocked(domain.ConsoleError, "git", err.Error())
+		} else {
+			state.remoteDiff = diff
+			state.status = "Changes · " + path
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func documentationPages() []domain.DocPage {
+	return documentation.Pages()
+}
+
+func documentationPage(id string) (domain.DocPage, bool) {
+	for _, page := range documentationPages() {
+		if page.ID == id {
+			return page, true
+		}
+	}
+	return domain.DocPage{}, false
+}
+
+func documentationMatches(page domain.DocPage, query string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	if normalized == "" {
+		return true
+	}
+	haystack := strings.ToLower(page.Title + " " + page.Section + " " + page.Summary + " " +
+		page.SourcePath +
+		" " +
+		page.Markdown)
+	for _, token := range strings.Fields(normalized) {
+		if !strings.Contains(haystack, token) {
+			return false
+		}
+	}
+	return true
+}
+
+func (state *State) SetDocQuery(value string) {
+	state.mu.Lock()
+	state.docQuery = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) expandDocPageLocked(id string) {
+	page, ok := documentationPage(id)
+	if ok {
+		state.docExpanded[page.SectionID] = true
+	}
+}
+
+func (state *State) ToggleDocSection(key string) {
+	if !strings.HasPrefix(key, "section/") {
+		return
+	}
+	id := strings.TrimPrefix(key, "section/")
+	state.mu.Lock()
+	state.docExpanded[id] = !state.docExpanded[id]
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SelectDocTreeItem(key string) {
+	if strings.HasPrefix(key, "page/") {
+		state.OpenDoc(strings.TrimPrefix(key, "page/"))
+	}
+}
+
+func (state *State) OpenDoc(id string) {
+	for _, page := range documentationPages() {
+		if page.ID == id {
+			state.mu.Lock()
+			state.docPageID = id
+			state.expandDocPageLocked(id)
+			state.docHeadingID = ""
+			state.activity = ActivityDocs
+			state.status = "Documentation · " + page.Title
+			state.mu.Unlock()
+			_ = state.layout.Activate("documents", 1)
+			ui.Navigate("/docs/" + id)
+			ui.Invalidate()
+			return
+		}
+	}
+}
+
+func (state *State) OpenDocHeading(pageID string, headingID string) {
+	if headingID == "" {
+		return
+	}
+	state.mu.Lock()
+	state.docPageID = pageID
+	state.expandDocPageLocked(pageID)
+	state.docHeadingID = headingID
+	state.docFocusToken++
+	state.activity = ActivityDocs
+	state.mu.Unlock()
+	ui.Navigate("/docs/" + pageID + "#" + headingID)
+	ui.Invalidate()
+}
+
+func (state *State) ShowDocs() {
+	state.mu.Lock()
+	state.activity = ActivityDocs
+	if state.docPageID == "" {
+		state.docPageID = "introduction"
+	}
+	id := state.docPageID
+	state.expandDocPageLocked(id)
+	state.status = "Documentation"
+	state.mu.Unlock()
+	_ = state.layout.Activate("documents", 1)
+	ui.Navigate("/docs/" + id)
+	ui.Invalidate()
+}
+
+func (state *State) ShowPreview() {
+	_ = state.layout.Activate("bottom", 1)
+	ui.Invalidate()
+}
+
+func (state *State) ShowFind() {
+	state.mu.Lock()
+	state.findVisible = true
+	state.status = "Find in file"
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideFind() {
+	state.mu.Lock()
+	state.findVisible = false
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetFindQuery(value string) {
+	state.mu.Lock()
+	state.findQuery = value
+	code := state.editor
+	state.mu.Unlock()
+	if code != nil {
+		_ = code.Document.SetSelection(document.Selection{})
+	}
+	state.FindNext()
+}
+
+func findRuneOffset(text string, query string, start int, forward bool) int {
+	runes := []rune(text)
+	if len(runes) == 0 || query == "" {
+		return -1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > len(runes) {
+		start = len(runes)
+	}
+	if forward {
+		tail := string(runes[start:])
+		byteIndex := strings.Index(tail, query)
+		if byteIndex >= 0 {
+			return start + len([]rune(tail[:byteIndex]))
+		}
+		byteIndex = strings.Index(text, query)
+		if byteIndex >= 0 {
+			return len([]rune(text[:byteIndex]))
+		}
+		return -1
+	}
+	head := string(runes[:start])
+	byteIndex := strings.LastIndex(head, query)
+	if byteIndex >= 0 {
+		return len([]rune(head[:byteIndex]))
+	}
+	byteIndex = strings.LastIndex(text, query)
+	if byteIndex >= 0 {
+		return len([]rune(text[:byteIndex]))
+	}
+	return -1
+}
+
+func (state *State) selectFind(forward bool) {
+	state.mu.RLock()
+	query := state.findQuery
+	code := state.editor
+	state.mu.RUnlock()
+	if code == nil || query == "" {
+		return
+	}
+	selection := code.Document.Selection()
+	start := selection.End()
+	if !forward {
+		start = selection.Start()
+	}
+	index := findRuneOffset(code.Document.Text(), query, start, forward)
+	state.mu.Lock()
+	if index < 0 {
+		state.status = "No matches for " + query
+	} else {
+		if err := code.Document.SetSelection(document.Selection{
+			Anchor: index, Focus: index + len([]rune(query)),
+		}); err != nil {
+			state.mu.Unlock()
+			state.ReportFailure("find", err)
+			return
+		}
+		state.status = "Found " + query
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) FindNext() {
+	state.selectFind(true)
+}
+
+func (state *State) FindPrevious() {
+	state.selectFind(false)
+}
+
+func (state *State) ShowCommandPalette() {
+	state.mu.Lock()
+	state.paletteVisible = true
+	state.paletteQuery = ""
+	state.paletteSelected = 0
+	state.paletteFocusToken++
+	state.status = "Command palette"
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideCommandPalette() {
+	state.mu.Lock()
+	state.paletteVisible = false
+	state.paletteQuery = ""
+	state.paletteSelected = 0
+	state.status = "Ready"
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetPaletteQuery(value string) {
+	state.mu.Lock()
+	state.paletteQuery = value
+	state.paletteSelected = 0
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) SetPaletteSelection(value int64) {
+	state.mu.Lock()
+	state.paletteSelected = value
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) Search(value string) {
+	state.mu.Lock()
+	state.searchQuery = value
+	if state.searchCancel != nil {
+		state.searchCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	state.searchCancel = cancel
+	state.searchGeneration++
+	generation := state.searchGeneration
+	project := state.current
+	files := append([]domain.FileEntry(nil), state.files...)
+	query := strings.ToLower(strings.TrimSpace(value))
+	if query == "" {
+		state.searchResults = nil
+		state.searchCancel = nil
+		state.mu.Unlock()
+		cancel()
+		ui.Invalidate()
+		return
+	}
+	state.mu.Unlock()
+	go func() {
+		results := make([]string, 0)
+		for _, file := range files {
+			if len(results) >= MaxSearchResults || ctx.Err() != nil {
+				break
+			}
+			if file.Kind == domain.Directory {
+				continue
+			}
+			text, err := state.services.Files.ReadFile(ctx, project.ID, file.Path)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(strings.ToLower(file.Path), query) ||
+				strings.Contains(strings.ToLower(text), query) {
+				results = append(results, file.Path)
+			}
+		}
+		state.mu.Lock()
+		if generation == state.searchGeneration && ctx.Err() == nil {
+			state.searchResults = results
+			state.searchCancel = nil
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) ActivityRail() ui.View {
+	state.mu.RLock()
+	selected := state.activity
+	state.mu.RUnlock()
+	home := design.ActivityButton(icons.Home, "Home", "Home", selected == ActivityHome, state.ShowHome)
+	explorer := design.ActivityButton(icons.Folder, "Explorer", "Files", selected == ActivityExplorer, func() {
+		state.SetActivity(ActivityExplorer)
+	})
+	search := design.ActivityButton(icons.Search, "Search", "Search", selected == ActivitySearch, func() {
+		state.SetActivity(ActivitySearch)
+	})
+	sourceControl := design.ActivityButton(icons.Branch, "Source Control", "Source", selected ==
+		ActivitySourceControl, func() {
+		state.SetActivity(ActivitySourceControl)
+	})
+	docs := design.ActivityButton(icons.Book, "Documentation", "Docs", selected == ActivityDocs, state.ShowDocs)
+	activities := ui.Gap(ui.Column(home, explorer, search, sourceControl, docs), design.Space2)
+	view := ui.Padding(ui.Column(activities, ui.Flex(ui.Box(), 1)), design.Space2)
+	view = ui.Width(view, 64)
+	view = ui.Background(view, design.Canvas)
+	view = ui.Role(view, "navigation")
+	return ui.AccessibleName(view, "Studio activities")
+}
+
+func (state *State) Home() ui.View {
+	state.mu.RLock()
+	projects := append([]domain.Project(nil), state.projects...)
+	current := state.current
+	host := state.host
+	opening := state.openingExample
+	projectSearchQuery := state.projectSearchQuery
+	state.mu.RUnlock()
+	viewportWidth := ui.CurrentEnvironment().ViewportWidth
+	newProject := design.PrimaryButton("New project", state.ToggleProjectCreator)
+	openCounter := design.QuietButton("Open UIKit starter", func() {
+		state.OpenExample("counter")
+	})
+	openConcurrency := design.QuietButton("Open goroutine lab", func() {
+		state.OpenExample("channels")
+	})
+	quickActions := ui.GridColumns(ui.Gap(ui.Grid(newProject, openCounter, openConcurrency, design.QuietButton("Read documentation", state.ShowDocs)), design.Space2), "repeat(2, minmax(0px, 1fr))")
+	quickStart := design.DashboardPanel("QUICK START", "Create and run", "Start from a focused project or an editable example.", quickActions)
+	platform := host.Platform
+	if platform == "" {
+		platform = "Initializing"
+	}
+	runtimeStatus := "VM"
+	if supportsRuntimeMode(host, domain.RuntimeJIT) {
+		runtimeStatus = "VM + JIT"
+	}
+	previewStatus := "Unavailable"
+	previewColor := design.TextMuted
+	if host.CanPreview {
+		previewStatus = "Ready"
+		previewColor = design.Success
+	}
+	environmentRows := ui.Gap(ui.Column(design.CapabilityRow("Host", platform, design.Accent), design.CapabilityRow("Development runtime", runtimeStatus, design.Warning), design.CapabilityRow("Live preview", previewStatus, previewColor), design.CapabilityRow("Release targets", "WebAssembly + native", design.Success)), design.Space3)
+	environment := design.DashboardPanel("ENVIRONMENT", "Toolchain ready", "The same typed application crosses development and release hosts.", environmentRows)
+	startColumns := "minmax(0px, 1fr) minmax(0px, 1fr)"
+	if viewportWidth < 900 {
+		startColumns = "minmax(0px, 1fr)"
+	}
+	startGrid := ui.GridColumns(ui.Gap(ui.Grid(quickStart, environment), design.Space3), startColumns)
+	pageHeading := design.SectionHeading("VOLANG STUDIO", "Start", "Build, inspect, and ship pure Volang applications from one workspace.", ui.Box())
+	uiExampleViews := make([]ui.View, 0)
+	languageExampleViews := make([]ui.View, 0)
+	for _, example := range studioexamples.Catalog() {
+		item := example
+		card := design.StarterCard(item.Monogram, item.Title, item.File, item.Description, item.Tags, item.HasUI, opening !=
+			"", func() {
+			state.OpenExample(item.ID)
+		})
+		if item.HasUI {
+			uiExampleViews = append(uiExampleViews, ui.Key(card, "starter-" + item.ID))
+		} else {
+			languageExampleViews = append(languageExampleViews, ui.Key(card, "starter-" + item.ID))
+		}
+	}
+	exampleColumns := "repeat(3, minmax(0px, 1fr))"
+	if viewportWidth < 1260 {
+		exampleColumns = "repeat(2, minmax(0px, 1fr))"
+	}
+	if viewportWidth < 860 {
+		exampleColumns = "repeat(1, minmax(0px, 1fr))"
+	}
+	uiExamplesGrid := ui.GridColumns(ui.Gap(ui.Grid(uiExampleViews...), design.Space3), exampleColumns)
+	languageExamplesGrid := ui.GridColumns(ui.Gap(ui.Grid(languageExampleViews...), design.Space3), exampleColumns)
+	projectViews := make([]ui.View, 0, len(projects))
+	normalizedProjectQuery := strings.ToLower(strings.TrimSpace(projectSearchQuery))
+	for _, project := range projects {
+		item := project
+		if normalizedProjectQuery != "" &&
+			!strings.Contains(strings.ToLower(item.Name), normalizedProjectQuery) {
+			continue
+		}
+		projectViews = append(projectViews, ui.Key(design.ProjectCard(item.Name, item.Root, item.ID ==
+			current.ID, item.Managed, func() {
+			state.SelectProject(item.ID)
+		}, func() {
+			state.BeginRenameProject(item)
+		}, func() {
+			state.BeginDeleteProject(item)
+		}), "home-project-" + string(item.ID)))
+	}
+	projectColumns := "repeat(2, minmax(0px, 1fr))"
+	if viewportWidth < 900 {
+		projectColumns = "repeat(1, minmax(0px, 1fr))"
+	}
+	projectContent := ui.GridColumns(ui.Gap(ui.Grid(projectViews...), design.Space3), projectColumns)
+	if len(projects) == 0 {
+		projectContent = design.EmptyState("No projects yet", "Open a starter or create a blank UIKit project.", design.PrimaryButton("Create project", state.ToggleProjectCreator))
+	} else if len(projectViews) == 0 {
+		projectContent = design.EmptyState("No matching projects", "Try a shorter project name.", ui.Box())
+	}
+	projectSearch := ui.AccessibleName(ui.TextInput(projectSearchQuery, "Search projects", ui.TextChange(state.SetProjectSearchQuery)), "Search projects")
+	projectActions := ui.Width(projectSearch, 260)
+	projectHeading := design.SectionHeading("RECENT", "Your projects", "Persistent projects and local workspaces available on this device.", projectActions)
+	uiHeading := design.SectionHeading("STARTERS", "UIKit applications", "Open, edit, run, and preview complete cross-platform examples.", ui.Box())
+	languageHeading := design.SectionHeading("LANGUAGE LAB", "Learn by running", "Focused projects for goroutines, channels, errors, types, files, text, and time.", ui.Box())
+	content := ui.Gap(ui.Column(pageHeading, startGrid, uiHeading, uiExamplesGrid, projectHeading, projectContent, languageHeading, languageExamplesGrid), design.Space5)
+	content = ui.Flex(ui.MaxWidth(content, 1280), 1)
+	content = ui.Justify(ui.Row(content), ui.JustifyCenter)
+	return ui.Scroll(ui.Padding(content, design.Space6))
+}
+
+func (state *State) ProjectRenameDialog() ui.View {
+	state.mu.RLock()
+	visible := state.renameProjectVisible
+	name := state.renameProjectName
+	busy := state.projectMutationBusy
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	input := ui.AccessibleName(ui.TextInput(name, "project-name", ui.TextChange(state.SetRenameProjectName)), "Renamed project name")
+	confirm := ui.Disabled(design.PrimaryButton("Rename project", state.RenameProject), busy ||
+		strings.TrimSpace(name) == "")
+	content := ui.Gap(ui.Column(design.Muted("Choose a filesystem-safe project name."), input, confirm), design.Space3)
+	return design.ModalDialog("Rename project", true, content, state.HideRenameProject)
+}
+
+func (state *State) ProjectDeleteDialog() ui.View {
+	state.mu.RLock()
+	visible := state.deleteProjectVisible
+	project := state.deleteProject
+	busy := state.projectMutationBusy
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	title := "Forget project"
+	message := "Remove “" + project.Name +
+		"” from Studio while keeping every file in its external folder?"
+	warning := "The project can be opened again later."
+	buttonLabel := "Forget project"
+	if project.Managed {
+		title = "Delete project"
+		message = "Delete “" + project.Name + "” and every file in its managed workspace?"
+		warning = "This operation cannot be undone."
+		buttonLabel = "Delete project permanently"
+	}
+	confirm := ui.Disabled(design.PrimaryButton(buttonLabel, state.ConfirmDeleteProject), busy)
+	content := ui.Gap(ui.Column(ui.Foreground(ui.Text(message), design.TextSecondary), ui.Foreground(ui.Text(warning), design.Danger), confirm), design.Space3)
+	return design.ModalDialog(title, true, content, state.HideDeleteProject)
+}
+
+func (state *State) RemoteDeleteDialog() ui.View {
+	state.mu.RLock()
+	visible := state.remoteDeleteVisible
+	target := state.remote.DeleteTarget
+	confirmation := state.remoteDeleteConfirmation
+	busy := state.remoteDeleteBusy
+	managed := state.current.Managed
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	detail := "Type “" + target +
+		"” to confirm. This permanently deletes the GitHub repository and removes the local origin remote."
+	input := ui.AccessibleName(ui.TextInput(confirmation, target, ui.TextChange(state.SetRemoteDeleteConfirmation)), "Repository deletion confirmation")
+	disabled := busy || strings.TrimSpace(confirmation) != target
+	cloudOnly := ui.Disabled(design.DangerButton("Delete cloud repository", func() {
+		state.DeleteRemote(false)
+	}), disabled)
+	combinedLabel := "Delete cloud & forget project"
+	if managed {
+		combinedLabel = "Delete cloud & local project"
+	}
+	combined := ui.Disabled(design.DangerButton(combinedLabel, func() {
+		state.DeleteRemote(true)
+	}), disabled)
+	actions := ui.Gap(ui.Column(cloudOnly, combined), design.Space2)
+	if busy {
+		actions = design.Muted("Deletion in progress…")
+	}
+	content := ui.Gap(ui.Column(kit.Alert("Permanent operation", detail, kit.IntentDanger, true), input, actions), design.Space3)
+	return design.ModalDialog("Delete GitHub repository", true, content, state.HideRemoteDelete)
+}
+
+func (state *State) ProjectShareDialog() ui.View {
+	state.mu.RLock()
+	visible := state.shareVisible
+	loading := state.shareLoading
+	result := state.share
+	mode := preferredRuntimeMode(state.host)
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	if loading {
+		return design.ModalDialog("Share project", true, design.EmptyState("Creating links", "Studio is packaging the saved source snapshot.", ui.Box()), state.HideShareProject)
+	}
+	if !result.Shareable {
+		action := ui.Box()
+		if result.DevelopmentLink != "" {
+			action = design.QuietButton("Copy repository link", func() {
+				state.copyProjectLink(result.DevelopmentLink, "Repository link")
+			})
+		}
+		message := result.Reason
+		if message == "" {
+			message = "This project does not have a portable sharing target."
+		}
+		return design.ModalDialog("Share project", true, design.EmptyState("Portable link unavailable", message, action), state.HideShareProject)
+	}
+	linkView := func(label string, value string, copyLabel string) ui.View {
+		caption := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(label), design.TextSecondary), 650), 11)
+		displayValue := value
+		if marker := strings.Index(value, "#share="); marker >= 0 {
+			displayValue = value[:marker] + "#share=<portable-snapshot>"
+		}
+		address := ui.Padding(ui.Background(ui.Foreground(ui.Text(displayValue), design.TextSecondary), design.SurfaceSunken), design.Space3)
+		address = ui.Radius(address, 8)
+		return ui.Gap(ui.Column(caption, address, design.QuietButton("Copy " + copyLabel, func() {
+			state.copyProjectLink(value, label)
+		})), design.Space2)
+	}
+	development := linkView("Studio link", result.DevelopmentLink, "Studio link")
+	runner := linkView("Runner link", result.RunnerLink, "Runner link")
+	openRunner := ui.AccessibleName(design.PrimaryButton("Open Runner", func() {
+		state.StartRun(mode, true)
+		target := result.RunnerLink
+		if marker := strings.Index(target, "/runner"); marker >= 0 {
+			target = target[marker:]
+		}
+		ui.Navigate(target)
+		state.mu.Lock()
+		state.shareVisible = false
+		state.mu.Unlock()
+		ui.Invalidate()
+	}), "Open shared project Runner")
+	actions := ui.Row(openRunner)
+	content := ui.Gap(ui.Column(design.Muted("Both links contain an immutable saved source snapshot. The Runner opens without editor chrome."), development, runner, actions), design.Space4)
+	return design.ModalDialog("Share project", true, content, state.HideShareProject)
+}
+
+func (state *State) AccountDialog() ui.View {
+	state.mu.RLock()
+	visible := state.accountVisible
+	loading := state.accountLoading
+	account := state.account
+	platform := state.host.Platform
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	if loading {
+		return design.ModalDialog("GitHub account", true, design.EmptyState("Connecting account", "The platform host is completing the account request.", design.Badge("working", design.Accent)), state.HideAccount)
+	}
+	if account.Connected {
+		name := account.Name
+		if name == "" {
+			name = account.Login
+		}
+		detail := "@" + account.Login + " · credentials remain in the platform host"
+		content := ui.Gap(ui.Column(design.SectionHeading("GITHUB", name, detail, design.Badge("connected", design.Success)), design.Muted("Disconnecting Studio leaves GitHub CLI or the provider account itself unchanged."), design.QuietButton("Disconnect account", state.DisconnectAccount)), design.Space4)
+		return design.ModalDialog("GitHub account", true, content, state.HideAccount)
+	}
+	description := "Native Studio connects through the authenticated GitHub CLI and receives display-only identity data."
+	if platform == "web" {
+		description = "The browser host requests a token in its own prompt, verifies it with GitHub, and keeps it only for this page session."
+	}
+	content := ui.Gap(ui.Column(design.Muted(description), ui.AccessibleName(design.PrimaryButton("Connect GitHub", state.ConnectAccount), "Connect GitHub account")), design.Space4)
+	return design.ModalDialog("GitHub account", true, content, state.HideAccount)
+}
+
+func (state *State) NewFileDialog() ui.View {
+	state.mu.RLock()
+	visible := state.newFileVisible
+	path := state.newFilePath
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	input := ui.AccessibleName(ui.TextInput(path, "path/to/file.vo", ui.TextChange(state.SetNewFilePath)), "New file path")
+	create := ui.Disabled(design.PrimaryButton("Create file", state.CreateFile), strings.TrimSpace(path) ==
+		"")
+	content := ui.Gap(ui.Column(design.Muted("Use a path relative to the current project."), input, create), design.Space3)
+	return design.ModalDialog("New file", true, content, state.HideNewFileDialog)
+}
+
+func (state *State) RenameFileDialog() ui.View {
+	state.mu.RLock()
+	visible := state.renameFileVisible
+	from := state.activePath
+	path := state.renamePath
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	input := ui.AccessibleName(ui.TextInput(path, "new/path.vo", ui.TextChange(state.SetRenamePath)), "Rename active file")
+	rename := ui.Disabled(design.PrimaryButton("Rename file", state.RenameActiveFile), strings.TrimSpace(path) ==
+		"" ||
+		path == from)
+	content := ui.Gap(ui.Column(design.Muted("Rename " + from + " inside the current project."), input, rename), design.Space3)
+	return design.ModalDialog("Rename file", true, content, state.HideRenameFileDialog)
+}
+
+func fileGlyph(kind domain.FileKind) string {
+	if kind == domain.Directory {
+		return "▸ "
+	}
+	if kind == domain.ModuleFile {
+		return "◇ "
+	}
+	if kind == domain.DocumentationFile {
+		return "≡ "
+	}
+	if kind == domain.SourceFile {
+		return "V "
+	}
+	return "· "
+}
+
+func (state *State) Explorer() ui.View {
+	state.mu.RLock()
+	projects := append([]domain.Project(nil), state.projects...)
+	current := state.current
+	files := append([]domain.FileEntry(nil), state.files...)
+	active := state.activePath
+	projectCreatorVisible := state.projectCreatorVisible
+	newProjectName := state.newProjectName
+	canOpenLocal := state.host.CanOpenLocal
+	dirty := make(map[string]bool)
+	for path, value := range state.dirty {
+		dirty[path] = value
+	}
+	state.mu.RUnlock()
+	projectViews := make([]ui.View, 0, len(projects))
+	for _, project := range projects {
+		item := project
+		label := item.Name
+		if item.ID == current.ID {
+			label = "● " + label
+		}
+		projectButton := design.SidebarItem(label, item.ID == current.ID, func() {
+			state.SelectProject(item.ID)
+		})
+		projectButton = ui.AccessibleName(projectButton, "Open project " + item.Name)
+		projectViews = append(projectViews, ui.Key(projectButton, string(item.ID)))
+	}
+	projectCreator := ui.Box()
+	if projectCreatorVisible {
+		name := ui.TextInput(newProjectName, "project-name", ui.TextChange(state.SetNewProjectName))
+		name = ui.AccessibleName(name, "New project name")
+		projectCreator = ui.Padding(ui.Row(ui.Flex(name, 1), design.PrimaryButton("Create project", state.CreateProject)), design.Space2)
+	}
+	fileViews := make([]ui.View, 0, len(files))
+	for _, file := range files {
+		item := file
+		label := fileGlyph(item.Kind) + item.Name
+		if dirty[item.Path] {
+			label += "  ●"
+		}
+		button := design.SidebarItem(label, item.Path == active, func() {
+			if item.Kind != domain.Directory {
+				state.OpenFile(item.Path)
+			}
+		})
+		button = ui.Selected(button, item.Path == active)
+		button = ui.AccessibleName(button, "Open " + item.Path)
+		fileViews = append(fileViews, ui.Key(button, item.Path))
+	}
+	newFileButton := ui.AccessibleName(design.PrimaryButton("New", state.ShowNewFileDialog), "New file")
+	secondaryActions := ui.Gap(ui.Row(design.QuietButton("Rename", state.ShowRenameFileDialog), design.QuietButton("Delete", state.DeleteActiveFile)), design.Space2)
+	fileActions := ui.Gap(ui.Column(newFileButton, secondaryActions), design.Space2)
+	fileActions = ui.Padding(fileActions, design.Space3)
+	newProjectButton := ui.AccessibleName(design.QuietButton("New", state.ToggleProjectCreator), "New project")
+	projectActions := ui.Row(newProjectButton)
+	if canOpenLocal {
+		projectActions = ui.Row(design.QuietButton("Open", state.OpenLocalProject), newProjectButton)
+	}
+	refresh := ui.AccessibleName(design.QuietButton("Refresh", func() {
+		state.SelectProject(current.ID)
+	}), "Refresh project")
+	content := ui.Column(design.PanelHeader("PROJECTS", projectActions), projectCreator, ui.Column(projectViews...), design.PanelHeader(strings.ToUpper(current.Name), refresh), ui.Flex(ui.Scroll(ui.Column(fileViews...)), 1), fileActions)
+	content = ui.Gap(content, design.Space1)
+	return design.Panel(content)
+}
+
+func (state *State) SearchPanel() ui.View {
+	state.mu.RLock()
+	query := state.searchQuery
+	results := append([]string(nil), state.searchResults...)
+	state.mu.RUnlock()
+	input := ui.TextInput(query, "Search files and source", ui.TextChange(state.Search))
+	input = ui.AccessibleName(input, "Search workspace")
+	views := []ui.View{design.PanelHeader("SEARCH", ui.Box()), ui.Padding(input, design.Space2)}
+	for _, path := range results {
+		current := path
+		views = append(views, design.QuietButton(current, func() {
+			state.OpenFile(current)
+		}))
+	}
+	if query != "" && len(results) == 0 {
+		views = append(views, design.Muted("No matches"))
+	}
+	return design.Panel(ui.Column(views...))
+}
+
+func (state *State) SourceControlPanel() ui.View {
+	state.mu.RLock()
+	canSync := state.host.CanSyncRemote
+	remote := state.remote
+	loaded := state.remoteLoaded
+	loading := state.remoteLoading
+	busy := state.remoteBusy
+	selectedDiffPath := state.remoteDiff.Path
+	message := state.commitMessage
+	account := state.account
+	state.mu.RUnlock()
+	accountLabel := "Account"
+	if account.Connected {
+		accountLabel = "@" + account.Login
+	}
+	accountAction := ui.AccessibleName(design.QuietButton(accountLabel, state.ShowAccount), "GitHub account")
+	if !canSync {
+		return design.Panel(ui.Column(design.PanelHeader("SOURCE CONTROL", accountAction), design.EmptyState("Local browser workspace", "Connect a GitHub account for provider identity. Repository synchronization becomes available when a remote workspace provider is configured.", design.QuietButton("Open account", state.ShowAccount))))
+	}
+	refreshLabel := "Refresh"
+	if loading {
+		refreshLabel = "Refreshing…"
+	}
+	refresh := ui.Disabled(design.QuietButton(refreshLabel, state.RefreshRemote), loading || busy)
+	header := design.PanelHeader("SOURCE CONTROL", ui.Gap(ui.Row(accountAction, refresh), design.Space2))
+	if !loaded {
+		return design.Panel(ui.Column(header, design.EmptyState("Repository status", "Connect or initialize Git in this project to synchronize changes.", design.QuietButton("Refresh", state.RefreshRemote))))
+	}
+	if remote.Repository == "" && remote.Branch == "" {
+		return design.Panel(ui.Column(header, design.EmptyState("No Git repository", "Initialize Git and configure a remote in this project to enable synchronization and diffs.", design.QuietButton("Refresh", state.RefreshRemote))))
+	}
+	summary := remote.Branch + " · " + remote.Provider
+	if remote.Dirty {
+		summary += " · changes"
+	}
+	if remote.Ahead > 0 || remote.Behind > 0 {
+		summary += " · ↑" + strconv.Itoa(remote.Ahead) + " ↓" + strconv.Itoa(remote.Behind)
+	}
+	if remote.Diverged {
+		summary += " · diverged"
+	}
+	input := ui.TextInput(message, "Commit message", ui.TextChange(state.SetCommitMessage))
+	input = ui.AccessibleName(input, "Git commit message")
+	changeViews := make([]ui.View, 0, len(remote.Changes))
+	for _, change := range remote.Changes {
+		item := change
+		label := strings.ToUpper(item.Status) + "  " + item.Path
+		if item.Staged {
+			label += "  · staged"
+		}
+		button := design.SidebarItem(label, selectedDiffPath == item.Path, func() {
+			state.OpenRemoteDiff(item.Path)
+		})
+		button = ui.AccessibleName(button, "Open changes for " + item.Path)
+		changeViews = append(changeViews, ui.Key(button, "remote-change-" + item.Path))
+	}
+	changes := ui.Column(changeViews...)
+	if len(changeViews) == 0 {
+		changes = ui.Column(design.Muted("Working tree clean"))
+	}
+	warning := ui.Box()
+	if remote.Conflicts > 0 {
+		warning = kit.Alert("Resolve conflicts", strconv.Itoa(remote.Conflicts) +
+			" files require resolution before pull or push.", kit.IntentDanger, false)
+	} else if remote.Diverged {
+		warning = kit.Alert("Branches diverged", "Inspect local changes, then pull or reconcile before pushing.", kit.IntentWarning, false)
+	}
+	actions := ui.Row(ui.Disabled(design.QuietButton("Pull", state.PullRemote), busy ||
+		remote.Conflicts > 0), ui.Disabled(design.PrimaryButton("Commit & Push", state.PushRemote), busy ||
+		remote.Conflicts > 0 ||
+		strings.TrimSpace(message) == ""))
+	if busy {
+		actions = ui.Row(design.QuietButton("Cancel operation", state.CancelRemote))
+	}
+	repositoryActions := ui.Box()
+	if remote.DeleteTarget != "" {
+		repositoryActions = ui.AccessibleName(design.QuietButton("Repository settings", state.ShowRemoteDelete), "Open destructive repository settings for " +
+			remote.DeleteTarget)
+	}
+	content := ui.Column(header, ui.Padding(ui.Column(ui.Text(summary), design.Muted(remote.Repository), repositoryActions), design.Space3), ui.Padding(warning, design.Space3), design.PanelHeader("CHANGES", design.Badge(strconv.Itoa(len(remote.Changes)), design.TextSecondary)), ui.Flex(ui.Scroll(ui.Padding(changes, design.Space2)), 1), ui.Padding(input, design.Space3), ui.Padding(actions, design.Space3))
+	return design.Panel(content)
+}
+
+func (state *State) DocsNavigation() ui.View {
+	state.mu.RLock()
+	query := state.docQuery
+	selected := state.docPageID
+	expanded := make(map[string]bool)
+	for id, value := range state.docExpanded {
+		expanded[id] = value
+	}
+	state.mu.RUnlock()
+	input := ui.TextInput(query, "Search documentation", ui.TextChange(state.SetDocQuery))
+	input = ui.AccessibleName(input, "Search documentation")
+	pages := documentationPages()
+	items := make([]kit.TreeItem, 0, len(pages) + len(documentation.Sections()))
+	matchingPages := 0
+	searching := strings.TrimSpace(query) != ""
+	for _, section := range documentation.Sections() {
+		sectionPages := make([]domain.DocPage, 0)
+		for _, page := range pages {
+			if page.SectionID == section.ID && documentationMatches(page, query) {
+				sectionPages = append(sectionPages, page)
+			}
+		}
+		if len(sectionPages) == 0 {
+			continue
+		}
+		matchingPages += len(sectionPages)
+		sectionExpanded := searching || expanded[section.ID]
+		items = append(items, kit.TreeItem{
+			Key: "section/" + section.ID,
+			Label: section.Title + " (" + strconv.Itoa(len(sectionPages)) + ")", Depth: 0, HasChildren: true,
+			Expanded: sectionExpanded,
+		})
+		if sectionExpanded {
+			for _, page := range sectionPages {
+				items = append(items, kit.TreeItem{
+					Key: "page/" + page.ID, Label: page.Title, Depth: 1, Selected: page.ID == selected,
+				})
+			}
+		}
+	}
+	badge := strconv.Itoa(documentation.PageCount()) + " pages"
+	tree := kit.ThemedTree(design.StudioTheme(), "Volang documentation", items, state.ToggleDocSection, state.SelectDocTreeItem)
+	content := ui.Column(design.PanelHeader("VOLANG DOCUMENTATION", design.Badge(badge, design.Accent)), ui.Padding(input, design.Space2), ui.Flex(ui.Scroll(tree), 1))
+	if matchingPages == 0 {
+		content = ui.Column(design.PanelHeader("VOLANG DOCUMENTATION", design.Badge(badge, design.Accent)), ui.Padding(input, design.Space2), design.EmptyState("No documentation found", "Try language, errors, goroutines, modules, CLI, AOT, components, or testing.", ui.Box()))
+	}
+	return design.Panel(content)
+}
+
+func (state *State) SidePanel() ui.View {
+	state.mu.RLock()
+	activity := state.activity
+	state.mu.RUnlock()
+	if activity == ActivitySearch {
+		return state.SearchPanel()
+	}
+	if activity == ActivitySourceControl {
+		return state.SourceControlPanel()
+	}
+	if activity == ActivityDocs {
+		return state.DocsNavigation()
+	}
+	return state.Explorer()
+}
+
+func shortPath(path string) string {
+	index := strings.LastIndex(path, "/")
+	if index >= 0 && index + 1 < len(path) {
+		return path[index + 1:]
+	}
+	return path
+}
+
+func (state *State) DocumentTabs() ui.View {
+	state.mu.RLock()
+	paths := append([]string(nil), state.openPaths...)
+	active := state.activePath
+	dirty := make(map[string]bool)
+	for path, value := range state.dirty {
+		dirty[path] = value
+	}
+	state.mu.RUnlock()
+	tabs := make([]ui.View, 0, len(paths))
+	for _, path := range paths {
+		current := path
+		label := shortPath(current)
+		if dirty[current] {
+			label += "  ●"
+		}
+		tab := design.DocumentTab(label, current, current == active, func() {
+			state.OpenFile(current)
+		}, func() {
+			state.CloseFile(current)
+		})
+		tabs = append(tabs, ui.Key(tab, "document-tab-" + current))
+	}
+	bar := ui.Row(tabs...)
+	bar = ui.Role(bar, "tablist")
+	bar = ui.AccessibleName(bar, "Open editors")
+	bar = ui.Background(bar, design.Canvas)
+	return ui.Scroll(bar)
+}
+
+func (state *State) EditorPanel() ui.View {
+	state.mu.RLock()
+	code := state.editor
+	path := state.activePath
+	state.mu.RUnlock()
+	if code == nil {
+		return design.EmptyState("Open a project", "Choose a project and source file to begin.", design.PrimaryButton("Create project", state.CreateProject))
+	}
+	options := editor.DefaultOptions()
+	options.Width = 0
+	options.Height = 0
+	options.AccessibleName = "Editor for " + path
+	options.OnChange = state.DocumentChanged
+	return design.Panel(ui.Column(state.DocumentTabs(), ui.Flex(editor.View(code, options), 1)))
+}
+
+func (state *State) FindBar() ui.View {
+	state.mu.RLock()
+	findVisible := state.findVisible
+	findQuery := state.findQuery
+	state.mu.RUnlock()
+	input := ui.TextInput(findQuery, "Find in active file", ui.TextChange(state.SetFindQuery))
+	input = ui.AccessibleName(input, "Find in active file")
+	findBar := ui.Padding(ui.Row(ui.Flex(input, 1), design.QuietButton("Previous", state.FindPrevious), design.QuietButton("Next", state.FindNext), design.QuietButton("Close", state.HideFind)), design.Space2)
+	findBar = ui.Background(findBar, design.SurfaceRaised)
+	findBar = ui.Hidden(findBar, !findVisible)
+	return findBar
+}
+
+func (state *State) ConsolePanel() ui.View {
+	state.mu.RLock()
+	entries := append([]domain.ConsoleEntry(nil), state.console...)
+	running := state.running
+	state.mu.RUnlock()
+	lines := make([]ui.View, 0, len(entries))
+	for _, entry := range entries {
+		color := design.TextSecondary
+		if entry.Level == domain.ConsoleError {
+			color = design.Danger
+		} else if entry.Level == domain.ConsoleSuccess {
+			color = design.Success
+		} else if entry.Level == domain.ConsoleWarning {
+			color = design.Warning
+		}
+		line := ui.Foreground(ui.Text("[" + entry.Source + "] " + entry.Text), color)
+		line = ui.Key(line, "log-" + strconv.FormatUint(entry.Sequence, 10))
+		lines = append(lines, line)
+	}
+	action := design.QuietButton("Clear", func() {
+		state.mu.Lock()
+		state.console = nil
+		state.mu.Unlock()
+		ui.Invalidate()
+	})
+	if running {
+		action = design.QuietButton("Stop", state.StopRun)
+	}
+	log := ui.Role(ui.Scroll(ui.Column(lines...)), "log")
+	log = ui.AccessibleName(log, "Studio console")
+	return design.Panel(ui.Column(design.PanelHeader("CONSOLE", action), ui.Padding(ui.Flex(log, 1), design.Space2)))
+}
+
+func (state *State) ProblemsPanel() ui.View {
+	state.mu.RLock()
+	paths := append([]string(nil), state.openPaths...)
+	byPath := make(map[string][]domain.Diagnostic)
+	for path, values := range state.diagnosticsByPath {
+		byPath[path] = append([]domain.Diagnostic(nil), values...)
+	}
+	state.mu.RUnlock()
+	values := make([]domain.Diagnostic, 0)
+	for _, path := range paths {
+		for _, value := range byPath[path] {
+			item := value
+			if item.Path == "" {
+				item.Path = path
+			}
+			values = append(values, item)
+		}
+	}
+	views := []ui.View{
+		design.PanelHeader("PROBLEMS", design.Badge(strconv.Itoa(len(values)), design.TextSecondary)),
+	}
+	for index, value := range values {
+		current := value
+		color := design.TextSecondary
+		if value.Severity == domain.DiagnosticError {
+			color = design.Danger
+		} else if value.Severity == domain.DiagnosticWarning {
+			color = design.Warning
+		}
+		message := design.NavigationButton(value.Message, false, func() {
+			state.OpenFile(current.Path)
+		})
+		message = ui.Foreground(message, color)
+		item := ui.Column(message, design.Muted(value.Path + ":" + strconv.Itoa(value.Line) + ":" +
+			strconv.Itoa(value.Column) +
+			" · " +
+			value.Code))
+		views = append(views, ui.Key(ui.Padding(item, design.Space2), "problem-" + strconv.Itoa(index)))
+	}
+	if len(values) == 0 {
+		views = append(views, design.EmptyState("No problems", "The latest analysis completed cleanly.", ui.Box()))
+	}
+	return design.Panel(ui.Column(views...))
+}
+
+func (state *State) RemoteDiffPanel() ui.View {
+	state.mu.RLock()
+	diff := state.remoteDiff
+	loading := state.remoteDiffLoading
+	state.mu.RUnlock()
+	if loading {
+		return design.EmptyState("Loading changes", "Studio is reading the repository diff for " +
+			diff.Path +
+			".", design.Badge("working", design.Accent))
+	}
+	if diff.Path == "" {
+		return design.EmptyState("No change selected", "Choose a changed file in Source Control to inspect its unified diff.", ui.Box())
+	}
+	lines := strings.Split(diff.Unified, "\n")
+	views := make([]ui.View, 0, len(lines))
+	for index, line := range lines {
+		color := design.TextSecondary
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			color = design.Success
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			color = design.Danger
+		} else if strings.HasPrefix(line, "@@") {
+			color = design.Accent
+		}
+		view := ui.FontSize(ui.Foreground(ui.Text(line), color), 12)
+		views = append(views, ui.Key(view, "diff-line-" + strconv.Itoa(index)))
+	}
+	badge := design.Badge("working tree", design.Accent)
+	if diff.Truncated {
+		badge = design.Badge("truncated", design.Warning)
+	}
+	header := design.PanelHeader(strings.ToUpper(diff.Path), badge)
+	log := ui.AccessibleName(ui.Role(ui.Scroll(ui.Gap(ui.Column(views...), design.Space1)), "log"), "Changes for " +
+		diff.Path)
+	return design.Panel(ui.Column(header, ui.Padding(ui.Flex(log, 1), design.Space3)))
+}
+
+func (state *State) PreviewPanel() ui.View {
+	state.mu.RLock()
+	status := state.previewState
+	surface := state.previewSurface
+	mode := preferredRuntimeMode(state.host)
+	state.mu.RUnlock()
+	if status == domain.PreviewBuilding {
+		return design.EmptyState("Building preview", "The active UI entry is compiling.", design.Badge("working", design.Accent))
+	}
+	if status == domain.PreviewFailed {
+		return design.EmptyState("Preview failed", "See Problems and Console for details.", design.PrimaryButton("Try again", func() {
+			state.StartRun(mode, true)
+		}))
+	}
+	if status != domain.PreviewReady || surface == "" {
+		return design.EmptyState("No preview yet", "Run the current UI entry in an isolated child session.", design.PrimaryButton("Open preview", func() {
+			state.StartRun(mode, true)
+		}))
+	}
+	if strings.HasPrefix(surface, "native-window://") {
+		return design.EmptyState("Preview window is open", "The native preview runs in an isolated desktop window and closes when it is replaced or the project changes.", design.PrimaryButton("Reload preview", func() {
+			state.StartRun(mode, true)
+		}))
+	}
+	view := ui.PlatformView("volang-studio-preview/v1", surface, "Embedded Volang application preview")
+	view = ui.MinWidth(view, 320)
+	view = ui.MinHeight(view, 220)
+	view = ui.Flex(view, 1)
+	view = ui.Background(view, design.Canvas)
+	return design.Panel(ui.Column(design.PanelHeader("PREVIEW", design.QuietButton("Reload", func() {
+		state.StartRun(mode, true)
+	})), view, ui.Padding(design.Muted(surface), design.Space2)))
+}
+
+func (state *State) ReturnToStudio() {
+	state.mu.Lock()
+	state.activity = ActivityExplorer
+	state.status = "Workspace ready"
+	state.mu.Unlock()
+	ui.Navigate("/")
+	ui.Invalidate()
+}
+
+// RunnerView is the chromeless project surface used by portable Runner links.
+// It owns compile progress, recovery, stop/reload, and the route back into the
+// full workspace while reusing the same compiler and preview services.
+func (state *State) RunnerView() ui.View {
+	state.mu.RLock()
+	project := state.current
+	hasProject := state.hasProject
+	running := state.running
+	status := state.status
+	mode := preferredRuntimeMode(state.host)
+	state.mu.RUnlock()
+	name := "Shared Volang application"
+	if hasProject {
+		name = project.Name
+	}
+	statusColor := design.Success
+	if running {
+		statusColor = design.Warning
+	}
+	action := design.PrimaryButton("Reload", func() {
+		state.StartRun(mode, true)
+	})
+	if running {
+		action = design.QuietButton("Stop", state.StopRun)
+	}
+	returnButton := ui.AccessibleName(design.QuietButton("Edit in Studio", state.ReturnToStudio), "Return to Studio workspace")
+	header := ui.Align(ui.Gap(ui.Row(design.BrandLockup(), ui.Width(ui.Height(ui.Background(ui.Box(), design.DividerStrong), 24), 1), ui.Column(ui.FontWeight(ui.Text(name), 700), design.Muted("Portable Runner")), ui.Flex(ui.Box(), 1), design.StatusPill(status, statusColor), returnButton, action), design.Space3), ui.AlignCenter)
+	header = design.TopBar(header)
+	preview := ui.Flex(state.PreviewPanel(), 1)
+	if !hasProject {
+		preview = ui.Flex(design.EmptyState("Loading project", "Studio is restoring the shared source snapshot.", design.Badge("loading", design.Accent)), 1)
+	}
+	content := design.AppSurface(ui.Column(header, preview))
+	content = ui.MinWidth(content, 360)
+	content = ui.MinHeight(content, 320)
+	viewportHeight := ui.CurrentEnvironment().ViewportHeight
+	if viewportHeight > 0 {
+		content = ui.Height(content, viewportHeight)
+	}
+	return content
+}
+
+type documentationHeading struct {
+	ID string
+	Title string
+	Level int
+	BlockIndex int
+}
+
+func documentationHeadingSlug(title string, fallback int) string {
+	slug := ""
+	separator := false
+	for _, character := range strings.ToLower(title) {
+		letter := character >= 'a' && character <= 'z'
+		digit := character >= '0' && character <= '9'
+		if letter || digit {
+			if separator && slug != "" {
+				slug += "-"
+			}
+			slug += string(character)
+			separator = false
+		} else {
+			separator = true
+		}
+	}
+	if slug == "" {
+		return "section-" + strconv.Itoa(fallback)
+	}
+	return slug
+}
+
+func documentationHeadings(blocks []document.Block) []documentationHeading {
+	headings := make([]documentationHeading, 0)
+	seen := make(map[string]int)
+	for index, block := range blocks {
+		if block.Kind == document.Heading && (block.Level == 2 || block.Level == 3) {
+			id := documentationHeadingSlug(block.Text, index)
+			seen[id]++
+			if seen[id] > 1 {
+				id += "-" + strconv.Itoa(seen[id])
+			}
+			headings = append(headings, documentationHeading{
+				ID: id, Title: block.Text, Level: block.Level, BlockIndex: index,
+			})
+		}
+	}
+	return headings
+}
+
+func documentationHeadingForBlock(headings []documentationHeading, blockIndex int) string {
+	for _, heading := range headings {
+		if heading.BlockIndex == blockIndex {
+			return heading.ID
+		}
+	}
+	return ""
+}
+
+func renderDocumentation(blocks []document.Block, headings []documentationHeading, selectedHeading string, focusToken int64) ui.View {
+	views := make([]ui.View, 0, len(blocks))
+	for index, block := range blocks {
+		var view ui.View
+		if block.Kind == document.Heading {
+			size := 18.0
+			weight := int64(700)
+			if block.Level == 1 {
+				size = 30
+				weight = 780
+			} else if block.Level == 2 {
+				size = 20
+				weight = 730
+			}
+			view = ui.FontSize(ui.FontWeight(ui.Text(block.Text), weight), size)
+			view = ui.AccessibleName(ui.Role(view, "heading"), block.Text)
+			if block.Level == 2 || block.Level == 3 {
+				headingID := documentationHeadingForBlock(headings, index)
+				view = ui.TestID(ui.Focusable(view, true), headingID)
+				if selectedHeading == headingID {
+					view = ui.FocusRequest(view, focusToken)
+				}
+			}
+		} else if block.Kind == document.CodeBlock {
+			code := ui.Foreground(ui.Text(block.Text), 0xffc3e88d)
+			if block.Info != "" && block.Info != "table" {
+				code = ui.Gap(ui.Column(design.Muted(block.Info), code), design.Space1)
+			}
+			view = ui.Padding(ui.Background(code, design.SurfaceSunken), design.Space3)
+			view = ui.BorderColor(ui.BorderWidth(view, 1), design.Divider)
+		} else if block.Kind == document.ListItem {
+			marker := ui.Width(ui.Foreground(ui.Text(block.Info), design.Accent), 18)
+			if block.Info == "" {
+				marker = ui.Width(ui.Height(ui.Radius(ui.Background(ui.Box(), design.Accent), 3), 6), 18)
+			}
+			view = ui.Align(ui.Gap(ui.Row(marker, ui.Foreground(ui.Text(block.Text), design.TextSecondary)), design.Space2), ui.AlignCenter)
+		} else if block.Kind == document.Quote {
+			view = kit.Alert("Note", block.Text, kit.IntentInfo, false)
+		} else if block.Kind == document.Rule {
+			view = ui.Height(ui.Background(ui.Box(), design.Divider), 1)
+		} else if block.Text == "" {
+			view = ui.Height(ui.Box(), design.Space1)
+		} else {
+			view = ui.Foreground(ui.Text(block.Text), design.TextSecondary)
+		}
+		views = append(views, ui.Key(view, "doc-block-" + strconv.Itoa(index)))
+	}
+	return ui.Gap(ui.Column(views...), design.Space3)
+}
+
+func (state *State) documentationOutline(pageID string, headings []documentationHeading, selected string) ui.View {
+	items := make([]kit.TreeItem, 0, len(headings))
+	for _, heading := range headings {
+		items = append(items, kit.TreeItem{
+			Key: heading.ID, Label: heading.Title, Depth: int64(heading.Level - 2),
+			Selected: heading.ID == selected,
+		})
+	}
+	tree := kit.ThemedTree(design.StudioTheme(), "On this page", items, func(key string) {}, func(key string) {
+		state.OpenDocHeading(pageID, key)
+	})
+	header := design.PanelHeader("ON THIS PAGE", design.Badge(strconv.Itoa(len(headings)), design.TextSecondary))
+	outline := ui.Gap(ui.Column(header, tree), design.Space2)
+	outline = ui.BorderColor(ui.BorderWidth(ui.Radius(ui.Background(outline, design.SurfaceRaised), 8), 1), design.Divider)
+	return ui.Padding(outline, design.Space2)
+}
+
+func (state *State) DocsPanel() ui.View {
+	state.mu.RLock()
+	selected := state.docPageID
+	selectedHeading := state.docHeadingID
+	focusToken := state.docFocusToken
+	state.mu.RUnlock()
+	pages := documentationPages()
+	if len(pages) == 0 {
+		return design.Panel(design.EmptyState("Documentation unavailable", "The maintained documentation catalog contains no pages.", ui.Box()))
+	}
+	page := pages[0]
+	pageIndex := 0
+	for index, candidate := range pages {
+		if candidate.ID == selected {
+			page = candidate
+			pageIndex = index
+			break
+		}
+	}
+	blocks, err := document.ParseMarkdown(page.Markdown, 4096)
+	if err != nil {
+		return design.Panel(kit.Alert("Documentation unavailable", err.Error(), kit.IntentDanger, false))
+	}
+	headings := documentationHeadings(blocks)
+	breadcrumb := ui.Gap(ui.Row(design.Muted("Documentation"), design.Muted("/"), design.Muted(page.Section), design.Muted("/"), ui.Text(page.Title)), design.Space2)
+	header := ui.Align(ui.Row(ui.Flex(breadcrumb, 1), design.Badge("Volang " + documentation.Version(), design.Success)), ui.AlignCenter)
+	provenance := ui.Gap(ui.Column(ui.Foreground(ui.Text(page.Summary), design.TextSecondary), design.Muted("Canonical source · " +
+		page.SourcePath)), design.Space1)
+	previous := ui.Box()
+	if pageIndex > 0 {
+		item := pages[pageIndex - 1]
+		previous = design.QuietButton("← Previous · " + item.Title, func() {
+			state.OpenDoc(item.ID)
+		})
+	}
+	next := ui.Box()
+	if pageIndex + 1 < len(pages) {
+		item := pages[pageIndex + 1]
+		next = design.QuietButton("Next · " + item.Title + " →", func() {
+			state.OpenDoc(item.ID)
+		})
+	}
+	pageNavigation := ui.Align(ui.Row(previous, ui.Flex(ui.Box(), 1), next), ui.AlignCenter)
+	articleParts := []ui.View{header, provenance}
+	outline := ui.Box()
+	if len(headings) > 0 {
+		outline = state.documentationOutline(page.ID, headings, selectedHeading)
+		if ui.CurrentEnvironment().ViewportWidth < 1180 {
+			articleParts = append(articleParts, outline)
+		}
+	}
+	articleParts = append(articleParts, renderDocumentation(blocks, headings, selectedHeading, focusToken), ui.Height(ui.Background(ui.Box(), design.Divider), 1), pageNavigation)
+	article := ui.Gap(ui.Column(articleParts...), design.Space5)
+	article = ui.MaxWidth(article, 840)
+	article = ui.Padding(article, design.Space6)
+	content := ui.Flex(article, 1)
+	if len(headings) > 0 && ui.CurrentEnvironment().ViewportWidth >= 1180 {
+		content = ui.Row(ui.Flex(article, 1), ui.Width(ui.Padding(outline, design.Space4), 250))
+	}
+	content = ui.MaxWidth(content, 1140)
+	return design.Panel(ui.Scroll(ui.Justify(ui.Row(content), ui.JustifyCenter)))
+}
+
+// executeCommand is the one semantic command dispatcher shared by keyboard
+// shortcuts and projections such as the command palette. Keeping the dispatch
+// on State also avoids retaining one command callback from inside another UI
+// callback across an AOT invalidation boundary.
+func (state *State) executeCommand(id string, preferredMode domain.RuntimeMode) {
+	switch id {
+		case "command.palette", "command.palette.control":
+			state.ShowCommandPalette()
+		case "project.new":
+			state.ToggleProjectCreator()
+		case "project.open":
+			state.OpenLocalProject()
+		case "file.save", "file.save.control":
+			state.Save()
+		case "file.save-all", "file.save-all.control":
+			state.SaveAll()
+		case "file.close", "file.close.control":
+			state.CloseActiveFile()
+		case "edit.undo", "edit.undo.control":
+			state.Undo()
+		case "edit.redo", "edit.redo.control":
+			state.Redo()
+		case "search.file", "search.file.control":
+			state.ShowFind()
+		case "search.next", "search.next.control":
+			state.FindNext()
+		case "search.workspace", "search.workspace.control":
+			state.SetActivity(ActivitySearch)
+		case "view.explorer":
+			state.SetActivity(ActivityExplorer)
+		case "view.home":
+			state.ShowHome()
+		case "view.source-control":
+			state.SetActivity(ActivitySourceControl)
+		case "view.docs":
+			state.ShowDocs()
+		case "run.preferred":
+			state.StartRun(preferredMode, false)
+		case "run.jit":
+			state.StartRun(domain.RuntimeJIT, false)
+		case "view.preview":
+			state.ShowPreview()
+			state.StartRun(preferredMode, true)
+	}
+}
+
+func (state *State) commandScope(preferredMode domain.RuntimeMode) commands.Scope {
+	jit := commands.Action("run.jit", "Run with JIT", func() {
+		state.executeCommand("run.jit", preferredMode)
+	})
+	state.mu.RLock()
+	jit.Enabled = supportsRuntimeMode(state.host, domain.RuntimeJIT)
+	canOpenLocal := state.host.CanOpenLocal
+	state.mu.RUnlock()
+	openProject := commands.Action("project.open", "Open local project", func() {
+		state.executeCommand("project.open", preferredMode)
+	})
+	openProject.Enabled = canOpenLocal
+	return commands.NewScope(commands.New("command.palette", "Open command palette", commands.Key("p", ui.ModifierMeta |
+		ui.ModifierShift), func() {
+		state.executeCommand("command.palette", preferredMode)
+	}), commands.New("command.palette.control", "Open command palette", commands.Key("p", ui.ModifierControl |
+		ui.ModifierShift), func() {
+		state.executeCommand("command.palette.control", preferredMode)
+	}), commands.Action("project.new", "Create project", func() {
+		state.executeCommand("project.new", preferredMode)
+	}), openProject, commands.New("file.save", "Save", commands.Key("s", ui.ModifierMeta), func() {
+		state.executeCommand("file.save", preferredMode)
+	}), commands.New("file.save.control", "Save", commands.Key("s", ui.ModifierControl), func() {
+		state.executeCommand("file.save.control", preferredMode)
+	}), commands.New("file.save-all", "Save all", commands.Key("s", ui.ModifierMeta | ui.ModifierShift), func() {
+		state.executeCommand("file.save-all", preferredMode)
+	}), commands.New("file.save-all.control", "Save all", commands.Key("s", ui.ModifierControl |
+		ui.ModifierShift), func() {
+		state.executeCommand("file.save-all.control", preferredMode)
+	}), commands.New("file.close", "Close editor", commands.Key("w", ui.ModifierMeta), func() {
+		state.executeCommand("file.close", preferredMode)
+	}), commands.New("file.close.control", "Close editor", commands.Key("w", ui.ModifierControl), func() {
+		state.executeCommand("file.close.control", preferredMode)
+	}), commands.New("edit.undo", "Undo", commands.Key("z", ui.ModifierMeta), func() {
+		state.executeCommand("edit.undo", preferredMode)
+	}), commands.New("edit.undo.control", "Undo", commands.Key("z", ui.ModifierControl), func() {
+		state.executeCommand("edit.undo.control", preferredMode)
+	}), commands.New("edit.redo", "Redo", commands.Key("z", ui.ModifierMeta | ui.ModifierShift), func() {
+		state.executeCommand("edit.redo", preferredMode)
+	}), commands.New("edit.redo.control", "Redo", commands.Key("y", ui.ModifierControl), func() {
+		state.executeCommand("edit.redo.control", preferredMode)
+	}), commands.New("search.file", "Find in file", commands.Key("f", ui.ModifierMeta), func() {
+		state.executeCommand("search.file", preferredMode)
+	}), commands.New("search.file.control", "Find in file", commands.Key("f", ui.ModifierControl), func() {
+		state.executeCommand("search.file.control", preferredMode)
+	}), commands.New("search.next", "Find next", commands.Key("g", ui.ModifierMeta), func() {
+		state.executeCommand("search.next", preferredMode)
+	}), commands.New("search.next.control", "Find next", commands.Key("g", ui.ModifierControl), func() {
+		state.executeCommand("search.next.control", preferredMode)
+	}), commands.New("search.workspace", "Search workspace", commands.Key("f", ui.ModifierMeta |
+		ui.ModifierShift), func() {
+		state.executeCommand("search.workspace", preferredMode)
+	}), commands.New("search.workspace.control", "Search workspace", commands.Key("f", ui.ModifierControl |
+		ui.ModifierShift), func() {
+		state.executeCommand("search.workspace.control", preferredMode)
+	}), commands.Action("view.explorer", "Show Explorer", func() {
+		state.executeCommand("view.explorer", preferredMode)
+	}), commands.Action("view.home", "Show Home", func() {
+		state.executeCommand("view.home", preferredMode)
+	}), commands.Action("view.source-control", "Show Source Control", func() {
+		state.executeCommand("view.source-control", preferredMode)
+	}), commands.Action("view.docs", "Show Documentation", func() {
+		state.executeCommand("view.docs", preferredMode)
+	}), commands.New("run.preferred", "Run " + preferredMode.String(), commands.Key("Enter", ui.ModifierMeta), func() {
+		state.executeCommand("run.preferred", preferredMode)
+	}), jit, commands.New("view.preview", "Open preview", commands.Key("Enter", ui.ModifierMeta |
+		ui.ModifierShift), func() {
+		state.executeCommand("view.preview", preferredMode)
+	}))
+}
+
+func commandShortcutLabel(shortcut commands.Shortcut) string {
+	parts := []string{}
+	if shortcut.Modifiers & ui.ModifierControl != 0 || shortcut.Modifiers & ui.ModifierMeta != 0 {
+		parts = append(parts, "Ctrl/⌘")
+	}
+	if shortcut.Modifiers & ui.ModifierAlt != 0 {
+		parts = append(parts, "Alt")
+	}
+	if shortcut.Modifiers & ui.ModifierShift != 0 {
+		parts = append(parts, "Shift")
+	}
+	key := shortcut.Key
+	if key == "" {
+		key = shortcut.Code
+	}
+	if key != "" {
+		parts = append(parts, strings.ToUpper(key))
+	}
+	return strings.Join(parts, "+")
+}
+
+func (state *State) CommandPalette(scope commands.Scope, preferredMode domain.RuntimeMode) ui.View {
+	state.mu.RLock()
+	visible := state.paletteVisible
+	query := state.paletteQuery
+	selected := state.paletteSelected
+	focusToken := state.paletteFocusToken
+	state.mu.RUnlock()
+	if !visible {
+		return ui.Fragment()
+	}
+	derivedQuery := ui.DerivedString(query)
+	commandsFound := scope.Search(derivedQuery, 24)
+	items := make([]kit.CommandItem, 0, len(commandsFound))
+	for _, item := range commandsFound {
+		current := item
+		if strings.HasSuffix(current.ID, ".control") {
+			continue
+		}
+		items = append(items, kit.CommandItem{
+			Key: current.ID, Label: current.Label, Detail: current.Description,
+			Shortcut: commandShortcutLabel(current.Shortcut), Disabled: !current.Enabled,
+		})
+	}
+	if len(items) == 0 {
+		selected = -1
+	} else if selected < 0 || selected >= int64(len(items)) {
+		selected = 0
+	}
+	return kit.ProvideTheme(kit.DarkTheme(), func() ui.View {
+		return kit.CommandPalette("Command palette", query, "Type a command", true, selected, focusToken, items, state.SetPaletteQuery, state.SetPaletteSelection, func(commandID string) {
+			state.mu.Lock()
+			state.paletteVisible = false
+			state.paletteQuery = ""
+			state.paletteSelected = 0
+			state.status = "Ready"
+			state.mu.Unlock()
+			state.executeCommand(commandID, preferredMode)
+			ui.Invalidate()
+		}, state.HideCommandPalette)
+	})
+}
+
+func (state *State) TopBar() ui.View {
+	state.mu.RLock()
+	project := state.current
+	path := state.activePath
+	running := state.running
+	hasProject := state.hasProject
+	mode := state.runMode
+	status := state.status
+	preferredMode := preferredRuntimeMode(state.host)
+	activity := state.activity
+	state.mu.RUnlock()
+	viewportWidth := ui.CurrentEnvironment().ViewportWidth
+	run := design.QuietButton("Loading workspace…", func() {})
+	preview := design.QuietButton("Preview unavailable", func() {})
+	if hasProject && activity != ActivityHome {
+		run = ui.AccessibleName(design.PrimaryButton("Run", func() {
+			state.StartRun(preferredMode, false)
+		}), "Run " + preferredMode.String())
+		preview = ui.AccessibleName(design.QuietButton("Preview", func() {
+			state.ShowPreview()
+			state.StartRun(preferredMode, true)
+		}), "Open Preview")
+	}
+	if running && activity != ActivityHome {
+		run = ui.AccessibleName(design.QuietButton("Stop", state.StopRun), "Stop " + mode.String())
+	}
+	location := "Home"
+	if activity == ActivityHome {
+		location = "Start"
+	} else if hasProject {
+		location = project.Name
+		if path != "" && viewportWidth >= 1080 {
+			location += "  /  " + path
+		}
+	}
+	locationView := ui.FontSize(ui.Foreground(ui.Text(location), design.TextSecondary), 12)
+	separator := ui.Width(ui.Height(ui.Background(ui.Box(), design.DividerStrong), 24), 1)
+	left := ui.Align(ui.Gap(ui.Row(design.BrandLockup(), separator, locationView), design.Space3), ui.AlignCenter)
+	statusColor := design.Success
+	if running {
+		statusColor = design.Warning
+	}
+	statusView := design.StatusPill(status, statusColor)
+	find := design.QuietButton("Find", state.ShowFind)
+	save := ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File")
+	share := ui.AccessibleName(design.QuietButton("Share", state.ShowShareProject), "Share current project")
+	actions := ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), find, save, share, run, preview), design.Space2)
+	if activity == ActivityHome {
+		statusView = design.StatusPill("Workspace ready", design.Success)
+		actions = ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), design.QuietButton("Open workspace", func() {
+			state.SetActivity(ActivityExplorer)
+		}), design.PrimaryButton("New project", state.ToggleProjectCreator)), design.Space2)
+	}
+	if viewportWidth < 1080 {
+		if activity == ActivityHome {
+			actions = ui.Gap(ui.Row(design.QuietButton("Open workspace", func() {
+				state.SetActivity(ActivityExplorer)
+			}), design.PrimaryButton("New project", state.ToggleProjectCreator)), design.Space2)
+		} else {
+			actions = ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), save, share, run, preview), design.Space2)
+		}
+	}
+	bar := ui.Row(left, ui.Flex(ui.Box(), 1), statusView, actions)
+	bar = ui.Gap(bar, design.Space3)
+	bar = ui.Align(bar, ui.AlignCenter)
+	return ui.Role(design.TopBar(bar), "toolbar")
+}
+
+func (state *State) View() ui.View {
+	if runnerRoute(ui.LocationPath()) {
+		return state.RunnerView()
+	}
+	state.mu.RLock()
+	preferredMode := preferredRuntimeMode(state.host)
+	activity := state.activity
+	state.mu.RUnlock()
+	workspaceOptions := workspace.DefaultOptions()
+	workspaceOptions.SplitterSize = 2
+	workspaceOptions.TabPadding = 10
+	workspaceOptions.TabBarBackground = design.SurfaceSunken
+	workspaceOptions.TabBackground = design.SurfaceSunken
+	workspaceOptions.ActiveTabBackground = design.Surface
+	workspaceOptions.TabForeground = design.TextMuted
+	workspaceOptions.ActiveTabForeground = design.TextPrimary
+	workspaceOptions.SplitterColor = design.Divider
+	body := ui.Flex(state.layout.ViewWithOptions(workspaceOptions), 1)
+	if activity == ActivityHome {
+		body = ui.Flex(state.Home(), 1)
+	}
+	content := ui.Column(state.TopBar(), state.FindBar(), ui.Flex(ui.Row(state.ActivityRail(), body), 1))
+	content = design.AppSurface(content)
+	content = ui.MinWidth(content, 680)
+	content = ui.MinHeight(content, 480)
+	viewportHeight := ui.CurrentEnvironment().ViewportHeight
+	if viewportHeight > 0 {
+		// Bound the application shell to the host viewport so each workspace
+		// surface owns its scroll position. Navigating from a long start page
+		// must never carry the browser document scroll into the editor.
+		content = ui.Height(content, viewportHeight)
+	}
+	scope := state.commandScope(preferredMode)
+	content = ui.Stack(content, state.CommandPalette(scope, preferredMode), state.ProjectRenameDialog(), state.ProjectDeleteDialog(), state.RemoteDeleteDialog(), state.ProjectShareDialog(), state.AccountDialog(), state.NewFileDialog(), state.RenameFileDialog())
+	return scope.Bind(content)
+}

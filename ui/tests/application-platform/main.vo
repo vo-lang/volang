@@ -1,0 +1,89 @@
+package main
+
+import (
+	"errors"
+	"github.com/vo-lang/ui/commands"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/forms"
+	"github.com/vo-lang/ui/navigation"
+	"github.com/vo-lang/ui/persistence"
+	"github.com/vo-lang/ui/platform"
+	"github.com/vo-lang/ui/resource"
+)
+
+func assert(condition bool, message string) {
+	if !condition { panic(message) }
+}
+
+func main() {
+	markdown, err := document.ParseMarkdown("# Guide\n\nA paragraph\nthat wraps.\n\n```vo\nx := 1\nprintln(x)\n```\n\n1. first\n   continuation\n---", 8)
+	assert(err == nil && len(markdown) == 5, "Markdown semantic blocks")
+	assert(markdown[1].Kind == document.Paragraph && markdown[1].Text == "A paragraph that wraps.", "Markdown paragraph grouping")
+	assert(markdown[2].Kind == document.CodeBlock && markdown[2].Info == "vo" && markdown[2].Text == "x := 1\nprintln(x)", "Markdown code grouping")
+	assert(markdown[3].Kind == document.ListItem && markdown[3].Info == "1." && markdown[3].Text == "first continuation", "Markdown ordered list")
+	assert(markdown[4].Kind == document.Rule, "Markdown rule")
+	_, err = document.ParseMarkdown("```vo\nunclosed", 8)
+	assert(err != nil, "Markdown unclosed fence")
+
+	retry := resource.RetryPolicy{MaxAttempts: 4, BaseDelay: 10, MaxDelay: 25}
+	assert(retry.Backoff(1) == 10 && retry.Backoff(2) == 20 && retry.Backoff(3) == 25, "retry backoff")
+	join := resource.NewCoordinator(resource.Join, 4)
+	first := join.Begin("members")
+	joined := join.Begin("members")
+	queued := join.Begin("teams")
+	assert(first.Start && joined.Joined && queued.Queued, "join scheduling")
+	next := join.Complete(first.Generation)
+	assert(next.Start && next.Key == "teams", "joined lane queue")
+	latest := resource.NewCoordinator(resource.Latest, 1)
+	old := latest.Begin("old")
+	fresh := latest.Begin("fresh")
+	assert(fresh.Start && fresh.CancelGeneration == old.Generation, "latest scheduling")
+
+	mutation := resource.BeginOptimisticString("old", "new", 1)
+	assert(mutation.Pending && mutation.Commit(2, "wrong").Pending, "stale optimistic commit")
+	mutation = mutation.Revert(1, "rejected")
+	assert(!mutation.Pending && mutation.Value == "old" && mutation.Message == "rejected", "optimistic rollback")
+	page := resource.NewPage(2, 25, 80)
+	assert(page.Offset() == 50 && page.Count() == 4 && page.HasPrevious() && page.HasNext(), "pagination")
+
+	store := persistence.NewMemory()
+	assert(persistence.Save(store, "settings", 1, "Ada") == nil, "save")
+	restored, err := persistence.Restore(store, "settings", 2, persistence.Migration{
+		From: 1, To: 2, Apply: func(value string) (string, error) { return value + " Lovelace", nil },
+	})
+	assert(err == nil && restored.Found && restored.Migrated && restored.Payload == "Ada Lovelace", "migration")
+	history := persistence.NewHistory(3, "a")
+	history.Push("b"); history.Push("c"); history.Push("d")
+	value, ok := history.Undo()
+	assert(ok && value == "c", "bounded undo")
+	encoded, err := persistence.EncodeHistory(history)
+	assert(err == nil, "history encode")
+	reloaded, err := persistence.DecodeHistory(encoded)
+	assert(err == nil && reloaded.Current() == "c", "history restore")
+
+	member := navigation.NewPattern("member", navigation.Static("members"), navigation.Parameter("id"))
+	location, err := navigation.ParseLocation("/members/42?tab=activity#recent")
+	matched, ok := member.Match(location)
+	id, found := matched.Param("id")
+	assert(err == nil && ok && found && id == "42" && matched.Query("tab") == "activity", "typed route")
+	assert(member.Path(map[string]string{"id": "Ada Lovelace"}) == "/members/Ada%20Lovelace", "typed route generation")
+	catalog := platform.NewCatalog()
+	err = catalog.Register(platform.Descriptor{
+		ID: "network", ABI: "vo.platform.network/1", Packaging: "builtin", Sandbox: "origin",
+		Lifetime: platform.ApplicationLifetime, Effects: platform.EffectNetworkRead,
+		Targets: []platform.TargetSupport{{Target: platform.Web, Support: platform.PermissionRequired}},
+		Authorities: []platform.Authority{{Resource: "https://api.example.test", Operations: []string{"GET"}}},
+		Quota: platform.Quota{MaxConcurrent: 8, MaxBytes: 1048576, MaxItems: 1000, TimeoutMillis: 30000},
+	})
+	assert(err == nil && !catalog.Require("network", platform.Web, platform.EffectNetworkRead).Allowed, "permission gate")
+	assert(catalog.SetPermission("network", platform.PermissionGranted) == nil &&
+		catalog.Require("network", platform.Web, platform.EffectNetworkRead).Allowed, "permission grant")
+
+	form := forms.New(forms.FieldSpec{Name: "name", Label: "Name", Initial: "Ada", Required: true})
+	assert(form.Field("name").Value == "Ada", "form initialization")
+
+	invoked := false
+	scope := commands.NewScope(commands.Action("save", "Save settings", func() { invoked = true }))
+	assert(len(scope.Search("save", 8)) == 1 && scope.Invoke("save") && invoked, "command registry")
+	_ = errors.New("keeps errors package in the contract fixture")
+}

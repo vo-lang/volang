@@ -1,0 +1,59 @@
+schema_version = 1
+module = "github.com/vo-lang/ui"
+default_profile = "full"
+
+[[capability]]
+id = "core"
+requires = []
+packages = ["github.com/vo-lang/ui", "github.com/vo-lang/ui/kit"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+
+[[capability]]
+id = "graphics"
+requires = ["core"]
+packages = ["github.com/vo-lang/ui/animation", "github.com/vo-lang/ui/assets", "github.com/vo-lang/ui/chart", "github.com/vo-lang/ui/graphics", "github.com/vo-lang/ui/kit/icons", "github.com/vo-lang/ui/motion"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+
+[[capability]]
+id = "media"
+requires = ["graphics", "platform"]
+packages = ["github.com/vo-lang/ui/media"]
+targets = ["web-wasm-aot", "desktop-native-aot"]
+
+[[capability]]
+id = "editor"
+requires = ["core"]
+packages = ["github.com/vo-lang/ui/document", "github.com/vo-lang/ui/editor", "github.com/vo-lang/ui/language", "github.com/vo-lang/ui/workspace"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+
+[[capability]]
+id = "platform"
+requires = ["core"]
+packages = ["github.com/vo-lang/ui/desktop", "github.com/vo-lang/ui/platform", "github.com/vo-lang/ui/system", "github.com/vo-lang/ui/web"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+
+[[capability]]
+id = "testing"
+requires = ["core"]
+packages = ["github.com/vo-lang/ui/observability", "github.com/vo-lang/ui/testing"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+
+[[profile]]
+id = "minimal"
+capabilities = ["core"]
+
+[[profile]]
+id = "application"
+capabilities = ["core", "platform"]
+
+[[profile]]
+id = "web"
+capabilities = ["core", "graphics", "media", "platform"]
+
+[[profile]]
+id = "studio"
+capabilities = ["core", "editor", "graphics", "platform", "testing"]
+
+[[profile]]
+id = "full"
+capabilities = ["core", "editor", "graphics", "media", "platform", "testing"]

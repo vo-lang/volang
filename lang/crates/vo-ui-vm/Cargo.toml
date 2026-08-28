@@ -1,0 +1,22 @@
+[package]
+name = "vo-ui-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "VM and JIT development providers for Volang UI"
+publish = false
+
+[dependencies]
+vo-common-core.workspace = true
+vo-runtime.workspace = true
+vo-ui-artifact.workspace = true
+vo-ui-core.workspace = true
+vo-ui-headless.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-reload.workspace = true
+vo-ui-runtime.workspace = true
+vo-ui-system.workspace = true

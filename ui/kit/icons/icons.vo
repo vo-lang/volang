@@ -1,0 +1,195 @@
+// Package icons provides a compact renderer-neutral official symbol set.
+// Symbols are ordinary bounded graphics programs, so applications carry no
+// font, SVG script, or platform icon dependency.
+package icons
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/graphics"
+	"math"
+)
+
+type Glyph int64
+
+const (
+	Add Glyph = iota
+	Close
+	Search
+	Menu
+	ChevronDown
+	Check
+	Warning
+	Info
+	Play
+	Pause
+	File
+	Folder
+	Settings
+	ArrowBack
+	ArrowForward
+	Home
+	Branch
+	Book
+	Terminal
+)
+
+func point(scale float64, x float64, y float64) graphics.Point {
+	return graphics.Point{X: x * scale, Y: y * scale}
+}
+
+func line(program *graphics.Program, scale float64, color uint32, width float64, x1 float64, y1 float64, x2 float64, y2 float64) {
+	program.DrawLine(point(scale, x1, y1), point(scale, x2, y2), color, width * scale)
+}
+
+func path(program *graphics.Program, scale float64, color uint32, width float64, points []graphics.Point, closed bool) {
+	value := graphics.NewPath(len(points) + 1)
+	for index, current := range points {
+		current = point(scale, current.X, current.Y)
+		if index == 0 {
+			value.MoveTo(current)
+		} else {
+			value.LineTo(current)
+		}
+	}
+	if closed {
+		value.Close()
+	}
+	program.DrawPath(value, color, width * scale)
+}
+
+func ring(program *graphics.Program, scale float64, color uint32, width float64, centerX float64, centerY float64, radius float64) {
+	points := make([]graphics.Point, 16)
+	for index := 0; index < len(points); index++ {
+		angle := float64(index) * math.Pi / 8
+		points[index] = graphics.Point{
+			X: centerX + radius * math.Cos(angle), Y: centerY + radius * math.Sin(angle),
+		}
+	}
+	path(program, scale, color, width, points, true)
+}
+
+func program(glyph Glyph, size float64, color uint32) *graphics.Program {
+	if math.IsNaN(size) || math.IsInf(size, 0) || size < 8 || size > 512 {
+		panic("icon size must be between 8 and 512")
+	}
+	if glyph < Add || glyph > Terminal {
+		panic("icon glyph is invalid")
+	}
+	scale := size / 24
+	value := graphics.NewProgram(graphics.Limits{MaxCommands: 32, MaxEncodedBytes: 8192})
+	if glyph == Add {
+		line(value, scale, color, 2, 5, 12, 19, 12)
+		line(value, scale, color, 2, 12, 5, 12, 19)
+	}
+	if glyph == Close {
+		line(value, scale, color, 2, 6, 6, 18, 18)
+		line(value, scale, color, 2, 18, 6, 6, 18)
+	}
+	if glyph == Search {
+		ring(value, scale, color, 2, 10.5, 10.5, 5.5)
+		line(value, scale, color, 2, 15, 15, 20, 20)
+	}
+	if glyph == Menu {
+		line(value, scale, color, 2, 4, 6, 20, 6)
+		line(value, scale, color, 2, 4, 12, 20, 12)
+		line(value, scale, color, 2, 4, 18, 20, 18)
+	}
+	if glyph == ChevronDown {
+		line(value, scale, color, 2, 5, 9, 12, 16)
+		line(value, scale, color, 2, 12, 16, 19, 9)
+	}
+	if glyph == Check {
+		line(value, scale, color, 2, 4, 12, 9, 17)
+		line(value, scale, color, 2, 9, 17, 20, 6)
+	}
+	if glyph == Warning {
+		path(value, scale, color, 2, []graphics.Point{{X: 12, Y: 3}, {X: 22, Y: 21}, {X: 2, Y: 21}}, true)
+		line(value, scale, color, 2, 12, 9, 12, 14)
+		value.DrawCircle(point(scale, 12, 18), scale, color)
+	}
+	if glyph == Info {
+		ring(value, scale, color, 2, 12, 12, 10)
+		line(value, scale, color, 2, 12, 10, 12, 17)
+		value.DrawCircle(point(scale, 12, 7), scale, color)
+	}
+	if glyph == Play {
+		path(value, scale, color, 0, []graphics.Point{{X: 7, Y: 4}, {X: 20, Y: 12}, {X: 7, Y: 20}}, true)
+	}
+	if glyph == Pause {
+		value.Fill(graphics.Rect{X: 6 * scale, Y: 4 * scale, Width: 4 * scale, Height: 16 * scale}, color)
+		value.Fill(graphics.Rect{X: 14 * scale, Y: 4 * scale, Width: 4 * scale, Height: 16 * scale}, color)
+	}
+	if glyph == File {
+		path(value, scale, color, 2, []graphics.Point{
+			{X: 5, Y: 2}, {X: 14, Y: 2}, {X: 19, Y: 7}, {X: 19, Y: 22}, {X: 5, Y: 22},
+		}, true)
+		line(value, scale, color, 2, 14, 2, 14, 7)
+		line(value, scale, color, 2, 14, 7, 19, 7)
+	}
+	if glyph == Folder {
+		path(value, scale, color, 2, []graphics.Point{
+			{X: 2, Y: 5}, {X: 10, Y: 5}, {X: 12, Y: 8}, {X: 22, Y: 8}, {X: 22, Y: 20}, {X: 2, Y: 20},
+		}, true)
+	}
+	if glyph == Settings {
+		ring(value, scale, color, 2, 12, 12, 4)
+		for index := 0; index < 8; index++ {
+			angle := float64(index) * math.Pi / 4
+			line(value, scale, color, 2, 12 + 6 * math.Cos(angle), 12 + 6 * math.Sin(angle), 12 +
+				9 * math.Cos(angle), 12 + 9 * math.Sin(angle))
+		}
+	}
+	if glyph == ArrowBack {
+		line(value, scale, color, 2, 20, 12, 5, 12)
+		line(value, scale, color, 2, 5, 12, 12, 5)
+		line(value, scale, color, 2, 5, 12, 12, 19)
+	}
+	if glyph == ArrowForward {
+		line(value, scale, color, 2, 4, 12, 19, 12)
+		line(value, scale, color, 2, 19, 12, 12, 5)
+		line(value, scale, color, 2, 19, 12, 12, 19)
+	}
+	if glyph == Home {
+		path(value, scale, color, 2, []graphics.Point{{X: 3, Y: 11}, {X: 12, Y: 3}, {X: 21, Y: 11}}, false)
+		path(value, scale, color, 2, []graphics.Point{
+			{X: 5, Y: 10}, {X: 5, Y: 21}, {X: 19, Y: 21}, {X: 19, Y: 10},
+		}, false)
+		path(value, scale, color, 2, []graphics.Point{
+			{X: 9, Y: 21}, {X: 9, Y: 14}, {X: 15, Y: 14}, {X: 15, Y: 21},
+		}, false)
+	}
+	if glyph == Branch {
+		value.DrawCircle(point(scale, 7, 5), 2 * scale, color)
+		value.DrawCircle(point(scale, 17, 8), 2 * scale, color)
+		value.DrawCircle(point(scale, 7, 19), 2 * scale, color)
+		line(value, scale, color, 2, 7, 7, 7, 17)
+		line(value, scale, color, 2, 9, 12, 13, 12)
+		line(value, scale, color, 2, 13, 12, 17, 10)
+	}
+	if glyph == Book {
+		path(value, scale, color, 2, []graphics.Point{
+			{X: 3, Y: 5}, {X: 9, Y: 4}, {X: 12, Y: 6}, {X: 15, Y: 4}, {X: 21, Y: 5}, {X: 21, Y: 20},
+			{X: 15, Y: 19}, {X: 12, Y: 21}, {X: 9, Y: 19}, {X: 3, Y: 20},
+		}, true)
+		line(value, scale, color, 2, 12, 6, 12, 21)
+	}
+	if glyph == Terminal {
+		path(value, scale, color, 2, []graphics.Point{
+			{X: 3, Y: 4}, {X: 21, Y: 4}, {X: 21, Y: 20}, {X: 3, Y: 20},
+		}, true)
+		line(value, scale, color, 2, 7, 9, 10, 12)
+		line(value, scale, color, 2, 10, 12, 7, 15)
+		line(value, scale, color, 2, 13, 15, 18, 15)
+	}
+	return value
+}
+
+func Icon(glyph Glyph, size float64, color uint32, description string) ui.View {
+	if description == "" {
+		panic("icon requires an accessible description")
+	}
+	view := graphics.Canvas(program(glyph, size, color), description)
+	view = ui.Width(view, size)
+	view = ui.Height(view, size)
+	return view
+}

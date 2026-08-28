@@ -1,0 +1,43 @@
+package main
+
+type SpreadNode struct {
+	Value int
+}
+
+type SpreadRecord struct {
+	Name string
+	Node *SpreadNode
+}
+
+func main() {
+	pointers := []*SpreadNode{&SpreadNode{Value: 41}, &SpreadNode{Value: 42}}
+	pointerResult := make([]*SpreadNode, 0, 1)
+	pointerResult = append(pointerResult, pointers...)
+	records := []SpreadRecord{
+		SpreadRecord{Name: "left", Node: &SpreadNode{Value: 77}},
+		SpreadRecord{Name: "right", Node: &SpreadNode{Value: 88}},
+	}
+	recordResult := make([]SpreadRecord, 0, 1)
+	recordResult = append(recordResult, records...)
+	values := []interface{}{&SpreadNode{Value: 101}, "kept"}
+	valueResult := make([]interface{}, 0, 1)
+	valueResult = append(valueResult, values...)
+	// Exceed the AOT collector's allocation-debt threshold, then cross a
+	// scheduler boundary. Every spread result must retain its precise element
+	// graph even after the source slice stops being the only convenient root.
+	for i := 0; i < 50000; i++ {
+		_ = &SpreadNode{Value: i}
+	}
+	done := make(chan bool)
+	go func() {
+		done <- true
+	}()
+	assert(<-done, "scheduler boundary")
+	assert(len(pointerResult) == 2, "pointer spread length")
+	assert(pointerResult[0].Value == 41 && pointerResult[1].Value == 42, "pointer spread roots")
+	assert(recordResult[0].Name == "left" && recordResult[0].Node.Value == 77, "struct spread first")
+	assert(recordResult[1].Name == "right" && recordResult[1].Node.Value == 88, "struct spread second")
+	assert(valueResult[0].(*SpreadNode).Value == 101, "interface spread pointer")
+	assert(valueResult[1].(string) == "kept", "interface spread string")
+	println("gc-spread-append-layout: PASS")
+}

@@ -1,0 +1,264 @@
+// Package headless owns accessible UIKit state machines without visual tokens.
+// Official recipes and application-specific design systems can share it.
+package headless
+
+import (
+	ui "github.com/vo-lang/ui"
+)
+
+type Orientation int64
+
+const (
+	Horizontal Orientation = iota
+	Vertical
+)
+
+func Button(label string, disabled bool, onActivate func()) ui.View {
+	return ui.Disabled(ui.Button(label, ui.Action(onActivate)), disabled)
+}
+
+// Pressable turns arbitrary composed content into one semantic, focusable
+// control. Pointer and keyboard activation share the same callback contract.
+func Pressable(label string, disabled bool, content ui.View, onActivate func()) ui.View {
+	control := ui.AccessibleName(ui.Role(ui.Disabled(ui.Focusable(content, !disabled), disabled), "button"), label)
+	control = ui.OnClick(control, func(event ui.Event) {
+		if !disabled {
+			onActivate()
+		}
+	})
+	return ui.OnKeyDown(control, func(event ui.Event) {
+		if !disabled && !event.Repeat && (event.Key == "Enter" || event.Key == " " || event.Key == "Space") {
+			onActivate()
+		}
+	})
+}
+
+func ToggleButton(label string, pressed bool, disabled bool, onChange func(bool)) ui.View {
+	control := Button(label, disabled, func() {
+		if !disabled {
+			onChange(!pressed)
+		}
+	})
+	return ui.Pressed(control, pressed)
+}
+
+func DisclosureTrigger(label string, open bool, disabled bool, onOpenChange func(bool)) ui.View {
+	control := Button(label, disabled, func() {
+		if !disabled {
+			onOpenChange(!open)
+		}
+	})
+	control = ui.Expanded(control, open)
+	return ui.OnKeyDown(control, func(event ui.Event) {
+		if disabled {
+			return
+		}
+		if event.Key == "ArrowDown" {
+			onOpenChange(true)
+		} else if event.Key == "Escape" {
+			onOpenChange(false)
+		}
+	})
+}
+
+func DisclosureContent(open bool, content ui.View) ui.View {
+	if !open {
+		return ui.Fragment()
+	}
+	return ui.Role(content, "group")
+}
+
+func boundedIndex(index int64, count int64) int64 {
+	if count <= 0 {
+		return 0
+	}
+	if index < 0 {
+		return count - 1
+	}
+	if index >= count {
+		return 0
+	}
+	return index
+}
+
+func movedIndex(event ui.Event, index int64, count int64, orientation Orientation) int64 {
+	if event.Key == "Home" {
+		return 0
+	}
+	if event.Key == "End" {
+		return count - 1
+	}
+	forward := event.Key == "ArrowDown"
+	backward := event.Key == "ArrowUp"
+	if orientation == Horizontal {
+		forward = event.Key == "ArrowRight"
+		backward = event.Key == "ArrowLeft"
+		if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			forward, backward = backward, forward
+		}
+	} else if orientation != Vertical {
+		panic("headless orientation is invalid")
+	}
+	if forward {
+		return boundedIndex(index + 1, count)
+	}
+	if backward {
+		return boundedIndex(index - 1, count)
+	}
+	return index
+}
+
+func movedEnabledIndex(event ui.Event, index int64, count int64, orientation Orientation, isDisabled func(int64) bool) int64 {
+	if count <= 0 {
+		return index
+	}
+	candidate := movedIndex(event, index, count, orientation)
+	if candidate == index {
+		return index
+	}
+	step := int64(1)
+	wrap := true
+	if event.Key == "Home" {
+		candidate = 0
+		step = 1
+		wrap = false
+	} else if event.Key == "End" {
+		candidate = count - 1
+		step = -1
+		wrap = false
+	} else {
+		forward := event.Key == "ArrowDown"
+		backward := event.Key == "ArrowUp"
+		if orientation == Horizontal {
+			forward = event.Key == "ArrowRight"
+			backward = event.Key == "ArrowLeft"
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				forward, backward = backward, forward
+			}
+		}
+		if backward {
+			step = -1
+		} else if !forward {
+			return index
+		}
+	}
+	for visited := int64(0); visited < count; visited++ {
+		if !isDisabled(candidate) {
+			return candidate
+		}
+		candidate += step
+		if candidate < 0 || candidate >= count {
+			if !wrap {
+				return index
+			}
+			candidate = boundedIndex(candidate, count)
+		}
+	}
+	return index
+}
+
+func RadioOption(label string, index int64, count int64, selected bool, disabled bool, orientation Orientation, focusToken int64, isDisabled func(int64) bool, onSelect func(int64)) ui.View {
+	control := ui.Role(ui.Disabled(ui.Button(label, func(event ui.Event) {
+		if !disabled {
+			onSelect(index)
+		}
+	}), disabled), "radio")
+	control = ui.Selected(control, selected)
+	control = ui.Checked(control, selected)
+	control = ui.FocusRequest(control, focusToken)
+	return ui.OnKeyDown(control, func(event ui.Event) {
+		if disabled || count <= 0 {
+			return
+		}
+		next := movedEnabledIndex(event, index, count, orientation, isDisabled)
+		if next != index {
+			onSelect(next)
+		}
+	})
+}
+
+func RadioGroup(label string, orientation Orientation, options ...ui.View) ui.View {
+	content := ui.Gap(ui.Column(options...), 8)
+	if orientation == Horizontal {
+		content = ui.Gap(ui.Row(options...), 8)
+	} else if orientation != Vertical {
+		panic("headless radio group orientation is invalid")
+	}
+	return ui.AccessibleName(ui.Role(content, "radiogroup"), label)
+}
+
+func Tab(label string, index int64, count int64, selected bool, disabled bool, orientation Orientation, focusToken int64, isDisabled func(int64) bool, onSelect func(int64)) ui.View {
+	control := ui.Role(ui.Disabled(ui.Button(label, func(event ui.Event) {
+		if !disabled {
+			onSelect(index)
+		}
+	}), disabled), "tab")
+	control = ui.Selected(control, selected)
+	control = ui.FocusRequest(control, focusToken)
+	return ui.OnKeyDown(control, func(event ui.Event) {
+		if disabled || count <= 0 {
+			return
+		}
+		next := movedEnabledIndex(event, index, count, orientation, isDisabled)
+		if next != index {
+			onSelect(next)
+		}
+	})
+}
+
+func TabList(label string, orientation Orientation, tabs ...ui.View) ui.View {
+	content := ui.Gap(ui.Row(tabs...), 4)
+	if orientation == Vertical {
+		content = ui.Gap(ui.Column(tabs...), 4)
+	} else if orientation != Horizontal {
+		panic("headless tab list orientation is invalid")
+	}
+	return ui.AccessibleName(ui.Role(content, "tablist"), label)
+}
+
+func TabPanel(label string, selected bool, content ui.View) ui.View {
+	if !selected {
+		return ui.Fragment()
+	}
+	return ui.AccessibleName(ui.Role(content, "tabpanel"), label)
+}
+
+func SelectTrigger(label string, value string, open bool, disabled bool, onOpenChange func(bool)) ui.View {
+	control := DisclosureTrigger(label + ": " + value, open, disabled, onOpenChange)
+	control = ui.Role(control, "combobox")
+	control = ui.AccessibleName(control, label)
+	control = ui.AccessibleValue(control, value)
+	return control
+}
+
+func SelectOption(label string, index int64, selected bool, disabled bool, onSelect func(int64)) ui.View {
+	control := ui.Role(ui.Disabled(ui.Button(label, func(event ui.Event) {
+		if !disabled {
+			onSelect(index)
+		}
+	}), disabled), "option")
+	return ui.Selected(control, selected)
+}
+
+func ListBox(label string, options ...ui.View) ui.View {
+	return ui.AccessibleName(ui.Role(ui.Column(options...), "listbox"), label)
+}
+
+func MenuItem(label string, disabled bool, checked bool, checkable bool, onActivate func()) ui.View {
+	role := ui.DerivedString("menuitem")
+	if checkable {
+		role = "menuitemcheckbox"
+	}
+	control := ui.Role(Button(label, disabled, onActivate), role)
+	if checkable {
+		control = ui.Checked(control, checked)
+	}
+	return control
+}
+
+func CurrentLink(label string, path string, current ui.CurrentToken) ui.View {
+	link := ui.Role(ui.Button(label, func(event ui.Event) {
+		ui.Navigate(path)
+	}), "link")
+	return ui.Current(link, current)
+}

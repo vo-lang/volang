@@ -23,7 +23,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "compiler")]
 use crate::js_types::make_run_result_obj;
 #[cfg(feature = "compiler")]
-use crate::vm::{decode_bytecode_module, register_wasm_runtime_externs};
+use crate::vm::{decode_bytecode_module, register_wasm_runtime_module_externs};
 
 // ── Outcome helpers ─────────────────────────────────────────────────────────
 
@@ -182,7 +182,6 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String, Option<i32>) 
             )
         }
     };
-    let exts = &module.externs;
     let reg = match vm.extern_registry_mut() {
         Ok(registry) => registry,
         Err(error) => {
@@ -194,7 +193,7 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String, Option<i32>) 
             )
         }
     };
-    if let Err(error) = register_wasm_runtime_externs(reg, exts) {
+    if let Err(error) = register_wasm_runtime_module_externs(reg, &module) {
         return (
             "error".into(),
             String::new(),

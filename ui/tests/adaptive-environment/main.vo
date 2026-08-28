@@ -1,0 +1,48 @@
+// Permanent E2 host-environment and adaptive-layout probe.
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"strconv"
+)
+
+func sizeLabel(size kit.WindowSizeClass) string {
+	if size == kit.Compact {
+		return "Compact"
+	}
+	if size == kit.Medium {
+		return "Medium"
+	}
+	return "Expanded"
+}
+
+func containerLabel(width float64, height float64) string {
+	if width == 0 || height == 0 {
+		return "Container pending"
+	}
+	return "Container " + strconv.FormatFloat(width, 'f', 0, 64) + "x" +
+		strconv.FormatFloat(height, 'f', 0, 64)
+}
+
+func App() ui.View {
+	containerWidth := ui.UseFloatState(0)
+	containerHeight := ui.UseFloatState(0)
+	requestedWidth := ui.UseFloatState(360)
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Column(kit.Title("Adaptive environment"), ui.TestID(kit.Paragraph(sizeLabel(kit.ViewportSizeClass())), "size-class"), ui.OnLayout(ui.Width(ui.Height(kit.Panel(kit.Caption(containerLabel(ui.FloatStateValue(containerWidth), ui.FloatStateValue(containerHeight)))), 80), ui.FloatStateValue(requestedWidth)), ui.LayoutChange(func(event ui.LayoutEvent) {
+			ui.SetFloatState(containerWidth, event.Width)
+			ui.SetFloatState(containerHeight, event.Height)
+		})), kit.ActionButton("Measure again", false, func() {
+			ui.SetFloatState(requestedWidth, 361)
+			ui.SetFloatState(containerWidth, 0)
+			ui.SetFloatState(containerHeight, 0)
+		}), kit.AdaptiveGrid(kit.Panel(kit.Caption("One")), kit.Panel(kit.Caption("Two")), kit.Panel(kit.Caption("Three")))))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

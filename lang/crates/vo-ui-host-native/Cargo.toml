@@ -1,0 +1,23 @@
+[package]
+name = "vo-ui-host-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native window input adapter for the Volang UI desktop renderer"
+publish = false
+
+[dependencies]
+accesskit.workspace = true
+vo-app-host-native = { path = "../vo-app-host-native" }
+vo-app-protocol.workspace = true
+vo-ui-accessibility.workspace = true
+vo-ui-accesskit.workspace = true
+vo-ui-core.workspace = true
+vo-ui-desktop.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-text-native.workspace = true

@@ -163,11 +163,24 @@ fn load_project_context_for_operation(
     project_dir: &Path,
     operation: &str,
 ) -> Result<crate::project::ProjectContext, Error> {
-    crate::project::load_project_context(&RealFs::new("."), project_dir).map_err(|error| {
-        Error::DependencyGraph(format!(
-            "{operation} cannot capture the project graph: {error}"
-        ))
-    })
+    load_project_context_for_operation_with_options(
+        project_dir,
+        operation,
+        &crate::project::ProjectContextOptions::default(),
+    )
+}
+
+fn load_project_context_for_operation_with_options(
+    project_dir: &Path,
+    operation: &str,
+    options: &crate::project::ProjectContextOptions,
+) -> Result<crate::project::ProjectContext, Error> {
+    crate::project::load_project_context_with_options(&RealFs::new("."), project_dir, options)
+        .map_err(|error| {
+            Error::DependencyGraph(format!(
+                "{operation} cannot capture the project graph: {error}"
+            ))
+        })
 }
 
 fn ensure_project_context_unchanged(
@@ -175,7 +188,21 @@ fn ensure_project_context_unchanged(
     expected: &crate::project::ProjectContext,
     operation: &str,
 ) -> Result<(), Error> {
-    let current = load_project_context_for_operation(project_dir, operation)?;
+    ensure_project_context_unchanged_with_options(
+        project_dir,
+        expected,
+        operation,
+        &crate::project::ProjectContextOptions::default(),
+    )
+}
+
+fn ensure_project_context_unchanged_with_options(
+    project_dir: &Path,
+    expected: &crate::project::ProjectContext,
+    operation: &str,
+    options: &crate::project::ProjectContextOptions,
+) -> Result<(), Error> {
+    let current = load_project_context_for_operation_with_options(project_dir, operation, options)?;
     if !current.has_same_root_authority(expected)
         || current.workspace_file() != expected.workspace_file()
         || current.workspace_generation() != expected.workspace_generation()
@@ -786,15 +813,38 @@ pub fn mod_fetch(
     cache_root: &Path,
     registry: &dyn Registry,
 ) -> Result<LockFileStatus, Error> {
+    mod_fetch_with_options(
+        project_dir,
+        cache_root,
+        registry,
+        &crate::project::ProjectContextOptions::default(),
+    )
+}
+
+/// Fetch a frozen graph under an explicit workspace-discovery policy. Product
+/// scaffolds use `Disabled` so an unrelated ancestor `vo.work` cannot capture
+/// a newly created standalone project.
+pub fn mod_fetch_with_options(
+    project_dir: &Path,
+    cache_root: &Path,
+    registry: &dyn Registry,
+    options: &crate::project::ProjectContextOptions,
+) -> Result<LockFileStatus, Error> {
     let registry = RegistryOperation::new(registry);
-    let context = load_project_context_for_operation(project_dir, "vo mod fetch")?;
+    let context =
+        load_project_context_for_operation_with_options(project_dir, "vo mod fetch", options)?;
     let Some(lf) = context.project_plan().lock_file() else {
-        ensure_project_context_unchanged(project_dir, &context, "vo mod fetch")?;
+        ensure_project_context_unchanged_with_options(
+            project_dir,
+            &context,
+            "vo mod fetch",
+            options,
+        )?;
         return Ok(LockFileStatus::NotRequired);
     };
     lifecycle::download_locked_dependencies(cache_root, lf, &registry)?;
     crate::readiness::validate_materialized_project_graph(&RealFs::new(cache_root), &context)?;
-    ensure_project_context_unchanged(project_dir, &context, "vo mod fetch")?;
+    ensure_project_context_unchanged_with_options(project_dir, &context, "vo mod fetch", options)?;
     Ok(LockFileStatus::Present)
 }
 

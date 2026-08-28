@@ -1,0 +1,16 @@
+:root {
+  --content-width: 72rem;
+}
+
+body {
+  letter-spacing: -0.01em;
+}
+
+#volang-root {
+  margin: 0 auto;
+  max-width: var(--content-width);
+}
+
+a, button, input {
+  font: inherit;
+}

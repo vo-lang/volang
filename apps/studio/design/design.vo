@@ -1,0 +1,329 @@
+// Package design owns Studio's visual language. Product components consume
+// semantic recipes instead of scattering renderer properties across features.
+package design
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/kit/icons"
+)
+
+const (
+	Canvas uint32 = 0xff070a10
+	SurfaceSunken uint32 = 0xff0a0f18
+	Surface uint32 = 0xff0e1420
+	SurfaceRaised uint32 = 0xff151d2b
+	SurfaceHover uint32 = 0xff1d2940
+	Divider uint32 = 0xff29364b
+	DividerStrong uint32 = 0xff394862
+	TextPrimary uint32 = 0xfff2f5fb
+	TextSecondary uint32 = 0xffaab5c8
+	TextMuted uint32 = 0xff748198
+	Accent uint32 = 0xff91a2ff
+	AccentStrong uint32 = 0xff637eff
+	AccentSoft uint32 = 0xff222e5c
+	Success uint32 = 0xff55d39a
+	Warning uint32 = 0xffffc96b
+	Danger uint32 = 0xffff7185
+)
+
+const (
+	Space1 float64 = 4
+	Space2 float64 = 8
+	Space3 float64 = 12
+	Space4 float64 = 16
+	Space5 float64 = 24
+	Space6 float64 = 32
+	Space7 float64 = 40
+	Space8 float64 = 48
+)
+
+// StudioTheme layers Studio's visual language on the official UIKit contract.
+// Generic controls stay owned by UIKit while this package owns product-level
+// compositions such as project cards, editor tabs, and the activity rail.
+func StudioTheme() kit.Theme {
+	theme := kit.DarkTheme()
+	theme.Colors.Canvas = Canvas
+	theme.Colors.Surface = Surface
+	theme.Colors.SurfaceRaised = SurfaceRaised
+	theme.Colors.Text = TextPrimary
+	theme.Colors.TextMuted = TextSecondary
+	theme.Colors.Accent = AccentStrong
+	theme.Colors.OnAccent = TextPrimary
+	theme.Colors.Danger = Danger
+	theme.Colors.Success = Success
+	theme.Colors.Warning = Warning
+	theme.Colors.Border = Divider
+	theme.Colors.Focus = Accent
+	theme.Background = Canvas
+	theme.Surface = Surface
+	theme.Foreground = TextPrimary
+	theme.MutedForeground = TextSecondary
+	theme.Accent = AccentStrong
+	theme.AccentForeground = TextPrimary
+	theme.Danger = Danger
+	theme.Radius = 8
+	theme.Space = Space2
+	theme.ControlHeight = 36
+	theme.Spacing.Step = Space2
+	theme.Spacing.ControlGap = Space2
+	theme.Spacing.ContentGap = Space3
+	theme.Spacing.SectionGap = Space5
+	theme.Shape.SmallRadius = 6
+	theme.Shape.MediumRadius = 8
+	theme.Shape.LargeRadius = 12
+	return theme
+}
+
+func framed(view ui.View, fill uint32, border uint32, radius float64) ui.View {
+	view = ui.Background(view, fill)
+	view = ui.BorderColor(view, border)
+	view = ui.BorderWidth(view, 1)
+	return ui.Radius(view, radius)
+}
+
+func AppSurface(view ui.View) ui.View {
+	view = ui.Background(view, Canvas)
+	view = ui.Foreground(view, TextPrimary)
+	return view
+}
+
+func Panel(view ui.View) ui.View {
+	view = ui.Background(view, Surface)
+	view = ui.Foreground(view, TextPrimary)
+	return ui.Overflow(view, ui.OverflowHidden)
+}
+
+func PanelHeader(title string, action ui.View) ui.View {
+	label := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(title), TextSecondary), 680), 11)
+	header := ui.Row(label, ui.Flex(ui.Box(), 1), action)
+	header = ui.Align(header, ui.AlignCenter)
+	header = ui.MinHeight(ui.Padding(header, Space2), 42)
+	header = ui.Background(header, SurfaceRaised)
+	separator := ui.Height(ui.Background(ui.Box(), Divider), 1)
+	return ui.Column(header, separator)
+}
+
+func TopBar(view ui.View) ui.View {
+	view = ui.MinHeight(ui.Padding(view, Space2), 54)
+	view = ui.Background(view, Surface)
+	separator := ui.Height(ui.Background(ui.Box(), Divider), 1)
+	return ui.Column(view, separator)
+}
+
+func PrimaryButton(label string, action func()) ui.View {
+	return kit.ThemedButton(StudioTheme(), label, kit.ButtonPrimary, kit.ControlMedium, false, action)
+}
+
+func QuietButton(label string, action func()) ui.View {
+	return kit.ThemedButton(StudioTheme(), label, kit.ButtonQuiet, kit.ControlMedium, false, action)
+}
+
+func DangerButton(label string, action func()) ui.View {
+	return kit.ThemedButton(StudioTheme(), label, kit.ButtonDanger, kit.ControlMedium, false, action)
+}
+
+func NavigationButton(label string, selected bool, action func()) ui.View {
+	button := kit.ThemedButton(StudioTheme(), label, kit.ButtonQuiet, kit.ControlMedium, false, action)
+	button = ui.Selected(button, selected)
+	if selected {
+		button = ui.Foreground(button, TextPrimary)
+		button = ui.Background(button, SurfaceHover)
+		button = ui.BorderColor(button, DividerStrong)
+	}
+	return button
+}
+
+// SidebarItem is a dense, borderless navigation row for project and file
+// trees. Commands and forms retain a control silhouette while persistent
+// navigation uses quiet hierarchy and a strong current-row signal.
+func SidebarItem(label string, selected bool, action func()) ui.View {
+	foreground := TextSecondary
+	background := Surface
+	if selected {
+		foreground = TextPrimary
+		background = SurfaceHover
+	}
+	button := ui.Button(label, ui.Action(action))
+	button = ui.Selected(button, selected)
+	button = ui.MinHeight(ui.Padding(button, 9), 34)
+	button = ui.FontSize(ui.FontWeight(ui.Foreground(button, foreground), 580), 12)
+	button = ui.Background(button, background)
+	button = ui.BorderWidth(button, 0)
+	button = ui.Radius(button, 7)
+	return button
+}
+
+func DocumentTab(label string, path string, selected bool, activate func(), close func()) ui.View {
+	tab := ui.Button(label, ui.Action(activate))
+	tab = ui.Role(tab, "tab")
+	tab = ui.Selected(tab, selected)
+	tab = ui.AccessibleName(tab, "Open editor " + path)
+	tab = ui.Foreground(tab, TextSecondary)
+	tab = ui.FontSize(ui.FontWeight(tab, 600), 12)
+	if selected {
+		tab = ui.Foreground(tab, TextPrimary)
+	}
+	tab = ui.Padding(tab, Space2)
+	closeButton := ui.Button("×", ui.Action(close))
+	closeButton = ui.AccessibleName(closeButton, "Close editor " + path)
+	closeButton = ui.Foreground(closeButton, TextMuted)
+	closeButton = ui.Padding(closeButton, Space2)
+	view := ui.Row(tab, closeButton)
+	view = ui.Align(view, ui.AlignCenter)
+	view = ui.Background(view, Surface)
+	if selected {
+		view = ui.Background(view, SurfaceRaised)
+	}
+	return view
+}
+
+func BrandMark() ui.View {
+	mark := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text("V"), TextPrimary), 820), 16)
+	mark = ui.Justify(ui.Align(ui.Height(ui.Width(mark, 38), 38), ui.AlignCenter), ui.JustifyCenter)
+	return framed(mark, AccentSoft, AccentStrong, 11)
+}
+
+func BrandLockup() ui.View {
+	name := ui.FontSize(ui.FontWeight(ui.Text("Studio"), 760), 14)
+	detail := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text("VOLANG"), TextMuted), 700), 9)
+	return ui.Align(ui.Gap(ui.Row(BrandMark(), ui.Column(name, detail)), Space2), ui.AlignCenter)
+}
+
+func ActivityButton(glyph icons.Glyph, name string, label string, selected bool, action func()) ui.View {
+	color := TextMuted
+	fill := Canvas
+	indicatorColor := Canvas
+	if selected {
+		color = Accent
+		fill = SurfaceHover
+		indicatorColor = AccentStrong
+	}
+	icon := icons.Icon(glyph, 20, color, name)
+	visual := ui.Justify(ui.Align(ui.Height(ui.Width(ui.Row(icon), 42), 42), ui.AlignCenter), ui.JustifyCenter)
+	visual = ui.Radius(ui.Background(visual, fill), 10)
+	button := ui.AccessibleName(ui.Button(" ", ui.Action(action)), name)
+	button = ui.AccessibleDescription(button, label)
+	button = ui.Selected(button, selected)
+	button = ui.Opacity(ui.Height(ui.Width(button, 42), 42), 0.001)
+	control := ui.Height(ui.Width(ui.Stack(visual, button), 42), 42)
+	indicator := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), indicatorColor), 2), 3), 28)
+	return ui.Align(ui.Gap(ui.Row(indicator, control), Space1), ui.AlignCenter)
+}
+
+func Muted(value string) ui.View {
+	return ui.Foreground(ui.Text(value), TextMuted)
+}
+
+func Badge(value string, color uint32) ui.View {
+	badge := ui.FontSize(ui.FontWeight(ui.Text(value), 720), 10)
+	badge = ui.Foreground(badge, color)
+	badge = ui.Background(badge, SurfaceRaised)
+	badge = ui.Padding(badge, 6)
+	badge = ui.Radius(badge, 6)
+	return ui.Row(badge, ui.Flex(ui.Box(), 1))
+}
+
+func StatusPill(value string, color uint32) ui.View {
+	dot := ui.Width(ui.Height(ui.Radius(ui.Background(ui.Box(), color), 4), 8), 8)
+	label := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(value), TextSecondary), 600), 11)
+	content := ui.Align(ui.Gap(ui.Row(dot, label), Space2), ui.AlignCenter)
+	return framed(ui.Padding(content, 7), SurfaceRaised, Divider, 8)
+}
+
+func SectionHeading(kicker string, title string, detail string, action ui.View) ui.View {
+	copy := ui.Gap(ui.Column(ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(kicker), Accent), 740), 10), ui.FontSize(ui.FontWeight(ui.Text(title), 760), 25), ui.Foreground(ui.Text(detail), TextSecondary)), Space1)
+	return ui.Align(ui.Row(ui.Flex(copy, 1), action), ui.AlignCenter)
+}
+
+func Hero(view ui.View) ui.View {
+	view = ui.Padding(view, Space6)
+	return framed(view, Surface, DividerStrong, 18)
+}
+
+// DashboardPanel is the compact workbench surface used by Studio's start page.
+// It keeps hierarchy and spacing consistent without pulling product copy into
+// the generic UIKit layer.
+func DashboardPanel(kicker string, title string, detail string, content ui.View) ui.View {
+	heading := ui.Gap(ui.Column(
+		ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(kicker), Accent), 740), 10),
+		ui.FontSize(ui.FontWeight(ui.Text(title), 740), 17),
+		ui.FontSize(ui.Foreground(ui.Text(detail), TextSecondary), 12),
+	), Space1)
+	body := ui.Gap(ui.Column(heading, content), Space4)
+	body = ui.MinHeight(ui.Padding(body, Space4), 184)
+	return framed(body, Surface, Divider, 12)
+}
+
+func CapabilityRow(label string, value string, color uint32) ui.View {
+	dot := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), color), 4), 8), 8)
+	name := ui.FontSize(ui.FontWeight(ui.Text(label), 620), 12)
+	status := ui.FontSize(ui.Foreground(ui.Text(value), TextMuted), 11)
+	return ui.Align(ui.Row(dot, ui.Flex(name, 1), status), ui.AlignCenter)
+}
+
+func Metric(label string, value string, detail string, color uint32) ui.View {
+	accent := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), color), 2), 3), 34)
+	copy := ui.Column(ui.FontSize(ui.FontWeight(ui.Text(value), 720), 15), ui.FontSize(ui.Foreground(ui.Text(label), TextSecondary), 11), ui.FontSize(ui.Foreground(ui.Text(detail), TextMuted), 10))
+	content := ui.Align(ui.Gap(ui.Row(accent, copy), Space3), ui.AlignCenter)
+	return framed(ui.Padding(content, Space3), SurfaceSunken, Divider, 10)
+}
+
+func EmptyState(title string, detail string, action ui.View) ui.View {
+	view := ui.Column(ui.FontSize(ui.FontWeight(ui.Text(title), 720), 18), ui.Foreground(ui.Text(detail), TextSecondary), action)
+	view = ui.Gap(view, Space3)
+	view = ui.Align(view, ui.AlignCenter)
+	view = ui.Justify(view, ui.JustifyCenter)
+	view = ui.Padding(view, Space6)
+	return framed(view, Surface, Divider, 12)
+}
+
+func StarterCard(monogram string, title string, file string, description string, tags string, featured bool, busy bool, action func()) ui.View {
+	accent := Accent
+	if !featured {
+		accent = Success
+	}
+	mark := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(monogram), accent), 820), 12)
+	mark = ui.Justify(ui.Align(ui.Height(ui.Width(ui.Background(ui.Radius(mark, 10), AccentSoft), 42), 42), ui.AlignCenter), ui.JustifyCenter)
+	header := ui.Align(ui.Row(mark, ui.Flex(ui.Box(), 1), ui.FontSize(Muted(file), 11)), ui.AlignCenter)
+	buttonLabel := "Open & edit"
+	if busy {
+		buttonLabel = "Opening…"
+	}
+	open := ui.Disabled(QuietButton(buttonLabel, action), busy)
+	open = ui.AccessibleName(open, "Open " + title + " example in Studio")
+	footer := ui.Align(ui.Row(ui.FontSize(Muted(tags), 11), ui.Flex(ui.Box(), 1), open), ui.AlignCenter)
+	content := ui.Gap(ui.Column(header, ui.FontSize(ui.FontWeight(ui.Text(title), 740), 18), ui.Foreground(ui.Text(description), TextSecondary), ui.Flex(ui.Box(), 1), footer), Space3)
+	content = ui.MinHeight(ui.Padding(content, Space4), 172)
+	stripe := ui.Height(ui.Background(ui.Box(), accent), 3)
+	return framed(ui.Column(stripe, content), Surface, Divider, 14)
+}
+
+func ProjectCard(name string, root string, selected bool, managed bool, open func(), rename func(), remove func()) ui.View {
+	title := name
+	if selected {
+		title = "● " + title
+	}
+	openButton := ui.AccessibleName(PrimaryButton("Open workspace", open), "Open project " + name)
+	renameButton := ui.Disabled(ui.AccessibleName(QuietButton("Rename", rename), "Rename project " +
+		name), !managed)
+	removeLabel := "Delete"
+	removeName := "Delete project " + name
+	if !managed {
+		removeLabel = "Forget"
+		removeName = "Forget project " + name
+	}
+	deleteButton := ui.AccessibleName(QuietButton(removeLabel, remove), removeName)
+	actions := ui.Gap(ui.Row(openButton, renameButton, deleteButton), Space2)
+	content := ui.Gap(ui.Column(ui.FontSize(ui.FontWeight(ui.Text(title), 720), 16), ui.FontSize(Muted(root), 11), ui.Flex(ui.Box(), 1), actions), Space2)
+	content = ui.MinHeight(ui.Padding(content, Space4), 146)
+	border := Divider
+	if selected {
+		border = AccentStrong
+	}
+	return framed(content, Surface, border, 12)
+}
+
+func ModalDialog(title string, open bool, content ui.View, onDismiss func()) ui.View {
+	return kit.Dialog(StudioTheme(), title, open, content, ui.Action(onDismiss))
+}

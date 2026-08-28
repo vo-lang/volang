@@ -74,9 +74,6 @@ Focused validation run for this landing slice included:
 - `cargo test -p vo-vm host_event`
 - `cargo test -p vo-app-runtime mailbox`
 - `cargo check -p vo-web --target wasm32-unknown-unknown`
-- `cargo check --manifest-path apps/studio/wasm/Cargo.toml --target wasm32-unknown-unknown`
-- `node ./node_modules/typescript/bin/tsc -p tsconfig.json` from `apps/studio`
-  using the bundled Codex runtime Node
 - `cargo test -p vo-runtime dynamic`
 - `cargo test -p vo-vm closure`
 - `cargo test -p vo-vm --features jit closure_call`
@@ -100,8 +97,6 @@ Related context:
 - [`lang/crates/vo-vm/src/frame_call.rs`](../../crates/vo-vm/src/frame_call.rs)
 - [`lang/crates/vo-runtime/src/builtins/dynamic.rs`](../../crates/vo-runtime/src/builtins/dynamic.rs)
 - [`lang/crates/vo-web/src/async_runner.rs`](../../crates/vo-web/src/async_runner.rs)
-- [`apps/studio/wasm/src/lib.rs`](../../../apps/studio/wasm/src/lib.rs)
-- [`apps/studio/src/lib/backend/web_backend.ts`](../../../apps/studio/src/lib/backend/web_backend.ts)
 
 ## Original Repair Context
 

@@ -1,0 +1,26 @@
+package main
+
+type DeepTransferNode struct {
+	Next *DeepTransferNode
+	Value int
+}
+
+func main() {
+	const nodeCount = 50000
+	var head *DeepTransferNode
+	for i := 0; i < nodeCount; i++ {
+		head = &DeepTransferNode{Next: head, Value: i}
+	}
+	worker := make(island)
+	result := make(port int, 1)
+	go @(worker) func(node *DeepTransferNode, out port<- int) {
+		count := 0
+		for ; node != nil; node = node.Next {
+			count++
+		}
+		out <- count
+	}(head, result)
+	assert(<-result == nodeCount, "deep transfer must preserve every node")
+	assert(head.Value == nodeCount - 1, "deep transfer must preserve the source graph")
+	println("island-deep-graph-transfer: PASS")
+}

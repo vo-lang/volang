@@ -1,0 +1,24 @@
+[package]
+name = "vo-aot-support-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared semantic support module for Volang Core-Wasm AOT hosts"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[package.metadata.wasm-pack.profile.release]
+# rustc emits the standardized bulk-memory instructions used throughout the
+# shared regexp implementation.  wasm-pack's independently downloaded
+# Binaryen build is not part of Volang's pinned toolchain and older builds
+# reject those instructions, so release correctness must not depend on it.
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vo-stdlib = { path = "../vo-stdlib", default-features = false }
+wasm-bindgen = "0.2"

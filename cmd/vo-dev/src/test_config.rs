@@ -39,6 +39,10 @@ pub(crate) struct TestTarget {
     pub(crate) kind: String,
     pub(crate) backend: String,
     #[serde(default)]
+    pub(crate) compatible_with: Option<String>,
+    #[serde(default = "default_true")]
+    pub(crate) inherit_compatible_skips: bool,
+    #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
     pub(crate) default_timeout_sec: u64,
     #[serde(default)]
@@ -47,6 +51,12 @@ pub(crate) struct TestTarget {
     pub(crate) release_build_args: Vec<String>,
     #[serde(default)]
     pub(crate) runner_command: Vec<String>,
+    #[serde(default)]
+    pub(crate) prepare_commands: Vec<Vec<String>>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 pub(crate) struct TestConfig {
@@ -105,6 +115,13 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
             &target.release_build_args,
         )?;
         validate_optional_command(&target.name, "runner_command", &target.runner_command)?;
+        for (index, command) in target.prepare_commands.iter().enumerate() {
+            validate_optional_command(
+                &target.name,
+                &format!("prepare_commands[{index}]"),
+                command,
+            )?;
+        }
         validate_test_command_tools(
             &toolchains.tools,
             &target.name,
@@ -117,6 +134,14 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
             "runner_command",
             &target.runner_command,
         )?;
+        for (index, command) in target.prepare_commands.iter().enumerate() {
+            validate_test_command_tools(
+                &toolchains.tools,
+                &target.name,
+                &format!("prepare_commands[{index}]"),
+                command,
+            )?;
+        }
         match target.kind.as_str() {
             "wasm" => {
                 if target.build_command.is_empty() {
@@ -133,7 +158,10 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
                 }
             }
             _ => {
-                if !target.runner_command.is_empty() || !target.build_command.is_empty() {
+                if !target.runner_command.is_empty()
+                    || !target.build_command.is_empty()
+                    || !target.prepare_commands.is_empty()
+                {
                     bail!(
                         "eng/tests.toml non-wasm target {} cannot declare build_command or runner_command",
                         target.name
@@ -149,6 +177,45 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
         }
         if targets.insert(target.name.clone(), target).is_some() {
             bail!("duplicate test target in eng/tests.toml");
+        }
+    }
+    for target in targets.values() {
+        let Some(compatible_with) = target.compatible_with.as_deref() else {
+            if !target.inherit_compatible_skips {
+                bail!(
+                    "eng/tests.toml target {} disables inherited skips without declaring compatible_with",
+                    target.name
+                );
+            }
+            continue;
+        };
+        if compatible_with == target.name {
+            bail!(
+                "eng/tests.toml target {} cannot be compatible with itself",
+                target.name
+            );
+        }
+        let compatible_target = targets.get(compatible_with).ok_or_else(|| {
+            anyhow!(
+                "eng/tests.toml target {} is compatible with unknown target {}",
+                target.name,
+                compatible_with
+            )
+        })?;
+        if compatible_target.kind != target.kind {
+            bail!(
+                "eng/tests.toml target {} kind {} cannot be compatible with target {} kind {}",
+                target.name,
+                target.kind,
+                compatible_with,
+                compatible_target.kind
+            );
+        }
+        if compatible_target.compatible_with.is_some() {
+            bail!(
+                "eng/tests.toml target {} compatibility must point directly at a canonical target",
+                target.name
+            );
         }
     }
     let mut aliases = HashMap::new();

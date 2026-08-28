@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Volang UI browser conformance</title>
+  </head>
+  <body>
+    <main id="app"></main>
+    <output id="result">running</output>
+    <script type="module">
+      import { UiDomAdapter } from '../dist/index.js';
+
+      const root = document.querySelector('#app');
+      const result = document.querySelector('#result');
+      const adapter = new UiDomAdapter(root);
+      const id = (index) => ({ index, generation: 1 });
+      try {
+        adapter.applyBatch({
+          sessionEpoch: 41n,
+          revision: 1n,
+          mutations: [
+            { type: 'create-element', id: id(1), primitive: 4 },
+            { type: 'create-element', id: id(2), primitive: 10 },
+            { type: 'create-element', id: id(3), primitive: 9 },
+            { type: 'create-text', id: id(4) },
+            {
+              type: 'set-property', id: id(1), property: 8,
+              value: { type: 'length', value: { unit: 'px', value: 12 } },
+            },
+            {
+              type: 'set-property', id: id(1), property: 10,
+              value: { type: 'color', value: 0xff315efb },
+            },
+            {
+              type: 'set-property', id: id(2), property: 16,
+              value: { type: 'text', value: 'initial' },
+            },
+            {
+              type: 'set-property', id: id(2), property: 20,
+              value: { type: 'text', value: 'Name' },
+            },
+            {
+              type: 'listen', id: id(2),
+              listener: {
+                event: 2,
+                handler: { index: 7, generation: 1 },
+                capture: false,
+                passive: false,
+                once: false,
+              },
+            },
+            {
+              type: 'listen', id: id(2),
+              listener: {
+                event: 7,
+                handler: { index: 8, generation: 1 },
+                capture: false,
+                passive: false,
+                once: false,
+              },
+            },
+            { type: 'set-text', id: id(4), text: 'Save' },
+            { type: 'insert-before', parent: id(0), child: id(1) },
+            { type: 'insert-before', parent: id(1), child: id(2) },
+            { type: 'insert-before', parent: id(1), child: id(3) },
+            { type: 'insert-before', parent: id(3), child: id(4) },
+          ],
+        });
+
+        const column = root.firstElementChild;
+        const input = column.children[0];
+        const button = column.children[1];
+        if (column.tagName !== 'DIV' || input.tagName !== 'INPUT' || button.tagName !== 'BUTTON') {
+          throw new Error('primitive mapping mismatch');
+        }
+        if (column.style.gap !== '12px' || column.style.background !== 'rgb(49, 94, 251)') {
+          throw new Error(`style mapping mismatch: ${column.style.cssText}`);
+        }
+        if (input.value !== 'initial' || input.getAttribute('aria-label') !== 'Name') {
+          throw new Error('form or accessibility mapping mismatch');
+        }
+        if (button.textContent !== 'Save') throw new Error('text mutation mismatch');
+
+        input.value = 'typed';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'd' }));
+        const event = adapter.shiftEventFrame();
+        if (event === undefined) throw new Error('input event was not encoded');
+        const view = new DataView(event.buffer, event.byteOffset, event.byteLength);
+        if (new TextDecoder().decode(event.subarray(0, 4)) !== 'VUE1'
+          || view.getBigUint64(4, true) !== 41n
+          || view.getUint32(12, true) !== 7
+          || view.getUint16(20, true) !== 2
+          || view.getUint8(38) !== 1
+          || new TextDecoder().decode(event.subarray(43)) !== 'typed') {
+          throw new Error('browser event frame mismatch');
+        }
+
+        input.dispatchEvent(new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'Enter',
+          code: 'NumpadEnter',
+          shiftKey: true,
+          repeat: true,
+        }));
+        const keyEvent = adapter.shiftEventFrame();
+        if (keyEvent === undefined) throw new Error('key event was not encoded');
+        const keyView = new DataView(
+          keyEvent.buffer,
+          keyEvent.byteOffset,
+          keyEvent.byteLength,
+        );
+        const keyLength = keyView.getUint32(39, true);
+        const key = new TextDecoder().decode(keyEvent.subarray(43, 43 + keyLength));
+        const codeLengthOffset = 43 + keyLength;
+        const codeLength = keyView.getUint32(codeLengthOffset, true);
+        const code = new TextDecoder().decode(
+          keyEvent.subarray(codeLengthOffset + 4, codeLengthOffset + 4 + codeLength),
+        );
+        const flags = keyView.getUint8(codeLengthOffset + 4 + codeLength);
+        if (keyView.getUint16(20, true) !== 7
+          || keyView.getUint32(12, true) !== 8
+          || keyView.getUint8(38) !== 5
+          || key !== 'Enter'
+          || code !== 'NumpadEnter'
+          || flags !== 0b01_0001) {
+          throw new Error('browser key frame mismatch');
+        }
+        document.body.dataset.status = 'passed';
+        result.value = 'passed';
+        result.textContent = 'passed';
+      } catch (error) {
+        document.body.dataset.status = 'failed';
+        result.value = String(error);
+        result.textContent = String(error);
+        throw error;
+      }
+    </script>
+  </body>
+</html>

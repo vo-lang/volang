@@ -1,0 +1,267 @@
+// Package commands provides renderer-neutral commands and keyboard shortcuts.
+// Resolution is deterministic: the highest enabled priority wins and equal-
+// priority duplicate chords are rejected while constructing the UI tree.
+package commands
+
+import (
+	"github.com/vo-lang/ui"
+	"strings"
+)
+
+type Shortcut struct {
+	Key string
+	Code string
+	Modifiers uint8
+	AllowRepeat bool
+	AllowComposing bool
+}
+
+func Key(key string, modifiers uint8) Shortcut {
+	return Shortcut{Key: key, Modifiers: modifiers}
+}
+
+func Physical(code string, modifiers uint8) Shortcut {
+	return Shortcut{Code: code, Modifiers: modifiers}
+}
+
+func (shortcut Shortcut) validate(optional bool) {
+	if shortcut.Key == "" && shortcut.Code == "" {
+		if optional {
+			return
+		}
+		panic("UI shortcut requires one logical key or physical code")
+	}
+	if shortcut.Key != "" && shortcut.Code != "" {
+		panic("UI shortcut cannot mix a logical key and physical code")
+	}
+	if shortcut.Modifiers &^ uint8(15) != 0 {
+		panic("UI shortcut contains unknown modifiers")
+	}
+}
+
+func (shortcut Shortcut) matches(event ui.KeyEvent) bool {
+	if shortcut.Modifiers != event.Modifiers {
+		return false
+	}
+	if !shortcut.AllowRepeat && event.Repeat {
+		return false
+	}
+	if !shortcut.AllowComposing && event.Composing {
+		return false
+	}
+	if shortcut.Key != "" {
+		return strings.EqualFold(shortcut.Key, event.Key)
+	}
+	return shortcut.Code == event.Code
+}
+
+func sameChord(left Shortcut, right Shortcut) bool {
+	return left.Key == right.Key && left.Code == right.Code && left.Modifiers == right.Modifiers &&
+		left.AllowRepeat == right.AllowRepeat &&
+		left.AllowComposing == right.AllowComposing
+}
+
+type Command struct {
+	ID string
+	Label string
+	Description string
+	Group string
+	Keywords []string
+	Enabled bool
+	Visible bool
+	Checked bool
+	Priority int64
+	Shortcut Shortcut
+	Execute func()
+}
+
+func New(id string, label string, shortcut Shortcut, execute func()) Command {
+	return Command{ID: id, Label: label, Enabled: true, Visible: true, Shortcut: shortcut, Execute: execute}
+}
+
+func Action(id string, label string, execute func()) Command {
+	return Command{ID: id, Label: label, Enabled: true, Visible: true, Execute: execute}
+}
+
+func validate(items []Command) {
+	for index, item := range items {
+		if item.ID == "" || item.Execute == nil {
+			panic("UI command requires an identity and execute callback")
+		}
+		if item.Label == "" {
+			panic("UI command requires a label")
+		}
+		item.Shortcut.validate(true)
+		for previous := 0; previous < index; previous++ {
+			other := items[previous]
+			if other.ID == item.ID {
+				panic("UI command identities must be unique within a scope")
+			}
+			if (item.Shortcut.Key != "" || item.Shortcut.Code != "") && item.Priority == other.Priority && sameChord(item.Shortcut, other.Shortcut) {
+				panic("UI command scope contains an ambiguous shortcut")
+			}
+		}
+	}
+}
+
+func dispatch(items []Command, event ui.KeyEvent) {
+	selected := -1
+	priority := int64(0)
+	for index, item := range items {
+		if item.Visible && item.Enabled && (item.Shortcut.Key != "" || item.Shortcut.Code != "") &&
+			item.Shortcut.matches(event) && (selected < 0 || item.Priority > priority) {
+			selected = index
+			priority = item.Priority
+		}
+	}
+	if selected >= 0 {
+		items[selected].Execute()
+	}
+}
+
+// Bind establishes one command scope. Focus and modal isolation remain host
+// responsibilities; this layer owns typed shortcut matching and conflicts.
+func Bind(view ui.View, items ...Command) ui.View {
+	validate(items)
+	return ui.OnKeyDownCapture(view, ui.KeyInput(func(event ui.KeyEvent) {
+		dispatch(items, event)
+	}))
+}
+
+// Scope is one immutable command registry shared by shortcuts, menus,
+// toolbars, context menus, and command palettes.
+type Scope struct {
+	items []Command
+}
+
+func NewScope(items ...Command) Scope {
+	validate(items)
+	return Scope{items: append([]Command{}, items...)}
+}
+
+func (scope Scope) Items() []Command {
+	return append([]Command{}, scope.items...)
+}
+
+func (scope Scope) Find(id string) (Command, bool) {
+	for _, item := range scope.items {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return Command{}, false
+}
+
+func (scope Scope) Invoke(id string) bool {
+	item, found := scope.Find(id)
+	if !found || !item.Visible || !item.Enabled {
+		return false
+	}
+	item.Execute()
+	return true
+}
+
+func containsFold(value string, query string) bool {
+	return strings.Contains(strings.ToLower(value), query)
+}
+
+// Search preserves declaration order, prioritizes exact identifiers and label
+// prefixes, and enforces a result bound suitable for live palettes.
+func (scope Scope) Search(query string, limit int) []Command {
+	if limit < 1 || limit > 256 {
+		panic("UI command search limit is outside bounded limits")
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	exact := []Command{}
+	prefix := []Command{}
+	contains := []Command{}
+	for _, item := range scope.items {
+		if !item.Visible {
+			continue
+		}
+		label := strings.ToLower(item.Label)
+		if query == "" || item.ID == query {
+			exact = append(exact, item)
+		} else if strings.HasPrefix(label, query) {
+			prefix = append(prefix, item)
+		} else {
+			matched := containsFold(item.Label, query) || containsFold(item.Description, query) ||
+				containsFold(item.Group, query)
+			for _, keyword := range item.Keywords {
+				matched = matched || containsFold(keyword, query)
+			}
+			if matched {
+				contains = append(contains, item)
+			}
+		}
+	}
+	results := append(exact, prefix...)
+	results = append(results, contains...)
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
+func (scope Scope) Bind(view ui.View) ui.View {
+	return Bind(view, scope.items...)
+}
+
+func commandButton(item Command, role string) ui.View {
+	label := ui.DerivedString(item.Label)
+	if item.Checked {
+		label = "✓ " + label
+	}
+	view := ui.Disabled(ui.Button(label, func(event ui.Event) { item.Execute() }), !item.Enabled)
+	if item.Description != "" {
+		view = ui.AccessibleDescription(view, item.Description)
+	}
+	if role != "" {
+		view = ui.Role(view, role)
+	}
+	return ui.Key(view, "command:" + item.ID)
+}
+
+func (scope Scope) projection(role string, label string, items []Command) ui.View {
+	children := []ui.View{}
+	itemRole := ui.DerivedString("")
+	if role == "menu" {
+		itemRole = "menuitem"
+	} else if role == "listbox" {
+		itemRole = "option"
+	}
+	for _, item := range items {
+		if item.Visible {
+			children = append(children, commandButton(item, itemRole))
+		}
+	}
+	return ui.AccessibleName(ui.Role(ui.Row(children...), role), label)
+}
+
+func (scope Scope) Toolbar(label string, ids ...string) ui.View {
+	items := []Command{}
+	for _, id := range ids {
+		item, found := scope.Find(id)
+		if !found {
+			panic("UI toolbar references an unknown command")
+		}
+		items = append(items, item)
+	}
+	return scope.projection("toolbar", label, items)
+}
+
+func (scope Scope) Menu(label string, ids ...string) ui.View {
+	items := []Command{}
+	for _, id := range ids {
+		item, found := scope.Find(id)
+		if !found {
+			panic("UI menu references an unknown command")
+		}
+		items = append(items, item)
+	}
+	return scope.projection("menu", label, items)
+}
+
+func (scope Scope) Palette(label string, query string, limit int) ui.View {
+	return scope.projection("listbox", label, scope.Search(query, limit))
+}

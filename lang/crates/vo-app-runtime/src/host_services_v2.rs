@@ -64,9 +64,7 @@ impl HostRequestCommand {
         else {
             return Ok(None);
         };
-        if capability_name.as_slice() != crate::CAPABILITY_VOGUI_RUN_ENTRY.as_bytes()
-            && capability_name.as_slice() != crate::CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes()
-        {
+        if capability_name.as_slice() != crate::CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes() {
             return Ok(None);
         }
         let launch = crate::decode_entry_launch(capability_name, payload)?;

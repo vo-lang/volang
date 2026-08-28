@@ -4,6 +4,8 @@
 //! - stdlib-only single-file compilation (`compile_source_with_std_fs`)
 //! - validated project compilation (`compile_entry_with_mod_fs` or `compile_entry_with_vfs`)
 
+#[cfg(any(target_arch = "wasm32", test))]
+use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -25,6 +27,11 @@ use vo_module::readiness::ReadyModule;
 use crate::js_types::CompileResult;
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_vfs::WasmVfs;
+
+#[cfg(target_arch = "wasm32")]
+const MAX_BROWSER_PROJECT_FILES: usize = 20_000;
+#[cfg(target_arch = "wasm32")]
+const MAX_BROWSER_PROJECT_BYTES: usize = 128 * 1024 * 1024;
 
 /// Build the standard library filesystem. Exported for libraries to extend.
 pub fn build_stdlib_fs() -> MemoryFs {
@@ -485,6 +492,21 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
             format!("generated invalid bytecode: {}", error),
         )
     })?;
+    let target =
+        vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN).map_err(|error| {
+            WebCompileError::new(
+                WebCompileStage::Codegen,
+                WebCompileErrorKind::Codegen,
+                format!("invalid WebAssembly target contract: {error}"),
+            )
+        })?;
+    vo_target::verify_module_for_target(&module, &target).map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Codegen,
+            WebCompileErrorKind::Codegen,
+            error.to_string(),
+        )
+    })?;
     module.serialize().map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Codegen,
@@ -515,7 +537,7 @@ fn compile_with_fs_modules<M: FileSystem + Send + Sync>(
     compile_with_ready_fs_modules(input, std_fs, mod_fs, &ready_modules)
 }
 
-const WASM_TARGET: &str = "wasm32-unknown-unknown";
+const WASM_TARGET: &str = vo_target::WASM32_UNKNOWN_UNKNOWN;
 
 fn validate_materialized_graph<M: FileSystem>(
     input: &PreparedCompileInput,
@@ -641,6 +663,270 @@ pub fn compile(source: &str, filename: Option<String>) -> CompileResult {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn snapshot_browser_project(project_root: &str) -> Result<MemoryFs, String> {
+    use std::collections::VecDeque;
+    use vo_common::vfs::FileSystemEntryKind;
+
+    let source = WasmVfs::new(project_root);
+    if !source.is_dir(Path::new(".")) {
+        return Err("browser project root is unavailable".to_string());
+    }
+    let mut output = MemoryFs::new();
+    let mut pending = VecDeque::from([PathBuf::from(".")]);
+    let mut files = 0_usize;
+    let mut bytes = 0_usize;
+    while let Some(directory) = pending.pop_front() {
+        for path in source
+            .read_dir(&directory)
+            .map_err(|error| error.to_string())?
+        {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            match source
+                .entry_kind(&path)
+                .map_err(|error| error.to_string())?
+            {
+                FileSystemEntryKind::Directory => {
+                    if matches!(name, ".git" | ".vo" | "node_modules" | "target") {
+                        continue;
+                    }
+                    output.add_dir(path.clone());
+                    pending.push_back(path);
+                }
+                FileSystemEntryKind::RegularFile => {
+                    files = files.saturating_add(1);
+                    if files > MAX_BROWSER_PROJECT_FILES {
+                        return Err("browser project contains too many files".to_string());
+                    }
+                    let content = source
+                        .read_bytes_limited(&path, MAX_BROWSER_PROJECT_BYTES.saturating_sub(bytes))
+                        .map_err(|error| error.to_string())?;
+                    bytes = bytes.saturating_add(content.len());
+                    if bytes > MAX_BROWSER_PROJECT_BYTES {
+                        return Err(
+                            "browser project exceeds the compiler snapshot limit".to_string()
+                        );
+                    }
+                    output.add_bytes(path, content);
+                }
+                FileSystemEntryKind::Missing
+                | FileSystemEntryKind::Symlink
+                | FileSystemEntryKind::Special
+                | FileSystemEntryKind::Unknown => {
+                    return Err(
+                        "browser project changed while its compiler snapshot was captured"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+/// Compile a bounded browser-VFS project with one optional unsaved editor
+/// overlay. The immutable snapshot prevents concurrent OPFS persistence from
+/// changing the compiler's view midway through analysis.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "compileProject")]
+pub fn compile_project(
+    entry: &str,
+    project_root: &str,
+    mod_root: Option<String>,
+    overlay_path: Option<String>,
+    overlay_text: Option<String>,
+) -> CompileResult {
+    let result = (|| {
+        let mut local = snapshot_browser_project(project_root)?;
+        match (overlay_path, overlay_text) {
+            (None, None) => {}
+            (Some(path), Some(text)) => {
+                let path = PathBuf::from(path);
+                vo_module::schema::portable_relative_path_from_path(&path)
+                    .map_err(|error| error.to_string())?;
+                local.add_file(path, text);
+            }
+            _ => {
+                return Err(
+                    "browser compiler overlay path and text must be supplied together".to_string(),
+                )
+            }
+        }
+        compile_entry_with_vfs(entry, local, mod_root.as_deref().unwrap_or(""))
+    })();
+    match result {
+        Ok(bytecode) => CompileResult {
+            success: true,
+            bytecode: Some(bytecode),
+            error_message: None,
+            error_line: None,
+            error_column: None,
+        },
+        Err(message) => CompileResult {
+            success: false,
+            bytecode: None,
+            error_message: Some(message),
+            error_line: None,
+            error_column: None,
+        },
+    }
+}
+
+/// Resolve authenticated registry modules into the persistent browser cache,
+/// then compile the same immutable project snapshot. Workspace-origin locks
+/// remain local-authority only and are never silently fetched from a registry.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "compileProjectAutoInstall")]
+pub async fn compile_project_auto_install(
+    entry: String,
+    project_root: String,
+    overlay_path: Option<String>,
+    overlay_text: Option<String>,
+) -> Result<CompileResult, wasm_bindgen::JsValue> {
+    let compile = async move {
+        let mut local = snapshot_browser_project(&project_root)?;
+        match (overlay_path, overlay_text) {
+            (None, None) => {}
+            (Some(path), Some(text)) => {
+                let path = PathBuf::from(path);
+                vo_module::schema::portable_relative_path_from_path(&path)
+                    .map_err(|error| error.to_string())?;
+                local.add_file(path, text);
+            }
+            _ => {
+                return Err(
+                    "browser compiler overlay path and text must be supplied together".to_string(),
+                )
+            }
+        }
+        let package_dir = Path::new(&entry).parent().unwrap_or(Path::new("."));
+        let context = vo_module::project::load_project_context(&local, package_dir)
+            .map_err(|error| error.to_string())?;
+        let ready = vo_module::async_install::ensure_project_plan(
+            &WasmVfs::new(""),
+            &crate::BrowserRegistry,
+            context.project_plan(),
+            vo_target::WASM32_UNKNOWN_UNKNOWN,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        compile_ready_entry_with_vfs(&entry, local, "", &ProjectContextOptions::default(), &ready)
+    }
+    .await;
+    Ok(match compile {
+        Ok(bytecode) => CompileResult {
+            success: true,
+            bytecode: Some(bytecode),
+            error_message: None,
+            error_line: None,
+            error_column: None,
+        },
+        Err(message) => CompileResult {
+            success: false,
+            bytecode: None,
+            error_message: Some(message),
+            error_line: None,
+            error_column: None,
+        },
+    })
+}
+
+/// Build a deterministic workspace-origin lock for an entirely packaged
+/// browser workspace. Registry nodes and capability-bearing dependencies stay
+/// outside this narrow offline authority boundary.
+#[cfg(any(target_arch = "wasm32", test))]
+fn prepare_workspace_lock_text(
+    root_mod: &str,
+    workspace_mods: &[String],
+) -> Result<String, String> {
+    let root =
+        vo_module::schema::modfile::ModFile::parse(root_mod).map_err(|error| error.to_string())?;
+    let mut available = BTreeMap::new();
+    for text in workspace_mods {
+        let module =
+            vo_module::schema::modfile::ModFile::parse(text).map_err(|error| error.to_string())?;
+        let path = vo_module::identity::ModulePath::parse(module.module.as_str())
+            .map_err(|error| error.to_string())?;
+        if available.insert(path.clone(), module).is_some() {
+            return Err(format!("duplicate packaged workspace module {path}"));
+        }
+    }
+    let mut pending = root.dependencies.clone();
+    let mut selected = BTreeMap::new();
+    while let Some(dependency) = pending.pop() {
+        if !dependency.capability_request.is_empty() {
+            return Err(format!(
+                "offline workspace lock cannot select capabilities for {}",
+                dependency.module
+            ));
+        }
+        let module = available.get(&dependency.module).ok_or_else(|| {
+            format!(
+                "packaged workspace is missing dependency {}",
+                dependency.module
+            )
+        })?;
+        if !dependency.constraint.satisfies(&module.version) {
+            return Err(format!(
+                "packaged workspace module {} version {} violates the project constraint",
+                dependency.module, module.version
+            ));
+        }
+        if selected.contains_key(&dependency.module) {
+            continue;
+        }
+        pending.extend(module.dependencies.iter().cloned());
+        selected.insert(dependency.module.clone(), module.clone());
+    }
+    if selected.is_empty() {
+        return Err("dependency-free projects omit vo.lock".to_string());
+    }
+    let modules = selected
+        .into_iter()
+        .map(|(path, module)| {
+            Ok(vo_module::schema::lockfile::LockedModule {
+                path,
+                version: module.version.clone(),
+                origin: vo_module::schema::lockfile::LockOrigin::Workspace,
+                release: None,
+                intent: Some(
+                    vo_module::lock::module_intent_digest(&module)
+                        .map_err(|error| error.to_string())?,
+                ),
+                selection: None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let lock = vo_module::schema::lockfile::LockFile {
+        format: vo_module::schema::lockfile::LOCK_FILE_VERSION,
+        root: vo_module::lock::module_intent_digest(&root).map_err(|error| error.to_string())?,
+        modules,
+    };
+    lock.render().map_err(|error| error.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "prepareWorkspaceLock")]
+pub fn prepare_workspace_lock(
+    root_mod: String,
+    workspace_mods: js_sys::Array,
+) -> Result<String, wasm_bindgen::JsValue> {
+    let workspace_mods = workspace_mods
+        .iter()
+        .map(|value| {
+            value
+                .as_string()
+                .ok_or_else(|| "workspace module manifests must be strings".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|message| wasm_bindgen::JsValue::from_str(&message))?;
+    prepare_workspace_lock_text(&root_mod, &workspace_mods)
+        .map_err(|message| wasm_bindgen::JsValue::from_str(&message))
+}
+
 /// Compile one source file against the standard-library filesystem supplied by
 /// the host. This source-only API never resolves third-party modules.
 pub fn compile_source_with_std_fs(
@@ -655,7 +941,7 @@ pub fn compile_source_with_std_fs(
 /// Compile a validated Vo project from a pre-populated local filesystem.
 ///
 /// `entry` is the path to the package entry file inside `local_fs`
-/// (e.g. `"apps/studio/main.vo"`). `local_fs` must contain the project source,
+/// (e.g. `"examples/hello/main.vo"`). `local_fs` must contain the project source,
 /// its canonical `vo.mod` and a complete format-1 `vo.lock` whenever its
 /// selected graph is non-empty. `mod_fs` uses the authenticated versioned
 /// cache layout for registry modules; selected workspace modules are read from

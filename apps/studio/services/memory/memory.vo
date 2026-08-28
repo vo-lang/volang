@@ -1,0 +1,669 @@
+// Package memory is the deterministic Studio host used by product tests,
+// examples, and host-failure recovery. Native and Web hosts implement the same
+// capability interfaces with real compiler and platform services.
+package memory
+
+import (
+	"context"
+	"errors"
+	"github.com/vo-lang/studio/domain"
+	"github.com/vo-lang/studio/protocol"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type projectState struct {
+	project domain.Project
+	files map[string]string
+}
+
+type Host struct {
+	mu sync.RWMutex
+	projects map[domain.ProjectID]*projectState
+	credentials map[string]string
+	account domain.AccountState
+	deletedRemotes map[domain.ProjectID]bool
+	nextProject uint64
+	nextArtifact uint64
+}
+
+func New() *Host {
+	host := &Host{
+		projects: make(map[domain.ProjectID]*projectState), credentials: make(map[string]string),
+		deletedRemotes: make(map[domain.ProjectID]bool),
+		nextProject: 2, nextArtifact: 1,
+	}
+	id := domain.ProjectID("welcome")
+	host.projects[id] = &projectState{
+		project: domain.Project{
+			ID: id, Name: "hello-studio", Root: "/workspace/hello-studio", Kind: domain.BrowserProject,
+			LastOpenedUnixMillis: time.Now().UnixMilli(), Pinned: true, Managed: true,
+		},
+		files: map[string]string{
+			"main.vo": "package main\n\nimport \"github.com/vo-lang/ui\"\n\nfunc App() ui.View {\n\treturn ui.Text(\"Hello from Volang Studio\")\n}\n\nfunc main() {\n\tif err := ui.Mount(App); err != nil { panic(err.Error()) }\n}\n",
+			"vo.mod": "format = 1\nmodule = \"local/hello-studio\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/vo-lang/ui\" = \"^0.1.4\"\n",
+			"README.md": "# Hello Studio\n\nA pure Volang Web and desktop application.\n",
+		},
+	}
+	return host
+}
+
+func (host *Host) Services() protocol.Services {
+	return protocol.Services{
+		Host: host, Files: host, Language: host, Compiler: host, Runner: host, Preview: host, Share: host,
+		Account: host, Remote: host, Credentials: host,
+	}
+}
+
+func (host *Host) Info(ctx context.Context) (domain.HostInfo, error) {
+	select {
+		case <-ctx.Done():
+			return domain.HostInfo{}, ctx.Err()
+		default:
+	}
+	return domain.HostInfo{
+		Platform: "memory", Persistent: false,
+		RuntimeModes: []domain.RuntimeMode{domain.RuntimeVM, domain.RuntimeJIT}, CanOpenLocal: false,
+		CanSyncRemote: true, CanPreview: true,
+	}, nil
+}
+
+func (host *Host) Projects(ctx context.Context) ([]domain.Project, error) {
+	select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	result := make([]domain.Project, 0, len(host.projects))
+	for _, state := range host.projects {
+		result = append(result, state.project)
+	}
+	for index := 1; index < len(result); index++ {
+		current := result[index]
+		position := index
+		for position > 0 &&
+			((!result[position - 1].Pinned && current.Pinned) ||
+				(result[position - 1].Pinned == current.Pinned && result[position - 1].Name > current.Name)) {
+			result[position] = result[position - 1]
+			position--
+		}
+		result[position] = current
+	}
+	return result, nil
+}
+
+func validName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') &&
+			!(character >= '0' && character <= '9') &&
+			character != '-' &&
+			character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func projectFiles(request protocol.CreateProjectRequest) (map[string]string, error) {
+	files := make(map[string]string)
+	if len(request.Files) == 0 {
+		files["main.vo"] = "package main\n\nimport \"github.com/vo-lang/ui\"\n\nfunc App() ui.View { return ui.Text(\"Hello\") }\n\nfunc main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }\n"
+	} else {
+		total := 0
+		for _, file := range request.Files {
+			path := strings.TrimSpace(file.Path)
+			validPath := path != "" && len(path) <= 4096 && !strings.HasPrefix(path, "/") &&
+				!strings.Contains(path, "\\")
+			for _, part := range strings.Split(path, "/") {
+				if part == "" || part == "." || part == ".." {
+					validPath = false
+				}
+			}
+			if !validPath || path == "vo.mod" || path == "vo.lock" {
+				return nil, errors.New("starter file path is invalid")
+			}
+			if _, exists := files[path]; exists {
+				return nil, errors.New("starter contains a duplicate file path")
+			}
+			total += len(file.Text)
+			if len(file.Text) > 4 * 1024 * 1024 || total > 8 * 1024 * 1024 {
+				return nil, errors.New("starter files exceed the Studio project limit")
+			}
+			files[path] = file.Text
+		}
+		if _, ok := files["main.vo"]; !ok {
+			return nil, errors.New("starter must provide main.vo")
+		}
+	}
+	files["vo.mod"] = "format = 1\nmodule = \"local/" + request.Name +
+		"\"\nversion = \"0.1.0\"\nvo = \"0.1.4\"\n\n[dependencies]\n\"github.com/vo-lang/ui\" = \"^0.1.4\"\n"
+	return files, nil
+}
+
+func (host *Host) CreateProject(ctx context.Context, request protocol.CreateProjectRequest) (domain.Project, error) {
+	select {
+		case <-ctx.Done():
+			return domain.Project{}, ctx.Err()
+		default:
+	}
+	if !validName(request.Name) {
+		return domain.Project{}, errors.New("project name may contain letters, numbers, dash, and underscore")
+	}
+	files, err := projectFiles(request)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	for _, state := range host.projects {
+		if state.project.Name == request.Name {
+			return domain.Project{}, errors.New("project already exists")
+		}
+	}
+	id := domain.ProjectID("project-" + strconv.FormatUint(host.nextProject, 10))
+	host.nextProject++
+	root := request.Root
+	if root == "" {
+		root = "/workspace/" + request.Name
+	}
+	project := domain.Project{
+		ID: id, Name: request.Name, Root: root, Kind: domain.BrowserProject,
+		LastOpenedUnixMillis: time.Now().UnixMilli(), Managed: true,
+	}
+	host.projects[id] = &projectState{project: project, files: files}
+	return project, nil
+}
+
+func (host *Host) OpenProject(ctx context.Context, root string) (domain.Project, error) {
+	select {
+		case <-ctx.Done():
+			return domain.Project{}, ctx.Err()
+		default:
+	}
+	return domain.Project{}, errors.New("the memory Studio host cannot open local folders")
+}
+
+func (host *Host) RenameProject(ctx context.Context, id domain.ProjectID, name string) (domain.Project, error) {
+	select {
+		case <-ctx.Done():
+			return domain.Project{}, ctx.Err()
+		default:
+	}
+	if !validName(name) {
+		return domain.Project{}, errors.New("project name may contain letters, numbers, dash, and underscore")
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(id)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	for existingID, existing := range host.projects {
+		if existingID != id && existing.project.Name == name {
+			return domain.Project{}, errors.New("project already exists")
+		}
+	}
+	state.project.Name = name
+	state.project.Root = "/workspace/" + name
+	state.project.LastOpenedUnixMillis = time.Now().UnixMilli()
+	return state.project, nil
+}
+
+func (host *Host) DeleteProject(ctx context.Context, id domain.ProjectID) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if _, err := host.project(id); err != nil {
+		return err
+	}
+	delete(host.projects, id)
+	delete(host.deletedRemotes, id)
+	return nil
+}
+
+func (host *Host) ForgetProject(ctx context.Context, id domain.ProjectID) error {
+	return host.DeleteProject(ctx, id)
+}
+
+func (host *Host) project(id domain.ProjectID) (*projectState, error) {
+	state := host.projects[id]
+	if state == nil {
+		return nil, errors.New("project was not found")
+	}
+	return state, nil
+}
+
+func fileKind(path string) domain.FileKind {
+	if path == "vo.mod" || path == "vo.lock" {
+		return domain.ModuleFile
+	}
+	if strings.HasSuffix(path, ".md") {
+		return domain.DocumentationFile
+	}
+	if strings.HasSuffix(path, ".vo") {
+		return domain.SourceFile
+	}
+	return domain.AssetFile
+}
+
+func (host *Host) Files(ctx context.Context, id domain.ProjectID) ([]domain.FileEntry, error) {
+	select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	state, err := host.project(id)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(state.files))
+	for path := range state.files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	result := make([]domain.FileEntry, 0, len(paths))
+	for _, path := range paths {
+		result = append(result, domain.FileEntry{
+			Path: path, Name: path, Kind: fileKind(path), ModifiedUnixMillis: time.Now().UnixMilli(),
+		})
+	}
+	return result, nil
+}
+
+func (host *Host) ReadFile(ctx context.Context, id domain.ProjectID, path string) (string, error) {
+	select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	state, err := host.project(id)
+	if err != nil {
+		return "", err
+	}
+	value, ok := state.files[path]
+	if !ok {
+		return "", errors.New("file was not found")
+	}
+	return value, nil
+}
+
+func (host *Host) WriteFile(ctx context.Context, id domain.ProjectID, path string, value string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	if path == "" || len(path) > 4096 || strings.Contains(path, "..") {
+		return errors.New("file path is invalid")
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(id)
+	if err != nil {
+		return err
+	}
+	state.files[path] = value
+	state.project.LastOpenedUnixMillis = time.Now().UnixMilli()
+	return nil
+}
+
+func (host *Host) RenameEntry(ctx context.Context, id domain.ProjectID, from string, to string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	if from == "" || to == "" || strings.Contains(from, "..") || strings.Contains(to, "..") {
+		return errors.New("file path is invalid")
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(id)
+	if err != nil {
+		return err
+	}
+	value, ok := state.files[from]
+	if !ok {
+		return errors.New("file was not found")
+	}
+	if _, exists := state.files[to]; exists {
+		return errors.New("destination already exists")
+	}
+	delete(state.files, from)
+	state.files[to] = value
+	return nil
+}
+
+func (host *Host) DeleteEntry(ctx context.Context, id domain.ProjectID, path string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	if path == "" || strings.Contains(path, "..") {
+		return errors.New("file path is invalid")
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(id)
+	if err != nil {
+		return err
+	}
+	if _, ok := state.files[path]; !ok {
+		return errors.New("file was not found")
+	}
+	delete(state.files, path)
+	return nil
+}
+
+func (host *Host) Analyze(ctx context.Context, request protocol.AnalyzeRequest) ([]domain.Diagnostic, error) {
+	select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+	}
+	result := make([]domain.Diagnostic, 0)
+	if !strings.HasPrefix(strings.TrimSpace(request.Text), "package ") {
+		result = append(result, domain.Diagnostic{
+			Path: request.Path, Line: 1, Column: 1, EndLine: 1, EndColumn: 1,
+			Severity: domain.DiagnosticError, Code: "studio/package",
+			Message: "source file must begin with a package declaration",
+		})
+	}
+	if strings.Contains(request.Text, "panic(") {
+		result = append(result, domain.Diagnostic{
+			Path: request.Path, Line: 1, Column: 1, EndLine: 1, EndColumn: 1,
+			Severity: domain.DiagnosticHint, Code: "studio/panic",
+			Message: "panic path is visible during development",
+		})
+	}
+	return result, nil
+}
+
+func (host *Host) Compile(ctx context.Context, request protocol.CompileRequest) (domain.Artifact, error) {
+	select {
+		case <-ctx.Done():
+			return domain.Artifact{}, ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(request.ProjectID)
+	if err != nil {
+		return domain.Artifact{}, err
+	}
+	source, ok := state.files[request.Entry]
+	if !ok {
+		return domain.Artifact{}, errors.New("entry file was not found")
+	}
+	for _, overlay := range request.Overlays {
+		if overlay.Path == request.Entry {
+			source = overlay.Text
+		}
+	}
+	id := "artifact-" + strconv.FormatUint(host.nextArtifact, 10)
+	host.nextArtifact++
+	kind := domain.BytecodeArtifact
+	if request.ForPreview {
+		kind = domain.UiArtifact
+	}
+	return domain.Artifact{ID: id, Kind: kind, Entry: request.Entry, Bytes: []byte(source)}, nil
+}
+
+func send(ctx context.Context, output chan domain.RunEvent, event domain.RunEvent) bool {
+	select {
+		case <-ctx.Done():
+			return false
+		case output <- event:
+			return true
+	}
+}
+
+func (host *Host) Run(ctx context.Context, request protocol.RunRequest) (<-chan domain.RunEvent, error) {
+	if len(request.Artifact.Bytes) == 0 {
+		return nil, errors.New("run artifact is empty")
+	}
+	output := make(chan domain.RunEvent, 8)
+	go func() {
+		started := time.Now()
+		if !send(ctx, output, domain.RunEvent{
+			Kind: domain.RunStarted, Text: request.Mode.String() + " session started",
+		}) {
+			close(output)
+			return
+		}
+		time.Sleep(8 * time.Millisecond)
+		if !send(ctx, output, domain.RunEvent{
+			Kind: domain.RunStdout, Text: "Hello from " + request.Artifact.Entry,
+		}) {
+			close(output)
+			return
+		}
+		if request.Artifact.Kind == domain.UiArtifact {
+			if !send(ctx, output, domain.RunEvent{
+				Kind: domain.RunPreview, Text: "preview ready", ArtifactID: request.Artifact.ID,
+			}) {
+				close(output)
+				return
+			}
+		}
+		send(ctx, output, domain.RunEvent{
+			Kind: domain.RunFinished, ExitCode: 0, Duration: time.Since(started),
+			Text: "process exited successfully",
+		})
+		close(output)
+	}()
+	return output, nil
+}
+
+func (host *Host) OpenPreview(ctx context.Context, artifact domain.Artifact) (string, error) {
+	select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+	}
+	if artifact.Kind != domain.UiArtifact {
+		return "", errors.New("artifact cannot be previewed")
+	}
+	return "memory://preview/" + artifact.ID, nil
+}
+
+func (host *Host) ClosePreview(ctx context.Context, id string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+	}
+}
+
+func (host *Host) Share(ctx context.Context, id domain.ProjectID) (domain.ProjectShare, error) {
+	select {
+		case <-ctx.Done():
+			return domain.ProjectShare{}, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	if _, err := host.project(id); err != nil {
+		return domain.ProjectShare{}, err
+	}
+	key := string(id)
+	return domain.ProjectShare{
+		Shareable: true, DevelopmentLink: "memory://studio/project/" + key,
+		RunnerLink: "memory://studio/runner/" + key,
+	}, nil
+}
+
+func (host *Host) Account(ctx context.Context) (domain.AccountState, error) {
+	select {
+		case <-ctx.Done():
+			return domain.AccountState{}, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	return host.account, nil
+}
+
+func (host *Host) ConnectAccount(ctx context.Context) (domain.AccountState, error) {
+	select {
+		case <-ctx.Done():
+			return domain.AccountState{}, ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	host.account = domain.AccountState{
+		Provider: "github", Connected: true, Login: "volang-developer", Name: "Volang Developer",
+	}
+	return host.account, nil
+}
+
+func (host *Host) DisconnectAccount(ctx context.Context) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	host.account = domain.AccountState{}
+	host.mu.Unlock()
+	return nil
+}
+
+func (host *Host) State(ctx context.Context, id domain.ProjectID) (domain.RemoteState, error) {
+	select {
+		case <-ctx.Done():
+			return domain.RemoteState{}, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	if _, err := host.project(id); err != nil {
+		return domain.RemoteState{}, err
+	}
+	if host.deletedRemotes[id] {
+		return domain.RemoteState{}, nil
+	}
+	target := "vo-lang/" + string(id)
+	return domain.RemoteState{Provider: "github", Repository: target, DeleteTarget: target, Branch: "main"}, nil
+}
+
+func (host *Host) Diff(ctx context.Context, id domain.ProjectID, path string) (domain.RemoteDiff, error) {
+	select {
+		case <-ctx.Done():
+			return domain.RemoteDiff{}, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	if _, err := host.project(id); err != nil {
+		return domain.RemoteDiff{}, err
+	}
+	return domain.RemoteDiff{Path: path, Unified: "No changes in the deterministic memory host."}, nil
+}
+
+func (host *Host) Pull(ctx context.Context, id domain.ProjectID, progress func(string)) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	if progress != nil { progress("Remote changes fetched") }
+	_, err := host.project(id)
+	return err
+}
+
+func (host *Host) Push(ctx context.Context, id domain.ProjectID, message string, progress func(string)) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	if strings.TrimSpace(message) == "" {
+		return errors.New("commit message is empty")
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	if progress != nil { progress("Commit uploaded") }
+	_, err := host.project(id)
+	return err
+}
+
+func (host *Host) DeleteRepository(ctx context.Context, id domain.ProjectID, repository string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if _, err := host.project(id); err != nil {
+		return err
+	}
+	expected := "vo-lang/" + string(id)
+	if repository != expected {
+		return errors.New("repository confirmation does not match")
+	}
+	host.deletedRemotes[id] = true
+	return nil
+}
+
+func (host *Host) Get(ctx context.Context, key string) (string, bool, error) {
+	select {
+		case <-ctx.Done():
+			return "", false, ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	value, ok := host.credentials[key]
+	return value, ok, nil
+}
+
+func (host *Host) Set(ctx context.Context, key string, value string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	if key == "" || value == "" {
+		return errors.New("credential key and value are required")
+	}
+	host.mu.Lock()
+	host.credentials[key] = value
+	host.mu.Unlock()
+	return nil
+}
+
+func (host *Host) Delete(ctx context.Context, key string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	delete(host.credentials, key)
+	host.mu.Unlock()
+	return nil
+}

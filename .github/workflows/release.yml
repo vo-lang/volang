@@ -118,6 +118,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.client_payload.tag }}
         run: |
           ./target/debug/vo-dev lint release
+          ./target/debug/vo-dev ui-certify --check
 
           unset GITHUB_REF_NAME GITHUB_SHA
           matrix="$(./target/debug/vo-dev release matrix)"
@@ -157,6 +158,26 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: lang/crates/vo-web/package-lock.json
+
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
       - name: Build release tool
         run: cargo build --locked -p vo-dev
 
@@ -173,7 +194,35 @@ jobs:
           binary="./target/${{ matrix.target }}/release/vo"
           "$binary" --version
           "$binary" run tests/lang/cases/runtime/array_len_cap_runtime.vo --mode=jit
+          runtime="./target/${{ matrix.target }}/release/libvo_aot_runtime.a"
+          "$binary" build examples/basics/hello.vo \
+            --runtime="$runtime" \
+            --no-cache \
+            -o "./target/${{ matrix.target }}/release/hello-aot-smoke"
+          test "$("./target/${{ matrix.target }}/release/hello-aot-smoke")" = "Hello, hello!"
           ./target/debug/vo-dev release package "${{ matrix.target }}"
+          unpack="./target/${{ matrix.target }}/release/package-smoke"
+          mkdir -p "$unpack"
+          tar -xzf "${{ matrix.artifact_name }}" -C "$unpack"
+          case "${{ matrix.target }}" in
+            *windows*) packaged_vo="$unpack/vo.exe" ;;
+            *) packaged_vo="$unpack/vo" ;;
+          esac
+          "$packaged_vo" ui build ui/examples/settings \
+            -o "./target/${{ matrix.target }}/release/ui-web-smoke"
+          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/app.wasm"
+          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/dist/index.js"
+          test -f "./target/${{ matrix.target }}/release/ui-web-smoke/runtime/aot-support/vo_aot_support_wasm_bg.wasm"
+          starter="$RUNNER_TEMP/vo-ui-release-starter"
+          export VO_MOD_CACHE="$RUNNER_TEMP/vo-ui-module-cache"
+          "$packaged_vo" ui new "$starter"
+          test -f "$starter/vo.lock"
+          "$packaged_vo" ui test "$starter" --mode=vm
+          "$packaged_vo" build ui/examples/settings \
+            --runtime="$unpack/libvo_ui_aot_runtime_native.a" \
+            --no-cache \
+            -o "./target/${{ matrix.target }}/release/ui-native-aot-smoke"
+          test -x "./target/${{ matrix.target }}/release/ui-native-aot-smoke"
 
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

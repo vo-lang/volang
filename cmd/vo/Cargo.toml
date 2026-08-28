@@ -14,11 +14,14 @@ name = "vo"
 path = "src/main.rs"
 
 [features]
-default = ["jit"]
+default = ["jit", "desktop-ui"]
 jit = ["vo-engine/jit"]
+desktop-ui = ["dep:vo-ui-shell-native"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
 toml = "0.8"
 vo-common-core = { path = "../../lang/crates/vo-common-core" }
 vo-common = { path = "../../lang/crates/vo-common" }
@@ -27,3 +30,18 @@ vo-module = { path = "../../lang/crates/vo-module" }
 vo-release = { path = "../../lang/crates/vo-release" }
 vo-schema-compiler = { path = "../../lang/crates/vo-schema-compiler" }
 vo-syntax = { path = "../../lang/crates/vo-syntax" }
+vo-target.workspace = true
+vo-ui-artifact.workspace = true
+vo-ui-accessibility.workspace = true
+vo-ui-core.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-shell-native = { workspace = true, optional = true, features = ["desktop-window"] }
+vo-ui-vm.workspace = true
+vo-ui-web.workspace = true
+vo-vm = { path = "../../lang/crates/vo-vm", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+find-msvc-tools = "=0.1.9"

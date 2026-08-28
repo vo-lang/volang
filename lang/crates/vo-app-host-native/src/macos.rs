@@ -4,17 +4,18 @@ use objc2::{
     class, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, NSObject, ProtocolObject, Sel},
-    DefinedClass, MainThreadMarker, MainThreadOnly,
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags,
+    NSAccessibility, NSApplication, NSBackingStoreType, NSDragOperation, NSDraggingDestination,
+    NSDraggingInfo, NSEvent, NSEventMask, NSEventModifierFlags, NSPasteboardTypeFileURL,
     NSTextInputClient, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowDelegate,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDate, NSDefaultRunLoopMode,
     NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRangePointer, NSRect, NSRunLoop, NSSize,
-    NSString, NSUInteger,
+    NSString, NSUInteger, NSURL,
 };
 use vo_app_protocol::{ViewHandle, WindowHandle};
 
@@ -318,6 +319,73 @@ define_class!(
             self.ivars().text.borrow().selected_range.location
         }
     }
+
+    unsafe impl NSObjectProtocol for MacOsInputView {}
+
+    unsafe impl NSDraggingDestination for MacOsInputView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(
+            &self,
+            sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            let paths = file_drag_paths(sender);
+            if paths.is_empty() {
+                return NSDragOperation::None;
+            }
+            let point = self.convertPoint_fromView(sender.draggingLocation(), None);
+            self.publish(NativeInputKind::FileDragEntered {
+                x_milli: milli_i32(point.x),
+                y_milli: milli_i32(point.y),
+                paths,
+            });
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(
+            &self,
+            sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            let point = self.convertPoint_fromView(sender.draggingLocation(), None);
+            self.publish(NativeInputKind::FileDragMoved {
+                x_milli: milli_i32(point.x),
+                y_milli: milli_i32(point.y),
+            });
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            self.publish(NativeInputKind::FileDragLeft);
+        }
+
+        #[unsafe(method(prepareForDragOperation:))]
+        fn prepare_for_drag_operation(
+            &self,
+            sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> bool {
+            !file_drag_paths(sender).is_empty()
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(
+            &self,
+            sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> bool {
+            let paths = file_drag_paths(sender);
+            if paths.is_empty() {
+                false
+            } else {
+                let point = self.convertPoint_fromView(sender.draggingLocation(), None);
+                self.publish(NativeInputKind::FileDropped {
+                    x_milli: milli_i32(point.x),
+                    y_milli: milli_i32(point.y),
+                    paths,
+                });
+                true
+            }
+        }
+    }
 );
 
 impl MacOsInputView {
@@ -555,6 +623,10 @@ impl MacOsGpuWindow {
             Arc::clone(&clock),
         );
         view.setWantsLayer(true);
+        // SAFETY: AppKit initializes this immutable process-global pasteboard
+        // type before application code runs.
+        let file_url_type = unsafe { NSPasteboardTypeFileURL };
+        view.registerForDraggedTypes(&NSArray::from_slice(&[file_url_type]));
         // SAFETY: CAMetalLayer is provided by QuartzCore on every supported
         // macOS target. The returned Objective-C object is retained.
         let metal_layer: Retained<AnyObject> = unsafe { msg_send![class!(CAMetalLayer), new] };
@@ -731,6 +803,12 @@ impl MacOsGpuWindow {
         self.view.clone().into_super().into_super().into()
     }
 
+    /// Raw NSView pointer accepted by AccessKit's NSAccessibility adapter.
+    /// It remains valid until this window owner is dropped.
+    pub fn accessibility_view_ptr(&self) -> *mut c_void {
+        Retained::as_ptr(&self.view).cast_mut().cast()
+    }
+
     /// Pointer accepted by `wgpu::SurfaceTargetUnsafe::CoreAnimationLayer`.
     ///
     /// It remains valid until this owner is dropped.
@@ -762,6 +840,26 @@ impl MacOsGpuWindow {
         self.window.close();
         self.closed = true;
     }
+}
+
+fn file_drag_paths(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<String> {
+    let pasteboard = sender.draggingPasteboard();
+    let classes = NSArray::from_slice(&[NSURL::class()]);
+    // SAFETY: NSURL conforms to NSPasteboardReading and no untyped options are
+    // supplied. Every returned object is checked before it is used.
+    let Some(objects) = (unsafe { pasteboard.readObjectsForClasses_options(&classes, None) })
+    else {
+        return Vec::new();
+    };
+    objects
+        .iter()
+        .filter_map(|object| {
+            let url = object.downcast_ref::<NSURL>()?;
+            url.isFileURL()
+                .then(|| url.path().map(|path| path.to_string()))
+                .flatten()
+        })
+        .collect()
 }
 
 impl Drop for MacOsGpuWindow {

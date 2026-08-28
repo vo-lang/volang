@@ -1,0 +1,13 @@
+[package]
+name = "vo-ui-reload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "State-preserving reload contract for Volang UI"
+publish = false
+
+[features]
+default = []

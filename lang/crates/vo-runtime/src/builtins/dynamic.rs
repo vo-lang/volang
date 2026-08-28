@@ -19,19 +19,17 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use core::borrow::Borrow;
-use hashbrown::HashMap;
-
 #[cfg(not(feature = "std"))]
 use alloc::borrow::Cow;
+use core::borrow::Borrow;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 #[cfg(feature = "std")]
 use std::string::String;
 
-use vo_common_core::bytecode::{FieldMeta, Module, StructMeta};
-use vo_common_core::types::{SlotType, ValueKind, ValueRttid};
-use vo_common_core::{is_exported_name, lookup_struct_tag_value, RuntimeType};
+use vo_common_core::bytecode::Module;
+use vo_common_core::types::{ValueKind, ValueRttid};
+use vo_common_core::{is_exported_name, lookup_dynamic_field, DynamicFieldLookup};
 use vo_ffi_macro::vo_errors;
 
 use super::error_helper::create_error_with_cause;
@@ -487,242 +485,6 @@ unsafe fn set_reflection(
 // Layer 3a: Struct Field Handlers
 // ============================================================================
 
-struct FieldInfo {
-    offset: u16,
-    slot_count: u16,
-    rttid: u32,
-    value_kind: ValueKind,
-    slot_types: Vec<SlotType>,
-    ptr_derefs: Vec<PtrDeref>,
-}
-
-#[derive(Clone, Copy)]
-struct PtrDeref {
-    offset: u16,
-}
-
-enum FieldLookup {
-    Found(FieldInfo),
-    Missing,
-    Ambiguous,
-    Invalid,
-}
-
-struct FieldSearchNode {
-    struct_meta_id: usize,
-    base_offset: u16,
-    path_tail: Option<usize>,
-    multiplicity: u8,
-}
-
-struct DerefLink {
-    parent: Option<usize>,
-    deref: PtrDeref,
-}
-
-fn dynamic_field_name(field: &FieldMeta) -> Option<&str> {
-    // Blank fields reserve layout only. Tags cannot turn `_` into a selectable
-    // runtime member because source code can never name that declaration.
-    if field.name == "_" {
-        return None;
-    }
-    if let Some(tag_name) = field
-        .tag
-        .as_deref()
-        .and_then(|tag| lookup_struct_tag_value(tag, "dyn"))
-    {
-        return (!tag_name.is_empty() && tag_name != "-").then_some(tag_name);
-    }
-    is_exported_name(&field.name).then_some(field.name.as_str())
-}
-
-fn dynamic_embedding_is_visible(field: &FieldMeta) -> bool {
-    if field.name == "_" {
-        return false;
-    }
-    match field
-        .tag
-        .as_deref()
-        .and_then(|tag| lookup_struct_tag_value(tag, "dyn"))
-    {
-        Some("") | Some("-") => false,
-        Some(_) | None => true,
-    }
-}
-
-fn checked_field_range<'a>(meta: &'a StructMeta, field: &FieldMeta) -> Option<&'a [SlotType]> {
-    let start = usize::from(field.offset);
-    let end = start.checked_add(usize::from(field.slot_count))?;
-    meta.slot_types.get(start..end)
-}
-
-fn embedded_struct_meta(module: &Module, field: &FieldMeta) -> Option<(usize, bool)> {
-    let resolver = module.runtime_type_resolver();
-    let (_, runtime_type) = resolver.resolve_value_rttid(field.type_info)?;
-    let (struct_rttid, is_pointer) = match runtime_type {
-        RuntimeType::Pointer(inner) => (*inner, true),
-        RuntimeType::Struct { .. } => (field.type_info, false),
-        _ => return None,
-    };
-    let struct_meta = resolver.canonical_value_meta_for_value_rttid(struct_rttid)?;
-    if struct_meta.value_kind() != ValueKind::Struct {
-        return None;
-    }
-    let struct_meta_id = usize::try_from(struct_meta.meta_id()).ok()?;
-    module.struct_metas.get(struct_meta_id)?;
-    Some((struct_meta_id, is_pointer))
-}
-
-fn materialize_deref_path(mut tail: Option<usize>, links: &[DerefLink]) -> Vec<PtrDeref> {
-    let mut reversed = Vec::new();
-    while let Some(index) = tail {
-        let Some(link) = links.get(index) else {
-            return Vec::new();
-        };
-        reversed.push(link.deref);
-        tail = link.parent;
-    }
-    reversed.reverse();
-    reversed
-}
-
-/// Look up a dynamic field using promotion depth, matching language field
-/// selection semantics. The search is iterative, cycle-aware, and treats two
-/// candidates at the same shallowest depth as ambiguous.
-fn lookup_field(module: &Module, struct_meta_id: usize, field_name: &str) -> FieldLookup {
-    let resolver = module.runtime_type_resolver();
-    let mut seen_depth = HashMap::new();
-    seen_depth.insert(struct_meta_id, 0usize);
-    let mut links = Vec::new();
-    let mut depth = 0usize;
-    let mut level = vec![FieldSearchNode {
-        struct_meta_id,
-        base_offset: 0,
-        path_tail: None,
-        multiplicity: 1,
-    }];
-
-    while !level.is_empty() {
-        let mut found = None;
-        let mut ambiguous = false;
-
-        for node in &level {
-            let Some(meta) = module.struct_metas.get(node.struct_meta_id) else {
-                return FieldLookup::Invalid;
-            };
-            for field in &meta.fields {
-                if dynamic_field_name(field) != Some(field_name) {
-                    continue;
-                }
-                let Some(slot_types) = checked_field_range(meta, field) else {
-                    return FieldLookup::Invalid;
-                };
-                if resolver
-                    .slot_count_for_value_rttid(field.type_info)
-                    .is_none_or(|slots| slots != usize::from(field.slot_count))
-                {
-                    return FieldLookup::Invalid;
-                }
-                let Some(offset) = node.base_offset.checked_add(field.offset) else {
-                    return FieldLookup::Invalid;
-                };
-                if field.slot_count > 0 && offset.checked_add(field.slot_count - 1).is_none() {
-                    return FieldLookup::Invalid;
-                }
-                let candidate = FieldInfo {
-                    offset,
-                    slot_count: field.slot_count,
-                    rttid: field.type_info.rttid(),
-                    value_kind: field.type_info.value_kind(),
-                    slot_types: slot_types.to_vec(),
-                    ptr_derefs: materialize_deref_path(node.path_tail, &links),
-                };
-                if node.multiplicity > 1 || found.is_some() {
-                    ambiguous = true;
-                } else {
-                    found = Some(candidate);
-                }
-            }
-        }
-
-        if ambiguous {
-            return FieldLookup::Ambiguous;
-        }
-        if let Some(field) = found {
-            return FieldLookup::Found(field);
-        }
-
-        let Some(next_depth) = depth.checked_add(1) else {
-            return FieldLookup::Invalid;
-        };
-        let mut next_level: Vec<FieldSearchNode> = Vec::new();
-        let mut next_indices: HashMap<usize, usize> = HashMap::new();
-
-        for node in &level {
-            let Some(meta) = module.struct_metas.get(node.struct_meta_id) else {
-                return FieldLookup::Invalid;
-            };
-            for field in &meta.fields {
-                if !field.embedded || !dynamic_embedding_is_visible(field) {
-                    continue;
-                }
-                if checked_field_range(meta, field).is_none()
-                    || resolver
-                        .slot_count_for_value_rttid(field.type_info)
-                        .is_none_or(|slots| slots != usize::from(field.slot_count))
-                {
-                    return FieldLookup::Invalid;
-                }
-                let Some((embedded_meta_id, is_pointer)) = embedded_struct_meta(module, field)
-                else {
-                    return FieldLookup::Invalid;
-                };
-
-                if seen_depth
-                    .get(&embedded_meta_id)
-                    .is_some_and(|seen| *seen < next_depth)
-                {
-                    continue;
-                }
-                if let Some(&index) = next_indices.get(&embedded_meta_id) {
-                    next_level[index].multiplicity = 2;
-                    continue;
-                }
-
-                let Some(absolute_offset) = node.base_offset.checked_add(field.offset) else {
-                    return FieldLookup::Invalid;
-                };
-                let (base_offset, path_tail) = if is_pointer {
-                    let link_index = links.len();
-                    links.push(DerefLink {
-                        parent: node.path_tail,
-                        deref: PtrDeref {
-                            offset: absolute_offset,
-                        },
-                    });
-                    (0, Some(link_index))
-                } else {
-                    (absolute_offset, node.path_tail)
-                };
-                let index = next_level.len();
-                next_indices.insert(embedded_meta_id, index);
-                seen_depth.entry(embedded_meta_id).or_insert(next_depth);
-                next_level.push(FieldSearchNode {
-                    struct_meta_id: embedded_meta_id,
-                    base_offset,
-                    path_tail,
-                    multiplicity: node.multiplicity,
-                });
-            }
-        }
-
-        level = next_level;
-        depth = next_depth;
-    }
-
-    FieldLookup::Missing
-}
-
 fn get_struct_field(
     call: &mut ExternCallContext,
     data_ref: GcRef,
@@ -739,11 +501,11 @@ fn get_struct_field(
             "struct metadata id exceeds host address width",
         )
     })?;
-    let field = match lookup_field(call.module(), struct_meta_id, field_name) {
-        FieldLookup::Found(field) => field,
-        FieldLookup::Missing => return Err((DynErr::BadField, "field not found")),
-        FieldLookup::Ambiguous => return Err((DynErr::BadField, "field is ambiguous")),
-        FieldLookup::Invalid => return Err((DynErr::BadField, "invalid field metadata")),
+    let field = match lookup_dynamic_field(call.module(), struct_meta_id, field_name) {
+        DynamicFieldLookup::Found(field) => field,
+        DynamicFieldLookup::Missing => return Err((DynErr::BadField, "field not found")),
+        DynamicFieldLookup::Ambiguous => return Err((DynErr::BadField, "field is ambiguous")),
+        DynamicFieldLookup::Invalid => return Err((DynErr::BadField, "invalid field metadata")),
     };
 
     if data_ref.is_null() {
@@ -767,7 +529,11 @@ fn get_struct_field(
         .map(|i| unsafe { Gc::read_slot(current_ref, field_offset + i) })
         .collect();
 
-    let boxed = call.box_to_interface(field.rttid, field.value_kind, &raw_slots);
+    let boxed = call.box_to_interface(
+        field.value_rttid.rttid(),
+        field.value_rttid.value_kind(),
+        &raw_slots,
+    );
     Ok((boxed.slot0, boxed.slot1))
 }
 
@@ -789,11 +555,11 @@ unsafe fn set_struct_field(
             "struct metadata id exceeds host address width",
         )
     })?;
-    let field = match lookup_field(call.module(), struct_meta_id, field_name) {
-        FieldLookup::Found(field) => field,
-        FieldLookup::Missing => return Err((DynErr::BadField, "field not found")),
-        FieldLookup::Ambiguous => return Err((DynErr::BadField, "field is ambiguous")),
-        FieldLookup::Invalid => return Err((DynErr::BadField, "invalid field metadata")),
+    let field = match lookup_dynamic_field(call.module(), struct_meta_id, field_name) {
+        DynamicFieldLookup::Found(field) => field,
+        DynamicFieldLookup::Missing => return Err((DynErr::BadField, "field not found")),
+        DynamicFieldLookup::Ambiguous => return Err((DynErr::BadField, "field is ambiguous")),
+        DynamicFieldLookup::Invalid => return Err((DynErr::BadField, "invalid field metadata")),
     };
 
     if data_ref.is_null() {
@@ -811,12 +577,12 @@ unsafe fn set_struct_field(
     }
 
     // Unbox and write
-    let field_vk = field.value_kind;
+    let field_vk = field.value_rttid.value_kind();
     let field_slots = usize::from(field.slot_count);
     let field_slot_types = &field.slot_types;
     let written_vals = prepare_dynamic_value_for_target(
         call,
-        ValueRttid::new(field.rttid, field_vk),
+        field.value_rttid,
         field_vk,
         field_slots,
         val_slot0,

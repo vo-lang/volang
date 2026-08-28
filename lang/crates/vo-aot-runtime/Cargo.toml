@@ -1,0 +1,18 @@
+[package]
+name = "vo-aot-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Statically linked runtime entry for Volang native AOT images"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+vo-aot-runtime-core = { path = "../vo-aot-runtime-core" }
+vo-vm = { path = "../vo-vm", features = ["jit"] }

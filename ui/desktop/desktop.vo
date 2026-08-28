@@ -1,0 +1,296 @@
+// Package desktop defines portable window, lifecycle, single-instance, package,
+// and update contracts. The native shell implements Host; application code
+// remains independent from winit, Cocoa, Win32, and Wayland/X11 APIs.
+package desktop
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+)
+
+const (
+	MaxWindows = 256
+	MaxMonitors = 64
+	MaxHandoffBytes = 1024 * 1024
+	MaxUpdateFiles = 100000
+)
+
+type WindowID uint64
+
+func NewWindowID(index uint32, generation uint32) WindowID {
+	if generation == 0 { panic("desktop window generation must be non-zero") }
+	return WindowID(uint64(generation)<<32 | uint64(index))
+}
+
+func (id WindowID) Index() uint32 { return uint32(uint64(id)) }
+func (id WindowID) Generation() uint32 { return uint32(uint64(id) >> 32) }
+
+type Geometry struct {
+	X float64
+	Y float64
+	Width float64
+	Height float64
+	Maximized bool
+	Fullscreen bool
+}
+
+func (geometry Geometry) Validate() error {
+	if geometry.Width <= 0 || geometry.Height <= 0 || geometry.Width > 100000 || geometry.Height > 100000 {
+		return errors.New("desktop window geometry is invalid")
+	}
+	return nil
+}
+
+type Monitor struct {
+	ID string
+	Name string
+	WorkArea Geometry
+	Scale float64
+	Primary bool
+}
+
+type WindowOptions struct {
+	ID WindowID
+	Owner WindowID
+	Title string
+	Geometry Geometry
+	MinWidth float64
+	MinHeight float64
+	MonitorID string
+	Visible bool
+	Resizable bool
+	Decorated bool
+}
+
+func (options WindowOptions) Validate() error {
+	if options.ID.Generation() == 0 || options.Title == "" || options.MinWidth <= 0 || options.MinHeight <= 0 {
+		return errors.New("desktop window options are invalid")
+	}
+	if options.Owner != 0 && options.Owner == options.ID {
+		return errors.New("desktop window cannot own itself")
+	}
+	return options.Geometry.Validate()
+}
+
+type Lifecycle int64
+
+const (
+	Created Lifecycle = iota
+	Activated
+	Deactivated
+	Suspended
+	Resumed
+	CloseRequested
+	Closed
+	ThemeChanged
+	LocaleChanged
+	ScaleChanged
+	MonitorChanged
+)
+
+type Event struct {
+	Window WindowID
+	Lifecycle Lifecycle
+	Geometry Geometry
+	Theme string
+	Locale string
+	Scale float64
+}
+
+type Host interface {
+	Open(context.Context, WindowOptions) error
+	Close(context.Context, WindowID) error
+	Activate(context.Context, WindowID) error
+	SetGeometry(context.Context, WindowID, Geometry) error
+	Monitors(context.Context) ([]Monitor, error)
+	NextEvent(context.Context) (Event, error)
+}
+
+type Registry struct {
+	mu sync.Mutex
+	windows map[WindowID]WindowOptions
+	order []WindowID
+}
+
+func NewRegistry() *Registry {
+	return &Registry{windows: make(map[WindowID]WindowOptions), order: make([]WindowID, 0, MaxWindows)}
+}
+
+func (registry *Registry) Open(options WindowOptions) error {
+	if registry == nil { return errors.New("desktop window registry is nil") }
+	if err := options.Validate(); err != nil { return err }
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.windows) >= MaxWindows { return errors.New("desktop window limit exceeded") }
+	if _, found := registry.windows[options.ID]; found { return errors.New("desktop window identity is already open") }
+	if options.Owner != 0 {
+		if _, found := registry.windows[options.Owner]; !found { return errors.New("desktop owner window is not open") }
+	}
+	registry.windows[options.ID] = options
+	registry.order = append(registry.order, options.ID)
+	return nil
+}
+
+func (registry *Registry) Close(id WindowID) []WindowID {
+	if registry == nil { return []WindowID{} }
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if _, found := registry.windows[id]; !found { return []WindowID{} }
+	closing := map[WindowID]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for _, candidate := range registry.order {
+			options, found := registry.windows[candidate]
+			if found && !closing[candidate] && closing[options.Owner] {
+				closing[candidate] = true
+				changed = true
+			}
+		}
+	}
+	closed := make([]WindowID, 0, len(closing))
+	for i := len(registry.order) - 1; i >= 0; i-- {
+		candidate := registry.order[i]
+		if closing[candidate] { closed = append(closed, candidate) }
+	}
+	for _, candidate := range closed { delete(registry.windows, candidate) }
+	retained := registry.order[:0]
+	for _, candidate := range registry.order {
+		if !closing[candidate] { retained = append(retained, candidate) }
+	}
+	registry.order = retained
+	return closed
+}
+
+func (registry *Registry) Restore(id WindowID, monitors []Monitor) (WindowOptions, bool) {
+	if registry == nil || len(monitors) == 0 || len(monitors) > MaxMonitors { return WindowOptions{}, false }
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	options, found := registry.windows[id]
+	if !found { return WindowOptions{}, false }
+	selected := monitors[0]
+	for _, monitor := range monitors {
+		if monitor.ID == options.MonitorID || (options.MonitorID == "" && monitor.Primary) { selected = monitor; break }
+	}
+	work := selected.WorkArea
+	if options.Geometry.Width > work.Width { options.Geometry.Width = work.Width }
+	if options.Geometry.Height > work.Height { options.Geometry.Height = work.Height }
+	if options.Geometry.X < work.X || options.Geometry.X + options.Geometry.Width > work.X + work.Width { options.Geometry.X = work.X }
+	if options.Geometry.Y < work.Y || options.Geometry.Y + options.Geometry.Height > work.Y + work.Height { options.Geometry.Y = work.Y }
+	options.MonitorID = selected.ID
+	return options, true
+}
+
+type InstanceHandoff struct {
+	Arguments []string
+	WorkingDirectory string
+	Payload []byte
+}
+
+func (handoff InstanceHandoff) Validate() error {
+	if len(handoff.Arguments) > 4096 || len(handoff.Payload) > MaxHandoffBytes {
+		return errors.New("desktop single-instance handoff exceeds bounded limits")
+	}
+	return nil
+}
+
+type SingleInstance interface {
+	Acquire(context.Context, string) (bool, error)
+	Handoff(context.Context, string, InstanceHandoff) error
+	NextHandoff(context.Context) (InstanceHandoff, error)
+}
+
+type PackageFormat string
+
+const (
+	MacApplication PackageFormat = "app"
+	MacDiskImage PackageFormat = "dmg"
+	WindowsMSIX PackageFormat = "msix"
+	WindowsPortable PackageFormat = "windows-portable"
+	LinuxAppImage PackageFormat = "appimage"
+	LinuxDeb PackageFormat = "deb"
+	LinuxRPM PackageFormat = "rpm"
+)
+
+type PackagePolicy struct {
+	ApplicationID string
+	Version string
+	Format PackageFormat
+	Executable string
+	Icon string
+	SigningIdentity string
+	TimestampURL string
+	Reproducible bool
+}
+
+func (policy PackagePolicy) Validate() error {
+	if policy.ApplicationID == "" || policy.Version == "" || policy.Executable == "" {
+		return errors.New("desktop package policy is incomplete")
+	}
+	switch policy.Format {
+	case MacApplication, MacDiskImage, WindowsMSIX, WindowsPortable, LinuxAppImage, LinuxDeb, LinuxRPM:
+	default:
+		return errors.New("desktop package format is unsupported")
+	}
+	return nil
+}
+
+type UpdateFile struct {
+	Path string
+	SHA256 string
+	Size int64
+}
+
+type UpdateManifest struct {
+	ApplicationID string
+	Version string
+	MinimumVersion string
+	Target string
+	PublishedUnixMillis int64
+	Files []UpdateFile
+	Signature string
+}
+
+func validUpdatePath(path string) bool {
+	if path == "" || path[0] == '/' || strings.Contains(path, "\\") { return false }
+	for _, part := range strings.Split(path, "/") {
+		if part == "" || part == "." || part == ".." { return false }
+	}
+	return true
+}
+
+func validSHA256(digest string) bool {
+	if len(digest) != 64 { return false }
+	for i := 0; i < len(digest); i++ {
+		character := digest[i]
+		if !((character >= '0' && character <= '9') ||
+			(character >= 'a' && character <= 'f') ||
+			(character >= 'A' && character <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func (manifest UpdateManifest) Validate() error {
+	if manifest.ApplicationID == "" || manifest.Version == "" || manifest.Target == "" || manifest.PublishedUnixMillis < 0 ||
+		len(manifest.Files) == 0 || len(manifest.Files) > MaxUpdateFiles || manifest.Signature == "" {
+		return errors.New("desktop update manifest is invalid")
+	}
+	seen := make(map[string]bool)
+	for _, file := range manifest.Files {
+		if !validUpdatePath(file.Path) || !validSHA256(file.SHA256) || file.Size < 0 || seen[file.Path] {
+			return errors.New("desktop update file is invalid")
+		}
+		seen[file.Path] = true
+	}
+	return nil
+}
+
+type Updater interface {
+	Check(context.Context) (UpdateManifest, bool, error)
+	Stage(context.Context, UpdateManifest) error
+	Activate(context.Context, UpdateManifest) error
+	Rollback(context.Context) error
+}

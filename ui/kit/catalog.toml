@@ -1,0 +1,417 @@
+schema_version = 1
+product = "Volang UI"
+delivery = "E3"
+status = "complete"
+families = ["content", "form", "feedback", "overlay", "navigation", "data"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+themes = ["light", "dark", "high-contrast"]
+densities = ["compact", "comfortable", "spacious"]
+directions = ["ltr", "rtl"]
+
+[[component]]
+id = "application"
+family = "content"
+status = "conformant"
+api = "kit.Application"
+behavior = "environment and theme provider"
+variants = ["system", "explicit-environment"]
+states = ["light", "dark", "high-contrast", "reduced-motion"]
+keyboard = ["preserves descendant focus order"]
+semantics = ["inherits locale and flow direction"]
+evidence = ["ui/kit/kit.vo", "ui/tests/adaptive-environment/main.vo"]
+
+[[component]]
+id = "typography"
+family = "content"
+status = "conformant"
+api = "kit.Title, kit.Paragraph, kit.Caption"
+behavior = "semantic text recipes"
+variants = ["title", "paragraph", "caption"]
+states = ["default", "high-contrast", "scaled-text"]
+keyboard = ["none"]
+semantics = ["heading and static text"]
+evidence = ["ui/kit/kit.vo"]
+
+[[component]]
+id = "surface"
+family = "content"
+status = "conformant"
+api = "kit.Page, kit.Panel"
+behavior = "content grouping"
+variants = ["page", "panel", "section"]
+states = ["default", "nested-theme"]
+keyboard = ["none"]
+semantics = ["group and region compatible"]
+evidence = ["ui/kit/kit.vo"]
+
+[[component]]
+id = "badge"
+family = "content"
+status = "conformant"
+api = "kit.Badge"
+behavior = "short status label"
+variants = ["neutral", "accent", "danger", "success"]
+states = ["default"]
+keyboard = ["none"]
+semantics = ["status text"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "separator"
+family = "content"
+status = "conformant"
+api = "kit.Separator"
+behavior = "visual and semantic section boundary"
+variants = ["horizontal", "vertical"]
+states = ["decorative", "named"]
+keyboard = ["none"]
+semantics = ["separator"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "button"
+family = "form"
+status = "conformant"
+api = "kit.ActionButton, kit.DestructiveButton"
+behavior = "headless button activation"
+variants = ["primary", "secondary", "quiet", "danger"]
+states = ["default", "disabled", "focused", "pressed"]
+keyboard = ["Enter and Space activate once"]
+semantics = ["button with accessible name"]
+evidence = ["ui/kit/kit.vo", "ui/tests/modal-validation-form/main.vo"]
+
+[[component]]
+id = "text-field"
+family = "form"
+status = "conformant"
+api = "kit.Input, kit.ValidatedInput"
+behavior = "controlled text input and validation"
+variants = ["plain", "required", "validated"]
+states = ["default", "disabled", "focused", "invalid"]
+keyboard = ["native text editing and IME"]
+semantics = ["textbox, name, description, required, invalid"]
+evidence = ["ui/kit/kit.vo", "ui/tests/modal-validation-form/main.vo"]
+
+[[component]]
+id = "switch"
+family = "form"
+status = "conformant"
+api = "kit.Switch"
+behavior = "controlled boolean toggle"
+variants = ["standard"]
+states = ["on", "off", "disabled", "focused"]
+keyboard = ["Space toggles once"]
+semantics = ["switch with checked state"]
+evidence = ["ui/kit/kit.vo", "ui/testdata/goldens/uikit.accessibility.txt"]
+
+[[component]]
+id = "checkbox"
+family = "form"
+status = "conformant"
+api = "kit.Checkbox"
+behavior = "controlled independent boolean selection"
+variants = ["standard"]
+states = ["checked", "unchecked", "disabled", "focused"]
+keyboard = ["Space toggles once"]
+semantics = ["checkbox with checked state and visible label"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "text-area"
+family = "form"
+status = "conformant"
+api = "kit.TextArea"
+behavior = "controlled multiline text input and validation"
+variants = ["plain", "required", "validated"]
+states = ["default", "disabled", "focused", "invalid"]
+keyboard = ["native multiline editing and IME"]
+semantics = ["multiline textbox, name, description, required, invalid"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "slider"
+family = "form"
+status = "conformant"
+api = "kit.Slider"
+behavior = "controlled finite numeric range selection"
+variants = ["continuous", "stepped"]
+states = ["default", "disabled", "focused"]
+keyboard = ["Arrow keys change by one step, Home and End reach bounds"]
+semantics = ["named slider with numeric value and range"]
+evidence = ["ui/ui.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "radio-group"
+family = "form"
+status = "conformant"
+api = "kit.RadioGroup"
+behavior = "single selection with roving focus"
+variants = ["vertical", "horizontal"]
+states = ["selected", "unselected", "disabled"]
+keyboard = ["Arrow keys move and select, Space selects"]
+semantics = ["radiogroup and radio"]
+evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "select"
+family = "form"
+status = "conformant"
+api = "kit.Select"
+behavior = "single selection popup"
+variants = ["standard"]
+states = ["closed", "open", "disabled", "invalid"]
+keyboard = ["Enter opens, arrows navigate, Escape closes"]
+semantics = ["combobox and listbox"]
+evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "alert"
+family = "feedback"
+status = "conformant"
+api = "kit.Alert"
+behavior = "polite or assertive message"
+variants = ["info", "success", "warning", "danger"]
+states = ["static", "live"]
+keyboard = ["none"]
+semantics = ["status or alert"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "progress"
+family = "feedback"
+status = "conformant"
+api = "kit.MotionProgress"
+behavior = "bounded determinate progress"
+variants = ["determinate"]
+states = ["zero", "partial", "complete"]
+keyboard = ["none"]
+semantics = ["progressbar with value"]
+evidence = ["ui/kit/kit.vo", "ui/examples/motion/main.vo"]
+
+[[component]]
+id = "spinner"
+family = "feedback"
+status = "conformant"
+api = "kit.Spinner"
+behavior = "indeterminate pending status"
+variants = ["small", "medium", "large"]
+states = ["active", "reduced-motion"]
+keyboard = ["none"]
+semantics = ["status with accessible label"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "skeleton"
+family = "feedback"
+status = "conformant"
+api = "kit.Skeleton"
+behavior = "non-interactive loading placeholder"
+variants = ["text", "block"]
+states = ["active", "reduced-motion"]
+keyboard = ["excluded from focus order"]
+semantics = ["hidden placeholder with surrounding status"]
+evidence = ["ui/kit/components/components.vo", "ui/crates/vo-ui-accessibility/src/lib.rs"]
+
+[[component]]
+id = "empty-state"
+family = "feedback"
+status = "conformant"
+api = "kit.EmptyState"
+behavior = "empty result explanation"
+variants = ["informational", "actionable"]
+states = ["default"]
+keyboard = ["contained actions use normal order"]
+semantics = ["named content group"]
+evidence = ["ui/kit/kit.vo"]
+
+[[component]]
+id = "dialog"
+family = "overlay"
+status = "conformant"
+api = "kit.ModalDialog"
+behavior = "modal focus scope and dismissal"
+variants = ["modal"]
+states = ["open", "closed", "invalid-form"]
+keyboard = ["Tab is trapped, Escape dismisses"]
+semantics = ["named modal dialog"]
+evidence = ["ui/kit/kit.vo", "ui/tests/modal-validation-form/main.vo"]
+
+[[component]]
+id = "alert-dialog"
+family = "overlay"
+status = "conformant"
+api = "kit.AlertDialog"
+behavior = "modal destructive confirmation"
+variants = ["danger", "warning"]
+states = ["open", "closed"]
+keyboard = ["Tab is trapped, Escape follows dismissal policy"]
+semantics = ["alertdialog with name and description"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "command-palette"
+family = "overlay"
+status = "conformant"
+api = "kit.CommandPalette"
+behavior = "controlled command search, roving selection, and semantic activation"
+variants = ["modal", "empty-results", "disabled-command"]
+states = ["open", "closed", "filtered", "selected", "empty"]
+keyboard = ["Arrow keys, Home, and End move selection; Enter activates; Escape dismisses"]
+semantics = ["named modal dialog with combobox and listbox"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "apps/studio/app/app.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "popover"
+family = "overlay"
+status = "conformant"
+api = "kit.Popover"
+behavior = "non-modal associated disclosure"
+variants = ["interactive"]
+states = ["open", "closed"]
+keyboard = ["Escape dismisses and restores trigger focus"]
+semantics = ["named group related to trigger"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "tooltip"
+family = "overlay"
+status = "conformant"
+api = "kit.Tooltip"
+behavior = "non-interactive contextual description"
+variants = ["focus", "controlled-pointer"]
+states = ["visible", "hidden", "reduced-motion"]
+keyboard = ["appears for keyboard focus"]
+semantics = ["tooltip description"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "drawer"
+family = "overlay"
+status = "conformant"
+api = "kit.Drawer"
+behavior = "edge-aligned modal task surface"
+variants = ["trailing"]
+states = ["open", "closed"]
+keyboard = ["Tab is trapped, Escape dismisses"]
+semantics = ["named modal dialog"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "toast-region"
+family = "feedback"
+status = "conformant"
+api = "kit.ToastRegion"
+behavior = "caller-timed keyed transient notifications"
+variants = ["info", "success", "warning", "danger"]
+states = ["visible", "dismissible"]
+keyboard = ["dismiss action uses normal order"]
+semantics = ["polite status or assertive alert in a named region"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "menu"
+family = "overlay"
+status = "conformant"
+api = "kit.MenuBar, kit.MenuGroup, kit.MenuAction"
+behavior = "portable command menu"
+variants = ["bar", "group", "action", "toggle-action"]
+states = ["default", "disabled", "checked"]
+keyboard = ["items retain logical command bindings"]
+semantics = ["menubar, menu, menuitem"]
+evidence = ["ui/kit/kit.vo", "ui/examples/menu/main.vo"]
+
+[[component]]
+id = "tabs"
+family = "navigation"
+status = "conformant"
+api = "kit.Tabs"
+behavior = "single active panel with roving focus"
+variants = ["line", "pill"]
+states = ["selected", "unselected", "disabled"]
+keyboard = ["Arrow keys move, Home and End jump"]
+semantics = ["tablist, tab, tabpanel"]
+evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "accordion"
+family = "navigation"
+status = "conformant"
+api = "kit.Accordion"
+behavior = "controlled disclosure sections with stable keys"
+variants = ["single", "multiple-controlled"]
+states = ["expanded", "collapsed", "disabled"]
+keyboard = ["Enter and Space toggle each heading"]
+semantics = ["expanded disclosure buttons and named regions"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "breadcrumb"
+family = "navigation"
+status = "conformant"
+api = "kit.Breadcrumb"
+behavior = "hierarchical path navigation"
+variants = ["standard", "collapsed"]
+states = ["current", "link"]
+keyboard = ["links use normal order"]
+semantics = ["named navigation and current page"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "pagination"
+family = "navigation"
+status = "conformant"
+api = "kit.Pagination"
+behavior = "bounded page navigation"
+variants = ["compact", "full"]
+states = ["current", "available", "disabled"]
+keyboard = ["buttons use normal order"]
+semantics = ["named navigation and current page"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "navigation-rail"
+family = "navigation"
+status = "conformant"
+api = "kit.AdaptivePage, kit.Link"
+behavior = "adaptive primary navigation"
+variants = ["bottom", "compact-rail", "expanded-rail"]
+states = ["compact", "medium", "expanded"]
+keyboard = ["preserves link order across adaptation"]
+semantics = ["navigation landmark and links"]
+evidence = ["ui/kit/kit.vo", "ui/examples/adaptive/main.vo"]
+
+[[component]]
+id = "data-table"
+family = "data"
+status = "conformant"
+api = "kit.DataTable, kit.VirtualDataProvider"
+behavior = "sortable keyed grid with bounded provider materialization"
+variants = ["materialized", "virtual-provider"]
+states = ["loading", "selected", "disabled", "ascending", "descending"]
+keyboard = ["sortable headers and row headers use normal activation"]
+semantics = ["grid, row, columnheader, rowheader, gridcell"]
+evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-engine/src/run.rs"]
+
+[[component]]
+id = "tree"
+family = "data"
+status = "conformant"
+api = "kit.Tree, kit.VirtualTreeProvider"
+behavior = "flattened hierarchical selection and expansion"
+variants = ["materialized", "virtual-provider"]
+states = ["expanded", "collapsed", "selected", "disabled"]
+keyboard = ["ArrowRight expands and ArrowLeft collapses"]
+semantics = ["tree and treeitem"]
+evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo"]
+
+[[component]]
+id = "bar-chart"
+family = "data"
+status = "conformant"
+api = "kit.BarChart"
+behavior = "bounded dashboard comparison chart"
+variants = ["token-colored horizontal bars"]
+states = ["default", "high-contrast", "rtl"]
+keyboard = ["summary is non-interactive"]
+semantics = ["named image with textual data summary"]
+evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo"]

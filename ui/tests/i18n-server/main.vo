@@ -1,0 +1,19 @@
+package main
+
+import i18n "github.com/vo-lang/ui/i18n/core"
+
+func main() {
+	en := i18n.Parse("en-US")
+	ar := i18n.Parse("ar-EG")
+	ru := i18n.Parse("ru-RU")
+	if en.Tag != "en-US" || ar.Direction != i18n.DirectionRTL ||
+		i18n.Plural(ar, 2) != i18n.PluralTwo || i18n.Plural(ru, 23) != i18n.PluralFew {
+		panic("server locale contract failed")
+	}
+	if i18n.FormatInteger(en, 1234567) != "1,234,567" ||
+		len(i18n.Graphemes("Á👩‍💻🇨🇳")) != 3 ||
+		i18n.DirectionOf("مرحبا") != i18n.DirectionRTL {
+		panic("server Unicode contract failed")
+	}
+	println("Volang UI server i18n: ok")
+}

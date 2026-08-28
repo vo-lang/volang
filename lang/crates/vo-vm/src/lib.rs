@@ -52,6 +52,8 @@ pub use vo_runtime::serialize;
 // Re-export semantic JIT observation types for all builds.
 pub use fiber::VmResourceLimits;
 #[cfg(feature = "jit")]
+pub use vm::AotFunctionEntry;
+#[cfg(feature = "jit")]
 pub use vm::JitConfig;
 pub use vm::VmResourceError;
 pub use vm::{JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};

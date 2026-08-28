@@ -1,0 +1,491 @@
+schema_version = 1
+product = "Volang UI"
+scope = "foundation-and-end-to-end-baseline"
+completion_claim = "foundation-certified"
+frozen = true
+product_status = "in-progress"
+product_roadmap = "ui/product-roadmap.toml"
+capability_catalog = "ui/capabilities.toml"
+delivery_plan = "ui/delivery.toml"
+source_extension = ".vo"
+language_dependency_direction = "lang-adapter -> ui-plan"
+development_backends = ["vm", "jit"]
+release_backends = ["native-aot", "wasm-aot"]
+platforms = ["web", "desktop"]
+
+[completion]
+required_milestones = ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"]
+required_gates = [
+  "workspace-test",
+  "workspace-clippy",
+  "no-std-check",
+  "renderer-conformance",
+  "vm-jit-aot-differential",
+  "web-browser-suite",
+  "desktop-platform-suite",
+  "accessibility-suite",
+  "performance-budget",
+  "examples-and-templates",
+  "release-certification",
+]
+
+[[milestone]]
+id = "M0"
+name = "foundation"
+status = "complete"
+deliverables = [
+  "independent top-level UI workspace",
+  "renderer-neutral view model",
+  "fine-grained scoped reactivity",
+  "atomic mutation protocol",
+  "persistent keyed reconciler",
+  "headless renderer",
+  "initial UIKit primitives",
+]
+gates = ["workspace-test", "workspace-clippy", "no-std-check"]
+
+[[milestone]]
+id = "M1"
+name = "compiled-components-and-concurrency"
+status = "complete"
+deliverables = [
+  "validated compiler-neutral component plan ABI",
+  "pre-indexed direct slot update sites",
+  "transactional compiled-template runtime",
+  "bounded goroutine completion turns",
+  "generational task cancellation by component scope",
+]
+gates = ["workspace-test", "workspace-clippy", "no-std-check"]
+
+[[milestone]]
+id = "M2"
+name = "volang-integration"
+status = "complete"
+deliverables = [
+  "official Volang UI package API",
+  "typed compiler adapter producing component plans",
+  "VM and JIT development execution",
+  "event-handler and state-slot lowering",
+  "hot-reload-compatible component identity",
+]
+gates = ["language-cases", "vm-jit-differential", "component-plan-goldens"]
+
+[[work_item]]
+id = "M2.1"
+milestone = "M2"
+name = "official-vo-api"
+status = "complete"
+owners = ["ui/ui.vo", "ui/vo.mod"]
+
+[[work_item]]
+id = "M2.2"
+milestone = "M2"
+name = "typed-component-plan-adapter"
+status = "complete"
+owners = ["lang/crates/vo-ui-compiler"]
+
+[[work_item]]
+id = "M2.3"
+milestone = "M2"
+name = "component-artifact-and-expression-lowering"
+status = "complete"
+owners = ["vo-ui-compiler", "vo-codegen", "vo-engine"]
+completed = [
+  "bounded versioned component-plan binary codec",
+  "bounded deployable component artifact codec",
+  "generic namespaced VOB module artifact section",
+  "engine compile-cache artifact persistence",
+  "handler expression to bytecode function identity binding",
+  "native AOT module artifact embedding",
+  "Wasm AOT artifact custom section",
+  "state initializer evaluator entry points",
+  "slot expression evaluator entry points",
+]
+
+[[work_item]]
+id = "M2.4"
+milestone = "M2"
+name = "vm-jit-ui-session"
+status = "complete"
+owners = ["vo-engine", "vo-vm", "ui runtime"]
+completed = [
+  "single-owner bounded session coordinator",
+  "goroutine completion coalescing into one renderer commit",
+  "official UI extern provider shared by VM and JIT",
+  "engine pre-load provider registration",
+  "persistent host-event replay loop",
+  "generational live-listener validation",
+  "VM/JIT mount-and-event protocol differential",
+  "browser VM UI provider registration and binary host-output/event APIs",
+  "compiled template projection for VM/JIT root fallback",
+  "changed-slot-only VM/JIT renderer commits",
+  "bounded typed component state cells with initialize-once semantics",
+  "VM/JIT persistent local-state differential",
+  "Web VM development CLI host loop",
+  "coalesced worker-goroutine invalidation wake through the UI Island",
+  "compiled direct binding evaluator bridge",
+  "dependency-filtered VM/JIT direct updates after one root bootstrap",
+  "multi-event guest handler retention in direct mode",
+  "automatic string bool int and float component-local state externalization",
+  "automatic local reads assignments compound assignments and increment decrement lowering",
+  "automatic local persistence through static direct and library-composition generic paths",
+  "automatic local Native AOT and Core Wasm AOT lowering verification",
+  "single-owner native VM and JIT desktop session pump",
+  "native mutation output event replay and bounded host timer coordination",
+  "native primary pointer click synthesis with monotonic reverse-event identity",
+  "native worker-goroutine invalidation commits",
+  "transactional state-preserving native VM and JIT hot reload",
+  "monotonic session epochs across replacement VMs",
+]
+remaining = []
+
+[[work_item]]
+id = "M2.5"
+milestone = "M2"
+name = "state-preserving-reload-contract"
+status = "complete"
+owners = ["vo-ui-compiler", "ui runtime"]
+completed = [
+  "bounded component state schema",
+  "key-and-type-safe state migration plan",
+  "compiler stable logical type fingerprints",
+  "atomic template replacement",
+  "browser rebuild notification transport",
+  "transactional replacement VM startup with arena rollback",
+  "VUA1 key-and-type state migration in the Web development host",
+  "generic-root declaration-order and runtime-type state migration",
+  "detached DOM validation and atomic visible-root adoption",
+  "real-browser state-preserving reload and compiler-error recovery smoke",
+  "vo ui inspect component artifact and generic-fallback report",
+  "vo ui test deterministic VM and JIT initial-mount validation",
+  "byte-exact VUI1 snapshot comparison and explicit golden update",
+  "accessible-name input and click interaction runner through VUE1",
+  "VM/JIT byte-identical stateful Settings interaction snapshot",
+]
+
+[[milestone]]
+id = "M3"
+name = "web-platform"
+status = "complete"
+deliverables = [
+  "DOM renderer and browser embedder",
+  "Wasm AOT packaging without application JavaScript",
+  "typed browser event bridge",
+  "IME and accessibility bridge",
+  "web layout, style, resources, and hydration policy",
+]
+gates = ["renderer-conformance", "web-browser-suite", "wasm-aot-differential"]
+
+[[work_item]]
+id = "M3.1"
+milestone = "M3"
+name = "atomic-dom-renderer-contract"
+status = "complete"
+owners = ["vo-ui-web"]
+completed = [
+  "atomic DOM command batches",
+  "live-listener reverse event validation",
+  "bounded versioned renderer-to-runtime event codec",
+  "no-std Wasm target build",
+]
+
+[[work_item]]
+id = "M3.2"
+milestone = "M3"
+name = "wasm-browser-host"
+status = "complete"
+owners = ["vo-ui-web", "vo-web"]
+completed = [
+  "versioned bidirectional browser wire adapter",
+  "bounded browser event frame reads",
+  "Wasm import ABI for atomic mutations and queued events",
+  "browser VM host-output and event-wake bridge",
+  "Wasm AOT backend-neutral artifact section",
+  "generated TypeScript VUI1/VUE1 DOM adapter",
+  "atomic browser DOM staging and rollback",
+  "typed DOM property, accessibility, listener, and input mapping",
+  "bounded Wasm linear-memory import bridge",
+  "UI Island timer-goroutine wake scheduling",
+  "real-browser DOM and input-event smoke test",
+  "typed keyboard, pointer, scroll, and composition event payloads",
+  "official Volang event-listener modifiers",
+  "VM/JIT key-event ABI differential",
+  "UTF-16 composition selection transport across Web native VM and JIT",
+  "controlled UTF-16 selection properties across compiler VM and browser DOM",
+  "semantic Text element DOM mapping",
+  "required invalid and accessible-description DOM properties",
+  "guest-owned GC-visible handler registry shared by VM JIT and Wasm AOT",
+  "authenticated Core Wasm AOT official UI extern table",
+  "Core Wasm AOT browser state view property listener and event provider",
+  "positional AOT DOM reconciliation preserving compatible nodes",
+  "vo ui build generated static Web AOT bundle",
+  "real-browser AOT mount input click and state-update smoke",
+  "composition-session controlled value and selection synchronization",
+  "VM and Wasm AOT worker-goroutine completion wake",
+  "bounded History push replace back and forward bridge",
+  "VM and Wasm AOT popstate invalidation and rerender",
+  "real-browser VM and Wasm AOT navigation flow",
+  "bounded typed resource cache with deterministic LRU eviction",
+  "same-key goroutine request joining and context cancellation",
+  "real-browser VM and Wasm AOT stale-result isolation",
+  "single-modal DOM focus trap background isolation and focus restoration",
+  "Web Stack overlap and inherited pointer-event hit-testing semantics",
+  "bounded VUS1 browser system request and response codec",
+  "browser VM clipboard dialog drag-drop and event-wait system host",
+  "Core Wasm AOT async ui/system extern provider",
+  "real-Chrome conformance matrix for CSS ARIA input IME modal focus and atomic rollback",
+  "client-owned initial mount with atomic state-preserving replacement policy",
+]
+remaining = []
+
+[[milestone]]
+id = "M4"
+name = "desktop-platform"
+status = "complete"
+deliverables = [
+  "native window and event loop embedder",
+  "GPU renderer",
+  "layout, shaping, font fallback, and text editing",
+  "clipboard, drag and drop, menus, dialogs, and accessibility",
+  "native AOT packaging",
+]
+gates = ["renderer-conformance", "desktop-platform-suite", "native-aot-differential"]
+
+[[work_item]]
+id = "M4.1"
+milestone = "M4"
+name = "native-renderer-and-input-boundary"
+status = "complete"
+owners = ["vo-ui-desktop", "vo-ui-host-native", "vo-app-host-native"]
+completed = [
+  "atomic native mutation host contract",
+  "transactional retained desktop tree",
+  "live-listener and monotonic-event validation",
+  "revision-bound layout snapshots and deterministic hit testing",
+  "native pointer focus and keyboard routing",
+  "native IME composition routing",
+  "native IME UTF-16 selection range preservation",
+  "bounded native event queue",
+  "native modal focus cycling background hit-test isolation and focus restoration",
+]
+
+[[work_item]]
+id = "M4.2"
+milestone = "M4"
+name = "layout-text-and-presentation"
+status = "complete"
+owners = ["vo-ui layout", "vo-ui host native", "vo-app-host-native"]
+completed = [
+  "bounded no-std retained-tree layout traversal",
+  "row column stack sizing and placement",
+  "typed length min-max padding gap and flex constraints",
+  "pluggable intrinsic text and replaced-content measurement",
+  "revision-bound native layout and hit-test integration",
+  "bounded fixed auto and fractional grid tracks",
+  "scroll offsets and inherited overflow clipping",
+  "clip-aware native hit testing",
+  "bounded renderer-neutral background and text paint scene",
+  "revision-safe native layout-to-paint bridge",
+  "bounded renderer-neutral accessibility semantic tree",
+  "semantic text flattening and typed form accessibility state",
+  "revision-safe native layout-to-accessibility bridge",
+  "validated same-revision controlled UTF-16 selection query",
+  "bounded repeat and minmax native grid track sizing",
+  "rectangular named grid areas shared by native layout and DOM",
+  "advanced native text shaping with system-font fallback and bidirectional layout",
+  "bounded deterministic RGBA software presentation with high-DPI scaling and clipping",
+  "atomic same-revision native layout paint shaping and hit-test frame preparation",
+  "validated RGBA8 WGPU layer upload with monotonic revision and texture identity",
+  "focused text-editor value placeholder UTF-16 selection and caret presentation",
+  "native pixel line and page wheel scrolling with bounded momentum and overscroll recovery",
+  "layout-derived horizontal and vertical scrollbar paint commands",
+  "monotonic local presentation frames within one UI mutation revision",
+  "incremental AccessKit projection with bounded platform action routing",
+  "real NSAccessibility UI Automation and AT-SPI adapters",
+  "renderer-neutral bounded clipboard dialog menu and drag-drop contracts",
+  "cross-platform native text image and HTML clipboard backend",
+  "cross-platform file and message dialog backend",
+  "native macOS and Windows menu materialization with validated identities",
+  "one bounded monotonic menu and drag-drop event queue",
+  "bounded VUS1 renderer-independent system request and response codec",
+  "official pure-Volang ui/system clipboard dialog menu and event API",
+  "VM and JIT per-goroutine system request replay",
+  "native macOS file drag and drop destination registration",
+  "cross-platform winit window input and IME loop",
+  "single-owner system request renderer timer and accessibility coordinator",
+  "WGPU upload composition fence and present loop",
+  "bounded WGPU surface reconfiguration and device-generation recovery",
+  "AppKit UI Automation and AT-SPI adapters wired into the live shell",
+  "vo ui run VM and JIT native desktop command",
+  "Native AOT official UI provider registration and desktop shell entry",
+  "ordered atomic deduplicated desktop file-drop destination batching",
+  "native macOS and Windows multi-file drag initiation",
+  "VM JIT Native AOT and Core Wasm AOT file-drag system request parity",
+  "hosted Ubuntu macOS and Windows target-native platform contract suites",
+  "real Ubuntu macOS and Windows window surface upload composition and present smoke suites",
+  "documented typed platform capability fallback contract",
+  "portable accessible UIKit menu surface on Web macOS Windows and Linux",
+  "typed Linux unsupported responses for OS facilities absent from the stable window boundary",
+]
+remaining = []
+
+[[milestone]]
+id = "M5"
+name = "official-uikit"
+status = "complete"
+deliverables = [
+  "theme and design tokens",
+  "accessible controls and form validation",
+  "routing and navigation",
+  "resources and suspense boundaries",
+  "animation, gestures, overlays, and virtualized collections",
+  "responsive and adaptive components",
+]
+gates = ["uikit-behavior-suite", "accessibility-suite", "cross-platform-goldens"]
+
+[[work_item]]
+id = "M5.1"
+milestone = "M5"
+name = "typed-volang-component-library"
+status = "complete"
+owners = ["ui/kit", "vo-ui-kit", "vo-ui-compiler", "vo-ui-vm"]
+completed = [
+  "pure Volang UIKit package independent from language internals",
+  "light and dark renderer-neutral design tokens",
+  "typography surface button text-field toggle toolbar form and empty-state components",
+  "static-plan optimization fallback for library composition and dynamic control flow",
+  "VM/JIT generic-reconciler differential for official UIKit",
+  "stateful settings example",
+  "semantic styled text element shared by compiled and generic paths",
+  "validated text field required invalid description and alert semantics",
+  "real-browser validation disable recovery and submit flow",
+  "named-area application shell and Dashboard AOT example",
+  "keyed stale-safe string resource and accessible resource boundary",
+  "real-browser VM and Wasm AOT goroutine resource completion",
+  "pure Volang route resolver link and UIKit navigation link",
+  "History-backed navigation example shared by VM JIT and Wasm AOT",
+  "bounded typed resource cache with expiry retry joining cancellation and statistics",
+  "accessible UIKit dialog with Escape backdrop and explicit close dismissal",
+  "shared Web and desktop modal focus-scope behavior",
+  "bounded public sibling keys with VM JIT and Wasm AOT node reuse across reordering",
+  "pure Volang visible-range and keyed virtual-list components with bounded materialization",
+  "bounded generational tween and spring values driven by one goroutine per active animation",
+  "typed drag recognizer with pointer ownership capture and cancellation",
+  "progress accessibility value projection shared by Web and desktop adapters",
+  "compact medium and expanded responsive grid and scaffold variants",
+  "portable accessible menu bar groups commands and check actions",
+  "VM JIT and real-browser motion execution",
+  "native UI async-I/O polling for timer-backed animation goroutines",
+  "versioned renderer-neutral accessibility and logical paint goldens",
+  "versioned Web ARIA control-state and visual-style golden",
+  "official UIKit VM JIT cross-backend golden differential",
+]
+remaining = []
+
+[[milestone]]
+id = "M6"
+name = "developer-experience"
+status = "complete"
+deliverables = [
+  "project creation and official templates",
+  "development server and incremental rebuild",
+  "state-preserving hot reload",
+  "component inspector and reactive profiler",
+  "unit, snapshot, interaction, and end-to-end test tools",
+  "package interoperability contracts",
+]
+gates = ["examples-and-templates", "hot-reload-suite", "devtools-suite"]
+
+[[work_item]]
+id = "M6.1"
+milestone = "M6"
+name = "web-vm-development-host"
+status = "complete"
+owners = ["cmd/vo", "vo-web", "vo-ui-vm"]
+completed = [
+  "vo ui new official UIKit starter generator",
+  "canonical module identity derivation and overwrite protection",
+  "vo ui dev command and loopback-only HTTP host",
+  "official ui.Mount project validation",
+  "bounded source and module-metadata watcher",
+  "containing module-root dependency watcher",
+  "VOB diagnostics runtime assets and SSE endpoints",
+  "browser VM session bootstrap without application JavaScript",
+  "session-local automatic VM rebuild and reload",
+  "transactional state migration and atomic DOM subtree adoption",
+  "real-browser state-preserving reload and compiler-error recovery smoke",
+  "vo ui build deployable Core Wasm AOT Web bundle",
+  "vo ui run native VM and JIT GPU shell",
+  "typed drag interaction scripting with live-listener re-resolution",
+  "default desktop source watching with transactional state-preserving VM replacement",
+  "desktop build diagnostics that retain the last interactive session",
+  "validated complete-workspace member and workfile source watching",
+  "exact lock-selected registry dependency source watching",
+  "provenance-bound bundled browser VM and Core Wasm AOT release runtime",
+  "packaged CLI Web AOT build smoke on every release target",
+  "VM JIT reactive work profiling for state roots bindings evaluators slots revisions mutations and no-op turns",
+  "deterministic bundled official UI registry release with generated lock and cache materialization",
+  "one-command packaged CLI project creation and VM mount smoke on every release target",
+  "bounded in-process successful compiler-generation reuse with complete frozen-input revalidation",
+]
+remaining = []
+
+[[milestone]]
+id = "M7"
+name = "certification-and-release"
+status = "complete"
+deliverables = [
+  "backend differential suite",
+  "renderer and UIKit conformance suite",
+  "performance benchmark dashboard",
+  "production examples and migration guides",
+  "versioned protocol and package release policy",
+  "native and Wasm AOT release certification",
+]
+gates = ["performance-budget", "release-certification"]
+
+[[work_item]]
+id = "M7.1"
+milestone = "M7"
+name = "governed-release-certification"
+status = "complete"
+owners = ["ui/certification.toml", "vo-dev", "CI", "release"]
+completed = [
+  "machine-readable certification map covering every completion gate",
+  "vo-dev ui-certify milestone gate protocol evidence and version validation",
+  "VM JIT Native AOT and Core Wasm AOT differential evidence",
+  "renderer UIKit accessibility and real-browser conformance evidence",
+  "zero-allocation scalar update benchmark",
+  "optimized frame and interaction p95 budget dashboard",
+  "Linux macOS and Windows real-window platform matrix",
+  "production dashboard menu settings resources navigation motion dialog adaptive and virtualization examples",
+  "JavaScript ecosystem migration and mature-library porting guide",
+  "versioned package protocol artifact deprecation and release policy",
+  "release archives containing authenticated browser core AOT and UI Native AOT runtimes",
+  "packaged CLI starter VM Web AOT and Native AOT smoke certification",
+]
+remaining = []
+
+[[performance_budget]]
+id = "direct-slot-update"
+metric = "work"
+target = "O(changed update sites)"
+enforced_from = "M2"
+
+[[performance_budget]]
+id = "steady-state-update-allocation"
+metric = "host allocations per scalar slot update"
+target = "0"
+enforced_from = "M7"
+
+[[performance_budget]]
+id = "frame-commit"
+metric = "p95 UI work at 60 Hz on reference hardware"
+target = "<= 8 ms"
+enforced_from = "M7"
+
+[[performance_budget]]
+id = "interaction-latency"
+metric = "p95 input-to-present on reference hardware"
+target = "<= 50 ms"
+enforced_from = "M7"

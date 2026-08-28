@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod bytecode;
 pub mod debug_info;
+pub mod dynamic_layout;
 pub mod exact_bases;
 pub mod execution_effects;
 pub mod execution_layouts;
@@ -35,11 +36,15 @@ pub mod verifier;
 
 pub use bytecode::{
     Constant, ExternDef, ExternEffects, ExternIntrinsic, ExternJitRoute, FunctionDef, GlobalDef,
-    InstructionMetadata, InterfaceMeta, Itab, Module, ParamShape, ProviderTrust,
+    InstructionMetadata, InterfaceMeta, Itab, Module, ModuleArtifact, ParamShape, ProviderTrust,
     RegisteredExternSource, ResolvedExtern, ResolvedExternAbi, ResolvedExternTable,
     ResolvedExternTableError, ReturnShape, SelectCaseLayout, StructMeta, TransferType,
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
+pub use dynamic_layout::{
+    dynamic_field_name, lookup_dynamic_field, runtime_value_is_assignable, DynamicFieldInfo,
+    DynamicFieldLookup, DynamicPtrDeref,
+};
 pub use exact_bases::{ExactBaseMaps, FunctionExactBaseMap, WriteBarrierBaseProvenance};
 pub use execution_layouts::{
     ElementLayoutMaps, FunctionElementLayouts, FunctionPointerLayouts, PointerExecutionLayout,

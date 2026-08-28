@@ -1,0 +1,804 @@
+package components
+
+import (
+	ui "github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit/headless"
+	"github.com/vo-lang/ui/kit/tokens"
+	"math"
+	"strconv"
+)
+
+type FeedbackIntent int64
+
+const (
+	IntentInfo FeedbackIntent = iota
+	IntentSuccess
+	IntentWarning
+	IntentDanger
+)
+
+type Axis int64
+
+const (
+	AxisHorizontal Axis = iota
+	AxisVertical
+)
+
+func intentColor(theme tokens.Theme, intent FeedbackIntent) uint32 {
+	if intent == IntentInfo {
+		return theme.Colors.Accent
+	}
+	if intent == IntentSuccess {
+		return theme.Colors.Success
+	}
+	if intent == IntentWarning {
+		return theme.Colors.Warning
+	}
+	if intent == IntentDanger {
+		return theme.Colors.Danger
+	}
+	panic("UIKit feedback intent is invalid")
+}
+
+// Button composes headless activation with one resolved visual recipe.
+func Button(theme tokens.Theme, label string, variant tokens.ButtonVariant, size tokens.ControlSize, disabled bool, onActivate func()) ui.View {
+	recipe := tokens.ResolveButtonRecipe(theme, variant, size, disabled)
+	control := headless.Button(label, disabled, onActivate)
+	control = ui.FontWeight(ui.FontSize(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.FontSize), recipe.FontWeight)
+	control = ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
+	return ui.Padding(ui.Height(ui.Radius(control, recipe.Radius), recipe.Height), recipe.Padding)
+}
+
+func Badge(theme tokens.Theme, label string, intent FeedbackIntent) ui.View {
+	view := ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(label), intentColor(theme, intent)), theme.Typography.CaptionSize), theme.Typography.WeightMedium)
+	view = ui.Padding(ui.Radius(ui.Background(view, theme.Colors.SurfaceRaised), theme.Shape.SmallRadius), theme.Spacing.ControlGap /
+		2)
+	return ui.AccessibleName(ui.Role(view, "status"), label)
+}
+
+func Separator(theme tokens.Theme, axis Axis, label string) ui.View {
+	line := ui.Background(ui.Box(), theme.Colors.Border)
+	if axis == AxisHorizontal {
+		line = ui.Height(ui.Flex(line, 1), 1)
+	} else if axis == AxisVertical {
+		line = ui.Width(ui.MinHeight(line, theme.ControlHeight), 1)
+	} else {
+		panic("UIKit separator axis is invalid")
+	}
+	line = ui.Role(line, "separator")
+	if label != "" {
+		line = ui.AccessibleName(line, label)
+	}
+	return line
+}
+
+func Alert(theme tokens.Theme, title string, detail string, intent FeedbackIntent, assertive bool) ui.View {
+	role := ui.DerivedString("status")
+	if assertive {
+		role = "alert"
+	}
+	content := ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(title), intentColor(theme, intent)), theme.Typography.WeightStrong), ui.Foreground(ui.Text(detail), theme.Colors.Text)), theme.Spacing.ControlGap)
+	return ui.AccessibleName(ui.Role(ui.Padding(ui.Radius(ui.Background(content, theme.Colors.SurfaceRaised), theme.Shape.MediumRadius), theme.Spacing.ContentGap), role), title)
+}
+
+func Progress(theme tokens.Theme, label string, value float64, maximum float64) ui.View {
+	if maximum <= 0 || math.IsNaN(maximum) || math.IsInf(maximum, 0) || math.IsNaN(value) ||
+		math.IsInf(value, 0) {
+		panic("UIKit progress values must be finite and maximum must be positive")
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > maximum {
+		value = maximum
+	}
+	width := float64(240)
+	track := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), theme.Colors.Border), theme.Shape.SmallRadius), width), theme.Spacing.Step)
+	fill := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), theme.Colors.Accent), theme.Shape.SmallRadius), width *
+		value /
+		maximum), theme.Spacing.Step)
+	text := strconv.FormatFloat(value / maximum * 100, 'f', 0, 64) + "%"
+	return ui.AccessibleValue(ui.AccessibleName(ui.Role(ui.Stack(track, fill), "progressbar"), label), text)
+}
+
+func Spinner(theme tokens.Theme, label string, size tokens.ControlSize) ui.View {
+	diameter := ui.DerivedFloat(theme.ControlHeight * 0.5)
+	if size == tokens.ControlSmall {
+		diameter *= 0.75
+	} else if size == tokens.ControlLarge {
+		diameter *= 1.5
+	} else if size != tokens.ControlMedium {
+		panic("UIKit spinner size is invalid")
+	}
+	indicator := ui.Width(ui.Height(ui.Radius(ui.Background(ui.Box(), theme.Colors.Accent), diameter /
+		2), diameter), diameter)
+	if ui.CurrentEnvironment().ReducedMotion {
+		indicator = ui.Background(indicator, theme.Colors.TextMuted)
+	}
+	return ui.AccessibleName(ui.Role(indicator, "status"), label)
+}
+
+func Skeleton(theme tokens.Theme, width float64, height float64) ui.View {
+	if width < 0 || height < 0 || math.IsNaN(width) || math.IsNaN(height) || math.IsInf(width, 0) ||
+		math.IsInf(height, 0) {
+		panic("UIKit skeleton geometry must be finite and non-negative")
+	}
+	return ui.Role(ui.Width(ui.Height(ui.Radius(ui.Background(ui.Box(), theme.Colors.SurfaceRaised), theme.Shape.SmallRadius), height), width), "presentation")
+}
+
+// Checkbox keeps the native input and its visible label in one portable
+// composition. The input owns keyboard, focus, and checked semantics.
+func Checkbox(theme tokens.Theme, label string, checked bool, disabled bool, onChange func(bool)) ui.View {
+	if label == "" {
+		panic("UIKit checkbox label must not be empty")
+	}
+	control := ui.Role(ui.Toggle(checked, label, func(event ui.Event) {
+		onChange(event.Checked)
+	}), "checkbox")
+	control = ui.Checked(ui.Disabled(control, disabled), checked)
+	control = ui.AccessibleName(control, label)
+	indicatorSize := theme.ControlHeight * 0.45
+	control = ui.Width(ui.Height(control, indicatorSize), indicatorSize)
+	text := ui.AccessibilityHidden(ui.FontSize(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.BodySize), true)
+	row := ui.Align(ui.Gap(ui.Row(control, text), theme.Spacing.ControlGap), ui.AlignCenter)
+	if disabled {
+		row = ui.Opacity(row, 0.55)
+	}
+	return row
+}
+
+func TextArea(theme tokens.Theme, label string, value string, placeholder string, height float64, required bool, disabled bool, errorMessage string, onInput func(string)) ui.View {
+	if label == "" || height < theme.ControlHeight * 2 || math.IsNaN(height) || math.IsInf(height, 0) {
+		panic("UIKit text area height is invalid")
+	}
+	control := ui.TextArea(value, placeholder, func(event ui.Event) {
+		onInput(event.Text)
+	})
+	control = ui.AccessibleName(control, label)
+	control = ui.AccessibleDescription(control, errorMessage)
+	control = ui.Required(control, required)
+	control = ui.Invalid(control, errorMessage != "")
+	control = ui.Disabled(control, disabled)
+	control = ui.Height(ui.Radius(ui.Background(control, theme.Colors.SurfaceRaised), theme.Shape.MediumRadius), height)
+	border := textAreaBorder(theme, errorMessage)
+	control = ui.BorderWidth(ui.BorderColor(control, border), 1)
+	views := []ui.View{
+		ui.FontWeight(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.WeightMedium),
+		control,
+	}
+	if errorMessage != "" {
+		views = append(views, ui.Role(ui.FontSize(ui.Foreground(ui.Text(errorMessage), theme.Colors.Danger), theme.Typography.CaptionSize), "alert"))
+	}
+	return ui.Gap(ui.Column(views...), theme.Spacing.ControlGap)
+}
+
+func textAreaBorder(theme tokens.Theme, errorMessage string) uint32 {
+	if errorMessage != "" {
+		return theme.Colors.Danger
+	}
+	return theme.Colors.Border
+}
+
+func Slider(theme tokens.Theme, label string, value float64, minimum float64, maximum float64, step float64, disabled bool, onChange func(float64)) ui.View {
+	if label == "" || math.IsNaN(value) || math.IsInf(value, 0) || math.IsNaN(minimum) ||
+		math.IsInf(minimum, 0) ||
+		math.IsNaN(maximum) ||
+		math.IsInf(maximum, 0) ||
+		math.IsNaN(step) ||
+		math.IsInf(step, 0) ||
+		maximum <= minimum ||
+		step <= 0 ||
+		value < minimum ||
+		value > maximum {
+		panic("UIKit slider range is invalid")
+	}
+	control := ui.Slider(value, minimum, maximum, step, label, func(event ui.Event) {
+		next, err := strconv.ParseFloat(event.Text, 64)
+		if err == nil && !math.IsNaN(next) && !math.IsInf(next, 0) && next >= minimum && next <= maximum {
+			onChange(next)
+		}
+	})
+	control = ui.Disabled(control, disabled)
+	control = ui.Foreground(control, theme.Colors.Accent)
+	control = ui.Background(control, theme.Colors.Border)
+	control = ui.Flex(control, 1)
+	valueLabel := ui.DerivedString(strconv.FormatFloat(value, 'f', -1, 64))
+	heading := ui.Row(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.WeightMedium), ui.Flex(ui.Box(), 1), ui.FontSize(ui.Foreground(ui.Text(valueLabel), theme.Colors.TextMuted), theme.Typography.CaptionSize))
+	view := ui.Gap(ui.Column(heading, control), theme.Spacing.ControlGap)
+	if disabled {
+		view = ui.Opacity(view, 0.55)
+	}
+	return view
+}
+
+type AccordionItem struct {
+	Key string
+	Title string
+	Content ui.View
+	Expanded bool
+	Disabled bool
+}
+
+func Accordion(theme tokens.Theme, label string, items []AccordionItem, onExpandedChange func(string, bool)) ui.View {
+	if label == "" || len(items) > 64 {
+		panic("UIKit accordion contract is invalid")
+	}
+	for index, item := range items {
+		if item.Key == "" || item.Title == "" {
+			panic("UIKit accordion item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit accordion item keys must be unique")
+			}
+		}
+	}
+	rows := make([]ui.View, 0, len(items))
+	for _, item := range items {
+		current := item
+		marker := ui.DerivedString("+")
+		if current.Expanded {
+			marker = "−"
+		}
+		trigger := headless.DisclosureTrigger(marker + "  " + current.Title, current.Expanded, current.Disabled, func(value bool) {
+			onExpandedChange(current.Key, value)
+		})
+		trigger = ui.Padding(ui.Height(ui.Foreground(trigger, theme.Colors.Text), theme.ControlHeight), theme.Spacing.ControlGap)
+		trigger = ui.BorderWidth(ui.BorderColor(trigger, theme.Colors.Border), 1)
+		panel := ui.Hidden(ui.Padding(ui.Role(current.Content, "region"), theme.Spacing.ContentGap), !current.Expanded)
+		panel = ui.AccessibleName(panel, current.Title)
+		rows = append(rows, ui.Key(ui.Column(trigger, panel), current.Key))
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(rows...), theme.Spacing.ControlGap), "group"), label)
+}
+
+type ChoiceOption struct {
+	Value string
+	Label string
+	Disabled bool
+}
+
+func choiceIndex(options []ChoiceOption, value string) int64 {
+	for index, option := range options {
+		if option.Value == value {
+			return int64(index)
+		}
+	}
+	return -1
+}
+
+func movedChoiceIndex(event ui.Event, options []ChoiceOption, current int64) int64 {
+	count := int64(len(options))
+	if count <= 0 {
+		return -1
+	}
+	candidate := current
+	step := int64(0)
+	wrap := true
+	if event.Key == "Home" {
+		candidate = 0
+		step = 1
+		wrap = false
+	} else if event.Key == "End" {
+		candidate = count - 1
+		step = -1
+		wrap = false
+	} else if event.Key == "ArrowDown" {
+		step = 1
+		candidate++
+	} else if event.Key == "ArrowUp" {
+		step = -1
+		candidate--
+	} else {
+		return current
+	}
+	if current < 0 && wrap {
+		candidate = 0
+		if step < 0 {
+			candidate = count - 1
+		}
+	}
+	for visited := int64(0); visited < count; visited++ {
+		if candidate < 0 || candidate >= count {
+			if !wrap {
+				return current
+			}
+			if candidate < 0 {
+				candidate = count - 1
+			} else {
+				candidate = 0
+			}
+		}
+		if !options[candidate].Disabled {
+			return candidate
+		}
+		candidate += step
+	}
+	return current
+}
+
+func RadioGroup(theme tokens.Theme, label string, options []ChoiceOption, value string, disabled bool, orientation headless.Orientation, focusToken int64, onChange func(string)) ui.View {
+	views := []ui.View{}
+	count := int64(len(options))
+	for index, option := range options {
+		selected := option.Value == value
+		token := int64(0)
+		if selected {
+			token = focusToken
+		}
+		optionIndex := int64(index)
+		control := headless.RadioOption(option.Label, optionIndex, count, selected, disabled ||
+			option.Disabled, orientation, token, func(candidate int64) bool {
+			return disabled || candidate < 0 || candidate >= int64(len(options)) ||
+				options[candidate].Disabled
+		}, func(next int64) {
+			if next >= 0 && next < int64(len(options)) && !disabled && !options[next].Disabled {
+				onChange(options[next].Value)
+			}
+		})
+		recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonQuiet, tokens.ControlMedium, disabled ||
+			option.Disabled)
+		control = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+		control = ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
+		views = append(views, ui.Key(control, option.Value))
+	}
+	return headless.RadioGroup(label, orientation, views...)
+}
+
+func Select(theme tokens.Theme, label string, open bool, value string, options []ChoiceOption, disabled bool, onOpenChange func(bool), onChange func(string)) ui.View {
+	selectedLabel := ui.DerivedString(value)
+	for _, option := range options {
+		if option.Value == value {
+			selectedLabel = option.Label
+		}
+	}
+	trigger := headless.SelectTrigger(label, selectedLabel, open, disabled, onOpenChange)
+	recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonSecondary, tokens.ControlMedium, disabled)
+	trigger = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+	trigger = ui.BorderWidth(ui.BorderColor(trigger, recipe.Border), recipe.BorderWidth)
+	trigger = ui.OnKeyDown(trigger, func(event ui.Event) {
+		if disabled {
+			return
+		}
+		if event.Key == "Escape" {
+			if open {
+				onOpenChange(false)
+			}
+			return
+		}
+		if event.Key != "ArrowDown" && event.Key != "ArrowUp" && event.Key != "Home" && event.Key != "End" {
+			return
+		}
+		if !open {
+			onOpenChange(true)
+			return
+		}
+		next := movedChoiceIndex(event, options, choiceIndex(options, value))
+		if next >= 0 && next < int64(len(options)) && !options[next].Disabled {
+			onChange(options[next].Value)
+		}
+	})
+	items := []ui.View{}
+	for index, option := range options {
+		itemIndex := int64(index)
+		item := headless.SelectOption(option.Label, itemIndex, option.Value == value, option.Disabled, func(next int64) {
+			if next >= 0 && next < int64(len(options)) {
+				onChange(options[next].Value)
+				onOpenChange(false)
+			}
+		})
+		items = append(items, ui.Key(item, option.Value))
+	}
+	popup := ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(headless.ListBox(label +
+		" options", items...), theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap)
+	popup = ui.OnKeyDown(popup, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onOpenChange(false)
+		}
+	})
+	popup = ui.Portal(ui.Justify(ui.Align(ui.Column(popup), "center"), "center"), ui.OverlayPopup)
+	popup = ui.Hidden(popup, !open)
+	return ui.Stack(ui.Key(trigger, "select-trigger"), ui.Key(popup, "select-popup"))
+}
+
+type TabItem struct {
+	Key string
+	Label string
+	Content ui.View
+	Disabled bool
+}
+
+func Tabs(theme tokens.Theme, label string, items []TabItem, selectedKey string, focusToken int64, onSelect func(string)) ui.View {
+	tabs := []ui.View{}
+	panel := ui.Fragment()
+	count := int64(len(items))
+	for index, item := range items {
+		selected := item.Key == selectedKey
+		token := int64(0)
+		if selected {
+			token = focusToken
+			panel = headless.TabPanel(item.Label, true, item.Content)
+		}
+		itemIndex := int64(index)
+		tab := headless.Tab(item.Label, itemIndex, count, selected, item.Disabled, headless.Horizontal, token, func(candidate int64) bool {
+			return candidate < 0 || candidate >= int64(len(items)) || items[candidate].Disabled
+		}, func(next int64) {
+			if next >= 0 && next < int64(len(items)) && !items[next].Disabled {
+				onSelect(items[next].Key)
+			}
+		})
+		tabs = append(tabs, ui.Key(tab, item.Key))
+	}
+	list := headless.TabList(label, headless.Horizontal, tabs...)
+	return ui.Gap(ui.Column(list, panel), theme.Spacing.ContentGap)
+}
+
+type BreadcrumbItem struct {
+	Label string
+	Path string
+	Current bool
+}
+
+func Breadcrumb(theme tokens.Theme, label string, items []BreadcrumbItem) ui.View {
+	views := []ui.View{}
+	for index, item := range items {
+		current := ui.CurrentNone
+		if item.Current {
+			current = ui.CurrentPage
+		}
+		views = append(views, ui.Key(headless.CurrentLink(item.Label, item.Path, current), item.Path))
+		if index < len(items) - 1 {
+			views = append(views, ui.Text("/"))
+		}
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Row(views...), theme.Spacing.ControlGap), "navigation"), label)
+}
+
+func Pagination(theme tokens.Theme, label string, page int64, pageCount int64, onPageChange func(int64)) ui.View {
+	if label == "" || onPageChange == nil || pageCount < 0 || page < 0 ||
+		page >= pageCount && pageCount > 0 {
+		panic("UIKit pagination range is invalid")
+	}
+	items := []ui.View{}
+	appendPage := func(index int64) {
+		current := ui.CurrentNone
+		if index == page {
+			current = ui.CurrentPage
+		}
+		itemIndex := index
+		button := ui.Current(headless.Button(strconv.FormatInt(index + 1, 10), false, func() {
+			onPageChange(itemIndex)
+		}), current)
+		items = append(items, ui.Key(button, strconv.FormatInt(index, 10)))
+	}
+	if pageCount <= 9 {
+		for index := int64(0); index < pageCount; index++ {
+			appendPage(index)
+		}
+	} else {
+		candidates := []int64{0, page - 2, page - 1, page, page + 1, page + 2, pageCount - 1}
+		previous := int64(-2)
+		for _, index := range candidates {
+			if index < 0 || index >= pageCount || index <= previous {
+				continue
+			}
+			if previous >= 0 && index - previous > 1 {
+				key := "gap:" + strconv.FormatInt(previous, 10) + ":" + strconv.FormatInt(index, 10)
+				items = append(items, ui.Key(ui.Role(ui.Text("…"), "presentation"), key))
+			}
+			appendPage(index)
+			previous = index
+		}
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Row(items...), theme.Spacing.ControlGap), "navigation"), label)
+}
+
+func titleView(theme tokens.Theme, value string) ui.View {
+	return ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(value), theme.Colors.Text), theme.Typography.TitleSize), theme.Typography.WeightStrong)
+}
+
+func paragraphView(theme tokens.Theme, value string) ui.View {
+	return ui.FontSize(ui.Foreground(ui.Text(value), theme.Colors.Text), theme.Typography.BodySize)
+}
+
+func dialogOverlay(theme tokens.Theme, role string, title string, detail string, open bool, content ui.View, dismissible bool, onDismiss func()) ui.View {
+	if !open {
+		return ui.Fragment()
+	}
+	backdrop := ui.OnClick(ui.Background(ui.Box(), theme.Colors.Overlay), ui.Action(func() {
+		if dismissible {
+			onDismiss()
+		}
+	}))
+	panelContent := ui.Gap(ui.Column(titleView(theme, title), paragraphView(theme, detail), content), theme.Spacing.ContentGap)
+	panel := ui.PointerEvents(ui.MinWidth(ui.MaxWidth(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(panelContent, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.LargeRadius), theme.Spacing.SectionGap), 520), 320), ui.PointerEventsAuto)
+	overlay := ui.PointerEvents(ui.Stack(backdrop, ui.Justify(ui.Align(ui.Column(panel), "center"), "center")), ui.PointerEventsNone)
+	overlay = ui.AccessibleDescription(ui.AccessibleName(ui.Role(overlay, role), title), detail)
+	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
+		if dismissible && event.Key == "Escape" {
+			onDismiss()
+		}
+	})
+	return ui.Portal(ui.Modal(overlay, true), ui.OverlayModal)
+}
+
+func AlertDialog(theme tokens.Theme, title string, detail string, open bool, confirmLabel string, cancelLabel string, onConfirm func(), onDismiss func()) ui.View {
+	actions := ui.Justify(ui.Gap(ui.Row(Button(theme, cancelLabel, tokens.ButtonSecondary, tokens.ControlMedium, false, onDismiss), Button(theme, confirmLabel, tokens.ButtonDanger, tokens.ControlMedium, false, onConfirm)), theme.Spacing.ControlGap), "end")
+	return dialogOverlay(theme, "alertdialog", title, detail, open, actions, false, onDismiss)
+}
+
+func Popover(theme tokens.Theme, triggerLabel string, title string, open bool, focusToken int64, content ui.View, onOpenChange func(bool)) ui.View {
+	trigger := headless.DisclosureTrigger(triggerLabel, open, false, onOpenChange)
+	recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonSecondary, tokens.ControlMedium, false)
+	trigger = ui.FocusRequest(ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding), focusToken)
+	trigger = ui.BorderWidth(ui.BorderColor(trigger, recipe.Border), recipe.BorderWidth)
+	panel := ui.AccessibleName(ui.Role(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(ui.Gap(ui.Column(titleView(theme, title), content), theme.Spacing.ContentGap), theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap), "group"), title)
+	panel = ui.OnKeyDown(panel, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onOpenChange(false)
+		}
+	})
+	popup := ui.Portal(ui.Justify(ui.Align(ui.Column(panel), "center"), "center"), ui.OverlayPopup)
+	popup = ui.Hidden(popup, !open)
+	return ui.Stack(ui.Key(trigger, "popover-trigger"), ui.Key(popup, "popover-popup"))
+}
+
+func Tooltip(theme tokens.Theme, triggerLabel string, label string, visible bool, focusToken int64, content ui.View, onVisibleChange func(bool)) ui.View {
+	trigger := headless.Button(triggerLabel, false, func() {})
+	recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonSecondary, tokens.ControlMedium, false)
+	trigger = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+	trigger = ui.BorderWidth(ui.BorderColor(trigger, recipe.Border), recipe.BorderWidth)
+	trigger = ui.OnFocus(trigger, func(event ui.Event) {
+		onVisibleChange(true)
+	})
+	trigger = ui.OnBlur(trigger, func(event ui.Event) {
+		onVisibleChange(false)
+	})
+	trigger = ui.FocusRequest(trigger, focusToken)
+	view := ui.AccessibleName(ui.Role(ui.Padding(ui.Radius(ui.Background(content, theme.Colors.Text), theme.Shape.SmallRadius), theme.Spacing.ControlGap), "tooltip"), label)
+	popup := ui.Portal(ui.PointerEvents(ui.Justify(ui.Align(ui.Column(view), "center"), "center"), ui.PointerEventsNone), ui.OverlayTooltip)
+	popup = ui.Hidden(popup, !visible)
+	return ui.Stack(ui.Key(trigger, "tooltip-trigger"), ui.Key(popup, "tooltip-popup"))
+}
+
+type Toast struct {
+	Key string
+	Title string
+	Detail string
+	Intent FeedbackIntent
+	Dismissible bool
+}
+
+// CommandItem is the portable projection consumed by CommandPalette. Search,
+// ranking, and command ownership remain in the caller's command registry.
+type CommandItem struct {
+	Key string
+	Label string
+	Detail string
+	Shortcut string
+	Disabled bool
+}
+
+func movedCommandIndex(event ui.Event, items []CommandItem, current int64) int64 {
+	count := int64(len(items))
+	if count == 0 {
+		return -1
+	}
+	step := int64(0)
+	candidate := current
+	wrap := true
+	if event.Key == "ArrowDown" {
+		step = 1
+		candidate++
+	} else if event.Key == "ArrowUp" {
+		step = -1
+		candidate--
+	} else if event.Key == "Home" {
+		step = 1
+		candidate = 0
+		wrap = false
+	} else if event.Key == "End" {
+		step = -1
+		candidate = count - 1
+		wrap = false
+	} else {
+		return current
+	}
+	if current < 0 && wrap {
+		candidate = 0
+		if step < 0 {
+			candidate = count - 1
+		}
+	}
+	for visited := int64(0); visited < count; visited++ {
+		if candidate < 0 || candidate >= count {
+			if !wrap {
+				return current
+			}
+			if candidate < 0 {
+				candidate = count - 1
+			} else {
+				candidate = 0
+			}
+		}
+		if !items[candidate].Disabled {
+			return candidate
+		}
+		candidate += step
+	}
+	return current
+}
+
+// CommandPalette provides the complete modal, combobox, listbox, roving
+// selection, empty state, and activation behavior while leaving fuzzy search
+// and semantic command dispatch in the application-owned registry.
+func CommandPalette(theme tokens.Theme, title string, query string, placeholder string, open bool, selected int64, focusToken int64, items []CommandItem, onQueryChange func(string), onSelectedChange func(int64), onActivate func(string), onDismiss func()) ui.View {
+	if !open {
+		return ui.Fragment()
+	}
+	if title == "" || placeholder == "" || len(items) > 256 {
+		panic("UIKit command palette contract is invalid")
+	}
+	if selected < -1 || selected >= int64(len(items)) {
+		panic("UIKit command palette selection is invalid")
+	}
+	for index, item := range items {
+		if item.Key == "" || item.Label == "" {
+			panic("UIKit command palette item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit command palette item keys must be unique")
+			}
+		}
+	}
+	if selected >= 0 && items[selected].Disabled {
+		selected = -1
+	}
+	if selected < 0 {
+		for index, item := range items {
+			if !item.Disabled {
+				selected = int64(index)
+				break
+			}
+		}
+	}
+	input := ui.TextInput(query, placeholder, ui.TextChange(onQueryChange))
+	input = ui.Role(input, "combobox")
+	input = ui.Expanded(input, true)
+	input = ui.AccessibleName(input, title + " query")
+	input = ui.FocusRequest(input, focusToken)
+	input = ui.AutoFocus(input, true)
+	input = ui.Height(ui.Radius(ui.Background(input, theme.Colors.Surface), theme.Shape.MediumRadius), theme.ControlHeight)
+	input = ui.BorderWidth(ui.BorderColor(input, theme.Colors.Border), 1)
+	input = ui.OnKeyDown(input, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onDismiss()
+			return
+		}
+		if event.Key == "Enter" {
+			if selected >= 0 && selected < int64(len(items)) && !items[selected].Disabled {
+				onActivate(items[selected].Key)
+			}
+			return
+		}
+		next := movedCommandIndex(event, items, selected)
+		if next != selected {
+			onSelectedChange(next)
+		}
+	})
+	rows := make([]ui.View, 0, len(items))
+	for index, item := range items {
+		current := item
+		itemIndex := int64(index)
+		copy := ui.Column(ui.FontWeight(ui.Text(current.Label), theme.Typography.WeightMedium))
+		if current.Detail != "" {
+			copy = ui.Gap(ui.Column(ui.FontWeight(ui.Text(current.Label), theme.Typography.WeightMedium), ui.FontSize(ui.Foreground(ui.Text(current.Detail), theme.Colors.TextMuted), theme.Typography.CaptionSize)), theme.Spacing.ControlGap /
+				2)
+		}
+		rowContent := ui.Row(ui.Flex(copy, 1))
+		if current.Shortcut != "" {
+			rowContent = ui.Row(ui.Flex(copy, 1), ui.FontSize(ui.Foreground(ui.Text(current.Shortcut), theme.Colors.TextMuted), theme.Typography.CaptionSize))
+		}
+		rowContent = ui.Align(rowContent, ui.AlignCenter)
+		row := headless.Pressable(current.Label, current.Disabled, rowContent, func() {
+			onActivate(current.Key)
+		})
+		row = ui.Role(row, "option")
+		row = ui.Selected(row, itemIndex == selected)
+		row = ui.AccessibleDescription(row, current.Detail)
+		row = ui.OnFocus(row, func(event ui.Event) {
+			onSelectedChange(itemIndex)
+		})
+		background := theme.Colors.SurfaceRaised
+		foreground := theme.Colors.Text
+		if itemIndex == selected {
+			background = theme.Colors.Surface
+			foreground = theme.Colors.Accent
+		}
+		row = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(row, background), foreground), theme.Shape.SmallRadius), theme.ControlHeight), theme.Spacing.ControlGap)
+		if current.Disabled {
+			row = ui.Opacity(row, 0.5)
+		}
+		rows = append(rows, ui.Key(row, current.Key))
+	}
+	list := ui.AccessibleName(ui.Role(ui.Gap(ui.Column(rows...), theme.Spacing.ControlGap / 2), "listbox"), title +
+		" results")
+	if len(rows) == 0 {
+		list = ui.AccessibleName(ui.Role(ui.Padding(ui.Foreground(ui.Text("No matching commands"), theme.Colors.TextMuted), theme.Spacing.SectionGap), "status"), "No matching commands")
+	}
+	list = ui.MaxHeight(ui.Scroll(list), 420)
+	content := ui.Gap(ui.Column(input, list), theme.Spacing.ContentGap)
+	panel := ui.PointerEvents(ui.MaxWidth(ui.MinWidth(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.LargeRadius), theme.Spacing.SectionGap), 680), 680), ui.PointerEventsAuto)
+	backdrop := ui.OnClick(ui.Background(ui.Box(), theme.Colors.Overlay), ui.Action(onDismiss))
+	overlay := ui.PointerEvents(ui.Stack(backdrop, ui.Justify(ui.Align(ui.Column(panel), ui.AlignCenter), ui.JustifyStart)), ui.PointerEventsNone)
+	overlay = ui.Padding(overlay, theme.Spacing.SectionGap * 3)
+	overlay = ui.AccessibleName(ui.Role(overlay, "dialog"), title)
+	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onDismiss()
+		}
+	})
+	return ui.Portal(ui.Modal(overlay, true), ui.OverlayModal)
+}
+
+// Toast timers and replacement generations stay in caller-owned Volang
+// goroutines; this component owns portal ordering, live regions, and dismissal.
+func ToastRegion(theme tokens.Theme, label string, toasts []Toast, onDismiss func(string)) ui.View {
+	if label == "" || len(toasts) > 8 {
+		panic("UIKit toast region contract is invalid")
+	}
+	for index, toast := range toasts {
+		if toast.Key == "" || toast.Title == "" {
+			panic("UIKit toast is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if toasts[previous].Key == toast.Key {
+				panic("UIKit toast keys must be unique")
+			}
+		}
+	}
+	views := make([]ui.View, 0, len(toasts))
+	for _, toast := range toasts {
+		current := toast
+		copy := ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(current.Title), intentColor(theme, current.Intent)), theme.Typography.WeightStrong), ui.FontSize(ui.Foreground(ui.Text(current.Detail), theme.Colors.Text), theme.Typography.BodySize)), theme.Spacing.ControlGap)
+		content := ui.Row(ui.Flex(copy, 1))
+		if current.Dismissible {
+			content = ui.Row(ui.Flex(copy, 1), Button(theme, "Dismiss", tokens.ButtonQuiet, tokens.ControlSmall, false, func() {
+				onDismiss(current.Key)
+			}))
+		}
+		role := ui.DerivedString("status")
+		if current.Intent == IntentDanger {
+			role = "alert"
+		}
+		view := ui.MinWidth(ui.MaxWidth(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), intentColor(theme, current.Intent)), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap), 420), 280)
+		view = ui.PointerEvents(ui.AccessibleName(ui.Role(view, role), current.Title), ui.PointerEventsAuto)
+		views = append(views, ui.Key(view, current.Key))
+	}
+	region := ui.Justify(ui.Align(ui.Padding(ui.Gap(ui.Column(views...), theme.Spacing.ControlGap), theme.Spacing.SectionGap), ui.AlignEnd), ui.JustifyStart)
+	region = ui.AccessibleName(ui.Role(region, "region"), label)
+	region = ui.PointerEvents(region, ui.PointerEventsNone)
+	return ui.Portal(region, ui.OverlayTooltip)
+}
+
+func Drawer(theme tokens.Theme, title string, open bool, width float64, content ui.View, onDismiss func()) ui.View {
+	if !open {
+		return ui.Fragment()
+	}
+	if title == "" || width < 240 || width > 960 || math.IsNaN(width) || math.IsInf(width, 0) {
+		panic("UIKit drawer width is invalid")
+	}
+	backdrop := ui.OnClick(ui.Background(ui.Box(), theme.Colors.Overlay), ui.Action(onDismiss))
+	close := Button(theme, "Close", tokens.ButtonQuiet, tokens.ControlMedium, false, onDismiss)
+	header := ui.Align(ui.Row(titleView(theme, title), ui.Flex(ui.Box(), 1), close), ui.AlignCenter)
+	panel := ui.PointerEvents(ui.Width(ui.Padding(ui.Background(ui.Gap(ui.Column(header, content), theme.Spacing.SectionGap), theme.Colors.SurfaceRaised), theme.Spacing.SectionGap), width), ui.PointerEventsAuto)
+	positioned := ui.PointerEvents(ui.Justify(ui.Row(ui.Flex(ui.Box(), 1), panel), ui.JustifyEnd), ui.PointerEventsNone)
+	overlay := ui.AccessibleName(ui.Role(ui.Stack(backdrop, positioned), "dialog"), title)
+	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onDismiss()
+		}
+	})
+	return ui.Portal(ui.Modal(overlay, true), ui.OverlayModal)
+}

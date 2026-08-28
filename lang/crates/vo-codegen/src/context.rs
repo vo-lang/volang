@@ -152,8 +152,8 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         "panic_with_error" => 0,
 
         // === Builtins (return 1 slot) ===
-        "vo_copy" => 1,
-        "vo_slice_append_slice" => 1,
+        "vo_copy" | "vo_copy_string" => 1,
+        "vo_slice_append_slice" | "vo_slice_append_string" => 1,
 
         // === Type conversions (return 1 slot: string or slice) ===
         "vo_conv_int_str" => 1,
@@ -400,6 +400,14 @@ fn declared_extern_allowed_effects(name: &str) -> ExternEffects {
 pub struct CodegenContext {
     module: Module,
 
+    /// Compiler-object keyed storage overrides supplied by an optional typed
+    /// adapter. Source semantics stay typed while the physical local contains
+    /// one opaque value handle.
+    externalized_locals: HashMap<ObjKey, crate::ExternalizedLocalSpec>,
+
+    /// Adapter-owned call scopes keyed by package-local source identity.
+    scoped_calls: HashMap<(PackageKey, vo_syntax::ast::ExprId), crate::ScopedCallSpec>,
+
     /// Method index: (receiver_type, is_pointer_recv, name) -> func_id
     /// Only for methods (recv.is_some()), used by embed.rs for method lookup
     func_indices: HashMap<(Option<TypeKey>, bool, Symbol), u32>,
@@ -439,6 +447,9 @@ pub struct CodegenContext {
 
     /// ObjKey -> iface_func_id (wrapper for value receiver methods, or original for pointer receiver)
     objkey_to_iface_func: HashMap<ObjKey, u32>,
+
+    /// Source expression identity -> emitted closure function ID.
+    expr_to_func: HashMap<(vo_analysis::objects::PackageKey, vo_syntax::ast::ExprId), u32>,
 
     /// init functions with their owning package (in source declaration order).
     ///
@@ -494,6 +505,8 @@ impl CodegenContext {
             });
         Self {
             module,
+            externalized_locals: HashMap::new(),
+            scoped_calls: HashMap::new(),
             func_indices: HashMap::new(),
             extern_names: HashMap::new(),
             global_indices: HashMap::new(),
@@ -507,6 +520,7 @@ impl CodegenContext {
             type_interner: TypeInterner::new(),
             objkey_to_func: HashMap::new(),
             objkey_to_iface_func: HashMap::new(),
+            expr_to_func: HashMap::new(),
             init_functions: Vec::new(),
             main_func_id: None,
             pending_itabs: Vec::new(),
@@ -517,6 +531,70 @@ impl CodegenContext {
             wrapper_cache: HashMap::new(),
             layout_errors: Vec::new(),
         }
+    }
+
+    pub(crate) fn install_externalized_locals(
+        &mut self,
+        specs: &[crate::ExternalizedLocalSpec],
+    ) -> Result<(), crate::CodegenError> {
+        for spec in specs {
+            if self
+                .externalized_locals
+                .insert(spec.object, spec.clone())
+                .is_some()
+            {
+                return Err(crate::CodegenError::Internal(format!(
+                    "externalized local {:?} was registered more than once",
+                    spec.object
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn externalized_local(
+        &self,
+        object: ObjKey,
+    ) -> Option<&crate::ExternalizedLocalSpec> {
+        self.externalized_locals.get(&object)
+    }
+
+    pub(crate) fn install_scoped_calls(
+        &mut self,
+        specs: &[crate::ScopedCallSpec],
+    ) -> Result<(), crate::CodegenError> {
+        for spec in specs {
+            let key = (spec.package, spec.expression);
+            if self.scoped_calls.insert(key, spec.clone()).is_some() {
+                return Err(crate::CodegenError::Internal(format!(
+                    "scoped call {:?} was registered more than once",
+                    key
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn scoped_call(
+        &self,
+        package: PackageKey,
+        expression: vo_syntax::ast::ExprId,
+    ) -> Option<&crate::ScopedCallSpec> {
+        self.scoped_calls.get(&(package, expression))
+    }
+
+    pub(crate) fn opaque_handle_transfer_type(&self) -> TransferType {
+        TransferType {
+            meta_raw: vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Uint64).to_raw(),
+            rttid_raw: 0,
+            slots: 1,
+        }
+    }
+
+    pub(crate) fn opaque_handle_meta(&mut self) -> u16 {
+        self.add_const(Constant::Int(i64::from(
+            vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Uint64).to_raw(),
+        )))
     }
 
     pub(crate) fn check_layout_errors(&self) -> Result<(), String> {
@@ -1291,8 +1369,8 @@ impl CodegenContext {
             .map(|i| i as u32)
             .unwrap_or_else(|| {
                 panic!(
-                    "method {} not found in interface - codegen bug",
-                    method_identity
+                    "method {} not found in interface metadata {:?} - codegen bug",
+                    method_identity, iface_meta.method_names
                 )
             })
     }
@@ -1480,6 +1558,36 @@ impl CodegenContext {
         self.func_indices
             .get(&(recv, is_pointer_recv, name))
             .copied()
+    }
+
+    pub(crate) fn record_expression_function(
+        &mut self,
+        package: vo_analysis::objects::PackageKey,
+        expression: vo_syntax::ast::ExprId,
+        function: u32,
+    ) {
+        // A function literal may be lowered once in its source function and
+        // again inside a generated adapter evaluator. Retain the original
+        // body mapping until the adapter entrypoint explicitly replaces it.
+        self.expr_to_func
+            .entry((package, expression))
+            .or_insert(function);
+    }
+
+    pub(crate) fn record_adapter_expression_function(
+        &mut self,
+        package: vo_analysis::objects::PackageKey,
+        expression: vo_syntax::ast::ExprId,
+        function: u32,
+    ) {
+        self.expr_to_func.insert((package, expression), function);
+    }
+
+    pub(crate) fn report(&self) -> crate::CodegenReport {
+        crate::CodegenReport {
+            functions_by_object: self.objkey_to_func.clone(),
+            functions_by_expression: self.expr_to_func.clone(),
+        }
     }
 
     /// Add anonymous function (for generated functions like __init__, __entry__).

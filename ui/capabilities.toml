@@ -1,0 +1,991 @@
+schema_version = 1
+product = "Volang UI"
+target_version = "1.0"
+maturity_order = ["specified", "implemented", "conformant", "dogfooded", "hardened", "stable"]
+api_stability_order = ["internal", "experimental", "preview", "stable", "deprecated"]
+tiers = ["core", "standard", "extended", "platform", "tooling", "ecosystem"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+
+[[capability]]
+id = "root-direct-update-baseline"
+domain = "authoring-model"
+name = "Certified single-root direct update baseline"
+delivery = "E0"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-plan", "vo-ui-artifact", "vo-ui-compiler", "vo-ui-vm"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = []
+acceptance = ["Changed scalar bindings update only pre-indexed sites and preserve renderer identity."]
+evidence = ["ui/crates/vo-ui-plan/src/lib.rs", "lang/crates/vo-ui-compiler/src/lib.rs"]
+
+[[capability]]
+id = "component-instance-graph"
+domain = "authoring-model"
+name = "Nested component instance graph"
+delivery = "E1"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-plan", "vo-ui-runtime", "vo-ui-compiler", "vo-ui-vm"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["root-direct-update-baseline"]
+acceptance = ["Nested keyed component calls own independent state, handler, effect, task, and environment scopes."]
+evidence = [
+  "ui/crates/vo-ui-runtime/src/component.rs",
+  "lang/crates/vo-ui-vm/src/lib.rs",
+  "lang/crates/vo-engine/src/run.rs",
+  "lang/crates/vo-web/tests/ui_protocol.test.mjs",
+  "ui/tests/nested-component-list/main.vo",
+]
+
+[[capability]]
+id = "package-component-linking"
+domain = "authoring-model"
+name = "Cross-package component artifact linking"
+delivery = "E1"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-artifact", "vo-ui-compiler", "vo-engine"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["component-instance-graph"]
+acceptance = ["Imported source components participate through canonical package identity, and authenticated component artifacts survive bytecode, cache, Native AOT, and Core Wasm AOT packaging."]
+evidence = [
+  "ui/crates/vo-ui-artifact/src/bundle.rs",
+  "lang/crates/vo-common-core/src/serialize.rs",
+  "lang/crates/vo-engine/src/compile/cache.rs",
+  "lang/crates/vo-jit/src/aot.rs",
+  "lang/crates/vo-wasm-aot/src/lib.rs",
+  "lang/crates/vo-ui-compiler/src/lib.rs",
+  "lang/crates/vo-engine/src/run.rs",
+  "fuzz/ui-artifact/fuzz_targets/ui_artifact_decoders.rs",
+]
+
+[[capability]]
+id = "component-lifecycle"
+domain = "authoring-model"
+name = "Render, commit, effect, and disposal lifecycle"
+delivery = "E1"
+status = "stable"
+api_stability = "stable"
+tier = "core"
+required_for_1_0 = true
+owners = ["ui", "vo-ui-reactive", "vo-ui-runtime"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["component-instance-graph"]
+acceptance = ["External effects start after a successful commit and disposal cancels owned work before cleanup."]
+evidence = [
+  "ui/crates/vo-ui-session/src/component.rs",
+  "ui/crates/vo-ui-runtime/src/component.rs",
+]
+
+[[capability]]
+id = "comfortable-public-api"
+domain = "authoring-model"
+name = "Comfortable typed authoring API"
+delivery = "E2"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui", "ui/kit"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["component-instance-graph", "component-lifecycle"]
+acceptance = ["Starter applications use inherited environment and typed callbacks without repeated theme arguments or generic event envelopes."]
+evidence = [
+  "ui/ui.vo",
+  "ui/kit/kit.vo",
+  "ui/templates/default/main.vo",
+  "ui/tests/modal-validation-form/main.vo",
+  "ui/docs/cross-platform-foundation.md",
+]
+
+[[capability]]
+id = "bounded-ui-scheduler"
+domain = "state-concurrency"
+name = "Bounded scoped completion scheduler"
+delivery = "E1"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-scheduler", "vo-ui-session"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = []
+acceptance = ["Task completions are generation checked, bounded per turn, and coalesced into at most one renderer commit."]
+evidence = ["ui/crates/vo-ui-scheduler/src/lib.rs", "ui/crates/vo-ui-session/src/lib.rs"]
+
+[[capability]]
+id = "structured-state"
+domain = "state-concurrency"
+name = "Structured state and deterministic transactions"
+delivery = "E1"
+status = "stable"
+api_stability = "stable"
+tier = "core"
+required_for_1_0 = true
+owners = ["ui", "vo-ui-reactive", "vo-ui-compiler", "vo-ui-vm"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["component-instance-graph"]
+acceptance = ["Scalar and structured values have explicit observable mutation, batching, derived-state, and ownership semantics."]
+evidence = [
+  "ui/crates/vo-ui-runtime/src/component.rs",
+  "ui/crates/vo-ui-reactive/src/lib.rs",
+  "lang/crates/vo-ui-vm/src/lib.rs",
+]
+
+[[capability]]
+id = "scoped-task-api"
+domain = "state-concurrency"
+name = "Pure-Volang scoped task, stream, and effect API"
+delivery = "E2"
+status = "stable"
+api_stability = "stable"
+tier = "core"
+required_for_1_0 = true
+owners = ["ui", "vo-ui-scheduler", "vo-ui-session", "vo-ui-vm"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["bounded-ui-scheduler", "component-lifecycle", "structured-state"]
+acceptance = ["Worker goroutines return typed messages and never mutate mounted state or renderer nodes directly."]
+evidence = [
+  "ui/task/task.vo",
+  "lang/crates/vo-ui-vm/src/lib.rs",
+  "ui/tests/asynchronous-search/main.vo",
+  "ui/tests/effect-lifecycle/main.vo",
+  "ui/tests/stream-lifecycle/main.vo",
+]
+
+[[capability]]
+id = "async-data-model"
+domain = "state-concurrency"
+name = "Typed query, mutation, pagination, and stream model"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/resource"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["scoped-task-api"]
+acceptance = ["Joining, latest, queue, retry, optimistic update, cancellation, cache, and backpressure policies are deterministic."]
+evidence = ["ui/resource/resource.vo", "ui/task/task.vo", "ui/tests/application-platform/main.vo", "ui/showcases/data-application/main.vo"]
+
+[[capability]]
+id = "state-persistence-history"
+domain = "state-concurrency"
+name = "Persistence, restoration, migration, and undo history"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui", "ui/resource", "ui/system"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["structured-state", "async-data-model"]
+acceptance = ["Compatible schemas restore predictably and history remains bounded across reload and restart."]
+evidence = ["ui/persistence/persistence.vo", "ui/tests/application-platform/main.vo", "ui/showcases/data-application/main.vo"]
+
+[[capability]]
+id = "layout-engine-baseline"
+domain = "layout-scroll"
+name = "Renderer-neutral retained layout baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-layout", "vo-ui-web", "vo-ui-host-native"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = []
+acceptance = ["Shared row, column, stack, grid, clipping, and scroll semantics pass renderer conformance."]
+evidence = ["ui/crates/vo-ui-layout/src/lib.rs", "ui/testdata/goldens/uikit.web.txt"]
+
+[[capability]]
+id = "adaptive-layout-measurement"
+domain = "layout-scroll"
+name = "Adaptive layout and bounded measurement feedback"
+delivery = "E2"
+status = "stable"
+api_stability = "stable"
+tier = "core"
+required_for_1_0 = true
+owners = ["ui", "vo-ui-layout", "vo-ui-web", "vo-ui-host-native"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["layout-engine-baseline", "comfortable-public-api"]
+acceptance = ["Viewport, container, intrinsic, safe-area, DPI, text-scale, and RTL inputs cannot create unbounded layout feedback."]
+evidence = [
+  "ui/ui.vo",
+  "ui/crates/vo-ui-layout/src/lib.rs",
+  "lang/crates/vo-web/js/ui_dom.ts",
+  "lang/crates/vo-ui-host-native/src/lib.rs",
+  "ui/tests/adaptive-environment/main.vo",
+]
+
+[[capability]]
+id = "virtual-collections"
+domain = "layout-scroll"
+name = "Virtual lists, grids, trees, and tables"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/kit", "vo-ui-layout", "vo-ui-runtime"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["component-instance-graph", "layout-engine-baseline"]
+acceptance = ["Large variable-size collections materialize bounded content and preserve stable keyed component state."]
+evidence = ["ui/kit/kit.vo", "ui/kit/data/data.vo", "ui/examples/virtual-list/main.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-engine/src/run.rs"]
+
+[[capability]]
+id = "workspace-layout"
+domain = "layout-scroll"
+name = "Resizable split, docking, panel, and multi-monitor layout"
+delivery = "E6"
+status = "stable"
+api_stability = "stable"
+tier = "extended"
+required_for_1_0 = true
+owners = ["ui/kit", "ui/desktop"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["adaptive-layout-measurement", "virtual-collections"]
+acceptance = ["Workspace layouts restore geometry and preserve focus, semantics, and component identity across adaptation."]
+evidence = ["ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "ui/showcases/studio-workbench/main.vo", "lang/crates/vo-engine/src/run.rs"]
+
+[[capability]]
+id = "paint-baseline"
+domain = "graphics-media"
+name = "Revision-safe logical paint baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-paint", "vo-ui-present-wgpu", "vo-ui-web"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["layout-engine-baseline"]
+acceptance = ["Paint commands, clipping, inherited style, and presenter loss preserve atomic revisions."]
+evidence = ["ui/crates/vo-ui-paint/src/lib.rs", "ui/testdata/goldens/uikit.paint.txt"]
+
+[[capability]]
+id = "graphics-assets-animation"
+domain = "graphics-media"
+name = "Graphics, assets, canvas, and animation"
+delivery = "E6"
+status = "stable"
+api_stability = "stable"
+tier = "extended"
+required_for_1_0 = true
+owners = ["ui", "ui/motion", "vo-ui-paint", "vo-ui-web", "vo-ui-present-wgpu"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["paint-baseline", "adaptive-layout-measurement"]
+acceptance = ["Images, SVG, paths, canvas, layers, transforms, effects, typed assets, and reduced-motion animation have bounded lifetime contracts."]
+evidence = ["ui/graphics/graphics.vo", "ui/assets/assets.vo", "ui/animation/animation.vo", "ui/chart/chart.vo", "ui/crates/vo-ui-paint/src/lib.rs", "lang/crates/vo-web/js/ui_dom.ts", "ui/tests/advanced-packs/main.vo"]
+
+[[capability]]
+id = "media-playback-capture"
+domain = "graphics-media"
+name = "Audio, video, and capture"
+delivery = "E6"
+status = "stable"
+api_stability = "stable"
+tier = "extended"
+required_for_1_0 = true
+owners = ["ui/media", "ui/system"]
+required_targets = ["web-wasm-aot", "desktop-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["graphics-assets-animation", "scoped-task-api", "capability-permissions"]
+acceptance = ["Playback, tracks, subtitles, seeking, camera, microphone, screen capture, permissions, recovery, limits, and teardown are typed."]
+evidence = ["ui/media/media.vo", "ui/showcases/media-application/main.vo", "ui/tests/advanced-packs/main.vo", "ui/docs/advanced-capability-packs.md"]
+
+[[capability]]
+id = "native-text-baseline"
+domain = "text-editing"
+name = "Unicode shaping and controlled text baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-text-native", "vo-ui-web", "vo-ui-host-native"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["layout-engine-baseline"]
+acceptance = ["Shaping, fallback, bidi, UTF-16 selection, caret, IME, and accessibility preserve one logical edit contract."]
+evidence = ["lang/crates/vo-ui-text-native/src/lib.rs", "ui/testdata/goldens/uikit.accessibility.txt"]
+
+[[capability]]
+id = "rich-text-document"
+domain = "text-editing"
+name = "Rich text and incremental document model"
+delivery = "E6"
+status = "stable"
+api_stability = "stable"
+tier = "extended"
+required_for_1_0 = true
+owners = ["ui/document", "vo-ui-text-native", "vo-ui-web"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["native-text-baseline", "structured-state", "virtual-collections"]
+acceptance = ["Rich text, Markdown, selection, undo, redo, find, replace, line indexing, and large-document editing share one bounded model."]
+evidence = ["ui/document/document.vo", "ui/tests/advanced-packs/main.vo", "ui/tests/multi-window-editor/main.vo", "lang/crates/vo-engine/src/run.rs"]
+
+[[capability]]
+id = "official-code-editor"
+domain = "text-editing"
+name = "Official code editor"
+delivery = "E6"
+status = "stable"
+api_stability = "stable"
+tier = "extended"
+required_for_1_0 = true
+owners = ["ui/editor"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["rich-text-document", "command-system", "language-tooling"]
+acceptance = ["The editor provides large-file virtualization, tokens, diagnostics, completion, folding, navigation, IME, accessibility, and stable budgets."]
+evidence = ["ui/editor/editor.vo", "ui/showcases/studio-workbench/main.vo", "ui/tests/multi-window-editor/main.vo", "ui/docs/quality-budgets.md"]
+
+[[capability]]
+id = "typed-input-baseline"
+domain = "input-interaction"
+name = "Typed keyboard, pointer, wheel, and IME baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-core", "vo-ui-web", "vo-ui-host-native"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = []
+acceptance = ["Reverse events reject stale identities and preserve typed keyboard, pointer, scroll, and composition data."]
+evidence = ["ui/crates/vo-ui-core/src/lib.rs", "lang/crates/vo-web/js/ui_protocol.ts"]
+
+[[capability]]
+id = "focus-overlay-command"
+domain = "input-interaction"
+name = "Focus, overlay, shortcut, and command kernel"
+delivery = "E2"
+status = "stable"
+api_stability = "stable"
+tier = "core"
+required_for_1_0 = true
+owners = ["ui", "ui/commands", "vo-ui-web", "vo-ui-host-native"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["component-instance-graph", "typed-input-baseline"]
+acceptance = ["Focus scopes, portals, overlays, commands, shortcuts, restoration, and conflict resolution are deterministic."]
+evidence = [
+  "ui/ui.vo",
+  "ui/commands/commands.vo",
+  "ui/kit/kit.vo",
+  "ui/crates/vo-ui-paint/src/lib.rs",
+  "lang/crates/vo-web/js/ui_dom.ts",
+  "lang/crates/vo-ui-host-native/src/lib.rs",
+  "ui/tests/typed-key-event/main.vo",
+  "ui/tests/modal-validation-form/main.vo",
+]
+
+[[capability]]
+id = "gesture-drag-drop"
+domain = "input-interaction"
+name = "Gesture arbitration and drag/drop"
+delivery = "E3"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/gesture", "ui/system", "vo-ui-web", "vo-ui-host-native"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["focus-overlay-command"]
+acceptance = ["Gesture competition, pointer capture loss, data transfer, external files, previews, and cancellation leave no stuck state."]
+evidence = [
+  "ui/gesture/gesture.vo",
+  "ui/examples/motion/main.vo",
+  "lang/crates/vo-web/tests/ui_protocol.test.mjs",
+  "lang/crates/vo-ui-host-native/src/lib.rs",
+]
+
+[[capability]]
+id = "semantic-tree-baseline"
+domain = "accessibility-i18n"
+name = "Renderer-neutral semantic tree baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-accessibility", "vo-ui-accesskit", "vo-ui-web"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["typed-input-baseline"]
+acceptance = ["Semantic identity, bounds, state, relations, actions, and live handler routing survive reconciliation and virtualization."]
+evidence = ["ui/crates/vo-ui-accessibility/src/lib.rs", "ui/testdata/goldens/uikit.accessibility.txt"]
+
+[[capability]]
+id = "apg-inclusive-interaction"
+domain = "accessibility-i18n"
+name = "APG and inclusive interaction conformance"
+delivery = "E3"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/kit", "ui/testing"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["semantic-tree-baseline", "focus-overlay-command"]
+acceptance = ["Official components pass keyboard, focus, target-size, contrast, zoom, reflow, reduced-motion, and assistive-technology contracts."]
+evidence = [
+  "ui/docs/uikit-wave1.md",
+  "ui/kit/catalog.toml",
+  "ui/testdata/goldens/uikit.accessibility.txt",
+  "ui/showcases/component-gallery/main.vo",
+  "lang/crates/vo-web/tests/ui_protocol.test.mjs",
+  "lang/crates/vo-ui-host-native/src/lib.rs",
+]
+
+[[capability]]
+id = "localization-bidi"
+domain = "accessibility-i18n"
+name = "Localization, formatting, collation, and bidi"
+delivery = "E3"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui", "ui/kit", "vo-stdlib"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["comfortable-public-api", "adaptive-layout-measurement", "native-text-baseline"]
+acceptance = ["Generated messages, plural rules, locale formats, segmentation, collation, mixed direction, and RTL adaptation are deterministic."]
+evidence = [
+  "ui/i18n/core/core.vo",
+  "ui/i18n/i18n.vo",
+  "ui/tests/i18n-behavior/main.vo",
+  "ui/tests/i18n-server/main.vo",
+]
+
+[[capability]]
+id = "design-token-recipes"
+domain = "design-system-uikit"
+name = "Volang design tokens and visual recipes"
+delivery = "E3"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/kit"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["comfortable-public-api", "adaptive-layout-measurement", "paint-baseline"]
+acceptance = ["Semantic tokens, density, motion, anatomy, variants, recipes, nested themes, and high contrast share one typed model."]
+evidence = [
+  "ui/kit/tokens/tokens.vo",
+  "ui/kit/components/components.vo",
+  "ui/showcases/component-gallery/main.vo",
+  "ui/docs/uikit-wave1.md",
+]
+
+[[capability]]
+id = "headless-behavior-primitives"
+domain = "design-system-uikit"
+name = "Headless accessible behavior primitives"
+delivery = "E3"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/kit", "ui/commands"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["focus-overlay-command", "semantic-tree-baseline", "scoped-task-api"]
+acceptance = ["Component state machines preserve behavior and semantics when applications replace visual recipes."]
+evidence = [
+  "ui/kit/headless/headless.vo",
+  "ui/kit/components/components.vo",
+  "ui/showcases/component-gallery/main.vo",
+  "ui/docs/uikit-wave1.md",
+]
+
+[[capability]]
+id = "official-uikit-catalog"
+domain = "design-system-uikit"
+name = "Official production UIKit catalog"
+delivery = "E3"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/kit"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["server-native-aot"]
+depends_on = ["design-token-recipes", "headless-behavior-primitives", "apg-inclusive-interaction"]
+acceptance = ["The governed catalog covers common content, form, feedback, overlay, navigation, collection, and application-shell needs."]
+evidence = [
+  "ui/kit/catalog.toml",
+  "ui/kit/kit.vo",
+  "ui/kit/components/components.vo",
+  "ui/showcases/component-gallery/main.vo",
+  "ui/docs/uikit-wave1.md",
+]
+
+[[capability]]
+id = "uikit-source-extension"
+domain = "design-system-uikit"
+name = "Icons, design assets, and source-level extension"
+delivery = "E7"
+status = "stable"
+api_stability = "stable"
+tier = "ecosystem"
+required_for_1_0 = true
+owners = ["ui/kit", "vo-ui-cli"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot"]
+depends_on = ["official-uikit-catalog", "module-distribution"]
+acceptance = ["Official icons, token export, design guidance, and component source export retain provenance and upgrade diagnostics."]
+evidence = ["ui/kit/icons/icons.vo", "ui/kit/tokens/tokens.vo", "cmd/vo/src/ui_dev.rs", "ui/editors/vscode", "ui/docs/package-authoring.md"]
+
+[[capability]]
+id = "typed-navigation"
+domain = "application-patterns"
+name = "Typed routing and restoration"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/navigation"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["component-instance-graph", "structured-state"]
+acceptance = ["Nested routes, arguments, back stacks, deep links, redirects, guards, focus, scroll, and restoration have typed tests."]
+evidence = ["ui/navigation/navigation.vo", "ui/examples/navigation/main.vo", "ui/tests/application-platform/main.vo", "ui/showcases/data-application/main.vo"]
+
+[[capability]]
+id = "forms-commands-patterns"
+domain = "application-patterns"
+name = "Forms, commands, and reusable application patterns"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/forms", "ui/commands", "ui/kit"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["official-uikit-catalog", "async-data-model", "typed-navigation"]
+acceptance = ["Validation, fields, submission, menus, shortcuts, data workflows, dashboards, settings, wizards, and workspaces compose publicly."]
+evidence = ["ui/forms/forms.vo", "ui/commands/commands.vo", "ui/showcases/data-application/main.vo", "ui/tests/application-platform/main.vo"]
+
+[[capability]]
+id = "command-system"
+domain = "application-patterns"
+name = "Typed command and shortcut system"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "standard"
+required_for_1_0 = true
+owners = ["ui/commands", "ui/kit", "ui/system"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["focus-overlay-command", "official-uikit-catalog"]
+acceptance = ["Menus, toolbars, context menus, palettes, and shortcuts share scoped command identity and deterministic enablement."]
+evidence = ["ui/commands/commands.vo", "ui/tests/typed-key-event/main.vo", "ui/tests/application-platform/main.vo", "ui/showcases/data-application/main.vo"]
+
+[[capability]]
+id = "web-renderer-baseline"
+domain = "web-application"
+name = "Certified browser VM and Wasm AOT renderer baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "platform"
+required_for_1_0 = true
+owners = ["vo-ui-web", "vo-web"]
+required_targets = ["web-vm", "web-wasm-aot"]
+depends_on = ["root-direct-update-baseline", "typed-input-baseline", "semantic-tree-baseline"]
+acceptance = ["Atomic DOM commits, reverse events, IME, focus, history, resources, services, rollback, and generated host glue pass real-browser tests."]
+evidence = ["lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-web/tests/ui_protocol.test.mjs"]
+
+[[capability]]
+id = "web-server-authority"
+domain = "web-application"
+name = "Server, shared, and client authority graph"
+delivery = "E5"
+status = "stable"
+api_stability = "internal"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/web", "vo-ui-compiler", "vo-engine"]
+required_targets = ["server-native-aot", "web-wasm-aot"]
+optional_targets = ["web-vm"]
+depends_on = ["package-component-linking", "component-lifecycle"]
+acceptance = ["Build-time dependency analysis prevents server-only capabilities and secrets from entering client artifacts."]
+evidence = ["ui/web/web.vo", "ui/web/server/server.vo", "lang/crates/vo-engine/src/compile/mod.rs", "lang/crates/vo-engine/src/compile/pipeline.rs", "lang/crates/vo-engine/src/run.rs"]
+
+[[capability]]
+id = "web-fullstack-production"
+domain = "web-application"
+name = "SSG, streaming SSR, activation, actions, caching, PWA, and deployment"
+delivery = "E5"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/web", "vo-ui-web", "vo-ui-compiler", "vo-engine", "vo-ui-cli"]
+required_targets = ["server-native-aot", "web-wasm-aot"]
+optional_targets = ["web-vm"]
+depends_on = ["web-server-authority", "typed-navigation", "forms-commands-patterns"]
+acceptance = ["Useful HTML, activation, loaders, actions, sessions, caches, metadata, assets, security, PWA, and adapters pass production suites."]
+evidence = ["ui/crates/vo-ui-web/src/ssr.rs", "cmd/vo/src/ui_dev.rs", "lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "ui/showcases/content-site", "ui/docs/web-desktop-products.md"]
+
+[[capability]]
+id = "desktop-renderer-baseline"
+domain = "desktop-application"
+name = "Certified native retained renderer baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "internal"
+tier = "platform"
+required_for_1_0 = true
+owners = ["vo-ui-desktop", "vo-ui-host-native", "vo-ui-shell-native"]
+required_targets = ["desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["layout-engine-baseline", "paint-baseline", "native-text-baseline", "semantic-tree-baseline"]
+acceptance = ["Native layout, text, paint, WGPU, input, IME, accessibility, services, VM/JIT, and AOT share revision-safe ownership."]
+evidence = ["ui/crates/vo-ui-desktop/src/lib.rs", "lang/crates/vo-ui-shell-native/src/lib.rs"]
+
+[[capability]]
+id = "desktop-window-lifecycle"
+domain = "desktop-application"
+name = "Multi-window and operating-system lifecycle"
+delivery = "E5"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/desktop", "vo-ui-shell-native"]
+required_targets = ["desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["component-instance-graph", "desktop-renderer-baseline"]
+acceptance = ["Windows, ownership, placement, geometry, activation, suspend, resume, close, monitors, DPI, theme, locale, and single-instance handoff are typed."]
+evidence = ["ui/desktop/desktop.vo", "lang/crates/vo-ui-shell-native/src/lifecycle.rs", "ui/tests/web-desktop-product/main.vo"]
+
+[[capability]]
+id = "desktop-shell-package-update"
+domain = "desktop-application"
+name = "Desktop shell, packaging, signing, update, and rollback"
+delivery = "E5"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/desktop", "ui/system", "vo-ui-system-native", "vo-ui-cli", "vo-dev release"]
+required_targets = ["desktop-native-aot"]
+optional_targets = ["desktop-vm", "desktop-jit"]
+depends_on = ["desktop-window-lifecycle", "capability-permissions", "supply-chain-security"]
+acceptance = ["Shell services and governed macOS, Windows, and Linux packages launch without a toolchain and support update rollback."]
+evidence = ["ui/desktop/desktop.vo", "lang/crates/vo-ui-shell-native/src/update.rs", "cmd/vo/src/ui_dev.rs", "ui/showcases/data-application/ui.desktop.toml", "ui/docs/web-desktop-products.md"]
+
+[[capability]]
+id = "system-service-baseline"
+domain = "platform-services"
+name = "Bounded renderer-neutral system service baseline"
+delivery = "E2"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/system", "vo-ui-system", "vo-ui-system-native", "vo-web"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = ["bounded-ui-scheduler"]
+acceptance = ["Clipboard, dialogs, menus, and drag/drop suspend only the caller and return bounded typed outcomes."]
+evidence = [
+  "ui/system/system.vo",
+  "ui/crates/vo-ui-system/src/lib.rs",
+  "lang/crates/vo-ui-system-native/src/lib.rs",
+  "lang/crates/vo-web/js/ui_system_aot.ts",
+]
+
+[[capability]]
+id = "network-storage-process"
+domain = "platform-services"
+name = "Network, storage, filesystem, and process services"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/system", "vo-stdlib", "vo-ext"]
+required_targets = ["web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["scoped-task-api", "system-service-baseline"]
+acceptance = ["Network, files, watchers, databases, credentials, processes, cancellation, TLS, quota, and teardown have typed target contracts."]
+evidence = ["ui/platform/platform.vo", "lang/stdlib/net/http/http.vo", "lang/stdlib/io/fs/fs.vo", "ui/tests/application-platform/main.vo"]
+
+[[capability]]
+id = "application-host-invocation"
+domain = "platform-services"
+name = "Versioned bounded application host invocation"
+delivery = "E2"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/system", "vo-ui-system-native", "vo-ui-shell-native", "vo-web"]
+required_targets = ["web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+optional_targets = ["web-vm"]
+depends_on = ["system-service-baseline", "scoped-task-api"]
+acceptance = ["Opaque application payloads remain versioned and bounded; native work runs off the window thread; browser work uses promises; reload discards stale replies."]
+evidence = [
+  "ui/system/system.vo",
+  "ui/crates/vo-ui-system/src/codec.rs",
+  "lang/crates/vo-ui-system-native/src/lib.rs",
+  "lang/crates/vo-ui-shell-native/src/lib.rs",
+  "lang/crates/vo-web/js/ui_system.ts",
+  "lang/crates/vo-web/js/ui_system_aot.ts",
+  "apps/studio/host-native/src/lib.rs",
+  "apps/studio/protocol/protocol.vo",
+  "apps/studio/examples/examples.vo",
+]
+
+[[capability]]
+id = "capability-permissions"
+domain = "platform-services"
+name = "Capability, permission, and plugin model"
+delivery = "E4"
+status = "stable"
+api_stability = "stable"
+tier = "platform"
+required_for_1_0 = true
+owners = ["ui/system", "vo-ext", "vo-module"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["system-service-baseline"]
+acceptance = ["Every service and extension declares authority, support, permission, lifetime, quota, effects, sandbox, ABI, and packaging policy."]
+evidence = ["ui/platform/platform.vo", "ui/tests/application-platform/main.vo", "ui/docs/application-data-platform.md"]
+
+[[capability]]
+id = "cli-dev-baseline"
+domain = "developer-experience"
+name = "Certified create, dev, run, build, test, and inspect baseline"
+delivery = "E0"
+status = "stable"
+api_stability = "stable"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["vo-ui-cli", "vo-ui-compiler", "vo-ui-vm", "vo-web"]
+required_targets = ["web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+depends_on = []
+acceptance = ["One toolchain creates, develops, runs, builds, tests, and inspects applications without an application npm graph."]
+evidence = ["cmd/vo/src/ui_dev.rs", "ui/templates/default/main.vo"]
+
+[[capability]]
+id = "incremental-dev-reload"
+domain = "developer-experience"
+name = "Incremental development and component hot reload"
+delivery = "E1"
+status = "stable"
+api_stability = "stable"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["vo-ui-cli", "vo-ui-compiler", "vo-ui-reload", "vo-ui-vm"]
+required_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["component-instance-graph", "component-lifecycle"]
+acceptance = ["Compile and reload failures preserve the old application; compatible component instances migrate atomically with actionable diagnostics."]
+evidence = ["ui/crates/vo-ui-reload/src/lib.rs", "cmd/vo/src/ui_dev.rs"]
+
+[[capability]]
+id = "preview-inspector-language-tools"
+domain = "developer-experience"
+name = "Preview, inspector, profiler, size, and language tooling"
+delivery = "E7"
+status = "stable"
+api_stability = "stable"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["vo-ui-cli", "vo-lsp", "vo-ui-compiler", "ui/testing"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["comfortable-public-api", "package-component-linking", "quality-budgets"]
+acceptance = ["Framework-aware editing and live tools expose component, state, layout, paint, semantics, resources, goroutines, performance, and size."]
+evidence = ["cmd/vo/src/ui_dev.rs", "ui/language/language.vo", "ui/editor/editor.vo", "ui/testing/testing.vo", "ui/docs/tooling-resilience-ecosystem.md"]
+
+[[capability]]
+id = "language-tooling"
+domain = "developer-experience"
+name = "Framework-aware language tooling"
+delivery = "E6"
+status = "stable"
+api_stability = "stable"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["vo-lsp", "vo-ui-compiler", "vo-ui-cli"]
+required_targets = ["headless"]
+depends_on = ["comfortable-public-api", "package-component-linking"]
+acceptance = ["Completion, hover, navigation, rename, references, formatting, linting, component diagnostics, source maps, and recovery understand UI identities."]
+evidence = ["ui/language/language.vo", "ui/editor/editor.vo", "ui/showcases/studio-workbench/main.vo", "ui/tests/advanced-packs/main.vo"]
+
+[[capability]]
+id = "headless-test-baseline"
+domain = "testing-quality"
+name = "Deterministic headless and protocol test baseline"
+delivery = "E0"
+status = "stable"
+api_stability = "internal"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["vo-ui-headless", "vo-ui-golden", "vo-ui-protocol"]
+required_targets = ["headless"]
+depends_on = []
+acceptance = ["Headless renderer, protocols, semantics, paint, DOM mapping, snapshots, and interactions use production identities."]
+evidence = ["ui/crates/vo-ui-headless/src/lib.rs", "ui/crates/vo-ui-golden/src/lib.rs"]
+
+[[capability]]
+id = "executable-contract-probes"
+domain = "testing-quality"
+name = "Executable product contract probes"
+delivery = "E0"
+status = "stable"
+api_stability = "internal"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["ui/contracts", "vo-ui-cli", "vo-dev ui-certify"]
+required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot", "server-native-aot"]
+depends_on = ["headless-test-baseline", "cli-dev-baseline"]
+acceptance = ["Nested components, asynchronous search, modal forms, virtual data, SSR routes, and multiple windows become permanent contract applications."]
+evidence = ["ui/tests/nested-component-list/main.vo", "ui/tests/asynchronous-search/main.vo", "ui/tests/modal-validation-form/main.vo", "ui/showcases/data-application/main.vo"]
+
+[[capability]]
+id = "interaction-platform-quality"
+domain = "testing-quality"
+name = "Semantic interaction, real-platform, fuzz, and failure matrix"
+delivery = "E7"
+status = "stable"
+api_stability = "internal"
+tier = "tooling"
+required_for_1_0 = true
+owners = ["ui/testing", "vo-ui-headless", "vo-dev test"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+depends_on = ["executable-contract-probes", "web-fullstack-production", "desktop-shell-package-update"]
+acceptance = ["Semantic fakes, real platforms, accessibility, packaged artifacts, fuzz, OOM, device loss, cancellation, and flaky-test policy produce evidence."]
+evidence = ["ui/quality-matrix.toml", ".github/workflows/ci.yml", "ui/testing/testing.vo", "ui/tests/tooling-resilience/main.vo", "fuzz"]
+
+[[capability]]
+id = "direct-update-budget"
+domain = "performance-reliability-security"
+name = "Certified direct update and interaction budgets"
+delivery = "E0"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-benchmark", "vo-ui-runtime"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot"]
+optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["root-direct-update-baseline"]
+acceptance = ["Direct updates remain proportional to changed sites with zero host scalar-update allocations, governed p95 frame and interaction budgets, and stable identities across a 256-row keyed-component workload."]
+evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", "ui/roadmap.toml"]
+
+[[capability]]
+id = "quality-budgets"
+domain = "performance-reliability-security"
+name = "Representative startup, size, memory, frame, latency, jank, and power budgets"
+delivery = "E4"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-ui-benchmark", "vo-dev test"]
+required_targets = ["web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+optional_targets = ["headless", "web-vm", "desktop-vm", "desktop-jit"]
+depends_on = ["direct-update-budget", "executable-contract-probes"]
+acceptance = ["Reference and low-end profiles define p50, p95, p99, startup, download, binary, memory, allocation, frame, jank, latency, and power budgets."]
+evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", "ui/docs/quality-budgets.md", "lang/crates/vo-engine/src/run.rs"]
+
+[[capability]]
+id = "recovery-observability-security"
+domain = "performance-reliability-security"
+name = "Recovery, observability, least authority, and supply-chain security"
+delivery = "E7"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["ui", "vo-ui-runtime", "vo-ui-web", "vo-ui-shell-native", "vo-module", "vo-release"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+depends_on = ["quality-budgets", "interaction-platform-quality", "capability-permissions"]
+acceptance = ["Failures preserve rollback or a documented degraded state; all untrusted boundaries are bounded, authenticated, observable, and reproducible."]
+evidence = ["ui/observability/observability.vo", "ui/testing/testing.vo", "ui/tests/tooling-resilience/main.vo", "lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-engine/src/compile/mod.rs", "ui/docs/tooling-resilience-ecosystem.md"]
+
+[[capability]]
+id = "supply-chain-security"
+domain = "performance-reliability-security"
+name = "Artifact and supply-chain security"
+delivery = "E5"
+status = "stable"
+api_stability = "internal"
+tier = "core"
+required_for_1_0 = true
+owners = ["vo-module", "vo-release", "vo-ui-protocol", "vo-engine"]
+required_targets = ["web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+depends_on = ["capability-permissions", "quality-budgets"]
+acceptance = ["Artifacts, protocols, assets, paths, URLs, plugins, origins, and serialized state are bounded, authenticated, provenance checked, and reproducibly built."]
+evidence = ["lang/crates/vo-ui-shell-native/src/update.rs", "cmd/vo/src/ui_dev.rs", "ui/web/web.vo", "ui/platform/platform.vo"]
+
+[[capability]]
+id = "machine-readable-product-governance"
+domain = "ecosystem-governance"
+name = "Machine-readable capability, delivery, and certification governance"
+delivery = "E0"
+status = "stable"
+api_stability = "internal"
+tier = "ecosystem"
+required_for_1_0 = true
+owners = ["vo-dev ui-certify", "ui"]
+required_targets = ["headless"]
+depends_on = []
+acceptance = ["Scope, maturity, target support, dependencies, delivery, probes, and release evidence are validated together."]
+evidence = ["ui/capabilities.toml", "ui/delivery.toml", "cmd/vo-dev/src/ui_certification.rs"]
+
+[[capability]]
+id = "module-distribution"
+domain = "ecosystem-governance"
+name = "Authenticated module distribution and UI package metadata"
+delivery = "E7"
+status = "stable"
+api_stability = "stable"
+tier = "ecosystem"
+required_for_1_0 = true
+owners = ["vo-module", "vo-release", "vo-ui-cli"]
+required_targets = ["headless"]
+depends_on = ["package-component-linking", "supply-chain-security"]
+acceptance = ["The Volang module system carries platform, backend, capability, ABI, accessibility, provenance, and maintenance metadata without install scripts."]
+evidence = ["lang/crates/vo-module/src/profile.rs", "lang/crates/vo-module/src/schema/manifest.rs", "ui/module-profiles.toml", "cmd/vo-dev/src/ui_certification.rs", "ui/docs/package-authoring.md"]
+
+[[capability]]
+id = "documentation-release-governance"
+domain = "ecosystem-governance"
+name = "Documentation, authoring kits, compatibility, and release governance"
+delivery = "E8"
+status = "stable"
+api_stability = "stable"
+tier = "ecosystem"
+required_for_1_0 = true
+owners = ["ui/docs", "ui/templates", "vo-ui-cli", "vo-release", "vo-dev release"]
+required_targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
+depends_on = ["official-uikit-catalog", "module-distribution", "preview-inspector-language-tools", "recovery-observability-security"]
+acceptance = ["Official material and policy cover learning, migration, authoring, maintenance, security, support, compatibility, contribution, and immutable release evidence."]
+evidence = [
+  "ui/docs/getting-started.md",
+  "ui/docs/authoring-guide.md",
+  "ui/docs/testing-troubleshooting.md",
+  "ui/docs/accessibility-localization.md",
+  "ui/docs/security.md",
+  "ui/docs/compatibility-migration.md",
+  "ui/docs/contributing-support.md",
+  "ui/docs/release-notes-1.0.md",
+  "ui/product-certification.toml",
+  "cmd/vo-dev/src/release_archive.rs",
+  ".github/workflows/release.yml",
+]

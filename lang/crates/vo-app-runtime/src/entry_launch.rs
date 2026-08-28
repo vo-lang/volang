@@ -1,4 +1,3 @@
-use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -6,11 +5,7 @@ use crate::{
     CapabilityId, MaterializedRuntimeArtifact, ResolvedAppRuntimePlan, RuntimeArtifactRole,
 };
 
-pub const CAPABILITY_VOGUI_RUN_ENTRY: &str = "vogui.run-entry";
 pub const CAPABILITY_VOPLAY_RUN_ENTRY: &str = "voplay.run-entry";
-pub const CAPABILITY_VOGUI_TARGET_INIT: &str = "vogui.target-init";
-pub const CAPABILITY_VOGUI_TARGET_NEXT_TURN: &str = "vogui.target-next-turn";
-pub const CAPABILITY_VOGUI_TARGET_COMMIT: &str = "vogui.target-commit";
 pub const CAPABILITY_VOPLAY_TARGET_START: &str = "voplay.target-start";
 pub const CAPABILITY_VOPLAY_TARGET_NEXT_TICKS: &str = "voplay.target-next-ticks";
 pub const CAPABILITY_VOPLAY_TARGET_COMMIT_TICKS: &str = "voplay.target-commit-ticks";
@@ -25,11 +20,8 @@ pub const MAX_ENTRY_INIT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TARGET_STARTUP_BYTES: usize = 16 * 1024 * 1024;
 
 const ENTRY_LAUNCH_MAGIC: &[u8] = b"vo-entry-launch-v1\0";
-const VOGUI_TARGET_INIT_MAGIC: &[u8] = b"vogui-target-init-v1\0";
-const VOGUI_TARGET_COMMIT_MAGIC: &[u8] = b"vogui-target-commit-v1\0";
 const VOPLAY_TARGET_START_MAGIC: &[u8] = b"voplay-target-start-v3\0";
 const VOPLAY_TARGET_COMMIT_TICKS_MAGIC: &[u8] = b"voplay-target-commit-ticks-v1\0";
-const VOGUI_DESCRIPTOR_BYTES: usize = 172;
 const VOPLAY_DESCRIPTOR_BYTES: usize = 104;
 const VOPLAY_NEW_ENGINE_MAGIC: &[u8] = b"voplay-new-engine-v1\0";
 const VOPLAY_INSTALL_ENTRY_MAGIC: &[u8] = b"voplay-install-entry-v1\0";
@@ -37,14 +29,12 @@ const VOPLAY_ENGINE_CONTROL_MAGIC: &[u8] = b"voplay-engine-control-v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryFramework {
-    Vogui,
     Voplay,
 }
 
 impl EntryFramework {
     pub const fn capability(self) -> &'static str {
         match self {
-            Self::Vogui => CAPABILITY_VOGUI_RUN_ENTRY,
             Self::Voplay => CAPABILITY_VOPLAY_RUN_ENTRY,
         }
     }
@@ -52,17 +42,6 @@ impl EntryFramework {
     pub fn capability_id(self) -> CapabilityId {
         stable_capability_id(self.capability().as_bytes())
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VoguiEntryDescriptor {
-    pub artifact_identity: [u8; 32],
-    pub factory_id: u64,
-    pub app_build_identity: [u8; 32],
-    pub model_fingerprint: [u8; 32],
-    pub message_fingerprint: [u8; 32],
-    pub role_artifact_set_fingerprint: [u8; 32],
-    pub transaction_mode: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,28 +54,24 @@ pub struct VoplayEntryDescriptor {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryDescriptor {
-    Vogui(VoguiEntryDescriptor),
     Voplay(VoplayEntryDescriptor),
 }
 
 impl EntryDescriptor {
     pub const fn framework(self) -> EntryFramework {
         match self {
-            Self::Vogui(_) => EntryFramework::Vogui,
             Self::Voplay(_) => EntryFramework::Voplay,
         }
     }
 
     pub const fn artifact_identity(self) -> [u8; 32] {
         match self {
-            Self::Vogui(descriptor) => descriptor.artifact_identity,
             Self::Voplay(descriptor) => descriptor.artifact_identity,
         }
     }
 
     pub const fn factory_id(self) -> u64 {
         match self {
-            Self::Vogui(descriptor) => descriptor.factory_id,
             Self::Voplay(descriptor) => descriptor.factory_id,
         }
     }
@@ -354,12 +329,6 @@ fn decode_public_engine_ref(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetStartup {
-    Vogui {
-        model: Vec<u8>,
-        effects: Vec<u8>,
-        presentation: Vec<u8>,
-        subscriptions: Vec<u8>,
-    },
     Voplay {
         configuration: Vec<u8>,
         schedule_hash: u64,
@@ -372,7 +341,6 @@ pub enum TargetStartup {
 impl TargetStartup {
     pub const fn framework(&self) -> EntryFramework {
         match self {
-            Self::Vogui { .. } => EntryFramework::Vogui,
             Self::Voplay { .. } => EntryFramework::Voplay,
         }
     }
@@ -407,15 +375,6 @@ pub enum TargetStartupError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VoguiTargetCommit {
-    pub model: Vec<u8>,
-    pub update_result: Vec<u8>,
-    pub effects: Vec<u8>,
-    pub presentation: Vec<u8>,
-    pub subscriptions: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoplayTickCommit {
     pub first_tick: u64,
     pub count: u64,
@@ -434,11 +393,9 @@ pub fn decode_entry_launch(
     capability: &[u8],
     payload: &[u8],
 ) -> Result<EntryLaunch, EntryLaunchError> {
-    let framework = match capability {
-        value if value == CAPABILITY_VOGUI_RUN_ENTRY.as_bytes() => EntryFramework::Vogui,
-        value if value == CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes() => EntryFramework::Voplay,
-        _ => return Err(EntryLaunchError::UnsupportedCapability),
-    };
+    if capability != CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes() {
+        return Err(EntryLaunchError::UnsupportedCapability);
+    }
     let header_len = ENTRY_LAUNCH_MAGIC
         .len()
         .checked_add(8)
@@ -461,12 +418,7 @@ pub fn decode_entry_launch(
         return Err(EntryLaunchError::MalformedEnvelope);
     }
     let descriptor_bytes = &payload[header_len..descriptor_end];
-    let descriptor = match framework {
-        EntryFramework::Vogui => EntryDescriptor::Vogui(decode_vogui_descriptor(descriptor_bytes)?),
-        EntryFramework::Voplay => {
-            EntryDescriptor::Voplay(decode_voplay_descriptor(descriptor_bytes)?)
-        }
-    };
+    let descriptor = EntryDescriptor::Voplay(decode_voplay_descriptor(descriptor_bytes)?);
     Ok(EntryLaunch {
         descriptor,
         init: payload[descriptor_end..].to_vec(),
@@ -480,61 +432,11 @@ pub fn decode_target_startup(
     if payload.len() > MAX_TARGET_STARTUP_BYTES {
         return Err(TargetStartupError::Capacity);
     }
-    match capability {
-        value if value == CAPABILITY_VOGUI_TARGET_INIT.as_bytes() => {
-            decode_vogui_target_init(payload)
-        }
-        value if value == CAPABILITY_VOPLAY_TARGET_START.as_bytes() => {
-            decode_voplay_target_start(payload)
-        }
-        _ => Err(TargetStartupError::UnsupportedCapability),
+    if capability == CAPABILITY_VOPLAY_TARGET_START.as_bytes() {
+        decode_voplay_target_start(payload)
+    } else {
+        Err(TargetStartupError::UnsupportedCapability)
     }
-}
-
-pub fn decode_vogui_target_commit(payload: &[u8]) -> Result<VoguiTargetCommit, TargetStartupError> {
-    if payload.len() > MAX_TARGET_STARTUP_BYTES {
-        return Err(TargetStartupError::Capacity);
-    }
-    let header_len = VOGUI_TARGET_COMMIT_MAGIC
-        .len()
-        .checked_add(20)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    if payload.len() < header_len || !payload.starts_with(VOGUI_TARGET_COMMIT_MAGIC) {
-        return Err(TargetStartupError::MalformedEnvelope);
-    }
-    let model_len = read_target_u32(payload, VOGUI_TARGET_COMMIT_MAGIC.len())? as usize;
-    let update_len = read_target_u32(payload, VOGUI_TARGET_COMMIT_MAGIC.len() + 4)? as usize;
-    let effects_len = read_target_u32(payload, VOGUI_TARGET_COMMIT_MAGIC.len() + 8)? as usize;
-    let presentation_len = read_target_u32(payload, VOGUI_TARGET_COMMIT_MAGIC.len() + 12)? as usize;
-    let subscriptions_len =
-        read_target_u32(payload, VOGUI_TARGET_COMMIT_MAGIC.len() + 16)? as usize;
-    let model_end = header_len
-        .checked_add(model_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let update_end = model_end
-        .checked_add(update_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let effects_end = update_end
-        .checked_add(effects_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let presentation_end = effects_end
-        .checked_add(presentation_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let payload_end = presentation_end
-        .checked_add(subscriptions_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    if payload_end != payload.len() {
-        return Err(TargetStartupError::MalformedEnvelope);
-    }
-    validate_vogui_presentation(&payload[effects_end..presentation_end])?;
-    validate_vogui_subscriptions(&payload[presentation_end..])?;
-    Ok(VoguiTargetCommit {
-        model: payload[header_len..model_end].to_vec(),
-        update_result: payload[model_end..update_end].to_vec(),
-        effects: payload[update_end..effects_end].to_vec(),
-        presentation: payload[effects_end..presentation_end].to_vec(),
-        subscriptions: payload[presentation_end..].to_vec(),
-    })
 }
 
 pub fn decode_voplay_tick_commit(payload: &[u8]) -> Result<VoplayTickCommit, TargetStartupError> {
@@ -564,189 +466,6 @@ pub fn decode_voplay_tick_commit(payload: &[u8]) -> Result<VoplayTickCommit, Tar
         count,
         result: payload[header_len..end].to_vec(),
     })
-}
-
-fn decode_vogui_target_init(payload: &[u8]) -> Result<TargetStartup, TargetStartupError> {
-    let header_len = VOGUI_TARGET_INIT_MAGIC
-        .len()
-        .checked_add(16)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    if payload.len() < header_len || !payload.starts_with(VOGUI_TARGET_INIT_MAGIC) {
-        return Err(TargetStartupError::MalformedEnvelope);
-    }
-    let model_len = read_target_u32(payload, VOGUI_TARGET_INIT_MAGIC.len())? as usize;
-    let effects_len = read_target_u32(payload, VOGUI_TARGET_INIT_MAGIC.len() + 4)? as usize;
-    let presentation_len = read_target_u32(payload, VOGUI_TARGET_INIT_MAGIC.len() + 8)? as usize;
-    let subscriptions_len = read_target_u32(payload, VOGUI_TARGET_INIT_MAGIC.len() + 12)? as usize;
-    let model_end = header_len
-        .checked_add(model_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let effects_end = model_end
-        .checked_add(effects_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let presentation_end = effects_end
-        .checked_add(presentation_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    let payload_end = presentation_end
-        .checked_add(subscriptions_len)
-        .ok_or(TargetStartupError::MalformedEnvelope)?;
-    if payload_end != payload.len() {
-        return Err(TargetStartupError::MalformedEnvelope);
-    }
-    validate_vogui_presentation(&payload[effects_end..presentation_end])?;
-    validate_vogui_subscriptions(&payload[presentation_end..])?;
-    Ok(TargetStartup::Vogui {
-        model: payload[header_len..model_end].to_vec(),
-        effects: payload[model_end..effects_end].to_vec(),
-        presentation: payload[effects_end..presentation_end].to_vec(),
-        subscriptions: payload[presentation_end..].to_vec(),
-    })
-}
-
-fn validate_vogui_presentation(payload: &[u8]) -> Result<(), TargetStartupError> {
-    if payload.starts_with(b"VGR1") {
-        if payload.len() < 8 {
-            return Err(TargetStartupError::MalformedEnvelope);
-        }
-        let count = u16::from_le_bytes(payload[4..6].try_into().unwrap()) as usize;
-        if count == 0 || payload[6..8] != [0, 0] {
-            return Err(TargetStartupError::MalformedEnvelope);
-        }
-        let mut cursor = 8_usize;
-        let mut roots = BTreeSet::new();
-        for _ in 0..count {
-            let logical_root = read_target_u64(payload, cursor)?;
-            let length = read_target_u32(payload, cursor + 8)? as usize;
-            cursor = cursor
-                .checked_add(12)
-                .ok_or(TargetStartupError::MalformedEnvelope)?;
-            let end = cursor
-                .checked_add(length)
-                .filter(|end| *end <= payload.len())
-                .ok_or(TargetStartupError::MalformedEnvelope)?;
-            if logical_root == 0 || !roots.insert(logical_root) {
-                return Err(TargetStartupError::InvalidOperation);
-            }
-            validate_vogui_presentation(&payload[cursor..end])?;
-            cursor = end;
-        }
-        return (cursor == payload.len())
-            .then_some(())
-            .ok_or(TargetStartupError::MalformedEnvelope);
-    }
-    let mut cursor = 0usize;
-    let mut identities = BTreeSet::new();
-    let mut references = Vec::new();
-    let mut root = None;
-    while cursor < payload.len() {
-        let tag = payload[cursor];
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(TargetStartupError::MalformedEnvelope)?;
-        match tag {
-            1 => {
-                let id = read_target_u64(payload, cursor)?;
-                if id == 0 {
-                    return Err(TargetStartupError::InvalidOperation);
-                }
-                if !identities.insert(id) {
-                    return Err(TargetStartupError::InvalidOperation);
-                }
-                let key_len = read_target_u32(payload, cursor + 16)? as usize;
-                let properties_len = read_target_u32(payload, cursor + 20)? as usize;
-                let child_count = read_target_u32(payload, cursor + 24)? as usize;
-                let children_offset = cursor
-                    .checked_add(28)
-                    .and_then(|value| value.checked_add(key_len))
-                    .and_then(|value| value.checked_add(properties_len))
-                    .ok_or(TargetStartupError::MalformedEnvelope)?;
-                for index in 0..child_count {
-                    references.push(read_target_u64(
-                        payload,
-                        children_offset.saturating_add(index.saturating_mul(8)),
-                    )?);
-                }
-                cursor = cursor
-                    .checked_add(28)
-                    .and_then(|value| value.checked_add(key_len))
-                    .and_then(|value| value.checked_add(properties_len))
-                    .and_then(|value| value.checked_add(child_count.saturating_mul(8)))
-                    .ok_or(TargetStartupError::MalformedEnvelope)?;
-            }
-            2 => {
-                let id = read_target_u64(payload, cursor)?;
-                if id == 0 {
-                    return Err(TargetStartupError::InvalidOperation);
-                }
-                if !identities.insert(id) {
-                    return Err(TargetStartupError::InvalidOperation);
-                }
-                references.push(read_target_u64(payload, cursor + 16)?);
-                let key_len = read_target_u32(payload, cursor + 24)? as usize;
-                cursor = cursor
-                    .checked_add(28)
-                    .and_then(|value| value.checked_add(key_len))
-                    .ok_or(TargetStartupError::MalformedEnvelope)?;
-            }
-            3 => {
-                references.push(read_target_u64(payload, cursor)?);
-                cursor = cursor
-                    .checked_add(24)
-                    .ok_or(TargetStartupError::MalformedEnvelope)?;
-            }
-            4 => {
-                references.push(read_target_u64(payload, cursor)?);
-                cursor = cursor
-                    .checked_add(16)
-                    .ok_or(TargetStartupError::MalformedEnvelope)?;
-            }
-            5 => {
-                let identity = read_target_u64(payload, cursor)?;
-                if identity == 0 || root.replace(identity).is_some() {
-                    return Err(TargetStartupError::InvalidOperation);
-                }
-                cursor = cursor
-                    .checked_add(8)
-                    .ok_or(TargetStartupError::MalformedEnvelope)?;
-            }
-            _ => return Err(TargetStartupError::InvalidOperation),
-        }
-        if cursor > payload.len() {
-            return Err(TargetStartupError::MalformedEnvelope);
-        }
-    }
-    let root = root.ok_or(TargetStartupError::InvalidOperation)?;
-    if !identities.contains(&root)
-        || references
-            .iter()
-            .any(|identity| *identity == 0 || !identities.contains(identity))
-    {
-        return Err(TargetStartupError::InvalidOperation);
-    }
-    Ok(())
-}
-
-fn validate_vogui_subscriptions(payload: &[u8]) -> Result<(), TargetStartupError> {
-    let mut cursor = 0usize;
-    while cursor < payload.len() {
-        if payload[cursor] != 1 {
-            return Err(TargetStartupError::InvalidOperation);
-        }
-        cursor = cursor
-            .checked_add(1)
-            .ok_or(TargetStartupError::MalformedEnvelope)?;
-        let kind_len = read_target_u32(payload, cursor)? as usize;
-        let descriptor_len = read_target_u32(payload, cursor + 4)? as usize;
-        cursor = cursor
-            .checked_add(16)
-            .and_then(|value| value.checked_add(kind_len))
-            .and_then(|value| value.checked_add(descriptor_len))
-            .ok_or(TargetStartupError::MalformedEnvelope)?;
-        if cursor > payload.len() {
-            return Err(TargetStartupError::MalformedEnvelope);
-        }
-    }
-    Ok(())
 }
 
 fn decode_voplay_target_start(payload: &[u8]) -> Result<TargetStartup, TargetStartupError> {
@@ -891,10 +610,6 @@ pub fn certify_entry_launch(
         return Err(EntryLaunchError::CapabilityNotGranted);
     }
     let (binding_fingerprint, role_artifact_set_fingerprint) = match launch.descriptor {
-        EntryDescriptor::Vogui(descriptor) => (
-            descriptor.app_build_identity,
-            descriptor.role_artifact_set_fingerprint,
-        ),
         EntryDescriptor::Voplay(descriptor) => (
             descriptor.schema_fingerprint,
             descriptor.role_artifact_set_fingerprint,
@@ -950,7 +665,6 @@ pub fn scan_module_entry_factories(
             return Err(EntryFactoryMetadataError::MalformedMarker);
         }
         let framework = match fields[0] {
-            "vogui" => EntryFramework::Vogui,
             "voplay" => EntryFramework::Voplay,
             _ => return Err(EntryFactoryMetadataError::UnknownFramework),
         };
@@ -970,34 +684,6 @@ pub fn scan_module_entry_factories(
         });
     }
     Ok(factories)
-}
-
-fn decode_vogui_descriptor(bytes: &[u8]) -> Result<VoguiEntryDescriptor, EntryLaunchError> {
-    if bytes.len() != VOGUI_DESCRIPTOR_BYTES {
-        return Err(EntryLaunchError::DescriptorLength);
-    }
-    let descriptor = VoguiEntryDescriptor {
-        artifact_identity: read_digest(bytes, 0)?,
-        factory_id: read_u64(bytes, 32)?,
-        app_build_identity: read_digest(bytes, 40)?,
-        model_fingerprint: read_digest(bytes, 72)?,
-        message_fingerprint: read_digest(bytes, 104)?,
-        role_artifact_set_fingerprint: read_digest(bytes, 136)?,
-        transaction_mode: read_u32(bytes, 168)?,
-    };
-    if descriptor.factory_id == 0
-        || is_zero_digest(descriptor.artifact_identity)
-        || is_zero_digest(descriptor.app_build_identity)
-        || is_zero_digest(descriptor.model_fingerprint)
-        || is_zero_digest(descriptor.message_fingerprint)
-        || is_zero_digest(descriptor.role_artifact_set_fingerprint)
-    {
-        return Err(EntryLaunchError::InvalidDescriptor);
-    }
-    if descriptor.transaction_mode > 2 {
-        return Err(EntryLaunchError::InvalidTransactionMode);
-    }
-    Ok(descriptor)
 }
 
 fn decode_voplay_descriptor(bytes: &[u8]) -> Result<VoplayEntryDescriptor, EntryLaunchError> {

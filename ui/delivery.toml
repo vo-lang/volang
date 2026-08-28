@@ -1,0 +1,245 @@
+schema_version = 1
+product = "Volang UI"
+target_version = "1.0"
+active_increment = "E8"
+status = "complete"
+
+[[stream]]
+id = "component-runtime"
+name = "Component graph, compiler artifacts, runtime instances, and reload"
+
+[[stream]]
+id = "state-concurrency"
+name = "State, lifecycle, effects, goroutines, and asynchronous data"
+
+[[stream]]
+id = "authoring-interaction"
+name = "Public API, style, layout, input, focus, accessibility, and localization"
+
+[[stream]]
+id = "uikit-applications"
+name = "UIKit, navigation, forms, commands, patterns, and showcases"
+
+[[stream]]
+id = "web-platform"
+name = "Browser runtime, server rendering, activation, security, and deployment"
+
+[[stream]]
+id = "desktop-platform"
+name = "Native windows, services, packaging, signing, updates, and rollback"
+
+[[stream]]
+id = "advanced-packs"
+name = "Graphics, media, documents, editor, charting, and workspace"
+
+[[stream]]
+id = "tooling-quality-ecosystem"
+name = "CLI, language tooling, testing, profiling, documentation, registry, and release"
+
+[[increment]]
+id = "E0"
+name = "Executable contracts and governed preparation"
+status = "complete"
+depends_on = []
+streams = ["component-runtime", "state-concurrency", "authoring-interaction", "web-platform", "desktop-platform", "tooling-quality-ecosystem"]
+outcomes = [
+  "Foundation history is frozen as a certified baseline.",
+  "Product capabilities, target support, maturity, dependencies, and delivery are machine validated.",
+  "Six permanent contract probes define the first cross-platform product behaviors.",
+]
+exit = [
+  "Every 1.0 capability belongs to one known domain and delivery increment.",
+  "Every dependency is acyclic and cannot point to a later increment.",
+  "Every E0 contract probe declares target, capability, and executable acceptance criteria.",
+]
+
+[[increment]]
+id = "E1"
+name = "Component Model V2"
+status = "complete"
+depends_on = ["E0"]
+streams = ["component-runtime", "state-concurrency", "tooling-quality-ecosystem"]
+outcomes = [
+  "A component artifact graph replaces the single-root optimization boundary.",
+  "Nested and imported components own stable instances, structured state, lifecycle, tasks, effects, and reload schemas.",
+  "VM, JIT, Native AOT, and Core Wasm AOT link and execute the same component identities.",
+]
+exit = [
+  "Keyed insertion, removal, movement, and replacement preserve the correct component state.",
+  "Disposal cancels owned asynchronous work before cleanup and rejects late completions.",
+  "Imported package components participate in direct updates with a bounded generic fallback.",
+]
+
+[[increment]]
+id = "E2"
+name = "Comfortable cross-platform foundation"
+status = "complete"
+depends_on = ["E1"]
+streams = ["state-concurrency", "authoring-interaction", "web-platform", "desktop-platform", "tooling-quality-ecosystem"]
+outcomes = [
+  "Inherited environment, typed callbacks, structured tasks, effects, style, adaptive measurement, focus, overlays, semantics, and localization form one public contract.",
+  "Web, desktop, and headless preserve common logical behavior while declaring target variations.",
+]
+exit = [
+  "Representative components use no repeated theme arguments or generic event envelopes for common interactions.",
+  "Render, commit, post-commit effect, and disposal phases have differential tests.",
+  "Layout feedback, focus restoration, IME, accessibility identity, and asynchronous completion remain bounded.",
+]
+
+[[increment]]
+id = "E3"
+name = "UIKit Wave 1 and component gallery"
+status = "complete"
+depends_on = ["E2"]
+streams = ["authoring-interaction", "uikit-applications", "tooling-quality-ecosystem"]
+outcomes = [
+  "Headless behavior primitives and Volang visual recipes produce an accessible official UIKit.",
+  "The permanent component gallery exercises theme, locale, density, viewport, input, and accessibility variants.",
+]
+exit = [
+  "Wave 1 content, form, feedback, overlay, and navigation components satisfy their governed matrices.",
+  "Component preview, semantic interaction tests, source extension, and APG evidence use public contracts.",
+]
+
+[[increment]]
+id = "E4"
+name = "Application and data platform"
+status = "complete"
+depends_on = ["E3"]
+streams = ["state-concurrency", "uikit-applications", "advanced-packs", "tooling-quality-ecosystem"]
+outcomes = [
+  "Typed navigation, forms, commands, resources, mutations, persistence, tables, trees, grids, and application patterns compose coherently.",
+  "A responsive Web and desktop data application becomes permanent dogfood.",
+]
+exit = [
+  "Data workflows cover loading, retry, optimistic update, offline state, selection, filtering, sorting, pagination, bulk action, and restoration.",
+  "Large collections and structured state pass representative performance budgets.",
+]
+
+[[increment]]
+id = "E5"
+name = "Complete Web and desktop products"
+status = "complete"
+depends_on = ["E4"]
+streams = ["web-platform", "desktop-platform", "tooling-quality-ecosystem"]
+outcomes = [
+  "Web gains server authority, SSG, streaming SSR, selective activation, actions, caching, metadata, PWA policy, security, and deployment adapters.",
+  "Desktop gains multi-window lifecycle, shell services, packaging, signing policy, updates, and rollback on macOS, Windows, and Linux.",
+]
+exit = [
+  "The content site ships useful HTML before activation and passes Web production gates.",
+  "Packaged desktop applications start without a development toolchain or network dependency.",
+]
+
+[[increment]]
+id = "E6"
+name = "Advanced official capability packs"
+status = "complete"
+depends_on = ["E5"]
+streams = ["authoring-interaction", "advanced-packs", "uikit-applications", "tooling-quality-ecosystem"]
+outcomes = [
+  "Graphics, assets, animation, charting, media, capture, rich text, documents, code editing, and workspace layout ship as independently linkable official packages.",
+  "The media application and Studio workbench grow on public APIs.",
+]
+exit = [
+  "Advanced packages declare capability, permission, memory, performance, accessibility, and target contracts.",
+  "The official editor remains responsive on governed large-document cases across Web and desktop.",
+]
+
+[[increment]]
+id = "E7"
+name = "Tooling, resilience, and ecosystem"
+status = "complete"
+depends_on = ["E6"]
+streams = ["component-runtime", "web-platform", "desktop-platform", "advanced-packs", "tooling-quality-ecosystem"]
+outcomes = [
+  "Language tooling, preview, inspector, profiler, size analysis, recovery, observability, security, module metadata, source extension, authoring kits, and documentation reach release quality.",
+  "All showcases produce reproducible platform and performance evidence.",
+]
+exit = [
+  "Real browser, real OS, accessibility, packaged artifact, fuzz, OOM, device-loss, cancellation, and supply-chain suites pass.",
+  "A new user can build, test, package, publish, and troubleshoot from official material alone.",
+]
+
+[[increment]]
+id = "E8"
+name = "Volang UI 1.0 general availability"
+status = "complete"
+depends_on = ["E7"]
+streams = ["component-runtime", "state-concurrency", "authoring-interaction", "uikit-applications", "web-platform", "desktop-platform", "advanced-packs", "tooling-quality-ecosystem"]
+outcomes = ["Every required capability is stable, every showcase is complete, and every product gate carries immutable evidence from one candidate commit."]
+exit = ["The aggregate Web, desktop, UIKit, advanced-pack, tooling, quality, documentation, ecosystem, and release contracts are complete."]
+
+[[contract_probe]]
+id = "nested-component-list"
+name = "Nested keyed component list"
+status = "complete"
+increment = "E0"
+capabilities = ["component-instance-graph", "structured-state", "package-component-linking", "incremental-dev-reload"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+acceptance = [
+  "Two instances of one component keep independent state.",
+  "Keyed insertion, removal, and reordering preserve the matching instance and dispose removed scopes.",
+  "An imported component follows the same optimized artifact path as a local component.",
+]
+
+[[contract_probe]]
+id = "asynchronous-search"
+name = "Asynchronous search with stale-result isolation"
+status = "complete"
+increment = "E0"
+capabilities = ["component-lifecycle", "scoped-task-api", "async-data-model", "bounded-ui-scheduler"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+acceptance = [
+  "Debounce and latest policies cancel superseded work and reject late results.",
+  "Bursty completion remains bounded and produces at most one visible commit per UI turn.",
+  "Unmount and hot reload cancel the owning task generation.",
+]
+
+[[contract_probe]]
+id = "modal-validation-form"
+name = "Modal validation form"
+status = "complete"
+increment = "E0"
+capabilities = ["comfortable-public-api", "focus-overlay-command", "forms-commands-patterns", "apg-inclusive-interaction", "native-text-baseline"]
+targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+acceptance = [
+  "Typed value and action callbacks avoid generic event handling in application code.",
+  "Focus trap, Escape, focus-to-error, IME, accessible descriptions, dismissal, and restoration share one behavior contract.",
+]
+
+[[contract_probe]]
+id = "virtual-data-grid"
+name = "Large virtual data grid"
+status = "complete"
+increment = "E0"
+capabilities = ["virtual-collections", "structured-state", "command-system", "quality-budgets"]
+targets = ["headless", "web-wasm-aot", "desktop-native-aot"]
+acceptance = [
+  "One hundred thousand rows use bounded materialization, semantics, selection, sorting, and keyboard navigation.",
+  "Stable row identity survives filtering, insertion, and reorder within governed memory and frame budgets.",
+]
+
+[[contract_probe]]
+id = "ssr-activation-route"
+name = "SSR route with selective activation"
+status = "complete"
+increment = "E0"
+capabilities = ["web-server-authority", "web-fullstack-production", "typed-navigation"]
+targets = ["server-native-aot", "web-wasm-aot"]
+acceptance = [
+  "The route streams useful semantic HTML and remains navigable before client activation.",
+  "Server-only authority cannot enter the Wasm artifact and activation preserves component identity.",
+]
+
+[[contract_probe]]
+id = "multi-window-editor"
+name = "Multi-window document editor"
+status = "complete"
+increment = "E0"
+capabilities = ["desktop-window-lifecycle", "rich-text-document", "official-code-editor", "command-system", "workspace-layout"]
+targets = ["desktop-vm", "desktop-jit", "desktop-native-aot"]
+acceptance = [
+  "Two windows share a document model while keeping independent renderer, focus, command, and component scopes.",
+  "Closing one window cancels its work without invalidating the other window or shared document.",
+]

@@ -382,7 +382,17 @@ const REGISTERED_EXTERNS: &[BuiltinExternEntry] = &[
         effects: crate::bytecode::ExternEffects::NONE,
     },
     BuiltinExternEntry {
+        name: "vo_copy_string",
+        func: builtin_copy,
+        effects: crate::bytecode::ExternEffects::NONE,
+    },
+    BuiltinExternEntry {
         name: "vo_slice_append_slice",
+        func: builtin_slice_append_slice,
+        effects: crate::bytecode::ExternEffects::NONE,
+    },
+    BuiltinExternEntry {
+        name: "vo_slice_append_string",
         func: builtin_slice_append_slice,
         effects: crate::bytecode::ExternEffects::NONE,
     },

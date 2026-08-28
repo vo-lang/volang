@@ -1,0 +1,133 @@
+// Package protocol is the versioned boundary between the pure Volang Studio
+// product and Native/Web hosts. Capabilities stay small so tests and alternate
+// hosts can replace them independently.
+package protocol
+
+import (
+	"context"
+	"github.com/vo-lang/studio/domain"
+)
+
+const Version = "volang.studio.host.v1"
+
+type CreateProjectRequest struct {
+	Name string
+	Root string
+	Template string
+	Files []domain.ProjectFile
+}
+
+type ProjectFiles interface {
+	Projects(context.Context) ([]domain.Project, error)
+	CreateProject(context.Context, CreateProjectRequest) (domain.Project, error)
+	OpenProject(context.Context, string) (domain.Project, error)
+	RenameProject(context.Context, domain.ProjectID, string) (domain.Project, error)
+	DeleteProject(context.Context, domain.ProjectID) error
+	ForgetProject(context.Context, domain.ProjectID) error
+	Files(context.Context, domain.ProjectID) ([]domain.FileEntry, error)
+	ReadFile(context.Context, domain.ProjectID, string) (string, error)
+	WriteFile(context.Context, domain.ProjectID, string, string) error
+	RenameEntry(context.Context, domain.ProjectID, string, string) error
+	DeleteEntry(context.Context, domain.ProjectID, string) error
+}
+
+type HostService interface {
+	Info(context.Context) (domain.HostInfo, error)
+}
+
+type AnalyzeRequest struct {
+	ProjectID domain.ProjectID
+	Path string
+	Version uint64
+	Text string
+}
+
+type LanguageService interface {
+	Analyze(context.Context, AnalyzeRequest) ([]domain.Diagnostic, error)
+}
+
+type CompileRequest struct {
+	ProjectID domain.ProjectID
+	Entry string
+	Mode domain.RuntimeMode
+	ForPreview bool
+	Overlays []FileOverlay
+}
+
+// FileOverlay carries the editor's immutable build snapshot without writing
+// unsaved buffers into the user's project first.
+type FileOverlay struct {
+	Path string
+	Text string
+	Version uint64
+}
+
+type CompilerService interface {
+	Compile(context.Context, CompileRequest) (domain.Artifact, error)
+}
+
+type RunRequest struct {
+	ProjectID domain.ProjectID
+	Artifact domain.Artifact
+	Mode domain.RuntimeMode
+	Arguments []string
+}
+
+type RunService interface {
+	Run(context.Context, RunRequest) (<-chan domain.RunEvent, error)
+}
+
+type PreviewService interface {
+	OpenPreview(context.Context, domain.Artifact) (string, error)
+	ClosePreview(context.Context, string) error
+}
+
+type ProjectShareService interface {
+	Share(context.Context, domain.ProjectID) (domain.ProjectShare, error)
+}
+
+type AccountService interface {
+	Account(context.Context) (domain.AccountState, error)
+	ConnectAccount(context.Context) (domain.AccountState, error)
+	DisconnectAccount(context.Context) error
+}
+
+type RemoteProjectService interface {
+	State(context.Context, domain.ProjectID) (domain.RemoteState, error)
+	Diff(context.Context, domain.ProjectID, string) (domain.RemoteDiff, error)
+	Pull(context.Context, domain.ProjectID, func(string)) error
+	Push(context.Context, domain.ProjectID, string, func(string)) error
+	DeleteRepository(context.Context, domain.ProjectID, string) error
+}
+
+type CredentialStore interface {
+	Get(context.Context, string) (string, bool, error)
+	Set(context.Context, string, string) error
+	Delete(context.Context, string) error
+}
+
+type Services struct {
+	Host HostService
+	Files ProjectFiles
+	Language LanguageService
+	Compiler CompilerService
+	Runner RunService
+	Preview PreviewService
+	Share ProjectShareService
+	Account AccountService
+	Remote RemoteProjectService
+	Credentials CredentialStore
+}
+
+func (services Services) Validate() {
+	if services.Host == nil || services.Files == nil || services.Language == nil ||
+		services.Compiler == nil ||
+		services.Runner == nil ||
+		services.Preview == nil ||
+		services.Share == nil ||
+		services.Account == nil ||
+		services.Remote == nil ||
+		services.Credentials == nil {
+		panic("Studio host does not provide every required capability")
+	}
+}

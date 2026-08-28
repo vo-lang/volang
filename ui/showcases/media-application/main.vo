@@ -1,0 +1,157 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/animation"
+	"github.com/vo-lang/ui/assets"
+	"github.com/vo-lang/ui/chart"
+	"github.com/vo-lang/ui/graphics"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/media"
+	"github.com/vo-lang/ui/motion"
+	"github.com/vo-lang/ui/navigation"
+	"time"
+)
+
+type demoHost struct{}
+
+func (host *demoHost) Open(ctx context.Context, id string, source assets.Source) error { return nil }
+func (host *demoHost) Control(ctx context.Context, id string, action string, value float64) error { return nil }
+func (host *demoHost) Close(ctx context.Context, id string) error { return nil }
+
+type demoCaptureHost struct { grant bool }
+
+func (host *demoCaptureHost) Permission(ctx context.Context, kind media.CaptureKind) (media.PermissionState, error) {
+	if host.grant { return media.PermissionGranted, nil }
+	return media.PermissionDenied, nil
+}
+func (host *demoCaptureHost) Start(ctx context.Context, request media.CaptureRequest) (media.CaptureStream, error) {
+	return media.CaptureStream{ID: "showcase-camera", Kind: request.Kind, Tracks: []media.Track{{ID: "camera-video", Kind: media.VideoTrack, Label: "Demo camera"}}}, nil
+}
+func (host *demoCaptureHost) Stop(ctx context.Context, id string) error { return nil }
+
+var session *media.Session
+var capture *media.CaptureSession
+var playbackStatus = "Playback ready"
+var captureStatus = "Camera permission has not been requested"
+
+func newCapture(grant bool) *media.CaptureSession {
+	value, err := media.NewCaptureSession(media.CaptureRequest{Kind: media.Camera, Width: 1280, Height: 720, FrameRate: 30}, &demoCaptureHost{grant: grant})
+	if err != nil { panic(err.Error()) }
+	return value
+}
+
+func playbackAction(action string) {
+	var err error
+	if action == "play" { err = session.Play(context.Background()); if err == nil { playbackStatus = "Playback is running" } }
+	if action == "pause" { err = session.Pause(context.Background()); if err == nil { playbackStatus = "Playback is paused" } }
+	if action == "seek" { err = session.Seek(context.Background(), 30*time.Second); if err == nil { playbackStatus = "Playback position is 30 seconds" } }
+	if action == "quiet" { err = session.SetVolume(context.Background(), 0.5); if err == nil { playbackStatus = "Playback volume is 50 percent" } }
+	if action == "rate" { err = session.SetRate(context.Background(), 1.5); if err == nil { playbackStatus = "Playback speed is 1.5 times" } }
+	if err != nil { playbackStatus = "Playback failed: " + err.Error() }
+	ui.Invalidate()
+}
+
+func captureAction(action string) {
+	var err error
+	if action == "permission" { err = capture.RequestPermission(context.Background()); if err == nil { captureStatus = "Camera permission granted" } }
+	if action == "start" { err = capture.Start(context.Background()); if err == nil { captureStatus = "Camera is capturing " + capture.Stream().ID } }
+	if action == "stop" { err = capture.Stop(context.Background()); if err == nil { captureStatus = "Camera capture stopped" } }
+	if action == "deny" { _ = capture.Close(context.Background()); capture = newCapture(false); err = capture.RequestPermission(context.Background()) }
+	if action == "recover" { _ = capture.Close(context.Background()); capture = newCapture(true); captureStatus = "Camera session recovered; permission is ready to request" }
+	if err != nil { captureStatus = "Camera failed: " + err.Error() }
+	ui.Invalidate()
+}
+
+func Header() ui.View {
+	return ui.Gap(ui.Row(kit.Title("Volang Media Laboratory"), navigation.Link("Playback", "/"), navigation.Link("Capture", "/capture"), navigation.Link("Offline", "/offline")), 16)
+}
+
+func Layout(content ui.View) ui.View { return kit.Page(kit.AppShell(kit.CurrentTheme(), Header(), ui.Column(), content)) }
+
+func Spectrum() ui.View {
+	program := graphics.NewProgram(graphics.DefaultLimits())
+	program.Clear(0xff10141c)
+	for index := 0; index < 24; index++ {
+		height := ui.DerivedFloat(float64((index*17)%88 + 12))
+		program.Fill(graphics.Rect{X: float64(index)*10 + 8, Y: 112 - height, Width: 7, Height: height}, 0xff6c8cff)
+	}
+	view := graphics.Canvas(program, "Audio spectrum visualization")
+	view = ui.Width(view, 256); view = ui.Height(view, 120)
+	return view
+}
+
+func LatencyChart() ui.View {
+	options := chart.DefaultOptions("Recent playback latency")
+	options.Width = 320; options.Height = 120; options.Y = chart.Bounds{Minimum: 0, Maximum: 50}
+	return chart.Line([]chart.Series{{Name: "milliseconds", Color: 0xff6c8cff, Points: []chart.Point{{X: 0, Y: 18}, {X: 80, Y: 22}, {X: 160, Y: 14}, {X: 240, Y: 19}, {X: 320, Y: 13}}}}, options)
+}
+
+func Playback() ui.View {
+	showVisualizations := ui.UseBoolState(true)
+	transition := animation.UsePresence(true, 180*time.Millisecond)
+	player := media.Player(session, "Volang media preview", "/poster.svg")
+	player = ui.Width(player, 640); player = ui.Height(player, 360); player = animation.Apply(player, transition)
+	artwork := assets.Image(assets.Source{URI: "/poster.svg", Kind: assets.VectorImage, MediaType: "image/svg+xml"}, "Volang Media Laboratory artwork", assets.Cover)
+	artwork = ui.Width(artwork, 240); artwork = ui.Height(artwork, 135)
+	visualizations := ui.Hidden(ui.Gap(ui.Row(Spectrum(), LatencyChart()), 16), !ui.BoolStateValue(showVisualizations))
+	return Layout(ui.Gap(ui.Column(
+		kit.Badge("AUDIO + VIDEO", kit.IntentInfo), kit.Title("Portable playback with a native media host"),
+		kit.Paragraph("The same typed session controls browser media elements and desktop platform views while graphics retain an accessible fallback."),
+		kit.AdaptiveGrid(kit.Panel(player), kit.Panel(artwork)),
+		kit.Panel(ui.Gap(ui.Column(
+			ui.Role(ui.Text(playbackStatus), "status"),
+			kit.Actions(
+				kit.ActionButton("Play media", false, func() { playbackAction("play") }), kit.ActionButton("Pause media", false, func() { playbackAction("pause") }),
+				kit.ActionButton("Seek to 30 seconds", false, func() { playbackAction("seek") }), kit.ActionButton("Set volume to 50 percent", false, func() { playbackAction("quiet") }),
+				kit.ActionButton("Set speed to 1.5 times", false, func() { playbackAction("rate") }),
+			),
+			kit.Switch("Show visualizations", ui.BoolStateValue(showVisualizations), false, func(value bool) { ui.SetBoolState(showVisualizations, value) }),
+		), 12)),
+		visualizations,
+	), 20))
+}
+
+func Capture() ui.View {
+	return Layout(ui.Gap(ui.Column(
+		kit.Badge("PERMISSION SAFE", kit.IntentSuccess), kit.Title("Camera capture with explicit recovery"),
+		kit.Paragraph("Permission, start, stop, failure, cancellation, and recovery stay inside a generation-checked capture session."),
+		kit.Alert("Privacy boundary", "Camera data stays owned by the selected platform host and mounted application scope.", kit.IntentInfo, false),
+		kit.Panel(ui.Gap(ui.Column(
+			ui.Role(ui.Text(captureStatus), "status"),
+			kit.Actions(
+				kit.ActionButton("Request camera permission", false, func() { captureAction("permission") }), kit.ActionButton("Start camera capture", false, func() { captureAction("start") }),
+				kit.ActionButton("Stop camera capture", false, func() { captureAction("stop") }),
+			),
+			kit.Separator(kit.AxisHorizontal, "Recovery controls"),
+			kit.Actions(kit.DestructiveButton("Test denied permission", false, func() { captureAction("deny") }), kit.ActionButton("Recover camera session", false, func() { captureAction("recover") })),
+		), 12)),
+		kit.Paragraph("Microphone and screen capture use the same typed permission, stream validation, and generation contract."),
+	), 20))
+}
+
+func Offline() ui.View {
+	return Layout(ui.Gap(ui.Column(kit.Badge("OFFLINE", kit.IntentWarning), kit.Title("Media controls remain available offline"), kit.Paragraph("Cached application assets and local media sessions remain usable; network sources resume after reconnection.")), 16))
+}
+
+func App() ui.View {
+	return kit.Application(func() ui.View {
+		return navigation.ResolveTyped(func(location navigation.Location) ui.View { return Playback() },
+			navigation.ViewRoute(navigation.NewPattern("playback"), func(match navigation.Match) ui.View { return Playback() }),
+			navigation.ViewRoute(navigation.NewPattern("capture", navigation.Static("capture")), func(match navigation.Match) ui.View { return Capture() }),
+			navigation.ViewRoute(navigation.NewPattern("offline", navigation.Static("offline")), func(match navigation.Match) ui.View { return Offline() }),
+		)
+	})
+}
+
+func main() {
+	var err error
+	session, err = media.NewSession("showcase-player", assets.Source{URI: "/sample.mp4", Kind: assets.Video, MediaType: "video/mp4"}, &demoHost{})
+	if err != nil { panic(err.Error()) }
+	if err := session.Open(context.Background()); err != nil { panic(err.Error()) }
+	capture = newCapture(true)
+	timeline := animation.NewTimeline(time.Second, animation.Keyframe{At: 0, Value: 0, Curve: motion.Linear}, animation.Keyframe{At: 1, Value: 1, Curve: motion.EaseOut})
+	if len(timeline.Frames) != 2 { panic("media animation timeline") }
+	if err := ui.Mount(App); err != nil { panic(err.Error()) }
+}

@@ -84,6 +84,15 @@ use crate::RuntimeType;
 
 pub const MAP_ITER_SLOTS: usize = 7;
 
+/// Maximum number of namespaced, backend-neutral artifacts attached to one
+/// bytecode module. Artifacts are deliberately bounded because a VOB can be
+/// supplied by an untrusted host.
+pub const MAX_MODULE_ARTIFACTS: usize = 64;
+/// Maximum UTF-8 byte length of a module artifact identity.
+pub const MAX_MODULE_ARTIFACT_NAME_BYTES: usize = 128;
+/// Maximum payload size of one module artifact.
+pub const MAX_MODULE_ARTIFACT_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
 /// Bytecode-visible slot layout for the opaque map iterator state.
 ///
 /// Runtime writes this state as raw slots, so the verifier must enforce the
@@ -505,8 +514,10 @@ pub fn known_builtin_extern_param_slot_types(name: &str) -> Option<&'static [Slo
             SlotType::Interface1,
         ]),
         "panic_with_error" => Some(&[SlotType::Interface0, SlotType::Interface1]),
-        "vo_copy" => Some(&[SlotType::GcBase, SlotType::GcBase]),
-        "vo_slice_append_slice" => Some(&[SlotType::GcBase, SlotType::GcBase, SlotType::Value]),
+        "vo_copy" | "vo_copy_string" => Some(&[SlotType::GcBase, SlotType::GcBase]),
+        "vo_slice_append_slice" | "vo_slice_append_string" => {
+            Some(&[SlotType::GcBase, SlotType::GcBase, SlotType::Value])
+        }
         "vo_conv_int_str" => Some(&[SlotType::Value]),
         "vo_conv_bytes_str" | "vo_conv_runes_str" | "vo_conv_str_bytes" | "vo_conv_str_runes" => {
             Some(&[SlotType::GcBase])
@@ -531,8 +542,8 @@ pub fn known_builtin_extern_fixed_return_slot_types(name: &str) -> Option<&'stat
         return Some(&[SlotType::Float]);
     }
     match name {
-        "vo_copy" => Some(&[SlotType::Value]),
-        "vo_slice_append_slice" => Some(&[SlotType::GcBase]),
+        "vo_copy" | "vo_copy_string" => Some(&[SlotType::Value]),
+        "vo_slice_append_slice" | "vo_slice_append_string" => Some(&[SlotType::GcBase]),
         "vo_conv_int_str" => Some(&[SlotType::GcBase]),
         "vo_conv_bytes_str" | "vo_conv_runes_str" | "vo_conv_str_bytes" | "vo_conv_str_runes" => {
             Some(&[SlotType::GcBase])
@@ -2368,6 +2379,28 @@ impl<'a> From<&'a Module> for ModuleRuntimeMetadata<'a> {
     }
 }
 
+/// A versioned sidecar emitted by an optional compiler subsystem.
+///
+/// The bytecode layer keeps the payload opaque. Its owner defines the payload
+/// ABI and validates it before execution. Names are sorted in `Module` so the
+/// same semantic input always produces identical VOB bytes.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ModuleArtifact {
+    pub name: String,
+    pub version: u32,
+    pub payload: Vec<u8>,
+}
+
+impl ModuleArtifact {
+    pub fn new(name: impl Into<String>, version: u32, payload: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            version,
+            payload,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
@@ -2383,6 +2416,8 @@ pub struct Module {
     pub externs: Vec<ExternDef>,
     pub entry_func: u32,
     pub island_init_func: u32,
+    /// Compiler-owned, backend-neutral sidecars ordered by artifact name.
+    pub artifacts: Vec<ModuleArtifact>,
     pub debug_info: DebugInfo,
 }
 
@@ -2402,7 +2437,30 @@ impl Module {
             externs: Vec::new(),
             entry_func: 0,
             island_init_func: 0,
+            artifacts: Vec::new(),
             debug_info: DebugInfo::new(),
+        }
+    }
+
+    /// Find an attached artifact by its stable namespaced identity.
+    pub fn artifact(&self, name: &str) -> Option<&ModuleArtifact> {
+        self.artifacts
+            .binary_search_by(|artifact| artifact.name.as_str().cmp(name))
+            .ok()
+            .map(|index| &self.artifacts[index])
+    }
+
+    /// Insert or replace an artifact while retaining canonical name order.
+    pub fn set_artifact(&mut self, artifact: ModuleArtifact) -> Option<ModuleArtifact> {
+        match self
+            .artifacts
+            .binary_search_by(|current| current.name.cmp(&artifact.name))
+        {
+            Ok(index) => Some(core::mem::replace(&mut self.artifacts[index], artifact)),
+            Err(index) => {
+                self.artifacts.insert(index, artifact);
+                None
+            }
         }
     }
 

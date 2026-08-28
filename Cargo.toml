@@ -8,12 +8,14 @@ members = [
   "cmd/vo-dev",
   "cmd/vo-embed",
   "cmd/vo-test",
+  "apps/studio/host-native",
+  "ui",
+  "ui/crates/*",
 ]
 exclude = [
   "3rdparty/git2/rust",
   "3rdparty/resvg/rust",
   "3rdparty/wgpu/rust",
-  "apps/studio/src-tauri",
 ]
 
 [workspace.package]
@@ -29,19 +31,58 @@ readme = "README.md"
 # Keep host, alloc-only, and WASM math builtins on one audited implementation.
 # Updating this exact pin requires the cross-target language math matrix.
 libm = "=0.2.16"
+cosmic-text = { version = "=0.19.0", default-features = true }
+accesskit = { version = "=0.24.1", default-features = false }
+arboard = { version = "=3.6.1", default-features = true }
+drag = { version = "=2.1.1", default-features = false }
+muda = { version = "=0.19.3", default-features = false }
+rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
+pollster = "=0.4.0"
+winit = { version = "=0.30.13", default-features = true }
 vo-common-core = { path = "lang/crates/vo-common-core", version = "=0.1.4", default-features = false }
 vo-common = { path = "lang/crates/vo-common", version = "=0.1.4", default-features = false }
+vo-engine = { path = "lang/crates/vo-engine", version = "=0.1.4" }
 vo-syntax = { path = "lang/crates/vo-syntax", version = "=0.1.4", default-features = false }
 vo-module = { path = "lang/crates/vo-module", version = "=0.1.4", default-features = false }
 vo-analysis = { path = "lang/crates/vo-analysis", version = "=0.1.4" }
 vo-stdlib-source = { path = "lang/stdlib", version = "=0.1.4" }
 vo-ffi-macro = { path = "lang/crates/vo-ffi-macro", version = "=0.1.4" }
 vo-app-protocol = { path = "lang/crates/vo-app-protocol", version = "=0.1.4", default-features = false }
+vo-app-host-native = { path = "lang/crates/vo-app-host-native", version = "=0.1.4", default-features = false }
 vo-app-runtime = { path = "lang/crates/vo-app-runtime", version = "=0.1.4", default-features = false }
 vo-schema-compiler = { path = "lang/crates/vo-schema-compiler", version = "=0.1.4" }
 vo-runtime = { path = "lang/crates/vo-runtime", version = "=0.1.4", default-features = false }
 vo-ext = { path = "lang/crates/vo-ext", version = "=0.1.4" }
 vo-stdlib = { path = "lang/crates/vo-stdlib", version = "=0.1.4" }
+vo-target = { path = "lang/crates/vo-target", version = "=0.1.4" }
+vo-ui = { path = "ui", version = "=0.1.4", default-features = false }
+vo-ui-accessibility = { path = "ui/crates/vo-ui-accessibility", version = "=0.1.4", default-features = false }
+vo-ui-accesskit = { path = "lang/crates/vo-ui-accesskit", version = "=0.1.4" }
+vo-ui-artifact = { path = "ui/crates/vo-ui-artifact", version = "=0.1.4", default-features = false }
+vo-ui-benchmark = { path = "ui/crates/vo-ui-benchmark", version = "=0.1.4" }
+vo-ui-compiler = { path = "lang/crates/vo-ui-compiler", version = "=0.1.4" }
+vo-ui-core = { path = "ui/crates/vo-ui-core", version = "=0.1.4", default-features = false }
+vo-ui-desktop = { path = "ui/crates/vo-ui-desktop", version = "=0.1.4", default-features = false }
+vo-ui-golden = { path = "ui/crates/vo-ui-golden", version = "=0.1.4", default-features = false }
+vo-ui-headless = { path = "ui/crates/vo-ui-headless", version = "=0.1.4", default-features = false }
+vo-ui-host-native = { path = "lang/crates/vo-ui-host-native", version = "=0.1.4" }
+vo-ui-text-native = { path = "lang/crates/vo-ui-text-native", version = "=0.1.4" }
+vo-ui-kit = { path = "ui/crates/vo-ui-kit", version = "=0.1.4", default-features = false }
+vo-ui-layout = { path = "ui/crates/vo-ui-layout", version = "=0.1.4", default-features = false }
+vo-ui-paint = { path = "ui/crates/vo-ui-paint", version = "=0.1.4", default-features = false }
+vo-ui-plan = { path = "ui/crates/vo-ui-plan", version = "=0.1.4", default-features = false }
+vo-ui-present-wgpu = { path = "lang/crates/vo-ui-present-wgpu", version = "=0.1.4" }
+vo-ui-protocol = { path = "ui/crates/vo-ui-protocol", version = "=0.1.4", default-features = false }
+vo-ui-reactive = { path = "ui/crates/vo-ui-reactive", version = "=0.1.4", default-features = false }
+vo-ui-reload = { path = "ui/crates/vo-ui-reload", version = "=0.1.4", default-features = false }
+vo-ui-runtime = { path = "ui/crates/vo-ui-runtime", version = "=0.1.4", default-features = false }
+vo-ui-scheduler = { path = "ui/crates/vo-ui-scheduler", version = "=0.1.4", default-features = false }
+vo-ui-session = { path = "ui/crates/vo-ui-session", version = "=0.1.4", default-features = false }
+vo-ui-system = { path = "ui/crates/vo-ui-system", version = "=0.1.4", default-features = false }
+vo-ui-system-native = { path = "lang/crates/vo-ui-system-native", version = "=0.1.4" }
+vo-ui-shell-native = { path = "lang/crates/vo-ui-shell-native", version = "=0.1.4" }
+vo-ui-vm = { path = "lang/crates/vo-ui-vm", version = "=0.1.4" }
+vo-ui-web = { path = "ui/crates/vo-ui-web", version = "=0.1.4", default-features = false }
 
 # WASM-optimized release (size)
 [profile.release]

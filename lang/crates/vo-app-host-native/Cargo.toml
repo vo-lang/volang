@@ -31,8 +31,10 @@ objc2 = { version = "=0.6.4", optional = true, default-features = false, feature
 objc2-app-kit = { version = "=0.3.2", optional = true, default-features = false, features = [
   "NSApplication",
   "NSAccessibilityProtocols",
+  "NSDragging",
   "NSEvent",
   "NSGraphics",
+  "NSPasteboard",
   "NSResponder",
   "NSTextInputClient",
   "NSTextInputContext",
@@ -44,10 +46,12 @@ objc2-foundation = { version = "=0.3.2", optional = true, default-features = fal
   "NSArray",
   "NSAttributedString",
   "NSDate",
+  "NSEnumerator",
   "NSGeometry",
   "NSNotification",
   "NSObject",
   "NSRange",
   "NSRunLoop",
   "NSString",
+  "NSURL",
 ] }

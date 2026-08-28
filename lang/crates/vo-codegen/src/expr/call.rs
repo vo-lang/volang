@@ -393,7 +393,6 @@ fn compile_framework_entry_intrinsic(
     info: &TypeInfoWrapper,
 ) -> Result<Option<u16>, CodegenError> {
     let (prefix, suffix, value_argument, argument_count) = match (package_path, function_name) {
-        ("github.com/vo-lang/vogui", "Run") => ("__VoguiRun", "TypedAppAdapter", 0, 1),
         ("github.com/vo-lang/voplay", "Run") => ("__VoplayRun", "GeneratedGame", 0, 1),
         ("github.com/vo-lang/voplay", "Install") => ("__VoplayInstall", "GeneratedGame", 1, 3),
         _ => return Ok(None),
@@ -492,6 +491,20 @@ fn compile_call_with_placement(
 }
 
 fn compile_call_inner(
+    expr: &Expr,
+    call: &vo_syntax::ast::CallExpr,
+    result: ResultPlacement,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    if let Some(spec) = ctx.scoped_call(info.package_key(), expr.id).cloned() {
+        return compile_scoped_call(expr, result, &spec, ctx, func, info);
+    }
+    compile_call_inner_unscoped(expr, call, result, ctx, func, info)
+}
+
+fn compile_call_inner_unscoped(
     expr: &Expr,
     call: &vo_syntax::ast::CallExpr,
     result: ResultPlacement,
@@ -611,6 +624,90 @@ fn compile_call_inner(
 
     // Non-ident function call (e.g., expression returning a closure)
     compile_closure_call(expr, call, callee_expr, result, ctx, func, info)
+}
+
+fn compile_scoped_call(
+    expression: &Expr,
+    result: ResultPlacement,
+    spec: &crate::ScopedCallSpec,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    let target = strip_paren_expr(&spec.target);
+    let ExprKind::Call(target_call) = &target.kind else {
+        return Err(CodegenError::Internal(
+            "scoped adapter target must be a call expression".to_string(),
+        ));
+    };
+
+    let scope_args = func.alloc_slots(&[
+        SlotType::GcBase,
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::GcBase,
+    ]);
+    let identity = ctx.const_string(&spec.identity);
+    func.emit_op(Opcode::StrNew, scope_args, identity, 0);
+    let call_site = ctx.const_int(spec.call_site as i64);
+    func.emit_op(Opcode::LoadConst, scope_args + 1, call_site, 0);
+    func.emit_op(
+        Opcode::LoadInt,
+        scope_args + 2,
+        u16::from(spec.key.is_some()),
+        0,
+    );
+    if let Some(key) = &spec.key {
+        compile_expr_to(key, scope_args + 3, ctx, func, info)?;
+    } else {
+        let empty = ctx.const_string("");
+        func.emit_op(Opcode::StrNew, scope_args + 3, empty, 0);
+    }
+    let enter_types = [
+        SlotType::GcBase,
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::GcBase,
+    ];
+    let enter = ctx.get_or_register_declared_extern_with_return_shape(
+        &spec.enter_extern,
+        ReturnShape::slots(0),
+        crate::context::ext_slot_kinds_for_slot_types(&enter_types),
+    );
+    func.emit_call_extern(0, enter, scope_args, enter_types.len(), &[]);
+
+    let target_result = compile_call_inner_unscoped(
+        target,
+        target_call,
+        ResultPlacement::Natural,
+        ctx,
+        func,
+        info,
+    )?;
+
+    let exit = ctx.get_or_register_declared_extern_with_return_shape(
+        &spec.exit_extern,
+        ReturnShape::slots(0),
+        Vec::new(),
+    );
+    func.emit_call_extern(0, exit, 0, 0, &[]);
+
+    if spec.key.is_none() {
+        return Ok(result.finish_abi_call(expression, target_result, 1, func, info));
+    }
+    let key_extern = spec.key_extern.as_ref().ok_or_else(|| {
+        CodegenError::Internal("keyed scoped adapter call has no key extern".to_string())
+    })?;
+    let key_args = func.alloc_call_buffer(&[SlotType::Value, SlotType::GcBase], &[SlotType::Value]);
+    func.emit_copy(key_args, target_result, 1);
+    func.emit_copy(key_args + 1, scope_args + 3, 1);
+    let key = ctx.get_or_register_declared_extern_with_return_shape(
+        key_extern,
+        ReturnShape::slots(1),
+        crate::context::ext_slot_kinds_for_slot_types(&[SlotType::Value, SlotType::GcBase]),
+    );
+    func.emit_call_extern(key_args + 2, key, key_args, 2, &[SlotType::Value]);
+    Ok(result.finish_abi_call(expression, key_args + 2, 1, func, info))
 }
 
 fn compile_method_expr_call(

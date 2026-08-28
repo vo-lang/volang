@@ -1,0 +1,30 @@
+package main
+
+func descend(n int) int {
+	if n == 0 {
+		return 0
+	}
+	return descend(n - 1) + 1
+}
+
+func overflow(n int) {
+	if n == 0 {
+		return
+	}
+	overflow(n - 1)
+}
+
+func main() {
+	assert(descend(5000) == 5000, "deep scalar recursion must use the explicit-stack fallback")
+	recovered := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				recovered = true
+			}
+		}()
+		overflow(200000)
+	}()
+	assert(recovered, "explicit-stack overflow must remain recoverable")
+	println("wasm-aot-retry-safe-recursion: PASS")
+}

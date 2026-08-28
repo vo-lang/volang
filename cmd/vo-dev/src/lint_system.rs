@@ -16,8 +16,6 @@ const ALL_LINT_TARGETS: &[&str] = &[
     "layout",
     "docs",
     "skill",
-    "studio-web",
-    "studio-tauri",
     "examples",
     "benchmarks",
     "release",
@@ -46,8 +44,6 @@ fn run_lint_target(root: &Path, target: &str) -> Result<()> {
         "layout" => lint_layout(root)?,
         "docs" => lint_docs(root)?,
         "skill" => lint_volang_skill(root)?,
-        "studio-web" => lint_studio_web(root)?,
-        "studio-tauri" => lint_studio_tauri(root)?,
         "examples" => lint_examples(root)?,
         "benchmarks" => lint_benchmarks(root)?,
         "release" => release_system::lint_release(root)?,
@@ -242,7 +238,6 @@ fn lint_layout(root: &Path) -> Result<()> {
         }
     }
     for required in [
-        "apps/studio",
         "cmd/vo-test/Cargo.toml",
         "tests/lang/manifest.toml",
         "tests/lang/cases",
@@ -252,6 +247,7 @@ fn lint_layout(root: &Path) -> Result<()> {
         "tests/fixtures",
         "examples/manifest.toml",
         "benchmarks/manifest.toml",
+        "vo.work",
     ] {
         if !root.join(required).exists() {
             bail!("required layout path is missing: {required}");
@@ -268,6 +264,7 @@ fn lint_layout(root: &Path) -> Result<()> {
         "d.py",
         "rewrite-traceability.toml",
         "rust-toolchain.toml",
+        "vo.work",
     ]);
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -286,80 +283,23 @@ fn lint_layout(root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct StudioDocsManifest {
-    version: u32,
-    #[serde(default, rename = "section")]
-    sections: Vec<StudioDocsSection>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StudioDocsSection {
-    title: String,
-    slug: String,
-    #[serde(default, rename = "page")]
-    pages: Vec<StudioDocsPage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StudioDocsPage {
-    title: String,
-    file: String,
-}
-
 fn lint_docs(root: &Path) -> Result<()> {
     lint_current_markdown(root)?;
-    for old_path in ["apps/studio/docs/_manifest.json"] {
-        if root.join(old_path).exists() {
-            bail!("old docs path still exists: {old_path}");
-        }
-    }
-    let manifest_path = root.join("apps/studio/docs/manifest.toml");
-    let manifest_text = fs::read_to_string(&manifest_path)
-        .map_err(|err| anyhow!("could not read {}: {err}", manifest_path.display()))?;
-    let manifest: StudioDocsManifest = toml::from_str(&manifest_text)
-        .map_err(|err| anyhow!("could not parse Studio docs manifest: {err}"))?;
-    if manifest.version != 1 {
-        bail!("apps/studio/docs/manifest.toml version must be 1");
-    }
-    if manifest.sections.is_empty() {
-        bail!("Studio docs manifest has no sections");
-    }
-    let mut pages = HashSet::new();
-    for section in &manifest.sections {
-        if section.title.trim().is_empty() || section.slug.trim().is_empty() {
-            bail!("Studio docs section is missing title or slug");
-        }
-        if section.pages.is_empty() {
-            bail!("Studio docs section {} has no pages", section.slug);
-        }
-        for page in &section.pages {
-            if page.title.trim().is_empty() || page.file.trim().is_empty() {
-                bail!(
-                    "Studio docs section {} has an incomplete page",
-                    section.slug
-                );
-            }
-            if !pages.insert(page.file.clone()) {
-                bail!("duplicate Studio docs page {}", page.file);
-            }
-            if !root
-                .join("apps/studio/docs/pages")
-                .join(&page.file)
-                .is_file()
-            {
-                bail!("Studio docs manifest references missing page {}", page.file);
-            }
-        }
-    }
+    crate::generate_docs::check_studio_docs(root)?;
     lint_touched_dev_note_front_matter(root)?;
     Ok(())
 }
 
 fn lint_current_markdown(root: &Path) -> Result<()> {
     let mut files = collect_relative_files(root, &root.join("docs"), "md")?;
+    files.extend(collect_relative_files(
+        root,
+        &root.join("lang/docs/guides"),
+        "md",
+    )?);
+    files.extend(collect_relative_files(root, &root.join("ui/docs"), "md")?);
     files.sort();
-    if files.len() < 2 {
+    if files.len() < 20 {
         bail!("current repository documentation set is unexpectedly empty");
     }
     for relative in files {
@@ -426,306 +366,6 @@ fn lint_volang_skill(root: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn lint_studio_web(root: &Path) -> Result<()> {
-    const MAX_WEB_METADATA_BYTES: usize = 512 * 1024;
-    let studio = root.join("apps/studio");
-    let cname = read_utf8_regular_file_limited(
-        &studio.join("public/CNAME"),
-        "Studio site domain",
-        MAX_WEB_METADATA_BYTES,
-    )?;
-    if cname != "volang.dev\n" {
-        bail!("Studio public/CNAME must contain exactly volang.dev followed by a newline");
-    }
-    let status = Command::new("node")
-        .args(["--check", "scripts/build_wasm.mjs"])
-        .current_dir(&studio)
-        .status()
-        .map_err(|error| anyhow!("could not syntax-check Studio WASM builder: {error}"))?;
-    if !status.success() {
-        bail!("Studio WASM builder contains invalid JavaScript");
-    }
-    Ok(())
-}
-
-fn lint_studio_tauri(root: &Path) -> Result<()> {
-    const MAX_DESKTOP_METADATA_BYTES: usize = 2 * 1024 * 1024;
-    let tauri_root = root.join("apps/studio/src-tauri");
-
-    let cargo_manifest_path = tauri_root.join("Cargo.toml");
-    let cargo_manifest = read_utf8_regular_file_limited(
-        &cargo_manifest_path,
-        "Studio Tauri Cargo manifest",
-        MAX_DESKTOP_METADATA_BYTES,
-    )?;
-    let cargo: toml::Value = toml::from_str(&cargo_manifest)
-        .map_err(|error| anyhow!("Studio Tauri Cargo.toml is invalid: {error}"))?;
-    let package = cargo
-        .get("package")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| anyhow!("Studio Tauri Cargo.toml is missing [package]"))?;
-    let cargo_version = package
-        .get("version")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| anyhow!("Studio Tauri Cargo.toml is missing package.version"))?;
-    let cargo_edition = package
-        .get("edition")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| anyhow!("Studio Tauri Cargo.toml is missing package.edition"))?;
-    if package.get("name").and_then(toml::Value::as_str) != Some("studio")
-        || package.get("publish").and_then(toml::Value::as_bool) != Some(false)
-        || package.get("rust-version").and_then(toml::Value::as_str) != Some("1.94.0")
-    {
-        bail!("Studio Tauri Cargo.toml must describe the non-publishable studio package");
-    }
-    let vogui_rev = lint_vogui_protocol_manifest(&cargo)?;
-    let vogui_lock_source =
-        format!("git+https://github.com/vo-lang/vogui?rev={vogui_rev}#{vogui_rev}");
-    let cargo_lock = read_utf8_regular_file_limited(
-        &tauri_root.join("Cargo.lock"),
-        "Studio Tauri Cargo lockfile",
-        MAX_DESKTOP_METADATA_BYTES,
-    )?;
-    let lock: toml::Value = toml::from_str(&cargo_lock)
-        .map_err(|error| anyhow!("Studio Tauri Cargo.lock is invalid: {error}"))?;
-    lint_vogui_protocol_lock(&lock, &vogui_lock_source)?;
-
-    let npm_package = read_json_object_limited(
-        &root.join("apps/studio/package.json"),
-        "Studio package manifest",
-        MAX_DESKTOP_METADATA_BYTES,
-    )?;
-    if npm_package
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        != Some(cargo_version)
-        || npm_package
-            .pointer("/scripts/dev")
-            .and_then(serde_json::Value::as_str)
-            != Some("vite")
-        || npm_package
-            .pointer("/scripts/build")
-            .and_then(serde_json::Value::as_str)
-            != Some("vite build")
-    {
-        bail!("Studio package.json must match the desktop version and canonical Vite scripts");
-    }
-
-    let config_path = tauri_root.join("tauri.conf.json");
-    let config = read_json_object_limited(
-        &config_path,
-        "Studio Tauri configuration",
-        MAX_DESKTOP_METADATA_BYTES,
-    )?;
-    if config.get("$schema").and_then(serde_json::Value::as_str)
-        != Some("https://schema.tauri.app/config/2")
-        || config
-            .get("productName")
-            .and_then(serde_json::Value::as_str)
-            != Some("Studio")
-        || config.get("version").and_then(serde_json::Value::as_str) != Some(cargo_version)
-        || config.get("identifier").and_then(serde_json::Value::as_str) != Some("com.volang.studio")
-        || config
-            .pointer("/build/frontendDist")
-            .and_then(serde_json::Value::as_str)
-            != Some("../dist")
-        || config
-            .pointer("/build/beforeDevCommand")
-            .and_then(serde_json::Value::as_str)
-            != Some("npm run dev")
-        || config
-            .pointer("/build/beforeBuildCommand")
-            .and_then(serde_json::Value::as_str)
-            != Some("npm run build")
-        || config
-            .pointer("/build/devUrl")
-            .and_then(serde_json::Value::as_str)
-            != Some("http://127.0.0.1:5174")
-    {
-        bail!("Studio Tauri configuration is not bound to the canonical Studio web build");
-    }
-    let windows = config
-        .pointer("/app/windows")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow!("Studio Tauri configuration must declare app.windows"))?;
-    let mut window_labels = BTreeSet::new();
-    for window in windows {
-        let label = window
-            .get("label")
-            .and_then(serde_json::Value::as_str)
-            .filter(|label| !label.is_empty())
-            .ok_or_else(|| anyhow!("Studio Tauri window is missing a non-empty label"))?;
-        if !window_labels.insert(label.to_string()) {
-            bail!("Studio Tauri configuration repeats window label {label}");
-        }
-    }
-    if !window_labels.contains("main") {
-        bail!("Studio Tauri configuration must declare the main window");
-    }
-
-    let capability_path = tauri_root.join("capabilities/default.json");
-    let capability = read_json_object_limited(
-        &capability_path,
-        "Studio Tauri default capability",
-        MAX_DESKTOP_METADATA_BYTES,
-    )?;
-    if capability
-        .get("identifier")
-        .and_then(serde_json::Value::as_str)
-        != Some("default")
-    {
-        bail!("Studio Tauri default capability must use identifier default");
-    }
-    let capability_windows = capability
-        .get("windows")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow!("Studio Tauri default capability is missing windows"))?;
-    if !capability_windows.iter().all(|window| {
-        window
-            .as_str()
-            .is_some_and(|label| window_labels.contains(label))
-    }) || !capability_windows
-        .iter()
-        .any(|window| window.as_str() == Some("main"))
-    {
-        bail!("Studio Tauri default capability references an unknown or missing main window");
-    }
-    if !capability
-        .get("permissions")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|permissions| {
-            permissions
-                .iter()
-                .any(|permission| permission.as_str() == Some("core:default"))
-        })
-    {
-        bail!("Studio Tauri default capability must grant core:default");
-    }
-    let remote_urls = capability
-        .pointer("/remote/urls")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow!("Studio Tauri default capability is missing remote.urls"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| anyhow!("Studio Tauri remote URL must be a string"))
-        })
-        .collect::<Result<BTreeSet<_>>>()?;
-    let expected_remote_urls = BTreeSet::from(["http://127.0.0.1:5174/*".to_string()]);
-    if remote_urls != expected_remote_urls {
-        bail!("Studio Tauri default capability has unexpected development origins");
-    }
-
-    let schema_files = collect_relative_files(root, &tauri_root.join("gen/schemas"), "json")?;
-    let expected_schema_files = [
-        "apps/studio/src-tauri/gen/schemas/acl-manifests.json",
-        "apps/studio/src-tauri/gen/schemas/capabilities.json",
-        "apps/studio/src-tauri/gen/schemas/desktop-schema.json",
-        "apps/studio/src-tauri/gen/schemas/macOS-schema.json",
-    ];
-    if schema_files
-        != expected_schema_files
-            .iter()
-            .map(|path| path.to_string())
-            .collect::<Vec<_>>()
-    {
-        bail!("Studio Tauri generated schema set is incomplete or contains unexpected files");
-    }
-    for relative in schema_files {
-        read_json_object_limited(
-            &root.join(&relative),
-            &format!("Studio Tauri generated schema {relative}"),
-            MAX_DESKTOP_METADATA_BYTES,
-        )?;
-    }
-    let icon = read_regular_file_limited(
-        &tauri_root.join("icons/icon.png"),
-        "Studio Tauri tracked icon placeholder",
-        MAX_DESKTOP_METADATA_BYTES,
-    )?;
-    if !icon.starts_with(b"\x89PNG\r\n\x1a\n") {
-        bail!("Studio Tauri tracked icon placeholder is not a PNG file");
-    }
-    let mut rust_sources = collect_relative_files(root, &tauri_root.join("src"), "rs")?;
-    rust_sources.push("apps/studio/src-tauri/build.rs".to_string());
-    rust_sources.sort();
-    let status = Command::new("rustfmt")
-        .args(["--edition", cargo_edition, "--check"])
-        .args(&rust_sources)
-        .current_dir(root)
-        .status()
-        .map_err(|error| anyhow!("could not execute rustfmt for Studio Tauri: {error}"))?;
-    if !status.success() {
-        bail!("Studio Tauri Rust sources are not formatted");
-    }
-    Ok(())
-}
-
-fn lint_vogui_protocol_manifest(cargo: &toml::Value) -> Result<String> {
-    let dependency = cargo
-        .get("dependencies")
-        .and_then(toml::Value::as_table)
-        .and_then(|dependencies| dependencies.get("vogui-protocol"))
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| anyhow!("Studio Tauri must declare vogui-protocol as a table dependency"))?;
-    let revision = dependency
-        .get("rev")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| {
-            anyhow!("Studio Tauri vogui-protocol dependency must declare an exact revision")
-        })?;
-    if dependency.len() != 2
-        || dependency.get("git").and_then(toml::Value::as_str)
-            != Some("https://github.com/vo-lang/vogui")
-        || revision.len() != 40
-        || !revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        bail!("Studio Tauri vogui-protocol dependency must use the canonical Git URL and exact revision");
-    }
-    Ok(revision.to_string())
-}
-
-fn lint_vogui_protocol_lock(lock: &toml::Value, expected_source: &str) -> Result<()> {
-    if lock
-        .get("version")
-        .and_then(toml::Value::as_integer)
-        .is_none()
-    {
-        bail!("Studio Tauri Cargo.lock is missing version");
-    }
-    let packages = lock
-        .get("package")
-        .and_then(toml::Value::as_array)
-        .ok_or_else(|| anyhow!("Studio Tauri Cargo.lock is missing package records"))?;
-    let matching = packages
-        .iter()
-        .filter(|package| {
-            package.get("name").and_then(toml::Value::as_str) == Some("vogui-protocol")
-        })
-        .collect::<Vec<_>>();
-    if matching.len() != 1
-        || matching[0].get("version").and_then(toml::Value::as_str) != Some("0.1.0")
-        || matching[0].get("source").and_then(toml::Value::as_str) != Some(expected_source)
-    {
-        bail!("Studio Tauri Cargo.lock must pin exactly one vogui-protocol 0.1.0 package at the canonical Git revision");
-    }
-    Ok(())
-}
-
-fn read_json_object_limited(path: &Path, label: &str, limit: usize) -> Result<serde_json::Value> {
-    let source = read_utf8_regular_file_limited(path, label, limit)?;
-    let value: serde_json::Value = serde_json::from_str(&source)
-        .map_err(|error| anyhow!("{label} {} is invalid JSON: {error}", path.display()))?;
-    if !value.is_object() {
-        bail!("{label} {} must contain a JSON object", path.display());
-    }
-    Ok(value)
 }
 
 fn lint_touched_dev_note_front_matter(root: &Path) -> Result<()> {
@@ -978,17 +618,6 @@ fn lint_examples(root: &Path) -> Result<()> {
         );
     }
 
-    for relative in
-        collect_relative_files(root, &root.join("apps/studio/src/assets/examples"), "vo")?
-    {
-        let path = root.join(&relative);
-        let source = read_utf8_regular_file_limited(
-            &path,
-            &format!("Studio example {relative}"),
-            vo_common::vfs::MAX_TEXT_FILE_BYTES,
-        )?;
-        lint_single_file_source(&source, &format!("Studio example {relative}"))?;
-    }
     Ok(())
 }
 

@@ -1,0 +1,87 @@
+schema = "volang.studio.product-parity.v1"
+baseline = "legacy-studio-product-surface"
+
+[[capability]]
+id = "home"
+status = "implemented"
+acceptance = "The initial surface presents product orientation, starters, and local projects without entering the editor first."
+
+[[capability]]
+id = "starter-gallery"
+status = "implemented"
+acceptance = "At least the eleven legacy language topics plus maintained UIKit starters open as persistent editable projects."
+
+[[capability]]
+id = "starter-edit-run"
+status = "implemented"
+acceptance = "One click opens main.vo; edits participate in analysis/save; VM or JIT run and UI preview use the same snapshot."
+
+[[capability]]
+id = "project-create"
+status = "implemented"
+acceptance = "Web OPFS and desktop filesystems create complete projects from blank and starter snapshots."
+
+[[capability]]
+id = "project-open-import-recent"
+status = "implemented"
+acceptance = "Projects can be imported/opened, persisted, listed, and reopened across Studio sessions."
+
+[[capability]]
+id = "project-search"
+status = "implemented"
+acceptance = "The project catalog can be filtered by name without changing the persisted recent-project order."
+
+[[capability]]
+id = "project-rename-delete"
+status = "implemented"
+acceptance = "Project-level rename, delete, forget, and confirmation flows preserve local and remote authority boundaries."
+
+[[capability]]
+id = "project-share"
+status = "implemented"
+acceptance = "Eligible projects expose a canonical development or runner link with explicit non-shareable reasons."
+
+[[capability]]
+id = "github-account"
+status = "implemented"
+acceptance = "Connect, inspect, and disconnect a GitHub identity without exposing credentials to guest Volang code."
+
+[[capability]]
+id = "remote-status"
+status = "implemented"
+acceptance = "Projects show provider, repository, branch, dirty state, ahead, and behind information on every supported host."
+
+[[capability]]
+id = "remote-diff-conflicts"
+status = "implemented"
+acceptance = "Local and cloud snapshots can be compared per file, with explicit divergent and conflict states before mutation."
+
+[[capability]]
+id = "remote-pull-push"
+status = "implemented"
+acceptance = "Pull and commit/push are cancellable, recoverable operations with progress and actionable failures."
+
+[[capability]]
+id = "remote-delete-authority"
+status = "implemented"
+acceptance = "Remove local, forget catalog, delete cloud, and delete everywhere remain distinct confirmed operations."
+
+[[capability]]
+id = "workbench"
+status = "implemented"
+acceptance = "Resizable workspace, explorer, multi-buffer editor, save/save-all, undo/redo, find, diagnostics, search, console, preview, and commands work from one state model."
+
+[[capability]]
+id = "independent-runner"
+status = "implemented"
+acceptance = "A shareable chromeless runner owns loading, failure recovery, stop, and return-to-Studio flows on Web and desktop."
+
+[[capability]]
+id = "documentation-center"
+status = "implemented"
+acceptance = "Searchable, routed, versioned documentation is generated from canonical language, specification, toolchain, and UI sources; its collapsible section tree, page outline, breadcrumb, and previous/next controls expose the maintained hierarchy; every page shows its source path and stale mirrors fail repository lint."
+
+[[capability]]
+id = "release-backends"
+status = "implemented"
+acceptance = "The same Studio source is exercised in VM/JIT development and released through Core Wasm AOT and Native AOT."

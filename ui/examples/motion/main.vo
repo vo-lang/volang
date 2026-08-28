@@ -1,0 +1,48 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/gesture"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/motion"
+)
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	progress := motion.UseValue(0)
+	drag := gesture.UseDrag()
+	dragged := gesture.BindDrag(
+		ui.AccessibleName(ui.TestID(ui.Height(ui.Width(kit.Card(theme, kit.Body(theme, "Drag within this surface")), 280), 80), "motion-drag-target"), "Motion surface"),
+		drag,
+		gesture.DefaultDragOptions(),
+		func(snapshot gesture.DragSnapshot) {
+			if snapshot.Phase == gesture.Ended {
+				progress.SpringTo(0, motion.DefaultSpring())
+			} else {
+				progress.Set(snapshot.DeltaX)
+			}
+		},
+	)
+	status := "Idle"
+	if progress.IsRunning() {
+		status = "Animating"
+	}
+	content := ui.Gap(ui.Column(
+		kit.Heading(theme, "Motion and gestures"),
+		kit.MutedText(theme, status),
+		ui.Padding(dragged, progress.Current()),
+		kit.PrimaryButton(theme, "Tween", false, func(event ui.Event) {
+			progress.AnimateTo(120, motion.DefaultTween())
+		}),
+		kit.PrimaryButton(theme, "Spring", false, func(event ui.Event) {
+			progress.SpringTo(0, motion.DefaultSpring())
+		}),
+	), theme.Space*2)
+	return kit.Screen(theme, content)
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

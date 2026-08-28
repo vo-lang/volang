@@ -114,6 +114,7 @@ pub enum CompileError {
     Parse(String),
     Analysis(String),
     Codegen(String),
+    Target(String),
     ModuleSystem(ModuleSystemError),
 }
 
@@ -201,6 +202,7 @@ impl std::fmt::Display for CompileError {
             CompileError::Parse(e) => write!(f, "Parse error: {}", e),
             CompileError::Analysis(e) => write!(f, "Analysis error: {}", e),
             CompileError::Codegen(e) => write!(f, "Codegen error: {}", e),
+            CompileError::Target(e) => write!(f, "Target error: {}", e),
             CompileError::ModuleSystem(e) => write!(f, "Module system error: {}", e),
         }
     }
@@ -227,6 +229,7 @@ impl CompileError {
             CompileError::Parse(_) => "parse",
             CompileError::Analysis(_) => "analysis",
             CompileError::Codegen(_) => "codegen",
+            CompileError::Target(_) => "target",
             CompileError::ModuleSystem(_) => "module-system",
         }
     }
@@ -240,6 +243,73 @@ impl CompileError {
 }
 
 pub type CompileOutput = vo_stdlib::toolchain::ToolchainModule;
+
+pub const COMPILE_PACKAGES_ARTIFACT_NAME: &str = "volang.compile.packages";
+pub const COMPILE_PACKAGES_ARTIFACT_VERSION: u32 = 1;
+
+/// Return the canonical source package graph recorded by the compiler. Tools
+/// use this backend-neutral sidecar for authority, size, and link inspection.
+pub fn compile_output_packages(output: &CompileOutput) -> Result<Vec<String>, CompileError> {
+    let Some(artifact) = output.module.artifact(COMPILE_PACKAGES_ARTIFACT_NAME) else {
+        return Ok(Vec::new());
+    };
+    if artifact.version != COMPILE_PACKAGES_ARTIFACT_VERSION {
+        return Err(CompileError::Codegen(format!(
+            "unsupported compile package artifact version {}",
+            artifact.version
+        )));
+    }
+    let text = std::str::from_utf8(&artifact.payload)
+        .map_err(|_| CompileError::Codegen("compile package artifact is not UTF-8".to_string()))?;
+    let packages = text.lines().map(str::to_string).collect::<Vec<_>>();
+    if packages.iter().any(|package| package.is_empty())
+        || packages.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(CompileError::Codegen(
+            "compile package artifact is not canonical".to_string(),
+        ));
+    }
+    Ok(packages)
+}
+
+fn module_links_package(module: &vo_common_core::Module, package: &str) -> bool {
+    module
+        .artifact(COMPILE_PACKAGES_ARTIFACT_NAME)
+        .filter(|artifact| artifact.version == COMPILE_PACKAGES_ARTIFACT_VERSION)
+        .and_then(|artifact| std::str::from_utf8(&artifact.payload).ok())
+        .is_some_and(|packages| packages.lines().any(|candidate| candidate == package))
+}
+
+/// Apply target-dependent invariants to a commonly verified semantic module.
+/// Bytecode generation stays portable; every executable backend calls this
+/// boundary before lowering, linking, or execution.
+pub fn verify_compile_output_for_target(
+    output: &CompileOutput,
+    target: &vo_target::TargetSpec,
+) -> Result<(), CompileError> {
+    let module = output.module.module();
+    vo_target::verify_module_for_target(module, target)
+        .map_err(|error| CompileError::Target(error.to_string()))?;
+    if target.host_surface() == vo_target::HostSurface::BareWasm {
+        if module_links_package(module, "github.com/vo-lang/ui/web/server") {
+            return Err(CompileError::Target(
+                "browser AOT cannot include github.com/vo-lang/ui/web/server authority".to_string(),
+            ));
+        }
+        for external in &module.externs {
+            let Ok(key) = vo_common_core::extern_key::decode_extern_name(&external.name) else {
+                continue;
+            };
+            if key.package() == "github.com/vo-lang/ui/web/server" {
+                return Err(CompileError::Target(
+                    "browser AOT cannot include github.com/vo-lang/ui/web/server authority"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// A compiled module together with the authority needed to verify that live
 /// project inputs still match the generation used to produce it.

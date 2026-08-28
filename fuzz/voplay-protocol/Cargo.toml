@@ -1,0 +1,28 @@
+[package]
+name = "vo-voplay-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.94.0"
+license = "MIT"
+description = "Voplay protocol and partition decoder fuzz targets"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.12"
+voplay-protocol = { path = "../../../voplay/rust/crates/voplay-protocol" }
+voplay-runtime = { path = "../../../voplay/rust/crates/voplay-runtime" }
+
+[[bin]]
+name = "voplay_decoders"
+path = "fuzz_targets/voplay_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

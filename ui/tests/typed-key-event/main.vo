@@ -1,0 +1,24 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/commands"
+	"strconv"
+)
+
+func App() ui.View {
+	last := ui.UseStringState("Key pending")
+	input := ui.AccessibleName(ui.TextInput("", "Press a key", ui.TextChange(func(value string) {})), "Key target")
+	input = ui.OnKeyDown(input, ui.KeyInput(func(event ui.KeyEvent) {
+		ui.SetStringState(last, "Key " + event.Key + " code " + event.Code + " modifiers " +
+			strconv.FormatInt(int64(event.Modifiers), 10))
+	}))
+	page := ui.AccessibleName(ui.Column(ui.Text(ui.StringStateValue(last)), input), "Command scope")
+	return commands.Bind(page, commands.New("probe", "Probe", commands.Key("p", 0), func() {
+		ui.SetStringState(last, "Command p")
+	}))
+}
+
+func main() {
+	ui.Mount(App)
+}

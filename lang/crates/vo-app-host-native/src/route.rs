@@ -303,7 +303,12 @@ fn normalize_input(
             InputModifiers::default(),
             PlatformInputPayload::VisibilityChanged { visible: *visible },
         ),
-        NativeInputKind::ModifiersChanged(_) | NativeInputKind::Resized { .. } => return Ok(None),
+        NativeInputKind::ModifiersChanged(_)
+        | NativeInputKind::Resized { .. }
+        | NativeInputKind::FileDragEntered { .. }
+        | NativeInputKind::FileDragMoved { .. }
+        | NativeInputKind::FileDragLeft
+        | NativeInputKind::FileDropped { .. } => return Ok(None),
         NativeInputKind::CloseRequested => unreachable!(),
     };
     Ok(Some(normalized))

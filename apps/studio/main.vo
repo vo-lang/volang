@@ -1,0 +1,30 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/studio/app"
+	studiohost "github.com/vo-lang/studio/services/host"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/task"
+)
+
+var studio *app.State
+
+func App() ui.View {
+	task.UseEffect("studio:bootstrap", func(ctx context.Context) func() {
+		if err := studio.Bootstrap(ctx); err != nil {
+			studio.ReportFailure("bootstrap", err)
+		}
+		ui.Invalidate()
+		return nil
+	})
+	return studio.View()
+}
+
+func main() {
+	host := studiohost.New()
+	studio = app.New(host.Services())
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

@@ -1,0 +1,25 @@
+[package]
+name = "vo-ui-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Single-owner render sessions for Volang UI"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+vo-ui-artifact.workspace = true
+vo-ui-core.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-reactive.workspace = true
+vo-ui-runtime.workspace = true
+vo-ui-scheduler.workspace = true
+
+[dev-dependencies]
+vo-ui-headless.workspace = true

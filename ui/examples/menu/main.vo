@@ -1,0 +1,36 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	autoSave := ui.UseBoolState(true)
+	status := ui.UseStringState("Ready")
+	menu := kit.MenuBar(theme, "Application menu",
+		kit.MenuAction(theme, "New", false, func(event ui.Event) {
+			ui.SetStringState(status, "Created a document")
+		}),
+		kit.MenuAction(theme, "Save", false, func(event ui.Event) {
+			ui.SetStringState(status, "Saved")
+		}),
+		kit.MenuToggleAction(theme, "Auto save", ui.BoolStateValue(autoSave), false, func(event ui.Event) {
+			ui.SetBoolState(autoSave, event.Checked)
+		}),
+	)
+	return kit.Screen(theme, ui.Gap(ui.Column(
+		menu,
+		kit.Card(theme, ui.Gap(ui.Column(
+			kit.Heading(theme, "Portable menus"),
+			kit.Body(theme, ui.StringStateValue(status)),
+		), theme.Space)),
+	), theme.Space * 2))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

@@ -1,0 +1,412 @@
+// Package data contains the official data-dense UIKit components. Models and
+// behavior stay renderer neutral; applications may reuse them with custom
+// recipes by replacing only the token-driven rendering functions.
+package data
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit/tokens"
+	"math"
+	"strconv"
+)
+
+type SortDirection int64
+
+const (
+	SortNone SortDirection = iota
+	SortAscending
+	SortDescending
+)
+
+type Sort struct {
+	ColumnKey string
+	Direction SortDirection
+}
+
+type Column struct {
+	Key string
+	Label string
+	Width float64
+	Sortable bool
+}
+
+type Cell struct {
+	ColumnKey string
+	Value string
+}
+
+type Row struct {
+	Key string
+	Cells []Cell
+	Selected bool
+	Disabled bool
+}
+
+type Point struct {
+	Label string
+	Value float64
+}
+
+// BarChart is the compact UIKit chart baseline for dashboards. It exposes one
+// accessible image summary and keeps every visual bar decorative.
+func BarChart(theme tokens.Theme, label string, points []Point, maximum float64) ui.View {
+	if label == "" || len(points) == 0 || len(points) > 256 || maximum <= 0 || math.IsNaN(maximum) ||
+		math.IsInf(maximum, 0) {
+		panic("UIKit bar chart contract is invalid")
+	}
+	bars := []ui.View{}
+	summary := ui.DerivedString("")
+	for index, point := range points {
+		if point.Label == "" || point.Value < 0 || point.Value > maximum || math.IsNaN(point.Value) ||
+			math.IsInf(point.Value, 0) {
+			panic("UIKit bar chart point is invalid")
+		}
+		if index != 0 {
+			summary += ", "
+		}
+		summary += point.Label + " " + strconv.FormatFloat(point.Value, 'f', 0, 64)
+		bar := ui.Width(ui.Height(ui.Background(ui.Box(), theme.Accent), 12), point.Value / maximum * 100)
+		bars = append(bars, ui.Key(ui.Role(ui.Row(ui.Width(ui.Text(point.Label), 80), bar), "presentation"), "chart:" +
+			point.Label))
+	}
+	return ui.AccessibleDescription(ui.AccessibleName(ui.Role(ui.Gap(ui.Column(bars...), theme.Space /
+		2), "img"), label), summary)
+}
+
+func validateColumns(columns []Column) {
+	if len(columns) == 0 {
+		panic("UIKit data table requires at least one column")
+	}
+	for index, column := range columns {
+		if column.Key == "" || column.Label == "" || math.IsNaN(column.Width) ||
+			math.IsInf(column.Width, 0) ||
+			column.Width < 0 {
+			panic("UIKit data table column is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if columns[previous].Key == column.Key {
+				panic("UIKit data table column keys must be unique")
+			}
+		}
+	}
+}
+
+func validateRows(rows []Row) {
+	for index, row := range rows {
+		if row.Key == "" {
+			panic("UIKit data row requires a stable key")
+		}
+		for previous := 0; previous < index; previous++ {
+			if rows[previous].Key == row.Key {
+				panic("UIKit data row keys must be unique")
+			}
+		}
+	}
+}
+
+func gridTracks(columns []Column) string {
+	tracks := ""
+	for index, column := range columns {
+		if index != 0 {
+			tracks += " "
+		}
+		if column.Width > 0 {
+			tracks += strconv.FormatFloat(column.Width, 'f', 0, 64) + "px"
+		} else {
+			tracks += "minmax(120px, 1fr)"
+		}
+	}
+	return tracks
+}
+
+func sortDescription(column Column, sort Sort) string {
+	if sort.ColumnKey != column.Key || sort.Direction == SortNone {
+		return "Not sorted"
+	}
+	if sort.Direction == SortAscending {
+		return "Sorted ascending"
+	}
+	if sort.Direction == SortDescending {
+		return "Sorted descending"
+	}
+	panic("UIKit data table sort direction is invalid")
+}
+
+func headerCell(theme tokens.Theme, column Column, sort Sort, onSort func(string)) ui.View {
+	label := ui.DerivedString(column.Label)
+	if sort.ColumnKey == column.Key && sort.Direction == SortAscending {
+		label += " ascending"
+	} else if sort.ColumnKey == column.Key && sort.Direction == SortDescending {
+		label += " descending"
+	}
+	var content ui.View
+	if column.Sortable {
+		content = ui.Button(label, func(event ui.Event) {
+			onSort(column.Key)
+		})
+	} else {
+		content = ui.Text(label)
+	}
+	content = ui.AccessibleDescription(ui.AccessibleName(ui.Role(content, "columnheader"), column.Label), sortDescription(column, sort))
+	return ui.Background(ui.Padding(ui.FontWeight(content, 600), theme.Space), theme.Surface)
+}
+
+func header(theme tokens.Theme, columns []Column, sort Sort, onSort func(string)) ui.View {
+	cells := []ui.View{}
+	for _, column := range columns {
+		cells = append(cells, ui.Key(headerCell(theme, column, sort, onSort), "data-header:" + column.Key))
+	}
+	return ui.Role(ui.GridColumns(ui.Grid(cells...), gridTracks(columns)), "row")
+}
+
+func valueFor(row Row, column string) string {
+	for _, cell := range row.Cells {
+		if cell.ColumnKey == column {
+			return cell.Value
+		}
+	}
+	return ""
+}
+
+func bodyCell(theme tokens.Theme, row Row, column Column, first bool, onActivate func(string)) ui.View {
+	value := valueFor(row, column.Key)
+	var content ui.View
+	role := ui.DerivedString("gridcell")
+	if first {
+		role = "rowheader"
+		content = ui.Button(value, func(event ui.Event) {
+			onActivate(row.Key)
+		})
+	} else {
+		content = ui.Text(value)
+	}
+	content = ui.Disabled(ui.Selected(ui.AccessibleName(ui.Role(content, role), value), row.Selected), row.Disabled)
+	return ui.Padding(ui.Foreground(content, theme.Foreground), theme.Space)
+}
+
+func bodyRow(theme tokens.Theme, columns []Column, row Row, onActivate func(string)) ui.View {
+	cells := []ui.View{}
+	for index, column := range columns {
+		cells = append(cells, ui.Key(bodyCell(theme, row, column, index == 0, onActivate), "data-cell:" +
+			row.Key +
+			":" +
+			column.Key))
+	}
+	content := ui.GridColumns(ui.Grid(cells...), gridTracks(columns))
+	content = ui.Selected(ui.Disabled(ui.AccessibleName(ui.Role(content, "row"), row.Key), row.Disabled), row.Selected)
+	if row.Selected {
+		content = ui.Background(content, theme.Accent)
+	}
+	return ui.Key(content, "data-row:" + row.Key)
+}
+
+// Table renders a semantic sortable grid with stable row and cell identity.
+// The first cell is the row's keyboard activation target.
+func Table(theme tokens.Theme, label string, columns []Column, rows []Row, sort Sort, onSort func(string), onRowActivate func(string)) ui.View {
+	validateColumns(columns)
+	validateRows(rows)
+	if label == "" || onSort == nil || onRowActivate == nil {
+		panic("UIKit data table requires a label and callbacks")
+	}
+	children := []ui.View{ui.Key(header(theme, columns, sort, onSort), "data-header")}
+	for _, row := range rows {
+		children = append(children, bodyRow(theme, columns, row, onRowActivate))
+	}
+	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
+	return ui.Radius(ui.Background(grid, theme.Background), theme.Radius)
+}
+
+type VisibleRange struct {
+	Start int64
+	End int64
+}
+
+func visibleRange(count int64, itemHeight float64, scrollOffset float64, viewportHeight float64, overscan int64) VisibleRange {
+	if count < 0 || itemHeight <= 0 || math.IsNaN(itemHeight) || math.IsInf(itemHeight, 0) ||
+		scrollOffset < 0 ||
+		viewportHeight < 0 ||
+		overscan < 0 ||
+		overscan > 256 {
+		panic("UIKit virtual collection geometry is invalid")
+	}
+	start := int64(math.Floor(scrollOffset / itemHeight)) - overscan
+	if start < 0 {
+		start = 0
+	}
+	end := int64(math.Ceil((scrollOffset + viewportHeight) / itemHeight)) + overscan
+	if end > count {
+		end = count
+	}
+	if end < start {
+		end = start
+	}
+	return VisibleRange{Start: start, End: end}
+}
+
+// VirtualTable bounds mounted rows while preserving logical space and stable
+// row keys. It shares the semantic and activation contract of Table.
+func VirtualTable(theme tokens.Theme, label string, columns []Column, rows []Row, sort Sort, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, onSort func(string), onRowActivate func(string)) ui.View {
+	validateColumns(columns)
+	validateRows(rows)
+	if label == "" || onSort == nil || onRowActivate == nil {
+		panic("UIKit virtual data table requires a label and callbacks")
+	}
+	window := visibleRange(int64(len(rows)), rowHeight, scrollOffset, viewportHeight, overscan)
+	children := []ui.View{ui.Key(header(theme, columns, sort, onSort), "data-header")}
+	if window.Start > 0 {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(window.Start) * rowHeight), "presentation"), "data-before"))
+	}
+	for index := window.Start; index < window.End; index++ {
+		children = append(children, bodyRow(theme, columns, rows[index], onRowActivate))
+	}
+	if window.End < int64(len(rows)) {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(int64(len(rows)) -
+			window.End) *
+			rowHeight), "presentation"), "data-after"))
+	}
+	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
+	return ui.Radius(ui.Background(grid, theme.Background), theme.Radius)
+}
+
+// VirtualTableProvider keeps both model construction and view materialization
+// proportional to the visible range. rowAt must return a stable key for every
+// requested logical index.
+func VirtualTableProvider(theme tokens.Theme, label string, columns []Column, count int64, sort Sort, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, rowAt func(int64) Row, onSort func(string), onRowActivate func(string)) ui.View {
+	validateColumns(columns)
+	if label == "" || count < 0 || count > 100000000 || rowAt == nil || onSort == nil ||
+		onRowActivate == nil {
+		panic("UIKit virtual data provider contract is invalid")
+	}
+	window := visibleRange(count, rowHeight, scrollOffset, viewportHeight, overscan)
+	children := []ui.View{ui.Key(header(theme, columns, sort, onSort), "data-header")}
+	if window.Start > 0 {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(window.Start) * rowHeight), "presentation"), "data-before"))
+	}
+	seen := make(map[string]bool)
+	for index := window.Start; index < window.End; index++ {
+		row := rowAt(index)
+		if row.Key == "" || seen[row.Key] {
+			panic("UIKit virtual data provider returned an invalid or duplicate visible key")
+		}
+		seen[row.Key] = true
+		children = append(children, bodyRow(theme, columns, row, onRowActivate))
+	}
+	if window.End < count {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(count - window.End) *
+			rowHeight), "presentation"), "data-after"))
+	}
+	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
+	return ui.Radius(ui.Background(grid, theme.Background), theme.Radius)
+}
+
+type TreeItem struct {
+	Key string
+	Label string
+	Depth int64
+	HasChildren bool
+	Expanded bool
+	Selected bool
+	Disabled bool
+}
+
+func treeRow(theme tokens.Theme, item TreeItem, onToggle func(string), onSelect func(string)) ui.View {
+	if item.Key == "" || item.Label == "" || item.Depth < 0 || item.Depth > 64 {
+		panic("UIKit tree item is invalid")
+	}
+	label := ui.DerivedString(item.Label)
+	if item.HasChildren {
+		if item.Expanded {
+			label = "− " + label
+		} else {
+			label = "+ " + label
+		}
+	}
+	row := ui.Button(label, func(event ui.Event) {
+		onSelect(item.Key)
+		if item.HasChildren {
+			onToggle(item.Key)
+		}
+	})
+	row = ui.OnKeyDown(row, func(event ui.Event) {
+		if item.HasChildren &&
+			((event.Key == "ArrowRight" && !item.Expanded) || (event.Key == "ArrowLeft" && item.Expanded)) {
+			onToggle(item.Key)
+		}
+	})
+	row = ui.Expanded(ui.Selected(ui.Disabled(ui.AccessibleName(ui.Role(row, "treeitem"), item.Label), item.Disabled), item.Selected), item.Expanded)
+	row = ui.Foreground(ui.Background(row, theme.Surface), theme.Foreground)
+	row = ui.BorderWidth(row, 0)
+	row = ui.Radius(row, theme.Radius)
+	if item.HasChildren {
+		row = ui.FontWeight(row, 650)
+	}
+	row = ui.Padding(row, theme.Space)
+	if item.Selected {
+		row = ui.Background(row, theme.Accent)
+	}
+	if item.Depth > 0 {
+		row = ui.Row(ui.Width(ui.Box(), float64(item.Depth) * theme.Space * 2), ui.Flex(row, 1))
+	}
+	return ui.Key(row, "tree-item:" + item.Key)
+}
+
+// Tree consumes a flattened visible tree. Applications retain expansion and
+// selection state, which keeps domain ownership outside the visual recipe.
+func Tree(theme tokens.Theme, label string, items []TreeItem, onToggle func(string), onSelect func(string)) ui.View {
+	if label == "" || onToggle == nil || onSelect == nil {
+		panic("UIKit tree requires a label and callbacks")
+	}
+	children := []ui.View{}
+	for _, item := range items {
+		children = append(children, treeRow(theme, item, onToggle, onSelect))
+	}
+	return ui.AccessibleName(ui.Role(ui.Column(children...), "tree"), label)
+}
+
+// VirtualTree consumes the same flattened logical tree and mounts only the
+// visible semantic items plus layout spacers.
+func VirtualTree(theme tokens.Theme, label string, items []TreeItem, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, onToggle func(string), onSelect func(string)) ui.View {
+	if label == "" || onToggle == nil || onSelect == nil {
+		panic("UIKit virtual tree requires a label and callbacks")
+	}
+	window := visibleRange(int64(len(items)), rowHeight, scrollOffset, viewportHeight, overscan)
+	children := []ui.View{}
+	if window.Start > 0 {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(window.Start) * rowHeight), "presentation"), "tree-before"))
+	}
+	for index := window.Start; index < window.End; index++ {
+		children = append(children, treeRow(theme, items[index], onToggle, onSelect))
+	}
+	if window.End < int64(len(items)) {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(int64(len(items)) -
+			window.End) *
+			rowHeight), "presentation"), "tree-after"))
+	}
+	return ui.AccessibleName(ui.Role(ui.Column(children...), "tree"), label)
+}
+
+func VirtualTreeProvider(theme tokens.Theme, label string, count int64, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, itemAt func(int64) TreeItem, onToggle func(string), onSelect func(string)) ui.View {
+	if label == "" || count < 0 || count > 100000000 || itemAt == nil || onToggle == nil ||
+		onSelect == nil {
+		panic("UIKit virtual tree provider contract is invalid")
+	}
+	window := visibleRange(count, rowHeight, scrollOffset, viewportHeight, overscan)
+	children := []ui.View{}
+	if window.Start > 0 {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(window.Start) * rowHeight), "presentation"), "tree-before"))
+	}
+	seen := make(map[string]bool)
+	for index := window.Start; index < window.End; index++ {
+		item := itemAt(index)
+		if item.Key == "" || seen[item.Key] {
+			panic("UIKit virtual tree provider returned an invalid or duplicate visible key")
+		}
+		seen[item.Key] = true
+		children = append(children, treeRow(theme, item, onToggle, onSelect))
+	}
+	if window.End < count {
+		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(count - window.End) *
+			rowHeight), "presentation"), "tree-after"))
+	}
+	return ui.AccessibleName(ui.Role(ui.Column(children...), "tree"), label)
+}

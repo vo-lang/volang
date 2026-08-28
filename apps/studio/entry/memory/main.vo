@@ -1,0 +1,25 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/studio/app"
+	"github.com/vo-lang/studio/services/memory"
+	"github.com/vo-lang/ui"
+)
+
+var studio *app.State
+
+func App() ui.View {
+	return studio.View()
+}
+
+func main() {
+	host := memory.New()
+	studio = app.New(host.Services())
+	if err := studio.Bootstrap(context.Background()); err != nil {
+		panic(err.Error())
+	}
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

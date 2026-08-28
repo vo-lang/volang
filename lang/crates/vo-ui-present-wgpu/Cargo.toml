@@ -1,0 +1,16 @@
+[package]
+name = "vo-ui-present-wgpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "GPU presenter for prepared Volang UI native paint scenes"
+publish = false
+
+[dependencies]
+vo-app-host-native = { workspace = true, features = ["native-wgpu"] }
+vo-app-protocol.workspace = true
+vo-app-runtime = { workspace = true, features = ["std"] }
+vo-ui-text-native.workspace = true

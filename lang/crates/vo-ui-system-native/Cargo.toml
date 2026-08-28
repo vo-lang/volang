@@ -1,0 +1,25 @@
+[package]
+name = "vo-ui-system-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native clipboard, dialog, menu, and drag/drop services for Volang UI"
+publish = false
+
+[features]
+default = ["clipboard", "dialogs", "menus"]
+clipboard = ["dep:arboard"]
+dialogs = ["dep:rfd"]
+menus = ["dep:muda"]
+
+[dependencies]
+arboard = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+vo-app-host-native.workspace = true
+vo-ui-system.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+muda = { workspace = true, optional = true }

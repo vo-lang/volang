@@ -235,6 +235,7 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
             command_description(&wasm_target.build_command)
         );
     }
+    run_wasm_prepare_commands(root, wasm_target)?;
     let plan_path =
         std::env::temp_dir().join(format!("volang-wasm-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
@@ -243,6 +244,10 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
     command.arg(&plan_path);
     command.args(["--format", "text"]);
     command.current_dir(root);
+    command.env(
+        "VO_TEST_PROFILE",
+        if opts.release { "release" } else { "debug" },
+    );
     for (key, value) in wasm_target.env.clone() {
         command.env(key, value);
     }
@@ -311,6 +316,7 @@ fn run_wasm_tests_json(
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    run_wasm_prepare_commands(root, wasm_target)?;
     let plan_path =
         std::env::temp_dir().join(format!("volang-wasm-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
@@ -319,6 +325,10 @@ fn run_wasm_tests_json(
     command.arg(&plan_path);
     command.args(["--format", "json"]);
     command.current_dir(root);
+    command.env(
+        "VO_TEST_PROFILE",
+        if opts.release { "release" } else { "debug" },
+    );
     for (key, value) in wasm_target.env.clone() {
         command.env(key, value);
     }
@@ -330,6 +340,22 @@ fn run_wasm_tests_json(
         &output.stderr,
         &command_description(&wasm_target.runner_command),
     )
+}
+
+fn run_wasm_prepare_commands(root: &Path, target: &crate::test_config::TestTarget) -> Result<()> {
+    for args in &target.prepare_commands {
+        let mut command = command_from_args(args, "WASM prepare command")?;
+        let output = command.current_dir(root).output()?;
+        if !output.status.success() {
+            bail!(
+                "test command failed: {}\nstdout:\n{}\nstderr:\n{}",
+                command_description(args),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(())
 }
 
 fn aggregate_json_outputs(outputs: Vec<JsonRunOutput>) -> Result<JsonRunOutput> {

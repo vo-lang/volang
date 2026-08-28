@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Volang application preview</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body, #preview-root { width: 100%; min-height: 100%; margin: 0; }
+    body { background: #0b0e14; color: #edf2fa; }
+    #preview-root { display: flex; overflow: auto; }
+    #preview-root > [data-volang-node] { min-width: 0; min-height: 0; flex: 1; }
+    button, input, textarea { font: inherit; color: inherit; }
+    button { margin: 0; border: 0; appearance: none; cursor: pointer; text-align: inherit; }
+    #preview-error { display: none; margin: 16px; padding: 14px; border-radius: 10px;
+      color: #fff; background: #5c111c; white-space: pre-wrap; font: 12px/1.5 ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <main id="preview-root"></main>
+  <pre id="preview-error" role="alert"></pre>
+  <script type="module" src="/studio-surface.js"></script>
+</body>
+</html>

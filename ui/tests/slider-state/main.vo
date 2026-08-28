@@ -1,0 +1,28 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"strconv"
+)
+
+func App() ui.View {
+	value := ui.UseFloatState(72)
+	eventValue := ui.UseStringState("none")
+	return ui.Column(
+		ui.Text("current=" + strconv.FormatFloat(ui.FloatStateValue(value), 'f', -1, 64)),
+		ui.Text("event=" + ui.StringStateValue(eventValue)),
+		ui.Slider(ui.FloatStateValue(value), 0, 100, 1, "Quality", func(event ui.Event) {
+			ui.SetStringState(eventValue, event.Text)
+			next, err := strconv.ParseFloat(event.Text, 64)
+			if err == nil {
+				ui.SetFloatState(value, next)
+			}
+		}),
+	)
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

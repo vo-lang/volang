@@ -2185,6 +2185,7 @@ impl Gc {
     /// Fail-closed barrier entry for runtime ABIs that cannot surface an
     /// invalid-parent panic. Both references are canonicalized exactly once in
     /// the owning collector's common case.
+    #[cfg(feature = "std")]
     pub(crate) fn write_barrier_if_valid(&mut self, parent: GcRef, child: GcRef) {
         if parent.is_null() || child.is_null() {
             return;

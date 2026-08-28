@@ -6,6 +6,26 @@ type Error struct {
 	cause error
 }
 
+// These protocol interfaces make error-tree traversal ordinary language
+// dispatch. Keeping the method calls statically typed avoids reflection,
+// preserves pointer/value method-set rules, and lets every backend optimize
+// the standard error path in the same way.
+type unwrapper interface {
+	Unwrap() error
+}
+
+type multiUnwrapper interface {
+	Unwrap() []error
+}
+
+type isMatcher interface {
+	Is(error) bool
+}
+
+type asMatcher interface {
+	As(any) bool
+}
+
 func (e *Error) Error() string {
 	if e.cause == nil {
 		return e.msg
@@ -38,11 +58,8 @@ func Unwrap(err error) error {
 	if err == nil {
 		return nil
 	}
-	// Try calling Unwrap method via dynamic access
-	if result, e := err~>Unwrap(); e == nil {
-		if unwrapped, ok := result.(error); ok {
-			return unwrapped
-		}
+	if value, ok := err.(unwrapper); ok {
+		return value.Unwrap()
 	}
 	return nil
 }
@@ -54,11 +71,11 @@ func unwrapChildren(err error) []error {
 	if err == nil {
 		return nil
 	}
-	if result, e := err~>Unwrap(); e == nil {
-		if children, ok := result.([]error); ok {
-			return children
-		}
-		if child, ok := result.(error); ok && child != nil {
+	if value, ok := err.(multiUnwrapper); ok {
+		return value.Unwrap()
+	}
+	if value, ok := err.(unwrapper); ok {
+		if child := value.Unwrap(); child != nil {
 			return []error{child}
 		}
 	}
@@ -138,10 +155,8 @@ func As(err error, target any) bool {
 		if assignTo(current, target) {
 			return true
 		}
-		if result, e := current~>As(target); e == nil {
-			if ok, valid := result.(bool); valid && ok {
-				return true
-			}
+		if matcher, ok := current.(asMatcher); ok && matcher.As(target) {
+			return true
 		}
 		children := unwrapChildren(current)
 		for i := len(children) - 1; i >= 0; i-- {
@@ -175,10 +190,8 @@ func Is(err error, target error) bool {
 		if equal(current, target) {
 			return true
 		}
-		if result, e := current~>Is(target); e == nil {
-			if ok, valid := result.(bool); valid && ok {
-				return true
-			}
+		if matcher, ok := current.(isMatcher); ok && matcher.Is(target) {
+			return true
 		}
 		children := unwrapChildren(current)
 		for i := len(children) - 1; i >= 0; i-- {

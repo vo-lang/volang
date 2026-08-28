@@ -1,0 +1,16 @@
+package main
+
+import (
+	"strings"
+)
+
+func main() {
+	// The source allocation intentionally ends close to a WebAssembly page
+	// boundary. []byte then grows memory while it still needs the source bytes.
+	source := strings.Repeat("volang", 10000)
+	bytes := []byte(source)
+	assert(len(bytes) == 60000, "string-to-byte conversion lost its length across memory growth")
+	assert(string(bytes[:6]) == "volang", "string-to-byte conversion lost its prefix across memory growth")
+	assert(string(bytes[len(bytes) - 6:]) == "volang", "string-to-byte conversion lost its suffix across memory growth")
+	println("wasm-aot-string-bytes-growth: PASS")
+}

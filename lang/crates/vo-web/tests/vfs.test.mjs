@@ -130,10 +130,11 @@ class MemoryOPFSDirectory {
   }
 }
 
-async function withMockOPFS(run) {
+async function withMockOPFS(run, { page = true } = {}) {
   const controller = { failNextWrite: false, getDirectoryCalls: 0 };
   const root = new MemoryOPFSDirectory(controller);
-  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: {
@@ -145,11 +146,21 @@ async function withMockOPFS(run) {
       },
     },
   });
+  if (page) {
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { addEventListener() {} },
+    });
+  } else {
+    delete globalThis.window;
+  }
   try {
     await run({ controller, root });
   } finally {
-    if (previous) Object.defineProperty(globalThis, 'navigator', previous);
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
     else delete globalThis.navigator;
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else delete globalThis.window;
   }
 }
 
@@ -391,4 +402,15 @@ test('OPFS checkpoints are scoped, preserve metadata, and report storage failure
     assert.equal(reloaded.stat('/tmp/persisted')[3], persistedTime);
     assert.equal(reloaded.stat('/tmp')[2], 0o711);
   });
+});
+
+test('Worker VFS stays memory-only when OPFS exists on the worker navigator', async () => {
+  await withMockOPFS(async ({ controller, root }) => {
+    const workerFs = new VirtualFS();
+    await workerFs.init();
+    assert.equal(controller.getDirectoryCalls, 0);
+    assert.equal(workerFs.writeFile('/tmp/compiler-snapshot', encode('transient'), 0o600), null);
+    await workerFs.forceFlush();
+    assert.equal(root.children.has('vo-web-vfs-v1'), false);
+  }, { page: false });
 });

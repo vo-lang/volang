@@ -1,0 +1,178 @@
+format = 1
+version = "0.1.4"
+
+[[section]]
+id = "start"
+title = "Start here"
+
+[[section.page]]
+id = "introduction"
+title = "Introduction"
+summary = "Understand Volang's language, project, runtime, and deployment model."
+file = "lang/docs/guides/introduction.md"
+
+[[section.page]]
+id = "installation"
+title = "Installation"
+summary = "Install the CLI, verify the toolchain, and choose a development workflow."
+file = "lang/docs/guides/installation.md"
+
+[[section.page]]
+id = "hello-world"
+title = "Hello world"
+summary = "Run a script, create a module, test it, and build native or Wasm AOT output."
+file = "lang/docs/guides/hello-world.md"
+
+[[section.page]]
+id = "language-tour"
+title = "Language tour"
+summary = "Learn packages, values, functions, types, control flow, errors, and concurrency."
+file = "lang/docs/guides/language-tour.md"
+
+[[section.page]]
+id = "vo-for-gophers"
+title = "Volang for Go programmers"
+summary = "Map familiar Go syntax to Volang's distinct semantics and runtime model."
+file = "lang/docs/vo-for-gophers.md"
+
+[[section]]
+id = "language"
+title = "Language"
+
+[[section.page]]
+id = "error-handling"
+title = "Errors and cleanup"
+summary = "Learn error handling with values, the question operator, fail, defer, errdefer, panic, and recover."
+file = "lang/docs/guides/error-handling.md"
+
+[[section.page]]
+id = "dynamic-access"
+title = "Dynamic access"
+summary = "Safely traverse dynamic data with the typed dynamic-access protocol."
+file = "lang/docs/guides/dynamic-access.md"
+
+[[section.page]]
+id = "concurrency"
+title = "Goroutines, channels, and islands"
+summary = "Structure concurrent work, cancellation, channel ownership, and cross-island messages."
+file = "lang/docs/guides/concurrency.md"
+
+[[section.page]]
+id = "modules"
+title = "Modules and dependencies"
+summary = "Own dependency intent in vo.mod and one authenticated selection in vo.lock."
+file = "lang/docs/guides/modules.md"
+
+[[section.page]]
+id = "standard-library"
+title = "Standard library"
+summary = "Find the maintained core, encoding, I/O, networking, and runtime packages."
+file = "lang/docs/guides/standard-library.md"
+
+[[section]]
+id = "toolchain"
+title = "Toolchain"
+
+[[section.page]]
+id = "cli"
+title = "Command-line reference"
+summary = "Use the current run, check, test, format, module, generation, release, and UI commands."
+file = "lang/docs/guides/cli.md"
+
+[[section.page]]
+id = "execution-backends"
+title = "Execution backends"
+summary = "Choose VM or JIT for development and Native AOT or Core Wasm AOT for release."
+file = "lang/docs/guides/execution-backends.md"
+
+[[section.page]]
+id = "embedding-rust"
+title = "Embedding Volang in Rust"
+summary = "Compile, execute, capture output, interrupt work, and provide host capabilities from Rust."
+file = "lang/docs/guides/embedding-rust.md"
+
+[[section]]
+id = "reference"
+title = "Reference"
+
+[[section.page]]
+id = "language-specification"
+title = "Language specification"
+summary = "Normative syntax, types, memory behavior, errors, functions, and control flow."
+file = "lang/docs/spec/language.md"
+
+[[section.page]]
+id = "module-specification"
+title = "Module specification"
+summary = "Normative module identity, locking, workspaces, registries, and release rules."
+file = "lang/docs/spec/module.md"
+
+[[section.page]]
+id = "channel-specification"
+title = "Channel and island specification"
+summary = "Normative scheduling, channel, port, island, cancellation, and deadlock behavior."
+file = "lang/docs/spec/channel.md"
+
+[[section.page]]
+id = "dynamic-specification"
+title = "Dynamic access specification"
+summary = "Normative dynamic operation, protocol dispatch, conversion, and error behavior."
+file = "lang/docs/spec/dynamic.md"
+
+[[section.page]]
+id = "native-ffi-specification"
+title = "Native FFI specification"
+summary = "Normative native extension ABI, ownership, validation, and lifecycle rules."
+file = "lang/docs/spec/native-ffi.md"
+
+[[section.page]]
+id = "runtime-memory-specification"
+title = "Runtime memory specification"
+summary = "Normative object layout, roots, GC interaction, and runtime memory contracts."
+file = "lang/docs/spec/runtime-memory.md"
+
+[[section]]
+id = "ui"
+title = "Official UI"
+
+[[section.page]]
+id = "ui-getting-started"
+title = "UI getting started"
+summary = "Create, develop, test, build, and package a pure-Volang UI application."
+file = "ui/docs/getting-started.md"
+
+[[section.page]]
+id = "ui-authoring"
+title = "UI authoring guide"
+summary = "Compose typed views, state, effects, events, responsive layouts, and UIKit components."
+file = "ui/docs/authoring-guide.md"
+
+[[section.page]]
+id = "ui-component-model"
+title = "UI component model"
+summary = "Understand identity, state slots, effects, invalidation, reconciliation, and concurrency."
+file = "ui/docs/component-model-v2.md"
+
+[[section.page]]
+id = "ui-testing"
+title = "UI testing and troubleshooting"
+summary = "Exercise semantic interactions and diagnose VM, JIT, Web, and desktop behavior."
+file = "ui/docs/testing-troubleshooting.md"
+
+[[section.page]]
+id = "ui-platforms"
+title = "Web and desktop products"
+summary = "Design one application for Core Wasm AOT Web and Native AOT desktop hosts."
+file = "ui/docs/web-desktop-products.md"
+
+[[section.page]]
+id = "ui-accessibility"
+title = "Accessibility and localization"
+summary = "Build keyboard, screen-reader, locale, direction, and reduced-motion support into products."
+file = "ui/docs/accessibility-localization.md"
+
+[[section.page]]
+id = "ui-security"
+title = "UI security"
+summary = "Apply capability, authority, isolation, payload, navigation, and release boundaries."
+file = "ui/docs/security.md"

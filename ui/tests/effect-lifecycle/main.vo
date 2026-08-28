@@ -1,0 +1,53 @@
+// Permanent E2 render, commit, post-commit effect, and disposal probe.
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/task"
+)
+
+var phase = "idle"
+
+func readPhase() string {
+	return phase
+}
+
+func publishPhase(value string) {
+	phase = value
+	ui.Invalidate()
+}
+
+func EffectChild() ui.View {
+	task.UseEffect("subscription", func(ctx context.Context) func() {
+		publishPhase("started")
+		return func() {
+			if ctx.Err() == nil {
+				publishPhase("ordering violation")
+				return
+			}
+			publishPhase("cleaned")
+		}
+	})
+	return kit.Panel(ui.TestID(kit.Paragraph("Effect " + readPhase()), "effect-phase"))
+}
+
+func App() ui.View {
+	show := ui.UseBoolState(true)
+	return kit.Application(func() ui.View {
+		content := kit.Paragraph("Effect " + readPhase())
+		if ui.BoolStateValue(show) {
+			content = EffectChild()
+		}
+		return kit.Page(ui.Column(kit.Title("Effect lifecycle"), content, kit.ActionButton("Remove effect", !ui.BoolStateValue(show), func() {
+			ui.SetBoolState(show, false)
+		})))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

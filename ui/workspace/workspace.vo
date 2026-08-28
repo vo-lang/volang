@@ -1,0 +1,747 @@
+// Package workspace owns bounded split, dock, tab, panel, and restoration
+// models. Stable node and panel IDs preserve component identity across layout
+// adaptation, windows, monitors, and persistence.
+package workspace
+
+import (
+	"encoding/json"
+	"errors"
+	"github.com/vo-lang/ui"
+	"math"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+const (
+	MaxNodes = 4096
+	MaxDepth = 64
+	MaxPanels = 2048
+	MinimumRatio = 0.05
+	MaximumRatio = 0.95
+)
+
+type Axis int64
+
+const (
+	Horizontal Axis = iota
+	Vertical
+)
+
+type NodeKind int64
+
+const (
+	PanelNode NodeKind = iota
+	TabsNode
+	SplitNode
+)
+
+type DockPosition int64
+
+const (
+	DockCenter DockPosition = iota
+	DockLeft
+	DockRight
+	DockTop
+	DockBottom
+)
+
+type Panel struct {
+	ID string
+	Title string
+	Closable bool
+	Content func() ui.View
+}
+
+type Node struct {
+	ID string
+	Kind NodeKind
+	PanelID string
+	Axis Axis
+	Ratio float64
+	Active int
+	Children []Node
+}
+
+func PanelLayout(id string, panelID string) Node {
+	return Node{ID: id, Kind: PanelNode, PanelID: panelID}
+}
+
+func Tabs(id string, active int, children ...Node) Node {
+	return Node{ID: id, Kind: TabsNode, Active: active, Children: append([]Node(nil), children...)}
+}
+
+func Split(id string, axis Axis, ratio float64, first Node, second Node) Node {
+	return Node{ID: id, Kind: SplitNode, Axis: axis, Ratio: ratio, Children: []Node{first, second}}
+}
+
+type Options struct {
+	SplitterSize float64
+	KeyboardStep float64
+	TabPadding float64
+	TabBarBackground uint32
+	TabBackground uint32
+	ActiveTabBackground uint32
+	TabForeground uint32
+	ActiveTabForeground uint32
+	SplitterColor uint32
+}
+
+func DefaultOptions() Options {
+	return Options{
+		SplitterSize: 6, KeyboardStep: 0.025, TabPadding: 8,
+		TabBarBackground: 0xff0b0e14, TabBackground: 0xff111722,
+		ActiveTabBackground: 0xff182131, TabForeground: 0xff9ca9bd,
+		ActiveTabForeground: 0xffedf2fa, SplitterColor: 0xff2b3548,
+	}
+}
+
+func (options Options) validate() error {
+	if math.IsNaN(options.SplitterSize) || math.IsInf(options.SplitterSize, 0) ||
+		options.SplitterSize < 2 ||
+		options.SplitterSize > 64 ||
+		math.IsNaN(options.KeyboardStep) ||
+		math.IsInf(options.KeyboardStep, 0) ||
+		options.KeyboardStep <= 0 ||
+		options.KeyboardStep > 0.25 ||
+		math.IsNaN(options.TabPadding) ||
+		math.IsInf(options.TabPadding, 0) ||
+		options.TabPadding < 0 ||
+		options.TabPadding > 64 {
+		return errors.New("workspace view options are invalid")
+	}
+	return nil
+}
+
+type resizeSession struct {
+	nodeID string
+	pointerID int64
+	start float64
+	ratio float64
+	extent float64
+}
+
+type Model struct {
+	mu sync.RWMutex
+	Root Node
+	panels map[string]Panel
+	extents map[string]float64
+	resize resizeSession
+	nextLayoutIdentity uint64
+}
+
+type validation struct {
+	Seen map[string]bool
+	Panels map[string]bool
+	Count int
+}
+
+func cloneNode(node Node) Node {
+	copy := node
+	copy.Children = make([]Node, len(node.Children))
+	for index, child := range node.Children {
+		copy.Children[index] = cloneNode(child)
+	}
+	return copy
+}
+
+func findPanelNode(node Node, panelID string) (Node, bool) {
+	if node.Kind == PanelNode && node.PanelID == panelID {
+		return cloneNode(node), true
+	}
+	for _, child := range node.Children {
+		if result, ok := findPanelNode(child, panelID); ok {
+			return result, true
+		}
+	}
+	return Node{}, false
+}
+
+func containsNodeID(node Node, id string) bool {
+	if node.ID == id {
+		return true
+	}
+	for _, child := range node.Children {
+		if containsNodeID(child, id) {
+			return true
+		}
+	}
+	return false
+}
+
+func (model *Model) freshNodeID(root Node, prefix string) string {
+	for {
+		model.nextLayoutIdentity++
+		id := "workspace-" + prefix + "-" + strconv.FormatUint(model.nextLayoutIdentity, 10)
+		if !containsNodeID(root, id) {
+			return id
+		}
+	}
+}
+
+func New(root Node, panels []Panel) (*Model, error) {
+	if len(panels) == 0 || len(panels) > MaxPanels {
+		return nil, errors.New("workspace panel count is invalid")
+	}
+	model := &Model{
+		Root: cloneNode(root), panels: make(map[string]Panel), extents: make(map[string]float64),
+	}
+	for _, panel := range panels {
+		if panel.ID == "" || panel.Title == "" || panel.Content == nil || len(panel.ID) > 1024 ||
+			model.panels[panel.ID].ID != "" {
+			return nil, errors.New("workspace panel is invalid or duplicated")
+		}
+		model.panels[panel.ID] = panel
+	}
+	if err := model.validateRoot(model.Root); err != nil {
+		return nil, err
+	}
+	return model, nil
+}
+
+func (model *Model) validateNode(node Node, depth int, state *validation) error {
+	if depth > MaxDepth || state.Count >= MaxNodes || node.ID == "" || len(node.ID) > 1024 ||
+		state.Seen[node.ID] {
+		return errors.New("workspace node limit, identity, or depth is invalid")
+	}
+	state.Seen[node.ID] = true
+	state.Count++
+	if node.Kind == PanelNode {
+		if len(node.Children) != 0 || model.panels[node.PanelID].ID == "" || state.Panels[node.PanelID] {
+			return errors.New("workspace panel node is invalid or duplicated")
+		}
+		state.Panels[node.PanelID] = true
+		return nil
+	}
+	if node.Kind == TabsNode {
+		if len(node.Children) == 0 || node.Active < 0 || node.Active >= len(node.Children) {
+			return errors.New("workspace tabs node is invalid")
+		}
+	} else if node.Kind == SplitNode {
+		if len(node.Children) != 2 || (node.Axis != Horizontal && node.Axis != Vertical) ||
+			node.Ratio < MinimumRatio ||
+			node.Ratio > MaximumRatio {
+			return errors.New("workspace split node is invalid")
+		}
+	} else {
+		return errors.New("workspace node kind is invalid")
+	}
+	for _, child := range node.Children {
+		if err := model.validateNode(child, depth + 1, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (model *Model) validateRoot(root Node) error {
+	return model.validateNode(root, 0, &validation{
+		Seen: make(map[string]bool), Panels: make(map[string]bool),
+	})
+}
+
+func (model *Model) Validate() error {
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	return model.validateRoot(model.Root)
+}
+
+func mutate(node *Node, id string, action func(*Node) error) (bool, error) {
+	if node.ID == id {
+		return true, action(node)
+	}
+	for index := range node.Children {
+		found, err := mutate(&node.Children[index], id, action)
+		if found || err != nil {
+			return found, err
+		}
+	}
+	return false, nil
+}
+
+func clampRatio(value float64) float64 {
+	if value < MinimumRatio {
+		return MinimumRatio
+	}
+	if value > MaximumRatio {
+		return MaximumRatio
+	}
+	return value
+}
+
+func (model *Model) Resize(id string, ratio float64) error {
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+		return errors.New("workspace resize ratio is invalid")
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	found, err := mutate(&model.Root, id, func(node *Node) error {
+		if node.Kind != SplitNode || ratio < MinimumRatio || ratio > MaximumRatio {
+			return errors.New("workspace resize target or ratio is invalid")
+		}
+		node.Ratio = ratio
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("workspace split was not found")
+	}
+	return nil
+}
+
+// ResizeByDelta applies a device-independent drag delta to one split. It is
+// also the deterministic entry point used by keyboard, restoration, and tests.
+func (model *Model) ResizeByDelta(id string, delta float64, extent float64) error {
+	if math.IsNaN(delta) || math.IsInf(delta, 0) || math.IsNaN(extent) || math.IsInf(extent, 0) ||
+		extent <= 0 {
+		return errors.New("workspace resize delta or extent is invalid")
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	found, err := mutate(&model.Root, id, func(node *Node) error {
+		if node.Kind != SplitNode {
+			return errors.New("workspace resize target is invalid")
+		}
+		node.Ratio = clampRatio(node.Ratio + delta / extent)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("workspace split was not found")
+	}
+	return nil
+}
+
+func (model *Model) Activate(id string, index int) error {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	found, err := mutate(&model.Root, id, func(node *Node) error {
+		if node.Kind != TabsNode || index < 0 || index >= len(node.Children) {
+			return errors.New("workspace tab activation is invalid")
+		}
+		node.Active = index
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("workspace tabs were not found")
+	}
+	return nil
+}
+
+// MoveTab reorders children within one tab group while keeping the same active
+// panel selected.
+func (model *Model) MoveTab(id string, from int, to int) error {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	found, err := mutate(&model.Root, id, func(node *Node) error {
+		if node.Kind != TabsNode || from < 0 || from >= len(node.Children) || to < 0 ||
+			to >= len(node.Children) {
+			return errors.New("workspace tab move is invalid")
+		}
+		if from == to {
+			return nil
+		}
+		activeID := node.Children[node.Active].ID
+		moving := node.Children[from]
+		if from < to {
+			copy(node.Children[from:to], node.Children[from + 1:to + 1])
+		} else {
+			copy(node.Children[to + 1:from + 1], node.Children[to:from])
+		}
+		node.Children[to] = moving
+		for index, child := range node.Children {
+			if child.ID == activeID {
+				node.Active = index
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("workspace tabs were not found")
+	}
+	return nil
+}
+
+// DockPanel moves one panel transactionally into a tab group or beside any
+// surviving layout node. Component identity follows the original panel node.
+func (model *Model) DockPanel(panelID string, targetID string, position DockPosition) error {
+	if panelID == "" || targetID == "" || position < DockCenter || position > DockBottom {
+		return errors.New("workspace dock request is invalid")
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	moving, ok := findPanelNode(model.Root, panelID)
+	if !ok {
+		return errors.New("workspace panel is not in the layout")
+	}
+	if moving.ID == targetID {
+		return errors.New("workspace panel cannot dock onto itself")
+	}
+	candidate, removed, empty := removePanel(cloneNode(model.Root), panelID)
+	if !removed || empty {
+		return errors.New("workspace cannot move its final panel")
+	}
+	if !containsNodeID(candidate, targetID) {
+		return errors.New("workspace dock target was not found after extraction")
+	}
+	tabsID := ""
+	splitID := ""
+	if position == DockCenter {
+		tabsID = model.freshNodeID(candidate, "tabs")
+	} else {
+		splitID = model.freshNodeID(candidate, "split")
+	}
+	found, err := mutate(&candidate, targetID, func(target *Node) error {
+		if position == DockCenter {
+			if target.Kind == TabsNode {
+				target.Children = append(target.Children, moving)
+				target.Active = len(target.Children) - 1
+				return nil
+			}
+			previous := cloneNode(*target)
+			*target = Tabs(tabsID, 1, previous, moving)
+			return nil
+		}
+		previous := cloneNode(*target)
+		axis := Horizontal
+		first := moving
+		second := previous
+		if position == DockTop || position == DockBottom {
+			axis = Vertical
+		}
+		if position == DockRight || position == DockBottom {
+			first = previous
+			second = moving
+		}
+		*target = Split(splitID, axis, 0.5, first, second)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("workspace dock target was not found")
+	}
+	if err := model.validateRoot(candidate); err != nil {
+		return err
+	}
+	model.Root = candidate
+	return nil
+}
+
+func removePanel(node Node, panelID string) (Node, bool, bool) {
+	if node.Kind == PanelNode {
+		if node.PanelID == panelID {
+			return Node{}, true, true
+		}
+		return node, false, false
+	}
+	children := make([]Node, 0, len(node.Children))
+	removed := false
+	for _, child := range node.Children {
+		next, matched, empty := removePanel(child, panelID)
+		if matched {
+			removed = true
+		}
+		if !empty {
+			children = append(children, next)
+		}
+	}
+	if !removed {
+		return node, false, false
+	}
+	if len(children) == 0 {
+		return Node{}, true, true
+	}
+	if len(children) == 1 {
+		return children[0], true, false
+	}
+	node.Children = children
+	if node.Kind == TabsNode && node.Active >= len(children) {
+		node.Active = len(children) - 1
+	}
+	return node, true, false
+}
+
+func (model *Model) ClosePanel(panelID string) error {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	panel := model.panels[panelID]
+	if panel.ID == "" {
+		return errors.New("workspace panel was not found")
+	}
+	if !panel.Closable {
+		return errors.New("workspace panel cannot be closed")
+	}
+	next, removed, empty := removePanel(model.Root, panelID)
+	if !removed {
+		return errors.New("workspace panel is not in the layout")
+	}
+	if empty {
+		return errors.New("workspace cannot close its final panel")
+	}
+	if err := model.validateRoot(next); err != nil {
+		return err
+	}
+	model.Root = next
+	return nil
+}
+
+func (model *Model) panelFor(node Node) Panel {
+	if node.Kind == PanelNode {
+		return model.panels[node.PanelID]
+	}
+	return model.panelFor(node.Children[node.Active])
+}
+
+func (model *Model) updateExtent(id string, axis Axis, event ui.Event) {
+	extent := event.X
+	if axis == Vertical {
+		extent = event.Y
+	}
+	if extent <= 0 || math.IsNaN(extent) || math.IsInf(extent, 0) {
+		return
+	}
+	model.mu.Lock()
+	model.extents[id] = extent
+	model.mu.Unlock()
+}
+
+func (model *Model) beginResize(node Node, event ui.Event) {
+	coordinate := event.X
+	if node.Axis == Vertical {
+		coordinate = event.Y
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	extent := model.extents[node.ID]
+	if extent <= 0 {
+		return
+	}
+	model.resize = resizeSession{
+		nodeID: node.ID, pointerID: event.PointerID, start: coordinate, ratio: node.Ratio, extent: extent,
+	}
+}
+
+func (model *Model) continueResize(node Node, event ui.Event) bool {
+	coordinate := event.X
+	if node.Axis == Vertical {
+		coordinate = event.Y
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if model.resize.nodeID != node.ID || model.resize.pointerID != event.PointerID ||
+		model.resize.extent <= 0 {
+		return false
+	}
+	ratio := clampRatio(model.resize.ratio + (coordinate - model.resize.start) / model.resize.extent)
+	_, err := mutate(&model.Root, node.ID, func(target *Node) error {
+		target.Ratio = ratio
+		return nil
+	})
+	return err == nil
+}
+
+func (model *Model) endResize(node Node, event ui.Event) {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if model.resize.nodeID == node.ID && model.resize.pointerID == event.PointerID {
+		model.resize = resizeSession{}
+	}
+}
+
+func (model *Model) renderSplitter(node Node, options Options) ui.View {
+	value := strconv.Itoa(int(node.Ratio * 100)) + "%"
+	divider := ui.Button("", ui.Action(func() {}))
+	divider = ui.Role(divider, "separator")
+	divider = ui.AccessibleName(divider, "Resize panels")
+	divider = ui.AccessibleValue(divider, value)
+	divider = ui.TestID(divider, "workspace-splitter-" + node.ID)
+	divider = ui.Background(divider, options.SplitterColor)
+	divider = ui.CapturePointer(divider, true)
+	if node.Axis == Horizontal {
+		divider = ui.Width(divider, options.SplitterSize)
+	} else {
+		divider = ui.Height(divider, options.SplitterSize)
+	}
+	divider = ui.OnPointerDown(divider, func(event ui.Event) {
+		if event.Button == 0 {
+			model.beginResize(node, event)
+		}
+	})
+	divider = ui.OnPointerMove(divider, func(event ui.Event) {
+		if model.continueResize(node, event) {
+			ui.Invalidate()
+		}
+	})
+	divider = ui.OnPointerUp(divider, func(event ui.Event) {
+		model.endResize(node, event)
+	})
+	divider = ui.OnPointerCancel(divider, func(event ui.Event) {
+		model.endResize(node, event)
+	})
+	return ui.OnKeyDown(divider, func(event ui.Event) {
+		delta := 0.0
+		if (node.Axis == Horizontal && event.Key == "ArrowLeft") ||
+			(node.Axis == Vertical && event.Key == "ArrowUp") {
+			delta = -options.KeyboardStep
+		}
+		if (node.Axis == Horizontal && event.Key == "ArrowRight") ||
+			(node.Axis == Vertical && event.Key == "ArrowDown") {
+			delta = options.KeyboardStep
+		}
+		if delta != 0 {
+			_ = model.Resize(node.ID, clampRatio(node.Ratio + delta))
+			ui.Invalidate()
+		}
+	})
+}
+
+func (model *Model) render(node Node, options Options) ui.View {
+	if node.Kind == PanelNode {
+		panel := model.panels[node.PanelID]
+		return ui.Key(ui.Role(panel.Content(), "region"), panel.ID)
+	}
+	if node.Kind == TabsNode {
+		tabs := make([]ui.View, 0, 2)
+		headers := make([]ui.View, 0, len(node.Children))
+		for index, child := range node.Children {
+			panel := model.panelFor(child)
+			current := index
+			button := ui.Button(panel.Title, ui.Action(func() {
+				_ = model.Activate(node.ID, current)
+				ui.Invalidate()
+			}))
+			button = ui.Selected(button, index == node.Active)
+			button = ui.Role(button, "tab")
+			button = ui.TestID(button, "workspace-tab-" + panel.ID)
+			button = ui.Padding(button, options.TabPadding)
+			if index == node.Active {
+				button = ui.Background(button, options.ActiveTabBackground)
+				button = ui.Foreground(button, options.ActiveTabForeground)
+			} else {
+				button = ui.Background(button, options.TabBackground)
+				button = ui.Foreground(button, options.TabForeground)
+			}
+			header := button
+			if panel.Closable {
+				closeButton := ui.Button("×", ui.Action(func() {
+					_ = model.ClosePanel(panel.ID)
+					ui.Invalidate()
+				}))
+				closeButton = ui.AccessibleName(closeButton, "Close " + panel.Title)
+				closeButton = ui.TestID(closeButton, "workspace-close-" + panel.ID)
+				header = ui.Row(button, closeButton)
+			}
+			headers = append(headers, ui.Key(header, "header-" + panel.ID))
+		}
+		tablist := ui.Role(ui.Row(headers...), "tablist")
+		tablist = ui.Background(tablist, options.TabBarBackground)
+		tabs = append(tabs, tablist)
+		body := model.render(node.Children[node.Active], options)
+		body = ui.Flex(body, 1)
+		body = ui.MinWidth(body, 0)
+		body = ui.MinHeight(body, 0)
+		body = ui.Overflow(body, ui.OverflowHidden)
+		tabs = append(tabs, body)
+		result := ui.Column(tabs...)
+		result = ui.MinWidth(result, 0)
+		result = ui.MinHeight(result, 0)
+		result = ui.Overflow(result, ui.OverflowHidden)
+		return ui.Key(result, node.ID)
+	}
+	first := model.render(node.Children[0], options)
+	second := model.render(node.Children[1], options)
+	first = ui.Flex(first, node.Ratio)
+	first = ui.MinWidth(first, 0)
+	first = ui.MinHeight(first, 0)
+	first = ui.Overflow(first, ui.OverflowHidden)
+	second = ui.Flex(second, 1 - node.Ratio)
+	second = ui.MinWidth(second, 0)
+	second = ui.MinHeight(second, 0)
+	second = ui.Overflow(second, ui.OverflowHidden)
+	divider := model.renderSplitter(node, options)
+	var result ui.View
+	if node.Axis == Horizontal {
+		result = ui.Row(first, divider, second)
+	} else {
+		result = ui.Column(first, divider, second)
+	}
+	result = ui.OnLayout(result, func(event ui.Event) {
+		model.updateExtent(node.ID, node.Axis, event)
+	})
+	result = ui.MinWidth(result, 0)
+	result = ui.MinHeight(result, 0)
+	result = ui.Overflow(result, ui.OverflowHidden)
+	return ui.Key(result, node.ID)
+}
+
+func (model *Model) ViewWithOptions(options Options) ui.View {
+	if err := options.validate(); err != nil {
+		panic(err.Error())
+	}
+	model.mu.RLock()
+	root := cloneNode(model.Root)
+	model.mu.RUnlock()
+	if err := model.validateRoot(root); err != nil {
+		panic(err.Error())
+	}
+	return ui.TestID(ui.Role(model.render(root, options), "application"), "volang-workspace")
+}
+
+func (model *Model) View() ui.View {
+	return model.ViewWithOptions(DefaultOptions())
+}
+
+type snapshotEnvelope struct {
+	Version int64
+	Root Node
+}
+
+func (model *Model) Snapshot() string {
+	model.mu.RLock()
+	root := cloneNode(model.Root)
+	model.mu.RUnlock()
+	if err := model.validateRoot(root); err != nil {
+		panic(err.Error())
+	}
+	encoded, err := json.Marshal(snapshotEnvelope{Version: 2, Root: root})
+	if err != nil {
+		panic(err.Error())
+	}
+	return "VWS2|" + string(encoded)
+}
+
+// Restore validates a complete candidate before replacing the live tree. A
+// malformed or stale snapshot therefore leaves the current workspace intact.
+func (model *Model) Restore(snapshot string) error {
+	if !strings.HasPrefix(snapshot, "VWS2|") {
+		return errors.New("workspace snapshot version is unsupported")
+	}
+	var envelope snapshotEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(snapshot, "VWS2|")), &envelope); err != nil {
+		return err
+	}
+	if envelope.Version != 2 {
+		return errors.New("workspace snapshot version is unsupported")
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if err := model.validateRoot(envelope.Root); err != nil {
+		return err
+	}
+	model.Root = cloneNode(envelope.Root)
+	model.resize = resizeSession{}
+	return nil
+}

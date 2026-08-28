@@ -4,17 +4,16 @@ version = 2
 crate = "vo"
 binary = "vo"
 artifact_prefix = "vo"
-build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit"]
+build_args = ["--release", "--locked", "-p", "vo", "--no-default-features", "--features", "jit,desktop-ui"]
 release_opt_level = "3"
 release_lto = "thin"
 
 [sdk]
 registry = "crates-io"
 internal_standalone = [
-  "apps/studio/src-tauri",
-  "apps/studio/wasm",
   "fuzz/app-protocol",
-  "fuzz/framework-protocol",
+  "fuzz/ui-artifact",
+  "fuzz/voplay-protocol",
 ]
 packages = [
   "vo-common-core",
@@ -35,7 +34,7 @@ homebrew = [
   "brew tap vo-lang/vo",
   "brew install vo",
 ]
-manual_install = "Download the binary for your platform below, extract, and place `vo` on your PATH."
+manual_install = "Download the archive for your platform and preserve its `vo`, core and UI AOT runtimes, and `share/volang/ui-web` layout while adding `vo` to your PATH."
 
 [homebrew]
 repository = "vo-lang/homebrew-vo"

@@ -1,0 +1,158 @@
+// Package assets owns typed asset identity, provenance, resolution, cache
+// limits, and image projection independently from any renderer.
+package assets
+
+import (
+	"context"
+	"errors"
+	"github.com/vo-lang/ui"
+	"strings"
+	"sync"
+)
+
+type Kind int64
+const (
+	RasterImage Kind = iota
+	VectorImage
+	Font
+	Audio
+	Video
+	Binary
+)
+
+type CachePolicy int64
+const (
+	NoStore CachePolicy = iota
+	Memory
+	Persistent
+)
+
+type Source struct {
+	URI string
+	Kind Kind
+	Integrity string
+	MediaType string
+	Bytes int64
+	Cache CachePolicy
+}
+
+func (source Source) Validate() error {
+	if source.URI == "" || len(source.URI) > 4096 || strings.ContainsAny(source.URI, "\x00\r\n") {
+		return errors.New("asset URI is invalid")
+	}
+	lower := strings.ToLower(source.URI)
+	if strings.HasPrefix(lower, "javascript:") || strings.HasPrefix(lower, "file:") {
+		return errors.New("asset URI scheme is forbidden")
+	}
+	if !(strings.HasPrefix(source.URI, "/") || strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "data:image/") || strings.HasPrefix(lower, "blob:")) {
+		return errors.New("asset URI must be application-relative or use an allowed scheme")
+	}
+	if source.Kind < RasterImage || source.Kind > Binary || source.Bytes < 0 || source.Bytes > 1073741824 {
+		return errors.New("asset kind or byte size is invalid")
+	}
+	if source.Integrity != "" && !strings.HasPrefix(source.Integrity, "sha256-") {
+		return errors.New("asset integrity must use SHA-256")
+	}
+	if len(source.MediaType) > 255 || strings.ContainsAny(source.MediaType, "\x00\r\n") {
+		return errors.New("asset media type is invalid")
+	}
+	return nil
+}
+
+type Resolved struct {
+	Source Source
+	LocalURI string
+	Width float64
+	Height float64
+	Fingerprint string
+}
+
+type Resolver interface { Resolve(context.Context, Source) (Resolved, error) }
+
+type Limits struct { MaxEntries int; MaxBytes int64 }
+func DefaultLimits() Limits { return Limits{MaxEntries: 1024, MaxBytes: 268435456} }
+
+type Registry struct {
+	mu sync.Mutex
+	limits Limits
+	entries map[string]Resolved
+	order []string
+	bytes int64
+}
+
+func NewRegistry(limits Limits) *Registry {
+	if limits.MaxEntries <= 0 || limits.MaxEntries > 100000 || limits.MaxBytes <= 0 || limits.MaxBytes > 17179869184 {
+		panic("asset registry limits are invalid")
+	}
+	return &Registry{limits: limits, entries: make(map[string]Resolved)}
+}
+
+func (registry *Registry) Put(key string, asset Resolved) error {
+	if registry == nil || key == "" || len(key) > 1024 { return errors.New("asset registry key is invalid") }
+	if err := asset.Source.Validate(); err != nil { return err }
+	if asset.LocalURI == "" || len(asset.LocalURI) > 4096 || asset.Width < 0 || asset.Height < 0 {
+		return errors.New("resolved asset is invalid")
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	previous, present := registry.entries[key]
+	previousBytes := int64(0); if present { previousBytes = previous.Source.Bytes }
+	if !present {
+		if len(registry.entries) >= registry.limits.MaxEntries { return errors.New("asset registry entry limit exceeded") }
+	}
+	nextBytes := registry.bytes-previousBytes+asset.Source.Bytes
+	if nextBytes > registry.limits.MaxBytes { return errors.New("asset registry byte limit exceeded") }
+	if !present { registry.order = append(registry.order, key) }
+	registry.entries[key] = asset
+	registry.bytes = nextBytes
+	return nil
+}
+
+func (registry *Registry) Get(key string) (Resolved, bool) {
+	if registry == nil { return Resolved{}, false }
+	registry.mu.Lock(); defer registry.mu.Unlock()
+	asset, present := registry.entries[key]
+	return asset, present
+}
+
+func (registry *Registry) Remove(key string) bool {
+	if registry == nil { return false }
+	registry.mu.Lock(); defer registry.mu.Unlock()
+	asset, present := registry.entries[key]
+	if !present { return false }
+	delete(registry.entries, key); registry.bytes -= asset.Source.Bytes
+	for index, candidate := range registry.order {
+		if candidate == key { registry.order = append(registry.order[:index], registry.order[index+1:]...); break }
+	}
+	return true
+}
+
+func (registry *Registry) Clear() {
+	if registry == nil { return }
+	registry.mu.Lock(); defer registry.mu.Unlock()
+	registry.entries = make(map[string]Resolved); registry.order = nil; registry.bytes = 0
+}
+
+func (registry *Registry) Len() int { registry.mu.Lock(); defer registry.mu.Unlock(); return len(registry.entries) }
+func (registry *Registry) Bytes() int64 { registry.mu.Lock(); defer registry.mu.Unlock(); return registry.bytes }
+
+type Fit string
+const (
+	Contain Fit = "contain"
+	Cover Fit = "cover"
+	Fill Fit = "fill"
+	None Fit = "none"
+	ScaleDown Fit = "scale-down"
+)
+
+func Image(source Source, description string, fit Fit) ui.View {
+	if err := source.Validate(); err != nil { panic(err.Error()) }
+	if source.Kind != RasterImage && source.Kind != VectorImage { panic("asset image source has a non-image kind") }
+	if description == "" { panic("asset image requires an accessible description") }
+	if fit != Contain && fit != Cover && fit != Fill && fit != None && fit != ScaleDown { panic("asset image fit is invalid") }
+	view := ui.Image(source.URI, description)
+	view = ui.Fit(view, string(fit))
+	if source.MediaType != "" { view = ui.ContentType(view, source.MediaType) }
+	return view
+}

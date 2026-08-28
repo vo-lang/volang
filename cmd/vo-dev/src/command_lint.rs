@@ -73,9 +73,6 @@ fn cargo_run_invokes_vo_dev(command: &[String]) -> bool {
 
 fn infer_vo_dev_subcommand_tools(args: &[String], tools: &mut BTreeSet<&'static str>) {
     match args {
-        [command, ..] if command == "studio-install-local-vogui" => {
-            tools.extend(["node", "npm"]);
-        }
         [first, second, _repo, _location, rest @ ..]
             if first == "first-party" && matches!(second.as_str(), "run" | "run-workspace") =>
         {
@@ -97,7 +94,7 @@ mod tests {
             "vo-dev",
             "first-party",
             "run-workspace",
-            "vogui",
+            "voplay",
             "js",
             "--",
             "npm",

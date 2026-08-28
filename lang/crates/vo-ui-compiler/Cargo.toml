@@ -1,0 +1,23 @@
+[package]
+name = "vo-ui-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Typed Volang-to-UI component plan adapter"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+vo-analysis.workspace = true
+vo-common.workspace = true
+vo-syntax.workspace = true
+vo-ui-artifact.workspace = true
+vo-ui-core.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-reload.workspace = true
+
+[dev-dependencies]
+vo-module.workspace = true

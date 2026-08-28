@@ -1,0 +1,8 @@
+VWX1 revision=1
+column tag=DIV display=flex direction=column gap=16px background=#f7f7f8ff
+heading tag=SPAN role=heading text=Account color=#16181dff size=24px weight=700
+textbox tag=INPUT type=text name=Display name value=Ada placeholder=Your name required=true invalid=true description=Name is required height=40px background=#ffffffff radius=8px
+alert tag=SPAN role=alert text=Name is required
+switch tag=INPUT type=checkbox name=Email updates checked=true
+progress tag=DIV role=progressbar name=Progress value=42% track=100px,#646b76ff fill=42px,#315efbff
+button tag=BUTTON text=Save background=#315efbff color=#ffffffff

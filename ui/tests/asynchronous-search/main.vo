@@ -1,0 +1,59 @@
+// Permanent E2 structured-goroutine probe. A slow request is superseded by a
+// fast request; only the latest typed completion may reach mounted state.
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/task"
+	"time"
+)
+
+func search(ctx context.Context, query string) (string, error) {
+	delay := 40 * time.Millisecond
+	if query == "beta" {
+		delay = time.Millisecond
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timer.C:
+			return "Result: " + query, nil
+	}
+}
+
+func resultView(result task.String, query string) ui.View {
+	if result.IsReady() {
+		return ui.TestID(kit.Paragraph(result.Value()), "search-status")
+	}
+	if result.IsFailed() {
+		return ui.TestID(kit.Paragraph("Error: " + result.Error()), "search-status")
+	}
+	return ui.TestID(kit.Paragraph("Loading: " + query), "search-status")
+}
+
+func SearchResults(query string) ui.View {
+	result := task.UseString(query, func(ctx context.Context) (string, error) {
+		return search(ctx, query)
+	})
+	return resultView(result, query)
+}
+
+func App() ui.View {
+	queryState := ui.UseStringState("alpha")
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Column(kit.Title("Structured search"), ui.TestID(kit.Caption("Query: " +
+			ui.StringStateValue(queryState)), "search-query"), SearchResults(ui.StringStateValue(queryState)), kit.ActionButton("Search beta", false, func() {
+			ui.SetStringState(queryState, "beta")
+		})))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

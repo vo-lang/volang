@@ -24,6 +24,7 @@ compiler = [
     "vo-analysis",
     "vo-codegen",
     "vo-module",
+    "vo-target",
     "console_error_panic_hook",
     "web-sys",
     "serde_json",
@@ -41,6 +42,7 @@ vo-vm = { path = "../vo-vm", default-features = false }
 vo-web-runtime-wasm = { path = "runtime-wasm" }
 vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-stdlib = { path = "../vo-stdlib", default-features = false }
+vo-ui-vm.workspace = true
 
 # Optional: compiler chain dependencies
 vo-common = { path = "../vo-common", default-features = false, optional = true }
@@ -48,6 +50,7 @@ vo-syntax = { path = "../vo-syntax", optional = true }
 vo-analysis = { path = "../vo-analysis", optional = true }
 vo-codegen = { path = "../vo-codegen", optional = true }
 vo-module = { path = "../vo-module", optional = true }
+vo-target = { workspace = true, optional = true }
 serde_json = { version = "1.0", optional = true }
 toml = { version = "0.8", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }

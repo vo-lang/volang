@@ -2746,6 +2746,37 @@ mod tests {
         let _ = fs::remove_dir_all(&slot.dir);
     }
 
+    #[test]
+    fn cache_preserves_component_bundle_artifact_bytes() {
+        let slot = temp_cache_slot("component-bundle");
+        let source_root = slot.dir.join("sources");
+        let mut output = crate::compile_source_at("package main\nfunc main() {}\n", &source_root)
+            .expect("compile bundle cache fixture");
+        let mut module = output.module.module().clone();
+        module.set_artifact(vo_common_core::ModuleArtifact::new(
+            "volang.ui.component-bundle",
+            1,
+            vec![0x56, 0x55, 0x42, 0x31, 7, 9],
+        ));
+        output.module = Arc::new(
+            vo_common_core::verifier::verify_loaded_module(module)
+                .expect("verify bundle cache fixture"),
+        );
+
+        save_compile_cache(&slot, "fingerprint", &output);
+        let loaded =
+            try_load_cache(&slot, &source_root, "fingerprint").expect("load cached bundle fixture");
+        assert_eq!(
+            loaded
+                .module
+                .artifact("volang.ui.component-bundle")
+                .map(|artifact| artifact.payload.as_slice()),
+            Some([0x56, 0x55, 0x42, 0x31, 7, 9].as_slice())
+        );
+
+        let _ = fs::remove_dir_all(&slot.dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cache_payload_symlinks_are_rejected_even_when_bytes_match() {

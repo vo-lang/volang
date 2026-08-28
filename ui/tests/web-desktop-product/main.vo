@@ -1,0 +1,106 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/desktop"
+	"github.com/vo-lang/ui/navigation"
+	"github.com/vo-lang/ui/web"
+	"github.com/vo-lang/ui/web/server"
+)
+
+func assert(condition bool, message string) {
+	if !condition { panic(message) }
+}
+
+func main() {
+	security := web.Security{
+		AllowedOrigins: []string{"https://content.example.test"},
+		ContentSecurityPolicy: "default-src 'self'",
+		PermissionsPolicy: "camera=(), microphone=()",
+		CrossOriginOpenerPolicy: "same-origin",
+		RequireHTTPS: true,
+		MaxBodyBytes: 4096,
+	}
+	pwa := web.PWA{
+		Enabled: true, Name: "Volang Content", ShortName: "Content",
+		StartURL: "/", Scope: "/", Display: "standalone",
+		OfflineURL: "/offline", CacheVersion: "content-v1",
+	}
+	article := navigation.NewPattern("article", navigation.Static("articles"), navigation.Parameter("slug"))
+	route := web.Route{
+		Pattern: article,
+		Metadata: func(match navigation.Match, data web.PageData) web.Metadata {
+			return web.Metadata{Language: "zh-CN", Direction: "ltr", Title: match.Query("title") + data.Payload}
+		},
+		Render: func(match navigation.Match, data web.PageData) ui.View { return ui.Text(data.Payload) },
+		Load: func(ctx context.Context, request web.Request, match navigation.Match) (web.PageData, error) {
+			slug, _ := match.Param("slug")
+			return web.PageData{Status: 200, Payload: "article:" + slug}, nil
+		},
+		Act: func(ctx context.Context, request web.Request, match navigation.Match) (web.ActionResult, error) {
+			return web.ActionResult{Status: 202, Payload: request.Method}, nil
+		},
+		Cache: web.CachePolicy{Visibility: web.CachePublic, MaxAge: 60},
+		Activation: web.ActivateInteraction,
+	}
+	site, err := web.NewSite(security, pwa, route)
+	assert(err == nil, "web site policy")
+	resolved, found, err := site.Resolve("/articles/volang?title=Read%20")
+	slug, hasSlug := resolved.Match.Param("slug")
+	assert(err == nil && found && hasSlug && slug == "volang", "web typed route")
+	loaded, err := resolved.Route.Load(context.Background(), web.Request{Method: "GET", Path: "/articles/volang"}, resolved.Match)
+	action, err2 := resolved.Route.Act(context.Background(), web.Request{Method: "POST", Path: "/articles/volang"}, resolved.Match)
+	assert(err == nil && err2 == nil && loaded.Payload == "article:volang" && action.Status == 202, "web loader and action")
+	assert(web.ValidateRequest(web.Request{Method: "GET", Path: "/articles/volang", Body: []byte{}}, security) == nil, "bounded request")
+	assert(web.ValidateActionOrigin(web.Request{
+		Method: "POST", Path: "/subscribe", CSRFToken: "token",
+		Headers: map[string]string{"Origin": "https://content.example.test"},
+	}, "https://content.example.test", "token") == nil, "action origin")
+	environment, err := server.NewMemoryEnvironment(map[string]string{"database": "sealed"})
+	sessions, err2 := server.NewMemorySessions(4)
+	cache, err3 := server.NewMemoryCache(4, 1024)
+	assert(err == nil && err2 == nil && err3 == nil, "server adapters")
+	authority := server.NewAuthority(environment, sessions, cache)
+	secret, found, err := authority.Environment.Secret(context.Background(), "database")
+	assert(err == nil && found && secret == "sealed", "server secret authority")
+	assert(authority.Sessions.Save(context.Background(), server.Session{ID: "session", Values: map[string]string{"user": "ada"}}) == nil, "server session save")
+	session, found, err := authority.Sessions.Load(context.Background(), "session")
+	assert(err == nil && found && session.Values["user"] == "ada", "server session load")
+	assert(authority.Cache.Put(context.Background(), "article", server.CacheEntry{Payload: []byte("cached"), Tags: []string{"content"}}) == nil, "server cache put")
+	entry, found, err := authority.Cache.Get(context.Background(), "article")
+	assert(err == nil && found && string(entry.Payload) == "cached", "server cache get")
+	assert(authority.Cache.Invalidate(context.Background(), []string{"content"}) == nil, "server cache invalidate")
+
+	registry := desktop.NewRegistry()
+	mainWindow := desktop.NewWindowID(1, 1)
+	childWindow := desktop.NewWindowID(2, 1)
+	grandchildWindow := desktop.NewWindowID(3, 1)
+	geometry := desktop.Geometry{X: 10, Y: 10, Width: 1200, Height: 800}
+	assert(registry.Open(desktop.WindowOptions{
+		ID: mainWindow, Title: "Studio", Geometry: geometry,
+		MinWidth: 480, MinHeight: 320, Visible: true, Resizable: true,
+	}) == nil, "main window")
+	assert(registry.Open(desktop.WindowOptions{
+		ID: childWindow, Owner: mainWindow, Title: "Inspector", Geometry: geometry,
+		MinWidth: 320, MinHeight: 240, Visible: true, Resizable: true,
+	}) == nil, "owned window")
+	assert(registry.Open(desktop.WindowOptions{
+		ID: grandchildWindow, Owner: childWindow, Title: "Palette", Geometry: geometry,
+		MinWidth: 320, MinHeight: 240, Visible: true, Resizable: true,
+	}) == nil, "nested owned window")
+	closed := registry.Close(mainWindow)
+	assert(len(closed) == 3 && closed[0] == grandchildWindow && closed[1] == childWindow && closed[2] == mainWindow,
+		"deterministic recursive window close")
+
+	digest := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	manifest := desktop.UpdateManifest{
+		ApplicationID: "com.volang.studio", Version: "1.1.0", MinimumVersion: "1.0.0",
+		Target: "aarch64-apple-darwin", PublishedUnixMillis: 1,
+		Files: []desktop.UpdateFile{{Path: "bin/studio", SHA256: digest, Size: 1024}},
+		Signature: "ed25519:fixture",
+	}
+	assert(manifest.Validate() == nil, "signed update manifest")
+	manifest.Files[0].Path = "../studio"
+	assert(manifest.Validate() != nil, "update traversal rejection")
+}

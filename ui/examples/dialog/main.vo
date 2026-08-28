@@ -1,0 +1,33 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	open := ui.UseBoolState(false)
+	isOpen := ui.BoolStateValue(open)
+	openButton := kit.PrimaryButton(theme, "Open dialog", isOpen, func(event ui.Event) {
+		ui.SetBoolState(open, true)
+	})
+	dialog := kit.Dialog(theme, "Confirm action", isOpen, ui.Column(
+		kit.Body(theme, "Focus stays inside this dialog until it closes."),
+		kit.DangerButton(theme, "Confirm", false, func(event ui.Event) {
+			ui.SetBoolState(open, false)
+		}),
+	), func(event ui.Event) {
+		ui.SetBoolState(open, false)
+	})
+	return kit.Screen(theme, ui.Stack(
+		kit.Card(theme, ui.Column(kit.Heading(theme, "Modal dialog"), openButton)),
+		dialog,
+	))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

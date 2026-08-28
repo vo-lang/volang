@@ -1587,6 +1587,7 @@ fn validate_gc_object_kind(
 ///
 /// # Safety
 /// - `ctx` must be a valid pointer to the current JIT context
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_jit_gc_alloc_value_slots(ctx: *mut JitContext, meta: u32, slots: u32) -> u64 {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return 0;
@@ -1616,6 +1617,7 @@ fn jit_gc_alloc_value_slots_inner(gc: &mut Gc, meta: u32, slots: u32) -> u64 {
 ///
 /// Standalone JIT unit harnesses do not install VM callbacks and therefore
 /// receive `Ok`. Production contexts validate and install the callback.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
     let Some(ctx_ref) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;
@@ -1631,6 +1633,7 @@ pub extern "C" fn vo_jit_gc_safepoint(ctx: *mut JitContext) -> JitResult {
 
 /// Compile and publish an optimizing version at a baseline-entry safe point.
 /// Standalone JIT harnesses omit the VM callback and continue in baseline.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_jit_tier_up(ctx: *mut JitContext, func_id: u32) -> JitResult {
     let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
         return JitResult::JitError;
@@ -1644,6 +1647,7 @@ pub extern "C" fn vo_jit_tier_up(ctx: *mut JitContext, func_id: u32) -> JitResul
 /// Ask the owning VM whether a spent native execution lease can be renewed
 /// without returning through the scheduler. Standalone JIT harnesses omit the
 /// callback and therefore keep the conservative scheduler-boundary behavior.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_jit_refill_execution_budget(
     ctx: *mut JitContext,
     required_budget: u32,
@@ -1685,6 +1689,7 @@ pub extern "C" fn vo_jit_refill_execution_budget(
 /// Raw write barrier for one known-reference value. Multi-slot typed writes
 /// should use `vo_gc_typed_write_barrier_by_meta` so struct/interface layouts
 /// are interpreted with the same metadata as VM helpers.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: u64) {
     if gc.is_null() || obj == 0 {
         return;
@@ -1703,6 +1708,7 @@ pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: 
 /// The generated fast path already reads both headers directly. Reaching this
 /// helper therefore carries the same verifier-backed proof and does not need
 /// a second heap-range lookup.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_gc_write_barrier_exact_bases(gc: *mut Gc, parent: u64, child: u64) {
     if gc.is_null() || parent == 0 || child == 0 {
         return;
@@ -1715,6 +1721,7 @@ pub extern "C" fn vo_gc_write_barrier_exact_bases(gc: *mut Gc, parent: u64, chil
 
 /// Type-safe write barrier for JIT writes whose element metadata is known only
 /// at runtime from an array/slice/map header.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
     ctx: *mut JitContext,
     parent: u64,
@@ -1790,6 +1797,7 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
 ///
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_set_call_request(
     ctx: *mut JitContext,
     func_id: u32,
@@ -1845,6 +1853,7 @@ pub extern "C" fn vo_set_call_request(
 ///
 /// This helper is deliberately narrower than language `copy`: it only moves
 /// already-verified frame storage for the same compiled function layout.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_jit_copy_frame_slots(dst: *mut u64, src: *const u64, slot_count: u32) {
     let Ok(slot_count) = u16::try_from(slot_count) else {
         return;
@@ -1869,6 +1878,7 @@ pub extern "C" fn vo_jit_copy_frame_slots(dst: *mut u64, src: *const u64, slot_c
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
 /// - `ctx.defer_push_fn` must be set
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_defer_push(
     ctx: *mut JitContext,
     func_id: u32,
@@ -1905,6 +1915,7 @@ pub extern "C" fn vo_defer_push(
 /// - `ctx` must be a valid pointer to JitContext
 /// - `ctx.recover_fn` must be set
 /// - `result_ptr` must point to at least 2 u64 slots
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
     if ctx.is_null() {
         return JitResult::JitError;
@@ -1928,6 +1939,7 @@ pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitR
 ///
 /// # Safety
 /// - `ctx` must be a valid pointer to JitContext
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_panic(ctx: *mut JitContext, msg_slot0: u64, msg_slot1: u64) {
     unsafe {
         let Some(ctx) = ctx.as_mut() else {
@@ -1958,6 +1970,7 @@ pub extern "C" fn vo_panic(ctx: *mut JitContext, msg_slot0: u64, msg_slot1: u64)
 ///
 /// The VM side converts the compact kind and arguments back into
 /// `RuntimeTrapKind`, message text, and source location before unwinding.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_runtime_trap(
     ctx: *mut JitContext,
     kind: u32,
@@ -2006,6 +2019,7 @@ pub extern "C" fn vo_runtime_trap(
 /// # Returns
 /// - `JitResult::Ok` if function completed normally
 /// - `JitResult::Panic` if function panicked
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_call_extern(
     ctx: *mut JitContext,
     extern_id: u32,
@@ -2032,6 +2046,7 @@ pub extern "C" fn vo_call_extern(
 // =============================================================================
 
 /// Create a new map.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_new(
     gc: *mut Gc,
     key_meta: u32,
@@ -2460,6 +2475,7 @@ fn validate_map_key_layout(
 }
 
 /// Get map length.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_len(ctx: *mut JitContext, m: u64) -> u64 {
     use crate::objects::map;
     if m == 0 {
@@ -2477,6 +2493,7 @@ pub extern "C" fn vo_map_len(ctx: *mut JitContext, m: u64) -> u64 {
 /// key_ptr points to key_slots u64 values.
 /// val_ptr is output buffer for val_slots u64 values.
 /// Returns 1 if found, 0 if not found, 2 if the interface key is unhashable.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_get(
     ctx: *mut JitContext,
     m: u64,
@@ -2573,6 +2590,7 @@ pub extern "C" fn vo_map_get(
 /// Returns zero for missing, an aligned value-cell pointer for found, and
 /// `JIT_HELPER_MAP_SCALAR_FALLBACK` when the runtime map shape requires the
 /// generic metadata-aware helper.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_get_scalar(m: u64, key: u64) -> u64 {
     use crate::objects::map;
     if m == 0 {
@@ -2591,6 +2609,7 @@ pub extern "C" fn vo_map_get_scalar(m: u64, key: u64) -> u64 {
 /// Set value in map.
 /// Returns: 0 = success, 1 = panic (interface key with uncomparable type),
 /// 2 = retry after the caller executes its precise allocation safepoint.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_set(
     ctx: *mut JitContext,
     m: u64,
@@ -2699,6 +2718,7 @@ pub extern "C" fn vo_map_set(
 
 /// Trusted one-slot map mutation. The helper retains deferred-allocation
 /// status so generated code owns the precise GC safepoint before retrying.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_set_scalar(
     ctx: *mut JitContext,
     m: u64,
@@ -2757,6 +2777,7 @@ pub extern "C" fn vo_map_set_scalar(
 }
 
 /// Delete key from map.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_delete(
     ctx: *mut JitContext,
     m: u64,
@@ -2817,6 +2838,7 @@ pub extern "C" fn vo_map_delete(
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_delete_scalar(m: u64, key: u64) -> u64 {
     use crate::objects::map;
     if m == 0 {
@@ -2834,6 +2856,7 @@ pub extern "C" fn vo_map_delete_scalar(m: u64, key: u64) -> u64 {
 }
 
 /// Initialize a map iterator. Writes MAP_ITER_SLOTS * SLOT_BYTES bytes to iter_ptr.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_iter_init(ctx: *mut JitContext, m: u64, iter_ptr: *mut u64) -> u64 {
     use crate::objects::map;
     const SLOTS: usize = map::MAP_ITER_SLOTS;
@@ -2864,6 +2887,7 @@ pub extern "C" fn vo_map_iter_init(ctx: *mut JitContext, m: u64, iter_ptr: *mut 
 
 /// Advance map iterator and get next key-value pair.
 /// Returns 1 if valid entry exists, 0 if exhausted.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_map_iter_next(
     ctx: *mut JitContext,
     iter_ptr: *mut u64,
@@ -2972,6 +2996,7 @@ pub extern "C" fn vo_map_iter_next(
 ///
 /// # Returns
 /// Packed value: `(rune << 32) | width`
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_decode_rune(s: u64, pos: u64) -> u64 {
     use crate::objects::string;
     let Ok(pos) = usize::try_from(pos) else {
@@ -2983,6 +3008,7 @@ pub extern "C" fn vo_str_decode_rune(s: u64, pos: u64) -> u64 {
 }
 
 /// Get string length.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_len(s: u64) -> u64 {
     use crate::objects::string;
     // Safety: generated code passes a live string reference.
@@ -2990,6 +3016,7 @@ pub extern "C" fn vo_str_len(s: u64) -> u64 {
 }
 
 /// Get byte at index.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_index(s: u64, idx: u64) -> u64 {
     use crate::objects::string;
     let Ok(idx) = usize::try_from(idx) else {
@@ -3004,6 +3031,7 @@ pub extern "C" fn vo_str_index(s: u64, idx: u64) -> u64 {
 }
 
 /// Concatenate two strings.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_concat(gc: *mut Gc, a: u64, b: u64) -> u64 {
     use crate::objects::string;
     if gc.is_null() {
@@ -3029,6 +3057,7 @@ pub extern "C" fn vo_str_concat(gc: *mut Gc, a: u64, b: u64) -> u64 {
 }
 
 /// Create string slice.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
     use crate::objects::string;
     let (Ok(lo), Ok(hi)) = (usize::try_from(lo), usize::try_from(hi)) else {
@@ -3050,6 +3079,7 @@ pub extern "C" fn vo_str_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
 }
 
 /// Compare strings for equality.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_eq(a: u64, b: u64) -> u64 {
     use crate::objects::string;
     // Safety: generated code passes live string references.
@@ -3057,6 +3087,7 @@ pub extern "C" fn vo_str_eq(a: u64, b: u64) -> u64 {
 }
 
 /// Compare strings.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_cmp(a: u64, b: u64) -> i32 {
     use crate::objects::string;
     // Safety: generated code passes live string references.
@@ -3064,6 +3095,7 @@ pub extern "C" fn vo_str_cmp(a: u64, b: u64) -> i32 {
 }
 
 /// Create string from constant index.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_str_new(gc: *mut Gc, data: *const u8, len: u64) -> u64 {
     use crate::objects::string;
     let Ok(len) = usize::try_from(len) else {
@@ -3239,6 +3271,7 @@ fn validate_jit_interface_value(
 }
 
 /// Pack interface slot0: (itab_id << 32) | (rttid << 8) | value_kind
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_iface_pack_slot0(itab_id: u32, rttid: u32, vk: u8) -> u64 {
     let Some(value_kind) = ValueKind::try_from_u8(vk) else {
         return 0;
@@ -3250,6 +3283,7 @@ pub extern "C" fn vo_iface_pack_slot0(itab_id: u32, rttid: u32, vk: u8) -> u64 {
 }
 
 /// Clone a GcRef (deep copy for value semantics).
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_ptr_clone(gc: *mut Gc, ptr: u64) -> u64 {
     if gc.is_null() || ptr == 0 {
         return 0;
@@ -3269,6 +3303,7 @@ pub extern "C" fn vo_ptr_clone(gc: *mut Gc, ptr: u64) -> u64 {
 // =============================================================================
 
 /// Create a new closure.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) -> u64 {
     use crate::objects::closure;
     if gc.is_null() {
@@ -3290,6 +3325,7 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
 /// This helper does not inspect VM frame slots, allocate, collect, or schedule;
 /// native dynamic-call hits can therefore validate their object identity
 /// without materializing an interpreter frame.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_jit_validate_closure(ctx: *mut JitContext, raw: u64) -> u64 {
     let Some(ctx_ref) = (unsafe { ctx.as_ref() }) else {
         return 0;
@@ -3321,6 +3357,7 @@ pub extern "C" fn vo_jit_validate_closure(ctx: *mut JitContext, raw: u64) -> u64
 
 /// Create a new queue with validation (unified logic for VM and JIT). Managed
 /// allocation failure writes null with status 0 for the generated memory gate.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_queue_new_checked(
     ctx: *mut JitContext,
     kind: u32,
@@ -3396,6 +3433,7 @@ unsafe fn queue_new_checked(
 
 /// Create an array after validating its layout. A managed allocation failure
 /// writes null with status 0 so generated code can return `JitError`.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_array_new_checked(
     gc: *mut Gc,
     elem_meta: u32,
@@ -3432,6 +3470,7 @@ pub extern "C" fn vo_array_new_checked(
 }
 
 /// Get array length.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub unsafe extern "C" fn vo_array_len(arr: u64) -> u64 {
     use crate::objects::array;
     if arr == 0 {
@@ -3447,6 +3486,7 @@ pub unsafe extern "C" fn vo_array_len(arr: u64) -> u64 {
 /// Create a new slice with validation (unified logic for VM and JIT).
 /// Validation errors use a nonzero status; managed allocation failure writes
 /// null with status 0 so generated code can return `JitError`.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_new_checked(
     gc: *mut Gc,
     elem_meta: u32,
@@ -3473,6 +3513,7 @@ pub extern "C" fn vo_slice_new_checked(
 }
 
 /// Get slice length.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub unsafe extern "C" fn vo_slice_len(s: u64) -> u64 {
     if s == 0 {
         return 0;
@@ -3482,6 +3523,7 @@ pub unsafe extern "C" fn vo_slice_len(s: u64) -> u64 {
 }
 
 /// Get slice capacity.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub unsafe extern "C" fn vo_slice_cap(s: u64) -> u64 {
     if s == 0 {
         return 0;
@@ -3493,6 +3535,7 @@ pub unsafe extern "C" fn vo_slice_cap(s: u64) -> u64 {
 /// Create a sub-slice (two-index: s[lo:hi]).
 /// Returns u64::MAX on bounds error.
 /// Go semantics: nil[0:0] == nil (null input returns null when lo==0 and hi==0).
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
     use crate::objects::slice;
     if s == 0 {
@@ -3519,6 +3562,7 @@ pub extern "C" fn vo_slice_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
 /// Create a sub-slice with cap (three-index: s[lo:hi:max]).
 /// Returns u64::MAX on bounds error.
 /// Go semantics: nil[0:0:0] == nil (null input returns null when all indices are 0).
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_slice3(gc: *mut Gc, s: u64, lo: u64, hi: u64, max: u64) -> u64 {
     use crate::objects::slice;
     if s == 0 {
@@ -3553,6 +3597,7 @@ pub extern "C" fn vo_slice_slice3(gc: *mut Gc, s: u64, lo: u64, hi: u64, max: u6
 /// Append single element to slice.
 /// elem_bytes: actual byte size per element
 /// val_ptr points to ceil(elem_bytes / SLOT_BYTES) u64 values.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_append(
     ctx: *mut JitContext,
     elem_meta: u32,
@@ -3628,6 +3673,7 @@ pub extern "C" fn vo_slice_append(
 
 /// Create slice from array range (arr[lo:hi]).
 /// Returns u64::MAX on bounds error.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_from_array(gc: *mut Gc, arr: u64, lo: u64, hi: u64) -> u64 {
     use crate::objects::slice;
     let (Ok(lo), Ok(hi)) = (usize::try_from(lo), usize::try_from(hi)) else {
@@ -3650,6 +3696,7 @@ pub extern "C" fn vo_slice_from_array(gc: *mut Gc, arr: u64, lo: u64, hi: u64) -
 
 /// Create slice from array range with cap (arr[lo:hi:max]).
 /// Returns u64::MAX on bounds error.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_from_array3(gc: *mut Gc, arr: u64, lo: u64, hi: u64, max: u64) -> u64 {
     use crate::objects::slice;
     let (Ok(lo), Ok(hi), Ok(max)) = (
@@ -3675,6 +3722,7 @@ pub extern "C" fn vo_slice_from_array3(gc: *mut Gc, arr: u64, lo: u64, hi: u64, 
 }
 
 /// Create a slice from an inline fixed-array view.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_from_inline_array(
     gc: *mut Gc,
     owner: u64,
@@ -3721,6 +3769,7 @@ pub extern "C" fn vo_slice_from_inline_array(
 }
 
 /// Create a full slice from an inline fixed-array view.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_slice_from_inline_array3(
     gc: *mut Gc,
     owner: u64,
@@ -3777,6 +3826,7 @@ pub extern "C" fn vo_slice_from_inline_array3(
 /// src_slot0/slot1: source interface (2 slots)
 /// iface_meta_id: target interface meta id
 /// Returns: new slot0 with updated itab_id
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_iface_to_iface(
     ctx: *mut JitContext,
     src_slot0: u64,
@@ -3842,6 +3892,7 @@ pub extern "C" fn vo_iface_to_iface(
 
 /// Interface equality comparison.
 /// Returns: 0 = not equal, 1 = equal, 2 = panic (uncomparable type)
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub unsafe extern "C" fn vo_iface_eq(
     ctx: *mut JitContext,
     b_slot0: u64,
@@ -3888,6 +3939,7 @@ pub unsafe extern "C" fn vo_iface_eq(
 /// Returns JitResult::Ok on success, JitResult::Panic for a language type assertion panic,
 /// or JitResult::JitError for malformed runtime metadata.
 /// dst layout: [result_slots...][ok_flag if has_ok]
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_iface_assert(
     ctx: *mut JitContext,
     slot0: u64,
@@ -5010,6 +5062,7 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
 
 /// Create a new island.
 /// Calls into VM via callback to properly register with scheduler.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResult {
     if ctx.is_null() {
         return JitResult::JitError;
@@ -5029,6 +5082,7 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResul
 }
 
 /// Get channel length through VM-owned queue validation.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_chan_len(ctx: *mut JitContext, chan: u64, out: *mut u64) -> JitResult {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;
@@ -5040,6 +5094,7 @@ pub extern "C" fn vo_chan_len(ctx: *mut JitContext, chan: u64, out: *mut u64) ->
 }
 
 /// Get channel capacity through VM-owned queue validation.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_chan_cap(ctx: *mut JitContext, chan: u64, out: *mut u64) -> JitResult {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;
@@ -5054,6 +5109,7 @@ pub extern "C" fn vo_chan_cap(ctx: *mut JitContext, chan: u64, out: *mut u64) ->
 /// Returns JitResult::Ok on success without deferred effects,
 /// JitResult::RuntimeTransition when close effects must be committed by the VM,
 /// or JitResult::Panic on a nil/closed channel.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;
@@ -5072,6 +5128,7 @@ pub extern "C" fn vo_chan_close(ctx: *mut JitContext, chan: u64) -> JitResult {
 /// Returns JitResult::Ok on success without deferred effects,
 /// JitResult::RuntimeTransition when wake effects must be committed by the VM,
 /// JitResult::Panic on a nil/closed channel, or JitResult::WaitQueue when blocked.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_chan_send(
     ctx: *mut JitContext,
     chan: u64,
@@ -5091,6 +5148,7 @@ pub extern "C" fn vo_chan_send(
 /// Returns JitResult::Ok on success without deferred effects (including a closed channel),
 /// JitResult::RuntimeTransition when sender effects must be committed by the VM,
 /// JitResult::Panic on a nil channel, or JitResult::WaitQueue when blocked.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_chan_recv(
     ctx: *mut JitContext,
     chan: u64,
@@ -5113,6 +5171,7 @@ pub extern "C" fn vo_chan_recv(
 
 /// Spawn a new goroutine.
 /// This is fire-and-forget - the new fiber runs concurrently.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_go_start(
     ctx: *mut JitContext,
     func_id: u32,
@@ -5132,6 +5191,7 @@ pub extern "C" fn vo_go_start(
 
 /// Spawn a goroutine on a specific island.
 /// If island_id == 0, spawns locally. Otherwise sends to remote island.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_go_island(
     ctx: *mut JitContext,
     island: u64,
@@ -5153,6 +5213,7 @@ pub extern "C" fn vo_go_island(
 // =============================================================================
 
 /// Initialize a select statement.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_select_begin(
     ctx: *mut JitContext,
     case_count: u32,
@@ -5168,6 +5229,7 @@ pub extern "C" fn vo_select_begin(
 }
 
 /// Add a send case to the current select.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_select_send(
     ctx: *mut JitContext,
     queue_reg: u32,
@@ -5185,6 +5247,7 @@ pub extern "C" fn vo_select_send(
 }
 
 /// Add a recv case to the current select.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_select_recv(
     ctx: *mut JitContext,
     dst_reg: u32,
@@ -5204,6 +5267,7 @@ pub extern "C" fn vo_select_recv(
 
 /// Execute the select statement.
 /// Returns Ok, RuntimeTransition (deferred queue effects), WaitQueue (blocked), or Panic.
+#[cfg_attr(not(target_arch = "wasm32"), unsafe(no_mangle))]
 pub extern "C" fn vo_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
     let Some(ctx) = (unsafe { ctx.as_mut() }) else {
         return JitResult::JitError;

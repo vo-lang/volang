@@ -93,6 +93,21 @@ pub enum NativeInputKind {
     },
     ImeCommitted(String),
     ImeCancelled,
+    FileDragEntered {
+        x_milli: i32,
+        y_milli: i32,
+        paths: Vec<String>,
+    },
+    FileDragMoved {
+        x_milli: i32,
+        y_milli: i32,
+    },
+    FileDragLeft,
+    FileDropped {
+        x_milli: i32,
+        y_milli: i32,
+        paths: Vec<String>,
+    },
     FocusChanged(bool),
     VisibilityChanged(bool),
     Resized {
@@ -111,6 +126,7 @@ impl NativeInputKind {
                 | Self::Wheel { .. }
                 | Self::GamepadSnapshot { .. }
                 | Self::Resized { .. }
+                | Self::FileDragMoved { .. }
         )
     }
 
@@ -120,6 +136,9 @@ impl NativeInputKind {
             | Self::Text(logical_key)
             | Self::ImeCommitted(logical_key) => logical_key.len(),
             Self::ImeUpdated { text, .. } => text.len(),
+            Self::FileDragEntered { paths, .. } | Self::FileDropped { paths, .. } => {
+                paths.iter().map(String::len).sum::<usize>()
+            }
             _ => 0,
         }
     }
@@ -130,6 +149,7 @@ impl NativeInputKind {
             Self::Wheel { device, .. } => Some((2, *device)),
             Self::GamepadSnapshot { device, .. } => Some((3, *device)),
             Self::Resized { .. } => Some((4, 0)),
+            Self::FileDragMoved { .. } => Some((5, 0)),
             _ => None,
         }
     }
@@ -585,5 +605,93 @@ fn current_fault(shared: &SharedInputChannel) -> Option<NativeHostInputError> {
         FAULT_SEQUENCE_EXHAUSTED => Some(NativeHostInputError::SequenceExhausted),
         FAULT_POISONED => Some(NativeHostInputError::Poisoned),
         _ => Some(NativeHostInputError::Poisoned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_app_protocol::GenerationalHandle;
+
+    fn window() -> WindowHandle {
+        GenerationalHandle {
+            index: 1,
+            generation: 1,
+        }
+    }
+
+    fn view() -> ViewHandle {
+        GenerationalHandle {
+            index: 2,
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn file_drop_paths_are_charged_to_the_reliable_byte_budget() {
+        let (channel, receiver) = NativeInputChannel::bounded(NativeInputChannelConfig {
+            max_events: 4,
+            max_text_bytes: 8,
+        })
+        .unwrap();
+        channel
+            .publish(
+                1,
+                window(),
+                view(),
+                NativeInputKind::FileDropped {
+                    x_milli: 0,
+                    y_milli: 0,
+                    paths: vec![String::from("12345678")],
+                },
+            )
+            .unwrap();
+        assert_eq!(receiver.stats().unwrap().pending_text_bytes, 8);
+        assert_eq!(
+            channel.publish(
+                2,
+                window(),
+                view(),
+                NativeInputKind::FileDragEntered {
+                    x_milli: 0,
+                    y_milli: 0,
+                    paths: vec![String::from("x")],
+                },
+            ),
+            Err(NativeHostInputError::ReliableOverflow)
+        );
+    }
+
+    #[test]
+    fn file_drag_moves_coalesce_to_the_latest_sample() {
+        let (channel, receiver) = NativeInputChannel::bounded(NativeInputChannelConfig {
+            max_events: 1,
+            max_text_bytes: 8,
+        })
+        .unwrap();
+        for point in [1, 2] {
+            channel
+                .publish(
+                    point,
+                    window(),
+                    view(),
+                    NativeInputKind::FileDragMoved {
+                        x_milli: point as i32,
+                        y_milli: point as i32,
+                    },
+                )
+                .unwrap();
+        }
+        let stats = receiver.stats().unwrap();
+        assert_eq!(stats.pending_events, 1);
+        assert_eq!(stats.dropped_samples, 1);
+        let event = receiver.drain(1).unwrap().pop().unwrap();
+        assert!(matches!(
+            event.kind,
+            NativeInputKind::FileDragMoved {
+                x_milli: 2,
+                y_milli: 2
+            }
+        ));
     }
 }

@@ -1,0 +1,27 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/resource"
+	"time"
+)
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	welcome := resource.UseString("welcome", func() (string, error) {
+		time.Sleep(20 * time.Millisecond)
+		return "Loaded by a Volang goroutine", nil
+	})
+	content := kit.Card(theme, ui.Gap(ui.Column(
+		kit.Heading(theme, "Resources"),
+		kit.Body(theme, welcome.Value()),
+	), theme.Space))
+	return kit.Screen(theme, kit.ResourceBoundary(theme, welcome.IsPending(), welcome.Error(), content))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

@@ -1,0 +1,46 @@
+[package]
+name = "vo-ui-shell-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Official native window loop and presentation shell for Volang UI"
+publish = false
+
+[features]
+default = []
+desktop-window = [
+  "dep:pollster",
+  "dep:winit",
+  "dep:wgpu",
+  "vo-app-host-native/native-wgpu",
+]
+
+[dependencies]
+pollster = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }
+wgpu = { version = "=24.0.5", optional = true, default-features = false, features = ["dx12", "metal", "wgsl"] }
+vo-app-host-native.workspace = true
+vo-app-protocol.workspace = true
+vo-app-runtime = { workspace = true, features = ["std"] }
+vo-engine.workspace = true
+vo-ui-accesskit.workspace = true
+vo-ui-core.workspace = true
+vo-ui-host-native.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+vo-ui-present-wgpu.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-system.workspace = true
+vo-ui-system-native.workspace = true
+vo-ui-text-native.workspace = true
+vo-ui-vm.workspace = true
+vo-vm = { path = "../vo-vm" }
+accesskit.workspace = true
+ring = "0.17"
+sha2 = "0.10"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+drag.workspace = true

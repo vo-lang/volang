@@ -31,7 +31,6 @@ mkdir -p "$artifact_dir"
 ) >"$report_tmp"
 
 if ! grep -q '"passed":true' "$report_tmp" \
-  || ! grep -q '"vogui_profile":"headless"' "$report_tmp" \
   || ! grep -q '"voplay_profile":"core"' "$report_tmp" \
   || ! grep -q '"generated_outputs_written_to_app":false' "$report_tmp"; then
   cat "$report_tmp" >&2

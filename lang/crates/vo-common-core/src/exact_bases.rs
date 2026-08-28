@@ -358,7 +358,7 @@ fn analyze_function(
                 let parent_exact = state.get(instruction.a as usize).copied().unwrap_or(false);
                 let child_exact = state.get(instruction.c as usize).copied().unwrap_or(false);
                 write_barriers[pc] = WriteBarrierBaseProvenance(
-                    u8::from(parent_exact) * EXACT_PARENT | u8::from(child_exact) * EXACT_CHILD,
+                    (u8::from(parent_exact) * EXACT_PARENT) | (u8::from(child_exact) * EXACT_CHILD),
                 );
             }
         }

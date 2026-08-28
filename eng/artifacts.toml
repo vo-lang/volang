@@ -14,6 +14,49 @@ tracked = true
 approval = "checked-in-generated"
 
 [[artifact]]
+name = "studio-documentation.generated"
+class = "generated-checked-in"
+path = "apps/studio/documentation"
+owner = "volang-documentation"
+generator = ["cargo", "run", "-q", "-p", "vo-dev", "--locked", "--", "generate", "studio-docs", "--write"]
+provenance = "apps/studio/documentation/provenance.json"
+max_total_bytes = 1048576
+allowed_extensions = [".json", ".vo"]
+inputs = [
+  "lang/docs/catalog.toml",
+  "lang/docs/guides/introduction.md",
+  "lang/docs/guides/installation.md",
+  "lang/docs/guides/hello-world.md",
+  "lang/docs/guides/language-tour.md",
+  "lang/docs/vo-for-gophers.md",
+  "lang/docs/guides/error-handling.md",
+  "lang/docs/guides/dynamic-access.md",
+  "lang/docs/guides/concurrency.md",
+  "lang/docs/guides/modules.md",
+  "lang/docs/guides/standard-library.md",
+  "lang/docs/guides/cli.md",
+  "lang/docs/guides/execution-backends.md",
+  "lang/docs/guides/embedding-rust.md",
+  "lang/docs/spec/language.md",
+  "lang/docs/spec/module.md",
+  "lang/docs/spec/channel.md",
+  "lang/docs/spec/dynamic.md",
+  "lang/docs/spec/native-ffi.md",
+  "lang/docs/spec/runtime-memory.md",
+  "ui/docs/getting-started.md",
+  "ui/docs/authoring-guide.md",
+  "ui/docs/component-model-v2.md",
+  "ui/docs/testing-troubleshooting.md",
+  "ui/docs/web-desktop-products.md",
+  "ui/docs/accessibility-localization.md",
+  "ui/docs/security.md",
+  "apps/studio/ui.web.toml",
+  "cmd/vo-dev/src/generate_docs.rs",
+]
+tracked = true
+approval = "checked-in-generated"
+
+[[artifact]]
 name = "root.cargo-target"
 class = "cache"
 path = "target"
@@ -26,27 +69,15 @@ path = "fuzz/app-protocol/target"
 tracked = false
 
 [[artifact]]
-name = "framework-protocol-fuzz.cargo-target"
+name = "voplay-protocol-fuzz.cargo-target"
 class = "cache"
-path = "fuzz/framework-protocol/target"
+path = "fuzz/voplay-protocol/target"
 tracked = false
 
 [[artifact]]
-name = "studio.tauri-target"
+name = "ui-artifact-fuzz.cargo-target"
 class = "cache"
-path = "apps/studio/src-tauri/target"
-tracked = false
-
-[[artifact]]
-name = "studio.wasm-target"
-class = "cache"
-path = "apps/studio/wasm/target"
-tracked = false
-
-[[artifact]]
-name = "studio.node-modules"
-class = "cache"
-path = "apps/studio/node_modules"
+path = "fuzz/ui-artifact/target"
 tracked = false
 
 [[artifact]]
@@ -56,31 +87,19 @@ path = "lang/crates/vo-web/node_modules"
 tracked = false
 
 [[artifact]]
-name = "studio.dist"
-class = "build-output"
-path = "apps/studio/dist"
-tracked = false
-
-[[artifact]]
 name = "vo-web.dist"
 class = "build-output"
 path = "lang/crates/vo-web/dist"
 tracked = false
 
 [[artifact]]
-name = "studio.wasm-pkg"
-class = "build-output"
-path = "apps/studio/wasm/pkg"
-tracked = false
-
-[[artifact]]
-name = "studio.public-wasm"
-class = "build-output"
-path = "apps/studio/public/wasm"
-tracked = false
-
-[[artifact]]
 name = "vo-web.wasm-pkg"
 class = "build-output"
 path = "lang/crates/vo-web/pkg"
+tracked = false
+
+[[artifact]]
+name = "vo-web.aot-support"
+class = "build-output"
+path = "lang/crates/vo-web/aot-support"
 tracked = false

@@ -23,82 +23,82 @@ const INVALID_HOST_RESPONSE: &str = "invalid browser VFS host response";
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsOpenFile)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsOpenFile)]
     fn js_open_file(path: &str, flags: i32, mode: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsRead)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsRead)]
     fn js_read(fd: i32, length: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsWrite)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsWrite)]
     fn js_write(fd: i32, data: &[u8]) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsReadAt)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsReadAt)]
     fn js_read_at(fd: i32, length: u32, offset: i64) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsWriteAt)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsWriteAt)]
     fn js_write_at(fd: i32, data: &[u8], offset: i64) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsSeek)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsSeek)]
     fn js_seek(fd: i32, offset: i64, whence: i32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsClose)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsClose)]
     fn js_close(fd: i32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsSync)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsSync)]
     fn js_sync(fd: i32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsFstat)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsFstat)]
     fn js_fstat(fd: i32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsFtruncate)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsFtruncate)]
     fn js_ftruncate(fd: i32, size: i64) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsMkdir)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsMkdir)]
     fn js_mkdir(path: &str, mode: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsMkdirAll)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsMkdirAll)]
     fn js_mkdir_all(path: &str, mode: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsRemove)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsRemove)]
     fn js_remove(path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsRemoveAll)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsRemoveAll)]
     fn js_remove_all(path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsRename)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsRename)]
     fn js_rename(old_path: &str, new_path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsRenameNoreplace)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsRenameNoreplace)]
     fn js_rename_noreplace(old_path: &str, new_path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsStat)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsStat)]
     fn js_stat(path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsReadDir)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsReadDir)]
     fn js_read_dir(path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsChmod)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsChmod)]
     fn js_chmod(path: &str, mode: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsTruncate)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsTruncate)]
     fn js_truncate(path: &str, size: i64) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsGetwd)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsGetwd)]
     fn js_getwd() -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsChdir)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsChdir)]
     fn js_chdir(path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsReadFileLimited)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsReadFileLimited)]
     fn js_read_file_limited(path: &str, max_bytes: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsWriteFile)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsWriteFile)]
     fn js_write_file(path: &str, data: &[u8], mode: u32) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsResolveGuestPath)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsResolveGuestPath)]
     fn js_resolve_guest_path(path: &str) -> JsValue;
 
-    #[wasm_bindgen(js_namespace = window, js_name = _vfsGuestGetwd)]
+    #[wasm_bindgen(js_namespace = globalThis, js_name = _vfsGuestGetwd)]
     fn js_guest_getwd() -> JsValue;
 }
 

@@ -34,7 +34,7 @@ impl MapScratch {
         key_slots: usize,
         val_slots: usize,
     ) -> Result<(&mut [u64], &mut [u64]), InstructionError> {
-        let total = key_slots.checked_add(val_slots).ok_or_else(|| {
+        let total = key_slots.checked_add(val_slots).ok_or({
             InstructionError::Memory(vo_runtime::gc::MemoryError::AllocationSizeOverflow)
         })?;
         if total > self.slots.len() {

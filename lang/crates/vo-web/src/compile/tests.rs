@@ -143,6 +143,50 @@ fn rendered_lock(root_mod: &str, mut modules: Vec<LockedModule>) -> String {
     .unwrap()
 }
 
+#[test]
+fn offline_workspace_lock_closes_and_sorts_the_packaged_graph() {
+    let root = "format = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/ui\" = \"^0.1.0\"\n";
+    let ui = "format = 1\nmodule = \"github.com/acme/ui\"\nversion = \"0.1.4\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.2\"\n";
+    let core =
+        "format = 1\nmodule = \"github.com/acme/core\"\nversion = \"0.1.2\"\nvo = \"0.1.0\"\n";
+    let manifests = vec![ui.to_string(), core.to_string()];
+
+    let text = prepare_workspace_lock_text(root, &manifests).unwrap();
+    let lock = LockFile::parse(&text).unwrap();
+    assert_eq!(lock.modules.len(), 2);
+    assert_eq!(lock.modules[0].path.as_str(), "github.com/acme/core");
+    assert_eq!(lock.modules[1].path.as_str(), "github.com/acme/ui");
+    assert!(lock
+        .modules
+        .iter()
+        .all(|module| module.origin == LockOrigin::Workspace
+            && module.release.is_none()
+            && module.intent.is_some()));
+    assert_eq!(text, prepare_workspace_lock_text(root, &manifests).unwrap());
+}
+
+#[test]
+fn offline_workspace_lock_rejects_incomplete_or_incompatible_bundles() {
+    let root = "format = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/ui\" = \"^0.2.0\"\n";
+    let error = prepare_workspace_lock_text(root, &[]).unwrap_err();
+    assert!(
+        error.contains("missing dependency github.com/acme/ui"),
+        "{error}"
+    );
+
+    let ui = "format = 1\nmodule = \"github.com/acme/ui\"\nversion = \"0.1.4\"\nvo = \"0.1.0\"\n";
+    let error = prepare_workspace_lock_text(root, &[ui.to_string()]).unwrap_err();
+    assert!(error.contains("violates the project constraint"), "{error}");
+}
+
+#[test]
+fn offline_workspace_lock_rejects_capability_selection() {
+    let root = "format = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/ui\" = { version = \"^0.1.0\", capabilities = [\"native\"] }\n";
+    let ui = "format = 1\nmodule = \"github.com/acme/ui\"\nversion = \"0.1.4\"\nvo = \"0.1.0\"\n";
+    let error = prepare_workspace_lock_text(root, &[ui.to_string()]).unwrap_err();
+    assert!(error.contains("cannot select capabilities"), "{error}");
+}
+
 fn workspace_transitive_lock() -> String {
     rendered_lock(
         APP_WORKSPACE_MOD,

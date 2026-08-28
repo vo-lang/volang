@@ -1,0 +1,62 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/resource"
+	"time"
+)
+
+var appCache = resource.NewCache(8)
+
+func messageTimer(key string) *time.Timer {
+	if key == "slow" {
+		return time.NewTimer(250 * time.Millisecond)
+	}
+	return time.NewTimer(25 * time.Millisecond)
+}
+
+func loadMessage(ctx context.Context, key string) (string, error) {
+	timer := messageTimer(key)
+	defer timer.Stop()
+	select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timer.C:
+			return "Loaded " + key, nil
+	}
+}
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	keyState := ui.UseStringState("slow")
+	key := ui.StringStateValue(keyState)
+	policy := resource.Policy{MaxAge: time.Minute, RetryAfter: time.Second}
+	primary := resource.UseCachedString(appCache, key, policy, func(ctx context.Context) (string, error) {
+		return loadMessage(ctx, key)
+	})
+	joined := resource.UseCachedString(appCache, key, policy, func(ctx context.Context) (string, error) {
+		return loadMessage(ctx, key)
+	})
+	stats := appCache.Stats()
+	controls := ui.Row(kit.PrimaryButton(theme, "Load slow", false, func(event ui.Event) {
+		appCache.Cancel(key)
+		ui.SetStringState(keyState, "slow")
+	}), kit.PrimaryButton(theme, "Load fast", false, func(event ui.Event) {
+		appCache.Cancel(key)
+		ui.SetStringState(keyState, "fast")
+	}), kit.PrimaryButton(theme, "Refresh", false, func(event ui.Event) {
+		appCache.Invalidate(key)
+	}))
+	content := kit.Card(theme, ui.Gap(ui.Column(kit.Heading(theme, "Cached resources"), kit.Body(theme, primary.Value()), kit.Body(theme, joined.Value()), kit.Body(theme, fmt.Sprintf("key=%s loads=%d joins=%d canceled=%d", key, stats.Loads, stats.Joins, stats.Cancellations))), theme.Space))
+	result := kit.ResourceBoundary(theme, primary.IsPending(), primary.Error(), content)
+	return kit.Screen(theme, ui.Gap(ui.Column(controls, result), theme.Space))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

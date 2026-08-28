@@ -474,10 +474,7 @@ fn capture_browser_snapshot_from_fs(
     project_root: Option<&Path>,
     entry_path: &Path,
 ) -> Result<CapturedBrowserSnapshot, String> {
-    let mut files = Vec::new();
-    let mut source_indices = BTreeMap::new();
-    let mut claimed_paths = BTreeMap::new();
-    let mut budget = BrowserSnapshotBudget::new(snapshot.mounts.len())?;
+    let mut capture = FsSnapshotCapture::new(snapshot.mounts.len())?;
     for mount in &snapshot.mounts {
         validate_browser_snapshot_mount(mount)?;
         match mount.kind {
@@ -486,27 +483,18 @@ fn capture_browser_snapshot_from_fs(
                 runtime,
                 project_root,
                 entry_path,
-                &mut files,
-                &mut source_indices,
-                &mut claimed_paths,
-                &mut budget,
+                &mut capture,
             )?,
             BrowserSnapshotMountKind::File => materialize_snapshot_file_mount_from_fs(
                 mount,
                 runtime,
                 project_root,
                 entry_path,
-                &mut files,
-                &mut source_indices,
-                &mut claimed_paths,
-                &mut budget,
+                &mut capture,
             )?,
         }
     }
-    Ok(CapturedBrowserSnapshot {
-        files,
-        source_indices,
-    })
+    Ok(capture.finish())
 }
 
 /// Convert a native filesystem path into the canonical path understood by the
@@ -644,6 +632,31 @@ fn execute_pkg_island_action(action: &EnsurePkgIslandAction) -> Result<(), Strin
     Ok(())
 }
 
+struct FsSnapshotCapture {
+    files: Vec<BrowserSnapshotFile>,
+    source_indices: BTreeMap<PathBuf, usize>,
+    claimed_paths: BTreeMap<String, String>,
+    budget: BrowserSnapshotBudget,
+}
+
+impl FsSnapshotCapture {
+    fn new(mount_count: usize) -> Result<Self, String> {
+        Ok(Self {
+            files: Vec::new(),
+            source_indices: BTreeMap::new(),
+            claimed_paths: BTreeMap::new(),
+            budget: BrowserSnapshotBudget::new(mount_count)?,
+        })
+    }
+
+    fn finish(self) -> CapturedBrowserSnapshot {
+        CapturedBrowserSnapshot {
+            files: self.files,
+            source_indices: self.source_indices,
+        }
+    }
+}
+
 struct FsSnapshotDirectoryMaterializer<'a> {
     mount: &'a BrowserSnapshotMount,
     runtime: &'a BrowserRuntimePlan,
@@ -735,10 +748,7 @@ fn materialize_snapshot_directory_mount_from_fs(
     runtime: &BrowserRuntimePlan,
     project_root: Option<&Path>,
     entry_path: &Path,
-    files: &mut Vec<BrowserSnapshotFile>,
-    source_indices: &mut BTreeMap<PathBuf, usize>,
-    claimed_paths: &mut BTreeMap<String, String>,
-    budget: &mut BrowserSnapshotBudget,
+    capture: &mut FsSnapshotCapture,
 ) -> Result<(), String> {
     let root =
         resolve_snapshot_source_path_from_fs(runtime, &mount.source, project_root, entry_path)?;
@@ -747,10 +757,10 @@ fn materialize_snapshot_directory_mount_from_fs(
         runtime,
         project_root,
         entry_path,
-        files,
-        source_indices,
-        claimed_paths,
-        budget,
+        files: &mut capture.files,
+        source_indices: &mut capture.source_indices,
+        claimed_paths: &mut capture.claimed_paths,
+        budget: &mut capture.budget,
     }
     .walk(&root, 0)
 }
@@ -760,31 +770,34 @@ fn materialize_snapshot_file_mount_from_fs(
     runtime: &BrowserRuntimePlan,
     project_root: Option<&Path>,
     entry_path: &Path,
-    files: &mut Vec<BrowserSnapshotFile>,
-    source_indices: &mut BTreeMap<PathBuf, usize>,
-    claimed_paths: &mut BTreeMap<String, String>,
-    budget: &mut BrowserSnapshotBudget,
+    capture: &mut FsSnapshotCapture,
 ) -> Result<(), String> {
     let path =
         resolve_snapshot_source_path_from_fs(runtime, &mount.source, project_root, entry_path)?;
     let output_path =
         materialized_snapshot_path_from_fs(mount, runtime, project_root, entry_path, &path)?;
     let source_path = normalize_snapshot_output_path(&path)?;
-    budget.record_entry(&source_path)?;
-    if claim_browser_snapshot_output(claimed_paths, &output_path, &source_path)? {
-        let read_limit = budget.next_file_limit(&source_path)?;
+    capture.budget.record_entry(&source_path)?;
+    if claim_browser_snapshot_output(&mut capture.claimed_paths, &output_path, &source_path)? {
+        let read_limit = capture.budget.next_file_limit(&source_path)?;
         let source_key = normalize_fs_path(&path);
-        let bytes = captured_or_read_browser_file(&source_key, read_limit, files, source_indices)?;
-        budget.record_file(&source_path, bytes.len())?;
-        files
+        let bytes = captured_or_read_browser_file(
+            &source_key,
+            read_limit,
+            &capture.files,
+            &capture.source_indices,
+        )?;
+        capture.budget.record_file(&source_path, bytes.len())?;
+        capture
+            .files
             .try_reserve(1)
             .map_err(|_| format!("failed to reserve browser snapshot entry for {source_path:?}"))?;
-        let index = files.len();
-        files.push(BrowserSnapshotFile {
+        let index = capture.files.len();
+        capture.files.push(BrowserSnapshotFile {
             path: output_path,
             bytes,
         });
-        source_indices.entry(source_key).or_insert(index);
+        capture.source_indices.entry(source_key).or_insert(index);
     }
     Ok(())
 }

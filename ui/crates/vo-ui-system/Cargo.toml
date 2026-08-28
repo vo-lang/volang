@@ -1,0 +1,15 @@
+[package]
+name = "vo-ui-system"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Renderer-neutral system integration contracts for Volang UI"
+publish = false
+
+[features]
+default = []
+
+[dependencies]

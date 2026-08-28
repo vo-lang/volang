@@ -128,10 +128,14 @@ pub fn get_expr_source(
 ) -> ExprSource {
     match &expr.kind {
         ExprKind::Ident(ident) => {
+            let object = info.get_use(ident);
+            if ctx.externalized_local(object).is_some() {
+                return ExprSource::NeedsCompile;
+            }
             if let Some(local) = func.lookup_local(ident.symbol) {
                 return ExprSource::Location(local.storage);
             }
-            let obj_key = info.get_use(ident);
+            let obj_key = object;
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 if let Some(type_key) = info.try_obj_type(obj_key) {
                     return ExprSource::Location(StorageKind::package_global(
@@ -446,12 +450,18 @@ pub fn compile_expr_to(
                 compile_const_value(val, dst, target_type, ctx, func, info)?;
                 return Ok(());
             }
+            let object = info.get_use(ident);
+            if ctx.externalized_local(object).is_some() {
+                let lvalue = crate::lvalue::resolve_lvalue_for_read(expr, ctx, func, info)?;
+                crate::lvalue::emit_lvalue_load(&lvalue, dst, ctx, func)?;
+                return Ok(());
+            }
             match get_expr_source(expr, ctx, func, info) {
                 ExprSource::Location(storage) => {
                     func.emit_storage_load(storage, dst);
                 }
                 ExprSource::NeedsCompile => {
-                    let obj_key = info.get_use(ident);
+                    let obj_key = object;
                     // Closure capture: ClosureGet returns GcRef to the captured storage
                     if let Some(capture) = func.lookup_capture(ident.symbol) {
                         let capture_index = capture.index;

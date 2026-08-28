@@ -1,0 +1,107 @@
+// Package testing provides deterministic clocks, bounded event recording,
+// fault injection, and cancellation-aware polling for UI unit and contract
+// tests. It contains no renderer-specific implementation.
+package testing
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	DefaultMaxEvents = 10000
+	MaxFaultPoints = 4096
+)
+
+type Clock struct {
+	mu sync.Mutex
+	now time.Time
+}
+
+func NewClock(at time.Time) *Clock { return &Clock{now: at} }
+func (clock *Clock) Now() time.Time { clock.mu.Lock(); defer clock.mu.Unlock(); return clock.now }
+func (clock *Clock) Advance(duration time.Duration) time.Time {
+	if duration < 0 || duration > 365*24*time.Hour { panic("testing clock advance is invalid") }
+	clock.mu.Lock(); defer clock.mu.Unlock(); clock.now = clock.now.Add(duration); return clock.now
+}
+
+type Event struct {
+	Sequence uint64
+	At time.Time
+	Kind string
+	Name string
+	Value string
+}
+
+type Recorder struct {
+	mu sync.Mutex
+	clock *Clock
+	maximum int
+	next uint64
+	events []Event
+	dropped uint64
+}
+
+func NewRecorder(clock *Clock, maximum int) *Recorder {
+	if clock == nil || maximum <= 0 || maximum > 1000000 { panic("testing recorder configuration is invalid") }
+	return &Recorder{clock: clock, maximum: maximum, next: 1}
+}
+
+func (recorder *Recorder) Record(kind string, name string, value string) error {
+	if recorder == nil || kind == "" || name == "" || len(kind) > 128 || len(name) > 4096 || len(value) > 65536 ||
+		strings.ContainsAny(kind+name, "\x00\r\n") {
+		return errors.New("testing event is invalid")
+	}
+	recorder.mu.Lock(); defer recorder.mu.Unlock()
+	event := Event{Sequence: recorder.next, At: recorder.clock.Now(), Kind: kind, Name: name, Value: value}; recorder.next++
+	if len(recorder.events) == recorder.maximum {
+		copy(recorder.events, recorder.events[1:]); recorder.events[len(recorder.events)-1] = event; recorder.dropped++; return nil
+	}
+	recorder.events = append(recorder.events, event); return nil
+}
+
+func (recorder *Recorder) Events() []Event { recorder.mu.Lock(); defer recorder.mu.Unlock(); return append([]Event(nil), recorder.events...) }
+func (recorder *Recorder) Dropped() uint64 { recorder.mu.Lock(); defer recorder.mu.Unlock(); return recorder.dropped }
+func (recorder *Recorder) Clear() { recorder.mu.Lock(); defer recorder.mu.Unlock(); recorder.events = nil; recorder.dropped = 0 }
+
+// Faults fails a named boundary for the configured number of hits. Tests can
+// model OOM, device loss, permission denial, host failure, and cancellation
+// without introducing target-specific branches in application code.
+type Faults struct { mu sync.Mutex; remaining map[string]int }
+func NewFaults() *Faults { return &Faults{remaining: make(map[string]int)} }
+
+func (faults *Faults) Set(name string, hits int) error {
+	if faults == nil || name == "" || len(name) > 4096 || hits < 0 || hits > 1000000 || strings.ContainsAny(name, "\x00\r\n") {
+		return errors.New("testing fault point is invalid")
+	}
+	faults.mu.Lock(); defer faults.mu.Unlock()
+	if hits == 0 { delete(faults.remaining, name); return nil }
+	if len(faults.remaining) >= MaxFaultPoints && faults.remaining[name] == 0 { return errors.New("testing fault point limit exceeded") }
+	faults.remaining[name] = hits; return nil
+}
+
+func (faults *Faults) Hit(name string) bool {
+	if faults == nil { return false }
+	faults.mu.Lock(); defer faults.mu.Unlock()
+	remaining := faults.remaining[name]; if remaining <= 0 { return false }
+	remaining--; if remaining == 0 { delete(faults.remaining, name) } else { faults.remaining[name] = remaining }
+	return true
+}
+
+func (faults *Faults) Pending() int { faults.mu.Lock(); defer faults.mu.Unlock(); return len(faults.remaining) }
+
+func Eventually(ctx context.Context, interval time.Duration, condition func() bool) error {
+	if ctx == nil || condition == nil || interval < 0 || interval > time.Hour { return errors.New("testing eventual assertion is invalid") }
+	if condition() { return nil }
+	if interval == 0 { interval = time.Millisecond }
+	ticker := time.NewTicker(interval); defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done(): return ctx.Err()
+		case <-ticker.C: if condition() { return nil }
+		}
+	}
+}

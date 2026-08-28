@@ -612,31 +612,30 @@ impl<'a> FunctionCompiler<'a> {
         if let Some(crate::optimizer::LoweringAction::Replace(replacement)) =
             optimized.map(|node| node.action)
         {
-            let value = self.core.lowered_value(replacement).ok_or_else(|| {
-                JitError::Internal(format!(
-                    "GVN replacement value {} is unavailable at pc {}",
-                    replacement.index(),
-                    self.core.current_pc
-                ))
-            })?;
-            let output = *self
-                .core
-                .analysis
-                .ir()
-                .outputs(instruction)
-                .first()
-                .ok_or_else(|| {
-                    JitError::Internal(format!(
-                        "GVN replacement at pc {} has no output",
-                        self.core.current_pc
-                    ))
-                })?;
-            let output = self.core.analysis.ir().value(output);
-            match output.ty {
-                crate::ir::ValueType::Float64 => self.write_var_f64(output.slot, value),
-                _ => self.store_local(output.slot, value),
+            // A canonical value from a pruned predecessor may be absent at
+            // this concrete lowering point. The original instruction remains
+            // a complete semantic fallback and keeps AOT/JIT compilation
+            // robust without weakening the optimizer's analysis budget.
+            if let Some(value) = self.core.lowered_value(replacement) {
+                let output = *self
+                    .core
+                    .analysis
+                    .ir()
+                    .outputs(instruction)
+                    .first()
+                    .ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "GVN replacement at pc {} has no output",
+                            self.core.current_pc
+                        ))
+                    })?;
+                let output = self.core.analysis.ir().value(output);
+                match output.ty {
+                    crate::ir::ValueType::Float64 => self.write_var_f64(output.slot, value),
+                    _ => self.store_local(output.slot, value),
+                }
+                return Ok(false);
             }
-            return Ok(false);
         }
         if self.tier == vo_runtime::jit_api::JitTier::Optimizing
             && inst.opcode() == Opcode::PtrNew

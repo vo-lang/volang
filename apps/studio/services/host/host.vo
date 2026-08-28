@@ -1,0 +1,432 @@
+// Package host adapts the versioned Studio capability interfaces to the
+// renderer-neutral application-host invocation boundary.
+package host
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"github.com/vo-lang/studio/domain"
+	"github.com/vo-lang/studio/protocol"
+	"github.com/vo-lang/ui/system"
+)
+
+const MaxRunBatch = 128
+
+type Service struct{}
+
+func New() *Service {
+	return &Service{}
+}
+
+func (service *Service) Services() protocol.Services {
+	return protocol.Services{
+		Host: service, Files: service, Language: service, Compiler: service, Runner: service,
+		Preview: service, Share: service, Account: service, Remote: service, Credentials: service,
+	}
+}
+
+type hostInfoResponse struct {
+	Info domain.HostInfo
+}
+
+func (service *Service) Info(ctx context.Context) (domain.HostInfo, error) {
+	var response hostInfoResponse
+	err := call(ctx, "host.info", struct{}{}, &response)
+	return response.Info, err
+}
+
+func call(ctx context.Context, operation string, request interface{}, response interface{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	result, err := system.InvokeHost(protocol.Version, operation, payload)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if response == nil {
+		return nil
+	}
+	if len(result) == 0 {
+		return errors.New("Studio host returned an empty response")
+	}
+	return json.Unmarshal(result, response)
+}
+
+type projectsResponse struct {
+	Projects []domain.Project
+}
+
+func (service *Service) Projects(ctx context.Context) ([]domain.Project, error) {
+	var response projectsResponse
+	err := call(ctx, "projects.list", struct{}{}, &response)
+	return response.Projects, err
+}
+
+type projectResponse struct {
+	Project domain.Project
+}
+
+func (service *Service) CreateProject(ctx context.Context, request protocol.CreateProjectRequest) (domain.Project, error) {
+	var response projectResponse
+	err := call(ctx, "projects.create", request, &response)
+	return response.Project, err
+}
+
+type openProjectRequest struct {
+	Root string
+}
+
+func (service *Service) OpenProject(ctx context.Context, root string) (domain.Project, error) {
+	var response projectResponse
+	err := call(ctx, "projects.open", openProjectRequest{Root: root}, &response)
+	return response.Project, err
+}
+
+type renameProjectRequest struct {
+	ProjectID domain.ProjectID
+	Name string
+}
+
+func (service *Service) RenameProject(ctx context.Context, id domain.ProjectID, name string) (domain.Project, error) {
+	var response projectResponse
+	err := call(ctx, "projects.rename", renameProjectRequest{ProjectID: id, Name: name}, &response)
+	return response.Project, err
+}
+
+func (service *Service) DeleteProject(ctx context.Context, id domain.ProjectID) error {
+	return call(ctx, "projects.delete", projectRequest{ProjectID: id}, nil)
+}
+
+func (service *Service) ForgetProject(ctx context.Context, id domain.ProjectID) error {
+	return call(ctx, "projects.forget", projectRequest{ProjectID: id}, nil)
+}
+
+type projectRequest struct {
+	ProjectID domain.ProjectID
+}
+
+type filesResponse struct {
+	Files []domain.FileEntry
+}
+
+func (service *Service) Files(ctx context.Context, id domain.ProjectID) ([]domain.FileEntry, error) {
+	var response filesResponse
+	err := call(ctx, "files.list", projectRequest{ProjectID: id}, &response)
+	return response.Files, err
+}
+
+type readFileRequest struct {
+	ProjectID domain.ProjectID
+	Path string
+}
+
+type readFileResponse struct {
+	Text string
+}
+
+func (service *Service) ReadFile(ctx context.Context, id domain.ProjectID, path string) (string, error) {
+	var response readFileResponse
+	err := call(ctx, "files.read", readFileRequest{ProjectID: id, Path: path}, &response)
+	return response.Text, err
+}
+
+type writeFileRequest struct {
+	ProjectID domain.ProjectID
+	Path string
+	Text string
+}
+
+func (service *Service) WriteFile(ctx context.Context, id domain.ProjectID, path string, text string) error {
+	return call(ctx, "files.write", writeFileRequest{ProjectID: id, Path: path, Text: text}, nil)
+}
+
+type renameEntryRequest struct {
+	ProjectID domain.ProjectID
+	From string
+	To string
+}
+
+func (service *Service) RenameEntry(ctx context.Context, id domain.ProjectID, from string, to string) error {
+	return call(ctx, "files.rename", renameEntryRequest{ProjectID: id, From: from, To: to}, nil)
+}
+
+func (service *Service) DeleteEntry(ctx context.Context, id domain.ProjectID, path string) error {
+	return call(ctx, "files.delete", readFileRequest{ProjectID: id, Path: path}, nil)
+}
+
+type diagnosticsResponse struct {
+	Diagnostics []domain.Diagnostic
+}
+
+func (service *Service) Analyze(ctx context.Context, request protocol.AnalyzeRequest) ([]domain.Diagnostic, error) {
+	var response diagnosticsResponse
+	err := call(ctx, "language.analyze", request, &response)
+	return response.Diagnostics, err
+}
+
+type artifactResponse struct {
+	Artifact domain.Artifact
+	ID string
+	Kind domain.ArtifactKind
+	Entry string
+	Bytes []byte
+	Diagnostics []domain.Diagnostic
+}
+
+func (service *Service) Compile(ctx context.Context, request protocol.CompileRequest) (domain.Artifact, error) {
+	var response artifactResponse
+	err := call(ctx, "compiler.compile", request, &response)
+	if response.ID != "" {
+		return domain.Artifact{
+			ID: response.ID, Kind: response.Kind, Entry: response.Entry, Bytes: response.Bytes,
+			Diagnostics: response.Diagnostics,
+		}, err
+	}
+	return response.Artifact, err
+}
+
+type runStartResponse struct {
+	SessionID string
+}
+
+type runNextRequest struct {
+	SessionID string
+	Maximum int
+}
+
+type runNextResponse struct {
+	Events []domain.RunEvent
+	Done bool
+}
+
+type runStopRequest struct {
+	SessionID string
+}
+
+func publish(ctx context.Context, output chan domain.RunEvent, event domain.RunEvent) bool {
+	select {
+		case <-ctx.Done():
+			return false
+		case output <- event:
+			return true
+	}
+}
+
+func (service *Service) Run(ctx context.Context, request protocol.RunRequest) (<-chan domain.RunEvent, error) {
+	var started runStartResponse
+	if err := call(ctx, "run.start", request, &started); err != nil {
+		return nil, err
+	}
+	if started.SessionID == "" {
+		return nil, errors.New("Studio host returned an empty run session")
+	}
+	output := make(chan domain.RunEvent, MaxRunBatch)
+	go func() {
+		for {
+			if ctx.Err() != nil {
+				_ = call(context.Background(), "run.stop", runStopRequest{SessionID: started.SessionID}, nil)
+				close(output)
+				return
+			}
+			var response runNextResponse
+			if err := call(ctx, "run.next", runNextRequest{
+				SessionID: started.SessionID, Maximum: MaxRunBatch,
+			}, &response); err != nil {
+				if ctx.Err() == nil {
+					publish(ctx, output, domain.RunEvent{Kind: domain.RunStderr, Text: err.Error()})
+				}
+				close(output)
+				return
+			}
+			for _, event := range response.Events {
+				if !publish(ctx, output, event) {
+					close(output)
+					return
+				}
+			}
+			if response.Done {
+				close(output)
+				return
+			}
+		}
+	}()
+	return output, nil
+}
+
+type previewResponse struct {
+	SurfaceID string
+}
+
+func (service *Service) OpenPreview(ctx context.Context, artifact domain.Artifact) (string, error) {
+	var response previewResponse
+	err := call(ctx, "preview.open", artifact, &response)
+	return response.SurfaceID, err
+}
+
+type previewCloseRequest struct {
+	SurfaceID string
+}
+
+func (service *Service) ClosePreview(ctx context.Context, id string) error {
+	return call(ctx, "preview.close", previewCloseRequest{SurfaceID: id}, nil)
+}
+
+type shareResponse struct {
+	Share domain.ProjectShare
+}
+
+func (service *Service) Share(ctx context.Context, id domain.ProjectID) (domain.ProjectShare, error) {
+	var response shareResponse
+	err := call(ctx, "projects.share", projectRequest{ProjectID: id}, &response)
+	return response.Share, err
+}
+
+type accountResponse struct {
+	Account domain.AccountState
+}
+
+func (service *Service) Account(ctx context.Context) (domain.AccountState, error) {
+	var response accountResponse
+	err := call(ctx, "account.state", struct{}{}, &response)
+	return response.Account, err
+}
+
+func (service *Service) ConnectAccount(ctx context.Context) (domain.AccountState, error) {
+	var response accountResponse
+	err := call(ctx, "account.connect", struct{}{}, &response)
+	return response.Account, err
+}
+
+func (service *Service) DisconnectAccount(ctx context.Context) error {
+	return call(ctx, "account.disconnect", struct{}{}, nil)
+}
+
+type remoteResponse struct {
+	State domain.RemoteState
+}
+
+func (service *Service) State(ctx context.Context, id domain.ProjectID) (domain.RemoteState, error) {
+	var response remoteResponse
+	err := call(ctx, "remote.state", projectRequest{ProjectID: id}, &response)
+	return response.State, err
+}
+
+type remoteDiffResponse struct {
+	Diff domain.RemoteDiff
+}
+
+func (service *Service) Diff(ctx context.Context, id domain.ProjectID, path string) (domain.RemoteDiff, error) {
+	var response remoteDiffResponse
+	err := call(ctx, "remote.diff", readFileRequest{ProjectID: id, Path: path}, &response)
+	return response.Diff, err
+}
+
+type remoteStartResponse struct {
+	SessionID string
+}
+
+type remoteNextRequest struct {
+	SessionID string
+}
+
+type remoteNextResponse struct {
+	Done bool
+	Progress string
+	Error string
+}
+
+func remoteOperation(ctx context.Context, operation string, request interface{}, progress func(string)) error {
+	var started remoteStartResponse
+	if err := call(ctx, operation, request, &started); err != nil {
+		return err
+	}
+	if started.SessionID == "" {
+		return errors.New("Studio host returned an empty remote operation session")
+	}
+	stop := func() {
+		_ = call(context.Background(), "remote.stop", remoteNextRequest{SessionID: started.SessionID}, nil)
+	}
+	for {
+		select {
+			case <-ctx.Done():
+				stop()
+				return ctx.Err()
+			default:
+		}
+		var next remoteNextResponse
+		if err := call(context.Background(), "remote.next", remoteNextRequest{SessionID: started.SessionID}, &next); err != nil {
+			if ctx.Err() != nil {
+				stop()
+				return ctx.Err()
+			}
+			return err
+		}
+		if next.Progress != "" && progress != nil {
+			progress(next.Progress)
+		}
+		if next.Done {
+			if next.Error != "" {
+				return errors.New(next.Error)
+			}
+			return nil
+		}
+	}
+}
+
+func (service *Service) Pull(ctx context.Context, id domain.ProjectID, progress func(string)) error {
+	return remoteOperation(ctx, "remote.pull", projectRequest{ProjectID: id}, progress)
+}
+
+type pushRequest struct {
+	ProjectID domain.ProjectID
+	Message string
+}
+
+func (service *Service) Push(ctx context.Context, id domain.ProjectID, message string, progress func(string)) error {
+	return remoteOperation(ctx, "remote.push", pushRequest{ProjectID: id, Message: message}, progress)
+}
+
+type remoteDeleteRequest struct {
+	ProjectID domain.ProjectID
+	Repository string
+}
+
+func (service *Service) DeleteRepository(ctx context.Context, id domain.ProjectID, repository string) error {
+	return call(ctx, "remote.delete", remoteDeleteRequest{ProjectID: id, Repository: repository}, nil)
+}
+
+type credentialRequest struct {
+	Key string
+}
+
+type credentialSetRequest struct {
+	Key string
+	Value string
+}
+
+type credentialResponse struct {
+	Value string
+	Present bool
+}
+
+func (service *Service) Get(ctx context.Context, key string) (string, bool, error) {
+	var response credentialResponse
+	err := call(ctx, "credentials.get", credentialRequest{Key: key}, &response)
+	return response.Value, response.Present, err
+}
+
+func (service *Service) Set(ctx context.Context, key string, value string) error {
+	return call(ctx, "credentials.set", credentialSetRequest{Key: key, Value: value}, nil)
+}
+
+func (service *Service) Delete(ctx context.Context, key string) error {
+	return call(ctx, "credentials.delete", credentialRequest{Key: key}, nil)
+}

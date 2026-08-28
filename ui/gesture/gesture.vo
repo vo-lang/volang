@@ -1,0 +1,197 @@
+// Package gesture builds renderer-neutral pointer recognizers from typed UI
+// events. Recognizer state lives in stable UI cells, while Web and desktop
+// hosts remain responsible for trusted coordinates and pointer identity.
+package gesture
+
+import (
+	"github.com/vo-lang/ui"
+	"math"
+)
+
+type Axis int64
+
+const (
+	AnyAxis Axis = iota
+	Horizontal
+	Vertical
+)
+
+type Phase int64
+
+const (
+	Idle Phase = iota
+	Pressed
+	Started
+	Changed
+	Ended
+	Cancelled
+)
+
+type DragOptions struct {
+	Axis Axis
+	MinDistance float64
+}
+
+func DefaultDragOptions() DragOptions {
+	return DragOptions{Axis: AnyAxis, MinDistance: 3}
+}
+
+type DragSnapshot struct {
+	Phase Phase
+	Active bool
+	PointerID int64
+	StartX float64
+	StartY float64
+	X float64
+	Y float64
+	DeltaX float64
+	DeltaY float64
+}
+
+// Drag is one pointer-owned drag recognizer.
+type Drag struct {
+	phase ui.IntState
+	active ui.BoolState
+	pointerID ui.IntState
+	startX ui.FloatState
+	startY ui.FloatState
+	x ui.FloatState
+	y ui.FloatState
+	deltaX ui.FloatState
+	deltaY ui.FloatState
+}
+
+func UseDrag() Drag {
+	return Drag{
+		phase: ui.UseIntState(int64(Idle)), active: ui.UseBoolState(false),
+		pointerID: ui.UseIntState(-1), startX: ui.UseFloatState(0),
+		startY: ui.UseFloatState(0), x: ui.UseFloatState(0), y: ui.UseFloatState(0),
+		deltaX: ui.UseFloatState(0), deltaY: ui.UseFloatState(0),
+	}
+}
+
+func (drag Drag) Snapshot() DragSnapshot {
+	return DragSnapshot{
+		Phase: Phase(ui.IntStateValue(drag.phase)), Active: ui.BoolStateValue(drag.active),
+		PointerID: ui.IntStateValue(drag.pointerID),
+		StartX: ui.FloatStateValue(drag.startX), StartY: ui.FloatStateValue(drag.startY),
+		X: ui.FloatStateValue(drag.x), Y: ui.FloatStateValue(drag.y),
+		DeltaX: ui.FloatStateValue(drag.deltaX), DeltaY: ui.FloatStateValue(drag.deltaY),
+	}
+}
+
+func validateOptions(options DragOptions) {
+	if options.Axis < AnyAxis || options.Axis > Vertical || math.IsNaN(options.MinDistance) ||
+		math.IsInf(options.MinDistance, 0) || options.MinDistance < 0 || options.MinDistance > 1000000 {
+		panic("gesture drag options are invalid")
+	}
+}
+
+func distance(options DragOptions, deltaX float64, deltaY float64) float64 {
+	if options.Axis == Horizontal {
+		return math.Abs(deltaX)
+	}
+	if options.Axis == Vertical {
+		return math.Abs(deltaY)
+	}
+	return math.Sqrt(deltaX*deltaX + deltaY*deltaY)
+}
+
+func constrained(options DragOptions, deltaX float64, deltaY float64) (float64, float64) {
+	if options.Axis == Horizontal {
+		return deltaX, 0
+	}
+	if options.Axis == Vertical {
+		return 0, deltaY
+	}
+	return deltaX, deltaY
+}
+
+func (drag Drag) begin(event ui.Event) {
+	ui.SetIntState(drag.phase, int64(Pressed))
+	ui.SetBoolState(drag.active, false)
+	ui.SetIntState(drag.pointerID, event.PointerID)
+	ui.SetFloatState(drag.startX, event.X)
+	ui.SetFloatState(drag.startY, event.Y)
+	ui.SetFloatState(drag.x, event.X)
+	ui.SetFloatState(drag.y, event.Y)
+	ui.SetFloatState(drag.deltaX, 0)
+	ui.SetFloatState(drag.deltaY, 0)
+}
+
+func (drag Drag) move(event ui.Event, options DragOptions) bool {
+	if ui.IntStateValue(drag.phase) == int64(Idle) ||
+		ui.IntStateValue(drag.pointerID) != event.PointerID {
+		return false
+	}
+	deltaX := event.X - ui.FloatStateValue(drag.startX)
+	deltaY := event.Y - ui.FloatStateValue(drag.startY)
+	deltaX, deltaY = constrained(options, deltaX, deltaY)
+	active := ui.BoolStateValue(drag.active)
+	if !active && distance(options, deltaX, deltaY) < options.MinDistance {
+		return false
+	}
+	ui.SetFloatState(drag.x, event.X)
+	ui.SetFloatState(drag.y, event.Y)
+	ui.SetFloatState(drag.deltaX, deltaX)
+	ui.SetFloatState(drag.deltaY, deltaY)
+	if active {
+		ui.SetIntState(drag.phase, int64(Changed))
+	} else {
+		ui.SetBoolState(drag.active, true)
+		ui.SetIntState(drag.phase, int64(Started))
+	}
+	return true
+}
+
+func (drag Drag) finish(event ui.Event) bool {
+	if ui.IntStateValue(drag.phase) == int64(Idle) ||
+		ui.IntStateValue(drag.pointerID) != event.PointerID {
+		return false
+	}
+	active := ui.BoolStateValue(drag.active)
+	ui.SetFloatState(drag.x, event.X)
+	ui.SetFloatState(drag.y, event.Y)
+	ui.SetBoolState(drag.active, false)
+	ui.SetIntState(drag.pointerID, -1)
+	if active {
+		ui.SetIntState(drag.phase, int64(Ended))
+	} else {
+		ui.SetIntState(drag.phase, int64(Cancelled))
+	}
+	return active
+}
+
+// Cancel ends an owned pointer sequence without invoking a bound callback.
+func (drag Drag) Cancel() {
+	ui.SetBoolState(drag.active, false)
+	ui.SetIntState(drag.pointerID, -1)
+	ui.SetIntState(drag.phase, int64(Cancelled))
+	ui.Invalidate()
+}
+
+// BindDrag adds the three typed pointer listeners required by a drag. The
+// callback receives Started, Changed, and Ended snapshots after state updates.
+func BindDrag(view ui.View, drag Drag, options DragOptions, onChange func(DragSnapshot)) ui.View {
+	validateOptions(options)
+	view = ui.CapturePointer(view, true)
+	view = ui.OnPointerDown(view, func(event ui.Event) {
+		if event.Button == 0 {
+			drag.begin(event)
+		}
+	})
+	view = ui.OnPointerMove(view, func(event ui.Event) {
+		if drag.move(event, options) {
+			onChange(drag.Snapshot())
+		}
+	})
+	view = ui.OnPointerUp(view, func(event ui.Event) {
+		if drag.finish(event) {
+			onChange(drag.Snapshot())
+		}
+	})
+	return ui.OnPointerCancel(view, func(event ui.Event) {
+		drag.Cancel()
+		onChange(drag.Snapshot())
+	})
+}

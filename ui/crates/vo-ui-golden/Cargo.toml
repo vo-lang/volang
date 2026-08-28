@@ -1,0 +1,22 @@
+[package]
+name = "vo-ui-golden"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Versioned deterministic accessibility and paint snapshots for Volang UI"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+vo-ui-accessibility.workspace = true
+vo-ui-core.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+
+[dev-dependencies]
+vo-ui-protocol.workspace = true

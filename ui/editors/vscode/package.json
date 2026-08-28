@@ -1,0 +1,35 @@
+{
+  "name": "volang-ui-authoring",
+  "displayName": "Volang UI Authoring",
+  "description": "Syntax, configuration, and snippets for typed Volang UI applications.",
+  "version": "0.1.4",
+  "publisher": "vo-lang",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Programming Languages", "Snippets"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "volang",
+        "aliases": ["Volang", "vo"],
+        "extensions": [".vo"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "volang",
+        "scopeName": "source.volang",
+        "path": "./syntaxes/volang.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "volang",
+        "path": "./snippets/ui.json"
+      }
+    ]
+  }
+}

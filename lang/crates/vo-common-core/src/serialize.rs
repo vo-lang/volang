@@ -11,6 +11,7 @@
 //! - functions: [FunctionDef]
 //! - externs: [ExternDef]
 //! - entry_func: u32
+//! - artifacts: [ModuleArtifact]
 
 #[cfg(not(feature = "std"))]
 use alloc::{
@@ -29,7 +30,9 @@ use crate::bytecode::SelectCaseLayout;
 use crate::bytecode::{
     Constant, ExtSlotKind, ExternDef, ExternEffects, FieldMeta, FunctionDef, GlobalDef,
     InstructionMetadata, InterfaceMeta, InterfaceMethodMeta, Itab, MethodInfo, Module,
-    NamedTypeMeta, ParamShape, ReturnShape, StructMeta, TransferType, WellKnownTypes,
+    ModuleArtifact, NamedTypeMeta, ParamShape, ReturnShape, StructMeta, TransferType,
+    WellKnownTypes, MAX_MODULE_ARTIFACTS, MAX_MODULE_ARTIFACT_NAME_BYTES,
+    MAX_MODULE_ARTIFACT_PAYLOAD_BYTES,
 };
 use crate::instruction::Instruction;
 use crate::types::{SlotType, ValueMeta, ValueRttid};
@@ -38,7 +41,7 @@ use core::fmt;
 use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 20;
+const VERSION: u32 = 21;
 const MIN_SUPPORTED_VERSION: u32 = VERSION;
 /// Canonical maximum size of an encoded VOB module, for both input and output.
 pub const MAX_VOB_BYTES: usize = 128 * 1024 * 1024;
@@ -105,6 +108,11 @@ pub enum SerializeError {
     DuplicateInterfaceMethod(String),
     DuplicateNamedMethod(String),
     InvalidFunctionMetadata(String),
+    ModuleArtifactLimitExceeded {
+        context: &'static str,
+        len: usize,
+        max: usize,
+    },
 }
 
 impl fmt::Display for SerializeError {
@@ -186,6 +194,9 @@ impl fmt::Display for SerializeError {
             }
             Self::InvalidFunctionMetadata(detail) => {
                 write!(f, "invalid function metadata: {detail}")
+            }
+            Self::ModuleArtifactLimitExceeded { context, len, max } => {
+                write!(f, "{context} length {len} exceeds the {max}-byte limit")
             }
         }
     }
@@ -1142,6 +1153,37 @@ impl<'a> ByteReader<'a> {
         Ok(result)
     }
 
+    fn read_artifact_bytes(
+        &mut self,
+        context: &'static str,
+        max: usize,
+    ) -> Result<Vec<u8>, SerializeError> {
+        let len = self.read_u32()? as usize;
+        if len > max {
+            return Err(SerializeError::ModuleArtifactLimitExceeded { context, len, max });
+        }
+        let bytes = self.read_exact(len)?;
+        self.charge_allocation(context, len)?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(len)
+            .map_err(|_| SerializeError::AllocationFailed {
+                context,
+                additional: len,
+            })?;
+        result.extend_from_slice(bytes);
+        Ok(result)
+    }
+
+    fn read_artifact_string(
+        &mut self,
+        context: &'static str,
+        max: usize,
+    ) -> Result<String, SerializeError> {
+        String::from_utf8(self.read_artifact_bytes(context, max)?)
+            .map_err(|_| SerializeError::InvalidUtf8)
+    }
+
     fn read_string(&mut self) -> Result<String, SerializeError> {
         let bytes = self.read_bytes()?;
         String::from_utf8(bytes).map_err(|_| SerializeError::InvalidUtf8)
@@ -1440,6 +1482,35 @@ impl Module {
 
         w.write_u32(self.entry_func);
         w.write_u32(self.island_init_func);
+
+        if self.artifacts.len() > MAX_MODULE_ARTIFACTS {
+            w.fail(SerializeError::ModuleArtifactLimitExceeded {
+                context: "Module.artifacts",
+                len: self.artifacts.len(),
+                max: MAX_MODULE_ARTIFACTS,
+            });
+        }
+        w.write_vec("Module.artifacts", &self.artifacts, |w, artifact| {
+            if artifact.name.len() > MAX_MODULE_ARTIFACT_NAME_BYTES {
+                w.fail(SerializeError::ModuleArtifactLimitExceeded {
+                    context: "Module.artifacts[].name",
+                    len: artifact.name.len(),
+                    max: MAX_MODULE_ARTIFACT_NAME_BYTES,
+                });
+                return;
+            }
+            if artifact.payload.len() > MAX_MODULE_ARTIFACT_PAYLOAD_BYTES {
+                w.fail(SerializeError::ModuleArtifactLimitExceeded {
+                    context: "Module.artifacts[].payload",
+                    len: artifact.payload.len(),
+                    max: MAX_MODULE_ARTIFACT_PAYLOAD_BYTES,
+                });
+                return;
+            }
+            w.write_string("Module.artifacts[].name", &artifact.name);
+            w.write_u32(artifact.version);
+            w.write_bytes("Module.artifacts[].payload", &artifact.payload);
+        });
 
         // Debug info
         w.write_vec("Module.debug_info.files", &self.debug_info.files, |w, f| {
@@ -1776,6 +1847,44 @@ impl Module {
         let entry_func = r.read_u32()?;
         let island_init_func = r.read_u32()?;
 
+        let artifact_count = r.read_u32()? as usize;
+        if artifact_count > MAX_MODULE_ARTIFACTS {
+            return Err(SerializeError::ModuleArtifactLimitExceeded {
+                context: "Module.artifacts",
+                len: artifact_count,
+                max: MAX_MODULE_ARTIFACTS,
+            });
+        }
+        let artifact_allocation = artifact_count
+            .checked_mul(core::mem::size_of::<ModuleArtifact>())
+            .ok_or(SerializeError::AllocationBudgetExceeded {
+                context: "module artifacts",
+                requested: usize::MAX,
+                remaining: r.allocation_remaining,
+            })?;
+        r.charge_allocation("module artifacts", artifact_allocation)?;
+        let mut artifacts = Vec::new();
+        artifacts.try_reserve_exact(artifact_count).map_err(|_| {
+            SerializeError::AllocationFailed {
+                context: "VOB module artifacts",
+                additional: artifact_allocation,
+            }
+        })?;
+        for _ in 0..artifact_count {
+            let name =
+                r.read_artifact_string("Module.artifacts[].name", MAX_MODULE_ARTIFACT_NAME_BYTES)?;
+            let version = r.read_u32()?;
+            let payload = r.read_artifact_bytes(
+                "Module.artifacts[].payload",
+                MAX_MODULE_ARTIFACT_PAYLOAD_BYTES,
+            )?;
+            artifacts.push(ModuleArtifact {
+                name,
+                version,
+                payload,
+            });
+        }
+
         let files = r.read_vec(|r| r.read_string())?;
         let funcs = r.read_vec(|r| {
             let entries = r.read_vec(|r| {
@@ -1814,6 +1923,7 @@ impl Module {
             externs,
             entry_func,
             island_init_func,
+            artifacts,
             debug_info,
         })
     }
@@ -1885,6 +1995,71 @@ mod tests {
         let module2 = Module::deserialize(&bytes).unwrap();
         assert_eq!(module.name, module2.name);
         assert_eq!(module.entry_func, module2.entry_func);
+    }
+
+    #[test]
+    fn module_artifacts_roundtrip_in_canonical_order() {
+        let mut module = Module::new("test".into());
+        module.set_artifact(ModuleArtifact::new("volang.ui.component", 1, vec![1, 2, 3]));
+        module.set_artifact(ModuleArtifact::new(
+            "volang.ui.component-bundle",
+            1,
+            vec![0x56, 0x55, 0x42, 0x31],
+        ));
+        module.set_artifact(ModuleArtifact::new("acme.analysis", 7, vec![9, 8]));
+
+        let bytes = module.serialize().expect("serialize artifacts");
+        let decoded = Module::deserialize(&bytes).expect("deserialize artifacts");
+        assert_eq!(decoded.artifacts, module.artifacts);
+        assert_eq!(
+            decoded.artifact("volang.ui.component"),
+            Some(&ModuleArtifact::new(
+                "volang.ui.component",
+                1,
+                vec![1, 2, 3]
+            ))
+        );
+        assert_eq!(
+            decoded.artifact("volang.ui.component-bundle"),
+            Some(&ModuleArtifact::new(
+                "volang.ui.component-bundle",
+                1,
+                vec![0x56, 0x55, 0x42, 0x31]
+            ))
+        );
+    }
+
+    #[test]
+    fn module_artifact_codec_rejects_oversized_fields() {
+        let mut module = Module::new("test".into());
+        module.set_artifact(ModuleArtifact::new(
+            "x".repeat(MAX_MODULE_ARTIFACT_NAME_BYTES + 1),
+            1,
+            Vec::new(),
+        ));
+        assert!(matches!(
+            module.serialize(),
+            Err(SerializeError::ModuleArtifactLimitExceeded {
+                context: "Module.artifacts[].name",
+                ..
+            })
+        ));
+
+        let mut module = Module::new("too-many-artifacts".into());
+        for index in 0..=MAX_MODULE_ARTIFACTS {
+            module.set_artifact(ModuleArtifact::new(
+                format!("artifact.{index:03}"),
+                1,
+                Vec::new(),
+            ));
+        }
+        assert!(matches!(
+            module.serialize(),
+            Err(SerializeError::ModuleArtifactLimitExceeded {
+                context: "Module.artifacts",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -1,0 +1,53 @@
+// Permanent Component Model V2 contract probe. The same source is compiled
+// for headless, browser, desktop, VM, JIT, Native AOT, and Core Wasm AOT gates.
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/tests/nested-component-list/widgets"
+)
+
+func App() ui.View {
+	phase := int64(0)
+	advance := func(event ui.Event) {
+		phase++
+	}
+	if phase == 0 {
+		return ui.Column(
+			ui.TestID(ui.Button("Reorder", advance), "phase-control"),
+			ui.Key(widgets.Counter("Alpha"), "alpha"),
+			ui.Key(widgets.Counter("Beta"), "beta"),
+		)
+	}
+	if phase == 1 {
+		return ui.Column(
+			ui.TestID(ui.Button("Remove Beta", advance), "phase-control"),
+			ui.Key(widgets.Counter("Beta"), "beta"),
+			ui.Key(widgets.Counter("Alpha"), "alpha"),
+		)
+	}
+	if phase == 2 {
+		return ui.Column(
+			ui.TestID(ui.Button("Insert Beta", advance), "phase-control"),
+			ui.Key(widgets.Counter("Alpha"), "alpha"),
+		)
+	}
+	if phase == 3 {
+		return ui.Column(
+			ui.TestID(ui.Button("Replace Alpha", advance), "phase-control"),
+			ui.Key(widgets.Counter("Alpha"), "alpha"),
+			ui.Key(widgets.Counter("Beta"), "beta"),
+		)
+	}
+	return ui.Column(
+		ui.TestID(ui.Button("Complete", func(event ui.Event) {}), "phase-control"),
+		ui.Key(widgets.Counter("Alpha"), "alpha-v2"),
+		ui.Key(widgets.Counter("Beta"), "beta"),
+	)
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

@@ -1,0 +1,172 @@
+// Package graphics provides bounded renderer-neutral vector scenes and canvas
+// command streams. The compact VGC1 format is deterministic across VM, JIT,
+// Native AOT, Core Wasm AOT, SSR, and replay tests.
+package graphics
+
+import (
+	"github.com/vo-lang/ui"
+	"math"
+	"strconv"
+	"strings"
+)
+
+const (
+	DefaultMaxCommands = 65536
+	DefaultMaxEncodedBytes = 1048576
+)
+
+type Point struct { X float64; Y float64 }
+type Size struct { Width float64; Height float64 }
+type Rect struct { X float64; Y float64; Width float64; Height float64 }
+
+type Matrix struct { A float64; B float64; C float64; D float64; E float64; F float64 }
+
+func Identity() Matrix { return Matrix{A: 1, D: 1} }
+
+func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
+
+func validateNumber(value float64) {
+	if !finite(value) || math.Abs(value) > 1000000000 { panic("graphics coordinate is invalid") }
+}
+
+func (matrix Matrix) Validate() {
+	validateNumber(matrix.A); validateNumber(matrix.B); validateNumber(matrix.C)
+	validateNumber(matrix.D); validateNumber(matrix.E); validateNumber(matrix.F)
+}
+
+func number(value float64) string {
+	validateNumber(value)
+	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+func (matrix Matrix) CSS() string {
+	matrix.Validate()
+	return "matrix(" + number(matrix.A) + "," + number(matrix.B) + "," + number(matrix.C) + "," +
+		number(matrix.D) + "," + number(matrix.E) + "," + number(matrix.F) + ")"
+}
+
+type CommandKind int64
+const (
+	Clear CommandKind = iota
+	FillRect
+	StrokeRect
+	Line
+	Circle
+	Text
+	Path
+)
+
+type Command struct {
+	Kind CommandKind
+	Values []float64
+	Color uint32
+	Width float64
+	Payload string
+}
+
+type Limits struct { MaxCommands int; MaxEncodedBytes int }
+func DefaultLimits() Limits { return Limits{MaxCommands: DefaultMaxCommands, MaxEncodedBytes: DefaultMaxEncodedBytes} }
+
+type Program struct { commands []Command; limits Limits }
+
+func NewProgram(limits Limits) *Program {
+	if limits.MaxCommands <= 0 || limits.MaxCommands > 1000000 ||
+		limits.MaxEncodedBytes <= 0 || limits.MaxEncodedBytes > 16777216 {
+		panic("graphics limits are invalid")
+	}
+	return &Program{limits: limits}
+}
+
+func (program *Program) Len() int { return len(program.commands) }
+
+func (program *Program) add(command Command) {
+	if program == nil { panic("graphics program is nil") }
+	if len(program.commands) >= program.limits.MaxCommands { panic("graphics command limit exceeded") }
+	if len(command.Values) > 64 || len(command.Payload) > 65536 { panic("graphics command payload exceeds its limit") }
+	for _, value := range command.Values { validateNumber(value) }
+	if command.Width < 0 { panic("graphics stroke width cannot be negative") }
+	program.commands = append(program.commands, command)
+}
+
+func (program *Program) Clear(color uint32) { program.add(Command{Kind: Clear, Color: color}) }
+
+func (program *Program) Fill(rect Rect, color uint32) {
+	if rect.Width < 0 || rect.Height < 0 { panic("graphics rectangle size cannot be negative") }
+	program.add(Command{Kind: FillRect, Values: []float64{rect.X, rect.Y, rect.Width, rect.Height}, Color: color})
+}
+
+func (program *Program) Stroke(rect Rect, color uint32, width float64) {
+	if rect.Width < 0 || rect.Height < 0 { panic("graphics rectangle size cannot be negative") }
+	program.add(Command{Kind: StrokeRect, Values: []float64{rect.X, rect.Y, rect.Width, rect.Height}, Color: color, Width: width})
+}
+
+func (program *Program) DrawLine(from Point, to Point, color uint32, width float64) {
+	program.add(Command{Kind: Line, Values: []float64{from.X, from.Y, to.X, to.Y}, Color: color, Width: width})
+}
+
+func (program *Program) DrawCircle(center Point, radius float64, color uint32) {
+	if radius < 0 { panic("graphics circle radius cannot be negative") }
+	program.add(Command{Kind: Circle, Values: []float64{center.X, center.Y, radius}, Color: color})
+}
+
+func (program *Program) DrawText(origin Point, value string, color uint32, size float64) {
+	if strings.ContainsAny(value, "|\n\r") { panic("graphics text command contains a reserved delimiter") }
+	program.add(Command{Kind: Text, Values: []float64{origin.X, origin.Y, size}, Color: color, Payload: value})
+}
+
+type PathBuilder struct { values []float64; operations string; maxSegments int }
+
+func NewPath(maxSegments int) *PathBuilder {
+	if maxSegments <= 0 || maxSegments > 100000 { panic("graphics path segment limit is invalid") }
+	return &PathBuilder{maxSegments: maxSegments}
+}
+
+func (path *PathBuilder) segment(operation string, values ...float64) {
+	if path == nil || len(path.operations) >= path.maxSegments { panic("graphics path segment limit exceeded") }
+	for _, value := range values { validateNumber(value) }
+	path.operations += operation
+	path.values = append(path.values, values...)
+}
+
+func (path *PathBuilder) MoveTo(point Point) { path.segment("M", point.X, point.Y) }
+func (path *PathBuilder) LineTo(point Point) { path.segment("L", point.X, point.Y) }
+func (path *PathBuilder) QuadraticTo(control Point, point Point) { path.segment("Q", control.X, control.Y, point.X, point.Y) }
+func (path *PathBuilder) Close() { path.segment("Z") }
+
+func (program *Program) DrawPath(path *PathBuilder, color uint32, width float64) {
+	if path == nil { panic("graphics path is nil") }
+	program.add(Command{Kind: Path, Values: append([]float64(nil), path.values...), Color: color, Width: width, Payload: path.operations})
+}
+
+func color(value uint32) string { return strconv.FormatUint(uint64(value), 16) }
+
+func encodeValues(values []float64) string {
+	parts := make([]string, len(values))
+	for index, value := range values { parts[index] = number(value) }
+	return strings.Join(parts, ",")
+}
+
+func (program *Program) Encode() string {
+	if program == nil { panic("graphics program is nil") }
+	lines := make([]string, 0, len(program.commands)+1)
+	lines = append(lines, "VGC1")
+	for _, command := range program.commands {
+		line := strconv.FormatInt(int64(command.Kind), 10) + "|" + encodeValues(command.Values) + "|" + color(command.Color) + "|" + number(command.Width) + "|" + command.Payload
+		lines = append(lines, line)
+	}
+	encoded := strings.Join(lines, "\n")
+	if len(encoded) > program.limits.MaxEncodedBytes { panic("graphics encoded program exceeds its byte limit") }
+	return encoded
+}
+
+func Canvas(program *Program, description string) ui.View {
+	if description == "" { panic("graphics canvas requires an accessible description") }
+	return ui.Canvas(program.Encode(), description)
+}
+
+func Transformed(view ui.View, matrix Matrix) ui.View { return ui.Transform(view, matrix.CSS()) }
+
+func Faded(view ui.View, opacity float64) ui.View {
+	if !finite(opacity) || opacity < 0 || opacity > 1 { panic("graphics opacity must be between zero and one") }
+	return ui.Opacity(view, opacity)
+}

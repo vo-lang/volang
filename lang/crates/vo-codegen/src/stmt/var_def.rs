@@ -5,6 +5,7 @@
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
+use vo_runtime::bytecode::ReturnShape;
 use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 
@@ -609,6 +610,55 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             .try_type_slot_count(type_key)
             .map_err(CodegenError::Internal)?;
         let slot_types = self.info.type_slot_types(type_key);
+
+        if let Some(spec) = obj_key
+            .and_then(|object| self.ctx.externalized_local(object))
+            .cloned()
+        {
+            if slot_types.len() != 1 {
+                return Err(CodegenError::Internal(format!(
+                    "externalized local {sym:?} must have a one-slot source type"
+                )));
+            }
+            let handle_layout = [SlotType::Value];
+            let handle = self.func.alloc_slots(&handle_layout);
+            let initializer = self.ctx.get_or_register_declared_extern_with_return_shape(
+                &spec.initialize_extern,
+                ReturnShape::try_with_slot_types(handle_layout.to_vec())
+                    .map_err(CodegenError::Internal)?,
+                crate::context::ext_slot_kinds_for_slot_types(&slot_types),
+            );
+            self.func.emit_call_extern(
+                handle,
+                initializer,
+                src_slot,
+                slot_types.len(),
+                &handle_layout,
+            );
+
+            let needs_box = obj_key.map_or(escapes, |key| self.info.needs_boxing(key, type_key));
+            if !needs_box {
+                let storage = StorageKind::StackValue {
+                    slot: handle,
+                    slots: 1,
+                };
+                self.func.define_local_at(sym, handle, 1);
+                return Ok(storage);
+            }
+
+            let gcref_slot = self.func.define_local_heap_boxed(sym, 1, false);
+            let meta = self.func.alloc_slots(&[SlotType::Value]);
+            let meta_index = self.ctx.opaque_handle_meta();
+            self.func.emit_op(Opcode::LoadConst, meta, meta_index, 0);
+            self.func.emit_ptr_new(gcref_slot, meta, &handle_layout);
+            self.func
+                .emit_ptr_set_with_slot_types(gcref_slot, 0, handle, &handle_layout);
+            return Ok(StorageKind::HeapBoxed {
+                gcref_slot,
+                value_slots: 1,
+                stores_pointer: false,
+            });
+        }
 
         let needs_box = obj_key.map_or(escapes, |key| self.info.needs_boxing(key, type_key));
         if self.info.is_array(type_key) && !needs_box {

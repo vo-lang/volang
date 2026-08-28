@@ -1,0 +1,43 @@
+package main
+
+import (
+	"github.com/vo-lang/studio/documentation"
+	"github.com/vo-lang/ui/document"
+	"strings"
+)
+
+func assert(condition bool, message string) {
+	if !condition {
+		panic(message)
+	}
+}
+
+func main() {
+	sections := documentation.Sections()
+	pages := documentation.Pages()
+	assert(len(sections) >= 4, "documentation sections")
+	assert(documentation.PageCount() == len(pages), "documentation page count")
+	assert(len(pages) >= 20, "documentation coverage")
+	seen := make(map[string]bool)
+	seenSections := make(map[string]bool)
+	for _, section := range sections {
+		assert(section.ID != "" && section.Title != "", "documentation section identity")
+		assert(!seenSections[section.ID], "documentation section IDs are unique")
+		seenSections[section.ID] = true
+	}
+	languagePages := 0
+	for _, page := range pages {
+		assert(page.ID != "" && page.Title != "" && page.SectionID != "" && page.Section != "", "documentation identity")
+		assert(seenSections[page.SectionID], "documentation page references a section")
+		assert(page.Summary != "" && page.SourcePath != "" && page.Markdown != "", "documentation source metadata")
+		assert(!seen[page.ID], "documentation IDs are unique")
+		seen[page.ID] = true
+		if strings.HasPrefix(page.SourcePath, "lang/docs/") {
+			languagePages++
+		}
+		blocks, err := document.ParseMarkdown(page.Markdown, 4096)
+		assert(err == nil && len(blocks) > 0, "documentation Markdown parses")
+		assert(blocks[0].Kind == document.Heading && blocks[0].Level == 1, "documentation starts with a title")
+	}
+	assert(languagePages * 2 > len(pages), "language documentation is the catalog majority")
+}

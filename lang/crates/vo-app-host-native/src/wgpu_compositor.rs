@@ -197,6 +197,78 @@ impl<'window> WgpuCompositorAdapter<'window> {
         Ok(())
     }
 
+    /// Uploads a complete straight-alpha RGBA8 software frame into a sampled
+    /// GPU layer. Validation completes before the retained layer is replaced.
+    pub fn upload_rgba8_layer_texture(
+        &mut self,
+        surface: SurfaceHandle,
+        texture_token: u64,
+        device_generation: u64,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<(), NativeCompositorError> {
+        if !surface.is_valid() || texture_token == 0 {
+            return Err(NativeCompositorError::InvalidFrame);
+        }
+        if device_generation != self.device_generation {
+            return Err(NativeCompositorError::StaleDevice);
+        }
+        if !self.layers.contains_key(&surface)
+            && self.layers.len() == self.config.max_registered_layers
+        {
+            return Err(NativeCompositorError::LayerCapacity);
+        }
+        let bytes_per_row = validate_rgba8_upload(
+            width,
+            height,
+            pixels.len(),
+            self.device.limits().max_texture_dimension_2d,
+        )?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vo-ui-rgba8-layer"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.layers.insert(
+            surface,
+            RegisteredLayer {
+                texture_token,
+                device_generation,
+                texture,
+            },
+        );
+        Ok(())
+    }
+
     pub fn unregister_layer_texture(
         &mut self,
         surface: SurfaceHandle,
@@ -622,6 +694,33 @@ fn map_surface_error(error: wgpu::SurfaceError) -> NativeCompositorError {
     }
 }
 
+fn validate_rgba8_upload(
+    width: u32,
+    height: u32,
+    data_len: usize,
+    max_texture_dimension: u32,
+) -> Result<u32, NativeCompositorError> {
+    if width == 0 || height == 0 || width > max_texture_dimension || height > max_texture_dimension
+    {
+        return Err(NativeCompositorError::InvalidFrame);
+    }
+    let bytes_per_row = width
+        .checked_mul(4)
+        .ok_or(NativeCompositorError::InvalidFrame)?;
+    let expected = usize::try_from(bytes_per_row)
+        .ok()
+        .and_then(|row| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| row.checked_mul(height))
+        })
+        .ok_or(NativeCompositorError::InvalidFrame)?;
+    if data_len != expected {
+        return Err(NativeCompositorError::InvalidFrame);
+    }
+    Ok(bytes_per_row)
+}
+
 const COMPOSITOR_SHADER: &str = r#"
 struct LayerUniform {
     matrix: vec4<f32>,
@@ -680,3 +779,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(color.rgb, color.a * layer.opacity.x);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgba_upload_validation_is_exact_and_bounded() {
+        assert_eq!(validate_rgba8_upload(16, 8, 512, 4_096), Ok(64));
+        assert_eq!(
+            validate_rgba8_upload(16, 8, 511, 4_096),
+            Err(NativeCompositorError::InvalidFrame)
+        );
+        assert_eq!(
+            validate_rgba8_upload(4_097, 1, 16_388, 4_096),
+            Err(NativeCompositorError::InvalidFrame)
+        );
+        assert_eq!(
+            validate_rgba8_upload(0, 8, 0, 4_096),
+            Err(NativeCompositorError::InvalidFrame)
+        );
+    }
+}

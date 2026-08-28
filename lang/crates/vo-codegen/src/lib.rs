@@ -21,12 +21,102 @@ pub use func::FuncBuilder;
 pub use type_info::TypeInfoWrapper;
 pub use type_interner::{intern_type_key, TypeInterner};
 
+use vo_analysis::objects::{ObjKey, PackageKey};
 use vo_analysis::Project;
 use vo_runtime::bytecode::Module;
-use vo_syntax::ast::{Decl, Visitor};
+use vo_syntax::ast::{Decl, Expr, ExprId, Visitor};
+
+/// One compiler-owned expression entrypoint requested by a typed adapter.
+/// Parameters name source locals whose values the runtime supplies in the
+/// listed order. Keeping this description independent of UI artifacts avoids
+/// coupling the language backend to a framework package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpressionEvaluatorSpec {
+    pub package: PackageKey,
+    pub expression: ExprId,
+    pub parameters: Vec<ObjKey>,
+}
+
+/// Replaces one source local's physical storage with an opaque one-slot handle
+/// while preserving its source type at every read and write. Typed adapters can
+/// use this language-independent hook for persistent cells, transactions, or
+/// other storage models without teaching codegen about a framework package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalizedLocalSpec {
+    pub object: ObjKey,
+    pub initialize_extern: String,
+    pub read_extern: String,
+    pub write_extern: String,
+}
+
+/// Wraps one adapter-recognized one-slot call in a persistent runtime scope.
+/// The adapter supplies source expressions so codegen can evaluate an optional
+/// key before the target call while keeping ordinary language compilation
+/// independent from the framework that owns the scope.
+#[derive(Clone, Debug)]
+pub struct ScopedCallSpec {
+    pub package: PackageKey,
+    /// Expression intercepted by codegen: the target call itself when
+    /// unkeyed, or its surrounding framework key wrapper when keyed.
+    pub expression: ExprId,
+    pub target: Expr,
+    pub key: Option<Expr>,
+    pub identity: String,
+    pub call_site: u64,
+    pub enter_extern: String,
+    pub exit_extern: String,
+    pub key_extern: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CodegenReport {
+    functions_by_object: std::collections::HashMap<ObjKey, u32>,
+    functions_by_expression: std::collections::HashMap<(PackageKey, ExprId), u32>,
+}
+
+impl CodegenReport {
+    pub fn function_for_object(&self, object: ObjKey) -> Option<u32> {
+        self.functions_by_object.get(&object).copied()
+    }
+
+    pub fn function_for_expression(&self, package: PackageKey, expression: ExprId) -> Option<u32> {
+        self.functions_by_expression
+            .get(&(package, expression))
+            .copied()
+    }
+}
 
 /// Compile a type-checked project to VM bytecode.
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
+    compile_project_with_report(project).map(|(module, _report)| module)
+}
+
+/// Compile bytecode and retain the compiler-identity to bytecode-function map
+/// needed by optional typed adapters such as the UI component compiler.
+pub fn compile_project_with_report(
+    project: &Project,
+) -> Result<(Module, CodegenReport), CodegenError> {
+    compile_project_with_expression_evaluators(project, &[])
+}
+
+/// Compiles a project plus deterministic, statically callable expression
+/// entrypoints. Adapters use the returned expression map in their own
+/// versioned artifacts; ordinary language compilation passes an empty list.
+pub fn compile_project_with_expression_evaluators(
+    project: &Project,
+    evaluator_specs: &[ExpressionEvaluatorSpec],
+) -> Result<(Module, CodegenReport), CodegenError> {
+    compile_project_with_adapters(project, evaluator_specs, &[], &[])
+}
+
+/// Compiles a project with optional typed-adapter expression entrypoints and
+/// externalized local storage contracts.
+pub fn compile_project_with_adapters(
+    project: &Project,
+    evaluator_specs: &[ExpressionEvaluatorSpec],
+    externalized_locals: &[ExternalizedLocalSpec],
+    scoped_calls: &[ScopedCallSpec],
+) -> Result<(Module, CodegenReport), CodegenError> {
     if let Some(declared) = project
         .main_pkg()
         .name()
@@ -41,6 +131,8 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     let info = TypeInfoWrapper::for_main_package(project, layout_facts);
     let pkg_name = project.main_pkg().name().as_deref().unwrap_or("main");
     let mut ctx = CodegenContext::new(pkg_name);
+    ctx.install_externalized_locals(externalized_locals)?;
+    ctx.install_scoped_calls(scoped_calls)?;
 
     // 1. Register types (StructMeta, InterfaceMeta)
     register_types(project, &mut ctx, &info)?;
@@ -54,37 +146,270 @@ pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     compile_functions(project, &mut ctx, &info)?;
     ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 4. Generate __init__ and __entry__
+    // 4. Compile adapter-requested expression entrypoints.
+    compile_expression_evaluators(evaluator_specs, project, &mut ctx, &info)?;
+    ctx.check_layout_errors().map_err(CodegenError::Internal)?;
+
+    // 5. Generate __init__ and __entry__
     compile_init_and_entry(project, &mut ctx, &info)?;
     ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 5. Collect promoted methods from embedded interfaces
+    // 6. Collect promoted methods from embedded interfaces
     // This must happen after compile_functions (direct methods registered)
     // and before finalize_itabs (itabs need complete method set)
     collect_promoted_methods(project, &mut ctx, &info);
 
-    // 6. Build all pending itabs (from functions + __init__)
+    // 7. Build all pending itabs (from functions + __init__)
     ctx.finalize_itabs(&info.project.tc_objs, &info.project.interner);
 
-    // 7. Build runtime_types after all codegen (all types have been assigned rttid)
+    // 8. Build runtime_types after all codegen (all types have been assigned rttid)
     build_runtime_types(project, &mut ctx, &info);
     ctx.check_layout_errors().map_err(CodegenError::Internal)?;
 
-    // 8. Reconcile generated transfer metadata against the final runtime type table.
+    // 9. Reconcile generated transfer metadata against the final runtime type table.
     ctx.finalize_transfer_metadata()
         .map_err(CodegenError::Internal)?;
 
-    // 9. Fill WellKnownTypes for fast error creation
+    // 10. Fill WellKnownTypes for fast error creation
     ctx.fill_well_known_types()
         .map_err(CodegenError::Internal)?;
 
-    // 10. Finalize debug info (sort entries by PC)
+    // 11. Finalize debug info (sort entries by PC)
     ctx.finalize_debug_info().map_err(CodegenError::Internal)?;
 
-    // 11. Final check: all IDs within 24-bit limit
+    // 12. Final check: all IDs within 24-bit limit
     ctx.check_id_limits().map_err(CodegenError::Internal)?;
 
-    ctx.finish().map_err(CodegenError::Internal)
+    let report = ctx.report();
+    let module = ctx.finish().map_err(CodegenError::Internal)?;
+    Ok((module, report))
+}
+
+fn compile_expression_evaluators(
+    specs: &[ExpressionEvaluatorSpec],
+    project: &Project,
+    ctx: &mut CodegenContext,
+    main_info: &TypeInfoWrapper,
+) -> Result<(), CodegenError> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let mut by_package =
+        std::collections::HashMap::<PackageKey, Vec<&ExpressionEvaluatorSpec>>::new();
+    for spec in specs {
+        by_package.entry(spec.package).or_default().push(spec);
+    }
+    for (package_index, package) in project.packages.iter().copied().enumerate() {
+        let Some(package_specs) = by_package.remove(&package) else {
+            continue;
+        };
+        if package == project.main_package {
+            compile_package_expression_evaluators(
+                &package_specs,
+                project.files.as_slice(),
+                project,
+                ctx,
+                main_info,
+                package_index,
+            )?;
+            continue;
+        }
+        let package_path = project.tc_objs.pkgs[package].path();
+        let type_info = project
+            .imported_type_infos
+            .get(package_path)
+            .ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "expression evaluator package {package_path:?} has no type information"
+                ))
+            })?;
+        let files = project.imported_files.get(package_path).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "expression evaluator package {package_path:?} has no source files"
+            ))
+        })?;
+        let info = TypeInfoWrapper::for_package(
+            project,
+            package,
+            type_info,
+            main_info.shared_layout_facts(),
+        );
+        compile_package_expression_evaluators(
+            &package_specs,
+            files,
+            project,
+            ctx,
+            &info,
+            package_index,
+        )?;
+    }
+    if !by_package.is_empty() {
+        return Err(CodegenError::Internal(
+            "expression evaluator references a package outside the analyzed project".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn compile_package_expression_evaluators(
+    specs: &[&ExpressionEvaluatorSpec],
+    files: &[vo_syntax::ast::File],
+    project: &Project,
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+    package_index: usize,
+) -> Result<(), CodegenError> {
+    let requested = specs
+        .iter()
+        .map(|spec| spec.expression)
+        .collect::<std::collections::HashSet<_>>();
+    struct Finder<'a> {
+        requested: &'a std::collections::HashSet<ExprId>,
+        expressions: std::collections::HashMap<ExprId, Expr>,
+    }
+    impl Visitor for Finder<'_> {
+        fn visit_expr(&mut self, expression: &Expr) {
+            if self.requested.contains(&expression.id) {
+                self.expressions
+                    .entry(expression.id)
+                    .or_insert_with(|| expression.clone());
+            }
+            vo_syntax::ast::walk_expr(self, expression);
+        }
+    }
+
+    let mut finder = Finder {
+        requested: &requested,
+        expressions: std::collections::HashMap::new(),
+    };
+    for file in files {
+        finder.visit_file(file);
+    }
+
+    let mut emitted = std::collections::HashMap::new();
+    for spec in specs {
+        if let Some(previous) = emitted.insert(spec.expression, spec.parameters.clone()) {
+            if previous != spec.parameters {
+                return Err(CodegenError::Internal(format!(
+                    "expression evaluator {:?} was requested with inconsistent parameter lists",
+                    spec.expression
+                )));
+            }
+            continue;
+        }
+        let expression = finder.expressions.get(&spec.expression).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "requested expression evaluator {:?} is absent from package {}",
+                spec.expression,
+                project.tc_objs.pkgs[spec.package].path(),
+            ))
+        })?;
+        let name = format!("__adapter_eval_{package_index}_{}", spec.expression.0);
+        let placeholder = FuncBuilder::new(&name).build();
+        let function_id = ctx.add_function(placeholder);
+        ctx.set_current_func_id(function_id);
+
+        let mut builder = FuncBuilder::new(&name);
+        let mut escaped_externalized_params = Vec::new();
+        let mut escaped_source_params = Vec::new();
+        for parameter in &spec.parameters {
+            let object = &project.tc_objs.lobjs[*parameter];
+            let symbol = project.interner.get(object.name()).ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "evaluator parameter {:?} has no interned source symbol",
+                    parameter
+                ))
+            })?;
+            let type_key = object.typ().ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "evaluator parameter {:?} has no checked type",
+                    parameter
+                ))
+            })?;
+            if ctx.externalized_local(*parameter).is_some() {
+                builder
+                    .try_define_param(Some(symbol), 1, &[vo_runtime::SlotType::Value])
+                    .map_err(CodegenError::Internal)?;
+                if info.closure_captures(expression.id).contains(parameter) {
+                    escaped_externalized_params.push(symbol);
+                }
+                let transfer = ctx.opaque_handle_transfer_type();
+                builder.add_param_type(transfer.meta_raw, transfer.rttid_raw, transfer.slots);
+                continue;
+            }
+            let slots = info
+                .try_type_slot_count(type_key)
+                .map_err(CodegenError::Internal)?;
+            let slot_types = info.type_slot_types(type_key);
+            builder
+                .try_define_param(Some(symbol), slots, &slot_types)
+                .map_err(CodegenError::Internal)?;
+            builder.add_param_type_key(type_key, ctx, info);
+            if info.closure_captures(expression.id).contains(parameter) {
+                escaped_source_params.push((symbol, type_key, slots, slot_types));
+            }
+        }
+        // Parameter slots must remain a contiguous prefix of the frame.
+        // Boxing allocates GC and metadata temporaries, so defer it until every
+        // evaluator parameter has been declared.
+        for symbol in escaped_externalized_params {
+            builder.emit_box_escaped_param(
+                symbol,
+                1,
+                false,
+                ctx.opaque_handle_meta(),
+                &[vo_runtime::SlotType::Value],
+            );
+        }
+        for (symbol, type_key, slots, slot_types) in escaped_source_params {
+            if info.is_array(type_key) {
+                crate::array_value::materialize_escaped_param(
+                    symbol,
+                    type_key,
+                    ctx,
+                    &mut builder,
+                    info,
+                )?;
+            } else {
+                let meta_idx = ctx.get_or_create_value_slots_meta(type_key, info);
+                builder.emit_box_escaped_param(
+                    symbol,
+                    slots,
+                    info.is_pointer(type_key),
+                    meta_idx,
+                    &slot_types,
+                );
+            }
+        }
+
+        let result_type = info.expr_type(expression.id);
+        let result_slot_types = info
+            .try_type_slot_types(result_type)
+            .map_err(CodegenError::Internal)?;
+        let result_slots = info
+            .checked_slot_count(result_slot_types.len())
+            .map_err(CodegenError::Internal)?;
+        builder
+            .try_set_ret_slot_types(result_slot_types)
+            .map_err(CodegenError::Internal)?;
+        builder.set_return_types(vec![result_type]);
+        let result = expr::compile_expr(expression, ctx, &mut builder, info)?;
+        builder.emit_op(
+            vo_runtime::instruction::Opcode::Return,
+            result,
+            result_slots,
+            0,
+        );
+        builder
+            .check_layout_error()
+            .map_err(CodegenError::Internal)?;
+        let (function, debug_locs) = builder.build_with_debug_locs();
+        ctx.replace_function(function_id, function);
+        ctx.record_function_debug_locs(function_id, &debug_locs, &project.source_map);
+        ctx.record_adapter_expression_function(spec.package, spec.expression, function_id);
+    }
+    Ok(())
 }
 
 /// Validate arena layout metadata and the child types of intrinsically flat

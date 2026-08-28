@@ -1,0 +1,20 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/chart"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	options := chart.DefaultOptions("Weekly requests")
+	options.Height = 180
+	requests := chart.Series{Name: "Requests", Color: 0xff4f7cff, Points: []chart.Point{
+		{Label: "Mon", Y: 34}, {Label: "Tue", Y: 58}, {Label: "Wed", Y: 76}, {Label: "Thu", Y: 49},
+	}}
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Column(kit.Title("Operations"), kit.Paragraph("A typed, accessible dashboard starter."), chart.Bar(requests, options)))
+	})
+}
+
+func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }

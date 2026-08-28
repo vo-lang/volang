@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-label="Volang media waves">
+  <rect width="1280" height="720" fill="#10141c"/>
+  <path d="M0 420 Q160 210 320 420 T640 420 T960 420 T1280 420" fill="none" stroke="#6c8cff" stroke-width="36"/>
+  <circle cx="640" cy="310" r="86" fill="#d9e2ff" opacity=".9"/>
+</svg>

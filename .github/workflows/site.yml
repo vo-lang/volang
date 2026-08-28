@@ -10,21 +10,17 @@ permissions:
   contents: read
 
 env:
-  BLOCKKART_REVISION: c2b3af4df72805db1ae6ee6f9084cafe7c1ae8fb
-  VOPLAY_REVISION: ef5a4ac52bebbdd53c65672e0b673418eaabac59
-  VOGUI_REVISION: 1a9e61d62839f8a6464299090f49061e55d78752
-  VOPACK_REVISION: f9c0fe4427c9598e24f2bae4418d9966b7075dbb
-  BLOCKKART_BUNDLE_REVISION: c98c832ce97b25386e7539d2e9a1a3312161a38a
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  VOWORK: "off"
 
 concurrency:
   group: pages-${{ github.repository }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'workflow_dispatch' ||
-        github.event.workflow_run.head_sha == github.sha }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Studio
+    name: Build Volang Studio
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'push' &&
@@ -32,114 +28,83 @@ jobs:
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_sha == github.sha) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       contents: read
-    defaults:
-      run:
-        working-directory: apps/studio
     steps:
-      - name: Checkout
+      - name: Checkout certified source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
-      - name: Checkout BlockKart Quick Play source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: vo-lang/BlockKart
-          ref: ${{ env.BLOCKKART_REVISION }}
-          path: apps/studio/.quickplay-source/blockkart
-          persist-credentials: false
+      - name: Install Rust and WebAssembly target
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
+          rustup default 1.94.0
 
-      - name: Checkout voplay Quick Play source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: vo-lang/voplay
-          ref: ${{ env.VOPLAY_REVISION }}
-          path: apps/studio/.quickplay-source/voplay
-          persist-credentials: false
-
-      - name: Checkout vogui Quick Play source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: vo-lang/vogui
-          ref: ${{ env.VOGUI_REVISION }}
-          path: apps/studio/.quickplay-source/vogui
-          persist-credentials: false
-
-      - name: Checkout vopack Quick Play source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: vo-lang/vopack
-          ref: ${{ env.VOPACK_REVISION }}
-          path: apps/studio/.quickplay-source/vopack
-          persist-credentials: false
-
-      - name: Set up Node.js
+      - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: apps/studio/package-lock.json
+          cache-dependency-path: lang/crates/vo-web/package-lock.json
 
-      - name: Restore WASM build cache
+      - name: Cache Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/bin/wasm-pack
-            ~/.cargo/git
             ~/.cargo/registry
-            apps/studio/wasm/target
-          key: studio-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/studio/wasm/Cargo.lock') }}-${{ hashFiles('apps/studio/wasm/Cargo.toml', 'apps/studio/wasm/**/*.rs', 'lang/crates/**/Cargo.toml', 'lang/crates/**/*.rs', 'lang/stdlib/**/*.vo') }}
-          restore-keys: |
-            studio-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/studio/wasm/Cargo.lock') }}-
+            ~/.cargo/git
+          key: site-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Install WASM toolchain
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
         run: |
-          rustup target add wasm32-unknown-unknown
-          if [[ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]]; then
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
             cargo install wasm-pack --locked --version 0.14.0 --force
           fi
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build WASM
-        env:
-          VO_STUDIO_BUILD_ID: ${{ github.event.workflow_run.head_sha || github.sha }}
-        run: npm run build:wasm
-
-      - name: Check Studio
+      - name: Build release Web runtime
+        working-directory: lang/crates/vo-web
         run: |
-          npm run check
-          npm run test:site
+          npm ci
+          npm run build:release
 
-      - name: Test guest exit handling
-        run: npm run test:guest-exit
-
-      - name: Build site
+      - name: Build Volang Studio AOT site
         run: |
-          npm run build:quickplay -- \
-            .quickplay-source/blockkart "$BLOCKKART_REVISION" \
-            .quickplay-source/voplay "$VOPLAY_REVISION" \
-            .quickplay-source/vogui "$VOGUI_REVISION" \
-            .quickplay-source/vopack "$VOPACK_REVISION"
-          npm run build
-          test -s "dist/quickplay/blockkart-${BLOCKKART_BUNDLE_REVISION}.tar.gz"
+          cargo build --locked -p vo --no-default-features
+          ./target/debug/vo ui build apps/studio \
+            -o target/volang-dev \
+            --runtime-dir=lang/crates/vo-web
+          test -s target/volang-dev/app.wasm
+          test -s target/volang-dev/runtime/pkg/vo_web_bg.wasm
+          test "$(cat target/volang-dev/CNAME)" = "volang.dev"
+
+      - name: Enforce Studio image budget
+        run: >-
+          node eng/report-ui-web-artifact-size.mjs
+          --label studio
+          --artifact target/volang-dev/app.wasm
+          --brotli-limit 921600
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: apps/studio/dist
+          path: target/volang-dev
           retention-days: 1
 
   deploy:
-    name: Deploy Studio
+    name: Deploy volang.dev
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

@@ -1,0 +1,17 @@
+[package]
+name = "vo-wasm-aot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Versioned Core WebAssembly AOT images for Volang"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+vo-common-core.workspace = true
+vo-target.workspace = true
+wasm-encoder = "=0.244.0"
+wasmparser = "=0.244.0"

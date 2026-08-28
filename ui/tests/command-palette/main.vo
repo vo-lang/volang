@@ -1,0 +1,57 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"strings"
+)
+
+func App() ui.View {
+	open := ui.UseBoolState(true)
+	query := ui.UseStringState("")
+	selected := ui.UseIntState(0)
+	focusToken := ui.UseIntState(1)
+	status := ui.UseStringState("waiting")
+	all := []kit.CommandItem{
+		{Key: "file.open", Label: "Open file", Detail: "Open one source file", Shortcut: "Ctrl+O"},
+		{Key: "run.start", Label: "Run project", Detail: "Run with the preferred runtime", Shortcut: "F5"},
+		{Key: "release.publish", Label: "Publish release", Detail: "Build AOT artifacts", Disabled: true},
+	}
+	needle := ui.DerivedString(strings.ToLower(strings.TrimSpace(ui.StringStateValue(query))))
+	items := make([]kit.CommandItem, 0, len(all))
+	for _, item := range all {
+		if needle == "" || strings.Contains(strings.ToLower(item.Label + " " + item.Detail), needle) {
+			items = append(items, item)
+		}
+	}
+	firstLabel := "none"
+	if len(items) > 0 {
+		firstLabel = items[0].Label
+	}
+	firstLabel = ui.DerivedString(firstLabel)
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Column(
+			kit.Title("Command palette contract"),
+			ui.Role(kit.Paragraph(ui.StringStateValue(status)), "status"),
+			kit.Caption("first=" + firstLabel),
+			kit.CommandPalette("Command palette", ui.StringStateValue(query), "Search commands", ui.BoolStateValue(open), ui.IntStateValue(selected), ui.IntStateValue(focusToken), items, func(value string) {
+				ui.SetStringState(query, value)
+				ui.SetIntState(selected, 0)
+			}, func(value int64) {
+				ui.SetIntState(selected, value)
+			}, func(key string) {
+				ui.SetStringState(status, "executed=" + key)
+				ui.SetBoolState(open, false)
+			}, func() {
+				ui.SetStringState(status, "dismissed")
+				ui.SetBoolState(open, false)
+			}),
+		))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

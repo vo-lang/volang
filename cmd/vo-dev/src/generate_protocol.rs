@@ -16,11 +16,13 @@ pub(crate) fn cmd_generate(root: &Path, args: Vec<String>) -> Result<()> {
     let mode = parse_mode(&args)?;
     match args.first().map(String::as_str) {
         Some("app-protocol") => generate_app_protocol(root, mode),
-        Some("vogui-protocol") => generate_vogui_protocol(root, mode),
         Some("voplay-protocol") => generate_voplay_protocol(root, mode),
-        _ => bail!(
-            "usage: vo-dev generate app-protocol|vogui-protocol|voplay-protocol --check|--write"
-        ),
+        Some("studio-docs") => {
+            crate::generate_docs::generate_studio_docs(root, matches!(mode, Mode::Write))
+        }
+        _ => {
+            bail!("usage: vo-dev generate app-protocol|voplay-protocol|studio-docs --check|--write")
+        }
     }
 }
 
@@ -28,9 +30,9 @@ fn parse_mode(args: &[String]) -> Result<Mode> {
     match args.get(1).map(String::as_str) {
         Some("--check") if args.len() == 2 => Ok(Mode::Check),
         Some("--write") if args.len() == 2 => Ok(Mode::Write),
-        _ => bail!(
-            "usage: vo-dev generate app-protocol|vogui-protocol|voplay-protocol --check|--write"
-        ),
+        _ => {
+            bail!("usage: vo-dev generate app-protocol|voplay-protocol|studio-docs --check|--write")
+        }
     }
 }
 
@@ -77,22 +79,6 @@ fn generate_app_protocol(root: &Path, mode: Mode) -> Result<()> {
     }
     println!("vo-dev generate app-protocol {}: ok", mode.label());
     Ok(())
-}
-
-fn generate_vogui_protocol(root: &Path, mode: Mode) -> Result<()> {
-    generate_framework_protocol(
-        root,
-        mode,
-        "vogui",
-        "protocol/vogui.schema.toml",
-        "vogui.ui",
-        "voguiprotocol",
-        "vogui_protocol.ts",
-        "vogui_protocol.vo",
-        "protocol/generated",
-        "rust/protocol/src/generated.rs",
-        "vogui-protocol",
-    )
 }
 
 fn generate_voplay_protocol(root: &Path, mode: Mode) -> Result<()> {

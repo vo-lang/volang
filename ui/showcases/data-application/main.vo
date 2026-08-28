@@ -1,0 +1,234 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/commands"
+	"github.com/vo-lang/ui/forms"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/navigation"
+	"github.com/vo-lang/ui/persistence"
+	"github.com/vo-lang/ui/resource"
+	"strconv"
+)
+
+var serviceCache = resource.NewCache(32)
+
+var preferenceStore = persistence.NewMemory()
+
+var filterHistory = persistence.NewHistory(32, "")
+
+var optimisticStatus = resource.OptimisticString{Value: "No pending changes"}
+
+func dataColumns() []kit.DataColumn {
+	return []kit.DataColumn{
+		{Key: "name", Label: "Member", Width: 240, Sortable: true},
+		{Key: "team", Label: "Team", Width: 160, Sortable: true},
+		{Key: "status", Label: "Status", Width: 140, Sortable: true},
+		{Key: "activity", Label: "Activity", Width: 160, Sortable: true},
+	}
+}
+
+func treeItem(index int64, selected string) kit.TreeItem {
+	labels := []string{"All members", "Engineering", "Design", "Operations", "Archived"}
+	return kit.TreeItem{
+		Key: "tree-" + strconv.FormatInt(index, 10), Label: labels[index], Depth: 0,
+		HasChildren: index == 0, Expanded: true,
+		Selected: selected == "tree-" + strconv.FormatInt(index, 10),
+	}
+}
+
+func commandPaletteItems(items []commands.Command) []kit.CommandItem {
+	result := make([]kit.CommandItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, kit.CommandItem{
+			Key: item.ID, Label: item.Label, Detail: item.Description, Disabled: !item.Enabled,
+		})
+	}
+	return result
+}
+
+func Dashboard() ui.View {
+	filter := ""
+	selectedRow := ""
+	selectedTree := "tree-0"
+	sortKey := "name"
+	sortDirection := int64(kit.SortAscending)
+	page := int64(0)
+	scrollOffset := float64(0)
+	offline := false
+	commandQuery := ""
+	commandOpen := false
+	commandSelected := int64(0)
+	commandFocusToken := int64(0)
+	queryKey := ui.DerivedString("members:online")
+	if offline {
+		queryKey = "members:offline"
+	}
+	health := resource.UseQueryString(serviceCache, queryKey, resource.QueryPolicy{
+		Cache: resource.Policy{}, Retry: resource.RetryPolicy{MaxAttempts: 3},
+	}, func(ctx context.Context) (string, error) {
+		if queryKey == "members:offline" {
+			return "offline cache", nil
+		}
+		return "synchronized", nil
+	})
+	refresh := func() {
+		serviceCache.Invalidate(queryKey)
+		ui.Invalidate()
+	}
+	applyBulk := func() {
+		if selectedRow == "" {
+			return
+		}
+		optimisticStatus = resource.BeginOptimisticString(optimisticStatus.Value, "Archiving " +
+			selectedRow, optimisticStatus.Generation + 1)
+		ui.Invalidate()
+	}
+	commitBulk := func() {
+		optimisticStatus = optimisticStatus.Commit(optimisticStatus.Generation, "Archived " + selectedRow)
+		ui.Invalidate()
+	}
+	openCommands := func() {
+		commandQuery = ""
+		commandSelected = 0
+		commandFocusToken++
+		commandOpen = true
+	}
+	closeCommands := func() {
+		commandOpen = false
+	}
+	scope := commands.NewScope(commands.New("refresh", "Refresh data", commands.Key("r", ui.ModifierControl), refresh), commands.New("archive", "Archive selected", commands.Key("a", ui.ModifierControl), applyBulk), commands.Action("commit", "Commit optimistic change", commitBulk), commands.New("commands.open", "Open commands", commands.Key("k", ui.ModifierControl), openCommands))
+	total := ui.DerivedInt(100000)
+	if filter != "" {
+		total = 250
+	}
+	pageSize := int64(1000)
+	pageCount := ui.DerivedInt((total + pageSize - 1) / pageSize)
+	if page >= pageCount {
+		page = 0
+	}
+	visibleCount := ui.DerivedInt(pageSize)
+	if total - page * pageSize < visibleCount {
+		visibleCount = total - page * pageSize
+	}
+	rowAt := func(index int64) kit.DataRow {
+		logical := page * pageSize + index
+		if sortDirection == int64(kit.SortDescending) {
+			logical = total - logical - 1
+		}
+		key := "member-" + strconv.FormatInt(logical, 10)
+		return kit.DataRow{
+			Key: key, Selected: key == selectedRow,
+			Cells: []kit.DataCell{
+				{ColumnKey: "name", Value: "Member " + strconv.FormatInt(logical, 10)},
+				{ColumnKey: "team", Value: "Team " + strconv.FormatInt(logical % 12 + 1, 10)},
+				{ColumnKey: "status", Value: "Active"},
+				{ColumnKey: "activity", Value: strconv.FormatInt(logical % 97, 10) + " events"},
+			},
+		}
+	}
+	onSort := func(key string) {
+		if sortKey == key && sortDirection == int64(kit.SortAscending) {
+			sortDirection = int64(kit.SortDescending)
+		} else {
+			sortKey = key
+			sortDirection = int64(kit.SortAscending)
+		}
+		scrollOffset = 0
+	}
+	table := kit.VirtualDataProvider("Members", dataColumns(), visibleCount, kit.DataSort{
+		ColumnKey: sortKey, Direction: kit.DataSortDirection(sortDirection),
+	}, 44, scrollOffset, 440, 4, rowAt, onSort, func(key string) {
+		selectedRow = key
+	})
+	table = ui.OnScroll(ui.Scroll(table), func(event ui.Event) {
+		scrollOffset += event.DeltaY
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+	})
+	connection := ui.DerivedString("Loading")
+	intent := kit.FeedbackIntent(ui.DerivedInt(int64(kit.IntentInfo)))
+	if health.IsReady() {
+		connection = health.Value()
+		if offline {
+			intent = kit.IntentWarning
+		} else {
+			intent = kit.IntentSuccess
+		}
+	} else if health.IsFailed() {
+		connection = health.Error()
+		intent = kit.IntentDanger
+	}
+	filterControl := kit.Input("Filter members", filter, "Filter members", false, func(value string) {
+		filter = value
+		page = 0
+		filterHistory.Push(value)
+		encoded, err := persistence.EncodeHistory(filterHistory)
+		if err == nil {
+			_ = persistence.Save(preferenceStore, "dashboard.filters", 1, encoded)
+		}
+	})
+	offlineControl := kit.Switch("Work offline", offline, false, func(value bool) {
+		offline = value
+	})
+	header := ui.Gap(ui.Row(kit.Title("Operations dashboard"), kit.Badge(connection, intent)), 16)
+	navigationView := kit.Panel(ui.Gap(ui.Column(kit.Caption("WORKSPACES"), kit.VirtualTreeProvider("Workspace filters", 5, 40, 0, 240, 2, func(index int64) kit.TreeItem {
+		return treeItem(index, selectedTree)
+	}, func(key string) {}, func(key string) {
+		selectedTree = key
+	}), navigation.Link("Dashboard", "/"), navigation.Link("Settings", "/settings")), 12))
+	metrics := kit.AdaptiveGrid(kit.Panel(ui.Column(kit.Caption("TOTAL MEMBERS"), kit.Title(strconv.FormatInt(total, 10)))), kit.Panel(ui.Column(kit.Caption("SELECTED"), kit.Paragraph(selectedRow))), kit.Panel(ui.Column(kit.Caption("MUTATION"), kit.Paragraph(optimisticStatus.Value))))
+	chart := kit.Panel(kit.BarChart("Weekly activity", []kit.DataPoint{
+		{Label: "Mon", Value: 62}, {Label: "Tue", Value: 84}, {Label: "Wed", Value: 47},
+		{Label: "Thu", Value: 91}, {Label: "Fri", Value: 76},
+	}, 100))
+	toolbar := scope.Toolbar("Data actions", "refresh", "archive", "commit")
+	paletteResults := commandPaletteItems(scope.Search(commandQuery, 8))
+	palette := kit.CommandPalette("Command palette", commandQuery, "Find a command", commandOpen, commandSelected, commandFocusToken, paletteResults, func(value string) {
+		commandQuery = value
+		commandSelected = 0
+	}, func(value int64) {
+		commandSelected = value
+	}, func(key string) {
+		if scope.Invoke(key) {
+			closeCommands()
+		}
+	}, closeCommands)
+	content := ui.Gap(ui.Column(metrics, kit.Panel(ui.Gap(ui.Column(filterControl, offlineControl, toolbar, kit.ActionButton("Open commands", false, openCommands)), 8)), chart, kit.Panel(table), kit.Pagination("Member pages", page, pageCount, func(next int64) {
+		page = next
+		scrollOffset = 0
+	}), palette), 16)
+	return scope.Bind(kit.Page(kit.AppShell(kit.CurrentTheme(), header, navigationView, content)))
+}
+
+func Settings() ui.View {
+	form := forms.Use(forms.FieldSpec{
+		Name: "workspace", Label: "Workspace name", Initial: "Volang Team", Required: true,
+	}, forms.FieldSpec{Name: "owner", Label: "Owner", Initial: "Ada", Required: true})
+	return kit.Page(ui.Gap(ui.Column(navigation.Link("Back to dashboard", "/"), kit.Title("Settings"), form.ErrorSummary(), kit.Panel(ui.Gap(ui.Column(forms.TextField(form, "workspace"), forms.TextField(form, "owner"), kit.ActionButton("Save settings", form.Status() ==
+		forms.Submitting, func() {
+		form.Submit(func(ctx context.Context, values map[string]string) error {
+			return nil
+		})
+	})), 12))), 16))
+}
+
+func App() ui.View {
+	return kit.Application(func() ui.View {
+		return navigation.ResolveTyped(func(location navigation.Location) ui.View {
+			return Dashboard()
+		}, navigation.ViewRoute(navigation.NewPattern("dashboard"), func(match navigation.Match) ui.View {
+			return Dashboard()
+		}), navigation.ViewRoute(navigation.NewPattern("settings", navigation.Static("settings")), func(match navigation.Match) ui.View {
+			return Settings()
+		}))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

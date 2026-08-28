@@ -274,7 +274,66 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
         .env("SOURCE_DATE_EPOCH", identity.source_date_epoch.to_string())
         .current_dir(root);
     run_status(&mut command, &format!("cargo build {}", target.target))?;
+
+    let mut runtime_command = Command::new("cargo");
+    runtime_command
+        .args([
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "vo-aot-runtime",
+            "-p",
+            "vo-ui-aot-runtime-native",
+            "--target",
+            &target.target,
+        ])
+        .env(
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+            &release.package.release_opt_level,
+        )
+        .env("CARGO_PROFILE_RELEASE_LTO", &release.package.release_lto)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env_remove("CARGO_BUILD_TARGET")
+        .env("VO_BUILD_COMMIT", &identity.commit)
+        .env("VO_BUILD_DATE", &identity.build_date)
+        .env("SOURCE_DATE_EPOCH", identity.source_date_epoch.to_string())
+        .current_dir(root);
+    run_status(
+        &mut runtime_command,
+        &format!("cargo build AOT runtime {}", target.target),
+    )?;
+    build_ui_web_runtime(root)?;
     record_release_build(root, &release, &target.target, &identity)
+}
+
+fn build_ui_web_runtime(root: &Path) -> Result<()> {
+    let directory = root.join("lang/crates/vo-web");
+    for name in ["dist", "pkg", "aot-support"] {
+        let output = directory.join(name);
+        match fs::symlink_metadata(&output) {
+            Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&output)
+                .with_context(|| format!("could not clear {}", output.display()))?,
+            Ok(_) => bail!(
+                "UI Web runtime output must be a directory: {}",
+                output.display()
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not inspect {}", output.display()))
+            }
+        }
+    }
+    let mut install = Command::new("npm");
+    install
+        .args(["ci", "--ignore-scripts"])
+        .current_dir(&directory);
+    run_status(&mut install, "npm ci for the UI Web runtime")?;
+
+    let mut build = Command::new("npm");
+    build.args(["run", "build"]).current_dir(&directory);
+    run_status(&mut build, "npm run build for the UI Web runtime")
 }
 
 fn cmd_package(root: &Path, args: Vec<String>) -> Result<()> {

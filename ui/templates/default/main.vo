@@ -1,0 +1,23 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"strconv"
+)
+
+func App() ui.View {
+	count := ui.UseIntState(0)
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Gap(ui.Column(kit.Title("Welcome to Volang UI"), kit.Paragraph("Edit main.vo and save to reload."), kit.ActionButton("Count: " +
+			strconv.FormatInt(ui.IntStateValue(count), 10), false, func() {
+			ui.SetIntState(count, ui.IntStateValue(count) + 1)
+		})), kit.CurrentTheme().Space * 2))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

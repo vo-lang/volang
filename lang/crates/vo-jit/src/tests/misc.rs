@@ -1879,7 +1879,7 @@ fn optimizing_leaf_inline_charges_expanded_execution_budget() {
     jit.ctx.func.signature =
         crate::abi::native_signature(target_config.default_call_conv, ptr_type);
     jit.ctx.func.name = cranelift_codegen::ir::UserFuncName::user(0xfeed, 0);
-    let helpers = HelperRefs::new(&mut jit.module, jit.helper_funcs);
+    let helpers = HelperRefs::new(&mut *jit.module, jit.helper_funcs);
     let instruction_optimization = crate::optimizer::OptimizedFunction::analyze(analysis.ir());
     let compiler = FunctionCompiler::new(
         &mut jit.ctx.func,

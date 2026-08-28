@@ -237,7 +237,7 @@ impl<'a> FrameCallBuilder<'a> {
         &mut self,
         closure_value: u64,
         arg_start: usize,
-        mut ic_entry: Option<&mut vo_runtime::DynCallIC>,
+        ic_entry: Option<&mut vo_runtime::DynCallIC>,
         reference_proof: ClosureReferenceProof,
     ) -> ExecResult {
         let stack = self.fiber.stack_ptr();
@@ -376,9 +376,7 @@ impl<'a> FrameCallBuilder<'a> {
                 return ExecResult::JitError(err.message("CallClosure caller return window"));
             }
             if fill_ic_after_validation {
-                let entry = ic_entry
-                    .as_deref_mut()
-                    .expect("closure cache miss must retain its destination entry");
+                let entry = ic_entry.expect("closure cache miss must retain its destination entry");
                 entry.publish_interpreter_target(
                     dispatch_key,
                     vo_runtime::DynamicCallTarget {

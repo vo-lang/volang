@@ -4,6 +4,14 @@ type key [2]int
 
 type empty [0]int
 
+type packedInt8 [4]int8
+
+type packedInt16 [3]int16
+
+type packedInt32 [3]int32
+
+type packedFloat32 [3]float32
+
 var globalKey key
 
 var globalRecv key
@@ -61,6 +69,34 @@ func testConcreteArrayMapKeys() {
 	assert(nilKey[nil] == "nil", "nil interface map literal key")
 }
 
+func testPackedInterfaceArrayEqualityAndHashing() {
+	var int8Left any = packedInt8{-128, -1, 0, 127}
+	var int8Right any = packedInt8{-128, -1, 0, 127}
+	var int8Different any = packedInt8{-128, -1, 1, 127}
+	assert(int8Left == int8Right, "interface equality decodes packed int8 arrays")
+	assert(int8Left != int8Different, "interface inequality decodes packed int8 arrays")
+	var int16Left any = packedInt16{-32768, -1, 32767}
+	var int16Right any = packedInt16{-32768, -1, 32767}
+	assert(int16Left == int16Right, "interface equality decodes packed int16 arrays")
+	var int32Left any = packedInt32{-2147483648, -1, 2147483647}
+	var int32Right any = packedInt32{-2147483648, -1, 2147483647}
+	assert(int32Left == int32Right, "interface equality decodes packed int32 arrays")
+	var floatLeft any = packedFloat32{0, 1.5, -2.25}
+	var floatRight any = packedFloat32{0, 1.5, -2.25}
+	var floatDifferent any = packedFloat32{0, 1.5, -2.5}
+	assert(floatLeft == floatRight, "interface equality decodes packed float32 arrays")
+	assert(floatLeft != floatDifferent, "interface float32 array equality keeps numeric semantics")
+	keys := make(map[any]int)
+	keys[int8Left] = 8
+	keys[int16Left] = 16
+	keys[int32Left] = 32
+	keys[floatLeft] = 64
+	assert(keys[int8Right] == 8, "map[any] hashes packed int8 arrays by logical value")
+	assert(keys[int16Right] == 16, "map[any] hashes packed int16 arrays by logical value")
+	assert(keys[int32Right] == 32, "map[any] hashes packed int32 arrays by logical value")
+	assert(keys[floatRight] == 64, "map[any] hashes packed float32 arrays by logical value")
+}
+
 func testArrayQueues() {
 	globalKey = key{40, 41}
 	regular := make(chan key, 1)
@@ -111,6 +147,7 @@ func testArrayQueues() {
 func main() {
 	testWholeArrayAssignment()
 	testConcreteArrayMapKeys()
+	testPackedInterfaceArrayEqualityAndHashing()
 	testArrayQueues()
 	println("array_representation_abi: ok")
 }

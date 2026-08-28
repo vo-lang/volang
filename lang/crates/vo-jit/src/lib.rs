@@ -3,6 +3,8 @@
 
 mod abi;
 mod analysis;
+mod aot;
+mod aot_format;
 mod call_graph;
 mod call_helpers;
 #[cfg(test)]
@@ -32,6 +34,16 @@ mod translator;
 mod verifier;
 
 pub use abi::{invoke_native_from_frame, JitFunc, NativeJitFunc, NATIVE_ARG_LANES};
+pub use aot::{
+    compile_native_object, NativeAotFunction, NativeAotObject, NativeAotOptions,
+    NATIVE_AOT_FUNCTION_COUNT_SYMBOL, NATIVE_AOT_FUNCTION_TABLE_SYMBOL,
+    NATIVE_AOT_METADATA_BYTES_SYMBOL, NATIVE_AOT_METADATA_LEN_SYMBOL,
+    NATIVE_AOT_MODULE_BYTES_SYMBOL, NATIVE_AOT_MODULE_LEN_SYMBOL, NATIVE_AOT_START_SYMBOL,
+};
+pub use aot_format::{
+    decode_native_aot_metadata, encode_native_aot_metadata, NativeAotMetadata,
+    NATIVE_AOT_ABI_VERSION,
+};
 pub use loop_analysis::LoopInfo;
 pub use loop_compiler::LoopFunc;
 pub use native_stack_map::{
@@ -1131,9 +1143,7 @@ impl JitCompiler {
             loaded
                 .exact_base_maps()
                 .exact_base_returns()
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
+                .to_vec()
                 .into_boxed_slice(),
         );
         self.verified_module_identity = Some(identity);
@@ -1618,7 +1628,7 @@ impl JitCompiler {
                 .declare_func_in_func(func_id_cl, &mut self.ctx.func)
         });
 
-        let helpers = HelperRefs::new(&mut self.module, self.helper_funcs);
+        let helpers = HelperRefs::new(&mut *self.module, self.helper_funcs);
         let compile_result = {
             let compiler = FunctionCompiler::new(
                 &mut self.ctx.func,
@@ -1857,7 +1867,7 @@ impl JitCompiler {
             begin_pc as u32,
         );
 
-        let helpers = HelperRefs::new(&mut self.module, self.helper_funcs);
+        let helpers = HelperRefs::new(&mut *self.module, self.helper_funcs);
         let compile_result = {
             let compiler = LoopCompiler::new(
                 &mut self.ctx.func,

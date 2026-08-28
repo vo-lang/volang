@@ -1,0 +1,56 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/vo-lang/ui/resource"
+	"time"
+)
+
+func assert(condition bool, message string) {
+	if !condition {
+		panic(message)
+	}
+}
+
+func waitFor(signal <-chan struct{}, label string) {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+		case <-signal:
+		case <-timer.C:
+			panic("timed out waiting for " + label)
+	}
+}
+
+func main() {
+	cache := resource.NewCache(1)
+	firstStarted := make(chan struct{}, 1)
+	firstStopped := make(chan struct{}, 1)
+	loader := func(ctx context.Context) (string, error) {
+		firstStarted <- struct{}{}
+		<-ctx.Done()
+		firstStopped <- struct{}{}
+		return "", ctx.Err()
+	}
+	first := resource.UseCachedString(cache, "first", resource.DefaultPolicy(), loader)
+	joined := resource.UseCachedString(cache, "first", resource.DefaultPolicy(), loader)
+	assert(first.IsPending() && joined.IsPending(), "joined reads must remain pending")
+	waitFor(firstStarted, "first loader start")
+	stats := cache.Stats()
+	assert(stats.Loads == 1 && stats.Joins == 1 && stats.Entries == 1, "same-key reads did not join")
+	secondStopped := make(chan struct{}, 1)
+	resource.UseCachedString(cache, "second", resource.DefaultPolicy(), func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		secondStopped <- struct{}{}
+		return "", ctx.Err()
+	})
+	waitFor(firstStopped, "evicted loader cancellation")
+	stats = cache.Stats()
+	assert(stats.Loads == 2 && stats.Evictions == 1 && stats.Cancellations == 1, "bounded eviction did not cancel the oldest load")
+	cache.Clear()
+	waitFor(secondStopped, "clear cancellation")
+	stats = cache.Stats()
+	assert(stats.Entries == 0 && stats.Cancellations == 2, "cache clear did not cancel pending work")
+	fmt.Println("resource cache join, eviction, and cancellation: ok")
+}

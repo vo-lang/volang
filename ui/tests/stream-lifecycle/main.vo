@@ -1,0 +1,44 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/task"
+	"time"
+)
+
+func StreamProbe() ui.View {
+	values := task.UseStringStream("sequence", func(ctx context.Context, emit func(string) bool) error {
+		for _, value := range []string{"one", "two", "three"} {
+			if !emit(value) {
+				return nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return nil
+	})
+	status := "Stream pending"
+	if values.Status() == task.Ready {
+		status = fmt.Sprintf("Stream value %s revision %d", values.Value(), values.Revision())
+	} else if values.Status() == task.Complete {
+		status = fmt.Sprintf("Stream complete %s revision %d", values.Value(), values.Revision())
+	} else if values.Status() == task.Failed {
+		status = "Stream failed " + values.Error()
+	}
+	return ui.Column(ui.Text("Structured stream"), ui.Text(status))
+}
+
+func App() ui.View {
+	started := ui.UseBoolState(false)
+	if !ui.BoolStateValue(started) {
+		return ui.Column(ui.Text("Structured stream"), ui.Button("Start stream", func(event ui.Event) {
+			ui.SetBoolState(started, true)
+		}))
+	}
+	return StreamProbe()
+}
+
+func main() {
+	ui.Mount(App)
+}

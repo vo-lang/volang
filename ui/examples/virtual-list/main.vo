@@ -1,0 +1,25 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"strconv"
+)
+
+var scrollOffset = 0.0
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	list := kit.VirtualList(10000, 36, scrollOffset, 480, 4, func(index int64) ui.View {
+		return ui.Padding(kit.Body(theme, "Row "+strconv.FormatInt(index+1, 10)), theme.Space)
+	}, func(event ui.Event) {
+		scrollOffset = event.Y
+	})
+	return kit.Screen(theme, kit.Section(theme, "Virtualized collection", list))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

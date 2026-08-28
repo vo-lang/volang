@@ -1,0 +1,12 @@
+package main
+
+import (
+	"fmt"
+)
+
+func main() {
+	values, err := fmt.Scan()
+	assert(values == nil, "EOF scan must not fabricate values")
+	assert(err != nil && err.Error() == "EOF", "empty standard input must report EOF")
+	println("wasm-aot-stdin-eof: PASS")
+}

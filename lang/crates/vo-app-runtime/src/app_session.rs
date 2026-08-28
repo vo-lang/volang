@@ -2,8 +2,6 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
@@ -39,7 +37,7 @@ use vo_app_protocol::{InstanceGroupHandle, ProviderInstanceHandle, SessionHandle
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
 use vo_app_protocol::{SurfaceHandle, ViewHandle, WindowHandle};
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
-use vo_runtime::host_services_v2::{CallerEndpointHandle, HostResourceHandle};
+use vo_runtime::host_services_v2::CallerEndpointHandle;
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
 const VOPLAY_TICK_OUTPUT_MAGIC: &[u8] = b"voplay-tick-output-v1\0";
@@ -121,7 +119,6 @@ struct HostedTargetState {
     committed_fixed_ticks: u64,
     last_voplay_clock_nanos: Option<u64>,
     voplay_clock_paused: bool,
-    vogui_turns: VecDeque<Vec<u8>>,
     voplay_tick_turns: VecDeque<Vec<u8>>,
     voplay_inflight_tick: Option<(u64, u64)>,
     voplay_render_outbox: HostedVoplayRoleOutbox,
@@ -143,12 +140,6 @@ struct HostedTargetState {
     voplay_endpoint_observations: BTreeMap<(u8, u64, u64), ProviderRole>,
     voplay_input_frames: HostedVoplayRoleOutbox,
     voplay_presentation_pulses: HostedVoplayRoleOutbox,
-    last_update_result: Vec<u8>,
-    vogui_subscriptions: Vec<HostedVoguiSubscription>,
-    pending_vogui_effects: VecDeque<Vec<u8>>,
-    active_vogui_tasks: Vec<HostedVoguiTaskEffect>,
-    active_vogui_platform_effects: BTreeMap<RequestId, (u64, u64, u64)>,
-    vogui_subscription_deadlines: Vec<Option<u64>>,
     voplay_registry: Option<HostedVoplayRegistry>,
 }
 
@@ -165,15 +156,6 @@ struct HostedVoplayTickOutput {
     asset_packets: Vec<Vec<u8>>,
     audio_packets: Vec<Vec<u8>>,
     logic_packets: Vec<Vec<u8>>,
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-struct HostedVoguiTaskEffect {
-    effect_id: u64,
-    app_code_epoch: u64,
-    due_millis: u64,
-    deadline_millis: u64,
-    completion_payload: Vec<u8>,
 }
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
@@ -276,69 +258,6 @@ fn hosted_voplay_packet_kind(packet: &[u8]) -> Option<u16> {
         .get(..2)
         .and_then(|bytes| bytes.try_into().ok())
         .map(u16::from_le_bytes)
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HostedVoguiSubscription {
-    pub handle: HostResourceHandle,
-    pub kind: Vec<u8>,
-    pub descriptor: Vec<u8>,
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HostedVoguiSubscriptionBinding {
-    pub caller: CallerEndpointHandle,
-    pub subscription: HostedVoguiSubscription,
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HostedVoguiSubscriptionEvent {
-    pub caller: CallerEndpointHandle,
-    pub handle: HostResourceHandle,
-    pub payload: Vec<u8>,
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-pub fn encode_vogui_subscription_bindings(
-    bindings: &[HostedVoguiSubscriptionBinding],
-) -> Result<Vec<u8>, String> {
-    if bindings.len() > 4096 {
-        return Err(String::from("Vogui subscription binding capacity exceeded"));
-    }
-    let mut frame = Vec::from(&b"VSB1"[..]);
-    frame.extend_from_slice(&(bindings.len() as u32).to_le_bytes());
-    for binding in bindings {
-        let kind_len = u16::try_from(binding.subscription.kind.len())
-            .map_err(|_| String::from("Vogui subscription kind is too large"))?;
-        let descriptor_len = u32::try_from(binding.subscription.descriptor.len())
-            .map_err(|_| String::from("Vogui subscription descriptor is too large"))?;
-        frame.extend_from_slice(&binding.caller.session_index.to_le_bytes());
-        frame.extend_from_slice(&binding.caller.session_generation.to_le_bytes());
-        frame.extend_from_slice(&binding.caller.session_epoch.to_le_bytes());
-        frame.extend_from_slice(&binding.caller.endpoint_index.to_le_bytes());
-        frame.extend_from_slice(&binding.caller.endpoint_generation.to_le_bytes());
-        frame.extend_from_slice(&binding.caller.endpoint_epoch.to_le_bytes());
-        frame.extend_from_slice(&binding.subscription.handle.index.to_le_bytes());
-        frame.extend_from_slice(&binding.subscription.handle.generation.to_le_bytes());
-        frame.extend_from_slice(&kind_len.to_le_bytes());
-        frame.extend_from_slice(&descriptor_len.to_le_bytes());
-        frame.extend_from_slice(&binding.subscription.kind);
-        frame.extend_from_slice(&binding.subscription.descriptor);
-    }
-    Ok(frame)
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HostedVoguiEffectCompletion {
-    pub caller: CallerEndpointHandle,
-    pub effect_id: u64,
-    pub app_code_epoch: u64,
-    pub outcome: u8,
-    pub payload: Vec<u8>,
 }
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
@@ -1360,33 +1279,24 @@ impl HostedInstanceGroup {
                 "framework provider target startup capacity exhausted",
             ));
         }
-        let (vogui_subscriptions, voplay_registry) = match &startup {
-            crate::TargetStartup::Vogui { .. } => (Vec::new(), None),
-            crate::TargetStartup::Voplay { .. } => {
-                let registry = build_hosted_voplay_registry(&startup)?;
-                if registry
-                    .render_features
-                    .iter()
-                    .any(|feature| feature.compiled)
-                {
-                    let render_digest =
-                        self.provider_artifact_digest(ProviderRole::GameRenderer)?;
-                    if registry
-                        .render_features
-                        .iter()
-                        .filter(|feature| feature.compiled)
-                        .any(|feature| feature.render_artifact_digest != render_digest)
-                    {
-                        return Err(String::from(
-                            "compiled Voplay RenderFeature is not linked by the selected render artifact",
-                        ));
-                    }
-                }
-                (Vec::new(), Some(registry))
+        let registry = build_hosted_voplay_registry(&startup)?;
+        if registry
+            .render_features
+            .iter()
+            .any(|feature| feature.compiled)
+        {
+            let render_digest = self.provider_artifact_digest(ProviderRole::GameRenderer)?;
+            if registry
+                .render_features
+                .iter()
+                .filter(|feature| feature.compiled)
+                .any(|feature| feature.render_artifact_digest != render_digest)
+            {
+                return Err(String::from(
+                    "compiled Voplay RenderFeature is not linked by the selected render artifact",
+                ));
             }
-        };
-        let pending_vogui_effects = VecDeque::new();
-        let vogui_subscription_deadlines = vec![None; vogui_subscriptions.len()];
+        }
         self.target_states.push(HostedTargetState {
             caller,
             startup,
@@ -1395,7 +1305,6 @@ impl HostedInstanceGroup {
             committed_fixed_ticks: 0,
             last_voplay_clock_nanos: None,
             voplay_clock_paused: false,
-            vogui_turns: VecDeque::new(),
             voplay_tick_turns: VecDeque::new(),
             voplay_inflight_tick: None,
             voplay_render_outbox: HostedVoplayRoleOutbox::default(),
@@ -1417,13 +1326,7 @@ impl HostedInstanceGroup {
             voplay_endpoint_observations: BTreeMap::new(),
             voplay_input_frames: HostedVoplayRoleOutbox::default(),
             voplay_presentation_pulses: HostedVoplayRoleOutbox::default(),
-            last_update_result: Vec::new(),
-            vogui_subscriptions,
-            pending_vogui_effects,
-            active_vogui_tasks: Vec::new(),
-            active_vogui_platform_effects: BTreeMap::new(),
-            vogui_subscription_deadlines,
-            voplay_registry,
+            voplay_registry: Some(registry),
         });
         Ok(())
     }
@@ -1470,592 +1373,12 @@ impl HostedInstanceGroup {
             .find_map(|state| (state.caller == caller).then_some(state.revision))
     }
 
-    pub fn vogui_presentation(&self, caller: CallerEndpointHandle) -> Option<&[u8]> {
-        let state = self
-            .target_states
-            .iter()
-            .find(|state| state.caller == caller)?;
-        let crate::TargetStartup::Vogui { presentation, .. } = &state.startup else {
-            return None;
-        };
-        Some(presentation)
-    }
-
-    pub fn vogui_subscriptions(&self, caller: CallerEndpointHandle) -> Option<&[u8]> {
-        let state = self
-            .target_states
-            .iter()
-            .find(|state| state.caller == caller)?;
-        let crate::TargetStartup::Vogui { subscriptions, .. } = &state.startup else {
-            return None;
-        };
-        Some(subscriptions)
-    }
-
-    pub fn vogui_subscription_records(
-        &self,
-        caller: CallerEndpointHandle,
-    ) -> Option<&[HostedVoguiSubscription]> {
-        self.target_states
-            .iter()
-            .find(|state| state.caller == caller)
-            .map(|state| state.vogui_subscriptions.as_slice())
-    }
-
-    pub fn active_vogui_subscriptions(&self) -> Vec<HostedVoguiSubscriptionBinding> {
-        self.target_states
-            .iter()
-            .filter(|state| matches!(state.startup, crate::TargetStartup::Vogui { .. }))
-            .flat_map(|state| {
-                state
-                    .vogui_subscriptions
-                    .iter()
-                    .cloned()
-                    .map(|subscription| HostedVoguiSubscriptionBinding {
-                        caller: state.caller,
-                        subscription,
-                    })
-            })
-            .collect()
-    }
-
-    pub fn emit_vogui_subscription_event(
-        &self,
-        caller: CallerEndpointHandle,
-        handle: HostResourceHandle,
-        payload: Vec<u8>,
-    ) -> Result<HostedVoguiSubscriptionEvent, String> {
-        if payload.len() > 1024 * 1024 {
-            return Err(String::from(
-                "Vogui subscription event payload is too large",
-            ));
-        }
-        let state = self
-            .target_states
-            .iter()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        if !state
-            .vogui_subscriptions
-            .iter()
-            .any(|subscription| subscription.handle == handle)
-        {
-            return Err(String::from("stale Vogui subscription event"));
-        }
-        Ok(HostedVoguiSubscriptionEvent {
-            caller,
-            handle,
-            payload,
-        })
-    }
-
     pub fn voplay_registry(&self, caller: CallerEndpointHandle) -> Option<&HostedVoplayRegistry> {
         self.target_states
             .iter()
             .find(|state| state.caller == caller)?
             .voplay_registry
             .as_ref()
-    }
-
-    pub fn take_vogui_effect(
-        &mut self,
-        caller: CallerEndpointHandle,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-            return Err(String::from("target state belongs to Voplay"));
-        }
-        Ok(state.pending_vogui_effects.pop_front())
-    }
-
-    pub fn enqueue_vogui_provider_effect(
-        &mut self,
-        caller: CallerEndpointHandle,
-        packet: Vec<u8>,
-    ) -> Result<(), String> {
-        if packet.is_empty() || packet.len() > crate::MAX_TARGET_STARTUP_BYTES {
-            return Err(String::from("Vogui provider effect packet exceeds limit"));
-        }
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-            return Err(String::from("target state belongs to Voplay"));
-        }
-        if state.pending_vogui_effects.len() >= 4096 {
-            return Err(String::from("Vogui provider effect queue is full"));
-        }
-        state.pending_vogui_effects.push_back(packet);
-        Ok(())
-    }
-
-    pub fn cancel_vogui_provider_effect(
-        &mut self,
-        caller: CallerEndpointHandle,
-        effect_id: u64,
-        app_code_epoch: u64,
-    ) -> Result<(), String> {
-        if effect_id == 0 || app_code_epoch == 0 {
-            return Err(String::from("invalid Vogui effect cancellation identity"));
-        }
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        let mut retained = VecDeque::new();
-        while let Some(packet) = state.pending_vogui_effects.pop_front() {
-            let effect = decode_vogui_provider_effect(&packet)?;
-            if effect.effect_id != effect_id || effect.app_code_epoch != app_code_epoch {
-                retained.push_back(packet);
-            }
-        }
-        state.pending_vogui_effects = retained;
-        state
-            .active_vogui_tasks
-            .retain(|task| task.effect_id != effect_id || task.app_code_epoch != app_code_epoch);
-        let platform_request = state.active_vogui_platform_effects.iter().find_map(
-            |(request_id, (active_effect_id, active_epoch, _))| {
-                (*active_effect_id == effect_id && *active_epoch == app_code_epoch)
-                    .then_some(*request_id)
-            },
-        );
-        if let Some(request_id) = platform_request {
-            let owner = Arc::clone(&self.owner);
-            let session = self.session;
-            owner
-                .try_with_runtime(|runtime| {
-                    runtime
-                        .session_mut(session)
-                        .map_err(|error| {
-                            format!("access Vogui effect cancellation session: {error:?}")
-                        })?
-                        .abandon_platform_request(request_id)
-                        .map_err(|error| format!("abandon Vogui PlatformRequest: {error:?}"))
-                })
-                .map_err(|status| {
-                    format!("Vogui effect cancellation runtime busy: status {status}")
-                })??;
-            state.active_vogui_platform_effects.remove(&request_id);
-        }
-        Ok(())
-    }
-
-    pub fn apply_vogui_provider_effect_cancel(
-        &mut self,
-        caller: CallerEndpointHandle,
-        packet: &[u8],
-    ) -> Result<(), String> {
-        const PREFIX: &[u8] = b"vogui-host-effect-cancel-v1\0";
-        let body = packet
-            .strip_prefix(PREFIX)
-            .ok_or_else(|| String::from("invalid Vogui effect cancellation prefix"))?;
-        if body.len() != 16 {
-            return Err(String::from("invalid Vogui effect cancellation length"));
-        }
-        let effect_id = u64::from_le_bytes(body[..8].try_into().unwrap());
-        let app_code_epoch = u64::from_le_bytes(body[8..].try_into().unwrap());
-        self.cancel_vogui_provider_effect(caller, effect_id, app_code_epoch)
-    }
-
-    pub fn apply_vogui_provider_subscription(
-        &mut self,
-        caller: CallerEndpointHandle,
-        packet: &[u8],
-    ) -> Result<(), String> {
-        const PREFIX: &[u8] = b"vogui-host-subscription-v1\0";
-        let body = packet
-            .strip_prefix(PREFIX)
-            .ok_or_else(|| String::from("invalid Vogui provider subscription prefix"))?;
-        if body.len() < 9 {
-            return Err(String::from("truncated Vogui provider subscription"));
-        }
-        let action = body[0];
-        let handle = HostResourceHandle {
-            index: u32::from_le_bytes(body[1..5].try_into().unwrap()),
-            generation: u32::from_le_bytes(body[5..9].try_into().unwrap()),
-        };
-        if !handle.is_valid() {
-            return Err(String::from("invalid Vogui provider subscription handle"));
-        }
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        match action {
-            1 => {
-                if body.len() < 15 {
-                    return Err(String::from("truncated Vogui subscription start"));
-                }
-                let kind_len = u16::from_le_bytes(body[9..11].try_into().unwrap()) as usize;
-                let descriptor_len = u32::from_le_bytes(body[11..15].try_into().unwrap()) as usize;
-                let end = 15usize
-                    .checked_add(kind_len)
-                    .and_then(|offset| offset.checked_add(descriptor_len))
-                    .ok_or_else(|| String::from("Vogui subscription length overflow"))?;
-                if kind_len == 0
-                    || kind_len > 256
-                    || descriptor_len > 1024 * 1024
-                    || end != body.len()
-                    || state
-                        .vogui_subscriptions
-                        .iter()
-                        .any(|subscription| subscription.handle == handle)
-                {
-                    return Err(String::from("invalid Vogui subscription start"));
-                }
-                state.vogui_subscriptions.push(HostedVoguiSubscription {
-                    handle,
-                    kind: body[15..15 + kind_len].to_vec(),
-                    descriptor: body[15 + kind_len..].to_vec(),
-                });
-                state.vogui_subscription_deadlines.push(None);
-            }
-            2 if body.len() == 9 => {
-                let index = state
-                    .vogui_subscriptions
-                    .iter()
-                    .position(|subscription| subscription.handle == handle)
-                    .ok_or_else(|| String::from("unknown Vogui subscription stop"))?;
-                state.vogui_subscriptions.remove(index);
-                state.vogui_subscription_deadlines.remove(index);
-            }
-            _ => return Err(String::from("invalid Vogui subscription action")),
-        }
-        Ok(())
-    }
-
-    pub fn drive_vogui_subscriptions(
-        &mut self,
-        now_millis: u64,
-    ) -> Result<Vec<HostedVoguiSubscriptionEvent>, String> {
-        let mut events = Vec::new();
-        for state in &mut self.target_states {
-            if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-                continue;
-            }
-            for (index, subscription) in state.vogui_subscriptions.iter().enumerate() {
-                if !matches!(
-                    subscription.kind.as_slice(),
-                    b"timer.once" | b"timer.interval"
-                ) {
-                    continue;
-                }
-                let interval = decode_vogui_timer_interval(subscription)?;
-                let deadline = &mut state.vogui_subscription_deadlines[index];
-                let Some(current) = *deadline else {
-                    *deadline = Some(
-                        now_millis
-                            .checked_add(interval)
-                            .ok_or_else(|| String::from("Vogui subscription deadline overflow"))?,
-                    );
-                    continue;
-                };
-                if current > now_millis {
-                    continue;
-                }
-                match subscription.kind.as_slice() {
-                    b"timer.once" => {
-                        *deadline = Some(u64::MAX);
-                    }
-                    b"timer.interval" => {
-                        let elapsed = now_millis - current;
-                        let periods = elapsed / interval + 1;
-                        *deadline = Some(
-                            current
-                                .checked_add(interval.saturating_mul(periods))
-                                .ok_or_else(|| String::from("Vogui interval deadline overflow"))?,
-                        );
-                    }
-                    _ => unreachable!("supported subscription kind was checked"),
-                }
-                events.push(HostedVoguiSubscriptionEvent {
-                    caller: state.caller,
-                    handle: subscription.handle,
-                    payload: now_millis.to_le_bytes().to_vec(),
-                });
-            }
-        }
-        Ok(events)
-    }
-
-    pub fn drive_vogui_task_effects(
-        &mut self,
-        now_millis: u64,
-    ) -> Result<Vec<HostedVoguiEffectCompletion>, String> {
-        let mut completions = Vec::new();
-        for state in &mut self.target_states {
-            if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-                continue;
-            }
-            let mut retained = VecDeque::new();
-            while let Some(packet) = state.pending_vogui_effects.pop_front() {
-                let effect = decode_vogui_provider_effect(&packet)?;
-                if effect.executor != 3 {
-                    retained.push_back(packet);
-                    continue;
-                }
-                if (effect.kind != b"delay" && effect.kind != b"background")
-                    || effect.payload.len() < 8
-                    || (effect.kind == b"delay" && effect.payload.len() != 8)
-                {
-                    completions.push(HostedVoguiEffectCompletion {
-                        caller: state.caller,
-                        effect_id: effect.effect_id,
-                        app_code_epoch: effect.app_code_epoch,
-                        outcome: 2,
-                        payload: b"invalid TaskRegistry effect descriptor".to_vec(),
-                    });
-                    continue;
-                }
-                if effect.deadline_millis <= now_millis {
-                    completions.push(HostedVoguiEffectCompletion {
-                        caller: state.caller,
-                        effect_id: effect.effect_id,
-                        app_code_epoch: effect.app_code_epoch,
-                        outcome: 4,
-                        payload: Vec::new(),
-                    });
-                    continue;
-                }
-                let delay = u64::from_le_bytes(effect.payload[..8].try_into().unwrap());
-                state.active_vogui_tasks.push(HostedVoguiTaskEffect {
-                    effect_id: effect.effect_id,
-                    app_code_epoch: effect.app_code_epoch,
-                    due_millis: now_millis.saturating_add(delay).min(effect.deadline_millis),
-                    deadline_millis: effect.deadline_millis,
-                    completion_payload: effect.payload[8..].to_vec(),
-                });
-            }
-            state.pending_vogui_effects = retained;
-            let mut active = Vec::new();
-            for task in state.active_vogui_tasks.drain(..) {
-                if task.due_millis > now_millis {
-                    active.push(task);
-                    continue;
-                }
-                completions.push(HostedVoguiEffectCompletion {
-                    caller: state.caller,
-                    effect_id: task.effect_id,
-                    app_code_epoch: task.app_code_epoch,
-                    outcome: if now_millis >= task.deadline_millis {
-                        4
-                    } else {
-                        1
-                    },
-                    payload: if now_millis >= task.deadline_millis {
-                        Vec::new()
-                    } else {
-                        task.completion_payload
-                    },
-                });
-            }
-            state.active_vogui_tasks = active;
-        }
-        Ok(completions)
-    }
-
-    pub fn drive_vogui_platform_effects(
-        &mut self,
-        now_millis: u64,
-    ) -> Result<Vec<HostedVoguiEffectCompletion>, String> {
-        let owner = Arc::clone(&self.owner);
-        let session = self.session;
-        let mut immediate = Vec::new();
-        for state in &mut self.target_states {
-            if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-                continue;
-            }
-            let mut retained = VecDeque::new();
-            while let Some(packet) = state.pending_vogui_effects.pop_front() {
-                let effect = decode_vogui_provider_effect(&packet)?;
-                if effect.executor != 2 {
-                    retained.push_back(packet);
-                    continue;
-                }
-                if effect.deadline_millis <= now_millis {
-                    immediate.push(HostedVoguiEffectCompletion {
-                        caller: state.caller,
-                        effect_id: effect.effect_id,
-                        app_code_epoch: effect.app_code_epoch,
-                        outcome: 4,
-                        payload: Vec::new(),
-                    });
-                    continue;
-                }
-                let kind = vogui_platform_request_kind(effect.kind).ok_or_else(|| {
-                    format!(
-                        "unsupported Vogui PlatformRequest effect {}",
-                        String::from_utf8_lossy(effect.kind)
-                    )
-                })?;
-                let scope = vogui_platform_request_scope(state.caller, &effect)?;
-                let request_id = owner
-                    .try_with_runtime(|runtime| {
-                        runtime
-                            .session_mut(session)
-                            .map_err(|error| {
-                                format!("access Vogui PlatformRequest session: {error:?}")
-                            })?
-                            .submit_allocated_platform_request(
-                                state.caller,
-                                kind,
-                                scope,
-                                effect.deadline_millis,
-                                effect.payload.to_vec(),
-                            )
-                            .map_err(|error| format!("submit Vogui PlatformRequest: {error:?}"))
-                    })
-                    .map_err(|status| {
-                        format!("Vogui PlatformRequest runtime busy: status {status}")
-                    })??;
-                state.active_vogui_platform_effects.insert(
-                    request_id,
-                    (
-                        effect.effect_id,
-                        effect.app_code_epoch,
-                        effect.deadline_millis,
-                    ),
-                );
-            }
-            state.pending_vogui_effects = retained;
-        }
-        if self
-            .target_states
-            .iter()
-            .any(|state| !state.active_vogui_platform_effects.is_empty())
-        {
-            owner
-                .try_with_runtime(|runtime| {
-                    runtime
-                        .session_mut(session)
-                        .map_err(|error| {
-                            format!("access Vogui PlatformRequest expiry session: {error:?}")
-                        })?
-                        .expire_platform_requests(now_millis)
-                        .map(|_| ())
-                        .map_err(|error| format!("expire Vogui PlatformRequest: {error:?}"))
-                })
-                .map_err(|status| {
-                    format!("Vogui PlatformRequest expiry runtime busy: status {status}")
-                })??;
-        }
-        Ok(immediate)
-    }
-
-    pub fn take_vogui_platform_completions(
-        &mut self,
-    ) -> Result<Vec<HostedVoguiEffectCompletion>, String> {
-        let owner = Arc::clone(&self.owner);
-        let session = self.session;
-        let mut effect_completions = Vec::new();
-        for state in &mut self.target_states {
-            loop {
-                let completion = owner
-                    .try_with_runtime(|runtime| {
-                        runtime
-                            .session_mut(session)
-                            .map_err(|error| {
-                                format!("access Vogui platform completion session: {error:?}")
-                            })?
-                            .poll_platform_completion_for(state.caller)
-                            .map_err(|error| format!("poll Vogui platform completion: {error:?}"))
-                    })
-                    .map_err(|status| {
-                        format!("Vogui platform completion runtime busy: status {status}")
-                    })??;
-                let Some(completion) = completion else {
-                    break;
-                };
-                let (effect_id, app_code_epoch, _) = state
-                    .active_vogui_platform_effects
-                    .remove(&completion.request_id)
-                    .ok_or_else(|| {
-                        String::from("Vogui received an unknown PlatformRequest completion")
-                    })?;
-                let (outcome, payload) = match completion.outcome {
-                    crate::PlatformCompletionOutcome::Completed => (1, completion.payload),
-                    crate::PlatformCompletionOutcome::Cancelled => (3, Vec::new()),
-                    crate::PlatformCompletionOutcome::TimedOut => (4, Vec::new()),
-                    crate::PlatformCompletionOutcome::Denied
-                    | crate::PlatformCompletionOutcome::Unsupported
-                    | crate::PlatformCompletionOutcome::Failed
-                    | crate::PlatformCompletionOutcome::SessionClosed => (2, completion.payload),
-                };
-                effect_completions.push(HostedVoguiEffectCompletion {
-                    caller: state.caller,
-                    effect_id,
-                    app_code_epoch,
-                    outcome,
-                    payload,
-                });
-            }
-        }
-        Ok(effect_completions)
-    }
-
-    pub fn next_vogui_subscription_deadline(&self) -> Option<u64> {
-        self.target_states
-            .iter()
-            .flat_map(|state| state.vogui_subscription_deadlines.iter().copied())
-            .flatten()
-            .filter(|deadline| *deadline != u64::MAX)
-            .min()
-    }
-
-    pub fn next_vogui_task_deadline(&self) -> Option<u64> {
-        self.target_states
-            .iter()
-            .flat_map(|state| state.active_vogui_tasks.iter())
-            .map(|task| task.due_millis)
-            .min()
-    }
-
-    pub fn next_vogui_subscription_wake(&self, now_millis: u64) -> Result<Option<u64>, String> {
-        let mut next = None;
-        for state in &self.target_states {
-            for (subscription, deadline) in state
-                .vogui_subscriptions
-                .iter()
-                .zip(&state.vogui_subscription_deadlines)
-            {
-                if !matches!(
-                    subscription.kind.as_slice(),
-                    b"timer.once" | b"timer.interval"
-                ) {
-                    continue;
-                }
-                let interval = decode_vogui_timer_interval(subscription)?;
-                let deadline = match deadline {
-                    Some(u64::MAX) => continue,
-                    Some(deadline) => *deadline,
-                    None => now_millis
-                        .checked_add(interval)
-                        .ok_or_else(|| String::from("Vogui subscription deadline overflow"))?,
-                };
-                next = Some(next.map_or(deadline, |current: u64| current.min(deadline)));
-            }
-        }
-        Ok(next)
-    }
-
-    pub fn next_vogui_task_wake(&self) -> Option<u64> {
-        self.next_vogui_task_deadline()
-    }
-
-    pub fn next_vogui_platform_deadline(&self) -> Option<u64> {
-        self.target_states
-            .iter()
-            .flat_map(|state| state.active_vogui_platform_effects.values())
-            .map(|(_, _, deadline)| *deadline)
-            .min()
     }
 
     pub fn next_voplay_tick_wake_nanos(&self, now_nanos: u64) -> Result<Option<u64>, String> {
@@ -2081,118 +1404,6 @@ impl HostedInstanceGroup {
         Ok(next)
     }
 
-    pub fn commit_vogui_target_state(
-        &mut self,
-        caller: CallerEndpointHandle,
-        model: Vec<u8>,
-        update_result: Vec<u8>,
-        effects: Vec<u8>,
-        presentation: Vec<u8>,
-        subscriptions: Vec<u8>,
-    ) -> Result<u64, String> {
-        self.preflight_vogui_target_state(
-            caller,
-            &model,
-            &update_result,
-            &effects,
-            &presentation,
-            &subscriptions,
-        )?;
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .expect("preflight confirmed the Vogui target state");
-        let crate::TargetStartup::Vogui {
-            model: committed_model,
-            effects: committed_effects,
-            presentation: committed_presentation,
-            subscriptions: committed_subscriptions,
-        } = &mut state.startup
-        else {
-            unreachable!("preflight confirmed a Vogui target state");
-        };
-        *committed_model = model;
-        *committed_effects = effects;
-        *committed_presentation = presentation;
-        *committed_subscriptions = subscriptions;
-        state.last_update_result = update_result;
-        state.revision += 1;
-        Ok(state.revision)
-    }
-
-    pub fn preflight_vogui_target_state(
-        &self,
-        caller: CallerEndpointHandle,
-        model: &[u8],
-        update_result: &[u8],
-        effects: &[u8],
-        presentation: &[u8],
-        subscriptions: &[u8],
-    ) -> Result<(), String> {
-        if model
-            .len()
-            .saturating_add(update_result.len())
-            .saturating_add(effects.len())
-            .saturating_add(presentation.len())
-            .saturating_add(subscriptions.len())
-            > crate::MAX_TARGET_STARTUP_BYTES
-        {
-            return Err(String::from("Vogui target state exceeds provider limit"));
-        }
-        let state = self
-            .target_states
-            .iter()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-            return Err(String::from("target state belongs to Voplay"));
-        }
-        state
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| String::from("Vogui target revision exhausted"))?;
-        Ok(())
-    }
-
-    pub fn enqueue_vogui_target_turn(
-        &mut self,
-        caller: CallerEndpointHandle,
-        turn: Vec<u8>,
-    ) -> Result<(), String> {
-        if turn.is_empty() || turn.len() > crate::MAX_TARGET_STARTUP_BYTES {
-            return Err(String::from("Vogui target turn exceeds provider limit"));
-        }
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-            return Err(String::from("target state belongs to Voplay"));
-        }
-        if state.vogui_turns.len() >= 4096 {
-            return Err(String::from("Vogui target turn queue is full"));
-        }
-        state.vogui_turns.push_back(turn);
-        Ok(())
-    }
-
-    pub fn take_vogui_target_turn(
-        &mut self,
-        caller: CallerEndpointHandle,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let state = self
-            .target_states
-            .iter_mut()
-            .find(|state| state.caller == caller)
-            .ok_or_else(|| String::from("Vogui target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Vogui { .. }) {
-            return Err(String::from("target state belongs to Voplay"));
-        }
-        Ok(state.vogui_turns.pop_front())
-    }
-
     pub fn take_voplay_tick_turn(
         &mut self,
         caller: CallerEndpointHandle,
@@ -2202,9 +1413,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         if state.voplay_inflight_tick.is_some() {
             return Err(String::from(
                 "Voplay target requested another tick before committing the current batch",
@@ -2248,9 +1456,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         if state.voplay_inflight_tick != Some((first_tick, count))
             || first_tick
                 != state
@@ -2373,9 +1578,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         let outbox = match role {
             ProviderRole::GameRenderer => &mut state.voplay_render_outbox,
             ProviderRole::GameAsset => &mut state.voplay_asset_outbox,
@@ -2407,9 +1609,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         match (role, kind) {
             (ProviderRole::GameRenderer, 6) => {
                 state.voplay_render_control_snapshot = Some(packet.to_vec())
@@ -2432,9 +1631,6 @@ impl HostedInstanceGroup {
             .iter()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         match role {
             ProviderRole::GameRenderer => Ok(state.voplay_render_control_snapshot.clone()),
             ProviderRole::GameAudio => Ok(state.voplay_audio_control_snapshot.clone()),
@@ -2451,9 +1647,6 @@ impl HostedInstanceGroup {
             .iter()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         Ok(state.voplay_render_state_snapshot.clone())
     }
 
@@ -2466,9 +1659,6 @@ impl HostedInstanceGroup {
             .iter()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         Ok(state.voplay_audio_asset_rebinds.values().cloned().collect())
     }
 
@@ -2481,9 +1671,6 @@ impl HostedInstanceGroup {
             .iter()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         Ok(state
             .voplay_render_asset_rebinds
             .values()
@@ -2501,9 +1688,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         let mut retained = HostedVoplayRoleOutbox::default();
         let mut source = match role {
             ProviderRole::GameRenderer => core::mem::take(&mut state.voplay_render_outbox),
@@ -2570,9 +1754,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         let replaced_bytes = state
             .voplay_unobserved_control_commits
             .get(&key)
@@ -2609,9 +1790,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         Ok(state
             .voplay_unobserved_control_commits
             .remove(&key)
@@ -2677,9 +1855,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         let packets = state
             .voplay_unobserved_control_commits
             .values()
@@ -2709,9 +1884,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         let outbox = match role {
             ProviderRole::GameRenderer => &mut state.voplay_render_outbox,
             ProviderRole::GameAsset => &mut state.voplay_asset_outbox,
@@ -2734,9 +1906,6 @@ impl HostedInstanceGroup {
             .iter()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         let outbox = match role {
             ProviderRole::GameRenderer => &state.voplay_render_outbox,
             ProviderRole::GameAsset => &state.voplay_asset_outbox,
@@ -2759,7 +1928,7 @@ impl HostedInstanceGroup {
         let registry = state
             .voplay_registry
             .as_ref()
-            .ok_or_else(|| String::from("target state belongs to Vogui"))?;
+            .ok_or_else(|| String::from("Voplay target registry is missing"))?;
         Ok(registry
             .render_features
             .iter()
@@ -2780,9 +1949,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         state.voplay_render_returns.ensure_capacity(&render)?;
         state.voplay_asset_returns.ensure_capacity(&asset)?;
         state.voplay_audio_returns.ensure_capacity(&audio)?;
@@ -2804,9 +1970,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         state.voplay_input_frames.ensure_capacity(&frames)?;
         state.voplay_input_frames.push_all(frames);
         Ok(())
@@ -2822,9 +1985,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         state.voplay_presentation_pulses.ensure_capacity(&pulses)?;
         state.voplay_presentation_pulses.push_all(pulses);
         Ok(())
@@ -2840,9 +2000,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         Ok(select(state).pop())
     }
 
@@ -2859,9 +2016,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         if state.voplay_inflight_tick.is_some() || !state.voplay_tick_turns.is_empty() {
             return Err(String::from(
                 "Voplay target already has an outstanding tick batch",
@@ -2890,9 +2044,6 @@ impl HostedInstanceGroup {
             .iter_mut()
             .find(|state| state.caller == caller)
             .ok_or_else(|| String::from("Voplay target state is not bound"))?;
-        if !matches!(state.startup, crate::TargetStartup::Voplay { .. }) {
-            return Err(String::from("target state belongs to Vogui"));
-        }
         state.voplay_clock_paused = paused;
         if !paused {
             state.last_voplay_clock_nanos = None;
@@ -2916,9 +2067,7 @@ impl HostedInstanceGroup {
 
     pub fn rebase_voplay_browser_clock(&mut self, now_nanos: u64) {
         for state in &mut self.target_states {
-            if matches!(state.startup, crate::TargetStartup::Voplay { .. })
-                && !state.voplay_clock_paused
-            {
+            if !state.voplay_clock_paused {
                 state.last_voplay_clock_nanos = Some(now_nanos);
             }
         }
@@ -2935,10 +2084,7 @@ impl HostedInstanceGroup {
                 fixed_tick_nanos,
                 max_catch_up_ticks,
                 ..
-            } = &state.startup
-            else {
-                continue;
-            };
+            } = &state.startup;
             if state.voplay_clock_paused {
                 continue;
             }
@@ -3039,7 +2185,6 @@ impl HostedInstanceGroup {
             .target_states
             .iter()
             .position(|state| state.caller == caller)?;
-        self.cancel_vogui_platform_requests_for(index).ok()?;
         Some(self.target_states.swap_remove(index).startup)
     }
 
@@ -3060,7 +2205,6 @@ impl HostedInstanceGroup {
     }
 
     pub fn close(mut self) -> Result<ProviderGroupCloseReport, String> {
-        self.cancel_all_vogui_platform_requests()?;
         self.release_all_graphics_devices()?;
         self.release_all_audio_devices()?;
         let group = self.group.take().unwrap();
@@ -3073,13 +2217,6 @@ impl HostedInstanceGroup {
                     .map_err(|error| format!("failed to close hosted instance group: {error:?}"))
             })
             .map_err(|status| format!("app runtime busy: status {status}"))?
-    }
-
-    fn cancel_all_vogui_platform_requests(&mut self) -> Result<(), String> {
-        for index in 0..self.target_states.len() {
-            self.cancel_vogui_platform_requests_for(index)?;
-        }
-        Ok(())
     }
 
     fn release_all_audio_devices(&mut self) -> Result<(), String> {
@@ -3101,40 +2238,6 @@ impl HostedInstanceGroup {
         }
         Ok(())
     }
-
-    fn cancel_vogui_platform_requests_for(&mut self, index: usize) -> Result<(), String> {
-        let state = self
-            .target_states
-            .get_mut(index)
-            .ok_or_else(|| String::from("Vogui target state disappeared during cancellation"))?;
-        if state.active_vogui_platform_effects.is_empty() {
-            return Ok(());
-        }
-        let request_ids = state
-            .active_vogui_platform_effects
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        let owner = Arc::clone(&self.owner);
-        let session = self.session;
-        owner
-            .try_with_runtime(|runtime| {
-                let kernel = runtime
-                    .session_mut(session)
-                    .map_err(|error| format!("access Vogui cancellation session: {error:?}"))?;
-                for request_id in request_ids {
-                    kernel
-                        .abandon_platform_request(request_id)
-                        .map_err(|error| format!("cancel Vogui PlatformRequest: {error:?}"))?;
-                }
-                Ok::<(), String>(())
-            })
-            .map_err(|status| {
-                format!("Vogui PlatformRequest cancellation runtime busy: status {status}")
-            })??;
-        state.active_vogui_platform_effects.clear();
-        Ok(())
-    }
 }
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
@@ -3147,10 +2250,7 @@ fn build_hosted_voplay_registry(
         fixed_tick_nanos,
         max_catch_up_ticks,
         ..
-    } = startup
-    else {
-        return Err(String::from("target startup belongs to Vogui"));
-    };
+    } = startup;
     let mut registry = HostedVoplayRegistry {
         schedule_hash: *schedule_hash,
         component_schemas: Vec::new(),
@@ -3686,158 +2786,6 @@ fn encode_browser_voplay_presentation_pulse(
 }
 
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
-fn decode_vogui_timer_interval(subscription: &HostedVoguiSubscription) -> Result<u64, String> {
-    let interval = subscription
-        .descriptor
-        .as_slice()
-        .try_into()
-        .ok()
-        .map(u64::from_le_bytes)
-        .filter(|interval| *interval > 0)
-        .ok_or_else(|| String::from("Vogui timer subscription requires a non-zero u64 delay"))?;
-    Ok(interval)
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-struct DecodedVoguiProviderEffect<'a> {
-    effect_id: u64,
-    app_code_epoch: u64,
-    executor: u8,
-    scope: u8,
-    root: HostResourceHandle,
-    reference: HostResourceHandle,
-    binding_generation: u32,
-    deadline_millis: u64,
-    kind: &'a [u8],
-    payload: &'a [u8],
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-fn decode_vogui_provider_effect(packet: &[u8]) -> Result<DecodedVoguiProviderEffect<'_>, String> {
-    const PREFIX: &[u8] = b"vogui-host-effect-v1\0";
-    let body = packet
-        .strip_prefix(PREFIX)
-        .ok_or_else(|| String::from("invalid Vogui provider effect prefix"))?;
-    if body.len() < 52 {
-        return Err(String::from("truncated Vogui provider effect"));
-    }
-    let effect_id = u64::from_le_bytes(body[..8].try_into().unwrap());
-    let app_code_epoch = u64::from_le_bytes(body[8..16].try_into().unwrap());
-    let executor = body[16];
-    let scope = body[17];
-    let root = HostResourceHandle {
-        index: u32::from_le_bytes(body[18..22].try_into().unwrap()),
-        generation: u32::from_le_bytes(body[22..26].try_into().unwrap()),
-    };
-    let reference = HostResourceHandle {
-        index: u32::from_le_bytes(body[26..30].try_into().unwrap()),
-        generation: u32::from_le_bytes(body[30..34].try_into().unwrap()),
-    };
-    let binding_generation = u32::from_le_bytes(body[34..38].try_into().unwrap());
-    let deadline_millis = u64::from_le_bytes(body[38..46].try_into().unwrap());
-    let kind_len = u16::from_le_bytes(body[46..48].try_into().unwrap()) as usize;
-    let payload_len = u32::from_le_bytes(body[48..52].try_into().unwrap()) as usize;
-    let payload_start = 52usize
-        .checked_add(kind_len)
-        .ok_or_else(|| String::from("Vogui effect kind length overflow"))?;
-    let end = payload_start
-        .checked_add(payload_len)
-        .ok_or_else(|| String::from("Vogui effect payload length overflow"))?;
-    if effect_id == 0
-        || app_code_epoch == 0
-        || !matches!(executor, 2 | 3)
-        || !matches!(
-            (
-                scope,
-                root.is_valid(),
-                reference.is_valid(),
-                binding_generation
-            ),
-            (1, false, false, 0)
-                | (2, true, false, 0)
-                | (3, true, true, 1..=u32::MAX)
-                | (4, true, false, 1..=u32::MAX)
-        )
-        || deadline_millis == 0
-        || kind_len == 0
-        || kind_len > 256
-        || payload_len > 1024 * 1024
-        || end != body.len()
-    {
-        return Err(String::from("invalid Vogui provider effect"));
-    }
-    Ok(DecodedVoguiProviderEffect {
-        effect_id,
-        app_code_epoch,
-        executor,
-        scope,
-        root,
-        reference,
-        binding_generation,
-        deadline_millis,
-        kind: &body[52..payload_start],
-        payload: &body[payload_start..],
-    })
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-fn vogui_platform_request_kind(kind: &[u8]) -> Option<crate::PlatformRequestKind> {
-    Some(match kind {
-        b"clipboard.read" => crate::PlatformRequestKind::ClipboardRead,
-        b"clipboard.write" => crate::PlatformRequestKind::ClipboardWrite,
-        b"file.open" => crate::PlatformRequestKind::FileOpen,
-        b"file.save" => crate::PlatformRequestKind::FileSave,
-        b"navigation" => crate::PlatformRequestKind::Navigation,
-        b"window.command" => crate::PlatformRequestKind::WindowCommand,
-        b"view.command" => crate::PlatformRequestKind::ViewCommand,
-        b"vfs" => crate::PlatformRequestKind::Vfs,
-        b"capability" => crate::PlatformRequestKind::Capability,
-        b"audio.activation" => crate::PlatformRequestKind::AudioActivation,
-        b"haptics.rumble" => crate::PlatformRequestKind::Haptics,
-        _ => return None,
-    })
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
-fn vogui_platform_request_scope(
-    caller: CallerEndpointHandle,
-    effect: &DecodedVoguiProviderEffect<'_>,
-) -> Result<crate::PlatformRequestScope, String> {
-    if effect.scope == 1 {
-        return Ok(crate::PlatformRequestScope::Session);
-    }
-    let window = WindowHandle {
-        index: caller.endpoint_index,
-        generation: caller.endpoint_generation,
-    };
-    let view = ViewHandle {
-        index: caller.endpoint_index,
-        generation: caller.endpoint_generation,
-    };
-    if effect.kind == b"window.command" {
-        return Ok(crate::PlatformRequestScope::Window(window));
-    }
-    if effect.kind == b"view.command" {
-        return Ok(crate::PlatformRequestScope::View { window, view });
-    }
-    let surface = SurfaceHandle {
-        index: caller.endpoint_index,
-        generation: caller.endpoint_generation,
-    };
-    if effect.scope == 3 && (!effect.reference.is_valid() || effect.binding_generation == 0) {
-        return Err(String::from("invalid node-scoped Vogui PlatformRequest"));
-    }
-    if !effect.root.is_valid() {
-        return Err(String::from("invalid root-scoped Vogui PlatformRequest"));
-    }
-    Ok(crate::PlatformRequestScope::Surface {
-        window,
-        view,
-        surface,
-    })
-}
-
-#[cfg(any(feature = "std", target_arch = "wasm32"))]
 fn decode_hosted_voplay_tick_output(payload: &[u8]) -> Result<HostedVoplayTickOutput, String> {
     if !payload.starts_with(VOPLAY_TICK_OUTPUT_MAGIC) {
         return Err(String::from("Voplay tick output header is invalid"));
@@ -3902,7 +2850,7 @@ fn hosted_read_u32(payload: &[u8], offset: usize) -> Result<u32, String> {
     let bytes = payload
         .get(offset..offset.saturating_add(4))
         .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| String::from("truncated Vogui u32 field"))?;
+        .ok_or_else(|| String::from("truncated hosted u32 field"))?;
     Ok(u32::from_le_bytes(bytes))
 }
 
@@ -3911,7 +2859,7 @@ fn hosted_read_u64(payload: &[u8], offset: usize) -> Result<u64, String> {
     let bytes = payload
         .get(offset..offset.saturating_add(8))
         .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| String::from("truncated Vogui u64 field"))?;
+        .ok_or_else(|| String::from("truncated hosted u64 field"))?;
     Ok(u64::from_le_bytes(bytes))
 }
 
@@ -4271,7 +3219,6 @@ fn decode_voplay_render_asset_key(packet: &[u8]) -> Result<(u32, u64), String> {
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
 impl Drop for HostedInstanceGroup {
     fn drop(&mut self) {
-        let _ = self.cancel_all_vogui_platform_requests();
         let _ = self.release_all_graphics_devices();
         let _ = self.release_all_audio_devices();
         if let Some(group) = self.group.take() {

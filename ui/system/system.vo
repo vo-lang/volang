@@ -1,0 +1,427 @@
+// Package system exposes renderer-neutral clipboard, file dialog, native menu,
+// and drag/drop services. Calls suspend only the invoking goroutine; the UI
+// Island continues rendering, handling input, and running other goroutines.
+package system
+
+import "errors"
+
+const maxMenuItems = 4096
+const maxMenuDepth = 16
+const maxEventBuffer = 1024
+
+type ClipboardImage struct {
+	Width uint32
+	Height uint32
+	Pixels []byte
+}
+
+// ReadClipboardText returns present=false when the clipboard is empty or holds
+// another format.
+func ReadClipboardText() (string, bool, error) {
+	kind, text, _, _, _, _, present, err := runtimeReadClipboard(1)
+	if err != nil || !present {
+		return "", present, err
+	}
+	if kind != 1 {
+		return "", false, errors.New("clipboard host returned a non-text response")
+	}
+	return text, true, nil
+}
+
+func WriteClipboardText(value string) error {
+	return runtimeWriteClipboard(1, value, "", 0, 0, nil)
+}
+
+// ReadClipboardHTML returns both the source markup and its plain-text fallback.
+func ReadClipboardHTML() (string, string, bool, error) {
+	kind, html, plainText, _, _, _, present, err := runtimeReadClipboard(2)
+	if err != nil || !present {
+		return "", "", present, err
+	}
+	if kind != 2 {
+		return "", "", false, errors.New("clipboard host returned a non-HTML response")
+	}
+	return html, plainText, true, nil
+}
+
+func WriteClipboardHTML(html string, plainText string) error {
+	return runtimeWriteClipboard(2, html, plainText, 0, 0, nil)
+}
+
+func ReadClipboardImage() (ClipboardImage, bool, error) {
+	kind, _, _, width, height, pixels, present, err := runtimeReadClipboard(3)
+	if err != nil || !present {
+		return ClipboardImage{}, present, err
+	}
+	if kind != 3 {
+		return ClipboardImage{}, false, errors.New("clipboard host returned a non-image response")
+	}
+	return ClipboardImage{Width: uint32(width), Height: uint32(height), Pixels: pixels}, true, nil
+}
+
+func WriteClipboardImage(image ClipboardImage) error {
+	return runtimeWriteClipboard(3, "", "", int64(image.Width), int64(image.Height), image.Pixels)
+}
+
+type FileFilter struct {
+	Name string
+	Extensions []string
+}
+
+type FileDialogOptions struct {
+	Title string
+	InitialDirectory string
+	InitialFileName string
+	Filters []FileFilter
+	CanCreateDirectories bool
+}
+
+func flattenFilters(filters []FileFilter) ([]string, []string, []int64) {
+	names := make([]string, 0, len(filters))
+	extensions := make([]string, 0)
+	counts := make([]int64, 0, len(filters))
+	for _, filter := range filters {
+		names = append(names, filter.Name)
+		counts = append(counts, int64(len(filter.Extensions)))
+		extensions = append(extensions, filter.Extensions...)
+	}
+	return names, extensions, counts
+}
+
+func showFileDialog(kind int64, options FileDialogOptions) ([]string, error) {
+	names, extensions, counts := flattenFilters(options.Filters)
+	return runtimeFileDialog(
+		kind,
+		options.Title,
+		options.InitialDirectory,
+		options.InitialFileName,
+		options.CanCreateDirectories,
+		names,
+		extensions,
+		counts,
+	)
+}
+
+func OpenFile(options FileDialogOptions) (string, bool, error) {
+	paths, err := showFileDialog(1, options)
+	if err != nil || len(paths) == 0 {
+		return "", false, err
+	}
+	return paths[0], true, nil
+}
+
+func OpenFiles(options FileDialogOptions) ([]string, error) {
+	return showFileDialog(2, options)
+}
+
+func OpenFolder(options FileDialogOptions) (string, bool, error) {
+	paths, err := showFileDialog(3, options)
+	if err != nil || len(paths) == 0 {
+		return "", false, err
+	}
+	return paths[0], true, nil
+}
+
+func OpenFolders(options FileDialogOptions) ([]string, error) {
+	return showFileDialog(4, options)
+}
+
+func SaveFile(options FileDialogOptions) (string, bool, error) {
+	paths, err := showFileDialog(5, options)
+	if err != nil || len(paths) == 0 {
+		return "", false, err
+	}
+	return paths[0], true, nil
+}
+
+type MessageLevel int64
+
+const (
+	MessageInfo MessageLevel = 1
+	MessageWarning MessageLevel = 2
+	MessageError MessageLevel = 3
+)
+
+type MessageButtons int64
+
+const (
+	MessageOK MessageButtons = 1
+	MessageOKCancel MessageButtons = 2
+	MessageYesNo MessageButtons = 3
+	MessageYesNoCancel MessageButtons = 4
+)
+
+type MessageResult int64
+
+const (
+	MessageResultOK MessageResult = 1
+	MessageResultCancel MessageResult = 2
+	MessageResultYes MessageResult = 3
+	MessageResultNo MessageResult = 4
+)
+
+type MessageDialogOptions struct {
+	Level MessageLevel
+	Buttons MessageButtons
+	Title string
+	Description string
+}
+
+func ShowMessage(options MessageDialogOptions) (MessageResult, error) {
+	result, err := runtimeMessageDialog(
+		int64(options.Level),
+		int64(options.Buttons),
+		options.Title,
+		options.Description,
+	)
+	return MessageResult(result), err
+}
+
+type MenuItemID uint64
+
+func NewMenuItemID(index uint32, generation uint32) MenuItemID {
+	return MenuItemID(uint64(generation)<<32 | uint64(index))
+}
+
+func (id MenuItemID) Index() uint32 {
+	return uint32(uint64(id))
+}
+
+func (id MenuItemID) Generation() uint32 {
+	return uint32(uint64(id) >> 32)
+}
+
+type MenuItemKind int64
+
+const (
+	MenuCommand MenuItemKind = 1
+	MenuCheck MenuItemKind = 2
+	MenuSubmenu MenuItemKind = 3
+	MenuSeparator MenuItemKind = 4
+)
+
+type MenuItem struct {
+	ID MenuItemID
+	Kind MenuItemKind
+	Label string
+	Enabled bool
+	Checked bool
+	Shortcut string
+	Children []MenuItem
+}
+
+type Menu struct {
+	Revision int64
+	Items []MenuItem
+}
+
+// CommandItem creates an enabled native command. A struct literal remains
+// available for disabled commands and application-specific composition.
+func CommandItem(id MenuItemID, label string, shortcut string) MenuItem {
+	return MenuItem{ID: id, Kind: MenuCommand, Label: label, Enabled: true, Shortcut: shortcut}
+}
+
+func CheckItem(id MenuItemID, label string, checked bool, shortcut string) MenuItem {
+	return MenuItem{ID: id, Kind: MenuCheck, Label: label, Enabled: true, Checked: checked, Shortcut: shortcut}
+}
+
+func SubmenuItem(id MenuItemID, label string, children ...MenuItem) MenuItem {
+	return MenuItem{ID: id, Kind: MenuSubmenu, Label: label, Enabled: true, Children: children}
+}
+
+func SeparatorItem(id MenuItemID) MenuItem {
+	return MenuItem{ID: id, Kind: MenuSeparator, Enabled: true}
+}
+
+type menuArrays struct {
+	kinds []int64
+	ids []uint64
+	parents []int64
+	labels []string
+	flags []int64
+	shortcuts []string
+}
+
+func (arrays *menuArrays) append(item MenuItem, parent int64, depth int) error {
+	if depth > maxMenuDepth {
+		return errors.New("menu nesting exceeds the platform contract")
+	}
+	if len(arrays.kinds) >= maxMenuItems {
+		return errors.New("menu item count exceeds the platform contract")
+	}
+	if item.ID.Generation() == 0 {
+		return errors.New("menu item ID requires a non-zero generation")
+	}
+	index := int64(len(arrays.kinds))
+	arrays.kinds = append(arrays.kinds, int64(item.Kind))
+	arrays.ids = append(arrays.ids, uint64(item.ID))
+	arrays.parents = append(arrays.parents, parent)
+	arrays.labels = append(arrays.labels, item.Label)
+	flags := int64(0)
+	if item.Enabled {
+		flags |= 1
+	}
+	if item.Checked {
+		flags |= 2
+	}
+	arrays.flags = append(arrays.flags, flags)
+	arrays.shortcuts = append(arrays.shortcuts, item.Shortcut)
+	if item.Kind != MenuSubmenu && len(item.Children) != 0 {
+		return errors.New("only submenu items may contain children")
+	}
+	for _, child := range item.Children {
+		if err := arrays.append(child, index, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InstallMenu atomically replaces the native application/window menu. Stable
+// MenuItemID values let an event handler reject activations from an older menu.
+func InstallMenu(menu Menu) error {
+	if menu.Revision <= 0 {
+		return errors.New("menu revision must be positive")
+	}
+	arrays := &menuArrays{}
+	for _, item := range menu.Items {
+		if err := arrays.append(item, -1, 1); err != nil {
+			return err
+		}
+	}
+	return runtimeInstallMenu(
+		menu.Revision,
+		arrays.kinds,
+		arrays.ids,
+		arrays.parents,
+		arrays.labels,
+		arrays.flags,
+		arrays.shortcuts,
+	)
+}
+
+type FileDragMode int64
+
+const (
+	FileDragCopy FileDragMode = 1
+	FileDragMove FileDragMode = 2
+)
+
+type FileDragOptions struct {
+	Mode FileDragMode
+	Preview string
+}
+
+func DefaultFileDragOptions() FileDragOptions {
+	return FileDragOptions{Mode: FileDragCopy}
+}
+
+// BeginFileDrag starts one native OS file drag. Paths are validated at the
+// renderer-independent system boundary. The call returns after the platform
+// accepts initiation; a platform without a file-drag source reports an error.
+func BeginFileDrag(paths []string, options FileDragOptions) error {
+	if len(paths) == 0 {
+		return errors.New("file drag requires at least one path")
+	}
+	if options.Mode != FileDragCopy && options.Mode != FileDragMove {
+		return errors.New("file drag mode is invalid")
+	}
+	return runtimeBeginFileDrag(paths, options.Preview, int64(options.Mode))
+}
+
+type EventKind int64
+
+const (
+	EventMenuActivated EventKind = 1
+	EventDragDrop EventKind = 2
+)
+
+type DragPhase int64
+
+const (
+	DragEntered DragPhase = 1
+	DragMoved DragPhase = 2
+	DragLeft DragPhase = 3
+	DragDropped DragPhase = 4
+)
+
+type Event struct {
+	Kind EventKind
+	Sequence uint64
+	MenuItem MenuItemID
+	DragPhase DragPhase
+	X float64
+	Y float64
+	Paths []string
+}
+
+// WaitEvent suspends the current goroutine until the next native menu or file
+// drag/drop event is available.
+func WaitEvent() (Event, error) {
+	kind, sequence, menuItem, phase, x, y, paths, err := runtimeWaitEvent()
+	if err != nil {
+		return Event{}, err
+	}
+	return Event{
+		Kind: EventKind(kind),
+		Sequence: sequence,
+		MenuItem: MenuItemID(menuItem),
+		DragPhase: DragPhase(phase),
+		X: x,
+		Y: y,
+		Paths: paths,
+	}, nil
+}
+
+type EventResult struct {
+	Event Event
+	Err error
+}
+
+// Events turns the blocking event boundary into an idiomatic channel. Create
+// one stream per application; multiple streams intentionally compete for the
+// same ordered native event queue.
+func Events(buffer int) <-chan EventResult {
+	if buffer < 0 {
+		buffer = 0
+	}
+	if buffer > maxEventBuffer {
+		buffer = maxEventBuffer
+	}
+	stream := make(chan EventResult, buffer)
+	go func() {
+		for {
+			event, err := WaitEvent()
+			stream <- EventResult{Event: event, Err: err}
+			if err != nil {
+				close(stream)
+				return
+			}
+		}
+	}()
+	return stream
+}
+
+// InvokeHost transports one application-owned, versioned capability request.
+// It is intended for narrow product protocols such as an IDE compiler host;
+// reusable UI packages continue to expose dedicated typed APIs above it.
+func InvokeHost(service string, operation string, payload []byte) ([]byte, error) {
+	if service == "" || operation == "" { return nil, errors.New("host invocation service and operation are required") }
+	return runtimeInvokeHost(service, operation, payload)
+}
+
+func runtimeReadClipboard(format int64) (int64, string, string, int64, int64, []byte, bool, error)
+
+func runtimeWriteClipboard(kind int64, text string, plainText string, width int64, height int64, pixels []byte) error
+
+func runtimeFileDialog(kind int64, title string, initialDirectory string, initialFileName string, canCreateDirectories bool, filterNames []string, filterExtensions []string, filterExtensionCounts []int64) ([]string, error)
+
+func runtimeMessageDialog(level int64, buttons int64, title string, description string) (int64, error)
+
+func runtimeInstallMenu(revision int64, kinds []int64, ids []uint64, parents []int64, labels []string, flags []int64, shortcuts []string) error
+
+func runtimeBeginFileDrag(paths []string, preview string, mode int64) error
+
+func runtimeWaitEvent() (int64, uint64, uint64, int64, float64, float64, []string, error)
+
+func runtimeInvokeHost(service string, operation string, payload []byte) ([]byte, error)

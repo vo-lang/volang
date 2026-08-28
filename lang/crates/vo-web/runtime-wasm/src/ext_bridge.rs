@@ -47,7 +47,7 @@
 //!
 //! ```text
 //! 0x01 [source u8] [replay_encoding u8] → suspend and replay
-//!   source:          0=GUI event, 1=fetch, 2=extension
+//!   source:          0=GUI event, 1=fetch, 2=extension, 3=UI system
 //!   replay_encoding: 0=invoke exact extern with raw resume bytes,
 //!                    1=decode [i32 LE handler][UTF-8 payload] as (int,string)
 //! 0x02 [payload...]                         → host output
@@ -135,6 +135,7 @@ fn decode_suspend_metadata(output: &[u8]) -> Result<SuspendMetadata, String> {
         0 => HostEventReplaySource::GuiEvent,
         1 => HostEventReplaySource::Fetch,
         2 => HostEventReplaySource::Extension,
+        3 => HostEventReplaySource::UiSystem,
         value => return Err(format!("unknown host replay source {value}")),
     };
     let replay_encoding = match output[2] {
@@ -145,7 +146,8 @@ fn decode_suspend_metadata(output: &[u8]) -> Result<SuspendMetadata, String> {
     match (source, replay_encoding) {
         (HostEventReplaySource::GuiEvent, ReplayEncoding::GuiEventI32Utf8)
         | (HostEventReplaySource::Fetch, ReplayEncoding::InvokeExtern)
-        | (HostEventReplaySource::Extension, ReplayEncoding::InvokeExtern) => {}
+        | (HostEventReplaySource::Extension, ReplayEncoding::InvokeExtern)
+        | (HostEventReplaySource::UiSystem, ReplayEncoding::InvokeExtern) => {}
         _ => {
             return Err(format!(
                 "host replay source '{}' is incompatible with encoding {}",
@@ -1763,15 +1765,23 @@ mod tests {
                 replay_encoding: ReplayEncoding::InvokeExtern,
             })
         );
+        assert_eq!(
+            decode_suspend_metadata(&[TAG_SUSPEND, 3, 0]),
+            Ok(SuspendMetadata {
+                source: HostEventReplaySource::UiSystem,
+                replay_encoding: ReplayEncoding::InvokeExtern,
+            })
+        );
 
         for malformed in [
             vec![TAG_SUSPEND],
             vec![TAG_SUSPEND, 0],
             vec![TAG_SUSPEND, 0, 1, 0],
-            vec![TAG_SUSPEND, 3, 0],
+            vec![TAG_SUSPEND, 4, 0],
             vec![TAG_SUSPEND, 0, 2],
             vec![TAG_SUSPEND, 0, 0],
             vec![TAG_SUSPEND, 2, 1],
+            vec![TAG_SUSPEND, 3, 1],
         ] {
             assert!(
                 decode_suspend_metadata(&malformed).is_err(),

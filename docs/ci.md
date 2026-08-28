@@ -1,6 +1,6 @@
 # Continuous Integration
 
-Volang uses four GitHub Actions workflows. The workflow files are the
+Volang uses three GitHub Actions workflows. The workflow files are the
 executable source of truth; this document explains their stable responsibilities
 and the commands maintainers can reproduce locally.
 
@@ -20,8 +20,8 @@ small event-defined job graph.
 | --- | --- |
 | `quality-rust` | Rust formatting, repository and language-manifest lint, Action workflow lint, Clippy, root-workspace tests, and a clean generated state |
 | `language-native` | Pull requests run one `smoke` selection on VM, JIT, and compile targets; merge groups, `main`, and manual runs split the complete native VM/JIT/OSR/GC/no_std/compile selection into two stable case shards |
-| `wasm-web` | WASM language cases, `vo-web`, Studio Web, and standalone Studio WASM |
-| `studio-native` | Standalone Tauri Clippy and tests on macOS |
+| `wasm-web` | WASM language cases and `vo-web` |
+| `ui-platform` | Ubuntu, macOS, and Windows native UI contracts plus one real WGPU window present on each target |
 | `required` | Fails unless every lane above succeeds; configure this stable job name as the required branch-protection check |
 
 Pull-request and superseded merge-queue runs cancel older work for the same
@@ -35,25 +35,11 @@ but too expensive or platform-specific for every pull request:
 
 - complete native and WASM language matrices in release mode;
 - repeated GC, JIT/OSR, and scheduler stress selections;
-- root-workspace tests on macOS and Windows, plus the standalone Tauri
-  workspace on Windows;
-- Rust audits for all maintained lockfiles and npm audits for Studio and
-  `vo-web`.
+- root-workspace tests on macOS and Windows;
+- Rust audits for maintained lockfiles and npm audits for `vo-web`.
 
 Nightly never publishes or mutates repository contents. A nightly failure is a
 maintenance signal and does not replace the required pull-request check.
-
-### [`site.yml`](../.github/workflows/site.yml)
-
-Runs after a successful `CI` push run whose exact SHA is still the current
-`main` head, or by manual dispatch from `main`. The freshness condition prevents
-a slower, older CI run from rolling Pages back. It builds Studio WASM and the
-web application, checks the frontend, tests guest-exit handling, uploads
-`apps/studio/dist`, and deploys that artifact to GitHub Pages.
-
-The build job has read-only permissions. Only the deploy job receives
-`pages: write` and `id-token: write`. Configure the repository's Pages source
-to GitHub Actions before the first deployment.
 
 ### [`release.yml`](../.github/workflows/release.yml)
 
@@ -67,7 +53,11 @@ supply publication logic. Its phases are intentionally separate:
    from `origin/main`, validates release policy, and derives the target matrix
    and deterministic identity.
 2. `build` compiles and smoke-tests each target declared in
-   `eng/release.toml`, then uploads its archive, checksum, and provenance.
+   `eng/release.toml`, builds the browser VM and Core Wasm AOT runtime, and
+   records every bundled UI runtime file in the deterministic archive receipt
+   and provenance. It then extracts that archive and runs `vo ui build` through
+   the packaged sidecar, followed by a bundled-registry `vo ui new` and VM mount,
+   before uploading the archive, checksum, and provenance.
 3. `publish` downloads and verifies the complete artifact set, creates GitHub
    build-provenance attestations, and publishes one GitHub Release.
 
@@ -89,8 +79,6 @@ export VOWORK=off
 
 ```sh
 cargo fmt --all -- --check
-cargo fmt --manifest-path apps/studio/wasm/Cargo.toml -- --check
-cargo fmt --manifest-path apps/studio/src-tauri/Cargo.toml -- --check
 cargo run -q -p vo-dev --locked -- lint all
 cargo run -q -p vo-dev --locked -- test lint --suite lang --strict
 cargo run -q -p vo-dev --locked -- test fmt --suite lang
@@ -146,33 +134,19 @@ cargo run -q -p vo-dev --locked -- test run --suite lang --targets jit,osr --tag
 cargo run -q -p vo-dev --locked -- test run --suite lang --targets vm,jit --tags scheduler --repeat 10 --release
 ```
 
-### Web and Studio
+### Web
 
 ```sh
 npm --prefix lang/crates/vo-web ci
 npm --prefix lang/crates/vo-web run test:vfs
-
-npm --prefix apps/studio ci
-npm --prefix apps/studio run build:wasm
-npm --prefix apps/studio run check
-npm --prefix apps/studio run test:guest-exit
-npm --prefix apps/studio run build
-wasm-pack test --node --release apps/studio/wasm --locked
-
-cargo clippy --manifest-path apps/studio/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
-cargo test --manifest-path apps/studio/src-tauri/Cargo.toml --locked
+npm --prefix lang/crates/vo-web run test:ui
+npm --prefix lang/crates/vo-web run test:ui-browser
 ```
-
-The Studio commands above also reproduce the Pages build; the deployable output
-is `apps/studio/dist`.
 
 ### Dependency audits
 
 ```sh
 cargo audit --file Cargo.lock
-cargo audit --file apps/studio/wasm/Cargo.lock
-cargo audit --file apps/studio/src-tauri/Cargo.lock
-npm --prefix apps/studio audit --audit-level high
 npm --prefix lang/crates/vo-web audit --audit-level high
 ```
 

@@ -1,0 +1,311 @@
+package main
+
+import (
+	ui "github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/i18n"
+	"github.com/vo-lang/ui/kit"
+	"strings"
+)
+
+func App() ui.View {
+	dark := ui.UseBoolState(false)
+	highContrast := ui.UseBoolState(false)
+	rtl := ui.UseBoolState(false)
+	compact := ui.UseBoolState(false)
+	name := ui.UseStringState("Ada")
+	notes := ui.UseStringState("Ship Web and Desktop from one typed UI tree.")
+	consent := ui.UseBoolState(true)
+	quality := ui.UseFloatState(72)
+	choice := ui.UseStringState("fast")
+	expandedSection := ui.UseStringState("runtime")
+	selectOpen := ui.UseBoolState(false)
+	selectedTab := ui.UseStringState("overview")
+	radioFocusToken := ui.UseIntState(0)
+	tabFocusToken := ui.UseIntState(0)
+	page := ui.UseIntState(1)
+	alertOpen := ui.UseBoolState(false)
+	popoverOpen := ui.UseBoolState(false)
+	popoverFocusToken := ui.UseIntState(0)
+	tooltipVisible := ui.UseBoolState(false)
+	tooltipFocusToken := ui.UseIntState(0)
+	drawerOpen := ui.UseBoolState(false)
+	toastVisible := ui.UseBoolState(false)
+	commandOpen := ui.UseBoolState(false)
+	commandQuery := ui.UseStringState("")
+	commandSelected := ui.UseIntState(0)
+	commandFocusToken := ui.UseIntState(0)
+	autoSave := ui.UseBoolState(true)
+	dataSortColumn := ui.UseStringState("name")
+	dataSortDescending := ui.UseBoolState(false)
+	selectedDataRow := ui.UseStringState("compiler")
+	treeExpanded := ui.UseBoolState(true)
+	selectedTreeItem := ui.UseStringState("components")
+	status := ui.UseStringState("Gallery ready")
+	environment := ui.DefaultEnvironment()
+	if ui.BoolStateValue(dark) {
+		environment.ColorScheme = ui.ColorSchemeDark
+	}
+	if ui.BoolStateValue(highContrast) {
+		environment.Contrast = ui.ContrastMore
+	}
+	if ui.BoolStateValue(rtl) {
+		environment.Locale = "ar"
+		environment.Direction = ui.DirectionRTL
+	}
+	if ui.BoolStateValue(compact) {
+		environment.Density = 0.875
+	}
+	return kit.ApplicationWithEnvironment(environment, func() ui.View {
+		locale := i18n.Current()
+		catalog := i18n.NewCatalog(locale.Tag, map[string]string{
+			"gallery.title": "Volang UI component gallery",
+			"gallery.status": "Locale {locale}, direction {direction}",
+		})
+		direction := ui.DerivedString("LTR")
+		if locale.Direction == ui.DirectionRTL {
+			direction = "RTL"
+		}
+		radioChoices := []kit.ChoiceOption{
+			{Value: "fast", Label: "Fast processing"},
+			{Value: "balanced", Label: "Balanced processing", Disabled: true},
+			{Value: "precise", Label: "Precise processing"},
+		}
+		selectChoices := []kit.ChoiceOption{
+			{Value: "fast", Label: "Fast"}, {Value: "balanced", Label: "Balanced", Disabled: true},
+			{Value: "precise", Label: "Precise"},
+		}
+		allCommands := []kit.CommandItem{
+			{
+				Key: "project.new", Label: "Create project", Detail: "Create a typed Volang workspace",
+				Shortcut: "Ctrl/⌘+N",
+			},
+			{
+				Key: "file.open", Label: "Open file", Detail: "Open a source file in the active workspace",
+				Shortcut: "Ctrl/⌘+O",
+			},
+			{
+				Key: "run.start", Label: "Run project", Detail: "Run through the preferred development runtime",
+				Shortcut: "F5",
+			},
+			{
+				Key: "release.publish", Label: "Publish release",
+				Detail: "Build verified WebAssembly and desktop AOT artifacts",
+			},
+			{
+				Key: "settings.remote", Label: "Remote settings", Detail: "Unavailable in this gallery",
+				Disabled: true,
+			},
+		}
+		commandItems := make([]kit.CommandItem, 0, len(allCommands))
+		commandNeedle := ui.DerivedString(strings.ToLower(strings.TrimSpace(ui.StringStateValue(commandQuery))))
+		for _, item := range allCommands {
+			if commandNeedle == "" ||
+				strings.Contains(strings.ToLower(item.Label + " " + item.Detail), commandNeedle) {
+				commandItems = append(commandItems, item)
+			}
+		}
+		accordionItems := []kit.AccordionItem{
+			{
+				Key: "runtime", Title: "Development runtime",
+				Content: kit.Paragraph("Use VM or JIT while editing, then publish an AOT artifact."),
+				Expanded: ui.StringStateValue(expandedSection) == "runtime",
+			},
+			{
+				Key: "targets", Title: "Release targets",
+				Content: kit.Paragraph("The same UIKit tree renders on Web and desktop."),
+				Expanded: ui.StringStateValue(expandedSection) == "targets",
+			},
+		}
+		tabs := []kit.TabItem{
+			{Key: "overview", Label: "Overview", Content: kit.Paragraph("Accessible compiler-driven UI")},
+			{Key: "disabled", Label: "Disabled", Content: ui.Fragment(), Disabled: true},
+			{Key: "details", Label: "Details", Content: kit.Paragraph("VM/JIT development and AOT release")},
+		}
+		settings := kit.Panel(ui.Gap(ui.Column(kit.Title("Preview environment"), kit.Switch("Dark theme", ui.BoolStateValue(dark), false, func(value bool) {
+			ui.SetBoolState(dark, value)
+		}), kit.Switch("High contrast", ui.BoolStateValue(highContrast), false, func(value bool) {
+			ui.SetBoolState(highContrast, value)
+		}), kit.Switch("Right-to-left", ui.BoolStateValue(rtl), false, func(value bool) {
+			ui.SetBoolState(rtl, value)
+		}), kit.Switch("Compact density", ui.BoolStateValue(compact), false, func(value bool) {
+			ui.SetBoolState(compact, value)
+		}), kit.Caption(catalog.Message("gallery.status", i18n.Argument{Name: "locale", Value: locale.Tag}, i18n.Argument{
+			Name: "direction", Value: direction,
+		}))), kit.CurrentTheme().Spacing.ContentGap))
+		content := kit.Panel(ui.Gap(ui.Column(kit.Title("Content"), kit.Paragraph("Semantic typography, surfaces, badges, and separators share inherited tokens."), ui.Gap(ui.Row(kit.Badge("Information", kit.IntentInfo), kit.Badge("Healthy", kit.IntentSuccess), kit.Badge("Attention", kit.IntentWarning), kit.Badge("Danger", kit.IntentDanger)), kit.CurrentTheme().Spacing.ControlGap), kit.Separator(kit.AxisHorizontal, "Content boundary")), kit.CurrentTheme().Spacing.ContentGap))
+		forms := kit.Panel(ui.Gap(ui.Column(kit.Title("Forms"), ui.Gap(ui.Row(kit.Button("Primary", kit.ButtonPrimary, kit.ControlMedium, false, func() {
+			ui.SetStringState(status, "Primary activated")
+		}), kit.Button("Secondary", kit.ButtonSecondary, kit.ControlMedium, false, func() {
+			ui.SetStringState(status, "Secondary activated")
+		}), kit.Button("Delete", kit.ButtonDanger, kit.ControlMedium, false, func() {
+			ui.SetBoolState(alertOpen, true)
+		})), kit.CurrentTheme().Spacing.ControlGap), kit.Input("Name", ui.StringStateValue(name), "Display name", false, func(value string) {
+			ui.SetStringState(name, value)
+		}), kit.RadioGroup("Processing mode", radioChoices, ui.StringStateValue(choice), false, kit.Vertical, ui.IntStateValue(radioFocusToken), func(value string) {
+			ui.SetStringState(choice, value)
+			ui.SetIntState(radioFocusToken, ui.IntStateValue(radioFocusToken) + 1)
+		}), kit.Checkbox("Include source maps", ui.BoolStateValue(consent), false, func(value bool) {
+			ui.SetBoolState(consent, value)
+		}), kit.TextArea("Release notes", ui.StringStateValue(notes), "Describe this release", 112, true, false, "", func(value string) {
+			ui.SetStringState(notes, value)
+		}), kit.Slider("Optimization level", ui.FloatStateValue(quality), 0, 100, 1, false, func(value float64) {
+			ui.SetFloatState(quality, value)
+		}), kit.Select("Mode", ui.BoolStateValue(selectOpen), ui.StringStateValue(choice), selectChoices, false, func(value bool) {
+			ui.SetBoolState(selectOpen, value)
+		}, func(value string) {
+			ui.SetStringState(choice, value)
+		})), kit.CurrentTheme().Spacing.ContentGap))
+		feedback := kit.Panel(ui.Gap(ui.Column(kit.Title("Feedback"), kit.Alert("Build complete", "All target artifacts passed validation.", kit.IntentSuccess, false), kit.Progress("Release progress", 72, 100), ui.Gap(ui.Row(kit.Spinner("Loading preview", kit.ControlMedium), kit.Skeleton(180, 24)), kit.CurrentTheme().Spacing.ContentGap), kit.Accordion("Build details", accordionItems, func(key string, expanded bool) {
+			if expanded {
+				ui.SetStringState(expandedSection, key)
+			} else {
+				ui.SetStringState(expandedSection, "")
+			}
+		}), kit.EmptyState(kit.CurrentTheme(), "No diagnostics", "The project is clean."), ui.Role(kit.Caption(ui.StringStateValue(status)), "status")), kit.CurrentTheme().Spacing.ContentGap))
+		menu := kit.MenuBar(kit.CurrentTheme(), "Application menu", kit.MenuAction(kit.CurrentTheme(), "New", false, func(event ui.Event) {
+			ui.SetStringState(status, "Created a document")
+		}), kit.MenuAction(kit.CurrentTheme(), "Save", false, func(event ui.Event) {
+			ui.SetStringState(status, "Saved")
+		}), kit.MenuToggleAction(kit.CurrentTheme(), "Auto save", ui.BoolStateValue(autoSave), false, func(event ui.Event) {
+			ui.SetBoolState(autoSave, event.Checked)
+		}))
+		navigation := kit.Panel(ui.Gap(ui.Column(kit.Title("Navigation"), menu, kit.Breadcrumb("Breadcrumb", []kit.BreadcrumbItem{
+			{Label: "Home", Path: "/"}, {Label: "Components", Path: "/components"},
+			{Label: "Gallery", Path: "/components/gallery", Current: true},
+		}), kit.Tabs("Gallery sections", tabs, ui.StringStateValue(selectedTab), ui.IntStateValue(tabFocusToken), func(value string) {
+			ui.SetStringState(selectedTab, value)
+			ui.SetIntState(tabFocusToken, ui.IntStateValue(tabFocusToken) + 1)
+		}), kit.Pagination("Gallery pages", ui.IntStateValue(page), 5, func(value int64) {
+			ui.SetIntState(page, value)
+		}), kit.AdaptivePage(ui.Gap(ui.Column(kit.Link("Overview", "/"), kit.Link("Activity", "/activity")), kit.CurrentTheme().Spacing.ControlGap), kit.Paragraph("Adaptive navigation changes from a rail to a compact surface while preserving logical identity."))), kit.CurrentTheme().Spacing.ContentGap))
+		sortDirection := kit.SortAscending
+		if ui.BoolStateValue(dataSortDescending) {
+			sortDirection = kit.SortDescending
+		}
+		dataColumns := []kit.DataColumn{
+			{Key: "name", Label: "Package", Width: 180, Sortable: true},
+			{Key: "target", Label: "Targets", Width: 220, Sortable: true},
+			{Key: "status", Label: "Status", Width: 120, Sortable: true},
+		}
+		dataRows := []kit.DataRow{
+			{
+				Key: "compiler", Selected: ui.StringStateValue(selectedDataRow) == "compiler",
+				Cells: []kit.DataCell{
+					{ColumnKey: "name", Value: "UI compiler"}, {ColumnKey: "target", Value: "VM · JIT · AOT"},
+					{ColumnKey: "status", Value: "Ready"},
+				},
+			},
+			{
+				Key: "renderer", Selected: ui.StringStateValue(selectedDataRow) == "renderer",
+				Cells: []kit.DataCell{
+					{ColumnKey: "name", Value: "Renderers"}, {ColumnKey: "target", Value: "Web · Desktop"},
+					{ColumnKey: "status", Value: "Ready"},
+				},
+			},
+			{
+				Key: "tooling", Selected: ui.StringStateValue(selectedDataRow) == "tooling",
+				Cells: []kit.DataCell{
+					{ColumnKey: "name", Value: "Tooling"}, {ColumnKey: "target", Value: "All modes"},
+					{ColumnKey: "status", Value: "Verified"},
+				},
+			},
+		}
+		treeItems := []kit.TreeItem{
+			{
+				Key: "uikit", Label: "UIKit", HasChildren: true, Expanded: ui.BoolStateValue(treeExpanded),
+				Selected: ui.StringStateValue(selectedTreeItem) == "uikit",
+			},
+		}
+		if ui.BoolStateValue(treeExpanded) {
+			treeItems = append(treeItems, kit.TreeItem{
+				Key: "components", Label: "Components", Depth: 1,
+				Selected: ui.StringStateValue(selectedTreeItem) == "components",
+			}, kit.TreeItem{
+				Key: "tokens", Label: "Design tokens", Depth: 1,
+				Selected: ui.StringStateValue(selectedTreeItem) == "tokens",
+			})
+		}
+		data := kit.Panel(ui.Gap(ui.Column(kit.Title("Data"), kit.DataTable("Framework packages", dataColumns, dataRows, kit.DataSort{
+			ColumnKey: ui.StringStateValue(dataSortColumn), Direction: sortDirection,
+		}, func(key string) {
+			if key == ui.StringStateValue(dataSortColumn) {
+				ui.SetBoolState(dataSortDescending, !ui.BoolStateValue(dataSortDescending))
+			} else {
+				ui.SetStringState(dataSortColumn, key)
+				ui.SetBoolState(dataSortDescending, false)
+			}
+		}, func(key string) {
+			ui.SetStringState(selectedDataRow, key)
+			ui.SetStringState(status, "Selected data row: " + key)
+		}), kit.Tree("Package tree", treeItems, func(key string) {
+			if key == "uikit" {
+				ui.SetBoolState(treeExpanded, !ui.BoolStateValue(treeExpanded))
+			}
+		}, func(key string) {
+			ui.SetStringState(selectedTreeItem, key)
+		}), kit.BarChart("Runtime throughput", []kit.DataPoint{
+			{Label: "VM", Value: 58}, {Label: "JIT", Value: 86}, {Label: "AOT", Value: 96},
+		}, 100)), kit.CurrentTheme().Spacing.ContentGap))
+		overlays := kit.Panel(ui.Gap(ui.Column(kit.Title("Overlays"), ui.Gap(ui.Row(kit.ActionButton("Open confirmation", false, func() {
+			ui.SetBoolState(alertOpen, true)
+		}), kit.ActionButton("Open drawer", false, func() {
+			ui.SetBoolState(drawerOpen, true)
+		}), kit.ActionButton("Show toast", false, func() {
+			ui.SetBoolState(toastVisible, true)
+		}), kit.ActionButton("Open commands", false, func() {
+			ui.SetStringState(commandQuery, "")
+			ui.SetIntState(commandSelected, 0)
+			ui.SetIntState(commandFocusToken, ui.IntStateValue(commandFocusToken) + 1)
+			ui.SetBoolState(commandOpen, true)
+		}), kit.Popover("Toggle popover", "Popover", ui.BoolStateValue(popoverOpen), ui.IntStateValue(popoverFocusToken), kit.Paragraph("Portable non-modal overlay content"), func(value bool) {
+			ui.SetBoolState(popoverOpen, value)
+			if !value {
+				ui.SetIntState(popoverFocusToken, ui.IntStateValue(popoverFocusToken) + 1)
+				ui.SetStringState(status, "Popover dismissed")
+			}
+		}), kit.Tooltip("Toggle tooltip", "Gallery tooltip", ui.BoolStateValue(tooltipVisible), ui.IntStateValue(tooltipFocusToken), kit.Caption("Context without interaction"), func(value bool) {
+			if value == ui.BoolStateValue(tooltipVisible) {
+				return
+			}
+			ui.SetBoolState(tooltipVisible, value)
+			if value {
+				ui.SetIntState(tooltipFocusToken, ui.IntStateValue(tooltipFocusToken) + 1)
+			}
+		})), kit.CurrentTheme().Spacing.ControlGap)), kit.CurrentTheme().Spacing.ContentGap))
+		toasts := []kit.Toast{}
+		if ui.BoolStateValue(toastVisible) {
+			toasts = append(toasts, kit.Toast{
+				Key: "release", Title: "Release ready",
+				Detail: "WebAssembly and desktop artifacts passed verification.", Intent: kit.IntentSuccess,
+				Dismissible: true,
+			})
+		}
+		return kit.Page(ui.Gap(ui.Column(kit.Title(catalog.Message("gallery.title")), kit.Caption("Theme, locale, density, input, overlay, data, and accessibility laboratory"), settings, content, forms, feedback, navigation, data, overlays, kit.ToastRegion("Notifications", toasts, func(key string) {
+			ui.SetBoolState(toastVisible, false)
+		}), kit.CommandPalette("Command palette", ui.StringStateValue(commandQuery), "Search commands", ui.BoolStateValue(commandOpen), ui.IntStateValue(commandSelected), ui.IntStateValue(commandFocusToken), commandItems, func(value string) {
+			ui.SetStringState(commandQuery, value)
+			ui.SetIntState(commandSelected, 0)
+		}, func(value int64) {
+			ui.SetIntState(commandSelected, value)
+		}, func(key string) {
+			ui.SetStringState(status, "Command executed: " + key)
+			ui.SetBoolState(commandOpen, false)
+		}, func() {
+			ui.SetBoolState(commandOpen, false)
+		}), kit.Drawer("Release inspector", ui.BoolStateValue(drawerOpen), 420, kit.Paragraph("Review artifacts, signatures, and target capabilities before publishing."), func() {
+			ui.SetBoolState(drawerOpen, false)
+		}), kit.AlertDialog("Delete component", "This gallery action demonstrates a non-dismissible alert dialog.", ui.BoolStateValue(alertOpen), "Delete", "Cancel", func() {
+			ui.SetStringState(status, "Delete confirmed")
+			ui.SetBoolState(alertOpen, false)
+		}, func() {
+			ui.SetStringState(status, "Delete cancelled")
+			ui.SetBoolState(alertOpen, false)
+		})), kit.CurrentTheme().Spacing.SectionGap))
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

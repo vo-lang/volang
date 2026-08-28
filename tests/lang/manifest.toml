@@ -1350,8 +1350,8 @@ path = "cases/bugs/2026_04_30_ptrnew_large_struct_slots.vo"
 matrix = "default"
 tags = ["codegen", "regression", "struct", "smoke"]
 owner = "codegen"
-skip = ["nostd", "wasm"]
-reason = "toolchain externs are not registered in vo-embed or vo-web"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
 expect = "pass"
 
 [[case]]
@@ -1610,7 +1610,7 @@ path = "cases/runtime/core/bytes_simple.vo"
 matrix = "default"
 tags = ["legacy"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -2036,7 +2036,7 @@ path = "cases/runtime/method/cross_pkg_error_method.vo"
 matrix = "default"
 tags = ["legacy", "method"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -3681,8 +3681,8 @@ path = "cases/stdlib/exec_basic.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "exec requires native externs; nostd: filesystem externs are not registered in vo-embed"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "process creation requires a native host; nostd does not register filesystem externs"
 expect = "pass"
 
 [[case]]
@@ -3692,8 +3692,8 @@ path = "cases/stdlib/exec_comprehensive.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "exec requires native externs; nostd: os externs are not registered in vo-embed"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "process creation requires a native host; nostd does not register os externs"
 expect = "pass"
 
 [[case]]
@@ -3703,7 +3703,7 @@ path = "cases/stdlib/exec_handle_width.vo"
 matrix = "default"
 tags = ["stdlib", "exec", "abi", "regression", "smoke"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
+skip = ["nostd", "wasm", "wasm-aot"]
 reason = "process execution requires native host externs"
 expect = "pass"
 
@@ -3800,8 +3800,8 @@ path = "cases/stdlib/filepath_comprehensive.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "filesystem operations not supported in wasm; nostd: os externs are not registered in vo-embed"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "the case requires native symbolic-link semantics; nostd does not register os externs"
 expect = "pass"
 
 [[case]]
@@ -3996,6 +3996,16 @@ reason = "GC debug not available in wasm"
 expect = "pass"
 
 [[case]]
+id = "gc-deep-pointer-graph"
+kind = "file"
+path = "cases/gc/gc_deep_pointer_graph.vo"
+matrix = "compile"
+tags = ["gc", "pointer", "scheduler", "regression"]
+owner = "runtime-gc"
+reason = "Core Wasm AOT owns the executable deep-tracing regression gate; forced native JIT GC stress exceeds the general 90-second case budget"
+expect = "pass"
+
+[[case]]
 id = "gc-panic-recover-named-return-string"
 kind = "file"
 path = "cases/gc/gc_panic_recover_named_return_string.vo"
@@ -4049,6 +4059,16 @@ path = "cases/gc/gc_struct_nested.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract", "struct"]
 owner = "runtime-gc"
+expect = "pass"
+
+[[case]]
+id = "gc-spread-append-layout"
+kind = "file"
+path = "cases/gc/gc_spread_append_layout.vo"
+matrix = "compile"
+tags = ["gc", "slice", "string", "regression"]
+owner = "runtime-gc"
+reason = "Core Wasm AOT owns the executable host-allocation layout regression gate; forced native JIT GC stress exceeds the general 90-second case budget"
 expect = "pass"
 
 [[case]]
@@ -4560,7 +4580,7 @@ path = "cases/runtime/core/io_package_minimal.vo"
 matrix = "default"
 tags = ["legacy"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -4758,6 +4778,26 @@ owner = "runtime"
 skip = ["nostd", "wasm"]
 reason = "host-routed island scheduling is not supported in the Node WASM runner or vo-embed"
 timeout = { jit = 120 }
+expect = "pass"
+
+[[case]]
+id = "island-deep-graph-transfer"
+kind = "file"
+path = "cases/runtime/scheduler/island_deep_graph_transfer.vo"
+matrix = "compile"
+tags = ["runtime", "scheduler", "island", "pointer", "gc", "regression"]
+owner = "runtime"
+reason = "Core Wasm AOT owns the executable deep-clone regression gate; the ordinary runner cannot retain a suspended island session"
+expect = "pass"
+
+[[case]]
+id = "island-transfer-source-isolation"
+kind = "file"
+path = "cases/runtime/scheduler/island_transfer_source_isolation.vo"
+matrix = "compile"
+tags = ["runtime", "scheduler", "island", "pointer", "port", "regression"]
+owner = "runtime"
+reason = "Core Wasm AOT owns the executable source-isolation regression gate; the ordinary runner cannot retain a suspended island session"
 expect = "pass"
 
 [[case]]
@@ -5087,8 +5127,8 @@ path = "cases/lang/test/http_client_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "native listener externs are unavailable under nostd and wasm"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "the case creates a listening socket, which browser hosts cannot expose"
 expect = "pass"
 
 [[case]]
@@ -5109,8 +5149,8 @@ path = "cases/lang/test/http_server_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "native listener externs are unavailable under nostd and wasm"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "the case creates a listening socket, which browser hosts cannot expose"
 expect = "pass"
 
 [[case]]
@@ -5180,7 +5220,7 @@ path = "cases/runtime/array/large_zero_array_bounds.vo"
 matrix = "default"
 tags = ["runtime", "array", "slice", "numeric", "regression"]
 owner = "runtime"
-skip = ["wasm"]
+skip = ["wasm", "wasm-aot"]
 reason = "wasm32 reports a structured target-address-width diagnostic for this 2^32-element heap array"
 expect = "pass"
 
@@ -5191,7 +5231,7 @@ path = "cases/runtime/array/large_zero_byte_global_initializer.vo"
 matrix = "default"
 tags = ["runtime", "array", "global", "initializer", "zero-byte", "regression"]
 owner = "runtime"
-skip = ["wasm"]
+skip = ["wasm", "wasm-aot"]
 reason = "A 2^32-element zero-byte canonical heap array is valid on 64-bit targets; wasm32 has a separate target-width diagnostic case"
 expect = "pass"
 
@@ -5202,6 +5242,66 @@ path = "cases/runtime/array/large_zero_slot_stack_array.vo"
 matrix = "default"
 tags = ["runtime", "array", "regression", "zero-slot", "bounds", "range"]
 owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "wasm-aot-shadow-root-stack"
+kind = "file"
+path = "cases/gc/wasm_aot_shadow_root_stack.vo"
+matrix = "wasm-aot-only"
+tags = ["wasm", "aot", "gc", "pointer", "stack", "regression"]
+owner = "runtime-gc"
+reason = "Core Wasm AOT owns the executable shadow-root recursion and collection gate"
+expect = "pass"
+
+[[case]]
+id = "wasm-aot-spawn-shadow-root"
+kind = "file"
+path = "cases/gc/wasm_aot_spawn_shadow_root.vo"
+matrix = "compile"
+tags = ["wasm", "aot", "gc", "scheduler", "stack", "regression"]
+owner = "runtime-gc"
+reason = "Core Wasm AOT owns the executable spawned-fiber lazy shadow-root lifecycle gate"
+expect = "pass"
+
+[[case]]
+id = "wasm-aot-exit-zero"
+kind = "file"
+path = "cases/stdlib/wasm_aot_exit_zero.vo"
+matrix = "wasm-aot-only"
+tags = ["wasm", "aot", "stdlib", "os", "process", "regression"]
+owner = "stdlib"
+reason = "the Core Wasm host must stop guest execution immediately and preserve a successful explicit exit"
+expect = "pass"
+
+[[case]]
+id = "wasm-aot-retry-safe-recursion"
+kind = "file"
+path = "cases/runtime/core/wasm_aot_retry_safe_recursion.vo"
+matrix = "wasm-aot-only"
+tags = ["wasm", "aot", "runtime", "recursion", "stack", "panic", "recover", "regression"]
+owner = "wasm"
+reason = "Core Wasm AOT owns the bounded retry-safe recursion fast path, explicit-stack fallback, and recoverable overflow contract"
+expect = "pass"
+
+[[case]]
+id = "wasm-aot-stdin-eof"
+kind = "file"
+path = "cases/stdlib/wasm_aot_stdin_eof.vo"
+matrix = "wasm-aot-only"
+tags = ["wasm", "aot", "stdlib", "fmt", "stdin", "regression"]
+owner = "stdlib"
+reason = "the Core Wasm host must expose bounded line-oriented standard input and stable EOF semantics"
+expect = "pass"
+
+[[case]]
+id = "wasm-aot-string-bytes-growth"
+kind = "file"
+path = "cases/runtime/core/wasm_aot_string_bytes_growth.vo"
+matrix = "wasm-aot-only"
+tags = ["wasm", "aot", "runtime", "string", "slice", "memory-growth", "regression"]
+owner = "wasm"
+reason = "the Core Wasm host must stabilize guest string bytes before destination allocation can grow and detach linear memory"
 expect = "pass"
 
 [[case]]
@@ -5221,7 +5321,7 @@ path = "cases/runtime/array/wasm32_escaped_array_address_width.vo"
 matrix = "wasm-only"
 tags = ["wasm", "compile-fail", "array", "closure", "target-limit", "regression"]
 owner = "runtime"
-reason = "captured arrays must share canonical allocation validation and reject lengths outside wasm32 address space"
+reason = "arrays escaping through slices must share canonical allocation validation and reject lengths outside wasm32 address space"
 expect = { fail = ["target limit: array length 4294967296 exceeds the 32-bit target address width"] }
 
 [[case]]
@@ -5276,7 +5376,7 @@ path = "cases/runtime/map/map_any_key.vo"
 matrix = "default"
 tags = ["legacy", "map"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -5288,7 +5388,7 @@ path = "cases/runtime/map/map_any_key_debug.vo"
 matrix = "default"
 tags = ["legacy", "map"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -5754,8 +5854,8 @@ path = "cases/net/net_conn.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "net requires native externs; nostd: time externs are not registered in vo-embed"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "the case creates a listening socket, which browser hosts cannot expose; nostd does not register time externs"
 expect = "pass"
 
 [[case]]
@@ -5774,7 +5874,7 @@ path = "cases/runtime/panic/nil_map_assign_panic.vo"
 matrix = "default"
 tags = ["legacy", "panic", "map"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -5831,7 +5931,7 @@ path = "cases/stdlib/os_creation_permissions.vo"
 matrix = "default"
 tags = ["stdlib", "filesystem", "permissions", "regression"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
+skip = ["nostd", "wasm", "wasm-aot"]
 reason = "native filesystem permissions, flags, timestamps, and environment semantics"
 expect = "pass"
 
@@ -5842,7 +5942,7 @@ path = "cases/stdlib/os_pipe_chtimes.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
+skip = ["nostd", "wasm", "wasm-aot"]
 reason = "os module requires native; nostd: os externs are not registered in vo-embed"
 expect = "pass"
 
@@ -5864,8 +5964,8 @@ path = "cases/stdlib/os_read_dir_deterministic.vo"
 matrix = "default"
 tags = ["stdlib", "filesystem", "regression", "smoke"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "filesystem operations and symlinks require a native host"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "symbolic-link creation and inspection require a native host"
 expect = "pass"
 
 [[case]]
@@ -6339,6 +6439,15 @@ kind = "file"
 path = "cases/runtime/scheduler/select_multi_ready.vo"
 matrix = "default"
 tags = ["scheduler", "select"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "select-receiver-first-rendezvous"
+kind = "file"
+path = "cases/runtime/scheduler/select_receiver_first_rendezvous.vo"
+matrix = "default"
+tags = ["scheduler", "select", "channel", "wasm-aot", "regression"]
 owner = "runtime"
 expect = "pass"
 
@@ -9862,8 +9971,8 @@ path = "cases/skill_debug_vo/2026_03_26_runner_collect_vo_files.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "os externs are not registered in vo-embed; Node WASM runner has no browser VFS bindings for os.ReadDir"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "the case intentionally reads the native repository tree, which is outside the browser VFS capability boundary"
 expect = "pass"
 
 [[case]]
@@ -9927,7 +10036,7 @@ path = "cases/runtime/slice/slice_int8_memory.vo"
 matrix = "default"
 tags = ["legacy", "slice", "numeric"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -9939,7 +10048,7 @@ path = "cases/runtime/slice/slice_int8_new.vo"
 matrix = "default"
 tags = ["legacy", "slice", "numeric"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -9951,7 +10060,7 @@ path = "cases/runtime/slice/slice_int8_struct.vo"
 matrix = "default"
 tags = ["legacy", "slice", "struct", "numeric"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10372,7 +10481,7 @@ path = "cases/stdlib/http_native_cancel.vo"
 matrix = "default"
 tags = ["stdlib", "http", "context", "io", "regression"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
+skip = ["nostd", "wasm", "wasm-aot"]
 reason = "native loopback server exercises manual request cancellation and bounded request-state cleanup"
 timeout = { vm = 20, jit = 120, osr = 120 }
 expect = "pass"
@@ -10384,7 +10493,7 @@ path = "cases/stdlib/http_fileserver_semantics.vo"
 matrix = "default"
 tags = ["stdlib", "http", "filesystem", "regression"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
+skip = ["nostd", "wasm", "wasm-aot"]
 reason = "native filesystem and symlink confinement coverage"
 expect = "pass"
 
@@ -10722,7 +10831,7 @@ path = "cases/runtime/control_flow/switch_combined_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10752,7 +10861,7 @@ path = "cases/runtime/control_flow/switch_init_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10764,7 +10873,7 @@ path = "cases/runtime/control_flow/switch_init_scope.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10776,7 +10885,7 @@ path = "cases/runtime/map/switch_map_ok_debug.vo"
 matrix = "default"
 tags = ["legacy", "map", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10788,7 +10897,7 @@ path = "cases/runtime/control_flow/switch_multivar_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10818,7 +10927,7 @@ path = "cases/runtime/string/switch_string_debug.vo"
 matrix = "default"
 tags = ["legacy", "string", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -10839,7 +10948,7 @@ path = "cases/runtime/control_flow/switch_tagless_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
-skip = ["jit", "nostd", "osr", "vm", "wasm"]
+skip = ["jit", "nostd", "osr", "vm", "wasm", "wasm-aot"]
 reason = "blank placeholder"
 blank = true
 expect = "pass"
@@ -11034,8 +11143,8 @@ path = "cases/runtime/core/toolchain_compile_file_error.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "toolchain externs are not registered in vo-embed or vo-web"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
 expect = "pass"
 
 [[case]]
@@ -11045,8 +11154,8 @@ path = "cases/runtime/core/toolchain_handle_lifetime.vo"
 matrix = "default"
 tags = ["runtime", "toolchain", "handle", "regression"]
 owner = "runtime"
-skip = ["nostd", "wasm"]
-reason = "toolchain externs are not registered in vo-embed or vo-web"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
 expect = "pass"
 
 [[case]]

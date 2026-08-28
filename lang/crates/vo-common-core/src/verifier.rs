@@ -806,6 +806,48 @@ pub fn verify_function(func: &FunctionDef, module: &Module) -> Result<(), Module
 fn verify_module_invariants(module: &Module) -> Result<RuntimeTypeFacts, ModuleVerificationError> {
     let invariant = |detail: String| ModuleVerificationError::ModuleInvariant { detail };
 
+    if module.artifacts.len() > crate::bytecode::MAX_MODULE_ARTIFACTS {
+        return Err(invariant(format!(
+            "module artifact count {} exceeds limit {}",
+            module.artifacts.len(),
+            crate::bytecode::MAX_MODULE_ARTIFACTS
+        )));
+    }
+    let mut previous_artifact_name: Option<&str> = None;
+    for (index, artifact) in module.artifacts.iter().enumerate() {
+        if artifact.name.is_empty()
+            || artifact.name.len() > crate::bytecode::MAX_MODULE_ARTIFACT_NAME_BYTES
+        {
+            return Err(invariant(format!(
+                "artifacts[{index}] has an invalid name length {}",
+                artifact.name.len()
+            )));
+        }
+        if artifact.version == 0 {
+            return Err(invariant(format!(
+                "artifacts[{index}] ({}) uses reserved version 0",
+                artifact.name
+            )));
+        }
+        if artifact.payload.len() > crate::bytecode::MAX_MODULE_ARTIFACT_PAYLOAD_BYTES {
+            return Err(invariant(format!(
+                "artifacts[{index}] ({}) payload size {} exceeds limit {}",
+                artifact.name,
+                artifact.payload.len(),
+                crate::bytecode::MAX_MODULE_ARTIFACT_PAYLOAD_BYTES
+            )));
+        }
+        if let Some(previous) = previous_artifact_name {
+            if previous >= artifact.name.as_str() {
+                return Err(invariant(format!(
+                    "module artifact names must be unique and strictly sorted: {previous:?} precedes {:?}",
+                    artifact.name
+                )));
+            }
+        }
+        previous_artifact_name = Some(&artifact.name);
+    }
+
     validate_metadata_table_lengths(
         module.struct_metas.len(),
         module.interface_metas.len(),

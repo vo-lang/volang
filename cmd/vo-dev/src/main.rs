@@ -11,9 +11,9 @@ mod dev_clean;
 mod dev_common;
 mod dev_gc_perf;
 mod dev_loc;
-mod dev_studio;
 mod dpy_compat;
 mod first_party;
+mod generate_docs;
 mod generate_protocol;
 mod lint_policy;
 mod lint_system;
@@ -34,6 +34,7 @@ mod test_runner;
 mod test_system;
 mod tool_lint;
 mod tool_system;
+mod ui_certification;
 
 fn main() {
     if let Err(err) = real_main() {
@@ -63,11 +64,8 @@ fn real_main() -> Result<()> {
         "gc-perf" => dev_gc_perf::cmd_gc_perf(&root, args),
         "loc" => dev_loc::cmd_loc(&root, args),
         "clean" => dev_clean::cmd_clean(&root, args),
-        "studio" => dev_studio::cmd_studio(&root, args, false),
-        "studio-native" => dev_studio::cmd_studio(&root, args, true),
-        "studio-stop" => dev_studio::cmd_studio_stop(&root),
         "first-party" => first_party::cmd_first_party(&root, args),
-        "studio-install-local-vogui" => first_party::cmd_studio_install_local_vogui(&root),
+        "ui-certify" => ui_certification::cmd_ui_certify(&root, args),
         "-h" | "--help" | "help" => {
             print_usage();
             Ok(())
@@ -79,8 +77,8 @@ fn real_main() -> Result<()> {
 fn print_usage() {
     println!(
         r#"usage:
-  vo-dev lint artifacts|repo-boundaries|layout|docs|skill|studio-web|studio-tauri|examples|benchmarks|release|traceability|all
-  vo-dev generate app-protocol|vogui-protocol|voplay-protocol --check|--write
+  vo-dev lint artifacts|repo-boundaries|layout|docs|skill|examples|benchmarks|release|traceability|all
+  vo-dev generate app-protocol|voplay-protocol|studio-docs --check|--write
   vo-dev node-audit current|list
   vo-dev tool check [--json]
   vo-dev tool bootstrap [--apply] [--json]
@@ -105,7 +103,7 @@ fn print_usage() {
   vo-dev first-party run <repo> <subdir> -- <command...>
   vo-dev first-party run-workspace <repo> <workspace> -- <command...>
   vo-dev first-party release-verify <repo>
-  vo-dev studio-install-local-vogui
+  vo-dev ui-certify --check|--json
   vo-dev test lint --suite lang [--strict]
   vo-dev test fmt --suite lang
   vo-dev test stats --suite lang [--format text|json]
@@ -115,10 +113,7 @@ fn print_usage() {
   vo-dev bench [all|vo|score|<name>] [--all-langs] [--runs N] [--warmup N] [--arch 32|64] [--jit-hot]
   vo-dev gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
   vo-dev loc [--with-tests]
-  vo-dev clean [all|vo|rust|bench|junk]
-  vo-dev studio [--runner] [project]
-  vo-dev studio-native [--runner] [project]
-  vo-dev studio-stop"#
+  vo-dev clean [all|vo|rust|bench|junk]"#
     );
 }
 

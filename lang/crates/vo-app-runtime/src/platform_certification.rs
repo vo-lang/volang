@@ -17,7 +17,7 @@ pub enum PlatformCapability {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PlatformWorkload {
-    Vogui,
+    Ui,
     Voplay,
     Audio,
 }
@@ -286,7 +286,7 @@ pub fn required_host_probes(
         }
         crate::HostTopology::Headless | crate::HostTopology::Manual => {}
     }
-    if workloads.contains(&PlatformWorkload::Vogui) {
+    if workloads.contains(&PlatformWorkload::Ui) {
         bits |= crate::HostProbeRequirements::ACCESSIBILITY_BRIDGE.0;
     }
     if workloads.contains(&PlatformWorkload::Audio) {
@@ -314,7 +314,7 @@ pub fn required_platform_capabilities(
         ]),
         crate::HostTopology::Manual => BTreeSet::new(),
     };
-    if workloads.contains(&PlatformWorkload::Vogui) {
+    if workloads.contains(&PlatformWorkload::Ui) {
         required.extend([PlatformCapability::Ime, PlatformCapability::Accessibility]);
     }
     if workloads.contains(&PlatformWorkload::Voplay) {
@@ -337,7 +337,7 @@ mod tests {
             runtime_target: crate::RuntimeTarget::NativeMacOs,
             topology: crate::HostTopology::GpuNativeHost,
             workloads: BTreeSet::from([
-                PlatformWorkload::Vogui,
+                PlatformWorkload::Ui,
                 PlatformWorkload::Voplay,
                 PlatformWorkload::Audio,
             ]),

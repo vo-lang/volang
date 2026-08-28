@@ -562,6 +562,8 @@ use vo_runtime::itab::{validate_interface_itab, ItabCache};
 #[cfg(feature = "jit")]
 mod jit_mgr;
 #[cfg(feature = "jit")]
+pub use jit_mgr::AotFunctionEntry;
+#[cfg(feature = "jit")]
 pub(crate) use jit_mgr::{JitManager, NativeRootScanCursor, NativeRootScanStats};
 
 #[cfg(feature = "jit")]
@@ -1308,6 +1310,12 @@ impl Vm {
         self.scheduler.fiber_storage_bytes()
     }
 
+    /// Returns a point-in-time, mutation-free view of live Volang goroutines
+    /// and their scheduler waits for inspectors and profilers.
+    pub fn goroutine_snapshot(&self) -> crate::scheduler::GoroutineSnapshot {
+        self.scheduler.goroutine_snapshot()
+    }
+
     fn apply_gc_environment(&mut self) {
         #[cfg(feature = "std")]
         {
@@ -1546,6 +1554,24 @@ impl Vm {
             .and_then(|mgr| mgr.function_compile_error(func_id))
     }
 
+    /// Publish the complete statically linked function table after module
+    /// loading has frozen extern resolution and initialized runtime metadata.
+    #[cfg(feature = "jit")]
+    pub fn install_aot_functions(&mut self, entries: Vec<AotFunctionEntry>) -> Result<(), VmError> {
+        if self.module.is_none() {
+            return Err(VmError::Jit(
+                "AOT functions can only be installed after loading a verified module".to_string(),
+            ));
+        }
+        let manager = self
+            .jit
+            .manager_mut()
+            .ok_or_else(|| VmError::Jit("AOT execution requires native dispatch".to_string()))?;
+        manager
+            .install_aot_functions(entries)
+            .map_err(|error| VmError::Jit(format!("invalid AOT function table: {error}")))
+    }
+
     #[cfg(not(feature = "jit"))]
     pub fn has_jit(&self) -> bool {
         false
@@ -1589,6 +1615,11 @@ impl Vm {
 
     pub fn module(&self) -> Option<&Module> {
         self.module.as_deref().map(LoadedModule::module)
+    }
+
+    /// Immutable extern ABI and effect routes frozen during module loading.
+    pub fn resolved_externs(&self) -> &crate::bytecode::ResolvedExternTable {
+        self.state.extern_registry.resolved_externs()
     }
 
     pub(crate) fn module_runtime_metadata(

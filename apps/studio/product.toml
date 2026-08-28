@@ -1,0 +1,35 @@
+schema = "volang.studio.product.v1"
+protocol = "volang.studio.host.v1"
+
+[product]
+application_language = "volang"
+browser_component_runtime = false
+development_backends = ["vm", "jit"]
+release_backends = ["core-wasm-aot", "native-aot"]
+
+[capabilities]
+home = "implemented-pure-volang"
+starter_gallery = "implemented-14-editable-cross-host-projects"
+starter_open_edit_run = "implemented-vm-jit-web-preview-and-native-preview"
+project_center = "implemented-memory-native-and-web-opfs"
+file_explorer = "implemented-memory-native-and-web-opfs"
+incremental_editor = "implemented"
+latest_wins_analysis = "implemented-all-hosts"
+vm_jit_run_stream = "implemented-native-vm-jit-and-web-vm"
+embedded_preview = "implemented-web-isolated-child-and-native-isolated-window"
+console = "implemented"
+documentation = "implemented-generated-from-canonical-language-and-ui-sources"
+documentation_routes = "implemented-versioned-deep-links-with-source-provenance"
+project_share = "implemented-portable-snapshot-studio-and-runner-links"
+independent_runner = "implemented-chromeless-cold-start-and-recovery"
+remote_sync = "implemented-memory-and-native-git"
+remote_status_diff = "implemented-native-branch-divergence-conflict-and-unified-diff"
+github_account = "implemented-host-owned-browser-session-and-native-gh-cli"
+credentials = "implemented-memory-session-only"
+native_host = "implemented-vm-jit"
+web_host = "implemented-opfs-worker-compiler"
+aot_release = "implemented-core-wasm-and-native-custom-host-aot"
+
+[parity]
+matrix = "product-parity.toml"
+baseline = "legacy-studio-product-surface"

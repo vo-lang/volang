@@ -1,7 +1,13 @@
 use super::*;
-use vo_common_core::bytecode::{InterfaceMeta, InterfaceMethodMeta, MethodInfo, NamedTypeMeta};
+use vo_common_core::bytecode::{
+    FieldMeta, InterfaceMeta, InterfaceMethodMeta, MethodInfo, NamedTypeMeta, StructMeta,
+};
 use vo_common_core::runtime_type::InterfaceMethod;
-use vo_common_core::types::ValueMeta;
+use vo_common_core::types::{SlotType, ValueMeta};
+use vo_common_core::{
+    dynamic_field_name, lookup_dynamic_field as lookup_field, DynamicFieldLookup as FieldLookup,
+    RuntimeType,
+};
 
 #[test]
 fn dynamic_member_names_reject_malformed_utf8_without_substitution() {
@@ -100,8 +106,7 @@ fn dynamic_field_lookup_handles_deep_pointer_embedding_iteratively() {
     let FieldLookup::Found(field) = lookup_field(&module, current_meta_id, "Target") else {
         panic!("deep promoted field should be found");
     };
-    assert_eq!(field.rttid, int_type.rttid());
-    assert_eq!(field.value_kind, ValueKind::Int64);
+    assert_eq!(field.value_rttid, int_type);
     assert_eq!(field.offset, 0);
     assert_eq!(field.ptr_derefs.len(), DEPTH);
     assert!(field.ptr_derefs.iter().all(|deref| deref.offset == 0));
@@ -162,8 +167,7 @@ fn dynamic_field_lookup_prefers_the_shallowest_promoted_field() {
     let FieldLookup::Found(field) = lookup_field(&module, root_meta_id, "Target") else {
         panic!("shallow promoted field should be found");
     };
-    assert_eq!(field.rttid, int_type.rttid());
-    assert_eq!(field.value_kind, ValueKind::Int64);
+    assert_eq!(field.value_rttid, int_type);
     assert_eq!(field.offset, 1);
     assert!(field.ptr_derefs.is_empty());
 }
@@ -186,7 +190,7 @@ fn dynamic_field_lookup_promotes_exported_descendant_through_unexported_embeddin
     let FieldLookup::Found(field) = lookup_field(&module, root_meta_id, "Target") else {
         panic!("exported descendant should be promoted through an unexported embedding");
     };
-    assert_eq!(field.rttid, int_type.rttid());
+    assert_eq!(field.value_rttid, int_type);
     assert_eq!(field.offset, 0);
 }
 

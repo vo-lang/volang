@@ -1,0 +1,30 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/navigation"
+)
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	location := ui.LocationPath()
+	page := navigation.Resolve(
+		kit.EmptyState(theme, "Page not found", location),
+		navigation.Route{Path: "/", View: kit.Card(theme, kit.Heading(theme, "Home"))},
+		navigation.Route{Path: "/settings", View: kit.Card(theme, kit.Heading(theme, "Settings"))},
+	)
+	links := kit.Toolbar(theme,
+		kit.NavigationLink(theme, "Home", "/"),
+		kit.NavigationLink(theme, "Settings", "/settings"),
+		kit.PrimaryButton(theme, "Back", false, func(event ui.Event) { ui.NavigateBack() }),
+		kit.PrimaryButton(theme, "Forward", false, func(event ui.Event) { ui.NavigateForward() }),
+	)
+	return kit.Screen(theme, ui.Gap(ui.Column(links, kit.MutedText(theme, location), page), theme.Space * 2))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

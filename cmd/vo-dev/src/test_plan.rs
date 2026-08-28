@@ -392,15 +392,15 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
 
         let case_targets = resolved_case_targets(case, &test_config)?;
         for target_name in &effective_targets {
-            if !case_targets.iter().any(|target| target == target_name) {
-                continue;
-            }
-            if has_target_name(&case.skip, target_name) {
+            if !target_applies_to_case(&case_targets, target_name, targets)? {
                 continue;
             }
             let target = targets
                 .get(target_name)
                 .ok_or_else(|| anyhow!("unknown test target: {target_name}"))?;
+            if target_is_skipped(&case.skip, target) {
+                continue;
+            }
             jobs.push(TestJob {
                 id: format!("{}::{}", case.id, target_name),
                 case_id: case.id.clone(),
@@ -412,7 +412,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 tags: case.tags.clone(),
                 owner: case.owner.clone(),
                 env: target.env.clone(),
-                timeout_sec: case_timeout(case, target_name, target.default_timeout_sec),
+                timeout_sec: case_timeout(case, target, target.default_timeout_sec),
                 expect: json!({
                     "kind": "pass",
                     "jit_regular_call_side_exits_min": expect.jit_regular_call_side_exits_min,
@@ -549,17 +549,49 @@ fn compile_fail_job(
         tags: case.tags.clone(),
         owner: case.owner.clone(),
         env: target.env.clone(),
-        timeout_sec: case_timeout(case, &target.name, target.default_timeout_sec),
+        timeout_sec: case_timeout(case, target, target.default_timeout_sec),
         expect: json!({ "kind": "fail", "patterns": expect.patterns }),
         selection_reasons: selection_reasons.to_vec(),
     })
 }
 
-fn case_timeout(case: &ManifestCase, target: &str, default_timeout_sec: u64) -> u64 {
+fn case_timeout(case: &ManifestCase, target: &TestTarget, default_timeout_sec: u64) -> u64 {
     case.timeout
-        .get(target)
+        .get(&target.name)
+        .or_else(|| {
+            target
+                .compatible_with
+                .as_ref()
+                .and_then(|compatible| case.timeout.get(compatible))
+        })
         .copied()
         .unwrap_or(default_timeout_sec)
+}
+
+fn target_applies_to_case(
+    case_targets: &[String],
+    target_name: &str,
+    targets: &std::collections::HashMap<String, TestTarget>,
+) -> Result<bool> {
+    let target = targets
+        .get(target_name)
+        .ok_or_else(|| anyhow!("unknown test target: {target_name}"))?;
+    Ok(case_targets.iter().any(|case_target| {
+        case_target == target_name
+            || target
+                .compatible_with
+                .as_ref()
+                .is_some_and(|compatible| case_target == compatible)
+    }))
+}
+
+fn target_is_skipped(skips: &[String], target: &TestTarget) -> bool {
+    has_target_name(skips, &target.name)
+        || (target.inherit_compatible_skips
+            && target
+                .compatible_with
+                .as_ref()
+                .is_some_and(|compatible| has_target_name(skips, compatible)))
 }
 
 fn target_runs_native_compile_fail(target: &TestTarget) -> bool {
@@ -571,6 +603,11 @@ fn compile_fail_enabled_for_target(case_targets: &[String], target: &TestTarget)
         || case_targets
             .iter()
             .any(|case_target| case_target == &target.name)
+        || target.compatible_with.as_ref().is_some_and(|compatible| {
+            case_targets
+                .iter()
+                .any(|case_target| case_target == compatible)
+        })
         || case_targets
             .iter()
             .any(|case_target| case_target == "compile")
@@ -626,7 +663,9 @@ fn selection_reasons_for_case(
     if !case.tags.is_empty() {
         reasons.push(format!("case tags {}", case.tags.join(",")));
     }
-    if has_target_name(&case.skip, target_name) {
+    if opts.targets.iter().any(|selected| selected == target_name)
+        && has_target_name(&case.skip, target_name)
+    {
         reasons.push(format!(
             "target {target_name} skipped because {}",
             case.reason.as_deref().unwrap_or("(missing reason)")
@@ -937,6 +976,28 @@ mod tests {
             );
         }
         assert!(!target_runs_native_compile_fail(&config.targets["wasm"]));
+    }
+
+    #[test]
+    fn compatible_target_can_own_a_stronger_capability_surface() {
+        let mut target = TestTarget {
+            name: "wasm-aot".to_string(),
+            kind: "wasm".to_string(),
+            backend: "core-wasm-aot".to_string(),
+            compatible_with: Some("wasm".to_string()),
+            inherit_compatible_skips: true,
+            env: BTreeMap::new(),
+            default_timeout_sec: 60,
+            build_command: Vec::new(),
+            release_build_args: Vec::new(),
+            runner_command: Vec::new(),
+            prepare_commands: Vec::new(),
+        };
+        assert!(target_is_skipped(&["wasm".to_string()], &target));
+
+        target.inherit_compatible_skips = false;
+        assert!(!target_is_skipped(&["wasm".to_string()], &target));
+        assert!(target_is_skipped(&["wasm-aot".to_string()], &target));
     }
 
     #[test]

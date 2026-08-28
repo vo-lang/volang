@@ -1,0 +1,11 @@
+package main
+
+import (
+	"os"
+)
+
+func main() {
+	println("before exit")
+	os.Exit(0)
+	panic("execution continued after os.Exit")
+}

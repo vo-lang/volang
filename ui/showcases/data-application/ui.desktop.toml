@@ -1,0 +1,9 @@
+application_id = "org.volang.data-application"
+name = "Volang Data Application"
+version = "0.1.0"
+executable = "volang-data"
+signing_policy = "optional"
+resources = []
+
+[update]
+enabled = false

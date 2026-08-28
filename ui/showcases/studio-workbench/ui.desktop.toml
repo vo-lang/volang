@@ -1,0 +1,12 @@
+application_id = "dev.volang.studio"
+name = "Volang Studio"
+version = "0.1.0"
+executable = "volang-studio"
+signing_policy = "optional"
+resources = ["public/studio.css"]
+
+[update]
+enabled = false
+channel = "stable"
+endpoint = ""
+public_key = ""

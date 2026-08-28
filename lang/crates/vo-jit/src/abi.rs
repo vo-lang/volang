@@ -3,27 +3,20 @@ use cranelift_codegen::isa::CallConv;
 
 use vo_runtime::jit_api::{JitContext, JitResult};
 
-/// Number of raw machine-word argument lanes carried by the internal native
-/// entry. Wider signatures keep their remaining arguments in the fiber frame.
+/// Fixed lane count in the versioned native ABI.
 ///
-/// Lanes deliberately use the raw `u64` representation. Float slots cross the
-/// boundary with an explicit bitcast, so one uniform dispatch table can serve
-/// every verified Vo function shape.
-#[cfg(target_arch = "aarch64")]
+/// Keeping this independent of the compiler host makes object generation
+/// deterministic across supported native targets. Platform ABIs may place
+/// overflow lanes on the native stack; the logical signature stays stable.
+/// Float slots cross the boundary with an explicit bitcast, so one uniform
+/// dispatch table can serve every verified Vo function shape.
 pub const NATIVE_ARG_LANES: usize = 5;
-#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-pub const NATIVE_ARG_LANES: usize = 3;
-#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-pub const NATIVE_ARG_LANES: usize = 1;
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub const NATIVE_ARG_LANES: usize = 1;
 
 /// Unified VM/JIT native entry. `frame_bp` identifies the callee's verified
 /// fiber-stack window by stable slot index; generated code reconstructs a raw
 /// pointer only when it actually accesses frame memory. Static calls
 /// additionally pass the leading argument words in lanes so the callee can
 /// enter SSA without reloading them.
-#[cfg(target_arch = "aarch64")]
 pub type NativeJitFunc = extern "C" fn(
     ctx: *mut JitContext,
     frame_bp: u64,
@@ -34,23 +27,6 @@ pub type NativeJitFunc = extern "C" fn(
     lane3: u64,
     lane4: u64,
 ) -> JitResult;
-
-#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-pub type NativeJitFunc = extern "C" fn(
-    ctx: *mut JitContext,
-    frame_bp: u64,
-    ret_ptr: *mut u64,
-    lane0: u64,
-    lane1: u64,
-    lane2: u64,
-) -> JitResult;
-
-#[cfg(any(
-    all(target_arch = "x86_64", target_os = "windows"),
-    not(any(target_arch = "aarch64", target_arch = "x86_64"))
-))]
-pub type NativeJitFunc =
-    extern "C" fn(ctx: *mut JitContext, frame_bp: u64, ret_ptr: *mut u64, lane0: u64) -> JitResult;
 
 pub type JitFunc = NativeJitFunc;
 
@@ -97,8 +73,7 @@ pub unsafe fn invoke_native_from_frame(
     // fiber stack.
     let frame_bp = u64::from(unsafe { (*ctx).jit_bp });
 
-    #[cfg(target_arch = "aarch64")]
-    return entry(
+    entry(
         ctx,
         frame_bp,
         ret_ptr,
@@ -107,23 +82,5 @@ pub unsafe fn invoke_native_from_frame(
         unsafe { lane(frame_ptr, param_slots, 2) },
         unsafe { lane(frame_ptr, param_slots, 3) },
         unsafe { lane(frame_ptr, param_slots, 4) },
-    );
-
-    #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-    return entry(
-        ctx,
-        frame_bp,
-        ret_ptr,
-        unsafe { lane(frame_ptr, param_slots, 0) },
-        unsafe { lane(frame_ptr, param_slots, 1) },
-        unsafe { lane(frame_ptr, param_slots, 2) },
-    );
-
-    #[cfg(any(
-        all(target_arch = "x86_64", target_os = "windows"),
-        not(any(target_arch = "aarch64", target_arch = "x86_64"))
-    ))]
-    return entry(ctx, frame_bp, ret_ptr, unsafe {
-        lane(frame_ptr, param_slots, 0)
-    });
+    )
 }

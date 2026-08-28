@@ -5,6 +5,4 @@
 //! fail closed.
 
 pub mod capability;
-pub mod tick;
-pub mod timer;
 pub mod v2;

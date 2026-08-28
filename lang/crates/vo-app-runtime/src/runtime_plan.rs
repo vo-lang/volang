@@ -632,7 +632,6 @@ fn resolved_plan_identity(
     }
     for factory in entry_factories {
         let framework = match factory.framework {
-            crate::EntryFramework::Vogui => 1,
             crate::EntryFramework::Voplay => 2,
         };
         for byte in core::iter::once(framework)

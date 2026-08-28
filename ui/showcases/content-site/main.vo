@@ -1,0 +1,141 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/forms"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/navigation"
+	"strings"
+)
+
+func Header() ui.View {
+	return ui.Gap(ui.Row(
+		kit.Title("Volang Field Notes"),
+		navigation.Link("Home", "/"),
+		navigation.Link("Wasm AOT", "/articles/wasm-aot"),
+		navigation.Link("Concurrency", "/guides/concurrency"),
+		navigation.Link("Search", "/search"),
+		navigation.Link("Subscribe", "/subscribe"),
+	), 16)
+}
+
+func Layout(content ui.View) ui.View {
+	return kit.Page(kit.AppShell(kit.CurrentTheme(), Header(), ui.Column(),
+		ui.Gap(ui.Column(content, kit.Caption("Built with Volang UI · useful before activation")), 24)))
+}
+
+func Home() ui.View {
+	return Layout(ui.Gap(ui.Column(
+		kit.Badge("SSR + selective activation", kit.IntentSuccess),
+		kit.Title("A content site with zero JavaScript application code"),
+		kit.Paragraph("Every declared route is rendered to semantic HTML during release. Volang Wasm AOT activates only nodes that own interactions."),
+		kit.AdaptiveGrid(
+			kit.Panel(ui.Column(kit.Title("Useful HTML"), kit.Paragraph("Content, landmarks, forms, and accessibility semantics ship in the document."))),
+			kit.Panel(ui.Column(kit.Title("One application"), kit.Paragraph("The same typed views run in VM, JIT, browser AOT, and the native desktop shell."))),
+			kit.Panel(ui.Column(kit.Title("Bounded runtime"), kit.Paragraph("Routes, payloads, activation entries, and caches have explicit limits."))),
+		),
+		navigation.Link("Read the Wasm AOT article", "/articles/wasm-aot"),
+	), 20))
+}
+
+func Article(title string, lead string, sections ...ui.View) ui.View {
+	items := []ui.View{kit.Badge("FIELD NOTE", kit.IntentInfo), kit.Title(title), kit.Paragraph(lead)}
+	items = append(items, sections...)
+	return Layout(ui.Gap(ui.Column(items...), 18))
+}
+
+func WasmArticle() ui.View {
+	return Article("Wasm AOT without a JavaScript framework",
+		"Volang compiles the application and component plan ahead of time, then a small host adopts the server-rendered DOM.",
+		kit.Panel(ui.Column(kit.Title("Compilation"), kit.Paragraph("Typed views lower into stable component artifacts, direct bindings, and portable UI mutation batches."))),
+		kit.Panel(ui.Column(kit.Title("Activation"), kit.Paragraph("Server node identities let the browser attach state and event handlers without rebuilding the document."))),
+		kit.Panel(ui.Column(kit.Title("Authority"), kit.Paragraph("Browser builds reject imports that retain server-only secret, session, or cache authority."))),
+	)
+}
+
+func ConcurrencyGuide() ui.View {
+	return Article("Goroutines in interactive applications",
+		"Structured tasks keep workers cheap while the mounted UI remains a single-writer state owner.",
+		kit.Panel(ui.Column(kit.Title("Scoped lifetime"), kit.Paragraph("A component scope cancels pending work when its identity leaves the mounted tree."))),
+		kit.Panel(ui.Column(kit.Title("Deterministic delivery"), kit.Paragraph("Workers publish bounded mailbox results; the UI owner applies matching generations during a render turn."))),
+		kit.Panel(ui.Column(kit.Title("Backpressure"), kit.Paragraph("Join, latest, and queue policies make duplicate requests and overload behavior explicit."))),
+	)
+}
+
+func ValidateEmail(values map[string]string, value string) string {
+	if !strings.Contains(value, "@") || !strings.Contains(value, ".") {
+		return "Enter a valid email address"
+	}
+	return ""
+}
+
+func Subscribe() ui.View {
+	form := forms.Use(
+		forms.FieldSpec{Name: "email", Label: "Email address", Required: true, Validate: ValidateEmail},
+		forms.FieldSpec{Name: "name", Label: "Display name", Required: true},
+	)
+	return Layout(ui.Gap(ui.Column(
+		kit.Title("Subscribe to Field Notes"),
+		kit.Paragraph("This form is present in the server-rendered document and becomes interactive after selective activation."),
+		form.ErrorSummary(),
+		ui.Hidden(kit.Alert("Subscription confirmed", "Field Notes will be delivered to your inbox.", kit.IntentSuccess, false), form.Status() != forms.SubmitSucceeded),
+		kit.Panel(ui.Gap(ui.Column(
+			forms.TextField(form, "email"),
+			forms.TextField(form, "name"),
+			kit.ActionButton("Join Field Notes", form.Status() == forms.Submitting, func() {
+				form.Submit(func(ctx context.Context, values map[string]string) error { return nil })
+			}),
+		), 12)),
+	), 18))
+}
+
+func Search() ui.View {
+	query := ""
+	results := []ui.View{}
+	lower := ui.DerivedString(strings.ToLower(query))
+	if lower == "" || strings.Contains("wasm aot activation compiler browser", lower) {
+		results = append(results, kit.Panel(ui.Column(
+			kit.Title("Wasm AOT without a JavaScript framework"),
+			kit.Paragraph("Compilation, server-rendered identity, activation, and authority boundaries."),
+			navigation.Link("Open article", "/articles/wasm-aot"),
+		)))
+	}
+	if lower == "" || strings.Contains("goroutines concurrency tasks cancellation backpressure", lower) {
+		results = append(results, kit.Panel(ui.Column(
+			kit.Title("Goroutines in interactive applications"),
+			kit.Paragraph("Scoped lifetime, deterministic delivery, and bounded backpressure."),
+			navigation.Link("Open guide", "/guides/concurrency"),
+		)))
+	}
+	return Layout(ui.Gap(ui.Column(
+		kit.Title("Search Field Notes"),
+		kit.Input("Search articles", query, "Search articles", false, func(value string) { query = value }),
+		ui.Role(ui.Column(results...), "search"),
+	), 16))
+}
+
+func Offline() ui.View {
+	return Layout(ui.Column(
+		kit.Badge("OFFLINE", kit.IntentWarning),
+		kit.Title("Field Notes is available offline"),
+		kit.Paragraph("Reconnect to refresh articles and application assets."),
+	))
+}
+
+func App() ui.View {
+	return kit.Application(func() ui.View {
+		return navigation.ResolveTyped(func(location navigation.Location) ui.View { return Home() },
+			navigation.ViewRoute(navigation.NewPattern("home"), func(match navigation.Match) ui.View { return Home() }),
+			navigation.ViewRoute(navigation.NewPattern("wasm-aot", navigation.Static("articles"), navigation.Static("wasm-aot")), func(match navigation.Match) ui.View { return WasmArticle() }),
+			navigation.ViewRoute(navigation.NewPattern("concurrency", navigation.Static("guides"), navigation.Static("concurrency")), func(match navigation.Match) ui.View { return ConcurrencyGuide() }),
+			navigation.ViewRoute(navigation.NewPattern("search", navigation.Static("search")), func(match navigation.Match) ui.View { return Search() }),
+			navigation.ViewRoute(navigation.NewPattern("subscribe", navigation.Static("subscribe")), func(match navigation.Match) ui.View { return Subscribe() }),
+			navigation.ViewRoute(navigation.NewPattern("offline", navigation.Static("offline")), func(match navigation.Match) ui.View { return Offline() }),
+		)
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil { panic(err.Error()) }
+}

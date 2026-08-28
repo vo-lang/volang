@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod async_install;
 pub mod attestation;
+pub mod bundle;
 pub mod cache;
 pub mod digest;
 pub mod ext_manifest;

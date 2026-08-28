@@ -266,8 +266,16 @@ pub(super) fn prepare_native_extension_specs_with_readiness_and_workspace(
     Ok(specs)
 }
 
+pub(super) fn current_target_spec() -> &'static vo_target::TargetSpec {
+    static HOST: std::sync::OnceLock<vo_target::TargetSpec> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        vo_target::TargetSpec::parse(env!("VO_TARGET_TRIPLE"))
+            .unwrap_or_else(|error| panic!("Cargo supplied an unsupported host target: {error}"))
+    })
+}
+
 pub(super) fn current_target_triple() -> &'static str {
-    env!("VO_TARGET_TRIPLE")
+    current_target_spec().triple()
 }
 
 fn native_extension_spec(
@@ -2678,9 +2686,9 @@ fn native_module_compile_input_error(root: &Path, error: super::CompileError) ->
         super::CompileError::Io(error) => native_input_error_kind(error),
         super::CompileError::ModuleSystem(error) => error.kind,
         super::CompileError::Parse(_) => ModuleSystemErrorKind::ParseFailed,
-        super::CompileError::Analysis(_) | super::CompileError::Codegen(_) => {
-            ModuleSystemErrorKind::ValidationFailed
-        }
+        super::CompileError::Analysis(_)
+        | super::CompileError::Codegen(_)
+        | super::CompileError::Target(_) => ModuleSystemErrorKind::ValidationFailed,
     };
     ModuleSystemError::new(
         ModuleSystemStage::NativeExtension,

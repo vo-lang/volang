@@ -1,0 +1,201 @@
+// Package server contains explicit server-authority interfaces. Client route
+// code receives only public web.PageData; secrets and sessions stay behind an
+// injected server Environment.
+package server
+
+import (
+	"context"
+	"errors"
+	"sync"
+)
+
+const (
+	MaxSecrets = 1024
+	MaxSessions = 100000
+	MaxCacheEntries = 100000
+	MaxCacheBytes = 512 * 1024 * 1024
+)
+
+type Environment interface {
+	Secret(context.Context, string) (string, bool, error)
+}
+
+type Session struct {
+	ID string
+	Values map[string]string
+	ExpiresUnixMillis int64
+}
+
+type Sessions interface {
+	Load(context.Context, string) (Session, bool, error)
+	Save(context.Context, Session) error
+	Delete(context.Context, string) error
+}
+
+type CacheEntry struct {
+	Payload []byte
+	ExpiresUnixMillis int64
+	Tags []string
+}
+
+type Cache interface {
+	Get(context.Context, string) (CacheEntry, bool, error)
+	Put(context.Context, string, CacheEntry) error
+	Invalidate(context.Context, []string) error
+}
+
+type Authority struct {
+	Environment Environment
+	Sessions Sessions
+	Cache Cache
+}
+
+func NewAuthority(environment Environment, sessions Sessions, cache Cache) Authority {
+	if environment == nil || sessions == nil || cache == nil {
+		panic("web server authority requires environment, sessions, and cache")
+	}
+	return Authority{Environment: environment, Sessions: sessions, Cache: cache}
+}
+
+type MemoryEnvironment struct {
+	mu sync.Mutex
+	values map[string]string
+}
+
+func NewMemoryEnvironment(values map[string]string) (*MemoryEnvironment, error) {
+	if len(values) > MaxSecrets { return nil, errors.New("web server secret limit exceeded") }
+	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		if key == "" { return nil, errors.New("web server secret name is empty") }
+		copy[key] = value
+	}
+	return &MemoryEnvironment{values: copy}, nil
+}
+
+func (environment *MemoryEnvironment) Secret(ctx context.Context, name string) (string, bool, error) {
+	if err := ctx.Err(); err != nil { return "", false, err }
+	if environment == nil || name == "" { return "", false, errors.New("web server secret request is invalid") }
+	environment.mu.Lock()
+	defer environment.mu.Unlock()
+	value, found := environment.values[name]
+	return value, found, nil
+}
+
+func cloneValues(values map[string]string) map[string]string {
+	copy := make(map[string]string, len(values))
+	for key, value := range values { copy[key] = value }
+	return copy
+}
+
+func cloneSession(session Session) Session {
+	return Session{ID: session.ID, Values: cloneValues(session.Values), ExpiresUnixMillis: session.ExpiresUnixMillis}
+}
+
+type MemorySessions struct {
+	mu sync.Mutex
+	limit int
+	values map[string]Session
+}
+
+func NewMemorySessions(limit int) (*MemorySessions, error) {
+	if limit < 1 || limit > MaxSessions { return nil, errors.New("web server session limit is invalid") }
+	return &MemorySessions{limit: limit, values: make(map[string]Session)}, nil
+}
+
+func (sessions *MemorySessions) Load(ctx context.Context, id string) (Session, bool, error) {
+	if err := ctx.Err(); err != nil { return Session{}, false, err }
+	if sessions == nil || id == "" { return Session{}, false, errors.New("web server session request is invalid") }
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	session, found := sessions.values[id]
+	if !found { return Session{}, false, nil }
+	return cloneSession(session), true, nil
+}
+
+func (sessions *MemorySessions) Save(ctx context.Context, session Session) error {
+	if err := ctx.Err(); err != nil { return err }
+	if sessions == nil || session.ID == "" || len(session.Values) > 1024 {
+		return errors.New("web server session is invalid")
+	}
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if _, found := sessions.values[session.ID]; !found && len(sessions.values) >= sessions.limit {
+		return errors.New("web server session limit exceeded")
+	}
+	sessions.values[session.ID] = cloneSession(session)
+	return nil
+}
+
+func (sessions *MemorySessions) Delete(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil { return err }
+	if sessions == nil || id == "" { return errors.New("web server session delete is invalid") }
+	sessions.mu.Lock()
+	delete(sessions.values, id)
+	sessions.mu.Unlock()
+	return nil
+}
+
+func cloneCacheEntry(entry CacheEntry) CacheEntry {
+	payload := append([]byte{}, entry.Payload...)
+	tags := append([]string{}, entry.Tags...)
+	return CacheEntry{Payload: payload, ExpiresUnixMillis: entry.ExpiresUnixMillis, Tags: tags}
+}
+
+type MemoryCache struct {
+	mu sync.Mutex
+	entryLimit int
+	byteLimit int64
+	bytes int64
+	values map[string]CacheEntry
+}
+
+func NewMemoryCache(entryLimit int, byteLimit int64) (*MemoryCache, error) {
+	if entryLimit < 1 || entryLimit > MaxCacheEntries || byteLimit < 1 || byteLimit > MaxCacheBytes {
+		return nil, errors.New("web server cache limits are invalid")
+	}
+	return &MemoryCache{entryLimit: entryLimit, byteLimit: byteLimit, values: make(map[string]CacheEntry)}, nil
+}
+
+func (cache *MemoryCache) Get(ctx context.Context, key string) (CacheEntry, bool, error) {
+	if err := ctx.Err(); err != nil { return CacheEntry{}, false, err }
+	if cache == nil || key == "" { return CacheEntry{}, false, errors.New("web server cache request is invalid") }
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry, found := cache.values[key]
+	if !found { return CacheEntry{}, false, nil }
+	return cloneCacheEntry(entry), true, nil
+}
+
+func (cache *MemoryCache) Put(ctx context.Context, key string, entry CacheEntry) error {
+	if err := ctx.Err(); err != nil { return err }
+	if cache == nil || key == "" || len(entry.Tags) > 64 || int64(len(entry.Payload)) > cache.byteLimit {
+		return errors.New("web server cache entry is invalid")
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	previous, found := cache.values[key]
+	if !found && len(cache.values) >= cache.entryLimit { return errors.New("web server cache entry limit exceeded") }
+	nextBytes := cache.bytes - int64(len(previous.Payload)) + int64(len(entry.Payload))
+	if nextBytes > cache.byteLimit { return errors.New("web server cache byte limit exceeded") }
+	cache.values[key] = cloneCacheEntry(entry)
+	cache.bytes = nextBytes
+	return nil
+}
+
+func (cache *MemoryCache) Invalidate(ctx context.Context, tags []string) error {
+	if err := ctx.Err(); err != nil { return err }
+	if cache == nil || len(tags) > 64 { return errors.New("web server cache invalidation is invalid") }
+	selected := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		if tag == "" { return errors.New("web server cache tag is empty") }
+		selected[tag] = true
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for key, entry := range cache.values {
+		remove := false
+		for _, tag := range entry.Tags { if selected[tag] { remove = true; break } }
+		if remove { cache.bytes -= int64(len(entry.Payload)); delete(cache.values, key) }
+	}
+	return nil
+}

@@ -510,7 +510,7 @@ impl Module {
 **File format**:
 ```
 Magic: "VOB" (3 bytes)
-Version: u32 (currently 14)
+Version: u32 (currently 21)
 struct_metas: [StructMeta]
 interface_metas: [InterfaceMeta]
 named_type_metas: [NamedTypeMeta]
@@ -523,12 +523,14 @@ functions: [FunctionDef]
 externs: [ExternDef]
 entry_func: u32
 island_init_func: u32
+artifacts: [ModuleArtifact]
 debug_info: DebugInfo
 ```
 
-Version 14 includes the canonical function-local named-type identity contract.
-Only the current VOB version is accepted, so artifacts carrying the older
-package-only local-type encoding are rejected before module verification.
+Version 21 adds bounded, namespaced, versioned module artifacts. Their payloads
+remain opaque to the bytecode layer and are validated by their owning compiler
+subsystem. Artifact names are unique and strictly sorted for deterministic
+cache and AOT inputs. Only the current VOB version is accepted.
 
 Note: iface_dispatch removed, itab built lazily at runtime.
 

@@ -1,0 +1,39 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	// A blocked select receiver makes an unbuffered send ready.
+	receiveFirst := make(chan int)
+	receiverStarted := make(chan struct{}, 1)
+	received := make(chan int, 1)
+	go func() {
+		receiverStarted <- struct{}{}
+		select {
+			case value := <-receiveFirst:
+				received <- value
+		}
+	}()
+	<-receiverStarted
+	time.Sleep(time.Millisecond)
+	receiveFirst <- 7
+	assert(<-received == 7, "receiver-first select rendezvous")
+	// A blocked ordinary receiver makes a non-blocking select send ready.
+	sendFirst := make(chan int)
+	sendResult := make(chan bool, 1)
+	go func() {
+		time.Sleep(time.Millisecond)
+		select {
+			case sendFirst <- 9:
+				sendResult <- true
+			default:
+				sendResult <- false
+		}
+	}()
+	assert(<-sendFirst == 9, "select send delivered to waiting receiver")
+	assert(<-sendResult, "receiver made select send ready")
+	fmt.Println("PASS: select_receiver_first_rendezvous")
+}

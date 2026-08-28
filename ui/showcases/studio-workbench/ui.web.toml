@@ -1,0 +1,28 @@
+routes = ["/", "/offline"]
+
+[document]
+language = "en"
+direction = "ltr"
+title = "Volang Studio"
+description = "A pure-Volang project workbench built on the public UI, editor, command, document, and workspace packages."
+theme_color = "#111318"
+
+[[document.assets]]
+href = "/studio.css"
+kind = "style"
+
+[pwa]
+enabled = true
+name = "Volang Studio"
+short_name = "Vo Studio"
+start_url = "/"
+scope = "/"
+display = "standalone"
+offline_url = "/offline"
+cache_version = "volang-studio-v1"
+
+[security]
+content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'"
+permissions_policy = "camera=(), microphone=(), geolocation=()"
+cross_origin_opener_policy = "same-origin"
+require_https = true

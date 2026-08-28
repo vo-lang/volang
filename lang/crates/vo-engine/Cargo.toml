@@ -14,7 +14,12 @@ default = ["jit"]
 jit = ["vo-vm/jit"]
 
 [dependencies]
+vo-app-protocol.workspace = true
+vo-app-host-native.workspace = true
 vo-stdlib = { path = "../vo-stdlib", features = ["std"] }
+vo-jit = { path = "../vo-jit" }
+vo-target = { workspace = true }
+vo-wasm-aot = { path = "../vo-wasm-aot" }
 vo-vm = { path = "../vo-vm" }
 vo-runtime = { path = "../vo-runtime" }
 vo-common = { path = "../vo-common" }
@@ -23,6 +28,16 @@ vo-analysis = { path = "../vo-analysis" }
 vo-codegen = { path = "../vo-codegen" }
 vo-module = { path = "../vo-module" }
 vo-syntax = { path = "../vo-syntax" }
+vo-ui-artifact.workspace = true
+vo-ui-compiler.workspace = true
+vo-ui-core.workspace = true
+vo-ui-desktop.workspace = true
+vo-ui-host-native.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-system.workspace = true
+vo-ui-vm.workspace = true
+vo-ui-web.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -44,4 +59,9 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+vo-ui-accessibility.workspace = true
+vo-ui-golden.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+vo-ui-text-native.workspace = true
 zip = { version = "2.2", default-features = false, features = ["deflate"] }

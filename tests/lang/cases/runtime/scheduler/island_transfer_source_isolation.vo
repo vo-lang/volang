@@ -1,0 +1,31 @@
+package main
+
+type IsolationNode struct {
+	Value int
+}
+
+func main() {
+	worker := make(island)
+	directDone := make(port bool, 1)
+	direct := &IsolationNode{Value: 7}
+	go @(worker) func(value *IsolationNode, done port<- bool) {
+		value.Value = 70
+		done <- true
+	}(direct, directDone)
+	assert(<-directDone, "direct transfer completion")
+	assert(direct.Value == 7, "go-island source graph must remain isolated")
+	publication := make(port port<- *IsolationNode, 1)
+	remoteDone := make(port bool, 1)
+	go @(worker) func(publish port<- port<- *IsolationNode, done port<- bool) {
+		inbox := make(port *IsolationNode, 1)
+		publish <- inbox
+		value := <-inbox
+		value.Value = 90
+		done <- true
+	}(publication, remoteDone)
+	send := <-publication
+	message := &IsolationNode{Value: 9}
+	send <- message
+	assert(<-remoteDone, "remote port completion")
+	assert(message.Value == 9, "remote port source graph must remain isolated")
+}

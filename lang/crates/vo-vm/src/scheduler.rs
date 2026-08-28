@@ -143,6 +143,7 @@ impl HostWaitSource {
                 HostEventReplaySource::GuiEvent => "replay-gui-event",
                 HostEventReplaySource::Fetch => "replay-fetch",
                 HostEventReplaySource::Extension => "replay-extension",
+                HostEventReplaySource::UiSystem => "replay-ui-system",
             },
         }
     }
@@ -153,6 +154,7 @@ impl HostWaitSource {
             "replay" | "replay-gui-event" => Some(Self::Replay(HostEventReplaySource::GuiEvent)),
             "replay-fetch" => Some(Self::Replay(HostEventReplaySource::Fetch)),
             "replay-extension" => Some(Self::Replay(HostEventReplaySource::Extension)),
+            "replay-ui-system" => Some(Self::Replay(HostEventReplaySource::UiSystem)),
             _ => None,
         }
     }
@@ -265,6 +267,23 @@ pub struct PendingHostEvent {
     pub replay: bool,
 }
 
+/// Bounded, read-only scheduler evidence for development tools. Volang exposes
+/// goroutines at the language level while the VM stores them as reusable fiber
+/// slots; dead slots stay separate so tooling never reports cache capacity as
+/// live application work.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GoroutineSnapshot {
+    pub live: usize,
+    pub runnable: usize,
+    pub running: usize,
+    pub blocked: usize,
+    pub dead_slots: usize,
+    pub ready_queue_entries: usize,
+    pub host_event_waiters: usize,
+    pub io_waiters: usize,
+    pub fiber_storage_bytes: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct Scheduler {
     /// Fibers indexed by id (id == index).
@@ -335,6 +354,30 @@ impl Scheduler {
 
     pub(crate) fn fiber_storage_bytes(&self) -> usize {
         self.fiber_storage_budget.used_bytes()
+    }
+
+    pub(crate) fn goroutine_snapshot(&self) -> GoroutineSnapshot {
+        let mut snapshot = GoroutineSnapshot {
+            ready_queue_entries: self.ready_queue.len(),
+            host_event_waiters: self.host_event_waiters.len(),
+            #[cfg(feature = "std")]
+            io_waiters: self.io_waiters.len(),
+            fiber_storage_bytes: self.fiber_storage_bytes(),
+            ..GoroutineSnapshot::default()
+        };
+        for fiber in &self.fibers {
+            match &fiber.state {
+                FiberState::Runnable => snapshot.runnable += 1,
+                FiberState::Running => snapshot.running += 1,
+                FiberState::Blocked(_) => snapshot.blocked += 1,
+                FiberState::Dead => snapshot.dead_slots += 1,
+            }
+        }
+        snapshot.live = snapshot
+            .runnable
+            .saturating_add(snapshot.running)
+            .saturating_add(snapshot.blocked);
+        snapshot
     }
 
     /// Spawn a new fiber, returns its FiberId.
@@ -886,6 +929,7 @@ impl Scheduler {
             HostWaitSource::Replay(HostEventReplaySource::GuiEvent),
             HostWaitSource::Replay(HostEventReplaySource::Fetch),
             HostWaitSource::Replay(HostEventReplaySource::Extension),
+            HostWaitSource::Replay(HostEventReplaySource::UiSystem),
         ];
         let mut found = None;
         for source in sources {

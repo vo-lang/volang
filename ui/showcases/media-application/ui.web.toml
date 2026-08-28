@@ -1,0 +1,32 @@
+routes = ["/", "/capture", "/offline"]
+
+[document]
+language = "en"
+direction = "ltr"
+title = "Volang Media Laboratory"
+description = "Typed graphics, playback, capture, permissions, and recovery without an application JavaScript graph."
+theme_color = "#10141c"
+
+[[document.assets]]
+href = "/site.css"
+kind = "style"
+
+[[document.assets]]
+href = "/poster.svg"
+kind = "preload"
+
+[pwa]
+enabled = true
+name = "Volang Media Laboratory"
+short_name = "Vo Media"
+start_url = "/"
+scope = "/"
+display = "standalone"
+offline_url = "/offline"
+cache_version = "volang-media-v1"
+
+[security]
+content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'"
+permissions_policy = "camera=(self), microphone=(self), display-capture=(self), geolocation=()"
+cross_origin_opener_policy = "same-origin"
+require_https = true

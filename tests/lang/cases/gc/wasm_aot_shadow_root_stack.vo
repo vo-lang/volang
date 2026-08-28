@@ -1,0 +1,56 @@
+package main
+
+type shadowNode struct {
+	value int
+	next *shadowNode
+}
+
+func buildShadowChain(depth int) *shadowNode {
+	if depth == 0 {
+		return nil
+	}
+	// Keeping both objects live across the recursive allocation forces Core
+	// Wasm AOT to trace managed references from every active shadow frame.
+	padding := make([]byte, 16 * 1024)
+	padding[0] = byte(depth)
+	node := &shadowNode{value: depth}
+	node.next = buildShadowChain(depth - 1)
+	assert(int(padding[0]) == depth % 256, "shadow-frame slice survived collection")
+	return node
+}
+
+func overflowShadowStack(depth int) {
+	if depth == 0 {
+		return
+	}
+	node := &shadowNode{value: depth}
+	overflowShadowStack(depth - 1)
+	assert(node.value == depth, "overflow path retained rooted node")
+}
+
+func main() {
+	done := make(chan *shadowNode, 1)
+	go func() {
+		done <- buildShadowChain(900)
+	}()
+	root := <-done
+	count := 0
+	total := 0
+	for node := root; node != nil; node = node.next {
+		count++
+		total += node.value
+	}
+	assert(count == 900, "shadow-frame chain length")
+	assert(total == 405450, "shadow-frame chain contents")
+	recovered := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				recovered = true
+			}
+		}()
+		overflowShadowStack(200000)
+	}()
+	assert(recovered, "rooted durable overflow must remain recoverable")
+	println("wasm-aot-shadow-root-stack: PASS")
+}

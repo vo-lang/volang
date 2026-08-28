@@ -1,0 +1,17 @@
+[package]
+name = "vo-ui-scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic goroutine completion scheduling for Volang UI"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+vo-ui-core.workspace = true
+vo-ui-reactive.workspace = true

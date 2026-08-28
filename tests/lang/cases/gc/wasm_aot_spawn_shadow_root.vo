@@ -1,0 +1,27 @@
+package main
+
+type spawnedRootNode struct {
+	value int
+}
+
+func allocateSpawnedRoot(value int) *spawnedRootNode {
+	return &spawnedRootNode{value: value}
+}
+
+func runSpawnedRoot(done chan<- int) {
+	total := 0
+	for i := 0; i < 512; i++ {
+		node := allocateSpawnedRoot(i)
+		total += node.value
+	}
+	done <- total
+}
+
+func main() {
+	for round := 0; round < 64; round++ {
+		done := make(chan int, 1)
+		go runSpawnedRoot(done)
+		assert(<-done == 130816, "spawned fiber must retain and reuse its shadow-root chunk")
+	}
+	println("wasm-aot-spawn-shadow-root: PASS")
+}

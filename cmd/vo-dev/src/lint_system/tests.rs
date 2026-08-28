@@ -25,45 +25,6 @@ fn repository_lint_excludes_user_local_workspace_state() {
 }
 
 #[test]
-fn studio_tauri_vogui_protocol_dependency_requires_exact_git_revision() {
-    let git = "https://github.com/vo-lang/vogui";
-    let rev = "402aa502bf4951111c6dce9bb36cf76ef7d5090e";
-    let canonical: toml::Value = toml::from_str(&format!(
-        "[dependencies]\nvogui-protocol = {{ git = {git:?}, rev = {rev:?} }}\n"
-    ))
-    .unwrap();
-    assert_eq!(lint_vogui_protocol_manifest(&canonical).unwrap(), rev);
-
-    let sibling_path: toml::Value = toml::from_str(
-        "[dependencies]\nvogui-protocol = { path = \"../../../../vogui/rust/protocol\" }\n",
-    )
-    .unwrap();
-    assert!(lint_vogui_protocol_manifest(&sibling_path).is_err());
-
-    let short_revision: toml::Value = toml::from_str(
-        "[dependencies]\nvogui-protocol = { git = \"https://github.com/vo-lang/vogui\", rev = \"main\" }\n",
-    )
-    .unwrap();
-    assert!(lint_vogui_protocol_manifest(&short_revision).is_err());
-}
-
-#[test]
-fn studio_tauri_lock_requires_vogui_protocol_git_source() {
-    let source = "git+https://github.com/vo-lang/vogui?rev=402aa502bf4951111c6dce9bb36cf76ef7d5090e#402aa502bf4951111c6dce9bb36cf76ef7d5090e";
-    let canonical: toml::Value = toml::from_str(&format!(
-        "version = 4\n\n[[package]]\nname = \"vogui-protocol\"\nversion = \"0.1.0\"\nsource = {source:?}\n"
-    ))
-    .unwrap();
-    lint_vogui_protocol_lock(&canonical, source).unwrap();
-
-    let unpinned: toml::Value = toml::from_str(
-        "version = 4\n\n[[package]]\nname = \"vogui-protocol\"\nversion = \"0.1.0\"\n",
-    )
-    .unwrap();
-    assert!(lint_vogui_protocol_lock(&unpinned, source).is_err());
-}
-
-#[test]
 fn single_file_source_accepts_dependency_free_inline_authority() {
     let source = r#"/*vo:mod
 format = 1

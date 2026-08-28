@@ -1,0 +1,710 @@
+// Package kit is the official application-level component library for Volang
+// UI. Components are ordinary typed Volang functions, so they execute through
+// VM, JIT, native AOT, and Wasm AOT without an application JavaScript runtime.
+package kit
+
+import (
+	ui "github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/gesture"
+	"github.com/vo-lang/ui/kit/components"
+	"github.com/vo-lang/ui/kit/data"
+	"github.com/vo-lang/ui/kit/headless"
+	"github.com/vo-lang/ui/kit/tokens"
+	"github.com/vo-lang/ui/motion"
+	"math"
+	"strconv"
+)
+
+type Theme = tokens.Theme
+
+type ColorTokens = tokens.ColorTokens
+
+type SpacingTokens = tokens.SpacingTokens
+
+type TypographyTokens = tokens.TypographyTokens
+
+type ShapeTokens = tokens.ShapeTokens
+
+type MotionTokens = tokens.MotionTokens
+
+type DensityPreset = tokens.DensityPreset
+
+type ControlSize = tokens.ControlSize
+
+type ButtonVariant = tokens.ButtonVariant
+
+type ButtonRecipe = tokens.ButtonRecipe
+
+type FeedbackIntent = components.FeedbackIntent
+
+type Axis = components.Axis
+
+type ChoiceOption = components.ChoiceOption
+
+type TabItem = components.TabItem
+
+type BreadcrumbItem = components.BreadcrumbItem
+
+type AccordionItem = components.AccordionItem
+
+type Toast = components.Toast
+
+type CommandItem = components.CommandItem
+
+type DataSortDirection = data.SortDirection
+
+type DataSort = data.Sort
+
+type DataColumn = data.Column
+
+type DataCell = data.Cell
+
+type DataRow = data.Row
+
+type DataPoint = data.Point
+
+type TreeItem = data.TreeItem
+
+type Orientation = headless.Orientation
+
+const (
+	DensityCompact DensityPreset = tokens.DensityCompact
+	DensityComfortable DensityPreset = tokens.DensityComfortable
+	DensitySpacious DensityPreset = tokens.DensitySpacious
+	ControlSmall ControlSize = tokens.ControlSmall
+	ControlMedium ControlSize = tokens.ControlMedium
+	ControlLarge ControlSize = tokens.ControlLarge
+	ButtonPrimary ButtonVariant = tokens.ButtonPrimary
+	ButtonSecondary ButtonVariant = tokens.ButtonSecondary
+	ButtonQuiet ButtonVariant = tokens.ButtonQuiet
+	ButtonDanger ButtonVariant = tokens.ButtonDanger
+	IntentInfo FeedbackIntent = components.IntentInfo
+	IntentSuccess FeedbackIntent = components.IntentSuccess
+	IntentWarning FeedbackIntent = components.IntentWarning
+	IntentDanger FeedbackIntent = components.IntentDanger
+	AxisHorizontal Axis = components.AxisHorizontal
+	AxisVertical Axis = components.AxisVertical
+	SortNone DataSortDirection = data.SortNone
+	SortAscending DataSortDirection = data.SortAscending
+	SortDescending DataSortDirection = data.SortDescending
+	Horizontal Orientation = headless.Horizontal
+	Vertical Orientation = headless.Vertical
+)
+
+func LightTheme() Theme {
+	return tokens.ThemeFor(false, false)
+}
+
+func DarkTheme() Theme {
+	return tokens.ThemeFor(true, false)
+}
+
+var themeStack []Theme
+
+func popTheme() {
+	themeStack = themeStack[:len(themeStack) - 1]
+}
+
+// ProvideTheme supplies design tokens to the comfortable UIKit surface. The
+// scope is inherited through synchronous component construction and restores
+// the parent theme during panic unwinding.
+func ProvideTheme(theme Theme, content func() ui.View) ui.View {
+	theme = tokens.CompleteTheme(theme)
+	tokens.ValidateTheme(theme)
+	themeStack = append(themeStack, theme)
+	defer popTheme()
+	return content()
+}
+
+func CurrentTheme() Theme {
+	if len(themeStack) == 0 {
+		return SystemTheme()
+	}
+	return themeStack[len(themeStack) - 1]
+}
+
+func SystemTheme() Theme {
+	environment := ui.CurrentEnvironment()
+	dark := environment.ColorScheme == ui.ColorSchemeDark
+	highContrast := environment.Contrast == ui.ContrastMore
+	return tokens.ScaleTheme(tokens.ThemeFor(dark, highContrast), environment.Density)
+}
+
+func ScaleTheme(theme Theme, density float64) Theme {
+	return tokens.ScaleTheme(theme, density)
+}
+
+func ThemeWithDensity(theme Theme, density DensityPreset) Theme {
+	return tokens.ThemeWithDensity(theme, density)
+}
+
+func ResolveButtonRecipe(theme Theme, variant ButtonVariant, size ControlSize, disabled bool) ButtonRecipe {
+	return tokens.ResolveButtonRecipe(theme, variant, size, disabled)
+}
+
+func Button(label string, variant ButtonVariant, size ControlSize, disabled bool, onActivate func()) ui.View {
+	return components.Button(CurrentTheme(), label, variant, size, disabled, onActivate)
+}
+
+// ThemedButton is the explicit-theme counterpart used by design systems that
+// compose UIKit behavior while owning a product-specific visual language.
+func ThemedButton(theme Theme, label string, variant ButtonVariant, size ControlSize, disabled bool, onActivate func()) ui.View {
+	return components.Button(theme, label, variant, size, disabled, onActivate)
+}
+
+func Badge(label string, intent FeedbackIntent) ui.View {
+	return components.Badge(CurrentTheme(), label, intent)
+}
+
+func Separator(axis Axis, label string) ui.View {
+	return components.Separator(CurrentTheme(), axis, label)
+}
+
+func Alert(title string, detail string, intent FeedbackIntent, assertive bool) ui.View {
+	return components.Alert(CurrentTheme(), title, detail, intent, assertive)
+}
+
+func Progress(label string, value float64, maximum float64) ui.View {
+	return components.Progress(CurrentTheme(), label, value, maximum)
+}
+
+func Spinner(label string, size ControlSize) ui.View {
+	return components.Spinner(CurrentTheme(), label, size)
+}
+
+func Skeleton(width float64, height float64) ui.View {
+	return components.Skeleton(CurrentTheme(), width, height)
+}
+
+func Checkbox(label string, checked bool, disabled bool, onChange func(bool)) ui.View {
+	return components.Checkbox(CurrentTheme(), label, checked, disabled, onChange)
+}
+
+func TextArea(label string, value string, placeholder string, height float64, required bool, disabled bool, errorMessage string, onInput func(string)) ui.View {
+	return components.TextArea(CurrentTheme(), label, value, placeholder, height, required, disabled, errorMessage, onInput)
+}
+
+func Slider(label string, value float64, minimum float64, maximum float64, step float64, disabled bool, onChange func(float64)) ui.View {
+	return components.Slider(CurrentTheme(), label, value, minimum, maximum, step, disabled, onChange)
+}
+
+func Accordion(label string, items []AccordionItem, onExpandedChange func(string, bool)) ui.View {
+	return components.Accordion(CurrentTheme(), label, items, onExpandedChange)
+}
+
+func RadioGroup(label string, options []ChoiceOption, value string, disabled bool, orientation Orientation, focusToken int64, onChange func(string)) ui.View {
+	return components.RadioGroup(CurrentTheme(), label, options, value, disabled, orientation, focusToken, onChange)
+}
+
+func Select(label string, open bool, value string, options []ChoiceOption, disabled bool, onOpenChange func(bool), onChange func(string)) ui.View {
+	return components.Select(CurrentTheme(), label, open, value, options, disabled, onOpenChange, onChange)
+}
+
+func Tabs(label string, items []TabItem, selectedKey string, focusToken int64, onSelect func(string)) ui.View {
+	return components.Tabs(CurrentTheme(), label, items, selectedKey, focusToken, onSelect)
+}
+
+func Breadcrumb(label string, items []BreadcrumbItem) ui.View {
+	return components.Breadcrumb(CurrentTheme(), label, items)
+}
+
+func Pagination(label string, page int64, pageCount int64, onPageChange func(int64)) ui.View {
+	return components.Pagination(CurrentTheme(), label, page, pageCount, onPageChange)
+}
+
+func DataTable(label string, columns []DataColumn, rows []DataRow, sort DataSort, onSort func(string), onRowActivate func(string)) ui.View {
+	return data.Table(CurrentTheme(), label, columns, rows, sort, onSort, onRowActivate)
+}
+
+func BarChart(label string, points []DataPoint, maximum float64) ui.View {
+	return data.BarChart(CurrentTheme(), label, points, maximum)
+}
+
+func VirtualDataTable(label string, columns []DataColumn, rows []DataRow, sort DataSort, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, onSort func(string), onRowActivate func(string)) ui.View {
+	return data.VirtualTable(CurrentTheme(), label, columns, rows, sort, rowHeight, scrollOffset, viewportHeight, overscan, onSort, onRowActivate)
+}
+
+func VirtualDataProvider(label string, columns []DataColumn, count int64, sort DataSort, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, rowAt func(int64) DataRow, onSort func(string), onRowActivate func(string)) ui.View {
+	return data.VirtualTableProvider(CurrentTheme(), label, columns, count, sort, rowHeight, scrollOffset, viewportHeight, overscan, rowAt, onSort, onRowActivate)
+}
+
+func Tree(label string, items []TreeItem, onToggle func(string), onSelect func(string)) ui.View {
+	return data.Tree(CurrentTheme(), label, items, onToggle, onSelect)
+}
+
+func ThemedTree(theme Theme, label string, items []TreeItem, onToggle func(string), onSelect func(string)) ui.View {
+	return data.Tree(tokens.CompleteTheme(theme), label, items, onToggle, onSelect)
+}
+
+func VirtualTree(label string, items []TreeItem, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, onToggle func(string), onSelect func(string)) ui.View {
+	return data.VirtualTree(CurrentTheme(), label, items, rowHeight, scrollOffset, viewportHeight, overscan, onToggle, onSelect)
+}
+
+func VirtualTreeProvider(label string, count int64, rowHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, itemAt func(int64) TreeItem, onToggle func(string), onSelect func(string)) ui.View {
+	return data.VirtualTreeProvider(CurrentTheme(), label, count, rowHeight, scrollOffset, viewportHeight, overscan, itemAt, onToggle, onSelect)
+}
+
+func AlertDialog(title string, detail string, open bool, confirmLabel string, cancelLabel string, onConfirm func(), onDismiss func()) ui.View {
+	return components.AlertDialog(CurrentTheme(), title, detail, open, confirmLabel, cancelLabel, onConfirm, onDismiss)
+}
+
+func Popover(triggerLabel string, title string, open bool, focusToken int64, content ui.View, onOpenChange func(bool)) ui.View {
+	return components.Popover(CurrentTheme(), triggerLabel, title, open, focusToken, content, onOpenChange)
+}
+
+func Tooltip(triggerLabel string, label string, visible bool, focusToken int64, content ui.View, onVisibleChange func(bool)) ui.View {
+	return components.Tooltip(CurrentTheme(), triggerLabel, label, visible, focusToken, content, onVisibleChange)
+}
+
+func ToastRegion(label string, toasts []Toast, onDismiss func(string)) ui.View {
+	return components.ToastRegion(CurrentTheme(), label, toasts, onDismiss)
+}
+
+func CommandPalette(title string, query string, placeholder string, open bool, selected int64, focusToken int64, items []CommandItem, onQueryChange func(string), onSelectedChange func(int64), onActivate func(string), onDismiss func()) ui.View {
+	return components.CommandPalette(CurrentTheme(), title, query, placeholder, open, selected, focusToken, items, onQueryChange, onSelectedChange, onActivate, onDismiss)
+}
+
+func Drawer(title string, open bool, width float64, content ui.View, onDismiss func()) ui.View {
+	return components.Drawer(CurrentTheme(), title, open, width, content, onDismiss)
+}
+
+// Application is the normal UIKit root. Applications may override the host
+// environment with ApplicationWithEnvironment for tests, previews, embedded
+// surfaces, and deterministic server rendering.
+func Application(content func() ui.View) ui.View {
+	return ui.FlowDirection(ProvideTheme(SystemTheme(), content), ui.CurrentEnvironment().Direction)
+}
+
+func ApplicationWithEnvironment(environment ui.Environment, content func() ui.View) ui.View {
+	return ui.ProvideEnvironment(environment, func() ui.View {
+		return Application(content)
+	})
+}
+
+// The following components form the concise inherited-theme surface. The
+// explicit-theme functions below remain useful for low-level recipes and
+// incremental source migration.
+func Page(content ui.View) ui.View {
+	return Screen(CurrentTheme(), content)
+}
+
+func Panel(content ui.View) ui.View {
+	return Card(CurrentTheme(), content)
+}
+
+func Title(value string) ui.View {
+	return Heading(CurrentTheme(), value)
+}
+
+func Paragraph(value string) ui.View {
+	return ui.Role(Body(CurrentTheme(), value), "paragraph")
+}
+
+func Caption(value string) ui.View {
+	return MutedText(CurrentTheme(), value)
+}
+
+func ActionButton(label string, disabled bool, onClick func()) ui.View {
+	return Button(label, ButtonPrimary, ControlMedium, disabled, onClick)
+}
+
+func DestructiveButton(label string, disabled bool, onClick func()) ui.View {
+	return Button(label, ButtonDanger, ControlMedium, disabled, onClick)
+}
+
+func Input(label string, value string, placeholder string, disabled bool, onInput func(string)) ui.View {
+	return TextField(CurrentTheme(), label, value, placeholder, disabled, ui.TextChange(onInput))
+}
+
+func ValidatedInput(label string, value string, placeholder string, required bool, disabled bool, errorMessage string, focusToken int64, onInput func(string)) ui.View {
+	theme := CurrentTheme()
+	control := ui.TextInput(value, placeholder, ui.TextChange(onInput))
+	control = ui.FocusRequest(control, focusToken)
+	control = ui.AccessibleName(control, label)
+	control = ui.AccessibleDescription(control, errorMessage)
+	control = ui.Required(control, required)
+	control = ui.Invalid(control, errorMessage != "")
+	control = ui.Disabled(control, disabled)
+	control = ui.Height(ui.Radius(ui.Background(control, theme.Surface), theme.Radius), theme.ControlHeight)
+	control = ui.BorderWidth(ui.BorderColor(control, theme.Colors.Border), 1)
+	if errorMessage != "" {
+		return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control, FieldError(theme, errorMessage)), theme.Space /
+			2)
+	}
+	return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control), theme.Space /
+		2)
+}
+
+func Switch(label string, checked bool, disabled bool, onChange func(bool)) ui.View {
+	return ToggleField(CurrentTheme(), label, checked, disabled, ui.ToggleChange(onChange))
+}
+
+func Actions(children ...ui.View) ui.View {
+	return FormActions(CurrentTheme(), children...)
+}
+
+func Link(label string, path string) ui.View {
+	return NavigationLink(CurrentTheme(), label, path)
+}
+
+func ModalDialog(title string, open bool, content ui.View, onDismiss func()) ui.View {
+	return Dialog(CurrentTheme(), title, open, content, ui.Action(onDismiss))
+}
+
+// Screen supplies the standard application background, content width, and
+// vertical rhythm. Page content remains ordinary ui.View composition.
+func Screen(theme Theme, content ui.View) ui.View {
+	body := ui.Flex(ui.MaxWidth(ui.Gap(content, theme.Space * 2), theme.ContentWidth), 1)
+	body = ui.Justify(ui.Row(body), ui.JustifyCenter)
+	return ui.Background(ui.Padding(body, theme.Space * 3), theme.Background)
+}
+
+func Card(theme Theme, child ui.View) ui.View {
+	return ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(ui.Padding(child, theme.Space * 2), theme.Surface), theme.Colors.Border), 1), theme.Radius)
+}
+
+func Heading(theme Theme, value string) ui.View {
+	return ui.Role(ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(value), theme.Foreground), 24), 700), "heading")
+}
+
+func Body(theme Theme, value string) ui.View {
+	return ui.FontSize(ui.Foreground(ui.Text(value), theme.Foreground), 14)
+}
+
+func MutedText(theme Theme, value string) ui.View {
+	return ui.FontSize(ui.Foreground(ui.Text(value), theme.MutedForeground), 13)
+}
+
+func Section(theme Theme, title string, child ui.View) ui.View {
+	return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(title), theme.Foreground), 600), child), theme.Space)
+}
+
+func PrimaryButton(theme Theme, label string, disabled bool, onClick func(ui.Event)) ui.View {
+	return components.Button(theme, label, ButtonPrimary, ControlMedium, disabled, func() {
+		onClick(ui.Event{})
+	})
+}
+
+func DangerButton(theme Theme, label string, disabled bool, onClick func(ui.Event)) ui.View {
+	return components.Button(theme, label, ButtonDanger, ControlMedium, disabled, func() {
+		onClick(ui.Event{})
+	})
+}
+
+func TextField(theme Theme, label string, value string, placeholder string, disabled bool, onInput func(ui.Event)) ui.View {
+	return ValidatedTextField(theme, label, value, placeholder, false, disabled, "", onInput)
+}
+
+// FieldError exposes validation feedback as an assertive accessibility status.
+func FieldError(theme Theme, message string) ui.View {
+	return ui.Role(ui.FontSize(ui.Foreground(ui.Text(message), theme.Danger), 13), "alert")
+}
+
+// ValidatedTextField keeps visual, input, and accessibility validation state in
+// one component contract on every renderer.
+func ValidatedTextField(theme Theme, label string, value string, placeholder string, required bool, disabled bool, errorMessage string, onInput func(ui.Event)) ui.View {
+	control := ui.Height(ui.Radius(ui.Background(ui.Disabled(ui.Invalid(ui.Required(ui.AccessibleDescription(ui.AccessibleName(ui.TextInput(value, placeholder, onInput), label), errorMessage), required), errorMessage !=
+		""), disabled), theme.Surface), theme.Radius), theme.ControlHeight)
+	control = ui.BorderWidth(ui.BorderColor(control, theme.Colors.Border), 1)
+	if errorMessage != "" {
+		return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control, FieldError(theme, errorMessage)), theme.Space /
+			2)
+	}
+	return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control), theme.Space /
+		2)
+}
+
+func ToggleField(theme Theme, label string, checked bool, disabled bool, onChange func(ui.Event)) ui.View {
+	control := ui.Width(ui.Height(ui.Disabled(ui.Toggle(checked, label, onChange), disabled), theme.ControlHeight *
+		0.6), theme.ControlHeight)
+	control = ui.Foreground(control, theme.Accent)
+	// The switch owns the accessible name. The adjacent text is visual-only so
+	// assistive technology announces one labeled control.
+	text := ui.AccessibilityHidden(ui.FontSize(ui.Foreground(ui.Text(label), theme.Foreground), theme.Typography.BodySize), true)
+	view := ui.Align(ui.Gap(ui.Row(control, text), theme.Spacing.ControlGap), ui.AlignCenter)
+	if disabled {
+		view = ui.Opacity(view, 0.55)
+	}
+	return view
+}
+
+func Toolbar(theme Theme, children ...ui.View) ui.View {
+	return ui.Align(ui.Gap(ui.Row(children...), theme.Space), "center")
+}
+
+// MenuBar is the portable application-menu surface. It is available on every
+// renderer and is the standard Linux/Web fallback when no conventional native
+// application menu exists. The same actions may also be mirrored into
+// ui/system.Menu on macOS and Windows.
+func MenuBar(theme Theme, label string, children ...ui.View) ui.View {
+	bar := ui.Padding(ui.Align(ui.Gap(ui.Row(children...), theme.Space / 2), "center"), theme.Space)
+	return ui.AccessibleName(ui.Role(ui.Background(bar, theme.Surface), "menubar"), label)
+}
+
+// MenuGroup creates a named group for applications that expose expanded menu
+// content inside the application window.
+func MenuGroup(theme Theme, label string, children ...ui.View) ui.View {
+	group := ui.Gap(ui.Column(children...), theme.Space / 2)
+	return ui.AccessibleName(ui.Role(group, "menu"), label)
+}
+
+func MenuAction(theme Theme, label string, disabled bool, onActivate func(ui.Event)) ui.View {
+	action := ui.Height(ui.Padding(ui.Disabled(ui.Button(label, onActivate), disabled), theme.Space), theme.ControlHeight)
+	return ui.Role(action, "menuitem")
+}
+
+func MenuToggleAction(theme Theme, label string, checked bool, disabled bool, onChange func(ui.Event)) ui.View {
+	control := ui.Width(ui.Height(ui.Disabled(ui.Toggle(checked, label, onChange), disabled), theme.ControlHeight *
+		0.45), theme.ControlHeight * 0.75)
+	control = ui.Role(ui.Foreground(control, theme.Accent), "menuitemcheckbox")
+	labelView := ui.AccessibilityHidden(ui.Foreground(ui.Text(label), theme.Foreground), true)
+	action := ui.Height(ui.Padding(ui.Align(ui.Gap(ui.Row(control, labelView), theme.Spacing.ControlGap), ui.AlignCenter), theme.Space), theme.ControlHeight)
+	if disabled {
+		action = ui.Opacity(action, 0.55)
+	}
+	return action
+}
+
+// AppShell provides a named-area application layout shared by CSS Grid and the
+// native retained layout engine. The sidebar keeps a practical minimum while
+// the main content receives the larger flexible share.
+func AppShell(theme Theme, header ui.View, navigation ui.View, content ui.View) ui.View {
+	grid := ui.GridArea(ui.Role(header, "banner"), "header")
+	nav := ui.GridArea(ui.Role(navigation, "navigation"), "sidebar")
+	main := ui.GridArea(ui.Role(content, "main"), "main")
+	return ui.Gap(ui.GridColumns(ui.GridTemplateAreas(ui.Grid(grid, nav, main), "header header / sidebar main"), "minmax(180px, 1fr) minmax(320px, 3fr)"), theme.Space *
+		2)
+}
+
+func FormActions(theme Theme, children ...ui.View) ui.View {
+	return ui.Justify(ui.Align(ui.Gap(ui.Row(children...), theme.Space), "center"), "end")
+}
+
+func EmptyState(theme Theme, title string, detail string) ui.View {
+	content := Card(theme, ui.Align(ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(title), theme.Foreground), 600), MutedText(theme, detail)), theme.Space), "center"))
+	return ui.AccessibleName(ui.Role(content, "group"), title)
+}
+
+// MotionProgress visualizes a renderer-neutral motion value without taking
+// ownership of its goroutine or cancellation generation.
+func MotionProgress(theme Theme, value motion.Value, maximum float64) ui.View {
+	if maximum <= 0 || math.IsNaN(maximum) || math.IsInf(maximum, 0) {
+		panic("UIKit motion progress maximum must be finite and positive")
+	}
+	progress := ui.DerivedFloat(value.Current())
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > maximum {
+		progress = maximum
+	}
+	track := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), theme.MutedForeground), theme.Radius), maximum), theme.Space)
+	fill := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), theme.Accent), theme.Radius), progress), theme.Space)
+	percent := strconv.FormatFloat(progress / maximum * 100, 'f', 0, 64) + "%"
+	return ui.AccessibleValue(ui.AccessibleName(ui.Role(ui.Stack(track, fill), "progressbar"), "Progress"), percent)
+}
+
+// DragSurface applies standard card appearance to the low-level typed drag
+// recognizer. The recognizer remains reusable without UIKit.
+func DragSurface(theme Theme, drag gesture.Drag, options gesture.DragOptions, content ui.View, onChange func(gesture.DragSnapshot)) ui.View {
+	return gesture.BindDrag(Card(theme, content), drag, options, onChange)
+}
+
+type WindowSizeClass int64
+
+const (
+	Compact WindowSizeClass = iota
+	Medium
+	Expanded
+)
+
+// ClassifyWidth uses stable renderer-independent breakpoints. Hosts may feed
+// it a window, container, or test width; the component variants below only
+// depend on the resulting value.
+func ClassifyWidth(width float64) WindowSizeClass {
+	if width < 0 || math.IsNaN(width) || math.IsInf(width, 0) {
+		panic("UIKit adaptive width must be finite and non-negative")
+	}
+	if width < 600 {
+		return Compact
+	}
+	if width < 840 {
+		return Medium
+	}
+	return Expanded
+}
+
+func ViewportSizeClass() WindowSizeClass {
+	return ClassifyWidth(ui.CurrentEnvironment().ViewportWidth)
+}
+
+func AdaptiveGrid(children ...ui.View) ui.View {
+	return ResponsiveGrid(CurrentTheme(), ViewportSizeClass(), children...)
+}
+
+func AdaptivePage(navigation ui.View, content ui.View) ui.View {
+	return AdaptiveScaffold(CurrentTheme(), ViewportSizeClass(), navigation, content)
+}
+
+// ResponsiveGrid chooses a bounded one, two, or three-column grid while
+// preserving the same child identities across size-class changes.
+func ResponsiveGrid(theme Theme, size WindowSizeClass, children ...ui.View) ui.View {
+	columns := ui.DerivedInt(1)
+	if size == Medium {
+		columns = 2
+	} else if size == Expanded {
+		columns = 3
+	} else if size != Compact {
+		panic("UIKit window size class is invalid")
+	}
+	tracks := "repeat(" + strconv.FormatInt(columns, 10) + ", minmax(0px, 1fr))"
+	return ui.Gap(ui.GridColumns(ui.Grid(children...), tracks), theme.Space * 2)
+}
+
+// AdaptiveScaffold places navigation below content on compact widths and in a
+// stable leading rail at larger widths. Roles remain identical in each form.
+func AdaptiveScaffold(theme Theme, size WindowSizeClass, navigation ui.View, content ui.View) ui.View {
+	nav := ui.Role(navigation, "navigation")
+	main := ui.Role(content, "main")
+	if size == Compact {
+		return ui.Gap(ui.Column(main, nav), theme.Space * 2)
+	}
+	if size == Medium {
+		return ui.Gap(ui.Row(ui.Width(nav, 200), ui.Flex(main, 1)), theme.Space * 2)
+	}
+	if size == Expanded {
+		return ui.Gap(ui.Row(ui.Width(nav, 280), ui.Flex(main, 1)), theme.Space * 3)
+	}
+	panic("UIKit window size class is invalid")
+}
+
+// ResourceBoundary gives asynchronous data one accessible pending/error/content
+// presentation contract. Resource workers remain in the resource package;
+// UIKit only owns user-facing behavior and appearance.
+func ResourceBoundary(theme Theme, pending bool, errorMessage string, content ui.View) ui.View {
+	if pending {
+		return Card(theme, ui.Role(MutedText(theme, "Loading"), "status"))
+	}
+	if errorMessage != "" {
+		return Card(theme, FieldError(theme, errorMessage))
+	}
+	return content
+}
+
+// NavigationLink applies standard button sizing and link semantics while the
+// platform adapter owns History integration.
+func NavigationLink(theme Theme, label string, path string) ui.View {
+	return ui.Role(PrimaryButton(theme, label, false, func(event ui.Event) {
+		ui.Navigate(path)
+	}), "link")
+}
+
+// Dialog supplies one modal focus scope shared by Web and desktop hosts.
+// Escape and the backdrop invoke the same dismissal closure. Platforms trap
+// Tab inside enabled controls, isolate background interaction, and restore the
+// previously focused control when this view leaves the committed tree.
+func Dialog(theme Theme, title string, open bool, content ui.View, onDismiss func(ui.Event)) ui.View {
+	if !open {
+		return ui.Fragment()
+	}
+	backdrop := ui.TestID(ui.OnClick(ui.Background(ui.Box(), 0x99000000), onDismiss), "dialog-backdrop")
+	closeButton := PrimaryButton(theme, "Close dialog", false, onDismiss)
+	panelContent := ui.Gap(ui.Column(Heading(theme, title), content, FormActions(theme, closeButton)), theme.Space *
+		2)
+	panel := ui.PointerEvents(ui.MinWidth(ui.MaxWidth(Card(theme, panelContent), 480), 320), "auto")
+	positioned := ui.PointerEvents(ui.Justify(ui.Align(ui.Column(panel), "center"), "center"), "none")
+	overlay := ui.AccessibleName(ui.Role(ui.Stack(backdrop, positioned), "dialog"), title)
+	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onDismiss(event)
+		}
+	})
+	return ui.Portal(ui.Modal(overlay, true), ui.OverlayModal)
+}
+
+// VirtualRange is the half-open item interval materialized by VirtualList.
+// End never exceeds the declared item count.
+type VirtualRange struct {
+	Start int64
+	End int64
+}
+
+// VisibleRange deterministically expands the viewport by a bounded caller-
+// selected overscan count. Invalid geometry yields an empty interval.
+func VisibleRange(itemCount int64, itemHeight float64, scrollOffset float64, viewportHeight float64, overscan int64) VirtualRange {
+	if itemCount <= 0 || itemHeight <= 0 || viewportHeight <= 0 || math.IsNaN(itemHeight) ||
+		math.IsNaN(scrollOffset) ||
+		math.IsNaN(viewportHeight) ||
+		math.IsInf(itemHeight, 0) ||
+		math.IsInf(scrollOffset, 0) ||
+		math.IsInf(viewportHeight, 0) {
+		return VirtualRange{}
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+	if overscan < 0 {
+		overscan = 0
+	}
+	if overscan > itemCount {
+		overscan = itemCount
+	}
+	firstRatio := scrollOffset / itemHeight
+	first := itemCount
+	if firstRatio < float64(itemCount) {
+		first = int64(firstRatio)
+	}
+	start := first
+	if start > overscan {
+		start -= overscan
+	} else {
+		start = 0
+	}
+	visibleRatio := viewportHeight / itemHeight
+	visible := itemCount
+	if visibleRatio < float64(itemCount) {
+		visible = int64(visibleRatio) + 1
+	}
+	end := itemCount
+	if visible < itemCount - first {
+		end = first + visible
+	}
+	if end < itemCount {
+		if overscan >= itemCount - end {
+			end = itemCount
+		} else {
+			end += overscan
+		}
+	}
+	return VirtualRange{Start: start, End: end}
+}
+
+// VirtualList calls renderItem only for the visible plus overscan interval.
+// Stable row keys preserve compatible DOM/native nodes as the window moves;
+// top and bottom spacers retain the complete scroll extent.
+func VirtualList(itemCount int64, itemHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, renderItem func(int64) ui.View, onScroll func(ui.Event)) ui.View {
+	return VirtualListKeyed(itemCount, itemHeight, scrollOffset, viewportHeight, overscan, func(index int64) string {
+		return strconv.FormatInt(index, 10)
+	}, renderItem, onScroll)
+}
+
+// VirtualListKeyed lets data-backed collections preserve logical row identity
+// when their indices change. itemKey must return a unique, stable key for every
+// materialized sibling in the current window.
+func VirtualListKeyed(itemCount int64, itemHeight float64, scrollOffset float64, viewportHeight float64, overscan int64, itemKey func(int64) string, renderItem func(int64) ui.View, onScroll func(ui.Event)) ui.View {
+	window := VisibleRange(itemCount, itemHeight, scrollOffset, viewportHeight, overscan)
+	children := []ui.View{}
+	if window.Start > 0 {
+		children = append(children, ui.Key(ui.Height(ui.Box(), float64(window.Start) * itemHeight), "virtual-before"))
+	}
+	for index := window.Start; index < window.End; index++ {
+		row := ui.Role(ui.Height(renderItem(index), itemHeight), "listitem")
+		children = append(children, ui.Key(row, "virtual-row:" + itemKey(index)))
+	}
+	if window.End < itemCount {
+		children = append(children, ui.Key(ui.Height(ui.Box(), float64(itemCount - window.End) *
+			itemHeight), "virtual-after"))
+	}
+	list := ui.Role(ui.ScrollY(ui.Scroll(ui.Column(children...)), scrollOffset), "list")
+	return ui.Height(ui.OnScroll(list, onScroll), viewportHeight)
+}

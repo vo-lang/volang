@@ -1,0 +1,39 @@
+import { connectUiVmToDom, createVmIsland, init } from '/runtime/dist/index.js';
+
+// Neutral asset naming avoids privacy filters that block generic "preview-host" URLs.
+const PROTOCOL = 'volang.studio.preview.v1';
+const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
+const root = document.querySelector('#preview-root');
+const diagnostic = document.querySelector('#preview-error');
+const embeddingOrigin = document.referrer ? new URL(document.referrer).origin : location.origin;
+let session;
+let runtimeReady;
+
+function showError(cause) {
+  const error = cause instanceof Error ? cause : new Error(String(cause));
+  diagnostic.textContent = error.stack ?? error.message;
+  diagnostic.style.display = 'block';
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window.parent || event.origin !== embeddingOrigin) return;
+  const message = event.data;
+  if (message?.protocol !== PROTOCOL || !(message.artifact instanceof ArrayBuffer)
+    || message.artifact.byteLength === 0 || message.artifact.byteLength > MAX_ARTIFACT_BYTES) {
+    showError(new Error('Studio preview payload is invalid'));
+    return;
+  }
+  void (async () => {
+    diagnostic.textContent = '';
+    diagnostic.style.display = 'none';
+    session?.dispose();
+    root.replaceChildren();
+    runtimeReady ??= init(new URL('/runtime/pkg/vo_web_bg.wasm', embeddingOrigin));
+    await runtimeReady;
+    session = connectUiVmToDom(createVmIsland(new Uint8Array(message.artifact)), root, {
+      onError: showError,
+      initialLocation: '/',
+    });
+    session.start();
+  })().catch(showError);
+});

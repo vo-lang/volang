@@ -170,8 +170,13 @@ export class VirtualFS {
 
   private async initialize(): Promise<void> {
 
+    // A page owns durable browser storage. Compiler and VM Workers consume
+    // immutable snapshots and stay memory-only so they cannot race the page's
+    // OPFS checkpoint or delete application-owned files.
     this.opfsAvailable =
-      typeof navigator !== 'undefined' && Boolean(navigator.storage?.getDirectory);
+      typeof window !== 'undefined'
+      && typeof navigator !== 'undefined'
+      && Boolean(navigator.storage?.getDirectory);
 
     if (this.opfsAvailable) {
       try {
@@ -193,13 +198,10 @@ export class VirtualFS {
         this.openFiles.clear();
         this.nextFd = FIRST_FD;
         this.dirty = false;
-        console.log('[VFS] Loaded from OPFS');
       } catch (error) {
         this.opfsAvailable = false;
         console.warn('[VFS] OPFS init failed, using memory only:', error);
       }
-    } else {
-      console.log('[VFS] OPFS not available, using memory only');
     }
 
     this.initialized = true;
@@ -325,7 +327,6 @@ export class VirtualFS {
 
     try {
       await operation;
-      console.log('[VFS] Persisted to OPFS');
     } catch (error) {
       this.dirty = true;
       console.error('[VFS] Persist failed:', error);
@@ -1315,12 +1316,9 @@ const toSafeNumber = (value: unknown): number => {
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : Number.NaN;
 };
 
-/** Register VFS bindings on window for WASM to call. */
+/** Register VFS bindings on the current JavaScript global for WASM to call. */
 export function registerVFSBindings(): void {
-  if (typeof window === 'undefined') {
-    throw new Error('VFS WASM bindings require a window global');
-  }
-  const host = window as any;
+  const host = globalThis as any;
   host._vfsOpenFile = (path: string, flags: unknown, mode: unknown) =>
     vfs.openFile(path, toSafeNumber(flags), toSafeNumber(mode));
   host._vfsRead = (fd: unknown, length: unknown) =>

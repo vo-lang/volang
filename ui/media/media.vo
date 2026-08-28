@@ -1,0 +1,372 @@
+// Package media defines playback, timed tracks, capture, permission, recovery,
+// and teardown contracts. Platform hosts implement the narrow interfaces;
+// application and component code retain one portable state machine.
+package media
+
+import (
+	"context"
+	"errors"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/assets"
+	"github.com/vo-lang/ui/graphics"
+	"math"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	MaxTracks = 128
+	MaxCues = 100000
+	MaxDevices = 256
+)
+
+type PlaybackState int64
+const (
+	Idle PlaybackState = iota
+	Loading
+	Ready
+	Playing
+	Paused
+	Ended
+	Failed
+	Closed
+)
+
+type TrackKind int64
+const (
+	AudioTrack TrackKind = iota
+	VideoTrack
+	SubtitleTrack
+	CaptionTrack
+)
+
+type Track struct { ID string; Kind TrackKind; Label string; Language string; Default bool }
+type Cue struct { Start time.Duration; End time.Duration; Text string }
+
+func ValidateCues(cues []Cue) error {
+	if len(cues) > MaxCues { return errors.New("media cue limit exceeded") }
+	previous := time.Duration(-1)
+	for _, cue := range cues {
+		if cue.Start < 0 || cue.End <= cue.Start || cue.Start < previous || len(cue.Text) > 65536 {
+			return errors.New("media cue is invalid or out of order")
+		}
+		previous = cue.Start
+	}
+	return nil
+}
+
+type EventKind int64
+const (
+	StateChanged EventKind = iota
+	PositionChanged
+	TrackChanged
+	BufferingChanged
+	PlaybackError
+)
+
+type Event struct { Kind EventKind; State PlaybackState; Position time.Duration; Message string }
+type Host interface {
+	Open(context.Context, string, assets.Source) error
+	Control(context.Context, string, string, float64) error
+	Close(context.Context, string) error
+}
+
+type Session struct {
+	mu sync.Mutex
+	id string
+	source assets.Source
+	state PlaybackState
+	position time.Duration
+	duration time.Duration
+	volume float64
+	rate float64
+	tracks []Track
+	errorMessage string
+	host Host
+	generation uint64
+}
+
+func NewSession(id string, source assets.Source, host Host) (*Session, error) {
+	if id == "" || len(id) > 1024 || host == nil { return nil, errors.New("media session identity or host is invalid") }
+	if err := source.Validate(); err != nil { return nil, err }
+	if source.Kind != assets.Audio && source.Kind != assets.Video { return nil, errors.New("media source kind must be audio or video") }
+	return &Session{id: id, source: source, state: Idle, volume: 1, rate: 1, host: host}, nil
+}
+
+func (session *Session) Open(ctx context.Context) error {
+	session.mu.Lock()
+	if session.state != Idle { session.mu.Unlock(); return errors.New("media session can only open from idle") }
+	session.state = Loading; session.generation++; generation := session.generation
+	id := session.id; source := session.source; host := session.host
+	session.mu.Unlock()
+	if err := host.Open(ctx, id, source); err != nil {
+		session.mu.Lock(); defer session.mu.Unlock()
+		if session.generation != generation || session.state == Closed { return context.Canceled }
+		session.state = Failed; session.errorMessage = err.Error(); return err
+	}
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.generation != generation || session.state == Closed { return context.Canceled }
+	session.state = Ready; return nil
+}
+
+func (session *Session) control(ctx context.Context, action string, value float64, next PlaybackState) error {
+	session.mu.Lock()
+	if session.state == Closed || session.state == Failed || session.state == Idle || session.state == Loading {
+		session.mu.Unlock(); return errors.New("media control is unavailable in the current state")
+	}
+	id := session.id; host := session.host; generation := session.generation
+	session.mu.Unlock()
+	if err := host.Control(ctx, id, action, value); err != nil {
+		session.mu.Lock(); defer session.mu.Unlock()
+		if session.generation != generation || session.state == Closed { return context.Canceled }
+		return err
+	}
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.generation != generation || session.state == Closed { return context.Canceled }
+	session.state = next; return nil
+}
+
+func (session *Session) Play(ctx context.Context) error { return session.control(ctx, "play", 0, Playing) }
+func (session *Session) Pause(ctx context.Context) error { return session.control(ctx, "pause", 0, Paused) }
+
+func (session *Session) Seek(ctx context.Context, position time.Duration) error {
+	if position < 0 { return errors.New("media seek position cannot be negative") }
+	if err := session.control(ctx, "seek", float64(position)/float64(time.Second), session.State()); err != nil { return err }
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.state == Closed { return context.Canceled }
+	session.position = position; return nil
+}
+
+func (session *Session) SetVolume(ctx context.Context, volume float64) error {
+	if math.IsNaN(volume) || math.IsInf(volume, 0) || volume < 0 || volume > 1 { return errors.New("media volume is invalid") }
+	if err := session.control(ctx, "volume", volume, session.State()); err != nil { return err }
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.state == Closed { return context.Canceled }
+	session.volume = volume; return nil
+}
+
+func (session *Session) SetRate(ctx context.Context, rate float64) error {
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0.25 || rate > 4 { return errors.New("media playback rate is invalid") }
+	if err := session.control(ctx, "rate", rate, session.State()); err != nil { return err }
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.state == Closed { return context.Canceled }
+	session.rate = rate; return nil
+}
+
+func (session *Session) SetTracks(tracks []Track) error {
+	if len(tracks) > MaxTracks { return errors.New("media track limit exceeded") }
+	seen := make(map[string]bool)
+	for _, track := range tracks {
+		if track.ID == "" || len(track.ID) > 1024 || seen[track.ID] || track.Kind < AudioTrack || track.Kind > CaptionTrack {
+			return errors.New("media track is invalid or duplicated")
+		}
+		seen[track.ID] = true
+	}
+	session.mu.Lock(); session.tracks = append([]Track(nil), tracks...); session.mu.Unlock(); return nil
+}
+
+func (session *Session) Close(ctx context.Context) error {
+	session.mu.Lock()
+	if session.state == Closed { session.mu.Unlock(); return nil }
+	session.state = Closed; session.generation++; id := session.id; host := session.host
+	session.mu.Unlock()
+	return host.Close(ctx, id)
+}
+
+func (session *Session) State() PlaybackState { session.mu.Lock(); defer session.mu.Unlock(); return session.state }
+func (session *Session) Error() string { session.mu.Lock(); defer session.mu.Unlock(); return session.errorMessage }
+
+func (session *Session) projection() string {
+	session.mu.Lock(); defer session.mu.Unlock()
+	return "VMS1|" + strconv.FormatInt(int64(session.state), 10) + "|" +
+		strconv.FormatInt(int64(session.position), 10) + "|" + strconv.FormatFloat(session.volume, 'g', -1, 64) + "|" +
+		strconv.FormatFloat(session.rate, 'g', -1, 64)
+}
+
+func Player(session *Session, description string, poster string) ui.View {
+	if session == nil || description == "" { panic("media player requires a session and accessible description") }
+	kind := "audio"; if session.source.Kind == assets.Video { kind = "video" }
+	view := ui.PlatformView(kind, session.projection(), description)
+	view = ui.Source(view, session.source.URI)
+	if poster != "" { view = ui.Poster(view, poster) }
+	program := graphics.NewProgram(graphics.Limits{MaxCommands: 8, MaxEncodedBytes: 4096})
+	program.Clear(0xff10141c)
+	label := "Audio media"; if kind == "video" { label = "Video media" }
+	program.DrawText(graphics.Point{X: 20, Y: 42}, label, 0xfff4f5f7, 18)
+	program.DrawText(graphics.Point{X: 20, Y: 68}, "Portable host fallback", 0xffa2a9b3, 13)
+	fallback := graphics.Canvas(program, description + " fallback")
+	return ui.Stack(fallback, view)
+}
+
+type PermissionState int64
+const (
+	PermissionPrompt PermissionState = iota
+	PermissionGranted
+	PermissionDenied
+	PermissionUnavailable
+)
+
+type CaptureKind int64
+const (
+	Camera CaptureKind = iota
+	Microphone
+	Screen
+)
+
+type CaptureRequest struct {
+	Kind CaptureKind
+	DeviceID string
+	Width int
+	Height int
+	FrameRate float64
+	EchoCancellation bool
+}
+
+func (request CaptureRequest) Validate() error {
+	if request.Kind < Camera || request.Kind > Screen || len(request.DeviceID) > 1024 || request.Width < 0 || request.Width > 16384 ||
+		request.Height < 0 || request.Height > 16384 || math.IsNaN(request.FrameRate) || math.IsInf(request.FrameRate, 0) ||
+		request.FrameRate < 0 || request.FrameRate > 480 {
+		return errors.New("media capture request is invalid")
+	}
+	return nil
+}
+
+type CaptureStream struct { ID string; Kind CaptureKind; Tracks []Track }
+type CaptureHost interface {
+	Permission(context.Context, CaptureKind) (PermissionState, error)
+	Start(context.Context, CaptureRequest) (CaptureStream, error)
+	Stop(context.Context, string) error
+}
+
+func ValidateStream(stream CaptureStream) error {
+	if stream.ID == "" || len(stream.ID) > 1024 || len(stream.Tracks) > MaxTracks || strings.ContainsAny(stream.ID, "\x00\r\n") {
+		return errors.New("media capture stream is invalid")
+	}
+	seen := make(map[string]bool)
+	for _, track := range stream.Tracks {
+		if track.ID == "" || len(track.ID) > 1024 || seen[track.ID] || track.Kind < AudioTrack || track.Kind > CaptionTrack {
+			return errors.New("media capture stream contains an invalid or duplicated track")
+		}
+		seen[track.ID] = true
+	}
+	return nil
+}
+
+var ErrPermissionDenied = errors.New("media capture permission denied")
+var ErrCaptureUnavailable = errors.New("media capture is unavailable")
+
+type CaptureState int64
+const (
+	CaptureIdle CaptureState = iota
+	CaptureRequesting
+	CaptureReady
+	CaptureStarting
+	Capturing
+	CaptureStopping
+	CaptureStopped
+	CaptureFailed
+	CaptureClosed
+)
+
+// CaptureSession serializes permission, start, stop, and close operations. A
+// generation token prevents a late platform completion from reviving a closed
+// or superseded session.
+type CaptureSession struct {
+	mu sync.Mutex
+	request CaptureRequest
+	host CaptureHost
+	state CaptureState
+	permission PermissionState
+	stream CaptureStream
+	errorMessage string
+	generation uint64
+}
+
+func NewCaptureSession(request CaptureRequest, host CaptureHost) (*CaptureSession, error) {
+	if host == nil { return nil, errors.New("media capture host is required") }
+	if err := request.Validate(); err != nil { return nil, err }
+	return &CaptureSession{request: request, host: host, state: CaptureIdle, permission: PermissionPrompt}, nil
+}
+
+func (session *CaptureSession) recordFailure(generation uint64, err error) error {
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.generation != generation || session.state == CaptureClosed { return context.Canceled }
+	session.state = CaptureFailed; session.errorMessage = err.Error(); return err
+}
+
+func (session *CaptureSession) RequestPermission(ctx context.Context) error {
+	session.mu.Lock()
+	if session.state != CaptureIdle { session.mu.Unlock(); return errors.New("media capture permission can only be requested from idle") }
+	session.state = CaptureRequesting; session.generation++; generation := session.generation
+	host := session.host; kind := session.request.Kind
+	session.mu.Unlock()
+	permission, err := host.Permission(ctx, kind)
+	if err != nil { return session.recordFailure(generation, err) }
+	session.mu.Lock()
+	if session.generation != generation || session.state == CaptureClosed { session.mu.Unlock(); return context.Canceled }
+	session.permission = permission
+	if permission == PermissionGranted { session.state = CaptureReady; session.errorMessage = ""; session.mu.Unlock(); return nil }
+	var rejected error
+	if permission == PermissionDenied { rejected = ErrPermissionDenied } else { rejected = ErrCaptureUnavailable }
+	session.state = CaptureFailed; session.errorMessage = rejected.Error(); session.mu.Unlock(); return rejected
+}
+
+func (session *CaptureSession) Start(ctx context.Context) error {
+	session.mu.Lock()
+	if session.state != CaptureReady && session.state != CaptureStopped {
+		session.mu.Unlock(); return errors.New("media capture cannot start in the current state")
+	}
+	session.state = CaptureStarting; session.generation++; generation := session.generation
+	host := session.host; request := session.request
+	session.mu.Unlock()
+	stream, err := host.Start(ctx, request)
+	if err != nil { return session.recordFailure(generation, err) }
+	if err = ValidateStream(stream); err != nil {
+		if stream.ID != "" { _ = host.Stop(context.Background(), stream.ID) }
+		return session.recordFailure(generation, err)
+	}
+	if stream.Kind != request.Kind {
+		_ = host.Stop(context.Background(), stream.ID)
+		return session.recordFailure(generation, errors.New("media capture stream kind does not match the request"))
+	}
+	session.mu.Lock()
+	if session.generation != generation || session.state == CaptureClosed {
+		session.mu.Unlock()
+		_ = host.Stop(context.Background(), stream.ID)
+		return context.Canceled
+	}
+	session.stream = stream; session.state = Capturing; session.errorMessage = ""; session.mu.Unlock(); return nil
+}
+
+func (session *CaptureSession) Stop(ctx context.Context) error {
+	session.mu.Lock()
+	if session.state == CaptureStopped { session.mu.Unlock(); return nil }
+	if session.state != Capturing { session.mu.Unlock(); return errors.New("media capture is not active") }
+	session.state = CaptureStopping; session.generation++; generation := session.generation
+	host := session.host; id := session.stream.ID
+	session.mu.Unlock()
+	if err := host.Stop(ctx, id); err != nil { return session.recordFailure(generation, err) }
+	session.mu.Lock(); defer session.mu.Unlock()
+	if session.generation != generation || session.state == CaptureClosed { return context.Canceled }
+	session.stream = CaptureStream{}; session.state = CaptureStopped; return nil
+}
+
+func (session *CaptureSession) Close(ctx context.Context) error {
+	session.mu.Lock()
+	if session.state == CaptureClosed { session.mu.Unlock(); return nil }
+	id := ""; if session.state == Capturing || session.state == CaptureStopping { id = session.stream.ID }
+	session.state = CaptureClosed; session.generation++; host := session.host; session.stream = CaptureStream{}
+	session.mu.Unlock()
+	if id != "" { return host.Stop(ctx, id) }
+	return nil
+}
+
+func (session *CaptureSession) State() CaptureState { session.mu.Lock(); defer session.mu.Unlock(); return session.state }
+func (session *CaptureSession) PermissionState() PermissionState { session.mu.Lock(); defer session.mu.Unlock(); return session.permission }
+func (session *CaptureSession) Stream() CaptureStream {
+	session.mu.Lock(); defer session.mu.Unlock()
+	stream := session.stream; stream.Tracks = append([]Track(nil), stream.Tracks...); return stream
+}
+func (session *CaptureSession) Error() string { session.mu.Lock(); defer session.mu.Unlock(); return session.errorMessage }

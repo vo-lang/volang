@@ -320,6 +320,18 @@ fn case_uses_only_compile_failure_targets(
             .all(|target| target_supports_expected_compile_failure(test_config, target)))
 }
 
+fn target_applies_to_resolved_case(
+    target_name: &str,
+    target: &TestTarget,
+    resolved_targets: &HashSet<&str>,
+) -> bool {
+    resolved_targets.contains(target_name)
+        || target
+            .compatible_with
+            .as_deref()
+            .is_some_and(|compatible| resolved_targets.contains(compatible))
+}
+
 fn parse_u64_expect_min(
     case: &ManifestCase,
     table: &toml::map::Map<String, toml::Value>,
@@ -410,9 +422,9 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
         if resolved_targets.is_empty() && expect.kind != "fail" {
             bail!("case {} must declare matrix or targets", case.id);
         }
-        let mut target_names = HashSet::new();
+        let mut target_names: HashSet<&str> = HashSet::new();
         for target in &resolved_targets {
-            if !target_names.insert(target) {
+            if !target_names.insert(target.as_str()) {
                 bail!("case {} has duplicate target {}", case.id, target);
             }
         }
@@ -421,7 +433,10 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
             if !skip_names.insert(target) {
                 bail!("case {} has duplicate skip target {}", case.id, target);
             }
-            if !target_names.contains(target) {
+            let skip_target = targets
+                .get(target)
+                .ok_or_else(|| anyhow!("case {} references unknown target {}", case.id, target))?;
+            if !target_applies_to_resolved_case(target, skip_target, &target_names) {
                 bail!(
                     "case {} skips target {} that is not in targets",
                     case.id,
@@ -435,10 +450,10 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
             }
         }
         for (target, timeout_sec) in &case.timeout {
-            if !targets.contains_key(target) {
-                bail!("case {} has timeout for unknown target {}", case.id, target);
-            }
-            if !target_names.contains(target) {
+            let timeout_target = targets.get(target).ok_or_else(|| {
+                anyhow!("case {} has timeout for unknown target {}", case.id, target)
+            })?;
+            if !target_applies_to_resolved_case(target, timeout_target, &target_names) {
                 bail!(
                     "case {} has timeout for target {} that is not in targets",
                     case.id,
@@ -1483,11 +1498,14 @@ mod tests {
                     name: name.to_string(),
                     kind: kind.to_string(),
                     backend: name.to_string(),
+                    compatible_with: None,
+                    inherit_compatible_skips: true,
                     env: BTreeMap::new(),
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
                     runner_command: Vec::new(),
+                    prepare_commands: Vec::new(),
                 },
             );
         }
@@ -1533,11 +1551,14 @@ mod tests {
                     name: name.to_string(),
                     kind: "native".to_string(),
                     backend: backend.to_string(),
+                    compatible_with: None,
+                    inherit_compatible_skips: true,
                     env,
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
                     runner_command: Vec::new(),
+                    prepare_commands: Vec::new(),
                 },
             );
         }
@@ -1711,6 +1732,38 @@ mod tests {
             !case_uses_only_compile_failure_targets(&expected_failure_case("native"), &config)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn compatible_derived_target_can_declare_its_own_skip_and_timeout() {
+        use crate::test_config::TestTarget;
+
+        let resolved = HashSet::from(["wasm"]);
+        let target = TestTarget {
+            name: "wasm-aot".to_string(),
+            kind: "wasm".to_string(),
+            backend: "wasm-aot".to_string(),
+            compatible_with: Some("wasm".to_string()),
+            inherit_compatible_skips: false,
+            env: BTreeMap::new(),
+            default_timeout_sec: 20,
+            build_command: Vec::new(),
+            release_build_args: Vec::new(),
+            runner_command: Vec::new(),
+            prepare_commands: Vec::new(),
+        };
+
+        assert!(target_applies_to_resolved_case(
+            "wasm-aot", &target, &resolved
+        ));
+        let mut unrelated = target.clone();
+        unrelated.name = "unrelated".to_string();
+        unrelated.compatible_with = None;
+        assert!(!target_applies_to_resolved_case(
+            "unrelated",
+            &unrelated,
+            &resolved
+        ));
     }
 
     #[test]

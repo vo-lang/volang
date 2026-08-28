@@ -2,7 +2,6 @@ use crate::dev_bench;
 use crate::dev_clean;
 use crate::dev_gc_perf;
 use crate::dev_loc;
-use crate::dev_studio;
 use crate::test_config::load_test_config;
 use crate::test_system;
 use anyhow::{anyhow, bail, Context, Result};
@@ -27,9 +26,6 @@ pub(crate) fn cmd_dpy(root: &Path, mut args: Vec<String>) -> Result<()> {
         "bench" => dev_bench::cmd_bench(root, args),
         "loc" => dev_loc::cmd_loc(root, args),
         "clean" => dev_clean::cmd_clean(root, args),
-        "studio" => dev_studio::cmd_studio(root, args, false),
-        "studio-native" => dev_studio::cmd_studio(root, args, true),
-        "studio-stop" => dev_studio::cmd_studio_stop(root),
         "-h" | "--help" | "help" => {
             print_dpy_usage();
             Ok(())
@@ -222,6 +218,6 @@ fn prepend(first: &str, args: Vec<String>) -> Vec<String> {
 
 fn print_dpy_usage() {
     println!(
-        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--runner] [project]\n  ./d.py studio-native [--runner] [project]\n  ./d.py studio-stop\n  ./d.py run <file.vo> [--mode=vm|jit] [--release] [--codegen]\n  ./d.py vo <args...>"
+        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py run <file.vo> [--mode=vm|jit] [--release] [--codegen]\n  ./d.py vo <args...>"
     );
 }

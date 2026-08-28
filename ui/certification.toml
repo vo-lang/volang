@@ -1,0 +1,73 @@
+schema_version = 1
+product = "Volang UI"
+framework_version = "0.1.4"
+certification_level = "foundation"
+roadmap = "ui/roadmap.toml"
+product_roadmap = "ui/product-roadmap.toml"
+protocols = ["VUP1", "VUA1", "VUB1", "VUI1", "VUE1", "VUS1", "VAX1", "VPX1", "VWX1"]
+
+[[gate]]
+id = "workspace-test"
+summary = "Every Rust workspace target and repository contract test passes."
+commands = ["cargo test --workspace --all-targets --locked"]
+evidence = [".github/workflows/ci.yml#quality_rust"]
+
+[[gate]]
+id = "workspace-clippy"
+summary = "The complete workspace is warning-free under strict Clippy."
+commands = ["cargo clippy --workspace --all-targets --locked -- -D warnings"]
+evidence = [".github/workflows/ci.yml#quality_rust"]
+
+[[gate]]
+id = "no-std-check"
+summary = "Renderer-neutral UI foundations compile for wasm32 without std."
+commands = ["cargo check --locked --target wasm32-unknown-unknown -p vo-ui-core -p vo-ui-protocol -p vo-ui-reactive -p vo-ui-plan -p vo-ui-artifact -p vo-ui-runtime -p vo-ui-scheduler -p vo-ui-session -p vo-ui-system -p vo-ui-web --no-default-features"]
+evidence = [".github/workflows/ci.yml#wasm_web"]
+
+[[gate]]
+id = "renderer-conformance"
+summary = "Headless, Web, desktop, accessibility, layout, paint, and goldens share one contract."
+commands = ["cargo test --locked -p vo-ui-headless -p vo-ui-web -p vo-ui-desktop -p vo-ui-accessibility -p vo-ui-layout -p vo-ui-paint -p vo-ui-golden"]
+evidence = ["ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/uikit.paint.txt", "ui/testdata/goldens/uikit.web.txt"]
+
+[[gate]]
+id = "vm-jit-aot-differential"
+summary = "Official UI behavior and lowering agree across VM, JIT, Native AOT, and Core Wasm AOT."
+commands = ["cargo test --locked -p vo-engine official_ui_", "cargo test --locked -p vo-engine component_bundle_", "cargo test --locked -p vo-ui-vm"]
+evidence = ["lang/crates/vo-engine/src/run.rs", "ui/tests/nested-component-list/main.vo", ".github/workflows/ci.yml#language_native", ".github/workflows/ci.yml#wasm_web", ".github/workflows/ci.yml#ui_platform"]
+
+[[gate]]
+id = "web-browser-suite"
+summary = "Real browser VM and Wasm AOT flows cover DOM, input, IME, accessibility, navigation, resources, modal focus, and rollback."
+commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser", "npm --prefix lang/crates/vo-web run test:data-application-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
+evidence = ["lang/crates/vo-web/tests/ui_protocol.test.mjs", "lang/crates/vo-web/js/browser_smoke.ts", "ui/tests/nested-component-list/main.vo", "ui/showcases/component-gallery/main.vo", "ui/showcases/data-application/main.vo", "ui/showcases/content-site/main.vo", "apps/studio/app/app.vo", "eng/run-browser-smoke.mjs", ".github/workflows/ci.yml#wasm_web"]
+
+[[gate]]
+id = "desktop-platform-suite"
+summary = "Linux, macOS, and Windows exercise native services, the desktop shell, WGPU presentation, and one real VM/JIT and Native AOT window."
+commands = ["cargo test --locked -p vo-ui-shell-native --features desktop-window"]
+evidence = [".github/workflows/ci.yml#ui_platform", "apps/studio/host-native/src/main.rs", "ui/showcases/component-gallery/main.vo", "ui/showcases/data-application/main.vo", "ui/docs/platform-capabilities.md"]
+
+[[gate]]
+id = "accessibility-suite"
+summary = "Semantic goldens and AccessKit platform projections pass on all desktop targets."
+commands = ["cargo test --locked -p vo-ui-accessibility -p vo-ui-accesskit"]
+evidence = ["ui/testdata/goldens/uikit.accessibility.txt", ".github/workflows/ci.yml#ui_platform"]
+
+[[gate]]
+id = "performance-budget"
+summary = "Zero-allocation direct updates plus p95 frame, interaction, and 256-row keyed-component budgets are enforced in optimized code."
+commands = ["cargo run --locked --profile release-native -p vo-ui-benchmark"]
+evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", ".github/workflows/ci.yml#ui_platform"]
+
+[[gate]]
+id = "examples-and-templates"
+summary = "The bundled registry, starter, UIKit examples, inspector, snapshots, and interactions are exercised."
+commands = ["cargo test --locked -p vo ui_", "cargo test --locked -p vo pure_volang_studio_starter_opens_edits_saves_and_runs"]
+evidence = ["ui/templates/default/main.vo", "ui/examples/dashboard/main.vo", "ui/examples/settings/main.vo", "ui/examples/menu/main.vo", "apps/studio/examples/examples.vo", "apps/studio/app/app.vo"]
+
+[[gate]]
+id = "release-certification"
+summary = "Every target archive binds both AOT runtimes and the complete Web runtime, then builds and mounts packaged UI applications."
+commands = ["cargo test --locked -p vo-dev release_"]
+evidence = [".github/workflows/release.yml#build", "ui/docs/release-policy.md", "docs/aot.md"]

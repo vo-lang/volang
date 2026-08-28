@@ -1,0 +1,31 @@
+[package]
+name = "vo-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Official frontend framework facade for Volang"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+vo-ui-accessibility.workspace = true
+vo-ui-artifact.workspace = true
+vo-ui-core.workspace = true
+vo-ui-desktop.workspace = true
+vo-ui-kit.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-reactive.workspace = true
+vo-ui-reload.workspace = true
+vo-ui-runtime.workspace = true
+vo-ui-scheduler.workspace = true
+vo-ui-session.workspace = true
+vo-ui-system.workspace = true
+vo-ui-web.workspace = true

@@ -718,6 +718,7 @@ pub unsafe fn set_checked(
     }
 }
 
+#[cfg(any(feature = "std", test))]
 pub(crate) unsafe fn set_checked_deferred(
     gc: &mut Gc,
     m: GcRef,
@@ -738,6 +739,7 @@ pub(crate) unsafe fn set_checked_deferred(
     }
 }
 
+#[cfg(any(feature = "std", test))]
 pub(crate) unsafe fn set_trusted_scalar_deferred(
     gc: &mut Gc,
     m: GcRef,

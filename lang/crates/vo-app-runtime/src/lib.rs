@@ -66,10 +66,9 @@ mod waker;
 pub use app_session::AppSession;
 #[cfg(any(feature = "std", target_arch = "wasm32"))]
 pub use app_session::{
-    default_hosted_session_limits, encode_vogui_subscription_bindings, HostedAppRuntime,
-    HostedAudioDevice, HostedInstanceGroup, HostedLockedAudioDevice, HostedVoguiEffectCompletion,
-    HostedVoguiSubscription, HostedVoguiSubscriptionBinding, HostedVoguiSubscriptionEvent,
-    HostedVoplayRegistry, HostedVoplaySystem, PendingHostedAppSession, PendingHostedInstanceGroup,
+    default_hosted_session_limits, HostedAppRuntime, HostedAudioDevice, HostedInstanceGroup,
+    HostedLockedAudioDevice, HostedVoplayRegistry, HostedVoplaySystem, PendingHostedAppSession,
+    PendingHostedInstanceGroup,
 };
 pub use audio_device::{
     AudioDeviceFormat, AudioDeviceGeneration, AudioDeviceLeaseBinding, AudioDeviceLeaseHandle,
@@ -114,19 +113,17 @@ pub use endpoint_packet::{
     EndpointChannelBinding, EndpointPacket, EndpointPacketChannelMetrics, EndpointPacketError,
 };
 pub use entry_launch::{
-    certify_entry_launch, decode_entry_launch, decode_target_startup, decode_vogui_target_commit,
-    decode_voplay_engine_command, decode_voplay_tick_commit, scan_module_entry_factories,
-    CertifiedEntryLaunch, EntryDescriptor, EntryFactoryMetadataError, EntryFramework, EntryLaunch,
-    EntryLaunchError, TargetStartup, TargetStartupError, VoguiEntryDescriptor, VoguiTargetCommit,
-    VoplayEngineCommand, VoplayEngineCommandError, VoplayEntryDescriptor, VoplayPublicEngineDesc,
-    VoplayPublicEngineRef, VoplayStartupOperation, VoplayTickCommit, CAPABILITY_VOGUI_RUN_ENTRY,
-    CAPABILITY_VOGUI_TARGET_COMMIT, CAPABILITY_VOGUI_TARGET_INIT,
-    CAPABILITY_VOGUI_TARGET_NEXT_TURN, CAPABILITY_VOPLAY_ENGINE_PAUSE,
-    CAPABILITY_VOPLAY_ENGINE_RESUME, CAPABILITY_VOPLAY_ENGINE_SHUTDOWN,
-    CAPABILITY_VOPLAY_ENGINE_START, CAPABILITY_VOPLAY_ENGINE_STEP, CAPABILITY_VOPLAY_INSTALL_ENTRY,
-    CAPABILITY_VOPLAY_NEW_ENGINE, CAPABILITY_VOPLAY_RUN_ENTRY,
-    CAPABILITY_VOPLAY_TARGET_COMMIT_TICKS, CAPABILITY_VOPLAY_TARGET_NEXT_TICKS,
-    CAPABILITY_VOPLAY_TARGET_START, MAX_ENTRY_INIT_BYTES, MAX_TARGET_STARTUP_BYTES,
+    certify_entry_launch, decode_entry_launch, decode_target_startup, decode_voplay_engine_command,
+    decode_voplay_tick_commit, scan_module_entry_factories, CertifiedEntryLaunch, EntryDescriptor,
+    EntryFactoryMetadataError, EntryFramework, EntryLaunch, EntryLaunchError, TargetStartup,
+    TargetStartupError, VoplayEngineCommand, VoplayEngineCommandError, VoplayEntryDescriptor,
+    VoplayPublicEngineDesc, VoplayPublicEngineRef, VoplayStartupOperation, VoplayTickCommit,
+    CAPABILITY_VOPLAY_ENGINE_PAUSE, CAPABILITY_VOPLAY_ENGINE_RESUME,
+    CAPABILITY_VOPLAY_ENGINE_SHUTDOWN, CAPABILITY_VOPLAY_ENGINE_START,
+    CAPABILITY_VOPLAY_ENGINE_STEP, CAPABILITY_VOPLAY_INSTALL_ENTRY, CAPABILITY_VOPLAY_NEW_ENGINE,
+    CAPABILITY_VOPLAY_RUN_ENTRY, CAPABILITY_VOPLAY_TARGET_COMMIT_TICKS,
+    CAPABILITY_VOPLAY_TARGET_NEXT_TICKS, CAPABILITY_VOPLAY_TARGET_START, MAX_ENTRY_INIT_BYTES,
+    MAX_TARGET_STARTUP_BYTES,
 };
 pub use entry_supervisor::{
     EntryIslandConstructCommand, EntryLaunchCompletion, EntryLaunchId, EntryLaunchRecord,

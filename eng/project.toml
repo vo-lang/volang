@@ -5,17 +5,6 @@ name = "volang"
 module = "github.com/vo-lang/volang"
 
 [[first_party]]
-name = "vogui"
-repository = "vo-lang/vogui"
-local_hint = "../vogui"
-expected_commit = "a5bf43f92f02667dcd339dee8975eb45e1ccf21e"
-
-[[first_party.workspace]]
-name = "js"
-kind = "node"
-path = "js"
-
-[[first_party]]
 name = "voplay"
 repository = "vo-lang/voplay"
 local_hint = "../voplay"

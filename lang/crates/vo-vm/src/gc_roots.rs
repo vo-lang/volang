@@ -83,8 +83,15 @@ impl VmTraceEdge {
     unsafe fn mark(self, gc: &mut vo_runtime::gc::Gc) -> Result<(), MemoryError> {
         match self {
             Self::ExactBase(raw) => {
-                unsafe { gc.mark_gray_exact_base(raw) };
-                Ok(())
+                #[cfg(debug_assertions)]
+                {
+                    gc.try_mark_gray(raw)
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    unsafe { gc.mark_gray_exact_base(raw) };
+                    Ok(())
+                }
             }
             Self::InteriorCapable(raw) => gc.try_mark_gray(raw),
         }
@@ -204,6 +211,7 @@ enum VmRootSource {
         frame: usize,
         func_id: u32,
         pc: usize,
+        bp: usize,
         slot: usize,
     },
     FiberAux {
@@ -229,10 +237,11 @@ impl core::fmt::Display for VmRootSource {
                 frame,
                 func_id,
                 pc,
+                bp,
                 slot,
             } => write!(
                 formatter,
-                "fiber {fiber} frame {frame} function {func_id} pc {pc} slot {slot}"
+                "fiber {fiber} frame {frame} function {func_id} pc {pc} bp {bp} slot {slot}"
             ),
             Self::FiberAux {
                 fiber,
@@ -752,6 +761,10 @@ where
                             fiber,
                             snapshot.fiber_frame_cursor,
                         );
+                        let shadowed_from = fiber
+                            .frames
+                            .get(snapshot.fiber_frame_cursor + 1)
+                            .map_or(usize::MAX, |child| child.bp);
                         let root_count = roots.direct.len().saturating_add(roots.conditional.len());
                         if snapshot.fiber_slot_cursor == 0 {
                             assert!(
@@ -770,10 +783,11 @@ where
                             }
                             let idx = snapshot.fiber_slot_cursor;
                             let (slot, root) = if let Some(&slot) = roots.direct.get(idx) {
-                                let raw = fiber.stack[frame.bp + usize::from(slot)];
+                                let physical = frame.bp + usize::from(slot);
+                                let raw = fiber.stack[physical];
                                 (
                                     usize::from(slot),
-                                    (raw != 0).then(|| {
+                                    (physical < shadowed_from && raw != 0).then(|| {
                                         match func.slot_types[usize::from(slot)] {
                                             vo_runtime::SlotType::GcBase => {
                                                 VmTraceEdge::ExactBase(raw as GcRef)
@@ -790,9 +804,11 @@ where
                             } else {
                                 let conditional = idx - roots.direct.len();
                                 let header = usize::from(roots.conditional[conditional]);
+                                let physical_data = frame.bp + header + 1;
                                 let header_raw = fiber.stack[frame.bp + header];
-                                let data = fiber.stack[frame.bp + header + 1];
-                                let root = (data != 0
+                                let data = fiber.stack[physical_data];
+                                let root = (physical_data < shadowed_from
+                                    && data != 0
                                     && vo_runtime::objects::interface::data_is_gc_ref(header_raw))
                                 .then(|| interface_trace_edge(header_raw, data as GcRef));
                                 (header + 1, root)
@@ -805,6 +821,7 @@ where
                                         frame: snapshot.fiber_frame_cursor,
                                         func_id: frame.func_id,
                                         pc: frame.pc,
+                                        bp: frame.bp,
                                         slot,
                                     },
                                 );
@@ -1450,9 +1467,18 @@ impl Vm {
                                 return;
                             }
                             if edge.mark(gc).is_err() {
+                                let initialization = match source {
+                                    VmRootSource::FiberFrame { func_id, .. } => loaded_module
+                                        .frame_root_maps()
+                                        .function(func_id)
+                                        .and_then(|map| map.initialization_roots_to_clear())
+                                        .map(|roots| format!(" initialization={roots:?}"))
+                                        .unwrap_or_default(),
+                                    _ => String::new(),
+                                };
                                 invalid_vm_root = Some(format!(
-                                    "{source} exposed invalid GC root {:#x}",
-                                    edge.raw() as usize
+                                    "{source} exposed invalid GC root {:#x}{initialization}",
+                                    edge.raw() as usize,
                                 ));
                             }
                         },

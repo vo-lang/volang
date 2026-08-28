@@ -237,31 +237,28 @@ impl<'a> LoopCompiler<'a> {
             return Ok(true);
         }
         if let crate::optimizer::LoweringAction::Replace(replacement) = optimized.action {
-            let value = self.core.lowered_value(replacement).ok_or_else(|| {
-                JitError::Internal(format!(
-                    "OSR GVN replacement value {} is unavailable at pc {}",
-                    replacement.index(),
-                    self.core.current_pc
-                ))
-            })?;
-            let output = *self
-                .core
-                .analysis
-                .ir()
-                .outputs(instruction)
-                .first()
-                .ok_or_else(|| {
-                    JitError::Internal(format!(
-                        "OSR GVN replacement at pc {} has no output",
-                        self.core.current_pc
-                    ))
-                })?;
-            let output = self.core.analysis.ir().value(output);
-            match output.ty {
-                crate::ir::ValueType::Float64 => self.write_var_f64(output.slot, value),
-                _ => self.write_var(output.slot, value),
+            // OSR may enter after the block that materialized a canonical GVN
+            // value. Lower the source instruction when that value is absent.
+            if let Some(value) = self.core.lowered_value(replacement) {
+                let output = *self
+                    .core
+                    .analysis
+                    .ir()
+                    .outputs(instruction)
+                    .first()
+                    .ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "OSR GVN replacement at pc {} has no output",
+                            self.core.current_pc
+                        ))
+                    })?;
+                let output = self.core.analysis.ir().value(output);
+                match output.ty {
+                    crate::ir::ValueType::Float64 => self.write_var_f64(output.slot, value),
+                    _ => self.write_var(output.slot, value),
+                }
+                return Ok(false);
             }
-            return Ok(false);
         }
         match translate_inst(self, instruction)? {
             TranslateResult::Completed => return Ok(false),

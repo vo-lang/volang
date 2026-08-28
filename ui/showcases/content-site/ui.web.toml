@@ -1,0 +1,33 @@
+routes = ["/", "/articles/wasm-aot", "/guides/concurrency", "/search", "/subscribe", "/offline"]
+
+[document]
+language = "en"
+direction = "ltr"
+title = "Volang Field Notes"
+description = "A production content site rendered and activated by Volang UI."
+canonical_url = "https://field-notes.example"
+theme_color = "#315efb"
+
+[[document.assets]]
+href = "/site.css"
+kind = "style"
+
+[[document.assets]]
+href = "/app-icon.svg"
+kind = "icon"
+
+[pwa]
+enabled = true
+name = "Volang Field Notes"
+short_name = "Field Notes"
+start_url = "/"
+scope = "/"
+display = "standalone"
+offline_url = "/offline"
+cache_version = "field-notes-v1"
+
+[security]
+content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+permissions_policy = "camera=(), microphone=(), geolocation=(), payment=()"
+cross_origin_opener_policy = "same-origin"
+require_https = true

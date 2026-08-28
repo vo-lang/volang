@@ -34,6 +34,15 @@ const LOW_PROGRESS_BUDGET_DELTA: u32 = 32;
 const LOW_PROGRESS_EXIT_LIMIT: u8 = 8;
 const DISABLED_LOW_PROGRESS_STREAK: u8 = u8::MAX;
 
+/// Statically linked native entry validated from a versioned AOT image.
+#[derive(Clone)]
+pub struct AotFunctionEntry {
+    pub func_id: u32,
+    pub native: vo_jit::NativeJitFunc,
+    pub metadata: Arc<JitArtifactMetadata>,
+    pub entry_eligibility: JitFrameEntryEligibility,
+}
+
 #[inline]
 fn update_low_progress_streak(streak: &mut u8, result: JitResult, work_consumed: u64) -> bool {
     match result {
@@ -367,6 +376,59 @@ pub struct JitManager {
 unsafe impl Send for JitManager {}
 
 impl JitManager {
+    /// Atomically publish a complete, dense function table owned by the
+    /// process image. AOT entries use the optimizing recovery contract while
+    /// disabling runtime tier training and compilation.
+    pub fn install_aot_functions(
+        &mut self,
+        entries: Vec<AotFunctionEntry>,
+    ) -> Result<(), JitError> {
+        if entries.len() != self.funcs.len() {
+            return Err(JitError::Internal(format!(
+                "AOT function table has {} entries for a module with {} functions",
+                entries.len(),
+                self.funcs.len()
+            )));
+        }
+        for (expected, entry) in entries.iter().enumerate() {
+            if entry.func_id as usize != expected {
+                return Err(JitError::Internal(format!(
+                    "AOT function table must be dense and ordered; expected {expected}, found {}",
+                    entry.func_id
+                )));
+            }
+            if entry.metadata.code_size == 0 {
+                return Err(JitError::Internal(format!(
+                    "AOT function {} has an empty native code range",
+                    entry.func_id
+                )));
+            }
+        }
+
+        for entry in entries {
+            let idx = entry.func_id as usize;
+            let generation = self.funcs[idx].generation.saturating_add(1).max(1);
+            let dispatch = JitDispatchEntry {
+                native: entry.native as *const u8,
+                generation,
+                tier: JitTier::Optimizing as u8,
+                reserved: [0; 7],
+            };
+            let info = &mut self.funcs[idx];
+            info.state = CompileState::Optimizing;
+            info.generation = generation;
+            info.optimizing_failure = None;
+            info.versions = [None, Some(dispatch)];
+            info.compile_error = None;
+            info.full_low_progress_exit_streak = 0;
+            info.metadata = [None, Some(entry.metadata)];
+            info.entry_eligibility = Some(entry.entry_eligibility);
+            self.func_table[idx] = dispatch;
+            self.profiles[idx].tier_up_state = 3;
+        }
+        Ok(())
+    }
+
     fn publish_function_version(
         &mut self,
         func_id: u32,

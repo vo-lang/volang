@@ -1,0 +1,28 @@
+[package]
+name = "vo-ui-accesskit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "AccessKit bridge for Volang UI native accessibility trees"
+publish = false
+
+[dependencies]
+accesskit.workspace = true
+vo-ui-accessibility.workspace = true
+vo-ui-core.workspace = true
+
+[dev-dependencies]
+vo-ui-layout.workspace = true
+vo-ui-protocol.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos = { version = "=0.26.3", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+accesskit_windows = { version = "=0.34.0", default-features = false }
+
+[target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
+accesskit_unix = { version = "=0.22.1", default-features = false, features = ["async-io"] }

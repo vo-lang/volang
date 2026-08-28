@@ -1,0 +1,831 @@
+// Package ui is the official renderer-neutral application framework for Volang.
+// Its public surface is ordinary typed Volang. Development and release backends
+// provide these externs, while the UI compiler lowers recognized construction
+// calls into validated component plans and direct update sites.
+package ui
+
+// View is an opaque declaration consumed by a mounted UI root.
+type View struct {
+	handle uint64
+}
+
+// Typed state cells persist by declaration order for the lifetime of a mounted
+// root. The compiler lowers eligible component-local string, bool, int/int64,
+// and float64 declarations to this contract. Explicit calls remain available
+// for reusable state abstractions and component-library internals.
+type StringState struct {
+	handle uint64
+}
+
+type BoolState struct {
+	handle uint64
+}
+
+type IntState struct {
+	handle uint64
+}
+
+type FloatState struct {
+	handle uint64
+}
+
+// Environment is the inherited, renderer-neutral input to a component tree.
+// Providers are synchronous render scopes; descendants read a stable snapshot
+// and worker goroutines carry explicit values instead of consulting the stack.
+type ColorScheme int64
+
+const (
+	ColorSchemeLight ColorScheme = iota
+	ColorSchemeDark
+)
+
+type LayoutDirection int64
+
+const (
+	DirectionLTR LayoutDirection = iota
+	DirectionRTL
+)
+
+type ContrastPreference int64
+
+const (
+	ContrastStandard ContrastPreference = iota
+	ContrastMore
+)
+
+type Environment struct {
+	Locale string
+	Direction LayoutDirection
+	ColorScheme ColorScheme
+	Contrast ContrastPreference
+	Density float64
+	TextScale float64
+	ReducedMotion bool
+	ViewportWidth float64
+	ViewportHeight float64
+	ScaleFactor float64
+	SafeAreaTop float64
+	SafeAreaRight float64
+	SafeAreaBottom float64
+	SafeAreaLeft float64
+}
+
+var environmentStack []Environment
+
+func DefaultEnvironment() Environment {
+	viewportWidth, viewportHeight, scaleFactor := runtimeViewportMetrics()
+	return Environment{
+		Locale: "en", Direction: DirectionLTR, ColorScheme: ColorSchemeLight, Contrast: ContrastStandard,
+		Density: 1, TextScale: 1, ViewportWidth: viewportWidth, ViewportHeight: viewportHeight,
+		ScaleFactor: scaleFactor,
+	}
+}
+
+func runtimeViewportMetrics() (float64, float64, float64)
+
+func validateEnvironment(environment Environment) {
+	if environment.Locale == "" {
+		panic("UI environment locale cannot be empty")
+	}
+	if environment.Direction != DirectionLTR && environment.Direction != DirectionRTL {
+		panic("UI environment direction is invalid")
+	}
+	if environment.ColorScheme != ColorSchemeLight && environment.ColorScheme != ColorSchemeDark {
+		panic("UI environment color scheme is invalid")
+	}
+	if environment.Contrast != ContrastStandard && environment.Contrast != ContrastMore {
+		panic("UI environment contrast preference is invalid")
+	}
+	if environment.Density <= 0 || environment.TextScale <= 0 || environment.ScaleFactor <= 0 {
+		panic("UI environment density, text scale, and scale factor must be positive")
+	}
+	if environment.ViewportWidth < 0 || environment.ViewportHeight < 0 || environment.SafeAreaTop < 0 ||
+		environment.SafeAreaRight < 0 ||
+		environment.SafeAreaBottom < 0 ||
+		environment.SafeAreaLeft < 0 {
+		panic("UI environment geometry cannot be negative")
+	}
+}
+
+func popEnvironment() {
+	environmentStack = environmentStack[:len(environmentStack) - 1]
+}
+
+// ProvideEnvironment establishes an inherited environment for synchronous
+// descendant construction and restores the previous value even during panic
+// unwinding. Nested providers support locale, direction, and theme islands.
+func ProvideEnvironment(environment Environment, content func() View) View {
+	validateEnvironment(environment)
+	environmentStack = append(environmentStack, environment)
+	defer popEnvironment()
+	return content()
+}
+
+func CurrentEnvironment() Environment {
+	if len(environmentStack) == 0 {
+		return DefaultEnvironment()
+	}
+	return environmentStack[len(environmentStack) - 1]
+}
+
+func ProvideLocale(locale string, direction LayoutDirection, content func() View) View {
+	environment := CurrentEnvironment()
+	environment.Locale = locale
+	environment.Direction = direction
+	return ProvideEnvironment(environment, content)
+}
+
+func ProvideAccessibilityPreferences(textScale float64, reducedMotion bool, contrast ContrastPreference, content func() View) View {
+	environment := CurrentEnvironment()
+	environment.TextScale = textScale
+	environment.ReducedMotion = reducedMotion
+	environment.Contrast = contrast
+	return ProvideEnvironment(environment, content)
+}
+
+// The mounted Island retains event closures in guest memory. Renderers only
+// observe bounded numeric identities, so garbage collection and closure calls
+// remain entirely inside Volang across every execution backend.
+var runtimeHandlers []func(Event)
+
+const runtimeInvalidationHandler uint64 = 4294967295
+
+func registerRuntimeHandler(handler func(Event)) uint64 {
+	id := uint64(len(runtimeHandlers))
+	runtimeHandlers = append(runtimeHandlers, handler)
+	return id
+}
+
+func UseStringState(initial string) StringState
+
+func StringStateValue(state StringState) string
+
+func SetStringState(state StringState, value string)
+
+func UseBoolState(initial bool) BoolState
+
+func BoolStateValue(state BoolState) bool
+
+func SetBoolState(state BoolState, value bool)
+
+func UseIntState(initial int64) IntState
+
+func IntStateValue(state IntState) int64
+
+func SetIntState(state IntState, value int64)
+
+// IntStateAlive is the read-only ownership probe used by structured task
+// cancellation. It returns false after the component scope or state
+// generation has been disposed and never revives a stale handle.
+func IntStateAlive(state IntState) bool
+
+// IntStateCommitted distinguishes a live candidate render handle from state
+// owned by the latest accepted renderer revision. Structured work uses it to
+// begin external effects only after commit.
+func IntStateCommitted(state IntState) bool
+
+func UseFloatState(initial float64) FloatState
+
+func FloatStateValue(state FloatState) float64
+
+func SetFloatState(state FloatState, value float64)
+
+// Derived values are recomputed during every generic render transaction. The
+// UI compiler recognizes these markers so a convenient immutable local does
+// not acquire component-state identity. Direct-mode dependency lowering is a
+// future optimization; current derived components retain the bounded generic
+// path with identical VM/JIT/AOT behavior.
+func DerivedString(value string) string {
+	return value
+}
+
+func DerivedBool(value bool) bool {
+	return value
+}
+
+func DerivedInt(value int64) int64 {
+	return value
+}
+
+func DerivedFloat(value float64) float64 {
+	return value
+}
+
+// Event contains target-independent input data delivered to a typed handler.
+type Event struct {
+	Kind uint16
+	Sequence uint64
+	Text string
+	Checked bool
+	Key string
+	X float64
+	Y float64
+	Code string
+	Modifiers uint8
+	Repeat bool
+	Composing bool
+	Button int16
+	Buttons uint16
+	PointerID int64
+	PointerKind uint8
+	DeltaX float64
+	DeltaY float64
+	ScrollUnit uint8
+	SelectionStartUTF16 int64
+	SelectionLengthUTF16 int64
+}
+
+// Common callback adapters keep application code independent from the
+// renderer event envelope while preserving a single compact runtime ABI.
+// Advanced controls can still consume Event directly when they need several
+// input domains at once.
+func Action(handler func()) func(Event) {
+	return func(event Event) {
+		handler()
+	}
+}
+
+func TextChange(handler func(string)) func(Event) {
+	return func(event Event) {
+		handler(event.Text)
+	}
+}
+
+type TextInputChangeEvent struct {
+	Text string
+	SelectionStartUTF16 int64
+	SelectionLengthUTF16 int64
+}
+
+func TextInputChange(handler func(TextInputChangeEvent)) func(Event) {
+	return func(event Event) {
+		handler(TextInputChangeEvent{
+			Text: event.Text, SelectionStartUTF16: event.SelectionStartUTF16,
+			SelectionLengthUTF16: event.SelectionLengthUTF16,
+		})
+	}
+}
+
+func ToggleChange(handler func(bool)) func(Event) {
+	return func(event Event) {
+		handler(event.Checked)
+	}
+}
+
+type FocusEvent struct {
+	Focused bool
+}
+
+func FocusChange(focused bool, handler func(FocusEvent)) func(Event) {
+	return func(event Event) {
+		handler(FocusEvent{Focused: focused})
+	}
+}
+
+type KeyEvent struct {
+	Key string
+	Code string
+	Modifiers uint8
+	Repeat bool
+	Composing bool
+}
+
+const (
+	ModifierShift uint8 = 1
+	ModifierControl uint8 = 2
+	ModifierAlt uint8 = 4
+	ModifierMeta uint8 = 8
+)
+
+func KeyInput(handler func(KeyEvent)) func(Event) {
+	return func(event Event) {
+		handler(KeyEvent{
+			Key: event.Key, Code: event.Code, Modifiers: event.Modifiers, Repeat: event.Repeat,
+			Composing: event.Composing,
+		})
+	}
+}
+
+type PointerEvent struct {
+	X float64
+	Y float64
+	Button int16
+	Buttons uint16
+	PointerID int64
+	PointerKind uint8
+	Modifiers uint8
+}
+
+func PointerInput(handler func(PointerEvent)) func(Event) {
+	return func(event Event) {
+		handler(PointerEvent{
+			X: event.X, Y: event.Y, Button: event.Button, Buttons: event.Buttons, PointerID: event.PointerID,
+			PointerKind: event.PointerKind, Modifiers: event.Modifiers,
+		})
+	}
+}
+
+type WheelEvent struct {
+	DeltaX float64
+	DeltaY float64
+	Unit uint8
+	Modifiers uint8
+}
+
+func WheelInput(handler func(WheelEvent)) func(Event) {
+	return func(event Event) {
+		handler(WheelEvent{
+			DeltaX: event.DeltaX, DeltaY: event.DeltaY, Unit: event.ScrollUnit, Modifiers: event.Modifiers,
+		})
+	}
+}
+
+type CompositionEvent struct {
+	Text string
+	StartUTF16 int64
+	LengthUTF16 int64
+}
+
+type LayoutEvent struct {
+	Width float64
+	Height float64
+	Revision uint64
+}
+
+func CompositionInput(handler func(CompositionEvent)) func(Event) {
+	return func(event Event) {
+		handler(CompositionEvent{
+			Text: event.Text, StartUTF16: event.SelectionStartUTF16, LengthUTF16: event.SelectionLengthUTF16,
+		})
+	}
+}
+
+// LayoutChange adapts the low-level event ABI to committed border-box size.
+func LayoutChange(handler func(LayoutEvent)) func(Event) {
+	return func(event Event) {
+		handler(LayoutEvent{Width: event.X, Height: event.Y, Revision: event.Sequence})
+	}
+}
+
+// Mount starts one application root. Volang owns component and handler
+// execution, while the platform owns frame presentation and event delivery.
+// Keeping closure calls on the language side gives VM, JIT, Native AOT, and
+// Core Wasm AOT one lifecycle contract without a host-to-guest callback ABI.
+func Mount(root func() View) error {
+	initial := true
+	for {
+		direct := runtimeBegin(initial)
+		var view View
+		if !direct {
+			runtimeHandlers = runtimeHandlers[:0]
+			view = root()
+		}
+		handler, event := runtimeCommitAndWait(view, initial)
+		if handler != runtimeInvalidationHandler {
+			runtimeHandlers[handler](event)
+		}
+		initial = false
+	}
+}
+
+// Invalidate coalesces a worker-goroutine completion into a wake of the owning
+// UI Island. Call it after publishing resource state from a goroutine. Several
+// calls before the Island runs produce one additional render transaction.
+func Invalidate()
+
+// Renderer-neutral navigation. Paths are same-origin absolute application
+// paths beginning with '/'. Browser History and desktop history stacks remain
+// platform details below this API.
+func LocationPath() string
+
+func Navigate(path string)
+
+func ReplaceLocation(path string)
+
+func NavigateBack()
+
+func NavigateForward()
+
+// runtimeBegin opens one deterministic render transaction. These two private
+// externs form the complete platform lifecycle boundary used by Mount.
+func runtimeBegin(initial bool) bool
+
+// Compiler-inserted generic-backend scope boundaries. They let backends that
+// execute the authored component calls retain the same canonical keyed state
+// identity as VUB1 direct execution. Application code never calls them.
+func runtimeEnterComponent(identity string, callSite uint64, keyed bool, key string)
+
+func runtimeExitComponent()
+
+// runtimeCommitAndWait atomically publishes the built root, suspends until one
+// validated event arrives, and returns the guest closure that owns the event.
+func runtimeCommitAndWait(root View, initial bool) (uint64, Event)
+
+// Structural primitives.
+func Fragment(children ...View) View
+
+func Box(children ...View) View
+
+func Row(children ...View) View
+
+func Column(children ...View) View
+
+func Stack(children ...View) View
+
+func Grid(children ...View) View
+
+func Scroll(children ...View) View
+
+// Content and controls.
+func Text(value string) View
+
+// Image and Canvas expose the renderer-neutral graphics primitives. Source
+// resolution and graphics command construction live in the opt-in ui/assets
+// and ui/graphics packages.
+func Image(source string, description string) View {
+	return runtimeImage(source, description)
+}
+
+func runtimeImage(source string, description string) View
+
+func Canvas(program string, description string) View {
+	return runtimeCanvas(program, description)
+}
+
+func runtimeCanvas(program string, description string) View
+
+// PlatformView is the narrow retained slot used by typed platform capability
+// packages such as ui/media. Kind and state are validated by those packages.
+func PlatformView(kind string, state string, description string) View {
+	return runtimePlatformView(kind, state, description)
+}
+
+func runtimePlatformView(kind string, state string, description string) View
+
+func Button(label string, onClick func(Event)) View {
+	return runtimeButton(label, registerRuntimeHandler(onClick))
+}
+
+func runtimeButton(label string, handler uint64) View
+
+func TextInput(value string, placeholder string, onInput func(Event)) View {
+	return runtimeTextInput(value, placeholder, registerRuntimeHandler(onInput))
+}
+
+func runtimeTextInput(value string, placeholder string, handler uint64) View
+
+func TextArea(value string, placeholder string, onInput func(Event)) View {
+	return runtimeTextArea(value, placeholder, registerRuntimeHandler(onInput))
+}
+
+func runtimeTextArea(value string, placeholder string, handler uint64) View
+
+// Toggle is the renderer-native binary control. Label supplies its accessible
+// name; application-visible text belongs in a composed UIKit field.
+func Toggle(checked bool, label string, onChange func(Event)) View {
+	return runtimeToggle(checked, label, registerRuntimeHandler(onChange))
+}
+
+func runtimeToggle(checked bool, label string, handler uint64) View
+
+// Slider is a controlled finite range input. UIKit supplies validation,
+// labeling, value formatting, and the comfortable application-level surface.
+func Slider(value float64, minimum float64, maximum float64, step float64, label string, onChange func(Event)) View {
+	return runtimeSlider(value, minimum, maximum, step, label, registerRuntimeHandler(onChange))
+}
+
+func runtimeSlider(value float64, minimum float64, maximum float64, step float64, label string, handler uint64) View
+
+// Typed compositional modifiers. Calls may be nested in any order; the compiler
+// folds them into the target node and records dynamic arguments as direct slots.
+type Alignment string
+
+const (
+	AlignStart Alignment = "start"
+	AlignCenter Alignment = "center"
+	AlignEnd Alignment = "end"
+	AlignStretch Alignment = "stretch"
+)
+
+type Justification string
+
+const (
+	JustifyStart Justification = "start"
+	JustifyCenter Justification = "center"
+	JustifyEnd Justification = "end"
+	JustifySpaceBetween Justification = "space-between"
+	JustifySpaceAround Justification = "space-around"
+	JustifySpaceEvenly Justification = "space-evenly"
+)
+
+type OverflowMode string
+
+const (
+	OverflowVisible OverflowMode = "visible"
+	OverflowHidden OverflowMode = "hidden"
+	OverflowClip OverflowMode = "clip"
+	OverflowScroll OverflowMode = "scroll"
+	OverflowAuto OverflowMode = "auto"
+)
+
+type PointerEventsMode string
+
+const (
+	PointerEventsAuto PointerEventsMode = "auto"
+	PointerEventsNone PointerEventsMode = "none"
+)
+
+// OverlayLayer orders portal roots while preserving their logical component,
+// event, environment, and accessibility ancestry.
+type OverlayLayer int64
+
+const (
+	OverlayBase OverlayLayer = 0
+	OverlayPopup OverlayLayer = 100
+	OverlayModal OverlayLayer = 200
+	OverlayTooltip OverlayLayer = 300
+)
+
+func Width(view View, value float64) View
+
+func Height(view View, value float64) View
+
+func MinWidth(view View, value float64) View
+
+func MinHeight(view View, value float64) View
+
+func MaxWidth(view View, value float64) View
+
+func MaxHeight(view View, value float64) View
+
+func Flex(view View, value float64) View
+
+func Gap(view View, value float64) View
+
+func Padding(view View, value float64) View
+
+func Background(view View, rgba uint32) View
+
+func Foreground(view View, rgba uint32) View
+
+func FontSize(view View, value float64) View
+
+func FontWeight(view View, value int64) View
+
+func Align(view View, value Alignment) View
+
+func Justify(view View, value Justification) View
+
+func GridColumns(view View, value string) View
+
+// GridTemplateAreas uses slash-separated rows, for example
+// "header header / sidebar main". GridArea assigns a named rectangle to a
+// child. Web and desktop validate the same rectangular-area contract.
+func GridTemplateAreas(view View, value string) View
+
+func GridArea(view View, value string) View
+
+func Overflow(view View, value OverflowMode) View
+
+func Radius(view View, value float64) View
+
+// BorderColor and BorderWidth describe one solid renderer-neutral border.
+// Keeping the border on the target node avoids wrapper-only layout artifacts
+// and gives Web, SSR, headless, and desktop the same geometry contract.
+func BorderColor(view View, rgba uint32) View
+
+func BorderWidth(view View, value float64) View
+
+func ScrollX(view View, value float64) View
+
+func ScrollY(view View, value float64) View
+
+func Disabled(view View, value bool) View
+
+// Checked applies boolean state to custom radio, checkbox, switch, and menu
+// item behaviors. Native form controls continue to use their intrinsic state.
+func Checked(view View, value bool) View
+
+func Role(view View, value string) View
+
+func AccessibleName(view View, value string) View
+
+func AccessibleDescription(view View, value string) View
+
+// AccessibleValue supplies a renderer-independent textual value for custom
+// controls such as progress indicators and meters.
+func AccessibleValue(view View, value string) View
+
+func Required(view View, value bool) View
+
+func Invalid(view View, value bool) View
+
+// Selected, Expanded, Pressed, and Current expose the state vocabulary used by
+// headless UIKit behaviors to browser and native accessibility adapters.
+func Selected(view View, value bool) View
+
+func Expanded(view View, value bool) View
+
+func Pressed(view View, value bool) View
+
+type CurrentToken string
+
+const (
+	CurrentNone CurrentToken = "false"
+	CurrentItem CurrentToken = "true"
+	CurrentPage CurrentToken = "page"
+	CurrentStep CurrentToken = "step"
+	CurrentLocation CurrentToken = "location"
+	CurrentDate CurrentToken = "date"
+	CurrentTime CurrentToken = "time"
+)
+
+func Current(view View, value CurrentToken) View
+
+// Hidden retains component and node identity while excluding the complete
+// subtree from layout, paint, hit testing, focus, and accessibility.
+func Hidden(view View, value bool) View
+
+// AccessibilityHidden keeps a visual subtree in layout and paint while
+// excluding it from browser and desktop accessibility projections.
+func AccessibilityHidden(view View, value bool) View
+
+// Focusable opts a composed semantic control into or out of sequential
+// keyboard focus without requiring a renderer-specific element.
+func Focusable(view View, value bool) View
+
+func Source(view View, value string) View
+
+func ContentType(view View, value string) View
+
+func Fit(view View, value string) View
+
+func Opacity(view View, value float64) View
+
+func Transform(view View, value string) View
+
+func GraphicsProgram(view View, value string) View
+
+func MediaState(view View, value string) View
+
+func Poster(view View, value string) View
+
+// Modal creates one platform-enforced focus and interaction scope. A committed
+// tree may contain at most one active modal. AutoFocus selects its preferred
+// initial target; hosts fall back to the first enabled control, then the modal
+// container itself.
+func Modal(view View, value bool) View
+
+func AutoFocus(view View, value bool) View
+
+// PointerEvents accepts "auto" or "none". Descendants may opt back into hit
+// testing with "auto", which is useful for backdrop-and-panel overlays.
+func PointerEvents(view View, value PointerEventsMode) View
+
+// CapturePointer keeps move, up, and cancellation events routed to this view
+// after a pointer-down sequence crosses its bounds.
+func CapturePointer(view View, value bool) View
+
+// FlowDirection applies inherited logical direction to layout, text, and
+// platform semantics. UIKit roots derive it from CurrentEnvironment.
+func FlowDirection(view View, value LayoutDirection) View
+
+// Portal moves a subtree into the host overlay plane. Siblings with the same
+// layer retain logical tree order, so focus and paint ordering stay stable.
+func Portal(view View, layer OverlayLayer) View
+
+// FocusRequest moves focus after a successful commit when token is positive
+// and differs from the last accepted node/token pair. Incrementing a local
+// token makes validation focus and command-driven focus deterministic.
+func FocusRequest(view View, token int64) View
+
+// Key gives one sibling a stable logical identity across insertion, removal,
+// and reordering. Keys are local to one parent and must be unique there.
+func Key(view View, value string) View
+
+// Controlled text selection offsets use UTF-16 code units on every platform,
+// matching Event.SelectionStartUTF16 and Event.SelectionLengthUTF16.
+func SelectionStartUTF16(view View, start int64) View
+
+func SelectionLengthUTF16(view View, length int64) View
+
+func TestID(view View, value string) View
+
+// Typed event modifiers. Browser and desktop backends populate the same Event
+// fields and preserve handler identity through the renderer protocol.
+func OnClick(view View, handler func(Event)) View {
+	return runtimeOnClick(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnClick(view View, handler uint64) View
+
+func OnSubmit(view View, handler func(Event)) View {
+	return runtimeOnSubmit(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnSubmit(view View, handler uint64) View
+
+func OnFocus(view View, handler func(Event)) View {
+	return runtimeOnFocus(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnFocus(view View, handler uint64) View
+
+func OnBlur(view View, handler func(Event)) View {
+	return runtimeOnBlur(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnBlur(view View, handler uint64) View
+
+func OnKeyDown(view View, handler func(Event)) View {
+	return runtimeOnKeyDown(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnKeyDown(view View, handler uint64) View
+
+// OnKeyDownCapture observes a key before target and bubble listeners. Command
+// scopes use this phase so one shortcut dispatch remains atomic even when the
+// focused control also handles the same key or lives inside a portal.
+func OnKeyDownCapture(view View, handler func(Event)) View {
+	return runtimeOnKeyDownCapture(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnKeyDownCapture(view View, handler uint64) View
+
+func OnKeyUp(view View, handler func(Event)) View {
+	return runtimeOnKeyUp(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnKeyUp(view View, handler uint64) View
+
+func OnPointerDown(view View, handler func(Event)) View {
+	return runtimeOnPointerDown(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnPointerDown(view View, handler uint64) View
+
+func OnPointerMove(view View, handler func(Event)) View {
+	return runtimeOnPointerMove(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnPointerMove(view View, handler uint64) View
+
+func OnPointerUp(view View, handler func(Event)) View {
+	return runtimeOnPointerUp(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnPointerUp(view View, handler uint64) View
+
+func OnPointerCancel(view View, handler func(Event)) View {
+	return runtimeOnPointerCancel(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnPointerCancel(view View, handler uint64) View
+
+func OnScroll(view View, handler func(Event)) View {
+	return runtimeOnScroll(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnScroll(view View, handler uint64) View
+
+func OnCompositionStart(view View, handler func(Event)) View {
+	return runtimeOnCompositionStart(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnCompositionStart(view View, handler uint64) View
+
+func OnCompositionUpdate(view View, handler func(Event)) View {
+	return runtimeOnCompositionUpdate(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnCompositionUpdate(view View, handler uint64) View
+
+func OnCompositionEnd(view View, handler func(Event)) View {
+	return runtimeOnCompositionEnd(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnCompositionEnd(view View, handler uint64) View
+
+// OnSelectionChange reports the complete controlled value and its current
+// UTF-16 selection after pointer, keyboard, or platform selection movement.
+// TextInputChange adapts the Event to the compact typed payload.
+func OnSelectionChange(view View, handler func(Event)) View {
+	return runtimeOnSelectionChange(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnSelectionChange(view View, handler uint64) View
+
+func OnWheel(view View, handler func(Event)) View {
+	return runtimeOnWheel(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnWheel(view View, handler uint64) View
+
+// OnLayout reports a changed committed border-box size. Hosts suppress equal
+// values and reject unbounded layout feedback before it reaches application
+// state. Use LayoutChange for a typed callback.
+func OnLayout(view View, handler func(Event)) View {
+	return runtimeOnLayout(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnLayout(view View, handler uint64) View

@@ -4,13 +4,15 @@ package main
 
 type oversized [4294967296]struct{}
 
-func captureOversized() func() int {
-	value := oversized{}
-	return func() int {
-		return len(value)
-	}
+var value oversized
+
+func escapeOversized() []struct{} {
+	// The backing array remains globally represented while the slice escapes.
+	// This reaches wasm32 address-width verification without first requiring a
+	// target-independent, u16-wide aggregate transfer layout.
+	return value[:]
 }
 
 func main() {
-	_ = captureOversized()
+	_ = escapeOversized()
 }

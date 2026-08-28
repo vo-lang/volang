@@ -322,6 +322,227 @@ fn quote_meta_raw(raw: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Runtime-independent result used by the Core-Wasm AOT regexp support
+/// module. Keeping matching, capture ordering, arbitrary-byte handling, and
+/// replacement expansion here gives the VM and AOT hosts one semantic source.
+#[derive(Debug, Default)]
+pub struct AotRegexpResponse {
+    pub valid: bool,
+    pub scalar0: i64,
+    pub scalar1: i64,
+    pub bytes: Vec<Vec<u8>>,
+    pub integers: Vec<i64>,
+}
+
+/// Stable operation numbers for the private vo-web regexp support ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AotRegexpOperation {
+    MatchString = 0,
+    MatchBytes = 1,
+    FindString = 2,
+    FindStringIndex = 3,
+    FindAllString = 4,
+    ReplaceAllString = 5,
+    ReplaceAllLiteralString = 6,
+    SplitString = 7,
+    FindStringSubmatch = 8,
+    FindAllStringIndexFlat = 9,
+    FindAllStringSubmatchFlat = 10,
+    FindAllStringSubmatchIndexFlat = 11,
+    SubexpNames = 12,
+    FindBytesSubmatchIndex = 13,
+    FindAllBytesIndexFlat = 14,
+    ReplaceAllBytes = 15,
+    ReplaceAllLiteralBytes = 16,
+    QuoteMeta = 17,
+}
+
+impl AotRegexpOperation {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::MatchString,
+            1 => Self::MatchBytes,
+            2 => Self::FindString,
+            3 => Self::FindStringIndex,
+            4 => Self::FindAllString,
+            5 => Self::ReplaceAllString,
+            6 => Self::ReplaceAllLiteralString,
+            7 => Self::SplitString,
+            8 => Self::FindStringSubmatch,
+            9 => Self::FindAllStringIndexFlat,
+            10 => Self::FindAllStringSubmatchFlat,
+            11 => Self::FindAllStringSubmatchIndexFlat,
+            12 => Self::SubexpNames,
+            13 => Self::FindBytesSubmatchIndex,
+            14 => Self::FindAllBytesIndexFlat,
+            15 => Self::ReplaceAllBytes,
+            16 => Self::ReplaceAllLiteralBytes,
+            17 => Self::QuoteMeta,
+            _ => return None,
+        })
+    }
+}
+
+/// Execute one regexp operation without VM-owned values. The support module
+/// serializes this result across its private Wasm boundary; public language
+/// ABI construction remains in the AOT host.
+pub fn aot_regexp_operation(
+    operation: AotRegexpOperation,
+    pattern: &[u8],
+    input: &[u8],
+    replacement: &[u8],
+    n: i64,
+) -> AotRegexpResponse {
+    let mut response = AotRegexpResponse::default();
+    if operation == AotRegexpOperation::QuoteMeta {
+        response.valid = true;
+        response.bytes.push(quote_meta_raw(input));
+        return response;
+    }
+
+    let Some(re) = compile_pattern(pattern) else {
+        if operation == AotRegexpOperation::FindStringIndex {
+            response.scalar0 = -1;
+            response.scalar1 = -1;
+        }
+        return response;
+    };
+    response.valid = true;
+    let view = Utf8View::new(input);
+    match operation {
+        AotRegexpOperation::MatchString | AotRegexpOperation::MatchBytes => {
+            response.scalar0 = i64::from(re.is_match(&view.text));
+        }
+        AotRegexpOperation::FindString => {
+            response.bytes.push(
+                re.find(&view.text)
+                    .map(|found| {
+                        input[view.raw_offset(found.start())..view.raw_offset(found.end())].to_vec()
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        AotRegexpOperation::FindStringIndex => {
+            (response.scalar0, response.scalar1) = re
+                .find(&view.text)
+                .map(|found| {
+                    (
+                        i64::try_from(view.raw_offset(found.start())).unwrap_or(i64::MAX),
+                        i64::try_from(view.raw_offset(found.end())).unwrap_or(i64::MAX),
+                    )
+                })
+                .unwrap_or((-1, -1));
+        }
+        AotRegexpOperation::FindAllString => {
+            response.bytes = all_capture_ranges(&re, &view, n)
+                .into_iter()
+                .map(|captures| {
+                    let (start, end) = captures[0]
+                        .expect("a successful regexp capture set contains the whole match");
+                    input[start..end].to_vec()
+                })
+                .collect();
+        }
+        AotRegexpOperation::ReplaceAllString | AotRegexpOperation::ReplaceAllBytes => {
+            response
+                .bytes
+                .push(replace_all_raw(&re, input, replacement, false));
+        }
+        AotRegexpOperation::ReplaceAllLiteralString
+        | AotRegexpOperation::ReplaceAllLiteralBytes => {
+            response
+                .bytes
+                .push(replace_all_raw(&re, input, replacement, true));
+        }
+        AotRegexpOperation::SplitString => {
+            response.bytes = split_raw(&re, input, n);
+        }
+        AotRegexpOperation::FindStringSubmatch => {
+            response.bytes = first_capture_ranges(&re, &view)
+                .map(|captures| {
+                    captures
+                        .into_iter()
+                        .map(|capture| {
+                            capture
+                                .map(|(start, end)| input[start..end].to_vec())
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        AotRegexpOperation::FindAllStringIndexFlat | AotRegexpOperation::FindAllBytesIndexFlat => {
+            for captures in all_capture_ranges(&re, &view, n) {
+                let (start, end) =
+                    captures[0].expect("a successful regexp capture set contains the whole match");
+                response
+                    .integers
+                    .push(i64::try_from(start).unwrap_or(i64::MAX));
+                response
+                    .integers
+                    .push(i64::try_from(end).unwrap_or(i64::MAX));
+            }
+        }
+        AotRegexpOperation::FindAllStringSubmatchFlat => {
+            response.scalar0 = i64::try_from(re.captures_len()).unwrap_or(i64::MAX);
+            for captures in all_capture_ranges(&re, &view, n) {
+                response.bytes.extend(captures.into_iter().map(|capture| {
+                    capture
+                        .map(|(start, end)| input[start..end].to_vec())
+                        .unwrap_or_default()
+                }));
+            }
+        }
+        AotRegexpOperation::FindAllStringSubmatchIndexFlat => {
+            response.scalar0 = i64::try_from(re.captures_len()).unwrap_or(i64::MAX);
+            for captures in all_capture_ranges(&re, &view, n) {
+                for capture in captures {
+                    if let Some((start, end)) = capture {
+                        response
+                            .integers
+                            .push(i64::try_from(start).unwrap_or(i64::MAX));
+                        response
+                            .integers
+                            .push(i64::try_from(end).unwrap_or(i64::MAX));
+                    } else {
+                        response.integers.extend([-1, -1]);
+                    }
+                }
+            }
+        }
+        AotRegexpOperation::SubexpNames => {
+            response.bytes = re
+                .capture_names_go()
+                .iter()
+                .map(|name| {
+                    name.as_ref()
+                        .map(|name| name.as_bytes().to_vec())
+                        .unwrap_or_default()
+                })
+                .collect();
+        }
+        AotRegexpOperation::FindBytesSubmatchIndex => {
+            if let Some(captures) = first_capture_ranges(&re, &view) {
+                for capture in captures {
+                    if let Some((start, end)) = capture {
+                        response
+                            .integers
+                            .push(i64::try_from(start).unwrap_or(i64::MAX));
+                        response
+                            .integers
+                            .push(i64::try_from(end).unwrap_or(i64::MAX));
+                    } else {
+                        response.integers.extend([-1, -1]);
+                    }
+                }
+            }
+        }
+        AotRegexpOperation::QuoteMeta => unreachable!("handled before pattern compilation"),
+    }
+    response
+}
+
 fn split_raw(re: &CompiledRegex, raw: &[u8], n: i64) -> Vec<Vec<u8>> {
     if n == 0 {
         return Vec::new();

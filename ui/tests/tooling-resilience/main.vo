@@ -1,0 +1,34 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/observability"
+	uitesting "github.com/vo-lang/ui/testing"
+	"time"
+)
+
+func assert(ok bool, message string) { if !ok { panic(message) } }
+
+func App() ui.View { return ui.AccessibleName(ui.Text("tooling-resilience: ok"), "Tooling resilience result") }
+
+func main() {
+	clock := uitesting.NewClock(time.Unix(100, 0))
+	recorder := uitesting.NewRecorder(clock, 2)
+	assert(recorder.Record("input", "first", "a") == nil, "first test event")
+	clock.Advance(10*time.Millisecond)
+	assert(recorder.Record("input", "second", "b") == nil && recorder.Record("commit", "third", "c") == nil, "bounded test events")
+	events := recorder.Events()
+	assert(len(events) == 2 && events[0].Name == "second" && events[1].Sequence == 3 && recorder.Dropped() == 1, "test recorder ring")
+	faults := uitesting.NewFaults(); assert(faults.Set("present/device-loss", 2) == nil, "fault plan")
+	assert(faults.Hit("present/device-loss") && faults.Hit("present/device-loss") && !faults.Hit("present/device-loss") && faults.Pending() == 0, "fault countdown")
+
+	telemetry := observability.New(observability.Limits{MaxRecords: 2, MaxMetrics: 4, MaxAttributes: 4, MaxTextBytes: 1024})
+	assert(telemetry.Emit(observability.Info, "boot", "ready", observability.Attribute{Key: "token", Value: "secret", Sensitive: true}) == nil, "telemetry event")
+	span, err := telemetry.Start("render", "trace-1", observability.Attribute{Key: "route", Value: "/"}); assert(err == nil, "telemetry span")
+	assert(span.End(observability.Info, "presented") == nil && telemetry.AddMetric("frames", 1) == nil, "telemetry completion")
+	recovery := observability.Guard(telemetry, "component.callback", func() { panic("expected failure") })
+	assert(recovery.Recovered && recovery.Message == "expected failure", "panic recovery")
+	records := telemetry.Records(); assert(len(records) == 2 && telemetry.Dropped() == 1, "telemetry ring")
+	assert(records[0].TraceID == "trace-1" && telemetry.Metrics()["frames"] == 1, "trace and metric snapshot")
+	if err := ui.Mount(App); err != nil { panic(err.Error()) }
+}

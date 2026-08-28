@@ -1,0 +1,29 @@
+[package]
+name = "vo-ui-artifact-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.94.0"
+license = "MIT"
+description = "Volang UI component artifact and bundle decoder fuzz targets"
+repository = "https://github.com/vo-lang/volang"
+homepage = "https://volang.dev"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.12"
+vo-ui-artifact = { path = "../../ui/crates/vo-ui-artifact" }
+vo-ui-core = { path = "../../ui/crates/vo-ui-core" }
+vo-ui-plan = { path = "../../ui/crates/vo-ui-plan" }
+
+[[bin]]
+name = "ui_artifact_decoders"
+path = "fuzz_targets/ui_artifact_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -1,0 +1,8 @@
+format = 1
+root = "sha256:dd566bb1109d8a57c6c9e4726b282f1a5666463cc235622579510facab1d7225"
+
+[[module]]
+path = "github.com/vo-lang/ui"
+version = "0.1.4"
+origin = "workspace"
+intent = "sha256:75c48a22b6fa8dd0c544c54d4a70ff7c7616758362df363ddfaf061302b4ddc3"

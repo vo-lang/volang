@@ -300,10 +300,25 @@ macro_rules! export_extensions {
     };
 }
 
+/// Declare this crate as a statically linked extension artifact.
+///
+/// `#[vo_fn]` providers already contribute their entries to the process-wide
+/// linkme table. This macro adds the authoritative module-owner declaration
+/// without exporting the three dynamic-library entry symbols. A native AOT
+/// extension crate should build a `staticlib`, invoke this macro exactly once,
+/// and pass the resulting archive to `vo build --link-extension=PATH`.
+#[macro_export]
+macro_rules! register_static_extension {
+    () => {
+        $crate::__vo_declare_extension_module_owner!();
+    };
+}
+
 /// Prelude module for convenient imports.
 pub mod prelude {
     pub use crate::export_extensions;
     pub use crate::export_wasm_extension_protocol;
+    pub use crate::register_static_extension;
     pub use crate::vo_extension_entry;
     pub use crate::vo_fn;
     pub use crate::vo_wasm_bindgen_export;

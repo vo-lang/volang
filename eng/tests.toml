@@ -21,6 +21,9 @@ targets = ["compile"]
 [matrices.wasm-only]
 targets = ["wasm"]
 
+[matrices.wasm-aot-only]
+targets = ["wasm-aot"]
+
 [matrices.default-gc]
 targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
 
@@ -103,6 +106,22 @@ default_timeout_sec = 60
 build_command = ["wasm-pack", "build", "lang/crates/vo-web", "--target", "web", "--features", "compiler", "--locked"]
 release_build_args = ["--release"]
 runner_command = ["node", "lang/crates/vo-web/test_runner.mjs"]
+
+[[target]]
+name = "wasm-aot"
+kind = "wasm"
+backend = "core-wasm-aot"
+compatible_with = "wasm"
+inherit_compatible_skips = false
+env = { VOWORK = "off" }
+default_timeout_sec = 60
+build_command = ["cargo", "build", "--locked", "-p", "vo"]
+release_build_args = ["--release"]
+prepare_commands = [
+  ["npm", "--prefix", "lang/crates/vo-web", "run", "build:aot-support"],
+  ["npm", "--prefix", "lang/crates/vo-web", "run", "build:js"],
+]
+runner_command = ["node", "lang/crates/vo-web/aot_test_runner.mjs"]
 
 [[target]]
 name = "compile"

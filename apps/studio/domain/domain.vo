@@ -1,0 +1,219 @@
+// Package domain contains Studio's host-independent product vocabulary.
+package domain
+
+import (
+	"time"
+)
+
+type ProjectID string
+
+type HostInfo struct {
+	Platform string
+	Persistent bool
+	RuntimeModes []RuntimeMode
+	CanOpenLocal bool
+	CanSyncRemote bool
+	CanPreview bool
+}
+
+type ProjectKind int64
+
+const (
+	LocalProject ProjectKind = iota
+	BrowserProject
+	RemoteProject
+)
+
+type Project struct {
+	ID ProjectID
+	Name string
+	Root string
+	Kind ProjectKind
+	LastOpenedUnixMillis int64
+	Pinned bool
+	Managed bool
+}
+
+// ProjectFile is one bounded source file carried by a built-in starter.
+// Hosts materialize the complete set transactionally before publishing the
+// project manifest, so the catalog never observes half-created examples.
+type ProjectFile struct {
+	Path string
+	Text string
+}
+
+type FileKind int64
+
+const (
+	SourceFile FileKind = iota
+	Directory
+	ModuleFile
+	DocumentationFile
+	AssetFile
+)
+
+type FileEntry struct {
+	Path string
+	Name string
+	Kind FileKind
+	Depth int
+	ModifiedUnixMillis int64
+}
+
+type DiagnosticSeverity int64
+
+const (
+	DiagnosticHint DiagnosticSeverity = iota
+	DiagnosticInfo
+	DiagnosticWarning
+	DiagnosticError
+)
+
+type Diagnostic struct {
+	Path string
+	Line int
+	Column int
+	EndLine int
+	EndColumn int
+	Severity DiagnosticSeverity
+	Code string
+	Message string
+}
+
+type RuntimeMode int64
+
+const (
+	RuntimeVM RuntimeMode = iota
+	RuntimeJIT
+)
+
+func (mode RuntimeMode) String() string {
+	if mode == RuntimeJIT {
+		return "JIT"
+	}
+	return "VM"
+}
+
+type RunEventKind int64
+
+const (
+	RunStarted RunEventKind = iota
+	RunStdout
+	RunStderr
+	RunDiagnostic
+	RunPreview
+	RunFinished
+)
+
+type RunEvent struct {
+	Kind RunEventKind
+	Text string
+	ExitCode int
+	Duration time.Duration
+	ArtifactID string
+}
+
+type ArtifactKind int64
+
+const (
+	BytecodeArtifact ArtifactKind = iota
+	NativeArtifact
+	WasmArtifact
+	UiArtifact
+)
+
+type Artifact struct {
+	ID string `json:"id"`
+	Kind ArtifactKind `json:"kind"`
+	Entry string `json:"entry"`
+	Bytes []byte `json:"bytes"`
+	Diagnostics []Diagnostic `json:"diagnostics"`
+}
+
+type PreviewState int64
+
+const (
+	PreviewIdle PreviewState = iota
+	PreviewBuilding
+	PreviewReady
+	PreviewFailed
+)
+
+type ConsoleLevel int64
+
+const (
+	ConsoleTrace ConsoleLevel = iota
+	ConsoleInfo
+	ConsoleSuccess
+	ConsoleWarning
+	ConsoleError
+)
+
+type ConsoleEntry struct {
+	Sequence uint64
+	Time time.Time
+	Level ConsoleLevel
+	Source string
+	Text string
+}
+
+type DocPage struct {
+	ID string
+	Title string
+	SectionID string
+	Section string
+	Summary string
+	SourcePath string
+	Markdown string
+}
+
+type DocSection struct {
+	ID string
+	Title string
+}
+
+type RemoteState struct {
+	Provider string
+	Repository string
+	DeleteTarget string
+	Branch string
+	Ahead int
+	Behind int
+	Dirty bool
+	Diverged bool
+	Conflicts int
+	Changes []RemoteChange
+}
+
+type RemoteChange struct {
+	Path string
+	Status string
+	Staged bool
+	Conflict bool
+}
+
+type RemoteDiff struct {
+	Path string
+	Unified string
+	Truncated bool
+}
+
+// ProjectShare describes the two stable entry points produced from one
+// immutable project snapshot. Hosts keep URL construction and snapshot
+// transport outside guest application code; Studio only presents the result.
+type ProjectShare struct {
+	Shareable bool
+	DevelopmentLink string
+	RunnerLink string
+	Reason string
+}
+
+// AccountState contains display-only provider identity. Authentication
+// material remains entirely inside the Native or Web host.
+type AccountState struct {
+	Provider string
+	Connected bool
+	Login string
+	Name string
+	AvatarURL string
+}

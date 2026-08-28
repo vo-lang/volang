@@ -1,0 +1,448 @@
+// Package forms owns typed field state, validation, submission, reset, and
+// accessible field projection. Form models are scoped to mounted components
+// and remain renderer neutral.
+package forms
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	MaxFields = 256
+	MaxForms = 4096
+	MaxFieldBytes = 1024 * 1024
+)
+
+type Validator func(values map[string]string, value string) string
+
+type FieldSpec struct {
+	Name string
+	Label string
+	Initial string
+	Required bool
+	Disabled bool
+	Validate Validator
+}
+
+type Field struct {
+	Name string
+	Label string
+	Value string
+	Initial string
+	Message string
+	Required bool
+	Disabled bool
+	Touched bool
+	Dirty bool
+}
+
+type fieldState struct {
+	spec FieldSpec
+	value string
+	message string
+	touched bool
+}
+
+type SubmitStatus int64
+
+const (
+	SubmitIdle SubmitStatus = iota
+	Submitting
+	SubmitSucceeded
+	SubmitFailed
+)
+
+type Form struct {
+	mu sync.Mutex
+	fields map[string]*fieldState
+	order []string
+	submitStatus SubmitStatus
+	submitMessage string
+	submitGeneration int64
+	submitCancel context.CancelFunc
+	completion *submitCompletion
+	focusToken int64
+}
+
+type submitCompletion struct {
+	generation int64
+	message string
+}
+
+var registryMu sync.Mutex
+
+var registry map[int64]*Form
+
+var owners map[int64]ui.IntState
+
+var nextIdentity int64
+
+var watcher sync.Once
+
+func validateSpecs(specs []FieldSpec) {
+	if len(specs) == 0 || len(specs) > MaxFields {
+		panic("form requires between 1 and 256 fields")
+	}
+	for index, spec := range specs {
+		if spec.Name == "" || spec.Label == "" || len(spec.Initial) > MaxFieldBytes {
+			panic("form field specification is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if specs[previous].Name == spec.Name {
+				panic("form field names must be unique")
+			}
+		}
+	}
+}
+
+func newForm(specs []FieldSpec) *Form {
+	validateSpecs(specs)
+	form := &Form{fields: make(map[string]*fieldState), order: make([]string, 0, len(specs))}
+	for _, spec := range specs {
+		form.fields[spec.Name] = &fieldState{spec: spec, value: spec.Initial}
+		form.order = append(form.order, spec.Name)
+	}
+	return form
+}
+
+// New creates an explicitly owned form, useful for application models and
+// deterministic tests.
+func New(specs ...FieldSpec) *Form {
+	return newForm(specs)
+}
+
+func sweepDisposed() {
+	registryMu.Lock()
+	forms := make([]*Form, 0)
+	for identity, owner := range owners {
+		if ui.IntStateAlive(owner) {
+			continue
+		}
+		forms = append(forms, registry[identity])
+		delete(registry, identity)
+		delete(owners, identity)
+	}
+	registryMu.Unlock()
+	for _, form := range forms {
+		form.Cancel()
+	}
+}
+
+func watchDisposed() {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		sweepDisposed()
+	}
+}
+
+// Use returns one component-scoped form model. Disposal cancels an in-flight
+// submission before removing the model from the bounded registry.
+func Use(specs ...FieldSpec) *Form {
+	validateSpecs(specs)
+	owner := ui.UseIntState(0)
+	identity := ui.IntStateValue(owner)
+	registryMu.Lock()
+	if registry == nil {
+		registry = make(map[int64]*Form)
+		owners = make(map[int64]ui.IntState)
+	}
+	if identity == 0 {
+		if len(registry) >= MaxForms || nextIdentity == 9223372036854775807 {
+			registryMu.Unlock()
+			panic("form scoped registry limit exceeded")
+		}
+		nextIdentity++
+		identity = nextIdentity
+		registry[identity] = newForm(specs)
+		owners[identity] = owner
+		ui.SetIntState(owner, identity)
+	}
+	form := registry[identity]
+	registryMu.Unlock()
+	watcher.Do(func() {
+		go watchDisposed()
+	})
+	if form == nil {
+		panic("form scoped model is unavailable")
+	}
+	return form
+}
+
+func (form *Form) valuesLocked() map[string]string {
+	values := make(map[string]string, len(form.fields))
+	for name, field := range form.fields {
+		values[name] = field.value
+	}
+	return values
+}
+
+// applyCompletionLocked is called only from UI-owned public operations. The
+// worker can publish a mailbox value, while mounted form state changes here.
+func (form *Form) applyCompletionLocked() {
+	completion := form.completion
+	if completion == nil || completion.generation != form.submitGeneration {
+		return
+	}
+	form.completion = nil
+	form.submitCancel = nil
+	if completion.message != "" {
+		form.submitStatus = SubmitFailed
+		form.submitMessage = completion.message
+		return
+	}
+	form.submitStatus = SubmitSucceeded
+	form.submitMessage = ""
+	for _, field := range form.fields {
+		field.spec.Initial = field.value
+	}
+}
+
+func validateField(field *fieldState, values map[string]string) string {
+	if field.spec.Required && strings.TrimSpace(field.value) == "" {
+		return field.spec.Label + " is required"
+	}
+	if field.spec.Validate != nil {
+		return field.spec.Validate(values, field.value)
+	}
+	return ""
+}
+
+func (form *Form) validateLocked(touch bool) bool {
+	values := form.valuesLocked()
+	valid := true
+	for _, name := range form.order {
+		field := form.fields[name]
+		field.message = validateField(field, values)
+		if touch {
+			field.touched = true
+		}
+		if field.message != "" {
+			valid = false
+		}
+	}
+	if !valid && touch {
+		form.focusToken++
+	}
+	return valid
+}
+
+func (form *Form) Set(name string, value string) {
+	if form == nil || len(value) > MaxFieldBytes {
+		panic("form field update is invalid")
+	}
+	form.mu.Lock()
+	form.applyCompletionLocked()
+	field := form.fields[name]
+	if field == nil {
+		form.mu.Unlock()
+		panic("form field does not exist")
+	}
+	if field.spec.Disabled {
+		form.mu.Unlock()
+		return
+	}
+	field.value = value
+	form.validateLocked(false)
+	form.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (form *Form) Touch(name string) {
+	if form == nil {
+		return
+	}
+	form.mu.Lock()
+	form.applyCompletionLocked()
+	field := form.fields[name]
+	if field == nil {
+		form.mu.Unlock()
+		panic("form field does not exist")
+	}
+	field.touched = true
+	field.message = validateField(field, form.valuesLocked())
+	form.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (form *Form) Validate() bool {
+	if form == nil {
+		return false
+	}
+	form.mu.Lock()
+	form.applyCompletionLocked()
+	valid := form.validateLocked(true)
+	form.mu.Unlock()
+	ui.Invalidate()
+	return valid
+}
+
+func (form *Form) Field(name string) Field {
+	if form == nil {
+		return Field{}
+	}
+	form.mu.Lock()
+	defer form.mu.Unlock()
+	form.applyCompletionLocked()
+	field := form.fields[name]
+	if field == nil {
+		panic("form field does not exist")
+	}
+	return Field{
+		Name: name, Label: field.spec.Label, Value: field.value, Initial: field.spec.Initial,
+		Message: field.message, Required: field.spec.Required, Disabled: field.spec.Disabled,
+		Touched: field.touched, Dirty: field.value != field.spec.Initial,
+	}
+}
+
+func (form *Form) Values() map[string]string {
+	if form == nil {
+		return map[string]string{}
+	}
+	form.mu.Lock()
+	defer form.mu.Unlock()
+	form.applyCompletionLocked()
+	return form.valuesLocked()
+}
+
+func (form *Form) Reset() {
+	if form == nil {
+		return
+	}
+	form.Cancel()
+	form.mu.Lock()
+	for _, field := range form.fields {
+		field.value = field.spec.Initial
+		field.message = ""
+		field.touched = false
+	}
+	form.submitStatus = SubmitIdle
+	form.submitMessage = ""
+	form.mu.Unlock()
+	ui.Invalidate()
+}
+
+// Submit snapshots values after validation and gives the worker a cancellable
+// context. Only the matching generation publishes completion.
+func (form *Form) Submit(worker func(context.Context, map[string]string) error) bool {
+	if form == nil || worker == nil {
+		return false
+	}
+	form.mu.Lock()
+	form.applyCompletionLocked()
+	if !form.validateLocked(true) {
+		form.mu.Unlock()
+		ui.Invalidate()
+		return false
+	}
+	if form.submitCancel != nil {
+		form.submitCancel()
+	}
+	form.submitGeneration++
+	generation := form.submitGeneration
+	ctx, cancel := context.WithCancel(context.Background())
+	form.submitCancel = cancel
+	form.submitStatus = Submitting
+	form.submitMessage = ""
+	form.completion = nil
+	values := form.valuesLocked()
+	form.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		err := worker(ctx, values)
+		form.mu.Lock()
+		if form.submitGeneration != generation || ctx.Err() != nil {
+			form.mu.Unlock()
+			return
+		}
+		message := ""
+		if err != nil {
+			message = err.Error()
+		}
+		form.completion = &submitCompletion{generation: generation, message: message}
+		form.mu.Unlock()
+		ui.Invalidate()
+	}()
+	return true
+}
+
+func (form *Form) Cancel() {
+	if form == nil {
+		return
+	}
+	form.mu.Lock()
+	cancel := form.submitCancel
+	form.submitCancel = nil
+	form.submitGeneration++
+	form.completion = nil
+	if form.submitStatus == Submitting {
+		form.submitStatus = SubmitIdle
+	}
+	form.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (form *Form) Status() SubmitStatus {
+	if form == nil {
+		return SubmitIdle
+	}
+	form.mu.Lock()
+	defer form.mu.Unlock()
+	form.applyCompletionLocked()
+	return form.submitStatus
+}
+
+func (form *Form) SubmissionError() string {
+	if form == nil {
+		return ""
+	}
+	form.mu.Lock()
+	defer form.mu.Unlock()
+	form.applyCompletionLocked()
+	return form.submitMessage
+}
+
+// TextField is the renderer-neutral accessible projection for a string field.
+func TextField(form *Form, name string) ui.View {
+	field := form.Field(name)
+	view := ui.TextInput(field.Value, field.Label, func(event ui.Event) {
+		form.Set(name, event.Text)
+	})
+	view = ui.AccessibleName(view, field.Label)
+	view = ui.OnBlur(view, func(event ui.Event) {
+		form.Touch(name)
+	})
+	view = ui.Required(ui.Disabled(view, field.Disabled), field.Required)
+	if field.Touched && field.Message != "" {
+		view = ui.AccessibleDescription(ui.Invalid(view, true), field.Message)
+	}
+	return view
+}
+
+func (form *Form) ErrorSummary() ui.View {
+	if form == nil {
+		return ui.Box()
+	}
+	form.mu.Lock()
+	form.applyCompletionLocked()
+	messages := []string{}
+	for _, name := range form.order {
+		field := form.fields[name]
+		if field.touched && field.message != "" {
+			messages = append(messages, field.message)
+		}
+	}
+	token := form.focusToken
+	form.mu.Unlock()
+	if len(messages) == 0 {
+		return ui.Hidden(ui.Role(ui.Text(""), "alert"), true)
+	}
+	return ui.FocusRequest(ui.Role(ui.Text(strings.Join(messages, ". ")), "alert"), token)
+}

@@ -1,0 +1,33 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/desktop"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/editor"
+)
+
+func assert(ok bool, message string) { if !ok { panic(message) } }
+
+var shared = document.NewText("shared document\nsecond line")
+var primary = editor.New(shared, "file:///shared.vo", "volang")
+var secondary = editor.New(shared, "file:///shared.vo", "volang")
+
+func App() ui.View { return editor.View(primary, editor.DefaultOptions()) }
+
+func main() {
+	assert(primary.SetViewport(editor.Viewport{FirstLine: 0, LineCount: 10, Overscan: 2}) == nil, "primary viewport")
+	assert(secondary.SetViewport(editor.Viewport{FirstLine: 1, LineCount: 10, Overscan: 2}) == nil, "secondary viewport")
+	assert(shared.Apply(document.Edit{Start: 0, End: 6, Text: "linked"}) == nil, "shared edit")
+	assert(primary.Document.Text() == secondary.Document.Text(), "shared model")
+	registry := desktop.NewRegistry()
+	first := desktop.NewWindowID(1, 1); second := desktop.NewWindowID(2, 1)
+	geometry := desktop.Geometry{Width: 900, Height: 640}
+	assert(registry.Open(desktop.WindowOptions{ID: first, Title: "Primary", Geometry: geometry, MinWidth: 320, MinHeight: 240}) == nil, "primary window")
+	assert(registry.Open(desktop.WindowOptions{ID: second, Title: "Secondary", Geometry: geometry, MinWidth: 320, MinHeight: 240}) == nil, "secondary window")
+	closed := registry.Close(first)
+	assert(len(closed) == 1 && closed[0] == first, "independent window close")
+	_, alive := registry.Restore(second, []desktop.Monitor{{ID: "main", WorkArea: desktop.Geometry{Width: 1920, Height: 1080}, Scale: 1, Primary: true}})
+	assert(alive, "secondary survives primary close")
+	if err := ui.Mount(App); err != nil { panic(err.Error()) }
+}

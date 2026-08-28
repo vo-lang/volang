@@ -636,7 +636,7 @@ mod tests {
         release
             .sdk
             .internal_standalone
-            .push("apps/studio/wasm/".to_string());
+            .push("fuzz/example/".to_string());
 
         let error = lint_release_file(&release).unwrap_err();
         assert!(error.to_string().contains("must not end with a separator"));

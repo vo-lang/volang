@@ -469,12 +469,6 @@ fn parse_string<'a>(
     Err("unterminated JSON string")
 }
 
-pub fn parse_json_string_at(input: &str, start: usize) -> Result<(String, usize), &'static str> {
-    let mut pos = start;
-    let value = parse_string(input, input.as_bytes(), &mut pos)?;
-    Ok((value.into_owned(), pos))
-}
-
 fn parse_string_content(s: &str) -> Result<Cow<'_, str>, &'static str> {
     let bytes = s.as_bytes();
     if !bytes.contains(&b'\\') {

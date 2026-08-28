@@ -1,0 +1,839 @@
+// Package resource connects scoped UI state to worker goroutines. Loaders run
+// away from the renderer writer; their bounded completion wake is coalesced by
+// the owning UI Island before the component tree is evaluated again.
+package resource
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/task"
+	"sync"
+	"time"
+)
+
+type Status int64
+
+const (
+	Idle Status = iota
+	Pending
+	Ready
+	Failed
+)
+
+// String is the initial typed resource contract. The key identifies one load
+// generation. Changing it starts a new worker and makes any older completion
+// stale before it can publish a value.
+type String struct {
+	result task.String
+}
+
+func UseString(key string, loader func() (string, error)) String {
+	if loader == nil {
+		panic("resource string loader cannot be nil")
+	}
+	return UseStringContext(key, func(ctx context.Context) (string, error) {
+		return loader()
+	})
+
+}
+
+// UseStringContext is the cancellation-aware compatibility resource. It uses
+// the structured task mailbox, keeping worker goroutines away from mounted UI
+// state and dropping stale generations before the UI Island applies them.
+func UseStringContext(key string, loader func(context.Context) (string, error)) String {
+	if loader == nil {
+		panic("resource string loader cannot be nil")
+	}
+	return String{result: task.UseString(key, loader)}
+}
+
+func (resource String) Status() Status {
+	return Status(resource.result.Status())
+}
+
+func (resource String) IsPending() bool {
+	return resource.Status() == Pending
+}
+
+func (resource String) IsReady() bool {
+	return resource.Status() == Ready
+}
+
+func (resource String) IsFailed() bool {
+	return resource.Status() == Failed
+}
+
+func (resource String) Value() string {
+	return resource.result.Value()
+}
+
+func (resource String) Error() string {
+	return resource.result.Error()
+}
+
+const (
+	DefaultCapacity = 64
+	MaxCapacity = 4096
+	MaxKeyBytes = 16 * 1024
+)
+
+// Policy controls how long successful and failed cache entries remain fresh.
+// A zero duration keeps that result until explicit invalidation or eviction.
+type Policy struct {
+	MaxAge time.Duration
+	RetryAfter time.Duration
+}
+
+func DefaultPolicy() Policy {
+	return Policy{MaxAge: 5 * time.Minute, RetryAfter: time.Second}
+}
+
+// RetryPolicy uses bounded deterministic exponential backoff. Applications
+// can decide which failures are transient without exposing an error object to
+// render code.
+type RetryPolicy struct {
+	MaxAttempts int64
+	BaseDelay time.Duration
+	MaxDelay time.Duration
+	ShouldRetry func(attempt int64, message string) bool
+}
+
+func NoRetry() RetryPolicy {
+	return RetryPolicy{MaxAttempts: 1}
+}
+
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{MaxAttempts: 3, BaseDelay: 100 * time.Millisecond, MaxDelay: time.Second}
+}
+
+func (policy RetryPolicy) validate() {
+	if policy.MaxAttempts < 1 || policy.MaxAttempts > 16 || policy.BaseDelay < 0 || policy.MaxDelay < 0 {
+		panic("resource retry policy is outside bounded limits")
+	}
+	if policy.MaxDelay != 0 && policy.BaseDelay > policy.MaxDelay {
+		panic("resource retry base delay cannot exceed its maximum delay")
+	}
+}
+
+func (policy RetryPolicy) Backoff(failedAttempt int64) time.Duration {
+	policy.validate()
+	if failedAttempt < 1 {
+		panic("resource retry attempt must be positive")
+	}
+	delay := policy.BaseDelay
+	for attempt := int64(1); attempt < failedAttempt; attempt++ {
+		if policy.MaxDelay != 0 && delay >= policy.MaxDelay / 2 {
+			return policy.MaxDelay
+		}
+		delay *= 2
+	}
+	if policy.MaxDelay != 0 && delay > policy.MaxDelay {
+		return policy.MaxDelay
+	}
+	return delay
+}
+
+func (policy RetryPolicy) allows(attempt int64, message string) bool {
+	if attempt >= policy.MaxAttempts {
+		return false
+	}
+	return policy.ShouldRetry == nil || policy.ShouldRetry(attempt, message)
+}
+
+// LoadString executes a cancellation-aware loader with deterministic retry.
+// MaxAttempts includes the first call.
+func LoadString(ctx context.Context, policy RetryPolicy, loader func(context.Context) (string, error)) (string, error) {
+	if ctx == nil || loader == nil {
+		panic("resource retry requires a context and loader")
+	}
+	policy.validate()
+	for attempt := int64(1); ; attempt++ {
+		value, err := loader(ctx)
+		if err == nil || ctx.Err() != nil || !policy.allows(attempt, err.Error()) {
+			return value, err
+		}
+		delay := policy.Backoff(attempt)
+		if delay == 0 {
+			continue
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+type QueryPolicy struct {
+	Cache Policy
+	Retry RetryPolicy
+}
+
+func DefaultQueryPolicy() QueryPolicy {
+	return QueryPolicy{Cache: DefaultPolicy(), Retry: DefaultRetryPolicy()}
+}
+
+// UseQueryString joins concurrent reads through Cache and applies the same
+// retry policy on every target.
+func UseQueryString(cache *Cache, key string, policy QueryPolicy, loader func(context.Context) (string, error)) CachedString {
+	policy.Retry.validate()
+	return UseCachedString(cache, key, policy.Cache, func(ctx context.Context) (string, error) {
+		return LoadString(ctx, policy.Retry, loader)
+	})
+}
+
+type DispatchPolicy int64
+
+const (
+	Join DispatchPolicy = iota
+	Latest
+	Queue
+)
+
+type Dispatch struct {
+	Start bool
+	Joined bool
+	Queued bool
+	Generation int64
+	CancelGeneration int64
+	Key string
+}
+
+// Coordinator makes joining, latest-wins, and FIFO queue admission explicit.
+// It owns scheduling metadata only; callers retain task and cancellation scope.
+type Coordinator struct {
+	mu sync.Mutex
+	policy DispatchPolicy
+	capacity int
+	activeKey string
+	activeGeneration int64
+	nextGeneration int64
+	queue []string
+}
+
+func NewCoordinator(policy DispatchPolicy, capacity int) *Coordinator {
+	if policy < Join || policy > Queue || capacity < 1 || capacity > MaxCapacity {
+		panic("resource coordinator policy or capacity is invalid")
+	}
+	return &Coordinator{policy: policy, capacity: capacity}
+}
+
+func (coordinator *Coordinator) beginLocked(key string) Dispatch {
+	coordinator.nextGeneration++
+	coordinator.activeKey = key
+	coordinator.activeGeneration = coordinator.nextGeneration
+	return Dispatch{Start: true, Generation: coordinator.activeGeneration, Key: key}
+}
+
+func (coordinator *Coordinator) Begin(key string) Dispatch {
+	if coordinator == nil || key == "" || len(key) > MaxKeyBytes {
+		panic("resource coordinator requires a bounded key")
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if coordinator.activeGeneration == 0 {
+		return coordinator.beginLocked(key)
+	}
+	if coordinator.policy == Join && coordinator.activeKey == key {
+		return Dispatch{Joined: true, Generation: coordinator.activeGeneration, Key: key}
+	}
+	if coordinator.policy == Latest {
+		previous := coordinator.activeGeneration
+		next := coordinator.beginLocked(key)
+		next.CancelGeneration = previous
+		return next
+	}
+	if len(coordinator.queue) >= coordinator.capacity {
+		panic("resource coordinator queue capacity exceeded")
+	}
+	coordinator.queue = append(coordinator.queue, key)
+	return Dispatch{Queued: true, Generation: coordinator.activeGeneration, Key: key}
+}
+
+// Complete ignores stale generations. FIFO mode returns the next admitted
+// request; other modes become idle.
+func (coordinator *Coordinator) Complete(generation int64) Dispatch {
+	if coordinator == nil {
+		return Dispatch{}
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if generation == 0 || generation != coordinator.activeGeneration {
+		return Dispatch{}
+	}
+	coordinator.activeGeneration = 0
+	coordinator.activeKey = ""
+	if coordinator.policy == Latest || len(coordinator.queue) == 0 {
+		return Dispatch{}
+	}
+	next := coordinator.queue[0]
+	coordinator.queue = coordinator.queue[1:]
+	return coordinator.beginLocked(next)
+}
+
+type OptimisticString struct {
+	Value string
+	Previous string
+	Generation int64
+	Pending bool
+	Message string
+}
+
+func BeginOptimisticString(current string, optimistic string, generation int64) OptimisticString {
+	if generation < 1 {
+		panic("resource optimistic generation must be positive")
+	}
+	return OptimisticString{Value: optimistic, Previous: current, Generation: generation, Pending: true}
+}
+
+func (mutation OptimisticString) Commit(generation int64, value string) OptimisticString {
+	if !mutation.Pending || mutation.Generation != generation {
+		return mutation
+	}
+	mutation.Value = value
+	mutation.Previous = value
+	mutation.Pending = false
+	mutation.Message = ""
+	return mutation
+}
+
+func (mutation OptimisticString) Revert(generation int64, message string) OptimisticString {
+	if !mutation.Pending || mutation.Generation != generation {
+		return mutation
+	}
+	mutation.Value = mutation.Previous
+	mutation.Pending = false
+	mutation.Message = message
+	return mutation
+}
+
+type Page struct {
+	Index int64
+	Size int64
+	Total int64
+}
+
+func NewPage(index int64, size int64, total int64) Page {
+	if index < 0 || size < 1 || size > 1000 || total < 0 {
+		panic("resource page is outside bounded limits")
+	}
+	return Page{Index: index, Size: size, Total: total}
+}
+
+func (page Page) Offset() int64 {
+	return page.Index * page.Size
+}
+
+func (page Page) Count() int64 {
+	if page.Total == 0 {
+		return 0
+	}
+	return (page.Total + page.Size - 1) / page.Size
+}
+
+func (page Page) HasPrevious() bool {
+	return page.Index > 0
+}
+
+func (page Page) HasNext() bool {
+	return page.Index + 1 < page.Count()
+}
+
+type CursorPage struct {
+	Before string
+	After string
+	Limit int64
+}
+
+func NewCursorPage(before string, after string, limit int64) CursorPage {
+	if (before != "" && after != "") || limit < 1 || limit > 1000 {
+		panic("resource cursor page is invalid")
+	}
+	return CursorPage{Before: before, After: after, Limit: limit}
+}
+
+// Cache is a bounded, goroutine-safe request cache. One cache instance is an
+// explicit resource namespace, so independent packages cannot collide on a
+// textual key. Concurrent reads of one pending key join the same load.
+type Cache struct {
+	mu sync.Mutex
+	entries map[string]*entry
+	capacity int
+	clock int64
+	hits int64
+	misses int64
+	joins int64
+	loads int64
+	evicted int64
+	canceled int64
+}
+
+type entry struct {
+	generation int64
+	kind string
+	status Status
+	stringValue string
+	boolValue bool
+	intValue int64
+	floatValue float64
+	message string
+	updated time.Time
+	touched int64
+	cancel context.CancelFunc
+}
+
+// Stats is a consistent cache snapshot useful for tests and developer tools.
+type Stats struct {
+	Entries int
+	Hits int64
+	Misses int64
+	Joins int64
+	Loads int64
+	Evictions int64
+	Cancellations int64
+}
+
+// Cached is the common immutable result carried by typed cache adapters.
+type Cached struct {
+	status Status
+	stringValue string
+	boolValue bool
+	intValue int64
+	floatValue float64
+	message string
+}
+
+func (result Cached) Status() Status {
+	return result.status
+}
+
+func (result Cached) IsPending() bool {
+	return result.status == Pending
+}
+
+func (result Cached) IsReady() bool {
+	return result.status == Ready
+}
+
+func (result Cached) IsFailed() bool {
+	return result.status == Failed
+}
+
+func (result Cached) Error() string {
+	return result.message
+}
+
+func NewCache(capacity int) *Cache {
+	if capacity <= 0 || capacity > MaxCapacity {
+		panic("resource cache capacity must be between 1 and 4096")
+	}
+	return &Cache{entries: make(map[string]*entry), capacity: capacity}
+}
+
+func (cache *Cache) initializeLocked() {
+	if cache.entries == nil {
+		cache.entries = make(map[string]*entry)
+	}
+	if cache.capacity == 0 {
+		cache.capacity = DefaultCapacity
+	}
+}
+
+func validateRequest(key string, policy Policy) {
+	if len(key) == 0 || len(key) > MaxKeyBytes {
+		panic("resource cache key must contain between 1 and 16384 bytes")
+	}
+	if policy.MaxAge < 0 || policy.RetryAfter < 0 {
+		panic("resource cache durations cannot be negative")
+	}
+}
+
+func isFresh(item *entry, policy Policy, now time.Time) bool {
+	if item.status == Ready {
+		return policy.MaxAge == 0 || now.Sub(item.updated) < policy.MaxAge
+	}
+	if item.status == Failed {
+		return policy.RetryAfter == 0 || now.Sub(item.updated) < policy.RetryAfter
+	}
+	return false
+}
+
+func snapshot(item *entry) Cached {
+	return Cached{
+		status: item.status, stringValue: item.stringValue, boolValue: item.boolValue,
+		intValue: item.intValue, floatValue: item.floatValue, message: item.message,
+	}
+}
+
+func (cache *Cache) evictLocked(protected string) context.CancelFunc {
+	if len(cache.entries) < cache.capacity {
+		return nil
+	}
+	victimKey := ""
+	var victim *entry
+	for key, candidate := range cache.entries {
+		if key == protected {
+			continue
+		}
+		if victim == nil || candidate.touched < victim.touched ||
+			(candidate.touched == victim.touched && key < victimKey) {
+			victimKey = key
+			victim = candidate
+		}
+	}
+	if victim == nil {
+		return nil
+	}
+	delete(cache.entries, victimKey)
+	cache.evicted++
+	if victim.status == Pending && victim.cancel != nil {
+		cache.canceled++
+		return victim.cancel
+	}
+	return nil
+}
+
+// begin returns the current typed result and reserves at most one load
+// generation for a missing or expired key.
+func (cache *Cache) begin(key string, kind string, policy Policy) (Cached, bool, int64, context.Context) {
+	if cache == nil {
+		panic("resource cache cannot be nil")
+	}
+	validateRequest(key, policy)
+	now := time.Now()
+	cache.mu.Lock()
+	cache.initializeLocked()
+	cache.clock++
+	item := cache.entries[key]
+	if item != nil {
+		if item.kind != kind {
+			cache.mu.Unlock()
+			panic("resource cache key reused with a different value type")
+		}
+		item.touched = cache.clock
+		if item.status == Pending {
+			cache.joins++
+			result := snapshot(item)
+			cache.mu.Unlock()
+			return result, false, 0, nil
+		}
+		if isFresh(item, policy, now) {
+			cache.hits++
+			result := snapshot(item)
+			cache.mu.Unlock()
+			return result, false, 0, nil
+		}
+	}
+	cache.misses++
+	cache.loads++
+	generation := int64(1)
+	if item != nil {
+		generation = item.generation + 1
+	}
+	var evictedCancel context.CancelFunc
+	if item == nil {
+		evictedCancel = cache.evictLocked(key)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	item = &entry{
+		generation: generation, kind: kind, status: Pending, touched: cache.clock, cancel: cancel,
+	}
+	cache.entries[key] = item
+	result := snapshot(item)
+	cache.mu.Unlock()
+	if evictedCancel != nil {
+		evictedCancel()
+	}
+	return result, true, generation, ctx
+}
+
+// preparePublish returns the current entry with the cache mutex held. A nil
+// result means cancellation or a newer generation won and the lock is free.
+func (cache *Cache) preparePublish(key string, generation int64, ctx context.Context) *entry {
+	cache.mu.Lock()
+	item := cache.entries[key]
+	if item == nil || item.generation != generation || ctx.Err() != nil {
+		cache.mu.Unlock()
+		return nil
+	}
+	return item
+}
+
+// finishPublish consumes the cache mutex acquired by preparePublish.
+func (cache *Cache) finishPublish(item *entry, err error) {
+	item.cancel = nil
+	item.updated = time.Now()
+	if err != nil {
+		item.status = Failed
+		item.message = err.Error()
+	} else {
+		item.status = Ready
+		item.message = ""
+	}
+	cache.mu.Unlock()
+	ui.Invalidate()
+}
+
+// Invalidate removes a key and cancels its pending loader, if any. The next
+// Load starts a fresh generation.
+func (cache *Cache) Invalidate(key string) bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	cache.initializeLocked()
+	item := cache.entries[key]
+	if item == nil {
+		cache.mu.Unlock()
+		return false
+	}
+	delete(cache.entries, key)
+	var cancel context.CancelFunc
+	if item.status == Pending && item.cancel != nil {
+		cache.canceled++
+		cancel = item.cancel
+	}
+	cache.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
+}
+
+// Cancel is an alias with request-oriented wording.
+func (cache *Cache) Cancel(key string) bool {
+	return cache.Invalidate(key)
+}
+
+func (cache *Cache) Clear() {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	cache.initializeLocked()
+	cancels := make([]context.CancelFunc, 0)
+	for _, item := range cache.entries {
+		if item.status == Pending && item.cancel != nil {
+			cache.canceled++
+			cancels = append(cancels, item.cancel)
+		}
+	}
+	cache.entries = make(map[string]*entry)
+	cache.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (cache *Cache) Stats() Stats {
+	if cache == nil {
+		return Stats{}
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.initializeLocked()
+	return Stats{
+		Entries: len(cache.entries), Hits: cache.hits, Misses: cache.misses, Joins: cache.joins,
+		Loads: cache.loads, Evictions: cache.evicted, Cancellations: cache.canceled,
+	}
+}
+
+type CachedString struct {
+	result Cached
+}
+
+func UseCachedString(cache *Cache, key string, policy Policy, loader func(context.Context) (string, error)) CachedString {
+	if loader == nil {
+		panic("resource string loader cannot be nil")
+	}
+	result, start, generation, ctx := cache.begin(key, "string", policy)
+	if start {
+		go func() {
+			value, err := loader(ctx)
+			item := cache.preparePublish(key, generation, ctx)
+			if item == nil {
+				return
+			}
+			if err == nil {
+				item.stringValue = value
+			}
+			cache.finishPublish(item, err)
+		}()
+	}
+	return CachedString{result: result}
+}
+
+func (resource CachedString) Status() Status {
+	return resource.result.Status()
+}
+
+func (resource CachedString) IsPending() bool {
+	return resource.result.IsPending()
+}
+
+func (resource CachedString) IsReady() bool {
+	return resource.result.IsReady()
+}
+
+func (resource CachedString) IsFailed() bool {
+	return resource.result.IsFailed()
+}
+
+func (resource CachedString) Error() string {
+	return resource.result.Error()
+}
+
+func (resource CachedString) Value() string {
+	return resource.result.stringValue
+}
+
+type CachedBool struct {
+	result Cached
+}
+
+func UseCachedBool(cache *Cache, key string, policy Policy, loader func(context.Context) (bool, error)) CachedBool {
+	if loader == nil {
+		panic("resource bool loader cannot be nil")
+	}
+	result, start, generation, ctx := cache.begin(key, "bool", policy)
+	if start {
+		go func() {
+			value, err := loader(ctx)
+			item := cache.preparePublish(key, generation, ctx)
+			if item == nil {
+				return
+			}
+			if err == nil {
+				item.boolValue = value
+			}
+			cache.finishPublish(item, err)
+		}()
+	}
+	return CachedBool{result: result}
+}
+
+func (resource CachedBool) Status() Status {
+	return resource.result.Status()
+}
+
+func (resource CachedBool) IsPending() bool {
+	return resource.result.IsPending()
+}
+
+func (resource CachedBool) IsReady() bool {
+	return resource.result.IsReady()
+}
+
+func (resource CachedBool) IsFailed() bool {
+	return resource.result.IsFailed()
+}
+
+func (resource CachedBool) Error() string {
+	return resource.result.Error()
+}
+
+func (resource CachedBool) Value() bool {
+	return resource.result.boolValue
+}
+
+type CachedInt struct {
+	result Cached
+}
+
+func UseCachedInt(cache *Cache, key string, policy Policy, loader func(context.Context) (int64, error)) CachedInt {
+	if loader == nil {
+		panic("resource int loader cannot be nil")
+	}
+	result, start, generation, ctx := cache.begin(key, "int", policy)
+	if start {
+		go func() {
+			value, err := loader(ctx)
+			item := cache.preparePublish(key, generation, ctx)
+			if item == nil {
+				return
+			}
+			if err == nil {
+				item.intValue = value
+			}
+			cache.finishPublish(item, err)
+		}()
+	}
+	return CachedInt{result: result}
+}
+
+func (resource CachedInt) Status() Status {
+	return resource.result.Status()
+}
+
+func (resource CachedInt) IsPending() bool {
+	return resource.result.IsPending()
+}
+
+func (resource CachedInt) IsReady() bool {
+	return resource.result.IsReady()
+}
+
+func (resource CachedInt) IsFailed() bool {
+	return resource.result.IsFailed()
+}
+
+func (resource CachedInt) Error() string {
+	return resource.result.Error()
+}
+
+func (resource CachedInt) Value() int64 {
+	return resource.result.intValue
+}
+
+type CachedFloat struct {
+	result Cached
+}
+
+func UseCachedFloat(cache *Cache, key string, policy Policy, loader func(context.Context) (float64, error)) CachedFloat {
+	if loader == nil {
+		panic("resource float loader cannot be nil")
+	}
+	result, start, generation, ctx := cache.begin(key, "float", policy)
+	if start {
+		go func() {
+			value, err := loader(ctx)
+			item := cache.preparePublish(key, generation, ctx)
+			if item == nil {
+				return
+			}
+			if err == nil {
+				item.floatValue = value
+			}
+			cache.finishPublish(item, err)
+		}()
+	}
+	return CachedFloat{result: result}
+}
+
+func (resource CachedFloat) Status() Status {
+	return resource.result.Status()
+}
+
+func (resource CachedFloat) IsPending() bool {
+	return resource.result.IsPending()
+}
+
+func (resource CachedFloat) IsReady() bool {
+	return resource.result.IsReady()
+}
+
+func (resource CachedFloat) IsFailed() bool {
+	return resource.result.IsFailed()
+}
+
+func (resource CachedFloat) Error() string {
+	return resource.result.Error()
+}
+
+func (resource CachedFloat) Value() float64 {
+	return resource.result.floatValue
+}

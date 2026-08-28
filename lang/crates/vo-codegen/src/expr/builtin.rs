@@ -368,11 +368,15 @@ fn compile_builtin_call_impl(
             // Check for spread: append(a, b...)
             if call.spread && call.args.len() == 2 {
                 // Spread append: append all elements from second slice/string
-                // String and slice have identical memory layout, so vo_slice_append_slice works for both
                 let other_reg = compile_expr(&call.args[1], ctx, func, info)?;
                 let ret_slot_types = vec![SlotType::GcBase];
+                let other_type = info.expr_type(call.args[1].id);
                 let extern_id = ctx.get_or_register_extern_with_return_layout(
-                    "vo_slice_append_slice",
+                    if info.is_string(other_type) {
+                        "vo_slice_append_string"
+                    } else {
+                        "vo_slice_append_slice"
+                    },
                     ret_slot_types.clone(),
                 );
                 let args_reg =
@@ -433,8 +437,12 @@ fn compile_builtin_call_impl(
             }
         }
         "copy" => {
-            // copy(dst, src) - use extern for now
-            let extern_id = ctx.get_or_register_extern("vo_copy");
+            let source_type = info.expr_type(call.args[1].id);
+            let extern_id = ctx.get_or_register_extern(if info.is_string(source_type) {
+                "vo_copy_string"
+            } else {
+                "vo_copy"
+            });
             let args_start = func.alloc_slots(&[SlotType::GcBase, SlotType::GcBase]);
             compile_expr_to(&call.args[0], args_start, ctx, func, info)?;
             compile_expr_to(&call.args[1], args_start + 1, ctx, func, info)?;

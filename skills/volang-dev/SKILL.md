@@ -1,6 +1,6 @@
 ---
 name: volang-dev
-description: Maintain and review the Volang repository across the compiler, module system, bytecode, VM, JIT, GC, stdlib, FFI, CLI, language tests, Web/WASM, Studio, engineering automation, releases, docs, examples, benchmarks, and governed artifacts.
+description: Maintain and review the Volang repository across the compiler, module system, bytecode, VM, JIT, GC, stdlib, FFI, CLI, language tests, Web/WASM, app runtime, engineering automation, releases, docs, examples, benchmarks, and governed artifacts.
 ---
 
 # Volang Development
@@ -21,7 +21,7 @@ description: Maintain and review the Volang repository across the compiler, modu
 - Runtime memory: read `docs/game-memory-architecture.md` for the accepted architecture and `lang/docs/spec/runtime-memory.md` for the normative contract. `vo-runtime/src/gc/heap.rs` owns the Island SpanHeap; `gc.rs` owns policy, leases, telemetry, and collector state; `gc_types.rs` owns resumable object tracing; `vo-vm/src/gc_roots.rs` owns VM root scanning and host controls.
 - Modules and release: `vo-module` owns identity, schemas, authority, solving, lock/cache/readiness, workspaces, and lifecycle; `vo-release` owns user module release staging and publication; `vo-dev release` owns repository release automation.
 - Stdlib and extensions: `lang/stdlib` is the canonical Vo source set; `vo-stdlib` embeds it and supplies portable or `std` host providers; `vo-ffi-macro` validates wrappers against Vo declarations; `vo-runtime::ffi` resolves and freezes providers; `vo-ext` is the extension SDK.
-- Web and apps: `vo-web` owns browser compilation/runtime and VFS; `vo-web/runtime-wasm` supplies WASM host providers; `vo-app-runtime` owns host/session protocol. Studio spans `apps/studio/src`, standalone `apps/studio/wasm`, standalone `apps/studio/src-tauri`, and workspace build scripts.
+- Web and apps: `vo-web` owns browser compilation/runtime and VFS; `vo-web/runtime-wasm` supplies WASM host providers; `vo-app-runtime` owns generic host/session protocol.
 - Commands and tests: `cmd/vo` is the user CLI; `cmd/vo-embed` exercises the embedded path; `cmd/vo-dev` owns repository development commands; `cmd/vo-test` only executes generated native plans and backend differentials.
 - Test and content catalogs: `tests/lang/manifest.toml` owns language cases; `eng/tests.toml` owns targets, aliases, matrices, and environment. Root examples and benchmarks use their manifests; app example catalogs have separate lint/format ownership.
 
@@ -43,8 +43,8 @@ description: Maintain and review the Volang repository across the compiler, modu
 - WASM admission uses 64KiB pages, pre-grows `current + reserve`, and conservatively verifies `current + hard_limit` against the declared maximum.
 - Preserve transactional extern loading: canonical `(package, function)` identity, declared ABI/effects, provider ownership, complete-table resolution, then registry freeze. Current extension macros are `#[vo_fn]` and `#[vostd_fn]`.
 - Keep module-aware builds read-only over `vo.mod` and `vo.lock`; build-time auto-install may authenticate locked bytes into cache. Use explicit `vo mod` lifecycle commands to change the dependency graph.
-- Audit `no_std`, native, WASM, and feature-gated paths where they apply. Native engine, bare `vo-web`, Studio WASM, and Studio Tauri prepare projects and extensions through distinct adapters.
-- For GUI/runtime protocol changes, align event IDs, wait/replay keys, exit codes, render buffering, and island envelopes across stdlib, VM, `vo-app-runtime`, and Studio hosts.
+- Audit `no_std`, native, WASM, and feature-gated paths where they apply. Native engine and bare `vo-web` prepare projects and extensions through distinct adapters.
+- For app/runtime protocol changes, align event IDs, wait/replay keys, exit codes, render buffering, and island envelopes across stdlib, VM, `vo-app-runtime`, and active hosts.
 
 ## Use repository automation deliberately
 
@@ -54,12 +54,12 @@ description: Maintain and review the Volang repository across the compiler, modu
 - Inspect both `vo.work` and `eng/project.toml` for sibling work. Validate local hints and exact repository pins before relying on sibling source.
 - Treat `eng/artifacts.toml` as the governed-artifact registry. Only entries with declared generators are generated; run validators for read-only checks and generators only with authorization to change tracked bytes.
 - Keep source docs in `lang/docs/spec` and `lang/docs/vo-for-gophers.md`; app-visible copies are generated mirrors. Treat `dev-notes` and `outdated` as history, and read status fields before interpreting `lang/docs/dev` plans.
-- For Web, Studio, and release work, inspect the owning workspace scripts and `vo-dev` command implementation before running automation.
+- For Web and release work, inspect the owning workspace scripts and `vo-dev` command implementation before running automation.
 
 ## Validate proportionately
 
 - Pair language cases with owning crate tests. Keep discovered language cases exactly synchronized with `tests/lang/manifest.toml`; select VM, JIT, OSR, GC, nostd, WASM, or compile targets from `eng/tests.toml` according to the contract.
-- For runtime-memory changes, cover SpanHeap reuse/limits, strict GC work bounds, generational reachability, dirty roots/cards, Interpreter and generated-JIT OOM, container backing, cross-Island unpack, lease generation/capacity, child-Island policy, `runtime/mem`, and WASM admission. Run both `vo-runtime` and `vo-vm`; include `vo-jit`, `vo-engine`, `vo-web`, `vo-ext`, and Studio/Voplay owners when their boundary changes.
+- For runtime-memory changes, cover SpanHeap reuse/limits, strict GC work bounds, generational reachability, dirty roots/cards, Interpreter and generated-JIT OOM, container backing, cross-Island unpack, lease generation/capacity, child-Island policy, `runtime/mem`, and WASM admission. Run both `vo-runtime` and `vo-vm`; include `vo-jit`, `vo-engine`, `vo-web`, `vo-ext`, and active app owners when their boundary changes.
 - Distinguish `vo test` for user projects from `./d.py test` or `vo-dev test` for repository regressions.
 - Start narrow, then widen only for affected cross-layer contracts. Useful primitives include:
 
@@ -70,7 +70,6 @@ cargo check -p <crate> --all-targets --locked
 cargo run -q -p vo-dev --locked -- test lint --suite lang --strict
 ```
 
-- Root workspace checks do not cover the standalone Studio WASM and Tauri workspaces; use manifest-specific checks.
 - Run only one Cargo command at a time in the shared worktree unless target directories and fixtures are isolated.
 - Reuse a successful check only while its source, command, configuration, pins, and environment remain unchanged. Avoid stacking overlapping aggregate gates.
 - Report checks run, results, side effects, and material checks left unrun.

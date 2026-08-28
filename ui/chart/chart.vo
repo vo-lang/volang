@@ -1,0 +1,104 @@
+// Package chart builds accessible bounded charts from the public graphics and
+// UIKit contracts. It retains source data and summaries independently from the
+// canvas projection so assistive technology never depends on pixels.
+package chart
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/graphics"
+	"math"
+	"strconv"
+)
+
+const MaxPoints = 100000
+
+type Point struct { Label string; X float64; Y float64 }
+type Series struct { Name string; Color uint32; Points []Point }
+type Bounds struct { Minimum float64; Maximum float64 }
+
+func (bounds Bounds) Validate() {
+	if math.IsNaN(bounds.Minimum) || math.IsInf(bounds.Minimum, 0) || math.IsNaN(bounds.Maximum) ||
+		math.IsInf(bounds.Maximum, 0) || bounds.Maximum <= bounds.Minimum { panic("chart bounds are invalid") }
+}
+
+type Options struct {
+	Width float64
+	Height float64
+	Y Bounds
+	ShowAxes bool
+	AccessibleName string
+	MaxPoints int
+}
+
+func DefaultOptions(name string) Options {
+	return Options{Width: 640, Height: 320, Y: Bounds{Minimum: 0, Maximum: 100}, ShowAxes: true, AccessibleName: name, MaxPoints: MaxPoints}
+}
+
+func validate(series []Series, options Options) int {
+	options.Y.Validate()
+	if options.Width <= 0 || options.Width > 16384 || options.Height <= 0 || options.Height > 16384 ||
+		options.AccessibleName == "" || options.MaxPoints <= 0 || options.MaxPoints > MaxPoints {
+		panic("chart options are invalid")
+	}
+	count := 0
+	for _, item := range series {
+		if item.Name == "" { panic("chart series requires a name") }
+		count += len(item.Points)
+		if count > options.MaxPoints { panic("chart point limit exceeded") }
+		for _, point := range item.Points {
+			if math.IsNaN(point.X) || math.IsInf(point.X, 0) || math.IsNaN(point.Y) || math.IsInf(point.Y, 0) {
+				panic("chart point is invalid")
+			}
+		}
+	}
+	return count
+}
+
+func normalized(value float64, bounds Bounds) float64 {
+	result := (value-bounds.Minimum)/(bounds.Maximum-bounds.Minimum)
+	if result < 0 { return 0 }; if result > 1 { return 1 }; return result
+}
+
+func Bar(series Series, options Options) ui.View {
+	validate([]Series{series}, options)
+	program := graphics.NewProgram(graphics.DefaultLimits())
+	program.Clear(0x00000000)
+	count := len(series.Points)
+	if count > 0 {
+		width := options.Width / float64(count)
+		barWidth := width-2; if barWidth < 0.5 { barWidth = 0.5 }
+		for index, point := range series.Points {
+			height := normalized(point.Y, options.Y) * options.Height
+			program.Fill(graphics.Rect{X: float64(index)*width, Y: options.Height-height, Width: barWidth, Height: height}, series.Color)
+		}
+	}
+	canvas := graphics.Canvas(program, options.AccessibleName)
+	canvas = ui.Width(canvas, options.Width); canvas = ui.Height(canvas, options.Height)
+	return ui.Column(canvas, Summary([]Series{series}, options))
+}
+
+func Line(series []Series, options Options) ui.View {
+	validate(series, options)
+	program := graphics.NewProgram(graphics.DefaultLimits())
+	program.Clear(0x00000000)
+	for _, item := range series {
+		for index := 1; index < len(item.Points); index++ {
+			previous := item.Points[index-1]; current := item.Points[index]
+			program.DrawLine(
+				graphics.Point{X: previous.X, Y: options.Height*(1-normalized(previous.Y, options.Y))},
+				graphics.Point{X: current.X, Y: options.Height*(1-normalized(current.Y, options.Y))}, item.Color, 2,
+			)
+		}
+	}
+	canvas := graphics.Canvas(program, options.AccessibleName)
+	canvas = ui.Width(canvas, options.Width); canvas = ui.Height(canvas, options.Height)
+	return ui.Column(canvas, Summary(series, options))
+}
+
+func Summary(series []Series, options Options) ui.View {
+	children := []ui.View{ui.Text(options.AccessibleName + ". Data summary:")}
+	for _, item := range series {
+		children = append(children, ui.Text(item.Name + ": " + strconv.Itoa(len(item.Points)) + " points"))
+	}
+	return ui.Role(ui.Column(children...), "table")
+}

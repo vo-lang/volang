@@ -1,0 +1,960 @@
+// Package task provides component-scoped structured goroutines for Volang UI.
+// Workers receive a cancellation context and publish typed completions into a
+// bounded mailbox. Only the UI Island applies completions to mounted state.
+package task
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"sync"
+	"time"
+)
+
+type Status int64
+
+const (
+	Idle Status = iota
+	Pending
+	Ready
+	Failed
+	Complete
+)
+
+const (
+	kindString int64 = 1
+	kindBool int64 = 2
+	kindInt int64 = 3
+	kindFloat int64 = 4
+	kindEffect int64 = 5
+	kindStringStream int64 = 6
+	kindBoolStream int64 = 7
+	kindIntStream int64 = 8
+	kindFloatStream int64 = 9
+	maxLiveTasks = 4096
+	maxStreamBacklog = 256
+)
+
+type completion struct {
+	generation int64
+	failed bool
+	message string
+	stringValue string
+	boolValue bool
+	intValue int64
+	floatValue float64
+	terminal bool
+}
+
+type record struct {
+	owner ui.IntState
+	kind int64
+	generation int64
+	cancel context.CancelFunc
+	completion *completion
+	streamQueue []completion
+	cleanup func()
+}
+
+var registryMu sync.Mutex
+
+var registry map[int64]*record
+
+var nextIdentity int64
+
+var watcher sync.Once
+
+func ensureRegistry() {
+	registryMu.Lock()
+	if registry == nil {
+		registry = make(map[int64]*record)
+	}
+	registryMu.Unlock()
+	watcher.Do(func() {
+		go watchDisposedScopes()
+	})
+}
+
+func watchDisposedScopes() {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		sweepDisposedScopes()
+	}
+}
+
+func sweepDisposedScopes() {
+	registryMu.Lock()
+	cancels := make([]context.CancelFunc, 0)
+	cleanups := make([]func(), 0)
+	for identity, item := range registry {
+		if ui.IntStateAlive(item.owner) {
+			continue
+		}
+		delete(registry, identity)
+		if item.cancel != nil {
+			cancels = append(cancels, item.cancel)
+		}
+		if item.cleanup != nil {
+			cleanups = append(cleanups, item.cleanup)
+		}
+	}
+	registryMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for _, cleanup := range cleanups {
+		cleanup()
+	}
+}
+
+func allocate(owner ui.IntState, kind int64) int64 {
+	ensureRegistry()
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if len(registry) >= maxLiveTasks {
+		panic("UI structured task limit exceeded")
+	}
+	if nextIdentity == 9223372036854775807 {
+		panic("UI structured task identity space is exhausted")
+	}
+	nextIdentity++
+	registry[nextIdentity] = &record{owner: owner, kind: kind}
+	return nextIdentity
+}
+
+func requireRecord(identity int64, kind int64) *record {
+	item := registry[identity]
+	if item == nil || item.kind != kind {
+		panic("UI structured task record is unavailable")
+	}
+	return item
+}
+
+func restart(identity int64, kind int64, generation int64) context.Context {
+	registryMu.Lock()
+	item := requireRecord(identity, kind)
+	previous := item.cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	item.generation = generation
+	item.cancel = cancel
+	item.completion = nil
+	item.streamQueue = nil
+	registryMu.Unlock()
+	if previous != nil {
+		previous()
+	}
+	return ctx
+}
+
+func restartStream(identity int64, kind int64, generation int64) context.Context {
+	return restart(identity, kind, generation)
+}
+
+func restartEffect(identity int64, generation int64) context.Context {
+	registryMu.Lock()
+	item := requireRecord(identity, kindEffect)
+	previousCancel := item.cancel
+	previousCleanup := item.cleanup
+	ctx, cancel := context.WithCancel(context.Background())
+	item.generation = generation
+	item.cancel = cancel
+	item.cleanup = nil
+	registryMu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
+	if previousCleanup != nil {
+		go previousCleanup()
+	}
+	return ctx
+}
+
+func startEffect(identity int64, generation int64, ctx context.Context, start func(context.Context) func()) {
+	if ctx.Err() != nil {
+		return
+	}
+	cleanup := start(ctx)
+	registryMu.Lock()
+	item := registry[identity]
+	stale := item == nil || item.kind != kindEffect || item.generation != generation ||
+		ctx.Err() != nil
+	if !stale {
+		item.cleanup = cleanup
+	}
+	registryMu.Unlock()
+	if stale && cleanup != nil {
+		cleanup()
+	}
+}
+
+func publish(identity int64, kind int64, result completion, ctx context.Context) {
+	registryMu.Lock()
+	item := registry[identity]
+	if item == nil || item.kind != kind || item.generation != result.generation || ctx.Err() != nil {
+		registryMu.Unlock()
+		return
+	}
+	item.cancel = nil
+	item.completion = &result
+	registryMu.Unlock()
+	ui.Invalidate()
+}
+
+func take(identity int64, kind int64, generation int64) (completion, bool) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	item := registry[identity]
+	if item == nil || item.kind != kind || item.generation != generation || item.completion == nil {
+		return completion{}, false
+	}
+	result := *item.completion
+	item.completion = nil
+	return result, true
+}
+
+// publishStream provides bounded backpressure to a worker goroutine. The
+// worker owns no mounted state: it can only enqueue a typed completion for the
+// UI Island. A stale generation or cancelled scope closes the emitter.
+func publishStream(identity int64, kind int64, result completion, ctx context.Context) bool {
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		registryMu.Lock()
+		item := registry[identity]
+		if item == nil || item.kind != kind || item.generation != result.generation || ctx.Err() != nil {
+			registryMu.Unlock()
+			return false
+		}
+		if len(item.streamQueue) < maxStreamBacklog {
+			item.streamQueue = append(item.streamQueue, result)
+			registryMu.Unlock()
+			ui.Invalidate()
+			return true
+		}
+		registryMu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func finishStream(identity int64, kind int64, generation int64, err error, ctx context.Context) {
+	result := completion{generation: generation, terminal: true}
+	publishError(&result, err)
+	publishStream(identity, kind, result, ctx)
+}
+
+func takeStream(identity int64, kind int64, generation int64) (completion, bool) {
+	registryMu.Lock()
+	item := registry[identity]
+	if item == nil || item.kind != kind || item.generation != generation || len(item.streamQueue) == 0 {
+		registryMu.Unlock()
+		return completion{}, false
+	}
+	result := item.streamQueue[0]
+	item.streamQueue = item.streamQueue[1:]
+	more := len(item.streamQueue) != 0
+	registryMu.Unlock()
+	if more {
+		ui.Invalidate()
+	}
+	return result, true
+}
+
+func initialize(owner ui.IntState, kind int64) int64 {
+	identity := ui.IntStateValue(owner)
+	if identity != 0 {
+		return identity
+	}
+	identity = allocate(owner, kind)
+	ui.SetIntState(owner, identity)
+	return identity
+}
+
+func publishError(result *completion, err error) {
+	if err != nil {
+		result.failed = true
+		result.message = err.Error()
+	}
+}
+
+func awaitCommitted(owner ui.IntState, ctx context.Context) bool {
+	for {
+		if ctx.Err() != nil || !ui.IntStateAlive(owner) {
+			return false
+		}
+		if ui.IntStateCommitted(owner) {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// UseEffect starts an external effect after the current UI Island yields at
+// its commit boundary. Changing key cancels the previous context before its
+// cleanup runs. Disposing the owning component follows the same order through
+// its generational state handle.
+func UseEffect(key string, start func(context.Context) func()) {
+	if start == nil {
+		panic("UI effect start function cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	identity := initialize(owner, kindEffect)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ctx := restartEffect(identity, currentGeneration)
+		go func() {
+			if awaitCommitted(owner, ctx) {
+				startEffect(identity, currentGeneration, ctx, start)
+			}
+		}()
+	}
+}
+
+type String struct {
+	status ui.IntState
+	value ui.StringState
+	message ui.StringState
+}
+
+func UseString(key string, worker func(context.Context) (string, error)) String {
+	if worker == nil {
+		panic("UI string task worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseStringState("")
+	message := ui.UseStringState("")
+	identity := initialize(owner, kindString)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ctx := restart(identity, kindString, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			loaded, err := worker(ctx)
+			result := completion{generation: currentGeneration, stringValue: loaded}
+			publishError(&result, err)
+			publish(identity, kindString, result, ctx)
+		}()
+	}
+	if result, ok := take(identity, kindString, currentGeneration); ok {
+		if result.failed {
+			ui.SetStringState(message, result.message)
+			ui.SetIntState(status, int64(Failed))
+		} else {
+			ui.SetStringState(value, result.stringValue)
+			ui.SetStringState(message, "")
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return String{status: status, value: value, message: message}
+}
+
+func (result String) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result String) IsPending() bool {
+	return result.Status() == Pending
+}
+
+func (result String) IsReady() bool {
+	return result.Status() == Ready
+}
+
+func (result String) IsFailed() bool {
+	return result.Status() == Failed
+}
+
+func (result String) Value() string {
+	return ui.StringStateValue(result.value)
+}
+
+func (result String) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+type Bool struct {
+	status ui.IntState
+	value ui.BoolState
+	message ui.StringState
+}
+
+func UseBool(key string, worker func(context.Context) (bool, error)) Bool {
+	if worker == nil {
+		panic("UI bool task worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseBoolState(false)
+	message := ui.UseStringState("")
+	identity := initialize(owner, kindBool)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ctx := restart(identity, kindBool, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			loaded, err := worker(ctx)
+			result := completion{generation: currentGeneration, boolValue: loaded}
+			publishError(&result, err)
+			publish(identity, kindBool, result, ctx)
+		}()
+	}
+	if result, ok := take(identity, kindBool, currentGeneration); ok {
+		if result.failed {
+			ui.SetStringState(message, result.message)
+			ui.SetIntState(status, int64(Failed))
+		} else {
+			ui.SetBoolState(value, result.boolValue)
+			ui.SetStringState(message, "")
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return Bool{status: status, value: value, message: message}
+}
+
+func (result Bool) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result Bool) IsPending() bool {
+	return result.Status() == Pending
+}
+
+func (result Bool) IsReady() bool {
+	return result.Status() == Ready
+}
+
+func (result Bool) IsFailed() bool {
+	return result.Status() == Failed
+}
+
+func (result Bool) Value() bool {
+	return ui.BoolStateValue(result.value)
+}
+
+func (result Bool) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+type Int struct {
+	status ui.IntState
+	value ui.IntState
+	message ui.StringState
+}
+
+func UseInt(key string, worker func(context.Context) (int64, error)) Int {
+	if worker == nil {
+		panic("UI int task worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseIntState(0)
+	message := ui.UseStringState("")
+	identity := initialize(owner, kindInt)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ctx := restart(identity, kindInt, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			loaded, err := worker(ctx)
+			result := completion{generation: currentGeneration, intValue: loaded}
+			publishError(&result, err)
+			publish(identity, kindInt, result, ctx)
+		}()
+	}
+	if result, ok := take(identity, kindInt, currentGeneration); ok {
+		if result.failed {
+			ui.SetStringState(message, result.message)
+			ui.SetIntState(status, int64(Failed))
+		} else {
+			ui.SetIntState(value, result.intValue)
+			ui.SetStringState(message, "")
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return Int{status: status, value: value, message: message}
+}
+
+func (result Int) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result Int) IsPending() bool {
+	return result.Status() == Pending
+}
+
+func (result Int) IsReady() bool {
+	return result.Status() == Ready
+}
+
+func (result Int) IsFailed() bool {
+	return result.Status() == Failed
+}
+
+func (result Int) Value() int64 {
+	return ui.IntStateValue(result.value)
+}
+
+func (result Int) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+type Float struct {
+	status ui.IntState
+	value ui.FloatState
+	message ui.StringState
+}
+
+func UseFloat(key string, worker func(context.Context) (float64, error)) Float {
+	if worker == nil {
+		panic("UI float task worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseFloatState(0)
+	message := ui.UseStringState("")
+	identity := initialize(owner, kindFloat)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ctx := restart(identity, kindFloat, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			loaded, err := worker(ctx)
+			result := completion{generation: currentGeneration, floatValue: loaded}
+			publishError(&result, err)
+			publish(identity, kindFloat, result, ctx)
+		}()
+	}
+	if result, ok := take(identity, kindFloat, currentGeneration); ok {
+		if result.failed {
+			ui.SetStringState(message, result.message)
+			ui.SetIntState(status, int64(Failed))
+		} else {
+			ui.SetFloatState(value, result.floatValue)
+			ui.SetStringState(message, "")
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return Float{status: status, value: value, message: message}
+}
+
+func (result Float) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result Float) IsPending() bool {
+	return result.Status() == Pending
+}
+
+func (result Float) IsReady() bool {
+	return result.Status() == Ready
+}
+
+func (result Float) IsFailed() bool {
+	return result.Status() == Failed
+}
+
+func (result Float) Value() float64 {
+	return ui.FloatStateValue(result.value)
+}
+
+func (result Float) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+// StringStream is the latest committed value of a component-scoped string
+// stream. Revision increases once per accepted message. Complete and Failed
+// are terminal until key changes.
+type StringStream struct {
+	status ui.IntState
+	value ui.StringState
+	message ui.StringState
+	revision ui.IntState
+	hasValue ui.BoolState
+}
+
+// UseStringStream starts one post-commit worker for key. emit applies bounded
+// backpressure and returns false after cancellation or replacement.
+func UseStringStream(key string, worker func(context.Context, func(string) bool) error) StringStream {
+	if worker == nil {
+		panic("UI string stream worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseStringState("")
+	message := ui.UseStringState("")
+	revision := ui.UseIntState(0)
+	hasValue := ui.UseBoolState(false)
+	identity := initialize(owner, kindStringStream)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ui.SetIntState(revision, 0)
+		ui.SetBoolState(hasValue, false)
+		ctx := restartStream(identity, kindStringStream, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			err := worker(ctx, func(value string) bool {
+				return publishStream(identity, kindStringStream, completion{
+					generation: currentGeneration, stringValue: value,
+				}, ctx)
+			})
+			finishStream(identity, kindStringStream, currentGeneration, err, ctx)
+		}()
+	}
+	if result, ok := takeStream(identity, kindStringStream, currentGeneration); ok {
+		if result.terminal {
+			if result.failed {
+				ui.SetStringState(message, result.message)
+				ui.SetIntState(status, int64(Failed))
+			} else {
+				ui.SetIntState(status, int64(Complete))
+			}
+		} else {
+			ui.SetStringState(value, result.stringValue)
+			ui.SetBoolState(hasValue, true)
+			ui.SetIntState(revision, ui.IntStateValue(revision) + 1)
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return StringStream{
+		status: status, value: value, message: message, revision: revision, hasValue: hasValue,
+	}
+}
+
+func (result StringStream) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result StringStream) HasValue() bool {
+	return ui.BoolStateValue(result.hasValue)
+}
+
+func (result StringStream) Value() string {
+	return ui.StringStateValue(result.value)
+}
+
+func (result StringStream) Revision() int64 {
+	return ui.IntStateValue(result.revision)
+}
+
+func (result StringStream) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+type BoolStream struct {
+	status ui.IntState
+	value ui.BoolState
+	message ui.StringState
+	revision ui.IntState
+	hasValue ui.BoolState
+}
+
+func UseBoolStream(key string, worker func(context.Context, func(bool) bool) error) BoolStream {
+	if worker == nil {
+		panic("UI bool stream worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseBoolState(false)
+	message := ui.UseStringState("")
+	revision := ui.UseIntState(0)
+	hasValue := ui.UseBoolState(false)
+	identity := initialize(owner, kindBoolStream)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ui.SetIntState(revision, 0)
+		ui.SetBoolState(hasValue, false)
+		ctx := restartStream(identity, kindBoolStream, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			err := worker(ctx, func(value bool) bool {
+				return publishStream(identity, kindBoolStream, completion{
+					generation: currentGeneration, boolValue: value,
+				}, ctx)
+			})
+			finishStream(identity, kindBoolStream, currentGeneration, err, ctx)
+		}()
+	}
+	if result, ok := takeStream(identity, kindBoolStream, currentGeneration); ok {
+		if result.terminal {
+			if result.failed {
+				ui.SetStringState(message, result.message)
+				ui.SetIntState(status, int64(Failed))
+			} else {
+				ui.SetIntState(status, int64(Complete))
+			}
+		} else {
+			ui.SetBoolState(value, result.boolValue)
+			ui.SetBoolState(hasValue, true)
+			ui.SetIntState(revision, ui.IntStateValue(revision) + 1)
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return BoolStream{
+		status: status, value: value, message: message, revision: revision, hasValue: hasValue,
+	}
+}
+
+func (result BoolStream) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result BoolStream) HasValue() bool {
+	return ui.BoolStateValue(result.hasValue)
+}
+
+func (result BoolStream) Value() bool {
+	return ui.BoolStateValue(result.value)
+}
+
+func (result BoolStream) Revision() int64 {
+	return ui.IntStateValue(result.revision)
+}
+
+func (result BoolStream) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+type IntStream struct {
+	status ui.IntState
+	value ui.IntState
+	message ui.StringState
+	revision ui.IntState
+	hasValue ui.BoolState
+}
+
+func UseIntStream(key string, worker func(context.Context, func(int64) bool) error) IntStream {
+	if worker == nil {
+		panic("UI int stream worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseIntState(0)
+	message := ui.UseStringState("")
+	revision := ui.UseIntState(0)
+	hasValue := ui.UseBoolState(false)
+	identity := initialize(owner, kindIntStream)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ui.SetIntState(revision, 0)
+		ui.SetBoolState(hasValue, false)
+		ctx := restartStream(identity, kindIntStream, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			err := worker(ctx, func(value int64) bool {
+				return publishStream(identity, kindIntStream, completion{
+					generation: currentGeneration, intValue: value,
+				}, ctx)
+			})
+			finishStream(identity, kindIntStream, currentGeneration, err, ctx)
+		}()
+	}
+	if result, ok := takeStream(identity, kindIntStream, currentGeneration); ok {
+		if result.terminal {
+			if result.failed {
+				ui.SetStringState(message, result.message)
+				ui.SetIntState(status, int64(Failed))
+			} else {
+				ui.SetIntState(status, int64(Complete))
+			}
+		} else {
+			ui.SetIntState(value, result.intValue)
+			ui.SetBoolState(hasValue, true)
+			ui.SetIntState(revision, ui.IntStateValue(revision) + 1)
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return IntStream{
+		status: status, value: value, message: message, revision: revision, hasValue: hasValue,
+	}
+}
+
+func (result IntStream) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result IntStream) HasValue() bool {
+	return ui.BoolStateValue(result.hasValue)
+}
+
+func (result IntStream) Value() int64 {
+	return ui.IntStateValue(result.value)
+}
+
+func (result IntStream) Revision() int64 {
+	return ui.IntStateValue(result.revision)
+}
+
+func (result IntStream) Error() string {
+	return ui.StringStateValue(result.message)
+}
+
+type FloatStream struct {
+	status ui.IntState
+	value ui.FloatState
+	message ui.StringState
+	revision ui.IntState
+	hasValue ui.BoolState
+}
+
+func UseFloatStream(key string, worker func(context.Context, func(float64) bool) error) FloatStream {
+	if worker == nil {
+		panic("UI float stream worker cannot be nil")
+	}
+	owner := ui.UseIntState(0)
+	generation := ui.UseIntState(0)
+	activeKey := ui.UseStringState("")
+	started := ui.UseBoolState(false)
+	status := ui.UseIntState(int64(Idle))
+	value := ui.UseFloatState(0)
+	message := ui.UseStringState("")
+	revision := ui.UseIntState(0)
+	hasValue := ui.UseBoolState(false)
+	identity := initialize(owner, kindFloatStream)
+	currentGeneration := ui.IntStateValue(generation)
+	if !ui.BoolStateValue(started) || ui.StringStateValue(activeKey) != key {
+		currentGeneration++
+		ui.SetIntState(generation, currentGeneration)
+		ui.SetStringState(activeKey, key)
+		ui.SetBoolState(started, true)
+		ui.SetIntState(status, int64(Pending))
+		ui.SetStringState(message, "")
+		ui.SetIntState(revision, 0)
+		ui.SetBoolState(hasValue, false)
+		ctx := restartStream(identity, kindFloatStream, currentGeneration)
+		go func() {
+			if !awaitCommitted(owner, ctx) {
+				return
+			}
+			err := worker(ctx, func(value float64) bool {
+				return publishStream(identity, kindFloatStream, completion{
+					generation: currentGeneration, floatValue: value,
+				}, ctx)
+			})
+			finishStream(identity, kindFloatStream, currentGeneration, err, ctx)
+		}()
+	}
+	if result, ok := takeStream(identity, kindFloatStream, currentGeneration); ok {
+		if result.terminal {
+			if result.failed {
+				ui.SetStringState(message, result.message)
+				ui.SetIntState(status, int64(Failed))
+			} else {
+				ui.SetIntState(status, int64(Complete))
+			}
+		} else {
+			ui.SetFloatState(value, result.floatValue)
+			ui.SetBoolState(hasValue, true)
+			ui.SetIntState(revision, ui.IntStateValue(revision) + 1)
+			ui.SetIntState(status, int64(Ready))
+		}
+	}
+	return FloatStream{
+		status: status, value: value, message: message, revision: revision, hasValue: hasValue,
+	}
+}
+
+func (result FloatStream) Status() Status {
+	return Status(ui.IntStateValue(result.status))
+}
+
+func (result FloatStream) HasValue() bool {
+	return ui.BoolStateValue(result.hasValue)
+}
+
+func (result FloatStream) Value() float64 {
+	return ui.FloatStateValue(result.value)
+}
+
+func (result FloatStream) Revision() int64 {
+	return ui.IntStateValue(result.revision)
+}
+
+func (result FloatStream) Error() string {
+	return ui.StringStateValue(result.message)
+}

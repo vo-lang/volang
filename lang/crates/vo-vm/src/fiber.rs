@@ -1946,13 +1946,27 @@ impl Fiber {
         Ok(bp)
     }
 
-    pub fn pop_frame(&mut self) -> Option<CallFrame> {
-        if let Some(frame) = self.frames.pop() {
-            self.sp = frame.sp_restore;
-            Some(frame)
-        } else {
-            None
+    fn pop_frame_preserving_range(
+        &mut self,
+        preserve_start: usize,
+        preserve_count: usize,
+    ) -> Option<CallFrame> {
+        let frame = self.frames.pop()?;
+        let clear_start = frame.bp.min(self.stack.len());
+        let clear_end = frame.sp_restore.min(self.stack.len());
+        if clear_start < clear_end {
+            let preserve_end = preserve_start.saturating_add(preserve_count);
+            let left_end = clear_end.min(preserve_start.max(clear_start));
+            self.stack[clear_start..left_end].fill(0);
+            let right_start = clear_start.max(preserve_end.min(clear_end));
+            self.stack[right_start..clear_end].fill(0);
         }
+        self.sp = frame.sp_restore;
+        Some(frame)
+    }
+
+    pub fn pop_frame(&mut self) -> Option<CallFrame> {
+        self.pop_frame_preserving_range(0, 0)
     }
 
     /// Pop the active frame and copy its ordinary stack return into the caller.
@@ -1966,21 +1980,24 @@ impl Fiber {
         ret_start: u16,
         ret_count: u16,
     ) -> CompletedStackReturn {
-        let Some(frame) = self.pop_frame() else {
+        let Some(frame) = self.frames.last().copied() else {
             return CompletedStackReturn::Done;
         };
         let write_count = usize::from(frame.ret_count.min(ret_count));
         let src = frame.bp + usize::from(ret_start);
 
-        let Some(caller) = self.frames.last() else {
+        let Some(caller_index) = self.frames.len().checked_sub(2) else {
             self.copy_stack_slots(0, src, write_count);
+            let _ = self.pop_frame_preserving_range(0, write_count);
             self.sp = write_count;
             return CompletedStackReturn::Done;
         };
+        let caller = self.frames[caller_index];
 
         let dst = caller.bp + usize::from(frame.ret_reg);
         debug_assert!(dst + write_count <= self.stack.len());
         self.copy_stack_slots(dst, src, write_count);
+        let _ = self.pop_frame_preserving_range(dst, write_count);
         CompletedStackReturn::Resume
     }
 
@@ -2596,6 +2613,7 @@ mod tests {
     fn verified_stack_return_copies_results_and_restores_the_caller_window() {
         let mut fiber = Fiber::new(1);
         fiber.push_frame(7, 8, 0, 0);
+        fiber.stack[2..8].fill(0xdead);
         let caller_sp = fiber.sp;
         let callee_bp = fiber.push_borrowed_call_frame(9, 2, 4, 2, 4);
         fiber.stack[callee_bp..callee_bp + 2].copy_from_slice(&[41, 42]);
@@ -2608,8 +2626,24 @@ mod tests {
         let caller = fiber.frames.last().expect("resumed caller frame");
         assert_eq!(caller.func_id, 7);
         assert_eq!(fiber.sp, caller_sp);
+        assert_eq!(&fiber.stack[2..4], &[0, 0]);
         assert_eq!(&fiber.stack[4..6], &[41, 42]);
+        assert_eq!(&fiber.stack[6..8], &[0, 0]);
         assert_eq!(fiber.frames.len(), 1);
+    }
+
+    #[test]
+    fn popping_borrowed_frame_clears_the_reused_caller_window() {
+        let mut fiber = Fiber::new(1);
+        fiber.push_frame(7, 8, 0, 0);
+        fiber.stack[2..8].fill(0xdead);
+        fiber.push_borrowed_call_frame(9, 2, 4, 0, 3);
+
+        let frame = fiber.pop_frame().expect("borrowed frame");
+
+        assert_eq!(frame.bp, 2);
+        assert_eq!(fiber.sp, 8);
+        assert_eq!(&fiber.stack[2..8], &[0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

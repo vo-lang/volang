@@ -1,0 +1,303 @@
+// Package persistence provides versioned, bounded application state storage
+// and undo history. Backends remain injectable so Web, desktop, tests, and
+// future server hosts share migration behavior without sharing platform code.
+package persistence
+
+import (
+	"encoding/json"
+	"errors"
+	"sync"
+)
+
+const (
+	MaxKeyBytes = 16 * 1024
+	MaxPayloadBytes = 8 * 1024 * 1024
+	MaxMigrations = 64
+	MaxHistory = 4096
+)
+
+type Record struct {
+	Schema int64 `json:"schema"`
+	Payload string `json:"payload"`
+}
+
+type Backend interface {
+	Load(key string) (Record, bool, error)
+	Save(key string, record Record) error
+	Delete(key string) error
+}
+
+func validateKey(key string) error {
+	if len(key) == 0 || len(key) > MaxKeyBytes {
+		return errors.New("persistence key must contain between 1 and 16384 bytes")
+	}
+	return nil
+}
+
+func validateRecord(record Record) error {
+	if record.Schema < 1 {
+		return errors.New("persistence schema must be positive")
+	}
+	if len(record.Payload) > MaxPayloadBytes {
+		return errors.New("persistence payload exceeds the bounded size")
+	}
+	return nil
+}
+
+// Memory is the deterministic backend used by tests, previews, and embedded
+// sessions. Platform packages can implement Backend with durable storage.
+type Memory struct {
+	mu sync.Mutex
+	records map[string]Record
+}
+
+func NewMemory() *Memory {
+	return &Memory{records: make(map[string]Record)}
+}
+
+func (memory *Memory) ensureLocked() {
+	if memory.records == nil {
+		memory.records = make(map[string]Record)
+	}
+}
+
+func (memory *Memory) Load(key string) (Record, bool, error) {
+	if err := validateKey(key); err != nil {
+		return Record{}, false, err
+	}
+	if memory == nil {
+		return Record{}, false, errors.New("persistence memory backend is nil")
+	}
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	memory.ensureLocked()
+	record, found := memory.records[key]
+	return record, found, nil
+}
+
+func (memory *Memory) Save(key string, record Record) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if err := validateRecord(record); err != nil {
+		return err
+	}
+	if memory == nil {
+		return errors.New("persistence memory backend is nil")
+	}
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	memory.ensureLocked()
+	memory.records[key] = record
+	return nil
+}
+
+func (memory *Memory) Delete(key string) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if memory == nil {
+		return errors.New("persistence memory backend is nil")
+	}
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	memory.ensureLocked()
+	delete(memory.records, key)
+	return nil
+}
+
+type Migration struct {
+	From int64
+	To int64
+	Apply func(payload string) (string, error)
+}
+
+type Restored struct {
+	Found bool
+	Migrated bool
+	Schema int64
+	Payload string
+}
+
+func validateMigrations(migrations []Migration) error {
+	if len(migrations) > MaxMigrations {
+		return errors.New("persistence migration chain exceeds the bounded length")
+	}
+	for index, migration := range migrations {
+		if migration.From < 1 || migration.To != migration.From + 1 || migration.Apply == nil {
+			return errors.New("persistence migration must advance one schema version")
+		}
+		for previous := 0; previous < index; previous++ {
+			if migrations[previous].From == migration.From {
+				return errors.New("persistence migration sources must be unique")
+			}
+		}
+	}
+	return nil
+}
+
+func Save(backend Backend, key string, schema int64, payload string) error {
+	if backend == nil {
+		return errors.New("persistence backend is nil")
+	}
+	return backend.Save(key, Record{Schema: schema, Payload: payload})
+}
+
+// Restore applies a complete monotonic migration chain and writes the upgraded
+// record atomically through the backend contract before returning it.
+func Restore(backend Backend, key string, currentSchema int64, migrations ...Migration) (Restored, error) {
+	if backend == nil || currentSchema < 1 {
+		return Restored{}, errors.New("persistence restore requires a backend and current schema")
+	}
+	if err := validateMigrations(migrations); err != nil {
+		return Restored{}, err
+	}
+	record, found, err := backend.Load(key)
+	if err != nil || !found {
+		return Restored{Found: found}, err
+	}
+	if err := validateRecord(record); err != nil {
+		return Restored{}, err
+	}
+	if record.Schema > currentSchema {
+		return Restored{}, errors.New("persistence record uses a newer schema")
+	}
+	migrated := false
+	for record.Schema < currentSchema {
+		selected := -1
+		for index, migration := range migrations {
+			if migration.From == record.Schema {
+				selected = index
+				break
+			}
+		}
+		if selected < 0 {
+			return Restored{}, errors.New("persistence migration chain is incomplete")
+		}
+		next, migrationError := migrations[selected].Apply(record.Payload)
+		if migrationError != nil {
+			return Restored{}, migrationError
+		}
+		record.Schema = migrations[selected].To
+		record.Payload = next
+		if err := validateRecord(record); err != nil {
+			return Restored{}, err
+		}
+		migrated = true
+	}
+	if migrated {
+		if err := backend.Save(key, record); err != nil {
+			return Restored{}, err
+		}
+	}
+	return Restored{Found: true, Migrated: migrated, Schema: record.Schema, Payload: record.Payload}, nil
+}
+
+type HistorySnapshot struct {
+	Capacity int `json:"capacity"`
+	Position int `json:"position"`
+	Values []string `json:"values"`
+}
+
+type History struct {
+	mu sync.Mutex
+	capacity int
+	position int
+	values []string
+}
+
+func NewHistory(capacity int, initial string) *History {
+	if capacity < 1 || capacity > MaxHistory {
+		panic("persistence history capacity is outside bounded limits")
+	}
+	return &History{capacity: capacity, values: []string{initial}}
+}
+
+func (history *History) Push(value string) bool {
+	if history == nil {
+		return false
+	}
+	history.mu.Lock()
+	defer history.mu.Unlock()
+	if history.values[history.position] == value {
+		return false
+	}
+	history.values = history.values[:history.position + 1]
+	history.values = append(history.values, value)
+	history.position++
+	if len(history.values) > history.capacity {
+		history.values = history.values[1:]
+		history.position--
+	}
+	return true
+}
+
+func (history *History) Undo() (string, bool) {
+	if history == nil {
+		return "", false
+	}
+	history.mu.Lock()
+	defer history.mu.Unlock()
+	if history.position == 0 {
+		return history.values[0], false
+	}
+	history.position--
+	return history.values[history.position], true
+}
+
+func (history *History) Redo() (string, bool) {
+	if history == nil {
+		return "", false
+	}
+	history.mu.Lock()
+	defer history.mu.Unlock()
+	if history.position + 1 >= len(history.values) {
+		return history.values[history.position], false
+	}
+	history.position++
+	return history.values[history.position], true
+}
+
+func (history *History) Current() string {
+	if history == nil {
+		return ""
+	}
+	history.mu.Lock()
+	defer history.mu.Unlock()
+	return history.values[history.position]
+}
+
+func (history *History) Snapshot() HistorySnapshot {
+	if history == nil {
+		return HistorySnapshot{}
+	}
+	history.mu.Lock()
+	defer history.mu.Unlock()
+	values := append([]string{}, history.values...)
+	return HistorySnapshot{Capacity: history.capacity, Position: history.position, Values: values}
+}
+
+func RestoreHistory(snapshot HistorySnapshot) (*History, error) {
+	if snapshot.Capacity < 1 || snapshot.Capacity > MaxHistory || len(snapshot.Values) < 1 ||
+		len(snapshot.Values) > snapshot.Capacity || snapshot.Position < 0 || snapshot.Position >= len(snapshot.Values) {
+		return nil, errors.New("persistence history snapshot is invalid")
+	}
+	return &History{
+		capacity: snapshot.Capacity,
+		position: snapshot.Position,
+		values: append([]string{}, snapshot.Values...),
+	}, nil
+}
+
+func EncodeHistory(history *History) (string, error) {
+	encoded, err := json.Marshal(history.Snapshot())
+	return string(encoded), err
+}
+
+func DecodeHistory(payload string) (*History, error) {
+	snapshot := HistorySnapshot{}
+	if err := json.Unmarshal([]byte(payload), &snapshot); err != nil {
+		return nil, err
+	}
+	return RestoreHistory(snapshot)
+}

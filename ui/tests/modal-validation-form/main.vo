@@ -1,0 +1,54 @@
+// Permanent E2 comfortable API, focus, overlay, semantics, and command probe.
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/commands"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	open := ui.UseBoolState(false)
+	name := ui.UseStringState("")
+	errorMessage := ui.UseStringState("")
+	focusToken := ui.UseIntState(0)
+	submit := func() {
+		if ui.StringStateValue(name) == "" {
+			ui.SetStringState(errorMessage, "Name is required")
+			ui.SetIntState(focusToken, ui.IntStateValue(focusToken) + 1)
+			return
+		}
+		ui.SetStringState(errorMessage, "")
+		ui.SetBoolState(open, false)
+	}
+	dismiss := func() {
+		ui.SetBoolState(open, false)
+		ui.SetStringState(errorMessage, "")
+	}
+	return kit.Application(func() ui.View {
+		dialog := kit.ModalDialog("Create profile", ui.BoolStateValue(open), ui.Column(kit.ValidatedInput("Name", ui.StringStateValue(name), "Ada", true, false, ui.StringStateValue(errorMessage), ui.IntStateValue(focusToken), func(value string) {
+			ui.SetStringState(name, value)
+			ui.SetStringState(errorMessage, "")
+		}), kit.Actions(kit.ActionButton("Save", false, func() {
+			if ui.StringStateValue(name) == "" {
+				ui.SetStringState(errorMessage, "Name is required")
+				ui.SetIntState(focusToken, ui.IntStateValue(focusToken) + 1)
+				return
+			}
+			ui.SetStringState(errorMessage, "")
+			ui.SetBoolState(open, false)
+		}))), dismiss)
+		page := ui.AccessibleName(kit.Page(ui.Column(kit.Title("Modal validation"), kit.ActionButton("Open profile", false, func() {
+			ui.SetBoolState(open, true)
+		}), dialog)), "Modal form")
+		physicalSave := commands.New("profile.save.physical", "Save profile", commands.Physical("KeyS", ui.ModifierControl), submit)
+		physicalSave.Priority = 1
+		return commands.Bind(page, commands.New("profile.save", "Save profile", commands.Key("s", ui.ModifierControl), submit), physicalSave)
+	})
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

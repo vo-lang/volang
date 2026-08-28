@@ -1,0 +1,285 @@
+// Package platform defines the authority and lifetime boundary for services
+// used by UI applications. Concrete Web, desktop, server, test, and plugin
+// hosts implement these interfaces; application packages consume the same
+// typed, cancellation-aware contracts.
+package platform
+
+import (
+	"context"
+	"errors"
+	"sync"
+)
+
+const (
+	MaxServices = 1024
+	MaxAuthorities = 256
+	MaxOperations = 256
+	MaxPayloadBytes = 64 * 1024 * 1024
+)
+
+type Target int64
+
+const (
+	Headless Target = iota
+	Web
+	Desktop
+	Server
+)
+
+type Support int64
+
+const (
+	Unsupported Support = iota
+	Available
+	PermissionRequired
+)
+
+type Permission int64
+
+const (
+	PermissionUnknown Permission = iota
+	PermissionPrompt
+	PermissionGranted
+	PermissionDenied
+)
+
+type Lifetime int64
+
+const (
+	CallLifetime Lifetime = iota
+	ComponentLifetime
+	WindowLifetime
+	ApplicationLifetime
+)
+
+type Effect uint64
+
+const (
+	EffectNetworkRead Effect = 1 << iota
+	EffectNetworkWrite
+	EffectStorageRead
+	EffectStorageWrite
+	EffectFileRead
+	EffectFileWrite
+	EffectCredentialRead
+	EffectCredentialWrite
+	EffectProcessSpawn
+	EffectProcessSignal
+)
+
+type TargetSupport struct {
+	Target Target
+	Support Support
+}
+
+type Authority struct {
+	Resource string
+	Operations []string
+}
+
+type Quota struct {
+	MaxConcurrent int64
+	MaxBytes int64
+	MaxItems int64
+	TimeoutMillis int64
+}
+
+type Descriptor struct {
+	ID string
+	ABI string
+	Packaging string
+	Sandbox string
+	Lifetime Lifetime
+	Effects Effect
+	Targets []TargetSupport
+	Authorities []Authority
+	Quota Quota
+}
+
+func (descriptor Descriptor) Validate() error {
+	if descriptor.ID == "" || descriptor.ABI == "" || descriptor.Packaging == "" || descriptor.Sandbox == "" ||
+		descriptor.Lifetime < CallLifetime || descriptor.Lifetime > ApplicationLifetime || descriptor.Effects == 0 {
+		return errors.New("platform service descriptor is incomplete")
+	}
+	if len(descriptor.Targets) == 0 || len(descriptor.Targets) > 4 || len(descriptor.Authorities) > MaxAuthorities {
+		return errors.New("platform service target or authority count is invalid")
+	}
+	seenTargets := make(map[Target]bool)
+	for _, target := range descriptor.Targets {
+		if target.Target < Headless || target.Target > Server || target.Support < Unsupported || target.Support > PermissionRequired ||
+			seenTargets[target.Target] {
+			return errors.New("platform service target support is invalid")
+		}
+		seenTargets[target.Target] = true
+	}
+	seenAuthorities := make(map[string]bool)
+	for _, authority := range descriptor.Authorities {
+		if authority.Resource == "" || len(authority.Operations) == 0 || len(authority.Operations) > MaxOperations ||
+			seenAuthorities[authority.Resource] {
+			return errors.New("platform service authority is invalid")
+		}
+		seenAuthorities[authority.Resource] = true
+	}
+	quota := descriptor.Quota
+	if quota.MaxConcurrent < 1 || quota.MaxConcurrent > 65536 || quota.MaxBytes < 0 || quota.MaxBytes > MaxPayloadBytes ||
+		quota.MaxItems < 0 || quota.MaxItems > 100000000 || quota.TimeoutMillis < 0 || quota.TimeoutMillis > 86400000 {
+		return errors.New("platform service quota is outside bounded limits")
+	}
+	return nil
+}
+
+func (descriptor Descriptor) SupportFor(target Target) Support {
+	for _, support := range descriptor.Targets {
+		if support.Target == target {
+			return support.Support
+		}
+	}
+	return Unsupported
+}
+
+type Decision struct {
+	Allowed bool
+	Support Support
+	Permission Permission
+	Reason string
+}
+
+type Catalog struct {
+	mu sync.Mutex
+	services map[string]Descriptor
+	permissions map[string]Permission
+}
+
+func NewCatalog() *Catalog {
+	return &Catalog{services: make(map[string]Descriptor), permissions: make(map[string]Permission)}
+}
+
+func (catalog *Catalog) Register(descriptor Descriptor) error {
+	if catalog == nil {
+		return errors.New("platform catalog is nil")
+	}
+	if err := descriptor.Validate(); err != nil {
+		return err
+	}
+	catalog.mu.Lock()
+	defer catalog.mu.Unlock()
+	if len(catalog.services) >= MaxServices {
+		return errors.New("platform service catalog capacity exceeded")
+	}
+	if _, found := catalog.services[descriptor.ID]; found {
+		return errors.New("platform service identity is already registered")
+	}
+	catalog.services[descriptor.ID] = descriptor
+	return nil
+}
+
+func (catalog *Catalog) SetPermission(id string, permission Permission) error {
+	if catalog == nil || permission < PermissionUnknown || permission > PermissionDenied {
+		return errors.New("platform permission update is invalid")
+	}
+	catalog.mu.Lock()
+	defer catalog.mu.Unlock()
+	if _, found := catalog.services[id]; !found {
+		return errors.New("platform service is not registered")
+	}
+	catalog.permissions[id] = permission
+	return nil
+}
+
+func (catalog *Catalog) Require(id string, target Target, effect Effect) Decision {
+	if catalog == nil {
+		return Decision{Reason: "platform catalog is unavailable"}
+	}
+	catalog.mu.Lock()
+	defer catalog.mu.Unlock()
+	descriptor, found := catalog.services[id]
+	if !found {
+		return Decision{Reason: "platform service is not registered"}
+	}
+	support := descriptor.SupportFor(target)
+	permission := catalog.permissions[id]
+	if support == Unsupported {
+		return Decision{Support: support, Permission: permission, Reason: "platform target does not support the service"}
+	}
+	if effect == 0 || descriptor.Effects & effect != effect {
+		return Decision{Support: support, Permission: permission, Reason: "platform service authority does not include the requested effect"}
+	}
+	if support == PermissionRequired && permission != PermissionGranted {
+		return Decision{Support: support, Permission: permission, Reason: "platform service permission is not granted"}
+	}
+	if permission == PermissionDenied {
+		return Decision{Support: support, Permission: permission, Reason: "platform service permission is denied"}
+	}
+	return Decision{Allowed: true, Support: support, Permission: permission}
+}
+
+type NetworkRequest struct {
+	Method string
+	URL string
+	Headers map[string]string
+	Body []byte
+	MaxResponseBytes int64
+}
+
+type NetworkResponse struct {
+	Status int64
+	Headers map[string]string
+	Body []byte
+}
+
+type Network interface {
+	Do(context.Context, NetworkRequest) (NetworkResponse, error)
+}
+
+type StorageChange struct {
+	Key string
+	Deleted bool
+	Revision int64
+}
+
+type Storage interface {
+	Get(context.Context, string) ([]byte, bool, error)
+	Put(context.Context, string, []byte) error
+	Delete(context.Context, string) error
+	List(context.Context, string, int64) ([]string, error)
+	Watch(context.Context, string, func(StorageChange) bool) error
+}
+
+type FileInfo struct {
+	Path string
+	Size int64
+	Directory bool
+	ModifiedUnixMillis int64
+}
+
+type Files interface {
+	Read(context.Context, string, int64) ([]byte, error)
+	Write(context.Context, string, []byte) error
+	List(context.Context, string, int64) ([]FileInfo, error)
+	Watch(context.Context, string, func(FileInfo) bool) error
+}
+
+type Credentials interface {
+	Read(context.Context, string) ([]byte, bool, error)
+	Write(context.Context, string, []byte) error
+	Delete(context.Context, string) error
+}
+
+type ProcessSpec struct {
+	Program string
+	Arguments []string
+	Environment map[string]string
+	WorkingDirectory string
+	MaxOutputBytes int64
+}
+
+type ProcessEvent struct {
+	Stream string
+	Data []byte
+	ExitCode int64
+	Exited bool
+}
+
+type Process interface {
+	Run(context.Context, ProcessSpec, func(ProcessEvent) bool) error
+}

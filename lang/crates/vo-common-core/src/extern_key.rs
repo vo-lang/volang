@@ -81,10 +81,12 @@ pub const VM_INTERNAL_EXTERN_NAMES: &[&str] = &[
     "vo_conv_str_bytes",
     "vo_conv_str_runes",
     "vo_copy",
+    "vo_copy_string",
     "vo_iface_eq",
     "vo_print",
     "vo_println",
     "vo_slice_append_slice",
+    "vo_slice_append_string",
 ];
 
 /// VM-owned helpers whose ABI shape is specialized per compiler call site.

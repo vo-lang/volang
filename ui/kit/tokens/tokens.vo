@@ -1,0 +1,321 @@
+package tokens
+
+import (
+	"math"
+	"strconv"
+	"strings"
+)
+
+type Theme struct {
+	Colors ColorTokens
+	Spacing SpacingTokens
+	Typography TypographyTokens
+	Shape ShapeTokens
+	Motion MotionTokens
+	Density float64
+	Background uint32
+	Surface uint32
+	Foreground uint32
+	MutedForeground uint32
+	Accent uint32
+	AccentForeground uint32
+	Danger uint32
+	Radius float64
+	Space float64
+	ControlHeight float64
+	ContentWidth float64
+}
+
+	// ColorTokens use semantic names so applications can replace the visual
+	// product without rewriting component behavior. Colors use AARRGGBB.
+type ColorTokens struct {
+	Canvas uint32
+	Surface uint32
+	SurfaceRaised uint32
+	Text uint32
+	TextMuted uint32
+	Accent uint32
+	OnAccent uint32
+	Danger uint32
+	Success uint32
+	Warning uint32
+	Border uint32
+	Focus uint32
+	Overlay uint32
+}
+
+type SpacingTokens struct {
+	Step float64
+	ControlGap float64
+	ContentGap float64
+	SectionGap float64
+	PagePadding float64
+}
+
+type TypographyTokens struct {
+	BodySize float64
+	CaptionSize float64
+	TitleSize float64
+	WeightRegular int64
+	WeightMedium int64
+	WeightStrong int64
+}
+
+type ShapeTokens struct {
+	SmallRadius float64
+	MediumRadius float64
+	LargeRadius float64
+}
+
+type MotionTokens struct {
+	FastMilliseconds float64
+	NormalMilliseconds float64
+	SlowMilliseconds float64
+}
+
+type DensityPreset int64
+
+const (
+	DensityCompact DensityPreset = iota
+	DensityComfortable
+	DensitySpacious
+)
+
+type ControlSize int64
+
+const (
+	ControlSmall ControlSize = iota
+	ControlMedium
+	ControlLarge
+)
+
+type ButtonVariant int64
+
+const (
+	ButtonPrimary ButtonVariant = iota
+	ButtonSecondary
+	ButtonQuiet
+	ButtonDanger
+)
+
+// ButtonRecipe is a resolved immutable visual recipe. Headless behavior owns
+// activation and semantics; this value owns only renderer-neutral appearance.
+type ButtonRecipe struct {
+	Background uint32
+	Foreground uint32
+	Border uint32
+	BorderWidth float64
+	Height float64
+	Padding float64
+	Radius float64
+	FontSize float64
+	FontWeight int64
+}
+
+func ThemeFor(dark bool, highContrast bool) Theme {
+	colors := ColorTokens{
+		Canvas: 0xfff7f7f8, Surface: 0xffffffff, SurfaceRaised: 0xffffffff, Text: 0xff16181d,
+		TextMuted: 0xff646b76, Accent: 0xff315efb, OnAccent: 0xffffffff, Danger: 0xffc4314b,
+		Success: 0xff137333, Warning: 0xff8a4b08, Border: 0xffc8ccd4, Focus: 0xff174ea6,
+		Overlay: 0x99000000,
+	}
+	if dark {
+		colors = ColorTokens{
+			Canvas: 0xff111318, Surface: 0xff1d2027, SurfaceRaised: 0xff272b34, Text: 0xfff4f5f7,
+			TextMuted: 0xffa2a9b3, Accent: 0xff7694ff, OnAccent: 0xff0d1224, Danger: 0xffff6b82,
+			Success: 0xff63d892, Warning: 0xffffbd66, Border: 0xff555c68, Focus: 0xffa9bbff,
+			Overlay: 0xb3000000,
+		}
+	}
+	if highContrast && dark {
+		colors = ColorTokens{
+			Canvas: 0xff000000, Surface: 0xff000000, SurfaceRaised: 0xff111111, Text: 0xffffffff,
+			TextMuted: 0xffeeeeee, Accent: 0xffffff00, OnAccent: 0xff000000, Danger: 0xffff8080,
+			Success: 0xff80ff80, Warning: 0xffffff80, Border: 0xffffffff, Focus: 0xffffff00,
+			Overlay: 0xcc000000,
+		}
+	} else if highContrast {
+		colors = ColorTokens{
+			Canvas: 0xffffffff, Surface: 0xffffffff, SurfaceRaised: 0xfff4f4f4, Text: 0xff000000,
+			TextMuted: 0xff202020, Accent: 0xff0000cc, OnAccent: 0xffffffff, Danger: 0xff9b0000,
+			Success: 0xff005a00, Warning: 0xff6a3500, Border: 0xff000000, Focus: 0xff0000cc,
+			Overlay: 0xaa000000,
+		}
+	}
+	spacing := SpacingTokens{Step: 8, ControlGap: 8, ContentGap: 12, SectionGap: 24, PagePadding: 24}
+	typography := TypographyTokens{
+		BodySize: 14, CaptionSize: 13, TitleSize: 24, WeightRegular: 400, WeightMedium: 600,
+		WeightStrong: 700,
+	}
+	shape := ShapeTokens{SmallRadius: 5, MediumRadius: 8, LargeRadius: 12}
+	motion := MotionTokens{FastMilliseconds: 100, NormalMilliseconds: 180, SlowMilliseconds: 280}
+	return Theme{
+		Colors: colors, Spacing: spacing, Typography: typography, Shape: shape, Motion: motion,
+		Density: 1, Background: colors.Canvas, Surface: colors.Surface, Foreground: colors.Text,
+		MutedForeground: colors.TextMuted, Accent: colors.Accent, AccentForeground: colors.OnAccent,
+		Danger: colors.Danger, Radius: shape.MediumRadius, Space: spacing.Step, ControlHeight: 40,
+		ContentWidth: 1120,
+	}
+}
+
+func CompleteTheme(theme Theme) Theme {
+	if theme.Colors.Canvas == 0 {
+		theme.Colors = ColorTokens{
+			Canvas: theme.Background, Surface: theme.Surface, SurfaceRaised: theme.Surface,
+			Text: theme.Foreground, TextMuted: theme.MutedForeground, Accent: theme.Accent,
+			OnAccent: theme.AccentForeground, Danger: theme.Danger, Success: 0xff137333, Warning: 0xff8a4b08,
+			Border: theme.MutedForeground, Focus: theme.Accent, Overlay: 0x99000000,
+		}
+	}
+	if theme.Spacing.Step == 0 {
+		theme.Spacing = SpacingTokens{
+			Step: theme.Space, ControlGap: theme.Space, ContentGap: theme.Space * 1.5,
+			SectionGap: theme.Space * 3, PagePadding: theme.Space * 3,
+		}
+	}
+	if theme.Typography.BodySize == 0 {
+		theme.Typography = TypographyTokens{
+			BodySize: 14, CaptionSize: 13, TitleSize: 24, WeightRegular: 400, WeightMedium: 600,
+			WeightStrong: 700,
+		}
+	}
+	if theme.Shape.MediumRadius == 0 {
+		theme.Shape = ShapeTokens{
+			SmallRadius: theme.Radius * 0.625, MediumRadius: theme.Radius, LargeRadius: theme.Radius * 1.5,
+		}
+	}
+	if theme.Motion.NormalMilliseconds == 0 {
+		theme.Motion = MotionTokens{FastMilliseconds: 100, NormalMilliseconds: 180, SlowMilliseconds: 280}
+	}
+	if theme.Density == 0 {
+		theme.Density = 1
+	}
+	return theme
+}
+
+func ValidateTheme(theme Theme) {
+	if theme.Space <= 0 || theme.ControlHeight <= 0 || theme.ContentWidth <= 0 || theme.Radius < 0 ||
+		theme.Density <= 0 ||
+		math.IsNaN(theme.Space) ||
+		math.IsNaN(theme.ControlHeight) ||
+		math.IsNaN(theme.ContentWidth) ||
+		math.IsInf(theme.Space, 0) ||
+		math.IsInf(theme.ControlHeight, 0) ||
+		math.IsInf(theme.ContentWidth, 0) {
+		panic("UIKit theme geometry must be finite and positive")
+	}
+}
+
+func ScaleTheme(theme Theme, density float64) Theme {
+	theme = CompleteTheme(theme)
+	if density <= 0 || math.IsNaN(density) || math.IsInf(density, 0) {
+		panic("UIKit density must be finite and positive")
+	}
+	theme.Density = density
+	theme.Space *= density
+	theme.ControlHeight *= density
+	theme.Spacing.Step *= density
+	theme.Spacing.ControlGap *= density
+	theme.Spacing.ContentGap *= density
+	theme.Spacing.SectionGap *= density
+	theme.Spacing.PagePadding *= density
+	return theme
+}
+
+func ThemeWithDensity(theme Theme, density DensityPreset) Theme {
+	if density == DensityCompact {
+		return ScaleTheme(theme, 0.875)
+	}
+	if density == DensityComfortable {
+		return ScaleTheme(theme, 1)
+	}
+	if density == DensitySpacious {
+		return ScaleTheme(theme, 1.25)
+	}
+	panic("UIKit density preset is invalid")
+}
+
+func paddedHex(value uint32) string {
+	encoded := strconv.FormatUint(uint64(value), 16)
+	return strings.Repeat("0", 8-len(encoded)) + encoded
+}
+
+// ExportCSS produces deterministic renderer-neutral design-token variables.
+// AARRGGBB remains explicit in the variable value to avoid target-dependent
+// color parsing during package or design-tool interchange.
+func ExportCSS(theme Theme) string {
+	theme = CompleteTheme(theme); ValidateTheme(theme)
+	return ":root {\n" +
+		"  --vo-color-canvas: #" + paddedHex(theme.Colors.Canvas) + ";\n" +
+		"  --vo-color-surface: #" + paddedHex(theme.Colors.Surface) + ";\n" +
+		"  --vo-color-text: #" + paddedHex(theme.Colors.Text) + ";\n" +
+		"  --vo-color-muted: #" + paddedHex(theme.Colors.TextMuted) + ";\n" +
+		"  --vo-color-accent: #" + paddedHex(theme.Colors.Accent) + ";\n" +
+		"  --vo-color-danger: #" + paddedHex(theme.Colors.Danger) + ";\n" +
+		"  --vo-space-step: " + strconv.FormatFloat(theme.Spacing.Step, 'g', -1, 64) + "px;\n" +
+		"  --vo-space-page: " + strconv.FormatFloat(theme.Spacing.PagePadding, 'g', -1, 64) + "px;\n" +
+		"  --vo-font-body: " + strconv.FormatFloat(theme.Typography.BodySize, 'g', -1, 64) + "px;\n" +
+		"  --vo-radius-control: " + strconv.FormatFloat(theme.Shape.MediumRadius, 'g', -1, 64) + "px;\n" +
+		"  --vo-motion-normal: " + strconv.FormatFloat(theme.Motion.NormalMilliseconds, 'g', -1, 64) + "ms;\n" +
+		"}\n"
+}
+
+// ExportManifest is a compact versioned token interchange format consumed by
+// design adapters without adding JSON or JavaScript to the application graph.
+func ExportManifest(theme Theme) string {
+	theme = CompleteTheme(theme); ValidateTheme(theme)
+	return "VUT1\n" +
+		"canvas=" + paddedHex(theme.Colors.Canvas) + "\n" +
+		"surface=" + paddedHex(theme.Colors.Surface) + "\n" +
+		"text=" + paddedHex(theme.Colors.Text) + "\n" +
+		"accent=" + paddedHex(theme.Colors.Accent) + "\n" +
+		"danger=" + paddedHex(theme.Colors.Danger) + "\n" +
+		"density=" + strconv.FormatFloat(theme.Density, 'g', -1, 64) + "\n" +
+		"space=" + strconv.FormatFloat(theme.Space, 'g', -1, 64) + "\n" +
+		"control-height=" + strconv.FormatFloat(theme.ControlHeight, 'g', -1, 64) + "\n"
+}
+
+func ResolveButtonRecipe(theme Theme, variant ButtonVariant, size ControlSize, disabled bool) ButtonRecipe {
+	theme = CompleteTheme(theme)
+	background := theme.Colors.Accent
+	foreground := theme.Colors.OnAccent
+	border := theme.Colors.Accent
+	if variant == ButtonSecondary {
+		background = theme.Colors.SurfaceRaised
+		foreground = theme.Colors.Text
+		border = theme.Colors.Border
+	} else if variant == ButtonQuiet {
+		background = theme.Colors.Surface
+		foreground = theme.Colors.Text
+		border = theme.Colors.Border
+	} else if variant == ButtonDanger {
+		background = theme.Colors.Danger
+		foreground = theme.Colors.OnAccent
+		border = theme.Colors.Danger
+	} else if variant != ButtonPrimary {
+		panic("UIKit button variant is invalid")
+	}
+	height := theme.ControlHeight
+	padding := theme.Spacing.ContentGap
+	fontSize := theme.Typography.BodySize
+	if size == ControlSmall {
+		height *= 0.8
+		padding *= 0.75
+		fontSize = theme.Typography.CaptionSize
+	} else if size == ControlLarge {
+		height *= 1.2
+		padding *= 1.25
+	} else if size != ControlMedium {
+		panic("UIKit control size is invalid")
+	}
+	if disabled {
+		background = theme.Colors.SurfaceRaised
+		foreground = theme.Colors.TextMuted
+		border = theme.Colors.Border
+	}
+	return ButtonRecipe{
+		Background: background, Foreground: foreground, Border: border, BorderWidth: 1,
+		Height: height, Padding: padding,
+		Radius: theme.Shape.MediumRadius, FontSize: fontSize, FontWeight: theme.Typography.WeightMedium,
+	}
+}

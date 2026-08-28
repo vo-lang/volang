@@ -38,6 +38,11 @@ pub struct NativeProviderFactory {
 impl NativeProviderFactory {
     /// Load a provider only after its detached manifest and artifact bytes
     /// have already been authenticated by the module/runtime plan.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the authenticated file remains an ABI-compatible
+    /// Volang provider library for the lifetime of the returned factory.
     pub unsafe fn load(
         path: &Path,
         manifest: ProviderFactoryManifest,

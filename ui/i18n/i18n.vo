@@ -1,0 +1,110 @@
+// Package i18n adapts the renderer-independent locale core to the current UI
+// environment. Applications keep one public API across Web, desktop, and SSR.
+package i18n
+
+import (
+	ui "github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/i18n/core"
+)
+
+type Locale struct {
+	Tag string
+	Language string
+	Region string
+	Direction ui.LayoutDirection
+}
+
+func fromCore(locale core.Locale) Locale {
+	direction := ui.DirectionLTR
+	if locale.Direction == core.DirectionRTL {
+		direction = ui.DirectionRTL
+	}
+	return Locale{Tag: locale.Tag, Language: locale.Language, Region: locale.Region, Direction: direction}
+}
+
+func toCore(locale Locale) core.Locale {
+	direction := core.DirectionLTR
+	if locale.Direction == ui.DirectionRTL {
+		direction = core.DirectionRTL
+	}
+	return core.Locale{Tag: locale.Tag, Language: locale.Language, Region: locale.Region, Direction: direction}
+}
+
+func Parse(tag string) Locale {
+	return fromCore(core.Parse(tag))
+}
+
+func Current() Locale {
+	return Parse(ui.CurrentEnvironment().Locale)
+}
+
+type PluralCategory = core.PluralCategory
+
+const (
+	PluralZero PluralCategory = core.PluralZero
+	PluralOne PluralCategory = core.PluralOne
+	PluralTwo PluralCategory = core.PluralTwo
+	PluralFew PluralCategory = core.PluralFew
+	PluralMany PluralCategory = core.PluralMany
+	PluralOther PluralCategory = core.PluralOther
+)
+
+func Plural(locale Locale, value int64) PluralCategory {
+	return core.Plural(toCore(locale), value)
+}
+
+type Argument = core.Argument
+
+type PluralForms = core.PluralForms
+
+type Catalog struct {
+	Locale Locale
+	Messages map[string]string
+}
+
+func NewCatalog(locale string, messages map[string]string) Catalog {
+	return Catalog{Locale: Parse(locale), Messages: messages}
+}
+
+func (catalog Catalog) Message(id string, arguments ...Argument) string {
+	inner := core.Catalog{Locale: toCore(catalog.Locale), Messages: catalog.Messages}
+	return inner.Message(id, arguments...)
+}
+
+func (catalog Catalog) PluralMessage(value int64, forms PluralForms, arguments ...Argument) string {
+	inner := core.Catalog{Locale: toCore(catalog.Locale), Messages: catalog.Messages}
+	return inner.PluralMessage(value, forms, arguments...)
+}
+
+func FormatInteger(locale Locale, value int64) string {
+	return core.FormatInteger(toCore(locale), value)
+}
+
+func FormatDecimal(locale Locale, value float64, fractionDigits int64) string {
+	return core.FormatDecimal(toCore(locale), value, fractionDigits)
+}
+
+type Date = core.Date
+
+func FormatDate(locale Locale, date Date) string {
+	return core.FormatDate(toCore(locale), date)
+}
+
+func Graphemes(value string) []string {
+	return core.Graphemes(value)
+}
+
+func Compare(locale Locale, left string, right string) int64 {
+	return core.Compare(toCore(locale), left, right)
+}
+
+func DirectionOf(value string) ui.LayoutDirection {
+	if core.DirectionOf(value) == core.DirectionRTL {
+		return ui.DirectionRTL
+	}
+	return ui.DirectionLTR
+}
+
+func Isolate(value string) string {
+	return core.Isolate(value)
+}

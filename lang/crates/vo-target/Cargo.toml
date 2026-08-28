@@ -1,0 +1,15 @@
+[package]
+name = "vo-target"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Target specifications and target validation for the Vo toolchain"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+
+[dependencies]
+target-lexicon = "=0.13.5"
+vo-common-core = { workspace = true }

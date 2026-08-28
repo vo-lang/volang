@@ -1,0 +1,294 @@
+package main
+
+import (
+	"context"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/animation"
+	"github.com/vo-lang/ui/assets"
+	"github.com/vo-lang/ui/chart"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/editor"
+	"github.com/vo-lang/ui/graphics"
+	"github.com/vo-lang/ui/language"
+	"github.com/vo-lang/ui/kit/icons"
+	"github.com/vo-lang/ui/kit/tokens"
+	"github.com/vo-lang/ui/media"
+	"github.com/vo-lang/ui/motion"
+	"github.com/vo-lang/ui/workspace"
+	"strings"
+	"time"
+)
+
+func assert(ok bool, message string) {
+	if !ok {
+		panic(message)
+	}
+}
+
+type mediaHost struct{}
+
+func (host *mediaHost) Open(ctx context.Context, id string, source assets.Source) error {
+	return nil
+}
+
+func (host *mediaHost) Control(ctx context.Context, id string, action string, value float64) error {
+	return nil
+}
+
+func (host *mediaHost) Close(ctx context.Context, id string) error {
+	return nil
+}
+
+type blockingMediaHost struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (host *blockingMediaHost) Open(ctx context.Context, id string, source assets.Source) error {
+	host.started <- struct{}{}
+	<-host.release
+	return nil
+}
+
+func (host *blockingMediaHost) Control(ctx context.Context, id string, action string, value float64) error {
+	return nil
+}
+
+func (host *blockingMediaHost) Close(ctx context.Context, id string) error {
+	return nil
+}
+
+type captureHost struct {
+	stopped int
+}
+
+func (host *captureHost) Permission(ctx context.Context, kind media.CaptureKind) (media.PermissionState, error) {
+	return media.PermissionGranted, nil
+}
+
+func (host *captureHost) Start(ctx context.Context, request media.CaptureRequest) (media.CaptureStream, error) {
+	return media.CaptureStream{
+		ID: "capture-1", Kind: request.Kind,
+		Tracks: []media.Track{{ID: "camera", Kind: media.VideoTrack}},
+	}, nil
+}
+
+func (host *captureHost) Stop(ctx context.Context, id string) error {
+	host.stopped++
+	return nil
+}
+
+type blockingCaptureHost struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (host *blockingCaptureHost) Permission(ctx context.Context, kind media.CaptureKind) (media.PermissionState, error) {
+	host.started <- struct{}{}
+	<-host.release
+	return media.PermissionGranted, nil
+}
+
+func (host *blockingCaptureHost) Start(ctx context.Context, request media.CaptureRequest) (media.CaptureStream, error) {
+	return media.CaptureStream{}, nil
+}
+
+func (host *blockingCaptureHost) Stop(ctx context.Context, id string) error {
+	return nil
+}
+
+var model = document.NewText("package main\n\nfunc main() {}\n🙂")
+
+var code = editor.New(model, "file:///main.vo", "volang")
+
+var player *media.Session
+
+var space *workspace.Model
+
+func EditorPanel() ui.View {
+	return editor.View(code, editor.DefaultOptions())
+}
+
+func EmptyPanel() ui.View {
+	return ui.Text("Empty")
+}
+
+func PreviewPanel() ui.View {
+	program := graphics.NewProgram(graphics.DefaultLimits())
+	program.Clear(0xff101820)
+	program.Fill(graphics.Rect{X: 8, Y: 8, Width: 80, Height: 40}, 0xff4f7cff)
+	canvas := graphics.Canvas(program, "Blue rectangle preview")
+	image := assets.Image(assets.Source{
+		URI: "/poster.svg", Kind: assets.VectorImage, MediaType: "image/svg+xml",
+	}, "Product artwork", assets.Contain)
+	options := chart.DefaultOptions("Build duration")
+	options.Width = 320
+	options.Height = 120
+	options.Y = chart.Bounds{Minimum: 0, Maximum: 20}
+	bars := chart.Bar(chart.Series{
+		Name: "seconds", Color: 0xff4f7cff,
+		Points: []chart.Point{{Label: "VM", Y: 12}, {Label: "AOT", Y: 5}},
+	}, options)
+	return ui.Column(icons.Icon(icons.Play, 24, 0xff4f7cff, "Play preview"), canvas, image, bars, media.Player(player, "Release preview", "/poster.svg"))
+}
+
+func App() ui.View {
+	return space.View()
+}
+
+func main() {
+	assert(strings.Contains(tokens.ExportCSS(tokens.ThemeFor(false, false)), "--vo-color-accent") &&
+		strings.HasPrefix(tokens.ExportManifest(tokens.ThemeFor(false, false)), "VUT1\n"), "design token exports")
+	assert(model.LineCount() == 4, "document line index")
+	assert(model.Apply(document.Edit{Start: 0, End: 7, Text: "module"}) == nil, "document edit")
+	assert(model.Undo() && model.Redo(), "document undo and redo")
+	matches := model.Find("main", true)
+	assert(len(matches) == 2, "document find")
+	offset, err := model.UTF16Offset(model.Len())
+	assert(err == nil && offset > model.Len(), "UTF-16 astral accounting")
+	runeOffset, err := model.RuneOffsetFromUTF16(offset)
+	assert(err == nil && runeOffset == model.Len(), "UTF-16 coordinate roundtrip")
+	lines := document.NewText("alpha\nbeta\ngamma")
+	assert(lines.Apply(document.Edit{Start: 3, End: 13, Text: "X\nY\nZ\n"}) == nil &&
+		lines.LineCount() == 4, "incremental line reindex")
+	position, err := lines.Position(10)
+	assert(err == nil && position.Line == 3 && position.Column == 1, "document offset to position")
+	roundtrip, err := lines.Offset(position)
+	assert(err == nil && roundtrip == 10, "document position roundtrip")
+	assert(lines.Undo() && lines.LineCount() == 3 && lines.Redo() && lines.LineCount() == 4, "line index survives history")
+	word := language.Range{
+		Start: language.Position{Line: 0, CharacterUTF16: 0},
+		End: language.Position{Line: 0, CharacterUTF16: 6},
+	}
+	service := &language.StaticService{
+		Items: []language.Completion{{Label: "func", InsertText: "func"}},
+		HoverValue: language.Hover{Range: word, Markdown: "Module declaration"}, HasHover: true,
+		Definitions: []language.Location{{URI: "file:///main.vo", Range: word}},
+		ReferenceLocations: []language.Location{{URI: "file:///main.vo", Range: word}},
+		RenameEdits: []language.WorkspaceEdit{
+			{URI: "file:///main.vo", Edits: []language.TextEdit{{Range: word, Text: "module"}}},
+		},
+		FormatEdits: []language.TextEdit{{Range: word, Text: "module"}},
+	}
+	assert(code.RefreshLanguage(context.Background(), service, language.Position{}) == nil, "language refresh")
+	assert(len(code.Completions()) == 1, "language completion")
+	hover, present, err := code.Hover(context.Background(), service, language.Position{})
+	assert(err == nil && present && hover.Markdown != "", "language hover")
+	definitions, err := code.Definitions(context.Background(), service, language.Position{})
+	assert(err == nil && len(definitions) == 1, "language definition")
+	references, err := code.References(context.Background(), service, language.Position{})
+	assert(err == nil && len(references) == 1, "language references")
+	rename, err := code.Rename(context.Background(), service, language.Position{}, "module")
+	assert(err == nil && len(rename) == 1, "language rename")
+	format, err := code.Format(context.Background(), service)
+	assert(err == nil && len(format) == 1, "language format")
+	large := document.NewText(strings.Repeat("bounded line\n", 100000))
+	largeEditor := editor.New(large, "file:///large.vo", "volang")
+	assert(len(largeEditor.VisibleLines()) <= 56, "large editor remains virtualized")
+	incrementalDocument := document.NewText("ab🙂cd")
+	incrementalEditor := editor.New(incrementalDocument, "file:///incremental.vo", "volang")
+	edit, changed, err := incrementalEditor.ApplyValue("ab🙂Xcd")
+	assert(err == nil && changed && edit.Start == 3 && edit.End == 3 && edit.Text == "X", "editor derives a minimal input edit")
+	assert(incrementalDocument.Undo() && incrementalDocument.Text() == "ab🙂cd", "editor input remains one undo unit")
+	edit, changed, err = incrementalEditor.ApplyValue("ab🙂d")
+	assert(err == nil && changed && edit.Start == 3 && edit.End == 4 && edit.Text == "", "editor derives a minimal deletion")
+	assert(incrementalDocument.Undo() && incrementalDocument.Text() == "ab🙂cd", "editor deletion remains one undo unit")
+	edit, changed, err = incrementalEditor.ApplyValue("abλcd")
+	assert(err == nil && changed && edit.Start == 2 && edit.End == 3 && edit.Text == "λ", "editor derives a minimal unicode replacement")
+	assert(incrementalDocument.Undo() && incrementalDocument.Text() == "ab🙂cd", "editor replacement remains one undo unit")
+	selectionDocument := document.NewText("a🙂bc")
+	selectionEditor := editor.New(selectionDocument, "file:///selection.vo", "volang")
+	edit, changed, err = selectionEditor.ApplyInput("a🙂Xbc", 4, 0)
+	selection := selectionDocument.Selection()
+	assert(err == nil && changed && edit.Start == 2 && edit.End == 2 && edit.Text == "X", "editor applies UTF-16 input")
+	assert(selection.Anchor == 3 && selection.Focus == 3, "editor converts the platform caret to Unicode scalars")
+	assert(selectionDocument.Undo() && selectionDocument.Text() == "a🙂bc", "editor selected input undoes atomically")
+	assert(selectionDocument.Redo() && selectionDocument.Selection().Focus == 3, "editor selected input restores its caret on redo")
+	highlighted := editor.HighlightVolangLine("func main() { value := 12; text := \"ok\" // ready }")
+	assert(len(highlighted) > 8 && highlighted[0].Text == "func" && highlighted[0].Kind == editor.Keyword, "editor highlights Volang keywords")
+	assert(highlighted[len(highlighted) - 1].Kind == editor.Comment, "editor highlights trailing comments")
+	reconstructed := ""
+	for _, segment := range highlighted {
+		reconstructed += segment.Text
+	}
+	assert(reconstructed == "func main() { value := 12; text := \"ok\" // ready }", "editor highlighting preserves source text")
+	semanticDocument := document.NewText("func main")
+	semanticEditor := editor.New(semanticDocument, "file:///semantic.vo", "volang")
+	assert(semanticEditor.SetTokens([]editor.Token{{Start: 0, End: 4, Kind: editor.Comment}}) == nil, "editor accepts semantic tokens")
+	semanticSegments := semanticEditor.Segments(semanticEditor.VisibleLines()[0])
+	assert(len(semanticSegments) == 2 && semanticSegments[0].Text == "func" && semanticSegments[0].Kind == editor.Comment && semanticSegments[1].Text == " main", "semantic tokens override lexical fallback and preserve gaps")
+	assert(semanticEditor.SetTokens([]editor.Token{{Start: 0, End: 5, Kind: editor.Keyword}, {Start: 4, End: 9, Kind: editor.Identifier}}) != nil, "editor rejects overlapping semantic tokens")
+	timeline := animation.NewTimeline(200 * time.Millisecond, animation.Keyframe{
+		At: 1, Value: 1, Curve: motion.EaseOut,
+	})
+	assert(timeline.Duration == 200 * time.Millisecond, "animation timeline")
+	source := assets.Source{URI: "/movie.mp4", Kind: assets.Video, MediaType: "video/mp4"}
+	player, err = media.NewSession("preview", source, &mediaHost{})
+	assert(err == nil, "media session")
+	assert(player.Open(context.Background()) == nil && player.Play(context.Background()) == nil, "media state")
+	blocking := &blockingMediaHost{started: make(chan struct{}, 1), release: make(chan struct{}, 1)}
+	closing, err := media.NewSession("closing", source, blocking)
+	assert(err == nil, "blocking media session")
+	opened := make(chan error, 1)
+	go func() {
+		opened <- closing.Open(context.Background())
+	}()
+	<-blocking.started
+	assert(closing.Close(context.Background()) == nil, "media close during open")
+	blocking.release <- struct{}{}
+	assert(<-opened == context.Canceled && closing.State() == media.Closed, "late media completion is rejected")
+	capturePlatform := &captureHost{}
+	capture, err := media.NewCaptureSession(media.CaptureRequest{
+		Kind: media.Camera, Width: 1280, Height: 720, FrameRate: 30,
+	}, capturePlatform)
+	assert(err == nil && capture.RequestPermission(context.Background()) == nil &&
+		capture.PermissionState() == media.PermissionGranted, "capture permission")
+	assert(capture.Start(context.Background()) == nil && capture.State() == media.Capturing &&
+		capture.Stream().ID == "capture-1", "capture start")
+	assert(capture.Stop(context.Background()) == nil && capture.State() == media.CaptureStopped &&
+		capturePlatform.stopped == 1, "capture stop")
+	blockedCaptureHost := &blockingCaptureHost{
+		started: make(chan struct{}, 1), release: make(chan struct{}, 1),
+	}
+	blockedCapture, err := media.NewCaptureSession(media.CaptureRequest{Kind: media.Microphone}, blockedCaptureHost)
+	assert(err == nil, "blocking capture session")
+	permissionResult := make(chan error, 1)
+	go func() {
+		permissionResult <- blockedCapture.RequestPermission(context.Background())
+	}()
+	<-blockedCaptureHost.started
+	assert(blockedCapture.Close(context.Background()) == nil, "capture close during permission")
+	blockedCaptureHost.release <- struct{}{}
+	assert(<-permissionResult == context.Canceled && blockedCapture.State() == media.CaptureClosed, "late capture permission is rejected")
+	space, err = workspace.New(workspace.Split("root", workspace.Horizontal, 0.6, workspace.PanelLayout("editor", "editor"), workspace.PanelLayout("preview", "preview")), []workspace.Panel{
+		{ID: "editor", Title: "Editor", Content: EditorPanel},
+		{ID: "preview", Title: "Preview", Content: PreviewPanel},
+	})
+	assert(err == nil, "workspace model")
+	workspaceSnapshot := space.Snapshot()
+	assert(strings.HasPrefix(workspaceSnapshot, "VWS2|"), "workspace versioned snapshot")
+	assert(space.ResizeByDelta("root", 64, 640) == nil && space.Root.Ratio == 0.7, "workspace pointer delta resize")
+	assert(space.Restore(workspaceSnapshot) == nil && space.Root.Ratio == 0.6, "workspace snapshot restoration")
+	assert(space.Restore("VWS2|{}") != nil && space.Root.Ratio == 0.6, "workspace transactional restoration")
+	tabSpace, err := workspace.New(workspace.Tabs("documents", 1, workspace.PanelLayout("one", "one"), workspace.PanelLayout("two", "two"), workspace.PanelLayout("three", "three")), []workspace.Panel{
+		{ID: "one", Title: "One", Closable: true, Content: EmptyPanel},
+		{ID: "two", Title: "Two", Closable: true, Content: EmptyPanel},
+		{ID: "three", Title: "Three", Closable: true, Content: EmptyPanel},
+	})
+	assert(err == nil && tabSpace.MoveTab("documents", 1, 2) == nil && tabSpace.Root.Active == 2, "workspace tab reorder preserves selection")
+	assert(tabSpace.ClosePanel("two") == nil && len(tabSpace.Root.Children) == 2 &&
+		tabSpace.Root.Active == 1, "workspace close repairs active tab")
+	dockSpace, err := workspace.New(workspace.Split("dock-root", workspace.Horizontal, 0.5, workspace.Tabs("dock-tabs", 0, workspace.PanelLayout("dock-one", "one"), workspace.PanelLayout("dock-two", "two")), workspace.PanelLayout("dock-three", "three")), []workspace.Panel{
+		{ID: "one", Title: "One", Content: EmptyPanel},
+		{ID: "two", Title: "Two", Content: EmptyPanel},
+		{ID: "three", Title: "Three", Content: EmptyPanel},
+	})
+	assert(err == nil && dockSpace.DockPanel("two", "dock-three", workspace.DockCenter) == nil,
+		"workspace cross-group center dock")
+	assert(dockSpace.Validate() == nil && dockSpace.DockPanel("one", "dock-three", workspace.DockBottom) == nil,
+		"workspace edge dock")
+	assert(dockSpace.Validate() == nil, "workspace dock result validates")
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

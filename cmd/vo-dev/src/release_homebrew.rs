@@ -49,6 +49,20 @@ pub(crate) fn validate_homebrew_formula_targets(release: &ReleaseFile, text: &st
             }
         );
     }
+    if !text
+        .lines()
+        .any(|line| line.contains("install") && line.contains("share/volang"))
+    {
+        bail!("Homebrew formula must install the bundled share/volang UI runtime directory");
+    }
+    for runtime in ["libvo_aot_runtime", "libvo_ui_aot_runtime_native"] {
+        if !text
+            .lines()
+            .any(|line| line.contains("install") && line.contains(runtime))
+        {
+            bail!("Homebrew formula must install the bundled {runtime} archive");
+        }
+    }
     Ok(())
 }
 
@@ -308,6 +322,9 @@ mod tests {
             "  sha256_by_target = {\n",
             "    \"aarch64-apple-darwin\" => \"old\",\n",
             "  }\n",
+            "  share.install \"share/volang\"\n",
+            "  libexec.install \"libvo_aot_runtime.a\"\n",
+            "  libexec.install \"libvo_ui_aot_runtime_native.a\"\n",
             "end\n",
         );
 
@@ -322,11 +339,44 @@ mod tests {
             "    \"aarch64-apple-darwin\" => \"old\",\n",
             "    \"old-target\" => \"old\",\n",
             "  }\n",
+            "  share.install \"share/volang\"\n",
+            "  libexec.install \"libvo_aot_runtime.a\"\n",
+            "  libexec.install \"libvo_ui_aot_runtime_native.a\"\n",
             "end\n",
         );
 
         let error = validate_homebrew_formula_targets(&sample_release(), formula).unwrap_err();
         assert!(error.to_string().contains("unexpected: old-target"));
+    }
+
+    #[test]
+    fn homebrew_formula_must_preserve_the_bundled_ui_runtime() {
+        let formula = concat!(
+            "class Vo < Formula\n",
+            "  sha256_by_target = {\n",
+            "    \"aarch64-apple-darwin\" => \"old\",\n",
+            "  }\n",
+            "end\n",
+        );
+
+        let error = validate_homebrew_formula_targets(&sample_release(), formula).unwrap_err();
+        assert!(error.to_string().contains("share/volang"));
+    }
+
+    #[test]
+    fn homebrew_formula_must_preserve_both_aot_runtimes() {
+        let formula = concat!(
+            "class Vo < Formula\n",
+            "  sha256_by_target = {\n",
+            "    \"aarch64-apple-darwin\" => \"old\",\n",
+            "  }\n",
+            "  share.install \"share/volang\"\n",
+            "  libexec.install \"libvo_aot_runtime.a\"\n",
+            "end\n",
+        );
+
+        let error = validate_homebrew_formula_targets(&sample_release(), formula).unwrap_err();
+        assert!(error.to_string().contains("libvo_ui_aot_runtime_native"));
     }
 
     fn sample_release() -> ReleaseFile {

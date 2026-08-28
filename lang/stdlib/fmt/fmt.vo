@@ -60,10 +60,28 @@ func nativeSscanf(str string, format string) ([]any, error)
 
 func nativeReadLine() (string, error)
 
+// defaultFormatArgs resolves the language-level formatting hooks before the
+// primitive native formatter sees the values. Keeping method dispatch here
+// gives every backend identical error and Stringer behavior; the native layer
+// remains responsible only for scalar/container rendering and spacing.
+func defaultFormatArgs(a []interface{}) []interface{} {
+	formatted := make([]interface{}, len(a))
+	for i, value := range a {
+		if err, ok := value.(error); ok {
+			formatted[i] = err.Error()
+		} else if stringer, ok := value.(Stringer); ok {
+			formatted[i] = stringer.String()
+		} else {
+			formatted[i] = value
+		}
+	}
+	return formatted
+}
+
 // Print formats using the default formats and writes to standard output.
 // Returns the number of bytes written.
 func Print(a ...interface{}) int {
-	s := nativeSprint(a)
+	s := nativeSprint(defaultFormatArgs(a))
 	nativeWrite(s)
 	return len(s)
 }
@@ -71,7 +89,7 @@ func Print(a ...interface{}) int {
 // Println formats using the default formats and writes to standard output.
 // A newline is appended. Returns the number of bytes written.
 func Println(a ...interface{}) int {
-	s := nativeSprintln(a)
+	s := nativeSprintln(defaultFormatArgs(a))
 	nativeWrite(s)
 	return len(s)
 }
@@ -86,13 +104,13 @@ func Printf(format string, a ...interface{}) int {
 
 // Sprint formats using the default formats and returns the resulting string.
 func Sprint(a ...interface{}) string {
-	return nativeSprint(a)
+	return nativeSprint(defaultFormatArgs(a))
 }
 
 // Sprintln formats using the default formats and returns the resulting string.
 // A newline is appended.
 func Sprintln(a ...interface{}) string {
-	return nativeSprintln(a)
+	return nativeSprintln(defaultFormatArgs(a))
 }
 
 // Sprintf formats according to a format specifier and returns the resulting string.
@@ -103,14 +121,14 @@ func Sprintf(format string, a ...interface{}) string {
 // Fprint formats using the default formats and writes to w.
 // Returns the number of bytes written and any write error.
 func Fprint(w io.Writer, a ...interface{}) (int, error) {
-	s := nativeSprint(a)
+	s := nativeSprint(defaultFormatArgs(a))
 	return io.WriteString(w, s)
 }
 
 // Fprintln formats using the default formats, appends a newline, and writes to w.
 // Returns the number of bytes written and any write error.
 func Fprintln(w io.Writer, a ...interface{}) (int, error) {
-	s := nativeSprintln(a)
+	s := nativeSprintln(defaultFormatArgs(a))
 	return io.WriteString(w, s)
 }
 

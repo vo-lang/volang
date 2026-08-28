@@ -77,20 +77,8 @@ enum GuestEvent {
     PollDisplayTimingRequest {
         reply: mpsc::SyncSender<Result<Option<crate::DisplayTimingRequest>, String>>,
     },
-    PollVoguiEffect {
-        reply: mpsc::SyncSender<Result<Option<Vec<u8>>, String>>,
-    },
     PollPlatformRequest {
         reply: mpsc::SyncSender<Result<Option<crate::PlatformRequest>, String>>,
-    },
-    PollVoguiSubscriptions {
-        reply: mpsc::SyncSender<Result<Vec<u8>, String>>,
-    },
-    SubmitVoguiSubscriptionEvent {
-        caller: vo_runtime::host_services_v2::CallerEndpointHandle,
-        handle: vo_runtime::host_services_v2::HostResourceHandle,
-        payload: Vec<u8>,
-        reply: mpsc::SyncSender<Result<(), String>>,
     },
     CompletePlatformRequest {
         request_id: RequestId,
@@ -215,7 +203,6 @@ pub struct NativeGuestHandle {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebviewFrameworkRecoveryReport {
     pub restarted_lanes: Vec<crate::EndpointChannelBinding>,
-    pub replayed_vogui_packets: usize,
     pub replayed_voplay_packets: usize,
 }
 
@@ -452,50 +439,10 @@ impl NativeGuestHandle {
             .map_err(|_| String::from("guest VM stopped"))?
     }
 
-    pub fn poll_vogui_effect(&self) -> Result<Option<Vec<u8>>, String> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.event_tx
-            .send(GuestEvent::PollVoguiEffect { reply: reply_tx })
-            .map_err(|_| String::from("native guest event loop stopped"))?;
-        reply_rx
-            .recv()
-            .map_err(|_| String::from("native guest event loop stopped"))?
-    }
-
     pub fn poll_platform_request(&self) -> Result<Option<crate::PlatformRequest>, String> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.event_tx
             .send(GuestEvent::PollPlatformRequest { reply: reply_tx })
-            .map_err(|_| String::from("native guest event loop stopped"))?;
-        reply_rx
-            .recv()
-            .map_err(|_| String::from("native guest event loop stopped"))?
-    }
-
-    pub fn poll_vogui_subscriptions(&self) -> Result<Vec<u8>, String> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.event_tx
-            .send(GuestEvent::PollVoguiSubscriptions { reply: reply_tx })
-            .map_err(|_| String::from("native guest event loop stopped"))?;
-        reply_rx
-            .recv()
-            .map_err(|_| String::from("native guest event loop stopped"))?
-    }
-
-    pub fn submit_vogui_subscription_event(
-        &self,
-        caller: vo_runtime::host_services_v2::CallerEndpointHandle,
-        handle: vo_runtime::host_services_v2::HostResourceHandle,
-        payload: Vec<u8>,
-    ) -> Result<(), String> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.event_tx
-            .send(GuestEvent::SubmitVoguiSubscriptionEvent {
-                caller,
-                handle,
-                payload,
-                reply: reply_tx,
-            })
             .map_err(|_| String::from("native guest event loop stopped"))?;
         reply_rx
             .recv()
@@ -897,7 +844,6 @@ struct NativeEntryIsland {
     caller: vo_runtime::host_services_v2::CallerEndpointHandle,
     framework: crate::EntryFramework,
     startup_bound: bool,
-    pending_vogui_turn: Option<RequestId>,
     pending_voplay_tick_turn: Option<RequestId>,
 }
 
@@ -943,7 +889,7 @@ pub struct NativeGuiEventLoopConfig {
     /// Dispatches one bounded HostServices V2 command. Completing only
     /// enqueues an event back to the VM owner thread.
     pub on_host_request: Option<HostRequestCallback>,
-    /// Constructs a generated Vogui/Voplay entry in its certified target
+    /// Constructs a generated Voplay entry in its certified target
     /// island. Completion is posted back to the VM owner thread.
     pub on_entry_launch: Option<EntryLaunchCallback>,
     /// Resolves and validates a platform-native provider artifact when the
@@ -1314,7 +1260,6 @@ fn close_native_entry_endpoint(
 
 fn framework_module_matches(module_key: &str, framework: crate::EntryFramework) -> bool {
     let expected = match framework {
-        crate::EntryFramework::Vogui => "vogui",
         crate::EntryFramework::Voplay => "voplay",
     };
     module_key
@@ -1357,251 +1302,6 @@ fn release_target_framework_startup(
     if let Ok(group) = target_framework_group_mut(active, framework) {
         group.release_target_startup(caller);
     }
-}
-
-fn encode_vogui_target_turn(
-    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
-    source_root: Option<(u32, u32)>,
-    source_view: Option<(u32, u32)>,
-    event_sequence: Option<u64>,
-    event_revision: Option<u64>,
-    mapper_id: u32,
-    monotonic_millis: u64,
-    payload: &[u8],
-) -> Result<Vec<u8>, String> {
-    if mapper_id == 0 || payload.len() > crate::MAX_TARGET_STARTUP_BYTES - 52 {
-        return Err(String::from("Vogui target turn exceeds provider limits"));
-    }
-    let mut turn = Vec::with_capacity(52 + payload.len());
-    turn.extend_from_slice(&3_u32.to_le_bytes());
-    turn.extend_from_slice(&mapper_id.to_le_bytes());
-    turn.extend_from_slice(&monotonic_millis.to_le_bytes());
-    let source_root = source_root.unwrap_or((caller.endpoint_index, caller.endpoint_generation));
-    let source_view = source_view.unwrap_or(source_root);
-    turn.extend_from_slice(&source_root.0.to_le_bytes());
-    turn.extend_from_slice(&source_root.1.to_le_bytes());
-    turn.extend_from_slice(&source_view.0.to_le_bytes());
-    turn.extend_from_slice(&source_view.1.to_le_bytes());
-    turn.extend_from_slice(&event_sequence.unwrap_or(0).to_le_bytes());
-    turn.extend_from_slice(&event_revision.unwrap_or(0).to_le_bytes());
-    turn.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    turn.extend_from_slice(payload);
-    Ok(turn)
-}
-
-struct DecodedProviderVoguiTurn<'a> {
-    mapper_id: u32,
-    source_root: Option<(u32, u32)>,
-    source_view: Option<(u32, u32)>,
-    event_sequence: Option<u64>,
-    event_revision: Option<u64>,
-    payload: &'a [u8],
-}
-
-fn decode_provider_vogui_turn(
-    packet: &[u8],
-) -> Result<Option<DecodedProviderVoguiTurn<'_>>, String> {
-    if let Some(turn) = packet.strip_prefix(b"vogui-target-turn-v3\0") {
-        if turn.len() < 40 {
-            return Err(String::from("sequenced Vogui target turn is truncated"));
-        }
-        let mapper_id = u32::from_le_bytes(turn[..4].try_into().unwrap());
-        let source_root = (
-            u32::from_le_bytes(turn[4..8].try_into().unwrap()),
-            u32::from_le_bytes(turn[8..12].try_into().unwrap()),
-        );
-        let source_view = (
-            u32::from_le_bytes(turn[12..16].try_into().unwrap()),
-            u32::from_le_bytes(turn[16..20].try_into().unwrap()),
-        );
-        let event_sequence = u64::from_le_bytes(turn[20..28].try_into().unwrap());
-        let event_revision = u64::from_le_bytes(turn[28..36].try_into().unwrap());
-        let payload_len = u32::from_le_bytes(turn[36..40].try_into().unwrap()) as usize;
-        if mapper_id == 0
-            || source_root.1 == 0
-            || source_view.1 == 0
-            || event_sequence == 0
-            || payload_len != turn.len() - 40
-        {
-            return Err(String::from("sequenced Vogui target turn is malformed"));
-        }
-        return Ok(Some(DecodedProviderVoguiTurn {
-            mapper_id,
-            source_root: Some(source_root),
-            source_view: Some(source_view),
-            event_sequence: Some(event_sequence),
-            event_revision: Some(event_revision),
-            payload: &turn[40..],
-        }));
-    }
-    if let Some(turn) = packet.strip_prefix(b"vogui-target-turn-v2\0") {
-        if turn.len() < 24 {
-            return Err(String::from("qualified Vogui target turn is truncated"));
-        }
-        let mapper_id = u32::from_le_bytes(turn[..4].try_into().unwrap());
-        let source_root = (
-            u32::from_le_bytes(turn[4..8].try_into().unwrap()),
-            u32::from_le_bytes(turn[8..12].try_into().unwrap()),
-        );
-        let source_view = (
-            u32::from_le_bytes(turn[12..16].try_into().unwrap()),
-            u32::from_le_bytes(turn[16..20].try_into().unwrap()),
-        );
-        let payload_len = u32::from_le_bytes(turn[20..24].try_into().unwrap()) as usize;
-        if mapper_id == 0
-            || source_root.1 == 0
-            || source_view.1 == 0
-            || payload_len != turn.len() - 24
-        {
-            return Err(String::from("qualified Vogui target turn is malformed"));
-        }
-        return Ok(Some(DecodedProviderVoguiTurn {
-            mapper_id,
-            source_root: Some(source_root),
-            source_view: Some(source_view),
-            event_sequence: None,
-            event_revision: None,
-            payload: &turn[24..],
-        }));
-    }
-    if let Some(turn) = packet.strip_prefix(b"vogui-target-turn-v1\0") {
-        if turn.len() < 8 {
-            return Err(String::from("Vogui target turn is truncated"));
-        }
-        let mapper_id = u32::from_le_bytes(turn[..4].try_into().unwrap());
-        let payload_len = u32::from_le_bytes(turn[4..8].try_into().unwrap()) as usize;
-        if mapper_id == 0 || payload_len != turn.len() - 8 {
-            return Err(String::from("Vogui target turn is malformed"));
-        }
-        return Ok(Some(DecodedProviderVoguiTurn {
-            mapper_id,
-            source_root: None,
-            source_view: None,
-            event_sequence: None,
-            event_revision: None,
-            payload: &turn[8..],
-        }));
-    }
-    Ok(None)
-}
-
-fn enqueue_native_vogui_target_turn(
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-    mapper_id: i32,
-    payload: &[u8],
-    monotonic_millis: u64,
-    event_tx: &mpsc::Sender<GuestEvent>,
-) -> Result<bool, String> {
-    let callers = entry_islands
-        .values()
-        .filter(|entry| entry.framework == crate::EntryFramework::Vogui && entry.startup_bound)
-        .take(2)
-        .map(|entry| entry.caller)
-        .collect::<Vec<_>>();
-    if callers.is_empty() {
-        return Ok(false);
-    }
-    if callers.len() != 1 {
-        return Err(String::from(
-            "unqualified Vogui event is ambiguous across target instances",
-        ));
-    }
-    let caller = callers[0];
-    let mapper_id =
-        u32::try_from(mapper_id).map_err(|_| String::from("Vogui mapper identity is negative"))?;
-    enqueue_native_vogui_target_turn_for(
-        active_framework_providers,
-        entry_islands,
-        caller,
-        None,
-        None,
-        None,
-        None,
-        mapper_id,
-        payload,
-        monotonic_millis,
-        event_tx,
-    )?;
-    Ok(true)
-}
-
-fn enqueue_native_vogui_target_turn_for(
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
-    source_root: Option<(u32, u32)>,
-    source_view: Option<(u32, u32)>,
-    event_sequence: Option<u64>,
-    event_revision: Option<u64>,
-    mapper_id: u32,
-    payload: &[u8],
-    monotonic_millis: u64,
-    event_tx: &mpsc::Sender<GuestEvent>,
-) -> Result<(), String> {
-    if !entry_islands.values().any(|entry| {
-        entry.caller == caller
-            && entry.framework == crate::EntryFramework::Vogui
-            && entry.startup_bound
-    }) {
-        return Err(String::from("Vogui subscription caller is not active"));
-    }
-    let turn = encode_vogui_target_turn(
-        caller,
-        source_root,
-        source_view,
-        event_sequence,
-        event_revision,
-        mapper_id,
-        monotonic_millis,
-        payload,
-    )?;
-    let group =
-        target_framework_group_mut(active_framework_providers, crate::EntryFramework::Vogui)
-            .map_err(|error| format!("select Vogui provider: {error:?}"))?;
-    group.enqueue_vogui_target_turn(caller, turn)?;
-    let pending = entry_islands
-        .values_mut()
-        .find(|entry| entry.caller == caller)
-        .and_then(|entry| entry.pending_vogui_turn.take());
-    if let Some(request_id) = pending {
-        let turn = group
-            .take_vogui_target_turn(caller)?
-            .ok_or_else(|| String::from("queued Vogui target turn disappeared"))?;
-        let mut response = Vec::with_capacity(1 + turn.len());
-        response.push(0);
-        response.extend_from_slice(&turn);
-        event_tx
-            .send(GuestEvent::HostRequestCompletion {
-                caller,
-                request_id,
-                outcome: RequestOutcome::Success,
-                response,
-            })
-            .map_err(|_| String::from("native guest event loop stopped"))?;
-    }
-    Ok(())
-}
-
-fn take_native_vogui_effect(
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    entry_islands: &BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-) -> Result<Option<Vec<u8>>, String> {
-    let callers = entry_islands
-        .values()
-        .filter(|entry| entry.framework == crate::EntryFramework::Vogui && entry.startup_bound)
-        .take(2)
-        .map(|entry| entry.caller)
-        .collect::<Vec<_>>();
-    if callers.is_empty() {
-        return Ok(None);
-    }
-    if callers.len() != 1 {
-        return Err(String::from("Vogui effect poll is ambiguous"));
-    }
-    target_framework_group_mut(active_framework_providers, crate::EntryFramework::Vogui)
-        .map_err(|error| format!("select Vogui provider: {error:?}"))?
-        .take_vogui_effect(callers[0])
 }
 
 fn complete_native_voplay_tick_turn(
@@ -2257,9 +1957,9 @@ fn restart_webview_framework_state(
     active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
     active_native_framework_providers: &mut BTreeMap<String, Vec<NativeFrameworkProviderSlot>>,
     native_voplay_role_epochs: &mut NativeVoplayRoleEpochs,
-    entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-    event_tx: &mpsc::Sender<GuestEvent>,
-    now_millis: u64,
+    _entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
+    _event_tx: &mpsc::Sender<GuestEvent>,
+    _now_millis: u64,
     render_buffer: &SyncRenderBuffer,
 ) -> Result<WebviewFrameworkRecoveryReport, String> {
     let services = runtime
@@ -2276,83 +1976,8 @@ fn restart_webview_framework_state(
     };
     let mut report = WebviewFrameworkRecoveryReport {
         restarted_lanes: Vec::new(),
-        replayed_vogui_packets: 0,
         replayed_voplay_packets: 0,
     };
-
-    if let Ok(module_key) =
-        target_framework_module_key(active_framework_providers, crate::EntryFramework::Vogui)
-    {
-        report.restarted_lanes.push(
-            services
-                .restart_named_endpoint_channel(host, b"vogui/ui-renderer", limits)
-                .map_err(|status| format!("restart Vogui WebView lane: status {status}"))?,
-        );
-        let provider = active_native_framework_providers
-            .get_mut(&module_key)
-            .and_then(|providers| {
-                providers
-                    .iter_mut()
-                    .find(|provider| provider.role == crate::ProviderRole::UiLogic)
-            })
-            .ok_or_else(|| String::from("Vogui UiLogic provider disappeared during recovery"))?;
-        provider
-            .instance
-            .dispatch_packet(b"vogui-host-renderer-restart-v1\0")?;
-        while let Some(returned) = services
-            .try_take_default_outbound_endpoint_packet(provider.endpoint)
-            .map_err(|status| format!("poll Vogui recovery output: status {status}"))?
-        {
-            let (envelope, payload) = crate::decode_envelope(&returned.bytes)
-                .map_err(|error| format!("decode Vogui recovery output: {error:?}"))?;
-            if envelope.message_kind != crate::AppMessageKind::FrameworkPayload {
-                return Err(String::from(
-                    "Vogui recovery produced a non-framework packet",
-                ));
-            }
-            if let Some(turn) = decode_provider_vogui_turn(payload)? {
-                let callers = entry_islands
-                    .values()
-                    .filter(|entry| {
-                        entry.framework == crate::EntryFramework::Vogui && entry.startup_bound
-                    })
-                    .map(|entry| entry.caller)
-                    .take(2)
-                    .collect::<Vec<_>>();
-                if callers.len() != 1 {
-                    return Err(format!(
-                        "Vogui recovery target turn has {} candidate callers",
-                        callers.len()
-                    ));
-                }
-                enqueue_native_vogui_target_turn_for(
-                    active_framework_providers,
-                    entry_islands,
-                    callers[0],
-                    turn.source_root,
-                    turn.source_view,
-                    turn.event_sequence,
-                    turn.event_revision,
-                    turn.mapper_id,
-                    turn.payload,
-                    now_millis,
-                    event_tx,
-                )?;
-                continue;
-            }
-            if payload.starts_with(b"vogui-host-effect")
-                || payload.starts_with(b"vogui-host-subscription")
-            {
-                return Err(String::from(
-                    "Vogui renderer recovery produced unexpected logic work",
-                ));
-            }
-            services
-                .publish_named_endpoint_payload(host, b"vogui/ui-renderer", payload)
-                .map_err(|status| format!("replay Vogui WebView snapshot: status {status}"))?;
-            report.replayed_vogui_packets += 1;
-        }
-    }
 
     if let Ok(module_key) =
         target_framework_module_key(active_framework_providers, crate::EntryFramework::Voplay)
@@ -2476,382 +2101,6 @@ fn restart_webview_framework_state(
     Ok(report)
 }
 
-fn dispatch_native_vogui_presentation(
-    module_key: &str,
-    caller: vo_runtime::host_services_v2::CallerEndpointHandle,
-    renderer_host: vo_runtime::host_services_v2::CallerEndpointHandle,
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    native: &mut BTreeMap<String, Vec<NativeFrameworkProviderSlot>>,
-    host_services: &crate::AppHostServicesV2,
-    provider_ingress: &[u8],
-    render_buffer: &SyncRenderBuffer,
-) -> Result<(), String> {
-    let providers = native
-        .get_mut(module_key)
-        .ok_or_else(|| String::from("Vogui native provider set disappeared"))?;
-    let count = providers
-        .iter()
-        .filter(|provider| provider.role == crate::ProviderRole::UiLogic)
-        .count();
-    if count != 1 {
-        return Err(format!(
-            "Vogui UiLogic has {count} native provider instances"
-        ));
-    }
-    let provider = providers
-        .iter_mut()
-        .find(|provider| provider.role == crate::ProviderRole::UiLogic)
-        .ok_or_else(|| String::from("Vogui UiLogic native provider disappeared"))?;
-    provider.instance.dispatch_packet(provider_ingress)?;
-    while let Some(returned) = host_services
-        .try_take_default_outbound_endpoint_packet(provider.endpoint)
-        .map_err(|status| format!("poll Vogui UiLogic provider output: status {status}"))?
-    {
-        let (envelope, payload) = crate::decode_envelope(&returned.bytes)
-            .map_err(|error| format!("decode Vogui provider output: {error:?}"))?;
-        if envelope.message_kind != crate::AppMessageKind::FrameworkPayload {
-            return Err(String::from(
-                "Vogui UiLogic output used a non-framework message kind",
-            ));
-        }
-        if payload.starts_with(b"vogui-host-effect-cancel-v1\0") {
-            active_framework_providers
-                .get_mut(module_key)
-                .ok_or_else(|| String::from("Vogui provider group disappeared"))?
-                .apply_vogui_provider_effect_cancel(caller, payload)?;
-            continue;
-        }
-        if payload.starts_with(b"vogui-host-effect-v1\0") {
-            active_framework_providers
-                .get_mut(module_key)
-                .ok_or_else(|| String::from("Vogui provider group disappeared"))?
-                .enqueue_vogui_provider_effect(caller, payload.to_vec())?;
-            continue;
-        }
-        if payload.starts_with(b"vogui-host-subscription-v1\0") {
-            active_framework_providers
-                .get_mut(module_key)
-                .ok_or_else(|| String::from("Vogui provider group disappeared"))?
-                .apply_vogui_provider_subscription(caller, payload)?;
-            continue;
-        }
-        publish_vogui_renderer_payload(host_services, renderer_host, payload, render_buffer)?;
-    }
-    Ok(())
-}
-
-fn publish_vogui_renderer_payload(
-    services: &crate::AppHostServicesV2,
-    host: vo_runtime::host_services_v2::CallerEndpointHandle,
-    payload: &[u8],
-    fallback: &SyncRenderBuffer,
-) -> Result<(), String> {
-    match services.publish_named_endpoint_payload(host, b"vogui/ui-renderer", payload) {
-        Ok(()) => Ok(()),
-        Err(vo_runtime::host_services_v2::HOST_SERVICE_STATUS_UNAVAILABLE) => {
-            fallback.push(payload.to_vec());
-            Ok(())
-        }
-        Err(status) => Err(format!(
-            "publish Vogui WebView renderer payload: status {status}"
-        )),
-    }
-}
-
-fn dispatch_native_vogui_renderer_returns(
-    runtime: &NativeGuiRuntime,
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    native: &mut BTreeMap<String, Vec<NativeFrameworkProviderSlot>>,
-    entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-    event_tx: &mpsc::Sender<GuestEvent>,
-    render_buffer: &SyncRenderBuffer,
-    now_millis: u64,
-) -> Result<(), String> {
-    let module_key =
-        match target_framework_module_key(active_framework_providers, crate::EntryFramework::Vogui)
-        {
-            Ok(module_key) => module_key,
-            Err(_) => return Ok(()),
-        };
-    let services = runtime
-        .host_services_v2()
-        .cloned()
-        .ok_or_else(|| String::from("native Vogui runtime has no HostServices V2 owner"))?;
-    let host = runtime
-        .host_caller()
-        .ok_or_else(|| String::from("native Vogui runtime has no host caller"))?;
-    let providers = native
-        .get_mut(&module_key)
-        .ok_or_else(|| String::from("Vogui native provider set disappeared"))?;
-    let provider = providers
-        .iter_mut()
-        .find(|provider| provider.role == crate::ProviderRole::UiLogic)
-        .ok_or_else(|| String::from("Vogui UiLogic native provider disappeared"))?;
-    while let Some(packet) = services
-        .try_take_named_inbound_endpoint_packet(host, b"vogui/ui-renderer")
-        .map_err(|status| format!("poll native Vogui renderer lane: status {status}"))?
-    {
-        let (envelope, payload) = crate::decode_envelope(&packet.bytes)
-            .map_err(|error| format!("decode native Vogui renderer return: {error:?}"))?;
-        if envelope.message_kind != crate::AppMessageKind::FrameworkPayload {
-            return Err(String::from(
-                "native Vogui renderer returned a non-framework packet",
-            ));
-        }
-        provider.instance.dispatch_packet(payload)?;
-        while let Some(returned) = services
-            .try_take_default_outbound_endpoint_packet(provider.endpoint)
-            .map_err(|status| format!("poll native Vogui UiLogic output: status {status}"))?
-        {
-            let (envelope, payload) = crate::decode_envelope(&returned.bytes)
-                .map_err(|error| format!("decode native Vogui UiLogic output: {error:?}"))?;
-            if envelope.message_kind != crate::AppMessageKind::FrameworkPayload {
-                return Err(String::from(
-                    "native Vogui UiLogic output used a non-framework message kind",
-                ));
-            }
-            if let Some(turn) = decode_provider_vogui_turn(payload)? {
-                let callers = entry_islands
-                    .values()
-                    .filter(|entry| {
-                        entry.framework == crate::EntryFramework::Vogui && entry.startup_bound
-                    })
-                    .map(|entry| entry.caller)
-                    .take(2)
-                    .collect::<Vec<_>>();
-                if callers.len() != 1 {
-                    return Err(format!(
-                        "native Vogui target turn has {} candidate callers",
-                        callers.len()
-                    ));
-                }
-                enqueue_native_vogui_target_turn_for(
-                    active_framework_providers,
-                    entry_islands,
-                    callers[0],
-                    turn.source_root,
-                    turn.source_view,
-                    turn.event_sequence,
-                    turn.event_revision,
-                    turn.mapper_id,
-                    turn.payload,
-                    now_millis,
-                    event_tx,
-                )?;
-            } else if payload.starts_with(b"vogui-host-effect-cancel-v1\0") {
-                let callers = entry_islands
-                    .values()
-                    .filter(|entry| {
-                        entry.framework == crate::EntryFramework::Vogui && entry.startup_bound
-                    })
-                    .map(|entry| entry.caller)
-                    .take(2)
-                    .collect::<Vec<_>>();
-                if callers.len() != 1 {
-                    return Err(format!(
-                        "native Vogui effect cancellation has {} candidate callers",
-                        callers.len()
-                    ));
-                }
-                active_framework_providers
-                    .get_mut(&module_key)
-                    .ok_or_else(|| String::from("native Vogui provider group disappeared"))?
-                    .apply_vogui_provider_effect_cancel(callers[0], payload)?;
-            } else if payload.starts_with(b"vogui-host-effect-v1\0") {
-                let callers = entry_islands
-                    .values()
-                    .filter(|entry| {
-                        entry.framework == crate::EntryFramework::Vogui && entry.startup_bound
-                    })
-                    .map(|entry| entry.caller)
-                    .take(2)
-                    .collect::<Vec<_>>();
-                if callers.len() != 1 {
-                    return Err(format!(
-                        "native Vogui effect has {} candidate callers",
-                        callers.len()
-                    ));
-                }
-                active_framework_providers
-                    .get_mut(&module_key)
-                    .ok_or_else(|| String::from("native Vogui provider group disappeared"))?
-                    .enqueue_vogui_provider_effect(callers[0], payload.to_vec())?;
-            } else if payload.starts_with(b"vogui-host-subscription-v1\0") {
-                let callers = entry_islands
-                    .values()
-                    .filter(|entry| {
-                        entry.framework == crate::EntryFramework::Vogui && entry.startup_bound
-                    })
-                    .map(|entry| entry.caller)
-                    .take(2)
-                    .collect::<Vec<_>>();
-                if callers.len() != 1 {
-                    return Err(format!(
-                        "native Vogui subscription has {} candidate callers",
-                        callers.len()
-                    ));
-                }
-                active_framework_providers
-                    .get_mut(&module_key)
-                    .ok_or_else(|| String::from("native Vogui provider group disappeared"))?
-                    .apply_vogui_provider_subscription(callers[0], payload)?;
-                continue;
-            } else {
-                publish_vogui_renderer_payload(&services, host, payload, render_buffer)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn dispatch_native_vogui_subscription_event(
-    runtime: &NativeGuiRuntime,
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    native: &mut BTreeMap<String, Vec<NativeFrameworkProviderSlot>>,
-    entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-    event_tx: &mpsc::Sender<GuestEvent>,
-    render_buffer: &SyncRenderBuffer,
-    event: crate::HostedVoguiSubscriptionEvent,
-    now_millis: u64,
-) -> Result<(), String> {
-    let module_key =
-        target_framework_module_key(active_framework_providers, crate::EntryFramework::Vogui)
-            .map_err(|error| format!("select Vogui provider: {error:?}"))?;
-    let services = runtime
-        .host_services_v2()
-        .cloned()
-        .ok_or_else(|| String::from("native Vogui runtime has no HostServices V2 owner"))?;
-    let provider = native
-        .get_mut(&module_key)
-        .and_then(|providers| {
-            providers
-                .iter_mut()
-                .find(|provider| provider.role == crate::ProviderRole::UiLogic)
-        })
-        .ok_or_else(|| String::from("native Vogui UiLogic provider disappeared"))?;
-    let payload_len =
-        u32::try_from(event.payload.len()).map_err(|_| String::from("Vogui event too large"))?;
-    let mut packet = Vec::with_capacity(45 + event.payload.len());
-    packet.extend_from_slice(b"vogui-host-subscription-event-v1\0");
-    packet.extend_from_slice(&event.handle.index.to_le_bytes());
-    packet.extend_from_slice(&event.handle.generation.to_le_bytes());
-    packet.extend_from_slice(&payload_len.to_le_bytes());
-    packet.extend_from_slice(&event.payload);
-    provider.instance.dispatch_packet(&packet)?;
-    while let Some(returned) = services
-        .try_take_default_outbound_endpoint_packet(provider.endpoint)
-        .map_err(|status| format!("poll native Vogui subscription output: status {status}"))?
-    {
-        let (envelope, payload) = crate::decode_envelope(&returned.bytes)
-            .map_err(|error| format!("decode native Vogui subscription output: {error:?}"))?;
-        if envelope.message_kind != crate::AppMessageKind::FrameworkPayload {
-            return Err(String::from(
-                "native Vogui subscription output used a non-framework message kind",
-            ));
-        }
-        if let Some(turn) = decode_provider_vogui_turn(payload)? {
-            enqueue_native_vogui_target_turn_for(
-                active_framework_providers,
-                entry_islands,
-                event.caller,
-                turn.source_root,
-                turn.source_view,
-                turn.event_sequence,
-                turn.event_revision,
-                turn.mapper_id,
-                turn.payload,
-                now_millis,
-                event_tx,
-            )?;
-        } else {
-            publish_vogui_renderer_payload(
-                &services,
-                runtime.host_caller().ok_or_else(|| {
-                    String::from("native Vogui runtime has no framework host caller")
-                })?,
-                payload,
-                render_buffer,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn dispatch_native_vogui_effect_completion(
-    runtime: &NativeGuiRuntime,
-    active_framework_providers: &mut BTreeMap<String, crate::HostedInstanceGroup>,
-    native: &mut BTreeMap<String, Vec<NativeFrameworkProviderSlot>>,
-    entry_islands: &mut BTreeMap<crate::EntryLaunchId, NativeEntryIsland>,
-    event_tx: &mpsc::Sender<GuestEvent>,
-    render_buffer: &SyncRenderBuffer,
-    completion: crate::HostedVoguiEffectCompletion,
-    now_millis: u64,
-) -> Result<(), String> {
-    let module_key =
-        target_framework_module_key(active_framework_providers, crate::EntryFramework::Vogui)
-            .map_err(|error| format!("select Vogui provider: {error:?}"))?;
-    let services = runtime
-        .host_services_v2()
-        .cloned()
-        .ok_or_else(|| String::from("native Vogui runtime has no HostServices V2 owner"))?;
-    let provider = native
-        .get_mut(&module_key)
-        .and_then(|providers| {
-            providers
-                .iter_mut()
-                .find(|provider| provider.role == crate::ProviderRole::UiLogic)
-        })
-        .ok_or_else(|| String::from("native Vogui UiLogic provider disappeared"))?;
-    let payload_len = u32::try_from(completion.payload.len())
-        .map_err(|_| String::from("Vogui effect completion is too large"))?;
-    let mut packet = Vec::with_capacity(50 + completion.payload.len());
-    packet.extend_from_slice(b"vogui-host-effect-result-v1\0");
-    packet.extend_from_slice(&completion.effect_id.to_le_bytes());
-    packet.extend_from_slice(&completion.app_code_epoch.to_le_bytes());
-    packet.push(completion.outcome);
-    packet.extend_from_slice(&payload_len.to_le_bytes());
-    packet.extend_from_slice(&completion.payload);
-    provider.instance.dispatch_packet(&packet)?;
-    while let Some(returned) = services
-        .try_take_default_outbound_endpoint_packet(provider.endpoint)
-        .map_err(|status| format!("poll native Vogui effect completion: status {status}"))?
-    {
-        let (envelope, payload) = crate::decode_envelope(&returned.bytes)
-            .map_err(|error| format!("decode native Vogui effect output: {error:?}"))?;
-        if envelope.message_kind != crate::AppMessageKind::FrameworkPayload {
-            return Err(String::from(
-                "native Vogui effect output used a non-framework message kind",
-            ));
-        }
-        if let Some(turn) = decode_provider_vogui_turn(payload)? {
-            enqueue_native_vogui_target_turn_for(
-                active_framework_providers,
-                entry_islands,
-                completion.caller,
-                turn.source_root,
-                turn.source_view,
-                turn.event_sequence,
-                turn.event_revision,
-                turn.mapper_id,
-                turn.payload,
-                now_millis,
-                event_tx,
-            )?;
-        } else {
-            publish_vogui_renderer_payload(
-                &services,
-                runtime.host_caller().ok_or_else(|| {
-                    String::from("native Vogui runtime has no framework host caller")
-                })?,
-                payload,
-                render_buffer,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn dispatch_voplay_engine_command(
     runtime: &mut NativeGuiRuntime,
     resolved_plan: &crate::ResolvedAppRuntimePlan,
@@ -3114,7 +2363,6 @@ fn enqueue_public_voplay_entry(
                     caller: child,
                     framework: crate::EntryFramework::Voplay,
                     startup_bound: false,
-                    pending_vogui_turn: None,
                     pending_voplay_tick_turn: None,
                 },
             );
@@ -3299,8 +2547,7 @@ fn dispatch_host_requests(
             HostRequestCommand::Begin {
                 capability_name,
                 ..
-            } if capability_name.as_slice() == crate::CAPABILITY_VOGUI_RUN_ENTRY.as_bytes()
-                || capability_name.as_slice() == crate::CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes()
+            } if capability_name.as_slice() == crate::CAPABILITY_VOPLAY_RUN_ENTRY.as_bytes()
         );
         let is_cancel = matches!(&command, HostRequestCommand::Cancel { .. });
         if is_entry_begin || is_cancel {
@@ -3328,10 +2575,7 @@ fn dispatch_host_requests(
                         let parent = runtime.host_caller().ok_or_else(|| {
                             String::from("native entry runtime has no bootstrap caller")
                         })?;
-                        let role = match construct.framework {
-                            crate::EntryFramework::Vogui => crate::EndpointRole::UiExecutor,
-                            crate::EntryFramework::Voplay => crate::EndpointRole::EngineLogic,
-                        };
+                        let role = crate::EndpointRole::EngineLogic;
                         let child = owner
                             .register_child_endpoint(
                                 parent,
@@ -3371,7 +2615,6 @@ fn dispatch_host_requests(
                                         caller: child,
                                         framework: construct.framework,
                                         startup_bound: false,
-                                        pending_vogui_turn: None,
                                         pending_voplay_tick_turn: None,
                                     },
                                 );
@@ -3438,49 +2681,6 @@ fn dispatch_host_requests(
             }
         }
         match &command {
-            HostRequestCommand::Begin {
-                capability_name,
-                payload,
-                ..
-            } if capability_name.as_slice()
-                == crate::CAPABILITY_VOGUI_TARGET_NEXT_TURN.as_bytes() =>
-            {
-                if !payload.is_empty() {
-                    completer.complete_with_data(
-                        request_id,
-                        RequestOutcome::ProviderError,
-                        entry_launch_error_response(b"Vogui target turn request must be empty"),
-                    )?;
-                    continue;
-                }
-                let entry = entry_islands
-                    .values_mut()
-                    .find(|entry| entry.caller == caller)
-                    .ok_or_else(|| String::from("Vogui target turn caller is not active"))?;
-                if entry.framework != crate::EntryFramework::Vogui
-                    || !entry.startup_bound
-                    || entry.pending_vogui_turn.is_some()
-                {
-                    completer.complete_with_data(
-                        request_id,
-                        RequestOutcome::ProviderError,
-                        entry_launch_error_response(b"Vogui target turn wait is invalid"),
-                    )?;
-                    continue;
-                }
-                let turn = target_framework_group_mut(active_framework_providers, entry.framework)
-                    .map_err(|error| format!("select Vogui provider: {error:?}"))?
-                    .take_vogui_target_turn(caller)?;
-                if let Some(turn) = turn {
-                    let mut response = Vec::with_capacity(1 + turn.len());
-                    response.push(0);
-                    response.extend_from_slice(&turn);
-                    completer.complete_with_data(request_id, RequestOutcome::Success, response)?;
-                } else {
-                    entry.pending_vogui_turn = Some(request_id);
-                }
-                continue;
-            }
             HostRequestCommand::Begin {
                 capability_name,
                 payload,
@@ -3576,93 +2776,6 @@ fn dispatch_host_requests(
                 }
                 continue;
             }
-            HostRequestCommand::Begin {
-                capability_name,
-                payload,
-                ..
-            } if capability_name.as_slice() == crate::CAPABILITY_VOGUI_TARGET_COMMIT.as_bytes() => {
-                let provider_host = runtime.host_services_v2().cloned().ok_or_else(|| {
-                    String::from("native Vogui runtime has no HostServices V2 owner")
-                })?;
-                let renderer_host = runtime.host_caller().ok_or_else(|| {
-                    String::from("native Vogui runtime has no framework host caller")
-                })?;
-                let provider_ingress = payload.to_vec();
-                let result = crate::decode_vogui_target_commit(payload)
-                    .map_err(|error| format!("decode Vogui target commit: {error:?}"))
-                    .and_then(|commit| {
-                        target_framework_group_mut(
-                            active_framework_providers,
-                            crate::EntryFramework::Vogui,
-                        )
-                        .map_err(|error| format!("select Vogui provider: {error:?}"))?
-                        .preflight_vogui_target_state(
-                            caller,
-                            &commit.model,
-                            &commit.update_result,
-                            &commit.effects,
-                            &commit.presentation,
-                            &commit.subscriptions,
-                        )?;
-                        let module_key = target_framework_module_key(
-                            active_framework_providers,
-                            crate::EntryFramework::Vogui,
-                        )
-                        .map_err(|error| format!("select Vogui provider: {error:?}"))?;
-                        dispatch_native_vogui_presentation(
-                            &module_key,
-                            caller,
-                            renderer_host,
-                            active_framework_providers,
-                            active_native_framework_providers,
-                            &provider_host,
-                            &provider_ingress,
-                            render_buffer,
-                        )?;
-                        target_framework_group_mut(
-                            active_framework_providers,
-                            crate::EntryFramework::Vogui,
-                        )
-                        .map_err(|error| format!("select Vogui provider: {error:?}"))?
-                        .commit_vogui_target_state(
-                            caller,
-                            commit.model,
-                            commit.update_result,
-                            commit.effects,
-                            commit.presentation,
-                            commit.subscriptions,
-                        )?;
-                        Ok(())
-                    });
-                match result {
-                    Ok(()) => completer.complete_with_data(
-                        request_id,
-                        RequestOutcome::Success,
-                        vec![0],
-                    )?,
-                    Err(error) => completer.complete_with_data(
-                        request_id,
-                        RequestOutcome::ProviderError,
-                        entry_launch_error_response(error.as_bytes()),
-                    )?,
-                }
-                continue;
-            }
-            HostRequestCommand::Cancel { .. }
-                if entry_islands.values().any(|entry| {
-                    entry.caller == caller && entry.pending_vogui_turn == Some(request_id)
-                }) =>
-            {
-                let entry = entry_islands
-                    .values_mut()
-                    .find(|entry| {
-                        entry.caller == caller && entry.pending_vogui_turn == Some(request_id)
-                    })
-                    .expect("guard certified pending Vogui target turn");
-                entry.pending_vogui_turn = None;
-                completer.complete(request_id, RequestOutcome::Cancelled)?;
-                continue;
-            }
             HostRequestCommand::Cancel { .. }
                 if entry_islands.values().any(|entry| {
                     entry.caller == caller && entry.pending_voplay_tick_turn == Some(request_id)
@@ -3682,11 +2795,7 @@ fn dispatch_host_requests(
                 capability_name,
                 payload,
                 ..
-            } if capability_name.as_slice() == crate::CAPABILITY_VOGUI_TARGET_INIT.as_bytes()
-                || capability_name.as_slice()
-                    == crate::CAPABILITY_VOPLAY_TARGET_START.as_bytes() =>
-            {
-                let provider_ingress = payload.to_vec();
+            } if capability_name.as_slice() == crate::CAPABILITY_VOPLAY_TARGET_START.as_bytes() => {
                 let result =
                     crate::decode_target_startup(capability_name, payload).and_then(|startup| {
                         let entry = entry_islands
@@ -3708,37 +2817,6 @@ fn dispatch_host_requests(
                     });
                 match result {
                     Ok(()) => {
-                        let framework = entry_islands
-                            .values()
-                            .find(|entry| entry.caller == caller)
-                            .map(|entry| entry.framework)
-                            .ok_or_else(|| String::from("initialized target entry disappeared"))?;
-                        if framework == crate::EntryFramework::Vogui {
-                            let provider_host =
-                                runtime.host_services_v2().cloned().ok_or_else(|| {
-                                    String::from(
-                                        "native Vogui runtime has no HostServices V2 owner",
-                                    )
-                                })?;
-                            let renderer_host = runtime.host_caller().ok_or_else(|| {
-                                String::from("native Vogui runtime has no framework host caller")
-                            })?;
-                            let module_key = target_framework_module_key(
-                                active_framework_providers,
-                                crate::EntryFramework::Vogui,
-                            )
-                            .map_err(|error| format!("select Vogui provider: {error:?}"))?;
-                            dispatch_native_vogui_presentation(
-                                &module_key,
-                                caller,
-                                renderer_host,
-                                active_framework_providers,
-                                active_native_framework_providers,
-                                &provider_host,
-                                &provider_ingress,
-                                render_buffer,
-                            )?;
-                        }
                         let launch_id = entry_islands
                             .iter()
                             .find_map(|(launch_id, entry)| {
@@ -4103,76 +3181,6 @@ fn run_event_loop(
                 return;
             }
         }
-        let mut subscription_events = Vec::new();
-        for group in active_framework_providers.values_mut() {
-            match group.drive_vogui_subscriptions(now) {
-                Ok(mut events) => subscription_events.append(&mut events),
-                Err(error) => {
-                    report_error(&on_error, &error);
-                    runtime.shutdown();
-                    return;
-                }
-            }
-        }
-        for event in subscription_events {
-            if let Err(error) = dispatch_native_vogui_subscription_event(
-                &runtime,
-                &mut active_framework_providers,
-                &mut active_native_framework_providers,
-                &mut entry_islands,
-                &platform_tx,
-                &buffer,
-                event,
-                now,
-            ) {
-                report_error(&on_error, &error);
-                runtime.shutdown();
-                return;
-            }
-        }
-        let mut effect_completions = Vec::new();
-        for group in active_framework_providers.values_mut() {
-            match group.drive_vogui_task_effects(now) {
-                Ok(mut completions) => effect_completions.append(&mut completions),
-                Err(error) => {
-                    report_error(&on_error, &error);
-                    runtime.shutdown();
-                    return;
-                }
-            }
-            match group.drive_vogui_platform_effects(now) {
-                Ok(mut completions) => effect_completions.append(&mut completions),
-                Err(error) => {
-                    report_error(&on_error, &error);
-                    runtime.shutdown();
-                    return;
-                }
-            }
-            match group.take_vogui_platform_completions() {
-                Ok(mut completions) => effect_completions.append(&mut completions),
-                Err(error) => {
-                    report_error(&on_error, &error);
-                    runtime.shutdown();
-                    return;
-                }
-            }
-        }
-        for completion in effect_completions {
-            if let Err(error) = dispatch_native_vogui_effect_completion(
-                &runtime,
-                &mut active_framework_providers,
-                &mut active_native_framework_providers,
-                &mut entry_islands,
-                &platform_tx,
-                &buffer,
-                completion,
-                now,
-            ) {
-                report_error(&on_error, &error);
-                runtime.shutdown();
-                return;
-            }
-        }
         if let Err(error) = dispatch_host_requests(
             &mut runtime,
             &entry_plan,
@@ -4193,19 +3201,6 @@ fn run_event_loop(
             runtime.shutdown();
             return;
         }
-        if let Err(error) = dispatch_native_vogui_renderer_returns(
-            &runtime,
-            &mut active_framework_providers,
-            &mut active_native_framework_providers,
-            &mut entry_islands,
-            &platform_tx,
-            buffer.as_ref(),
-            now,
-        ) {
-            report_error(&on_error, &error);
-            runtime.shutdown();
-            return;
-        }
         let host_deadline = match runtime.next_host_timer_deadline() {
             Ok(deadline) => deadline,
             Err(status) => {
@@ -4217,18 +3212,6 @@ fn run_event_loop(
                 return;
             }
         };
-        let subscription_deadline = active_framework_providers
-            .values()
-            .filter_map(crate::HostedInstanceGroup::next_vogui_subscription_deadline)
-            .min();
-        let task_deadline = active_framework_providers
-            .values()
-            .filter_map(crate::HostedInstanceGroup::next_vogui_task_deadline)
-            .min();
-        let platform_deadline = active_framework_providers
-            .values()
-            .filter_map(crate::HostedInstanceGroup::next_vogui_platform_deadline)
-            .min();
         let mut voplay_deadline = None;
         for group in active_framework_providers.values() {
             match group.next_voplay_tick_wake_nanos(now_nanos) {
@@ -4246,16 +3229,7 @@ fn run_event_loop(
                 }
             }
         }
-        let deadline = [
-            host_deadline,
-            subscription_deadline,
-            task_deadline,
-            platform_deadline,
-            voplay_deadline,
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let deadline = [host_deadline, voplay_deadline].into_iter().flatten().min();
         let event = match deadline {
             Some(deadline) => {
                 let wait = deadline_wait(now, deadline);
@@ -4380,47 +3354,9 @@ fn run_event_loop(
             GuestEvent::PollDisplayTimingRequest { reply } => {
                 let _ = reply.send(runtime.take_host_display_timing_request());
             }
-            GuestEvent::PollVoguiEffect { reply } => {
-                let _ = reply.send(take_native_vogui_effect(
-                    &mut active_framework_providers,
-                    &entry_islands,
-                ));
-            }
             GuestEvent::PollPlatformRequest { reply } => {
                 let now_millis = monotonic_millis(clock_origin);
                 let _ = reply.send(runtime.poll_host_platform_request(now_millis));
-            }
-            GuestEvent::PollVoguiSubscriptions { reply } => {
-                let bindings = active_framework_providers
-                    .values()
-                    .flat_map(crate::HostedInstanceGroup::active_vogui_subscriptions)
-                    .collect::<Vec<_>>();
-                let _ = reply.send(crate::encode_vogui_subscription_bindings(&bindings));
-            }
-            GuestEvent::SubmitVoguiSubscriptionEvent {
-                caller,
-                handle,
-                payload,
-                reply,
-            } => {
-                let event = active_framework_providers
-                    .values()
-                    .find(|group| group.vogui_subscription_records(caller).is_some())
-                    .ok_or_else(|| String::from("native Vogui subscription caller is not active"))
-                    .and_then(|group| group.emit_vogui_subscription_event(caller, handle, payload));
-                let result = event.and_then(|event| {
-                    dispatch_native_vogui_subscription_event(
-                        &runtime,
-                        &mut active_framework_providers,
-                        &mut active_native_framework_providers,
-                        &mut entry_islands,
-                        &platform_tx,
-                        &buffer,
-                        event,
-                        monotonic_millis(clock_origin),
-                    )
-                });
-                let _ = reply.send(result);
             }
             GuestEvent::CompletePlatformRequest {
                 request_id,
@@ -5018,99 +3954,59 @@ fn run_event_loop(
             GuestEvent::Event {
                 handler_id,
                 payload,
-            } => {
-                match enqueue_native_vogui_target_turn(
-                    &mut active_framework_providers,
-                    &mut entry_islands,
-                    handler_id,
-                    payload.as_bytes(),
-                    monotonic_millis(clock_origin),
-                    &platform_tx,
-                ) {
-                    Ok(true) => {
-                        let _ = render_tx.send(Ok(Vec::new()));
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        report_error(&on_error, &error);
-                        runtime.shutdown();
-                        let _ = render_tx.send(Err(error));
-                        return;
-                    }
+            } => match runtime.dispatch_event(handler_id, &payload) {
+                Ok(step) => {
+                    publish_stdout_diagnostic(
+                        &runtime,
+                        &on_diagnostic,
+                        &on_error,
+                        "event",
+                        step.stdout.as_deref(),
+                    );
+                    let _ = render_tx.send(Ok(step.render_output.unwrap_or_default()));
                 }
-                match runtime.dispatch_event(handler_id, &payload) {
-                    Ok(step) => {
-                        publish_stdout_diagnostic(
-                            &runtime,
-                            &on_diagnostic,
-                            &on_error,
-                            "event",
-                            step.stdout.as_deref(),
-                        );
-                        let _ = render_tx.send(Ok(step.render_output.unwrap_or_default()));
-                    }
-                    Err(error) => {
-                        let message = report_runtime_dispatch_error(
-                            &runtime,
-                            &on_diagnostic,
-                            &on_exit,
-                            &on_error,
-                            "on sync event",
-                            &error,
-                        );
-                        runtime.shutdown();
-                        let _ = render_tx.send(Err(message));
-                        return;
-                    }
+                Err(error) => {
+                    let message = report_runtime_dispatch_error(
+                        &runtime,
+                        &on_diagnostic,
+                        &on_exit,
+                        &on_error,
+                        "on sync event",
+                        &error,
+                    );
+                    runtime.shutdown();
+                    let _ = render_tx.send(Err(message));
+                    return;
                 }
-            }
+            },
             GuestEvent::AsyncEvent {
                 handler_id,
                 payload,
-            } => {
-                match enqueue_native_vogui_target_turn(
-                    &mut active_framework_providers,
-                    &mut entry_islands,
-                    handler_id,
-                    payload.as_bytes(),
-                    monotonic_millis(clock_origin),
-                    &platform_tx,
-                ) {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(error) => {
-                        report_error(&on_error, &error);
-                        runtime.shutdown();
-                        return;
-                    }
+            } => match runtime.try_dispatch_event(handler_id, &payload) {
+                Ok(Some(step)) => {
+                    publish_stdout_diagnostic(
+                        &runtime,
+                        &on_diagnostic,
+                        &on_error,
+                        "event",
+                        step.stdout.as_deref(),
+                    );
+                    buffer.push(step.render_output.unwrap_or_default());
                 }
-                match runtime.try_dispatch_event(handler_id, &payload) {
-                    Ok(Some(step)) => {
-                        publish_stdout_diagnostic(
-                            &runtime,
-                            &on_diagnostic,
-                            &on_error,
-                            "event",
-                            step.stdout.as_deref(),
-                        );
-                        buffer.push(step.render_output.unwrap_or_default());
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        report_runtime_dispatch_error(
-                            &runtime,
-                            &on_diagnostic,
-                            &on_exit,
-                            &on_error,
-                            "on async event",
-                            &error,
-                        );
-                        runtime.shutdown();
-                        return;
-                    }
+                Ok(None) => {}
+                Err(error) => {
+                    report_runtime_dispatch_error(
+                        &runtime,
+                        &on_diagnostic,
+                        &on_exit,
+                        &on_error,
+                        "on async event",
+                        &error,
+                    );
+                    runtime.shutdown();
+                    return;
                 }
-            }
+            },
             GuestEvent::IslandData { data } => match runtime.dispatch_island_frame(&data) {
                 Ok(step) => {
                     publish_stdout_diagnostic(

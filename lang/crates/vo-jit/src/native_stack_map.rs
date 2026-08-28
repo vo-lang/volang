@@ -19,7 +19,7 @@ pub enum NativeRootKind {
 }
 
 impl NativeRootKind {
-    const fn width(self) -> u32 {
+    pub const fn width(self) -> u32 {
         match self {
             Self::GcRef => 8,
             Self::InterfacePair => 16,
@@ -177,6 +177,60 @@ impl JitArtifactMetadata {
             });
         }
 
+        Self::try_from_parts(code_size, maps, Vec::new(), name)
+    }
+
+    /// Rebuild validated runtime metadata from a persistent AOT manifest.
+    pub fn try_from_parts(
+        code_size: u32,
+        mut maps: Vec<NativeStackMap>,
+        deopt_states: Vec<DeoptFrameState>,
+        name: &str,
+    ) -> Result<Self, JitError> {
+        maps.sort_unstable_by_key(|map| map.return_address_offset);
+        let mut previous_return_address = None;
+        for map in &mut maps {
+            if map.return_address_offset > code_size {
+                return Err(JitError::Internal(format!(
+                    "native stack map for {name} points outside its code: {} > {code_size}",
+                    map.return_address_offset
+                )));
+            }
+            if previous_return_address.is_some_and(|previous| previous >= map.return_address_offset)
+            {
+                return Err(JitError::Internal(format!(
+                    "native stack maps for {name} are not strictly ordered"
+                )));
+            }
+            previous_return_address = Some(map.return_address_offset);
+            if map.anchor_sp_offset >= map.frame_size {
+                return Err(JitError::Internal(format!(
+                    "native stack map for {name} has anchor {} outside frame size {}",
+                    map.anchor_sp_offset, map.frame_size
+                )));
+            }
+            map.roots.sort_unstable_by_key(|root| root.sp_offset);
+            for root in &map.roots {
+                if root
+                    .sp_offset
+                    .checked_add(root.kind.width())
+                    .is_none_or(|end| end > map.frame_size)
+                {
+                    return Err(JitError::Internal(format!(
+                        "native stack map for {name} has a root outside frame size {}",
+                        map.frame_size
+                    )));
+                }
+            }
+            if map.roots.windows(2).any(|pair| {
+                pair[0].sp_offset.saturating_add(pair[0].kind.width()) > pair[1].sp_offset
+            }) {
+                return Err(JitError::Internal(format!(
+                    "native stack map for {name} contains overlapping root ranges"
+                )));
+            }
+        }
+
         let index_len = maps
             .iter()
             .map(|map| map.safepoint_id)
@@ -195,12 +249,13 @@ impl JitArtifactMetadata {
                 .map_err(|_| JitError::Internal("native stack map index overflow".into()))?;
         }
 
-        Ok(Self {
+        Self {
             code_size,
             stack_maps: maps.into_boxed_slice(),
             safepoint_index: safepoint_index.into_boxed_slice(),
             deopt_states: Box::new([]),
-        })
+        }
+        .with_deopt_states(deopt_states, name)
     }
 
     pub(crate) fn with_deopt_states(

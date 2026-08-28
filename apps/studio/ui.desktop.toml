@@ -1,0 +1,12 @@
+application_id = "org.volang.studio"
+name = "Volang Studio"
+version = "0.1.4"
+executable = "volang-studio"
+signing_policy = "optional"
+resources = []
+
+[update]
+enabled = false
+channel = "stable"
+endpoint = ""
+public_key = ""

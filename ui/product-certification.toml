@@ -1,0 +1,31 @@
+schema_version = 1
+product = "Volang UI"
+target_version = "1.0"
+status = "enforced"
+candidate_identity = "tagged-commit-with-successful-protected-main-ci"
+evidence_schema = "volang.ui.product-evidence.v1"
+quality_matrix = "ui/quality-matrix.toml"
+release_workflow = ".github/workflows/release.yml"
+required_gates = [
+  "public-api-usability",
+  "component-and-pattern-coverage",
+  "layout-graphics-text",
+  "input-accessibility-i18n",
+  "web-product",
+  "desktop-product",
+  "platform-and-media-services",
+  "developer-tools",
+  "testing-matrix",
+  "performance-and-resilience",
+  "showcase-dogfood",
+  "ecosystem-release",
+]
+required_showcases = ["component-gallery", "content-site", "data-application", "media-application", "studio-workbench"]
+required_artifacts = [
+  "target archive",
+  "SHA-256 sidecar",
+  "provenance receipt",
+  "UI product certification summary",
+  "build provenance attestation",
+  "immutable release",
+]

@@ -1,0 +1,36 @@
+[package]
+name = "vo-studio-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native capability host and launcher for Volang Studio"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "vo-studio-native"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vo-engine.workspace = true
+vo-aot-runtime-core = { path = "../../../lang/crates/vo-aot-runtime-core" }
+vo-runtime = { path = "../../../lang/crates/vo-runtime", features = ["std"] }
+vo-ui-shell-native = { workspace = true, features = ["desktop-window"] }
+vo-ui-system.workspace = true
+vo-ui-vm.workspace = true
+
+[dev-dependencies]
+vo-app-host-native.workspace = true
+vo-app-protocol.workspace = true
+vo-ui-core.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-system-native.workspace = true

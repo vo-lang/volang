@@ -1,0 +1,74 @@
+// Package animation composes motion values into bounded timelines and honors
+// the inherited reduced-motion preference without renderer-specific branches.
+package animation
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/motion"
+	"math"
+	"strconv"
+	"time"
+)
+
+const MaxKeyframes = 4096
+
+type Keyframe struct { At float64; Value float64; Curve motion.Curve }
+
+type Timeline struct { Duration time.Duration; Repeat int; Alternate bool; Frames []Keyframe }
+
+func (timeline Timeline) Validate() {
+	if timeline.Duration < 0 || timeline.Duration > motion.MaxDuration || timeline.Repeat < 0 || timeline.Repeat > 100000 ||
+		len(timeline.Frames) == 0 || len(timeline.Frames) > MaxKeyframes {
+		panic("animation timeline is invalid")
+	}
+	previous := -1.0
+	for _, frame := range timeline.Frames {
+		if math.IsNaN(frame.At) || math.IsInf(frame.At, 0) || frame.At < 0 || frame.At > 1 || frame.At < previous ||
+			math.IsNaN(frame.Value) || math.IsInf(frame.Value, 0) {
+			panic("animation keyframe is invalid or out of order")
+		}
+		previous = frame.At
+	}
+}
+
+func NewTimeline(duration time.Duration, frames ...Keyframe) Timeline {
+	copyFrames := append([]Keyframe(nil), frames...)
+	for index := 1; index < len(copyFrames); index++ {
+		current := copyFrames[index]; position := index
+		for position > 0 && copyFrames[position-1].At > current.At {
+			copyFrames[position] = copyFrames[position-1]; position--
+		}
+		copyFrames[position] = current
+	}
+	timeline := Timeline{Duration: duration, Frames: copyFrames}
+	timeline.Validate()
+	return timeline
+}
+
+func Reduced(timeline Timeline) Timeline {
+	timeline.Validate()
+	last := timeline.Frames[len(timeline.Frames)-1]
+	return Timeline{Duration: 0, Frames: []Keyframe{{At: 1, Value: last.Value, Curve: motion.Linear}}}
+}
+
+// UseTarget provides the common declarative animation path. Reduced-motion
+// environments publish the target in one owned UI turn.
+func UseTarget(target float64, tween motion.Tween) motion.Value {
+	if ui.CurrentEnvironment().ReducedMotion { tween.Duration = 0 }
+	return motion.UseTween(target, tween)
+}
+
+type Transition struct { Opacity motion.Value; Scale motion.Value }
+
+func UsePresence(visible bool, duration time.Duration) Transition {
+	targetOpacity := 0.0; targetScale := 0.96
+	if visible { targetOpacity = 1; targetScale = 1 }
+	tween := motion.DefaultTween(); tween.Duration = duration
+	return Transition{Opacity: UseTarget(targetOpacity, tween), Scale: UseTarget(targetScale, tween)}
+}
+
+func Apply(view ui.View, transition Transition) ui.View {
+	view = ui.Opacity(view, transition.Opacity.Current())
+	scale := transition.Scale.Current()
+	return ui.Transform(view, "scale(" + strconv.FormatFloat(scale, 'g', -1, 64) + ")")
+}

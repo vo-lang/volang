@@ -95,20 +95,6 @@ fn run_in(cwd: &Path, args: &[String], label: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
-    let package_path = first_party_workspace_path(root, "vogui", "js")?;
-    let status = Command::new("npm")
-        .args(["install", "--no-save"])
-        .arg(&package_path)
-        .current_dir(root.join("apps/studio"))
-        .status()
-        .context("could not install local @vogui/runtime")?;
-    if !status.success() {
-        bail!("npm install local @vogui/runtime failed");
-    }
-    Ok(())
-}
-
 fn first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
     let project = load_project(root)?;
     let entry = project

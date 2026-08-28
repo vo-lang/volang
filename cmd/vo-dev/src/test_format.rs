@@ -20,12 +20,7 @@ pub(crate) fn check_test_formatting(root: &Path, suite: &str) -> Result<TestForm
     }
 
     let mut sources = BTreeMap::<PathBuf, bool>::new();
-    for directory in [
-        "lang/stdlib",
-        "examples",
-        "benchmarks",
-        "apps/studio/src/assets/examples",
-    ] {
+    for directory in ["lang/stdlib", "examples", "benchmarks"] {
         collect_vo_files(&root.join(directory), false, &mut sources)?;
     }
     let test_root = root.join(&manifest.root);

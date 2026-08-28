@@ -1,0 +1,12 @@
+application_id = "dev.volang.media"
+name = "Volang Media Laboratory"
+version = "0.1.0"
+executable = "volang-media"
+signing_policy = "optional"
+resources = ["public/poster.svg", "public/site.css"]
+
+[update]
+enabled = false
+channel = "stable"
+endpoint = ""
+public_key = ""

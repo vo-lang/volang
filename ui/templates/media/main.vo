@@ -1,0 +1,20 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/assets"
+	"github.com/vo-lang/ui/graphics"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	program := graphics.NewProgram(graphics.DefaultLimits())
+	program.Clear(0xff101820)
+	program.Fill(graphics.Rect{X: 24, Y: 24, Width: 240, Height: 120}, 0xff4f7cff)
+	artwork := assets.Image(assets.Source{URI: "/poster.svg", Kind: assets.VectorImage, MediaType: "image/svg+xml"}, "Application artwork", assets.Contain)
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Column(kit.Title("Media workspace"), graphics.Canvas(program, "Generated blue rectangle"), artwork))
+	})
+}
+
+func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }

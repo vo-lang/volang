@@ -1,0 +1,149 @@
+// Package examples owns Studio's curated, host-independent starter catalog.
+// Source travels through the typed project protocol so Web, desktop, VM, JIT,
+// and AOT builds all open the exact same editable project.
+package examples
+
+import (
+	"github.com/vo-lang/studio/domain"
+)
+
+type Example struct {
+	ID string
+	ProjectName string
+	Title string
+	File string
+	Description string
+	Category string
+	Monogram string
+	Tags string
+	HasUI bool
+	Files []domain.ProjectFile
+}
+
+func projectFiles(title string, description string, source string) []domain.ProjectFile {
+	return []domain.ProjectFile{
+		{Path: "main.vo", Text: source},
+		{
+			Path: "README.md",
+			Text: "# " + title + "\n\n" + description +
+				"\n\nOpen `main.vo`, edit it, then use Run or Open Preview.\n",
+		},
+	}
+}
+
+func item(id string, title string, description string, category string, monogram string, tags string, hasUI bool, source string) Example {
+	return Example{
+		ID: id, ProjectName: "example-" + id, Title: title, File: "main.vo", Description: description,
+		Category: category, Monogram: monogram, Tags: tags, HasUI: hasUI,
+		Files: projectFiles(title, description, source),
+	}
+}
+
+func buildCatalog() []Example {
+	return []Example{
+		item("counter", "Interactive counter", "Build a stateful UIKit screen and update it from an event handler.", "UI applications", "UI", "state · events · UIKit", true, counterSource()),
+		item("dashboard", "Responsive dashboard", "Compose a toolbar, navigation, cards, and a responsive metric grid.", "UI applications", "DB", "layout · cards · responsive", true, dashboardSource()),
+		item("async-search", "Goroutine search", "Run cancelable work after commit and safely publish the latest result to the UI Island.", "UI applications", "GO", "goroutine · task · cancellation", true, asyncSearchSource()),
+		item("channels", "Channels", "Coordinate a producer and consumer with typed message passing.", "Concurrency", "CH", "chan · messages", false, channelsSource()),
+		item("goroutines", "Goroutines", "Launch lightweight concurrent workers and collect their results.", "Concurrency", "GO", "go · workers", false, goroutinesSource()),
+		item("select", "Select", "Wait on multiple channel operations without coupling their producers.", "Concurrency", "SL", "select · channels", false, selectSource()),
+		item("error-handling", "Error handling", "Propagate failures with the question operator and keep validation direct.", "Language essentials", "ER", "errors · propagation", false, errorHandlingSource()),
+		item("closures", "Closures", "Capture values and build compact stateful behavior.", "Language essentials", "FN", "functions · capture", false, closuresSource()),
+		item("interfaces", "Interfaces", "Use structural contracts to keep callers flexible.", "Language essentials", "IF", "types · methods", false, interfacesSource()),
+		item("defer", "Defer", "Schedule predictable LIFO cleanup next to the work it protects.", "Language essentials", "DF", "cleanup · control flow", false, deferSource()),
+		item("dynamic-access", "Dynamic access", "Decode runtime-shaped JSON and access its fields explicitly.", "Data and standard library", "DY", "dynamic · JSON", false, dynamicAccessSource()),
+		item("filesystem", "Filesystem", "Write, read, inspect, and clean up files with the standard library.", "Data and standard library", "FS", "files · stdlib", false, filesystemSource()),
+		item("regexp", "Regular expressions", "Match, find, replace, split, and capture text.", "Data and standard library", "RX", "text · regexp", false, regexpSource()),
+		item("time", "Time", "Measure elapsed work and use portable duration values.", "Data and standard library", "TM", "time · duration", false, timeSource()),
+	}
+}
+
+var catalog = buildCatalog()
+
+func Catalog() []Example {
+	return append([]Example(nil), catalog...)
+}
+
+func Find(id string) (Example, bool) {
+	for _, example := range catalog {
+		if example.ID == id {
+			return example, true
+		}
+	}
+	return Example{}, false
+}
+
+func counterSource() string {
+	return "package main\n\n" +
+		"import (\n\t\"github.com/vo-lang/ui\"\n\t\"github.com/vo-lang/ui/kit\"\n\t\"strconv\"\n)\n\n" +
+		"func App() ui.View {\n\tcount := ui.UseIntState(0)\n\treturn kit.Application(func() ui.View {\n\t\treturn kit.Page(ui.Gap(ui.Column(\n" +
+		"\t\t\tkit.Title(\"Welcome to Volang UI\"),\n\t\t\tkit.Paragraph(\"Edit main.vo, save, and open the preview again.\"),\n" +
+		"\t\t\tkit.ActionButton(\"Count: \" + strconv.FormatInt(ui.IntStateValue(count), 10), false, func() {\n" +
+		"\t\t\t\tui.SetIntState(count, ui.IntStateValue(count) + 1)\n\t\t\t}),\n\t\t), kit.CurrentTheme().Space * 2))\n\t})\n}\n\n" +
+		"func main() {\n\tif err := ui.Mount(App); err != nil {\n\t\tpanic(err.Error())\n\t}\n}\n"
+}
+
+func dashboardSource() string {
+	return "package main\n\n" +
+		"import (\n\t\"github.com/vo-lang/ui\"\n\t\"github.com/vo-lang/ui/kit\"\n)\n\n" +
+		"func metric(theme kit.Theme, title string, value string) ui.View {\n\treturn kit.Card(theme, ui.Gap(ui.Column(kit.MutedText(theme, title), kit.Heading(theme, value)), theme.Space))\n}\n\n" +
+		"func App() ui.View {\n\ttheme := kit.LightTheme()\n\theader := kit.Toolbar(theme, kit.Heading(theme, \"Dashboard\"), kit.MutedText(theme, \"Native and Web\"))\n" +
+		"\tnavigation := kit.Card(theme, ui.Gap(ui.Column(\n\t\tkit.PrimaryButton(theme, \"Overview\", false, func(event ui.Event) {}),\n\t\tkit.PrimaryButton(theme, \"Activity\", false, func(event ui.Event) {}),\n\t), theme.Space))\n" +
+		"\tcontent := kit.Card(theme, ui.Gap(ui.Column(\n\t\tkit.Heading(theme, \"Overview\"),\n\t\tkit.Body(theme, \"One component tree drives DOM and native layout.\"),\n" +
+		"\t\tui.GridColumns(ui.Gap(ui.Grid(\n\t\t\tmetric(theme, \"Builds\", \"128\"),\n\t\t\tmetric(theme, \"Latency\", \"12 ms\"),\n\t\t\tmetric(theme, \"Targets\", \"Web + Desktop\"),\n\t\t), theme.Space), \"repeat(3, minmax(120px, 1fr))\"),\n\t), theme.Space * 2))\n" +
+		"\treturn kit.Screen(theme, kit.AppShell(theme, header, navigation, content))\n}\n\nfunc main() {\n\tif err := ui.Mount(App); err != nil { panic(err.Error()) }\n}\n"
+}
+
+func asyncSearchSource() string {
+	return "package main\n\n" +
+		"import (\n\t\"context\"\n\t\"github.com/vo-lang/ui\"\n\t\"github.com/vo-lang/ui/kit\"\n\t\"github.com/vo-lang/ui/task\"\n\t\"strings\"\n\t\"time\"\n)\n\n" +
+		"func App() ui.View {\n\tquery := ui.UseStringState(\"volang\")\n\tvalue := ui.StringStateValue(query)\n\tresult := task.UseString(value, func(ctx context.Context) (string, error) {\n" +
+		"\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn \"\", ctx.Err()\n\t\tcase <-time.After(120 * time.Millisecond):\n\t\t\treturn \"Latest result for \" + strings.ToUpper(value), nil\n\t\t}\n\t})\n" +
+		"\tstatus := \"Searching…\"\n\tif result.IsReady() { status = result.Value() }\n\tif result.IsFailed() { status = result.Error() }\n\treturn kit.Application(func() ui.View {\n" +
+		"\t\treturn kit.Page(ui.Gap(ui.Column(\n\t\t\tkit.Title(\"Cancelable goroutine search\"),\n\t\t\tkit.TextField(kit.CurrentTheme(), \"Query\", value, \"Type quickly\", false, func(event ui.Event) { ui.SetStringState(query, event.Text) }),\n\t\t\tkit.Paragraph(status),\n\t\t), kit.CurrentTheme().Space * 2))\n\t})\n}\n\n" +
+		"func main() {\n\tif err := ui.Mount(App); err != nil { panic(err.Error()) }\n}\n"
+}
+
+func channelsSource() string {
+	return "package main\n\nfunc main() {\n\tjobs := make(chan int, 5)\n\tdone := make(chan bool)\n\tgo func() {\n\t\tfor i := 1; i <= 5; i++ { jobs <- i; println(\"Sent job\", i) }\n\t\tclose(jobs)\n\t}()\n\tgo func() {\n\t\tfor job := range jobs { println(\"Processing job\", job) }\n\t\tdone <- true\n\t}()\n\t<-done\n\tprintln(\"All done!\")\n}\n"
+}
+
+func goroutinesSource() string {
+	return "package main\n\nfunc square(ch chan int, n int) { ch <- n * n }\n\nfunc main() {\n\tch := make(chan int, 3)\n\tgo square(ch, 3)\n\tgo square(ch, 4)\n\tgo square(ch, 5)\n\tsum := 0\n\tfor i := 0; i < 3; i++ { sum += <-ch }\n\tprintln(\"3² + 4² + 5² =\", sum)\n}\n"
+}
+
+func selectSource() string {
+	return "package main\n\nfunc main() {\n\tch1 := make(chan string)\n\tch2 := make(chan string)\n\tgo func() { ch1 <- \"from ch1\" }()\n\tgo func() { ch2 <- \"from ch2\" }()\n\tfor i := 0; i < 2; i++ {\n\t\tselect {\n\t\tcase msg := <-ch1:\n\t\t\tprintln(\"Received:\", msg)\n\t\tcase msg := <-ch2:\n\t\t\tprintln(\"Received:\", msg)\n\t\t}\n\t}\n\tprintln(\"Done\")\n}\n"
+}
+
+func errorHandlingSource() string {
+	return "package main\n\nimport \"errors\"\n\nfunc validate(n int) error {\n\tif n < 0 { fail errors.New(\"negative not allowed\") }\n\treturn nil\n}\n\nfunc process(n int) (int, error) {\n\tvalidate(n)?\n\treturn n * 2, nil\n}\n\nfunc main() {\n\tresult, err := process(10)\n\tif err != nil { println(\"Error:\", err) } else { println(\"Result:\", result) }\n\t_, err = process(-5)\n\tif err != nil { println(\"Caught:\", err) }\n}\n"
+}
+
+func closuresSource() string {
+	return "package main\n\nfunc makeCounter(start int) func() int {\n\tcount := start\n\treturn func() int { count++; return count }\n}\n\nfunc main() {\n\tcounter := makeCounter(10)\n\tprintln(counter())\n\tprintln(counter())\n\tprintln(counter())\n\tanother := makeCounter(100)\n\tprintln(another())\n\tprintln(counter())\n}\n"
+}
+
+func interfacesSource() string {
+	return "package main\n\ntype Writer interface {\n\tWrite(data string)\n}\n\ntype Console struct{}\n\nfunc (c Console) Write(data string) { println(\"[Console]\", data) }\n\ntype Logger struct {\n\tprefix string\n}\n\nfunc (l Logger) Write(data string) { println(l.prefix, data) }\n\nfunc output(w Writer, message string) { w.Write(message) }\n\nfunc main() {\n\toutput(Console{}, \"Hello from console\")\n\toutput(Logger{prefix: \"[LOG]\"}, \"Hello from logger\")\n}\n"
+}
+
+func deferSource() string {
+	return "package main\n\nfunc main() {\n\tprintln(\"Start\")\n\tdefer func() { println(\"First defer (runs last)\") }()\n\tdefer func() { println(\"Second defer\") }()\n\tdefer func() { println(\"Third defer (runs first)\") }()\n\tprintln(\"End of main\")\n}\n"
+}
+
+func dynamicAccessSource() string {
+	return "package main\n\nimport \"encoding/json\"\n\ntype Person struct { Name string; Age int }\n\nfunc main() error {\n\tdata := `{\"name\": \"Alice\", \"age\": 30}`\n\tobj := json.Decode([]byte(data))?\n\tname := obj~>name?\n\tage := obj~>age?\n\tprintln(\"Name:\", name, \"Age:\", age)\n\tvar person any = Person{Name: \"Bob\", Age: 25}\n\tprintln(\"Struct:\", person~>Name?, person~>Age?)\n\treturn nil\n}\n"
+}
+
+func filesystemSource() string {
+	return "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tpath := \"studio-example.txt\"\n\tif err := os.WriteFile(path, []byte(\"Hello from Volang!\"), 0644); err != nil {\n\t\tfmt.Println(\"Write error:\", err)\n\t\treturn\n\t}\n\tdata, err := os.ReadFile(path)\n\tif err != nil { fmt.Println(\"Read error:\", err); return }\n\tfmt.Println(\"Content:\", string(data))\n\tinfo, err := os.Stat(path)\n\tif err == nil { fmt.Println(\"Size:\", info.Size(), \"bytes\") }\n\tos.Remove(path)\n}\n"
+}
+
+func regexpSource() string {
+	return "package main\n\nimport \"regexp\"\n\nfunc main() {\n\tre := regexp.MustCompile(`\\d+`)\n\tprintln(\"Found:\", re.FindString(\"hello123world\"))\n\tprintln(\"Replaced:\", re.ReplaceAllString(\"a1b2c3\", \"X\"))\n\tfor _, value := range re.FindAllString(\"a1b2c3\", -1) { println(value) }\n}\n"
+}
+
+func timeSource() string {
+	return "package main\n\nimport \"time\"\n\nfunc main() {\n\tstarted := time.Now()\n\tsum := 0\n\tfor i := 0; i < 100000; i++ { sum += i }\n\telapsed := time.Since(started)\n\tprintln(\"Loop sum:\", sum)\n\tprintln(\"Elapsed nanoseconds:\", elapsed.Nanoseconds())\n}\n"
+}

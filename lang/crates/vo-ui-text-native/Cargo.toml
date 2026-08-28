@@ -1,0 +1,19 @@
+[package]
+name = "vo-ui-text-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native text shaping, font fallback, and deterministic software presentation for Volang UI"
+publish = false
+
+[dependencies]
+cosmic-text.workspace = true
+vo-ui-core.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+
+[dev-dependencies]
+vo-ui-protocol.workspace = true

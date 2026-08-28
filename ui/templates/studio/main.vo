@@ -1,0 +1,20 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/editor"
+	"github.com/vo-lang/ui/kit"
+)
+
+var source = document.NewText("package main\n\nfunc main() {}\n")
+var code = editor.New(source, "file:///main.vo", "volang")
+
+func App() ui.View {
+	options := editor.DefaultOptions(); options.AccessibleName = "Source editor"
+	return kit.Application(func() ui.View {
+		return kit.Page(ui.Column(kit.Title("Volang Studio"), kit.Paragraph("A shared-document editor starter."), editor.View(code, options)))
+	})
+}
+
+func main() { if err := ui.Mount(App); err != nil { panic(err.Error()) } }

@@ -1,0 +1,925 @@
+// Package editor is the official virtualized code editor model and view. Text,
+// selection, history, language data, IME projection, and window sharing remain
+// in typed Volang; renderers receive a bounded visible-line projection.
+package editor
+
+import (
+	"context"
+	"errors"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/language"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+const (
+	MaxVisibleLines = 2000
+	MaxTokens = 1000000
+	MaxDiagnostics = 100000
+	MaxCompletions = 100000
+)
+
+type TokenKind int64
+
+const (
+	Plain TokenKind = iota
+	Keyword
+	Identifier
+	String
+	Number
+	Comment
+	Punctuation
+)
+
+type Token struct {
+	Start int
+	End int
+	Kind TokenKind
+}
+
+type LineSegment struct {
+	Text string
+	Kind TokenKind
+}
+
+func volangIdentifierStart(value rune) bool {
+	return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= 128
+}
+
+func volangIdentifierContinue(value rune) bool {
+	return volangIdentifierStart(value) || value >= '0' && value <= '9'
+}
+
+func volangKeyword(value string) bool {
+	switch value {
+	case "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
+		"for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return",
+		"select", "struct", "switch", "type", "var", "dynamic", "match", "try", "catch", "throw":
+		return true
+	}
+	return false
+}
+
+// HighlightVolangLine performs bounded lexical highlighting for one visible
+// line. Compiler or language-server tokens can replace it through SetTokens;
+// this fallback keeps first paint useful without blocking on analysis.
+func HighlightVolangLine(text string) []LineSegment {
+	values := []rune(text)
+	segments := make([]LineSegment, 0, len(values) / 3 + 1)
+	appendSegment := func(start int, end int, kind TokenKind) {
+		if end > start {
+			segments = append(segments, LineSegment{Text: string(values[start:end]), Kind: kind})
+		}
+	}
+	for index := 0; index < len(values); {
+		start := index
+		value := values[index]
+		if value == '/' && index + 1 < len(values) && values[index + 1] == '/' {
+			appendSegment(index, len(values), Comment)
+			break
+		}
+		if value == '/' && index + 1 < len(values) && values[index + 1] == '*' {
+			index += 2
+			for index + 1 < len(values) && !(values[index] == '*' && values[index + 1] == '/') {
+				index++
+			}
+			if index + 1 < len(values) {
+				index += 2
+			} else {
+				index = len(values)
+			}
+			appendSegment(start, index, Comment)
+			continue
+		}
+		if value == '"' || value == '\'' || value == '`' {
+			quote := value
+			index++
+			for index < len(values) {
+				current := values[index]
+				index++
+				if current == '\\' && quote != '`' && index < len(values) {
+					index++
+					continue
+				}
+				if current == quote {
+					break
+				}
+			}
+			appendSegment(start, index, String)
+			continue
+		}
+		if value >= '0' && value <= '9' {
+			index++
+			for index < len(values) {
+				current := values[index]
+				signedExponent := (current == '+' || current == '-') && index > start &&
+					(values[index - 1] == 'e' || values[index - 1] == 'E' || values[index - 1] == 'p' || values[index - 1] == 'P')
+				if !(current >= '0' && current <= '9' || current >= 'a' && current <= 'f' ||
+					current >= 'A' && current <= 'F' || current == '.' || current == '_' || current == 'x' ||
+					current == 'X' || current == 'e' || current == 'E' || current == 'p' || current == 'P' ||
+					signedExponent) {
+					break
+				}
+				index++
+			}
+			appendSegment(start, index, Number)
+			continue
+		}
+		if volangIdentifierStart(value) {
+			index++
+			for index < len(values) && volangIdentifierContinue(values[index]) {
+				index++
+			}
+			word := string(values[start:index])
+			kind := Identifier
+			if volangKeyword(word) {
+				kind = Keyword
+			}
+			appendSegment(start, index, kind)
+			continue
+		}
+		if strings.ContainsRune("{}[]().,:;=+-*/%&|^!<>?", value) {
+			index++
+			appendSegment(start, index, Punctuation)
+			continue
+		}
+		index++
+		for index < len(values) && !volangIdentifierStart(values[index]) &&
+			!(values[index] >= '0' && values[index] <= '9') &&
+			!strings.ContainsRune("{}[]().,:;=+-*/%&|^!<>?\"'`", values[index]) {
+			index++
+		}
+		appendSegment(start, index, Plain)
+	}
+	return segments
+}
+
+type Fold struct {
+	StartLine int
+	EndLine int
+	Collapsed bool
+}
+
+type Viewport struct {
+	FirstLine int
+	LineCount int
+	Overscan int
+}
+
+func DefaultViewport() Viewport {
+	return Viewport{FirstLine: 0, LineCount: 40, Overscan: 8}
+}
+
+func (viewport Viewport) Validate() error {
+	if viewport.FirstLine < 0 || viewport.LineCount <= 0 || viewport.LineCount > MaxVisibleLines ||
+		viewport.Overscan < 0 ||
+		viewport.Overscan > MaxVisibleLines {
+		return errors.New("editor viewport is invalid")
+	}
+	return nil
+}
+
+type Model struct {
+	mu sync.RWMutex
+	Document *document.Document
+	URI string
+	LanguageID string
+	viewport Viewport
+	tokens []Token
+	diagnostics []language.Diagnostic
+	completions []language.Completion
+	folds []Fold
+	languageVersion uint64
+	scrollY float64
+}
+
+func New(model *document.Document, uri string, languageID string) *Model {
+	if model == nil || uri == "" || len(uri) > 4096 || len(languageID) > 255 {
+		panic("editor document identity is invalid")
+	}
+	return &Model{Document: model, URI: uri, LanguageID: languageID, viewport: DefaultViewport()}
+}
+
+// Rebind updates the stable document identity after a workspace rename while
+// preserving selection, undo history, viewport, and published language data.
+func (model *Model) Rebind(uri string, languageID string) error {
+	if uri == "" || len(uri) > 4096 || len(languageID) > 255 {
+		return errors.New("editor document identity is invalid")
+	}
+	model.mu.Lock()
+	model.URI = uri
+	model.LanguageID = languageID
+	model.mu.Unlock()
+	return nil
+}
+
+func (model *Model) SetViewport(viewport Viewport) error {
+	if err := viewport.Validate(); err != nil {
+		return err
+	}
+	model.mu.Lock()
+	model.viewport = viewport
+	model.mu.Unlock()
+	return nil
+}
+
+func (model *Model) Viewport() Viewport {
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	return model.viewport
+}
+
+func (model *Model) SetTokens(tokens []Token) error {
+	if len(tokens) > MaxTokens {
+		return errors.New("editor token limit exceeded")
+	}
+	length := model.Document.Len()
+	previousEnd := -1
+	for _, token := range tokens {
+		if token.Start < 0 || token.End <= token.Start || token.End > length || token.Start < previousEnd ||
+			token.Kind < Plain ||
+			token.Kind > Punctuation {
+			return errors.New("editor token is invalid or out of order")
+		}
+		previousEnd = token.End
+	}
+	model.mu.Lock()
+	model.tokens = append([]Token(nil), tokens...)
+	model.mu.Unlock()
+	return nil
+}
+
+func (model *Model) SetFolds(folds []Fold) error {
+	if len(folds) > 100000 {
+		return errors.New("editor fold limit exceeded")
+	}
+	lines := model.Document.LineCount()
+	for _, fold := range folds {
+		if fold.StartLine < 0 || fold.EndLine <= fold.StartLine || fold.EndLine >= lines {
+			return errors.New("editor fold is invalid")
+		}
+	}
+	model.mu.Lock()
+	model.folds = append([]Fold(nil), folds...)
+	model.mu.Unlock()
+	return nil
+}
+
+func (model *Model) snapshot() language.Snapshot {
+	model.mu.RLock()
+	uri := model.URI
+	languageID := model.LanguageID
+	model.mu.RUnlock()
+	text, version := model.Document.Snapshot()
+	return language.Snapshot{
+		URI: uri, LanguageID: languageID, Version: version, Text: text,
+	}
+}
+
+// RefreshLanguage is designed for a component-scoped goroutine context. A
+// newer document version rejects late diagnostics and completions atomically.
+func (model *Model) RefreshLanguage(ctx context.Context, service language.Service, position language.Position) error {
+	if service == nil {
+		return errors.New("editor language service is nil")
+	}
+	snapshot := model.snapshot()
+	if err := snapshot.Validate(268435456); err != nil {
+		return err
+	}
+	diagnostics, err := service.Diagnostics(ctx, snapshot)
+	if err != nil {
+		return err
+	}
+	completions, err := service.Complete(ctx, snapshot, position)
+	if err != nil {
+		return err
+	}
+	diagnostics, err = language.NormalizeDiagnostics(diagnostics)
+	if err != nil {
+		return err
+	}
+	completions, err = language.NormalizeCompletions(completions)
+	if err != nil {
+		return err
+	}
+	if len(diagnostics) > MaxDiagnostics || len(completions) > MaxCompletions {
+		return errors.New("editor language result exceeds its limit")
+	}
+	if model.Document.Version() != snapshot.Version {
+		return context.Canceled
+	}
+	model.mu.Lock()
+	model.diagnostics = diagnostics
+	model.completions = completions
+	model.languageVersion = snapshot.Version
+	model.mu.Unlock()
+	ui.Invalidate()
+	return nil
+}
+
+func (model *Model) Hover(ctx context.Context, service language.Service, position language.Position) (language.Hover, bool, error) {
+	if service == nil {
+		return language.Hover{}, false, errors.New("editor language service is nil")
+	}
+	snapshot := model.snapshot()
+	result, present, err := service.Hover(ctx, snapshot, position)
+	if err != nil {
+		return language.Hover{}, false, err
+	}
+	if present {
+		if err := language.ValidateRange(result.Range); err != nil {
+			return language.Hover{}, false, err
+		}
+	}
+	if model.Document.Version() != snapshot.Version {
+		return language.Hover{}, false, context.Canceled
+	}
+	return result, present, nil
+}
+
+func (model *Model) Definitions(ctx context.Context, service language.NavigationService, position language.Position) ([]language.Location, error) {
+	if service == nil {
+		return nil, errors.New("editor navigation service is nil")
+	}
+	snapshot := model.snapshot()
+	result, err := service.Definition(ctx, snapshot, position)
+	if err != nil {
+		return nil, err
+	}
+	result, err = language.NormalizeLocations(result)
+	if err != nil {
+		return nil, err
+	}
+	if model.Document.Version() != snapshot.Version {
+		return nil, context.Canceled
+	}
+	return result, nil
+}
+
+func (model *Model) References(ctx context.Context, service language.NavigationService, position language.Position) ([]language.Location, error) {
+	if service == nil {
+		return nil, errors.New("editor navigation service is nil")
+	}
+	snapshot := model.snapshot()
+	result, err := service.References(ctx, snapshot, position)
+	if err != nil {
+		return nil, err
+	}
+	result, err = language.NormalizeLocations(result)
+	if err != nil {
+		return nil, err
+	}
+	if model.Document.Version() != snapshot.Version {
+		return nil, context.Canceled
+	}
+	return result, nil
+}
+
+func (model *Model) Rename(ctx context.Context, service language.NavigationService, position language.Position, name string) ([]language.WorkspaceEdit, error) {
+	if service == nil {
+		return nil, errors.New("editor navigation service is nil")
+	}
+	snapshot := model.snapshot()
+	result, err := service.Rename(ctx, snapshot, position, name)
+	if err != nil {
+		return nil, err
+	}
+	result, err = language.NormalizeWorkspaceEdits(result)
+	if err != nil {
+		return nil, err
+	}
+	if model.Document.Version() != snapshot.Version {
+		return nil, context.Canceled
+	}
+	return result, nil
+}
+
+func (model *Model) Format(ctx context.Context, service language.Service) ([]language.TextEdit, error) {
+	if service == nil {
+		return nil, errors.New("editor language service is nil")
+	}
+	snapshot := model.snapshot()
+	result, err := service.Format(ctx, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) > language.MaxItems {
+		return nil, errors.New("editor format result exceeds its limit")
+	}
+	for _, edit := range result {
+		if err := language.ValidateRange(edit.Range); err != nil {
+			return nil, err
+		}
+	}
+	if model.Document.Version() != snapshot.Version {
+		return nil, context.Canceled
+	}
+	return append([]language.TextEdit(nil), result...), nil
+}
+
+func (model *Model) Diagnostics() []language.Diagnostic {
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	return append([]language.Diagnostic(nil), model.diagnostics...)
+}
+
+func (model *Model) Completions() []language.Completion {
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	return append([]language.Completion(nil), model.completions...)
+}
+
+// PublishLanguage lets a compiler-backed adapter commit one already-batched
+// analysis result. The version gate rejects stale goroutine completions.
+func (model *Model) PublishLanguage(version uint64, diagnostics []language.Diagnostic, completions []language.Completion) error {
+	diagnostics, err := language.NormalizeDiagnostics(diagnostics)
+	if err != nil {
+		return err
+	}
+	completions, err = language.NormalizeCompletions(completions)
+	if err != nil {
+		return err
+	}
+	if len(diagnostics) > MaxDiagnostics || len(completions) > MaxCompletions {
+		return errors.New("editor language result exceeds its limit")
+	}
+	if model.Document.Version() != version {
+		return context.Canceled
+	}
+	model.mu.Lock()
+	model.diagnostics = diagnostics
+	model.completions = completions
+	model.languageVersion = version
+	model.mu.Unlock()
+	ui.Invalidate()
+	return nil
+}
+
+// ApplyValue computes one bounded minimal replacement from a platform control
+// value. Ordinary typing therefore preserves incremental line indexing and
+// undo history instead of replacing the complete document on every key.
+func (model *Model) deriveValueEdit(value string) (document.Edit, bool) {
+	before := []rune(model.Document.Text())
+	after := []rune(value)
+	prefix := 0
+	for prefix < len(before) && prefix < len(after) && before[prefix] == after[prefix] {
+		prefix++
+	}
+	if prefix == len(before) && prefix == len(after) {
+		return document.Edit{}, false
+	}
+	beforeSuffix := len(before)
+	afterSuffix := len(after)
+	for beforeSuffix > prefix && afterSuffix > prefix &&
+		before[beforeSuffix - 1] == after[afterSuffix - 1] {
+		beforeSuffix--
+		afterSuffix--
+	}
+	edit := document.Edit{Start: prefix, End: beforeSuffix, Text: string(after[prefix:afterSuffix])}
+	return edit, true
+}
+
+func (model *Model) ApplyValue(value string) (document.Edit, bool, error) {
+	edit, changed := model.deriveValueEdit(value)
+	if !changed {
+		return document.Edit{}, false, nil
+	}
+	if err := model.Document.Apply(edit); err != nil {
+		return document.Edit{}, false, err
+	}
+	return edit, true, nil
+}
+
+func runeOffsetFromUTF16(value string, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, errors.New("editor UTF-16 selection is invalid")
+	}
+	units := int64(0)
+	runes := 0
+	for _, character := range value {
+		if units == offset {
+			return runes, nil
+		}
+		width := int64(1)
+		if character > 0xffff {
+			width = 2
+		}
+		if units + width > offset {
+			return 0, errors.New("editor UTF-16 selection splits a surrogate pair")
+		}
+		units += width
+		runes++
+	}
+	if units == offset {
+		return runes, nil
+	}
+	return 0, errors.New("editor UTF-16 selection is out of bounds")
+}
+
+// ApplyInput commits text and the platform's post-edit selection atomically so
+// controlled Web and desktop inputs preserve their caret across rerenders.
+func (model *Model) ApplyInput(value string, startUTF16 int64, lengthUTF16 int64) (document.Edit, bool, error) {
+	if lengthUTF16 < 0 || startUTF16 > 9223372036854775807 - lengthUTF16 {
+		return document.Edit{}, false, errors.New("editor UTF-16 selection is invalid")
+	}
+	start, err := runeOffsetFromUTF16(value, startUTF16)
+	if err != nil {
+		return document.Edit{}, false, err
+	}
+	end, err := runeOffsetFromUTF16(value, startUTF16 + lengthUTF16)
+	if err != nil {
+		return document.Edit{}, false, err
+	}
+	selection := document.Selection{Anchor: start, Focus: end}
+	edit, changed := model.deriveValueEdit(value)
+	if !changed {
+		return document.Edit{}, false, model.Document.SetSelection(selection)
+	}
+	if err := model.Document.ApplyWithSelection(edit, selection); err != nil {
+		return document.Edit{}, false, err
+	}
+	return edit, true, nil
+}
+
+func (model *Model) updateScroll(scrollY float64, lineHeight float64) {
+	if scrollY < 0 {
+		scrollY = 0
+	}
+	model.mu.Lock()
+	model.scrollY = scrollY
+	viewport := model.viewport
+	viewport.FirstLine = int(scrollY / lineHeight)
+	maximum := model.Document.LineCount() - 1
+	if maximum < 0 {
+		maximum = 0
+	}
+	if viewport.FirstLine > maximum {
+		viewport.FirstLine = maximum
+	}
+	model.viewport = viewport
+	model.mu.Unlock()
+}
+
+func (model *Model) ScrollY() float64 {
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	return model.scrollY
+}
+
+type VisibleLine struct {
+	Number int
+	Start int
+	Text string
+	DiagnosticCount int
+}
+
+func (model *Model) VisibleLines() []VisibleLine {
+	model.mu.RLock()
+	viewport := model.viewport
+	diagnostics := append([]language.Diagnostic(nil), model.diagnostics...)
+	folds := append([]Fold(nil), model.folds...)
+	model.mu.RUnlock()
+	first := viewport.FirstLine - viewport.Overscan
+	if first < 0 {
+		first = 0
+	}
+	last := viewport.FirstLine + viewport.LineCount + viewport.Overscan
+	if last > model.Document.LineCount() {
+		last = model.Document.LineCount()
+	}
+	result := make([]VisibleLine, 0, last - first)
+	for line := first; line < last; line++ {
+		hidden := false
+		for _, fold := range folds {
+			if fold.Collapsed && line > fold.StartLine && line <= fold.EndLine {
+				hidden = true
+				break
+			}
+		}
+		if hidden {
+			continue
+		}
+		text, err := model.Document.Line(line)
+		if err != nil {
+			panic(err.Error())
+		}
+		count := 0
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Range.Start.Line <= line && diagnostic.Range.End.Line >= line {
+				count++
+			}
+		}
+		start, err := model.Document.Offset(document.Position{Line: line, Column: 0})
+		if err != nil {
+			panic(err.Error())
+		}
+		result = append(result, VisibleLine{Number: line + 1, Start: start, Text: text, DiagnosticCount: count})
+	}
+	return result
+}
+
+func projection(model *Model) string {
+	lines := model.VisibleLines()
+	values := make([]string, 0, len(lines) + 1)
+	values = append(values, "VED1|" + strconv.FormatUint(model.Document.Version(), 10))
+	for _, line := range lines {
+		text := strings.ReplaceAll(strings.ReplaceAll(line.Text, "\\", "\\\\"), "\n", "\\n")
+		values = append(values, strconv.Itoa(line.Number) + "|" + strconv.Itoa(line.DiagnosticCount) + "|" +
+			text)
+	}
+	return strings.Join(values, "\n")
+}
+
+type Options struct {
+	AccessibleName string
+	ReadOnly bool
+	ShowLineNumbers bool
+	ShowStatusBar bool
+	Width float64
+	Height float64
+	LineHeight float64
+	OnChange func(document.Edit, uint64)
+}
+
+func DefaultOptions() Options {
+	return Options{
+		AccessibleName: "Code editor", ShowLineNumbers: true, ShowStatusBar: true, Width: 640,
+		Height: 480, LineHeight: 20,
+	}
+}
+
+func (options Options) validate() error {
+	if options.AccessibleName == "" || options.Width < 0 || options.Width > 1000000 ||
+		options.Height < 0 ||
+		options.Height > 1000000 ||
+		options.LineHeight < 8 ||
+		options.LineHeight > 256 {
+		return errors.New("editor view options are invalid")
+	}
+	return nil
+}
+
+func lineNumberView(model *Model, options Options) ui.View {
+	lines := model.VisibleLines()
+	values := make([]ui.View, 0, len(lines))
+	for _, line := range lines {
+		value := ui.Text(strconv.Itoa(line.Number))
+		value = ui.Height(value, options.LineHeight)
+		value = ui.Foreground(value, 0xff8490a7)
+		value = ui.Key(value, "gutter-" + strconv.Itoa(line.Number))
+		values = append(values, value)
+	}
+	gutter := ui.Column(values...)
+	gutter = ui.Width(gutter, 52)
+	gutter = ui.Padding(gutter, 8)
+	gutter = ui.Background(gutter, 0xff111722)
+	gutter = ui.ScrollY(gutter, model.ScrollY())
+	gutter = ui.Role(gutter, "presentation")
+	return ui.AccessibilityHidden(gutter, true)
+}
+
+func statusView(model *Model) ui.View {
+	diagnostics := model.Diagnostics()
+	selection := model.Document.Selection()
+	position, err := model.Document.Position(selection.Focus)
+	if err != nil {
+		panic(err.Error())
+	}
+	left := ui.Text(model.LanguageID + "  ·  " + strconv.Itoa(model.Document.LineCount()) + " lines")
+	right := ui.Text("Ln " + strconv.Itoa(position.Line + 1) + ", Col " +
+		strconv.Itoa(position.Column + 1) +
+		"  ·  " +
+		strconv.Itoa(len(diagnostics)) +
+		" problems")
+	bar := ui.Row(left, ui.Flex(ui.Box(), 1), right)
+	bar = ui.Padding(bar, 6)
+	bar = ui.Background(bar, 0xff192131)
+	bar = ui.Foreground(bar, 0xffb9c3d5)
+	return ui.Role(bar, "status")
+}
+
+func tokenColor(kind TokenKind) uint32 {
+	switch kind {
+	case Keyword:
+		return 0xffc792ea
+	case String:
+		return 0xffc3e88d
+	case Number:
+		return 0xfff78c6c
+	case Comment:
+		return 0xff69758a
+	case Punctuation:
+		return 0xff89ddff
+	case Identifier:
+		return 0xffd8dee9
+	}
+	return 0xffd8dee9
+}
+
+// Segments resolves compiler/language-service semantic tokens first and fills
+// uncovered text as plain source. Volang lexical coloring is the bounded
+// first-paint fallback while asynchronous semantic tokens are unavailable.
+func (model *Model) Segments(line VisibleLine) []LineSegment {
+	model.mu.RLock()
+	tokens := append([]Token(nil), model.tokens...)
+	languageID := model.LanguageID
+	model.mu.RUnlock()
+	if len(tokens) == 0 {
+		if languageID == "volang" {
+			return HighlightVolangLine(line.Text)
+		}
+		return []LineSegment{{Text: line.Text, Kind: Plain}}
+	}
+	values := []rune(line.Text)
+	lineEnd := line.Start + len(values)
+	segments := []LineSegment{}
+	cursor := 0
+	for _, token := range tokens {
+		if token.End <= line.Start {
+			continue
+		}
+		if token.Start >= lineEnd {
+			break
+		}
+		start := token.Start - line.Start
+		if start < 0 {
+			start = 0
+		}
+		end := token.End - line.Start
+		if end > len(values) {
+			end = len(values)
+		}
+		if start > cursor {
+			segments = append(segments, LineSegment{Text: string(values[cursor:start]), Kind: Plain})
+		}
+		if end > start {
+			segments = append(segments, LineSegment{Text: string(values[start:end]), Kind: token.Kind})
+			cursor = end
+		}
+	}
+	if cursor < len(values) {
+		segments = append(segments, LineSegment{Text: string(values[cursor:]), Kind: Plain})
+	}
+	return segments
+}
+
+func highlightedLineView(model *Model, line VisibleLine, options Options) ui.View {
+	segments := model.Segments(line)
+	views := make([]ui.View, 0, len(segments))
+	for index, segment := range segments {
+		part := ui.Foreground(ui.Text(segment.Text), tokenColor(segment.Kind))
+		part = ui.Key(part, "token-" + strconv.Itoa(line.Number) + "-" + strconv.Itoa(index))
+		views = append(views, part)
+	}
+	lineView := ui.Height(ui.Row(views...), options.LineHeight)
+	lineView = ui.Key(lineView, "line-" + strconv.Itoa(line.Number))
+	if line.DiagnosticCount > 0 {
+		lineView = ui.AccessibleDescription(lineView, strconv.Itoa(line.DiagnosticCount) + " diagnostics")
+	}
+	return lineView
+}
+
+// highlightedEditorSurface mirrors only the virtualized text projection below
+// the native text-area control. The control remains the sole input, IME,
+// selection, and accessibility owner; this surface only paints syntax colors.
+func highlightedEditorSurface(model *Model, options Options) ui.View {
+	lines := model.VisibleLines()
+	views := make([]ui.View, 0, len(lines) + 2)
+	firstLine := 0
+	lastLine := 0
+	if len(lines) > 0 {
+		firstLine = lines[0].Number - 1
+		lastLine = lines[len(lines) - 1].Number
+	}
+	if firstLine > 0 {
+		views = append(views, ui.Height(ui.Box(), float64(firstLine) * options.LineHeight))
+	}
+	for _, line := range lines {
+		view := highlightedLineView(model, line, options)
+		if model.Document.Len() == 0 && line.Number == 1 {
+			view = ui.Height(ui.Foreground(ui.Text("Enter source"), 0xff69758a), options.LineHeight)
+		}
+		views = append(views, view)
+	}
+	remaining := model.Document.LineCount() - lastLine
+	if remaining > 0 {
+		views = append(views, ui.Height(ui.Box(), float64(remaining) * options.LineHeight))
+	}
+	surface := ui.Scroll(ui.Padding(ui.Column(views...), 8))
+	surface = ui.ScrollY(surface, model.ScrollY())
+	surface = ui.PointerEvents(surface, ui.PointerEventsNone)
+	surface = ui.Role(surface, "presentation")
+	surface = ui.AccessibilityHidden(surface, true)
+	surface = ui.TestID(surface, "volang-code-editor-highlight")
+	return ui.Background(surface, 0xff0d111a)
+}
+
+func View(model *Model, options Options) ui.View {
+	if model == nil {
+		panic("editor view requires a model")
+	}
+	if err := options.validate(); err != nil {
+		panic(err.Error())
+	}
+	if !options.ReadOnly && model.Document.Len() <= 1000000 {
+		input := ui.TextArea(model.Document.Text(), "Enter source", func(event ui.Event) {
+			if edit, changed, err := model.ApplyInput(event.Text, event.SelectionStartUTF16, event.SelectionLengthUTF16); err != nil {
+				panic(err.Error())
+			} else if changed {
+				if options.OnChange != nil {
+					options.OnChange(edit, model.Document.Version())
+				}
+				ui.Invalidate()
+			}
+		})
+		input = ui.AccessibleName(input, options.AccessibleName)
+		input = ui.TestID(input, "volang-code-editor")
+		selection := model.Document.Selection()
+		start, err := model.Document.UTF16Offset(selection.Start())
+		if err != nil {
+			panic(err.Error())
+		}
+		end, err := model.Document.UTF16Offset(selection.End())
+		if err != nil {
+			panic(err.Error())
+		}
+		input = ui.SelectionStartUTF16(input, int64(start))
+		input = ui.SelectionLengthUTF16(input, int64(end - start))
+		input = ui.OnSelectionChange(input, func(event ui.Event) {
+			before := model.Document.Selection()
+			if edit, changed, err := model.ApplyInput(event.Text, event.SelectionStartUTF16, event.SelectionLengthUTF16); err != nil {
+				panic(err.Error())
+			} else if changed {
+				// Browsers may publish selectionchange before input for one native
+				// edit. Treat the complete event payload as the authoritative edit;
+				// the later input event becomes an idempotent selection update.
+				if options.OnChange != nil {
+					options.OnChange(edit, model.Document.Version())
+				}
+				ui.Invalidate()
+				return
+			}
+			after := model.Document.Selection()
+			if before != after {
+				ui.Invalidate()
+			}
+		})
+		input = ui.OnScroll(input, func(event ui.Event) {
+			model.updateScroll(event.Y, options.LineHeight)
+			ui.Invalidate()
+		})
+		// Transparent glyphs reveal the renderer-neutral highlighted mirror.
+		// Selection and caret remain platform-owned and therefore stay visible.
+		input = ui.Foreground(ui.Background(ui.Padding(input, 8), 0x00000000), 0x00000000)
+		input = ui.FontSize(input, 16)
+		input = ui.Flex(input, 1)
+		editorSurface := ui.FontSize(ui.Stack(highlightedEditorSurface(model, options), input), 16)
+		editorSurface = ui.Flex(editorSurface, 1)
+		body := editorSurface
+		if options.ShowLineNumbers {
+			body = ui.Row(lineNumberView(model, options), editorSurface)
+		}
+		body = ui.Flex(body, 1)
+		views := []ui.View{body}
+		if options.ShowStatusBar {
+			views = append(views, statusView(model))
+		}
+		result := ui.Column(views...)
+		if options.Width > 0 {
+			result = ui.Width(result, options.Width)
+		}
+		if options.Height > 0 {
+			result = ui.Height(result, options.Height)
+		}
+		return ui.Background(result, 0xff0d111a)
+	}
+	lineViews := make([]ui.View, 0)
+	for _, line := range model.VisibleLines() {
+		prefix := ""
+		if options.ShowLineNumbers {
+			prefix = strconv.Itoa(line.Number) + "  "
+		}
+		view := highlightedLineView(model, line, options)
+		if prefix != "" {
+			lineNumber := ui.Width(ui.Foreground(ui.Text(prefix), 0xff8490a7), 52)
+			view = ui.Row(lineNumber, view)
+		}
+		lineViews = append(lineViews, view)
+	}
+	visible := ui.Role(ui.Column(lineViews...), "textbox")
+	visible = ui.AccessibleName(visible, options.AccessibleName)
+	visible = ui.AccessibleValue(visible, model.Document.Text())
+	visible = ui.TestID(visible, "volang-code-editor")
+	platform := ui.PlatformView("code-editor/v1", projection(model), options.AccessibleName)
+	platform = ui.Hidden(platform, true)
+	result := ui.Scroll(visible, platform)
+	if options.Width > 0 {
+		result = ui.Width(result, options.Width)
+	}
+	if options.Height > 0 {
+		result = ui.Height(result, options.Height)
+	}
+	return result
+}

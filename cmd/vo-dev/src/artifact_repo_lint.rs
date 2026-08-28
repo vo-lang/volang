@@ -277,7 +277,7 @@ name = "volang"
 module = "github.com/vo-lang/volang"
 "#,
         );
-        fs::create_dir_all(root.join("workspace/vogui/js/dist")).expect("dist dir");
+        fs::create_dir_all(root.join("workspace/sample/js/dist")).expect("dist dir");
 
         let artifacts = ArtifactFile {
             version: 1,
@@ -285,7 +285,7 @@ module = "github.com/vo-lang/volang"
         };
 
         let err = lint_tracked_artifacts(&root, &artifacts).unwrap_err();
-        assert!(format!("{err:#}").contains("workspace/vogui/js/dist looks generated"));
+        assert!(format!("{err:#}").contains("workspace/sample/js/dist looks generated"));
         fs::remove_dir_all(root).ok();
     }
 }

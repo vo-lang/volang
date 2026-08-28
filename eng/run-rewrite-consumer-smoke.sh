@@ -17,7 +17,6 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 CARGO_TARGET_DIR="${build_root}" cargo build --manifest-path "${volang_root}/Cargo.toml" -p vo --locked
-CARGO_TARGET_DIR="${build_root}" cargo build --manifest-path "${workspace_parent}/vogui/rust/Cargo.toml" -p vogui-codegen --bin vogui-generator-provider --locked
 CARGO_TARGET_DIR="${build_root}" cargo build --manifest-path "${workspace_parent}/voplay/rust/Cargo.toml" -p voplay-codegen --bin voplay-generator-provider --locked
 
 run_smoke() {
@@ -33,11 +32,7 @@ run_smoke() {
   cp "${fixture_root}/${framework}/vo.mod" "${app_root}/vo.mod"
   cp "${fixture_root}/${framework}/vo.generate.toml" "${app_root}/vo.generate.toml"
   cp "${fixture_root}/${framework}/main.vo" "${app_root}/main.vo"
-  if [ "${framework}" = "vogui" ]; then
-    cp "${fixture_root}/${framework}/app.schema.toml" "${app_root}/app.schema.toml"
-  else
-    cp "${fixture_root}/${framework}/components.toml" "${app_root}/components.toml"
-  fi
+  cp "${fixture_root}/${framework}/components.toml" "${app_root}/components.toml"
   cp "${build_root}/debug/${generator}" "${app_root}/bin/${generator}"
   cp "${workspace_parent}/${framework}/vo.mod" "${module_root}/vo.mod"
   cp "${workspace_parent}/${framework}/${framework}.vo" "${module_root}/${framework}.vo"
@@ -54,7 +49,6 @@ run_smoke() {
   done
 }
 
-run_smoke vogui "smoke_app_app.vo generated/smoke_app_app.manifest" vogui-generator-provider
 run_smoke voplay "position_component.vo smoke_game_game.vo generated/voplay_components.manifest" voplay-generator-provider
 
-printf '%s\n' '{"passed":true,"vogui_profile":"headless","voplay_profile":"core","generated_outputs_written_to_app":false}'
+printf '%s\n' '{"passed":true,"voplay_profile":"core","generated_outputs_written_to_app":false}'

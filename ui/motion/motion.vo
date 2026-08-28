@@ -1,0 +1,296 @@
+// Package motion supplies renderer-neutral animation values for Volang UI.
+// One bounded worker goroutine advances each active value; renderer mutation
+// remains on the owning UI Island through ui.Invalidate coalescing.
+package motion
+
+import (
+	"github.com/vo-lang/ui"
+	"math"
+	"time"
+)
+
+const (
+	FrameInterval = time.Second / 60
+	MaxDuration = 24 * time.Hour
+)
+
+// Curve selects one deterministic normalized tween curve.
+type Curve int64
+
+const (
+	Linear Curve = iota
+	EaseIn
+	EaseOut
+	EaseInOut
+)
+
+// Tween controls a finite-duration interpolation.
+type Tween struct {
+	Duration time.Duration
+	Curve Curve
+}
+
+func DefaultTween() Tween {
+	return Tween{Duration: 200 * time.Millisecond, Curve: EaseOut}
+}
+
+// Spring controls a bounded semi-implicit spring simulation. MaxDuration is a
+// hard safety limit; a settled spring normally completes much earlier.
+type Spring struct {
+	Stiffness float64
+	Damping float64
+	Mass float64
+	RestSpeed float64
+	RestDelta float64
+	MaxDuration time.Duration
+}
+
+func DefaultSpring() Spring {
+	return Spring{
+		Stiffness: 240, Damping: 28, Mass: 1,
+		RestSpeed: 0.01, RestDelta: 0.01, MaxDuration: 10 * time.Second,
+	}
+}
+
+// Value is a persistent scalar animation cell. Its state handles are opaque to
+// callers and survive ordinary rerenders and compatible hot reloads.
+type Value struct {
+	current ui.FloatState
+	target ui.FloatState
+	velocity ui.FloatState
+	generation ui.IntState
+	running ui.BoolState
+}
+
+func finite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func validateValue(value float64) {
+	if !finite(value) {
+		panic("motion values must be finite")
+	}
+}
+
+func validateTween(options Tween) {
+	if options.Duration < 0 || options.Duration > MaxDuration {
+		panic("motion tween duration must be between zero and 24 hours")
+	}
+	if options.Curve < Linear || options.Curve > EaseInOut {
+		panic("motion tween curve is invalid")
+	}
+}
+
+func validateSpring(options Spring) {
+	if !finite(options.Stiffness) || options.Stiffness <= 0 || options.Stiffness > 1000000 ||
+		!finite(options.Damping) || options.Damping < 0 || options.Damping > 1000000 ||
+		!finite(options.Mass) || options.Mass <= 0 || options.Mass > 1000000 ||
+		!finite(options.RestSpeed) || options.RestSpeed <= 0 ||
+		!finite(options.RestDelta) || options.RestDelta <= 0 ||
+		options.MaxDuration <= 0 || options.MaxDuration > MaxDuration {
+		panic("motion spring configuration is invalid")
+	}
+}
+
+func nextGeneration(value int64) int64 {
+	if value == 9223372036854775807 {
+		return 1
+	}
+	return value + 1
+}
+
+// UseValue declares one animation value in the mounted root's stable state
+// order. Call it unconditionally in the same manner as the other ui.Use APIs.
+func UseValue(initial float64) Value {
+	validateValue(initial)
+	return Value{
+		current: ui.UseFloatState(initial), target: ui.UseFloatState(initial),
+		velocity: ui.UseFloatState(0), generation: ui.UseIntState(0),
+		running: ui.UseBoolState(false),
+	}
+}
+
+func (value Value) Current() float64 {
+	return ui.FloatStateValue(value.current)
+}
+
+func (value Value) Target() float64 {
+	return ui.FloatStateValue(value.target)
+}
+
+func (value Value) Velocity() float64 {
+	return ui.FloatStateValue(value.velocity)
+}
+
+func (value Value) IsRunning() bool {
+	return ui.BoolStateValue(value.running)
+}
+
+func (value Value) owns(generation int64) bool {
+	return ui.IntStateValue(value.generation) == generation
+}
+
+func (value Value) reserve(target float64) int64 {
+	generation := nextGeneration(ui.IntStateValue(value.generation))
+	ui.SetIntState(value.generation, generation)
+	ui.SetFloatState(value.target, target)
+	ui.SetBoolState(value.running, true)
+	return generation
+}
+
+func (value Value) publish(generation int64, current float64, velocity float64, done bool) bool {
+	if !value.owns(generation) {
+		return false
+	}
+	ui.SetFloatState(value.current, current)
+	ui.SetFloatState(value.velocity, velocity)
+	if done {
+		ui.SetBoolState(value.running, false)
+	}
+	ui.Invalidate()
+	return true
+}
+
+// Set cancels the active animation and publishes one scalar immediately.
+func (value Value) Set(target float64) {
+	validateValue(target)
+	generation := value.reserve(target)
+	value.publish(generation, target, 0, true)
+}
+
+// Stop retains the current position and cancels the owning worker generation.
+func (value Value) Stop() {
+	current := value.Current()
+	generation := value.reserve(current)
+	value.publish(generation, current, 0, true)
+}
+
+func curveValue(curve Curve, progress float64) float64 {
+	if curve == EaseIn {
+		return progress * progress * progress
+	}
+	if curve == EaseOut {
+		inverse := 1 - progress
+		return 1 - inverse * inverse * inverse
+	}
+	if curve == EaseInOut {
+		if progress < 0.5 {
+			return 4 * progress * progress * progress
+		}
+		inverse := -2 * progress + 2
+		return 1 - inverse * inverse * inverse / 2
+	}
+	return progress
+}
+
+// AnimateTo starts one cancellable tween. A newer Set, Stop, AnimateTo, or
+// SpringTo generation makes the old goroutine exit before publishing again.
+func (value Value) AnimateTo(target float64, options Tween) {
+	validateValue(target)
+	validateTween(options)
+	from := value.Current()
+	generation := value.reserve(target)
+	ui.SetFloatState(value.velocity, 0)
+	if options.Duration == 0 || from == target {
+		value.publish(generation, target, 0, true)
+		return
+	}
+	go func() {
+		started := time.Now()
+		previous := from
+		for {
+			time.Sleep(FrameInterval)
+			tick := time.Now()
+			if !value.owns(generation) {
+				return
+			}
+			elapsed := tick.Sub(started)
+			if elapsed < 0 {
+				elapsed = 0
+			}
+			progress := float64(elapsed) / float64(options.Duration)
+			done := progress >= 1
+			if done {
+				progress = 1
+			}
+			current := from + (target-from)*curveValue(options.Curve, progress)
+			velocity := (current - previous) / (float64(FrameInterval) / float64(time.Second))
+			if done {
+				current = target
+				velocity = 0
+			}
+			if !value.publish(generation, current, velocity, done) || done {
+				return
+			}
+			previous = current
+		}
+	}()
+}
+
+// SpringTo starts one bounded physical interpolation and carries the previous
+// velocity into an interrupted spring for continuous motion.
+func (value Value) SpringTo(target float64, options Spring) {
+	validateValue(target)
+	validateSpring(options)
+	position := value.Current()
+	velocity := value.Velocity()
+	generation := value.reserve(target)
+	if position == target && math.Abs(velocity) <= options.RestSpeed {
+		value.publish(generation, target, 0, true)
+		return
+	}
+	go func() {
+		started := time.Now()
+		last := started
+		current := position
+		currentVelocity := velocity
+		for {
+			time.Sleep(FrameInterval)
+			tick := time.Now()
+			if !value.owns(generation) {
+				return
+			}
+			if tick.Sub(started) >= options.MaxDuration {
+				value.publish(generation, target, 0, true)
+				return
+			}
+			delta := tick.Sub(last)
+			if delta <= 0 || delta > 4*FrameInterval {
+				delta = FrameInterval
+			}
+			dt := float64(delta) / float64(time.Second)
+			force := -options.Stiffness*(current-target) - options.Damping*currentVelocity
+			currentVelocity += force / options.Mass * dt
+			current += currentVelocity * dt
+			done := math.Abs(current-target) <= options.RestDelta &&
+				math.Abs(currentVelocity) <= options.RestSpeed
+			if done {
+				current = target
+				currentVelocity = 0
+			}
+			if !value.publish(generation, current, currentVelocity, done) || done {
+				return
+			}
+			last = tick
+		}
+	}()
+}
+
+// UseTween follows a declarative target. It starts a new generation only when
+// the target changes and returns the same Value for diagnostics or controls.
+func UseTween(target float64, options Tween) Value {
+	value := UseValue(target)
+	if value.Target() != target {
+		value.AnimateTo(target, options)
+	}
+	return value
+}
+
+// UseSpring is the spring counterpart of UseTween.
+func UseSpring(target float64, options Spring) Value {
+	value := UseValue(target)
+	if value.Target() != target {
+		value.SpringTo(target, options)
+	}
+	return value
+}

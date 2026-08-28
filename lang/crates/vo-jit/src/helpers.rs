@@ -7,8 +7,10 @@
 //! truth instead of hand-synchronizing duplicate signatures.
 
 use cranelift_codegen::ir::{types, AbiParam, FuncRef, Signature, Type};
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::Module;
+use cranelift_jit::JITBuilder;
+#[cfg(test)]
+use cranelift_jit::JITModule;
+use cranelift_module::{FuncId, Module};
 use vo_runtime::jit_api::{runtime_helper_abi_fields, JitAbiType, JitRuntimeHelperAbi};
 
 use crate::JitError;
@@ -44,12 +46,12 @@ impl RuntimeHelper {
     }
 }
 
-fn helper_sig(module: &JITModule) -> Signature {
+fn helper_sig(module: &impl Module) -> Signature {
     Signature::new(module.target_config().default_call_conv)
 }
 
-fn declare_import(
-    module: &mut JITModule,
+fn declare_import<M: Module>(
+    module: &mut M,
     name: &str,
     sig: Signature,
 ) -> Result<cranelift_module::FuncId, cranelift_module::ModuleError> {
@@ -80,7 +82,7 @@ pub(crate) fn clif_type_for_abi(abi: JitAbiType, ptr: Type) -> Option<Type> {
 }
 
 fn signature_from_runtime_helper_abi(
-    module: &JITModule,
+    module: &impl Module,
     ptr: Type,
     abi: &JitRuntimeHelperAbi,
 ) -> Result<Signature, JitError> {
@@ -100,8 +102,8 @@ fn signature_from_runtime_helper_abi(
     Ok(sig)
 }
 
-fn declare_runtime_helper(
-    module: &mut JITModule,
+fn declare_runtime_helper<M: Module>(
+    module: &mut M,
     name: &str,
     ptr: Type,
 ) -> Result<RuntimeHelperId, JitError> {
@@ -112,6 +114,24 @@ fn declare_runtime_helper(
         requires_frame_sync: abi.requires_frame_sync(),
         requires_gc_poll: abi.requires_gc_poll(),
     })
+}
+
+trait FunctionModule {
+    fn declare_func_in_func(
+        &mut self,
+        func_id: FuncId,
+        func: &mut cranelift_codegen::ir::Function,
+    ) -> FuncRef;
+}
+
+impl<M: Module> FunctionModule for M {
+    fn declare_func_in_func(
+        &mut self,
+        func_id: FuncId,
+        func: &mut cranelift_codegen::ir::Function,
+    ) -> FuncRef {
+        Module::declare_func_in_func(self, func_id, func)
+    }
 }
 
 macro_rules! runtime_helper_table {
@@ -140,13 +160,13 @@ macro_rules! runtime_helper_table {
         }
 
         pub(crate) struct HelperRefs<'a> {
-            module: &'a mut JITModule,
+            module: &'a mut dyn FunctionModule,
             ids: HelperFuncIds,
             $($field: Option<RuntimeHelper>,)+
         }
 
         impl<'a> HelperRefs<'a> {
-            pub(crate) fn new(module: &'a mut JITModule, ids: HelperFuncIds) -> Self {
+            pub(crate) fn new<M: Module>(module: &'a mut M, ids: HelperFuncIds) -> Self {
                 Self {
                     module,
                     ids,
@@ -182,8 +202,8 @@ macro_rules! runtime_helper_table {
             }
         }
 
-        pub(crate) fn declare_helpers(
-            module: &mut JITModule,
+        pub(crate) fn declare_helpers<M: Module>(
+            module: &mut M,
             ptr: cranelift_codegen::ir::Type,
         ) -> Result<HelperFuncIds, JitError> {
             Ok(HelperFuncIds {

@@ -1,0 +1,38 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	name := ui.UseStringState("Volang")
+	notifications := ui.UseBoolState(true)
+	saved := ui.UseBoolState(false)
+	theme := kit.LightTheme()
+	status := "Changes have not been saved"
+	nameError := ""
+	if ui.StringStateValue(name) == "" {
+		nameError = "Display name is required"
+	}
+	if ui.BoolStateValue(saved) {
+		status = "Settings saved"
+	}
+	return kit.Screen(theme, ui.Gap(ui.Column(kit.Heading(theme, "Settings"), kit.MutedText(theme, status), kit.Card(theme, ui.Gap(ui.Column(kit.ValidatedTextField(theme, "Display name", ui.StringStateValue(name), "Your name", true, false, nameError, func(event ui.Event) {
+		ui.SetStringState(name, event.Text)
+		ui.SetBoolState(saved, false)
+	}), kit.ToggleField(theme, "Notifications", ui.BoolStateValue(notifications), false, func(event ui.Event) {
+		ui.SetBoolState(notifications, event.Checked)
+		ui.SetBoolState(saved, false)
+	}), kit.FormActions(theme, kit.PrimaryButton(theme, "Save", ui.BoolStateValue(saved) || nameError != "", func(event ui.Event) {
+		if ui.StringStateValue(name) != "" {
+			ui.SetBoolState(saved, true)
+		}
+	}))), theme.Space * 2))), theme.Space * 2))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

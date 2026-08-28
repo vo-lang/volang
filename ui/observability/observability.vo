@@ -1,0 +1,136 @@
+// Package observability provides bounded structured events, metrics, spans,
+// redaction, health state, and panic recovery for UI applications. Exporters
+// consume immutable snapshots and remain outside the component graph.
+package observability
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Level int64
+const (
+	Debug Level = iota
+	Info
+	Warning
+	Error
+)
+
+type Attribute struct { Key string; Value string; Sensitive bool }
+type Record struct {
+	Sequence uint64
+	At time.Time
+	Level Level
+	Name string
+	Message string
+	Attributes []Attribute
+	TraceID string
+	Duration time.Duration
+}
+
+type Limits struct { MaxRecords int; MaxMetrics int; MaxAttributes int; MaxTextBytes int }
+func DefaultLimits() Limits { return Limits{MaxRecords: 10000, MaxMetrics: 4096, MaxAttributes: 64, MaxTextBytes: 65536} }
+
+func (limits Limits) Validate() error {
+	if limits.MaxRecords <= 0 || limits.MaxRecords > 1000000 || limits.MaxMetrics <= 0 || limits.MaxMetrics > 100000 ||
+		limits.MaxAttributes <= 0 || limits.MaxAttributes > 1024 || limits.MaxTextBytes <= 0 || limits.MaxTextBytes > 1048576 {
+		return errors.New("observability limits are invalid")
+	}
+	return nil
+}
+
+type Recorder struct {
+	mu sync.Mutex
+	limits Limits
+	next uint64
+	records []Record
+	metrics map[string]int64
+	dropped uint64
+}
+
+func (recorder *Recorder) store(record Record) {
+	recorder.mu.Lock(); defer recorder.mu.Unlock()
+	record.Sequence = recorder.next; recorder.next++
+	if record.At.IsZero() { record.At = time.Now() }
+	if len(recorder.records) == recorder.limits.MaxRecords {
+		copy(recorder.records, recorder.records[1:]); recorder.records[len(recorder.records)-1] = record; recorder.dropped++; return
+	}
+	recorder.records = append(recorder.records, record)
+}
+
+func New(limits Limits) *Recorder {
+	if err := limits.Validate(); err != nil { panic(err.Error()) }
+	return &Recorder{limits: limits, next: 1, metrics: make(map[string]int64)}
+}
+
+func normalizeAttributes(values []Attribute, limits Limits) ([]Attribute, error) {
+	if len(values) > limits.MaxAttributes { return nil, errors.New("observability attribute limit exceeded") }
+	seen := make(map[string]bool); result := make([]Attribute, 0, len(values))
+	for _, value := range values {
+		if value.Key == "" || len(value.Key) > 255 || len(value.Value) > limits.MaxTextBytes || strings.ContainsAny(value.Key, "\x00\r\n") || seen[value.Key] {
+			return nil, errors.New("observability attribute is invalid or duplicated")
+		}
+		seen[value.Key] = true
+		if value.Sensitive { value.Value = "[redacted]" }
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func (recorder *Recorder) Emit(level Level, name string, message string, attributes ...Attribute) error {
+	if recorder == nil || level < Debug || level > Error || name == "" || len(name) > 1024 || len(message) > recorder.limits.MaxTextBytes ||
+		strings.ContainsAny(name, "\x00\r\n") { return errors.New("observability record is invalid") }
+	values, err := normalizeAttributes(attributes, recorder.limits); if err != nil { return err }
+	recorder.store(Record{Level: level, Name: name, Message: message, Attributes: values}); return nil
+}
+
+func (recorder *Recorder) AddMetric(name string, delta int64) error {
+	if recorder == nil || name == "" || len(name) > 255 || strings.ContainsAny(name, "\x00\r\n") { return errors.New("observability metric name is invalid") }
+	recorder.mu.Lock(); defer recorder.mu.Unlock()
+	if _, present := recorder.metrics[name]; !present && len(recorder.metrics) >= recorder.limits.MaxMetrics { return errors.New("observability metric limit exceeded") }
+	next := recorder.metrics[name]+delta
+	if (delta > 0 && next < recorder.metrics[name]) || (delta < 0 && next > recorder.metrics[name]) { return errors.New("observability metric overflow") }
+	recorder.metrics[name] = next; return nil
+}
+
+func (recorder *Recorder) Records() []Record { recorder.mu.Lock(); defer recorder.mu.Unlock(); return append([]Record(nil), recorder.records...) }
+func (recorder *Recorder) Metrics() map[string]int64 {
+	recorder.mu.Lock(); defer recorder.mu.Unlock(); result := make(map[string]int64)
+	for key, value := range recorder.metrics { result[key] = value }; return result
+}
+func (recorder *Recorder) Dropped() uint64 { recorder.mu.Lock(); defer recorder.mu.Unlock(); return recorder.dropped }
+
+type Span struct { recorder *Recorder; name string; traceID string; started time.Time; attributes []Attribute; ended bool }
+
+func (recorder *Recorder) Start(name string, traceID string, attributes ...Attribute) (*Span, error) {
+	if traceID == "" || len(traceID) > 255 || strings.ContainsAny(traceID, "\x00\r\n") { return nil, errors.New("observability trace identity is invalid") }
+	values, err := normalizeAttributes(attributes, recorder.limits); if err != nil { return nil, err }
+	if name == "" || len(name) > 1024 { return nil, errors.New("observability span name is invalid") }
+	return &Span{recorder: recorder, name: name, traceID: traceID, started: time.Now(), attributes: values}, nil
+}
+
+func (span *Span) End(level Level, message string) error {
+	if span == nil || span.ended { return errors.New("observability span is unavailable or already ended") }
+	if level < Debug || level > Error || len(message) > span.recorder.limits.MaxTextBytes { return errors.New("observability span result is invalid") }
+	span.ended = true
+	span.recorder.store(Record{Level: level, Name: span.name, Message: message, Attributes: append([]Attribute(nil), span.attributes...), TraceID: span.traceID, Duration: time.Since(span.started)})
+	return nil
+}
+
+type Recovery struct { Recovered bool; Message string }
+
+// Guard converts one application callback panic into an observable degraded
+// result. Runtime integrity failures still terminate at lower trust boundaries.
+func Guard(recorder *Recorder, name string, action func()) (result Recovery) {
+	if recorder == nil || action == nil { return Recovery{Recovered: true, Message: "recovery guard is invalid"} }
+	defer func() {
+		if value := recover(); value != nil {
+			result = Recovery{Recovered: true, Message: fmt.Sprint(value)}
+			_ = recorder.Emit(Error, name, result.Message, Attribute{Key: "recovered", Value: "true"})
+		}
+	}()
+	action(); return Recovery{}
+}

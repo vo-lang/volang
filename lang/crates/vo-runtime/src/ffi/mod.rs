@@ -164,6 +164,7 @@ pub enum HostEventReplaySource {
     GuiEvent,
     Fetch,
     Extension,
+    UiSystem,
 }
 
 impl HostEventReplaySource {
@@ -172,6 +173,7 @@ impl HostEventReplaySource {
             Self::GuiEvent => "gui-event",
             Self::Fetch => "fetch",
             Self::Extension => "extension",
+            Self::UiSystem => "ui-system",
         }
     }
 
@@ -180,6 +182,7 @@ impl HostEventReplaySource {
             "gui-event" => Some(Self::GuiEvent),
             "fetch" => Some(Self::Fetch),
             "extension" => Some(Self::Extension),
+            "ui-system" => Some(Self::UiSystem),
             _ => None,
         }
     }
@@ -642,6 +645,7 @@ const fn extension_abi_fingerprint() -> u64 {
         HostEventReplaySource::GuiEvent as u64,
         HostEventReplaySource::Fetch as u64,
         HostEventReplaySource::Extension as u64,
+        HostEventReplaySource::UiSystem as u64,
         ext_abi::RESULT_OK as u64,
         ext_abi::RESULT_YIELD as u64,
         ext_abi::RESULT_BLOCK as u64,
@@ -4813,6 +4817,9 @@ mod native_abi_v10 {
             value if value == HostEventReplaySource::Fetch as u8 => HostEventReplaySource::Fetch,
             value if value == HostEventReplaySource::Extension as u8 => {
                 HostEventReplaySource::Extension
+            }
+            value if value == HostEventReplaySource::UiSystem as u8 => {
+                HostEventReplaySource::UiSystem
             }
             value => {
                 record_error(

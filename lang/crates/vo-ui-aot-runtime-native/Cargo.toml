@@ -1,0 +1,19 @@
+[package]
+name = "vo-ui-aot-runtime-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Statically linked native AOT desktop runtime for Volang UI"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+vo-aot-runtime-core = { path = "../vo-aot-runtime-core" }
+vo-ui-shell-native = { workspace = true, features = ["desktop-window"] }
+vo-ui-vm.workspace = true

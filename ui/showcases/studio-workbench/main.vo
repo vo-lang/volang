@@ -1,0 +1,438 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/commands"
+	"github.com/vo-lang/ui/desktop"
+	"github.com/vo-lang/ui/document"
+	"github.com/vo-lang/ui/editor"
+	"github.com/vo-lang/ui/graphics"
+	"github.com/vo-lang/ui/kit"
+	"github.com/vo-lang/ui/navigation"
+	"github.com/vo-lang/ui/workspace"
+	"strconv"
+	"strings"
+)
+
+var mainDocument = document.NewText("package main\n\nimport \"github.com/vo-lang/ui\"\nimport \"github.com/vo-lang/ui/kit\"\n\nfunc App() ui.View {\n\treturn kit.Page(kit.Title(\"Hello from Volang Studio\"))\n}\n\nfunc main() {\n\tif err := ui.Mount(App); err != nil { panic(err.Error()) }\n}\n")
+var moduleDocument = document.NewText("module example.com/studio-workbench\n\nvo 0.1\n\nrequire github.com/vo-lang/ui v1.0.0\n")
+var readmeDocument = document.NewText("# Studio Workbench\n\nEdit main.vo, choose a development or release target, then run the project.\n\nThe same component tree runs in VM/JIT development, Wasm AOT, and Native AOT releases.\n")
+
+var mainEditor = editor.New(mainDocument, "file:///workspace/main.vo", "volang")
+var moduleEditor = editor.New(moduleDocument, "file:///workspace/vo.mod", "volang-module")
+var readmeEditor = editor.New(readmeDocument, "file:///workspace/README.md", "markdown")
+
+var selectedFile = "main.vo"
+var projectExpanded = true
+var buildMode = "JIT development"
+var savedMainVersion uint64
+var savedModuleVersion uint64
+var savedReadmeVersion uint64
+var runCount int64
+var projectStatus = "Workspace ready"
+var consoleLines = []string{
+	"✓ workspace restored",
+	"✓ language service ready",
+	"✓ VM, JIT, Wasm AOT, and Native AOT targets discovered",
+}
+var layout *workspace.Model
+var initialLayoutSnapshot string
+var windows = desktop.NewRegistry()
+
+func activeDocument() *document.Document {
+	if selectedFile == "vo.mod" {
+		return moduleDocument
+	}
+	if selectedFile == "README.md" {
+		return readmeDocument
+	}
+	return mainDocument
+}
+
+func activeEditor() *editor.Model {
+	if selectedFile == "vo.mod" {
+		return moduleEditor
+	}
+	if selectedFile == "README.md" {
+		return readmeEditor
+	}
+	return mainEditor
+}
+
+func savedVersion() uint64 {
+	if selectedFile == "vo.mod" {
+		return savedModuleVersion
+	}
+	if selectedFile == "README.md" {
+		return savedReadmeVersion
+	}
+	return savedMainVersion
+}
+
+func isDirty(name string) bool {
+	if name == "vo.mod" {
+		return moduleDocument.Version() != savedModuleVersion
+	}
+	if name == "README.md" {
+		return readmeDocument.Version() != savedReadmeVersion
+	}
+	return mainDocument.Version() != savedMainVersion
+}
+
+func appendConsole(message string) {
+	consoleLines = append(consoleLines, message)
+	if len(consoleLines) > 12 {
+		consoleLines = append([]string(nil), consoleLines[len(consoleLines)-12:]...)
+	}
+}
+
+func selectFile(name string) {
+	if name != "main.vo" && name != "vo.mod" && name != "README.md" {
+		return
+	}
+	selectedFile = name
+	projectStatus = "Opened " + name
+	_ = layout.Activate("documents", 0)
+	ui.Invalidate()
+}
+
+func saveFile() {
+	version := activeDocument().Version()
+	if selectedFile == "vo.mod" {
+		savedModuleVersion = version
+	} else if selectedFile == "README.md" {
+		savedReadmeVersion = version
+	} else {
+		savedMainVersion = version
+	}
+	projectStatus = "Saved " + selectedFile + " at version " + strconv.FormatUint(version, 10)
+	appendConsole("✓ " + projectStatus)
+	ui.Invalidate()
+}
+
+func undoEdit() {
+	if activeDocument().Undo() {
+		projectStatus = "Undid the last edit in " + selectedFile
+		appendConsole("↶ " + projectStatus)
+	}
+	ui.Invalidate()
+}
+
+func redoEdit() {
+	if activeDocument().Redo() {
+		projectStatus = "Redid the last edit in " + selectedFile
+		appendConsole("↷ " + projectStatus)
+	}
+	ui.Invalidate()
+}
+
+func chooseBuildMode(mode string) {
+	buildMode = mode
+	projectStatus = "Target changed to " + mode
+	appendConsole("→ " + projectStatus)
+	ui.Invalidate()
+}
+
+func showDocuments() {
+	_ = layout.Activate("documents", 0)
+	ui.Invalidate()
+}
+
+func showDocs() {
+	_ = layout.Activate("documents", 1)
+	ui.Invalidate()
+}
+
+func showConsole() {
+	_ = layout.Activate("bottom", 0)
+	ui.Invalidate()
+}
+
+func showPreview() {
+	_ = layout.Activate("bottom", 1)
+	ui.Invalidate()
+}
+
+func runProject() {
+	source := mainDocument.Text()
+	showPreview()
+	if !strings.Contains(source, "func App()") || !strings.Contains(source, "ui.Mount") {
+		projectStatus = "Build failed: main.vo must declare App and mount it"
+		appendConsole("✕ " + projectStatus)
+		ui.Invalidate()
+		return
+	}
+	runCount++
+	projectStatus = "Run " + strconv.FormatInt(runCount, 10) + " completed with " + buildMode
+	appendConsole("✓ " + projectStatus)
+	ui.Invalidate()
+}
+
+func resetWorkspace() {
+	if err := layout.Restore(initialLayoutSnapshot); err != nil {
+		projectStatus = "Workspace restore failed: " + err.Error()
+	} else {
+		projectStatus = "Workspace layout restored"
+		appendConsole("✓ " + projectStatus)
+	}
+	ui.Invalidate()
+}
+
+func toggleExplorer() {
+	ratio := 0.2
+	if projectExpanded {
+		ratio = 0.08
+	}
+	projectExpanded = !projectExpanded
+	_ = layout.Resize("outer", ratio)
+	projectStatus = "Explorer layout updated"
+	ui.Invalidate()
+}
+
+func commandScope(openCommands func()) commands.Scope {
+	return commands.NewScope(
+		commands.New("file.save", "Save active file", commands.Key("s", ui.ModifierControl), saveFile),
+		commands.New("edit.undo", "Undo edit", commands.Key("z", ui.ModifierControl), undoEdit),
+		commands.New("edit.redo", "Redo edit", commands.Key("y", ui.ModifierControl), redoEdit),
+		commands.New("project.run", "Run project", commands.Key("Enter", ui.ModifierControl), runProject),
+		commands.New("commands.open", "Open command palette", commands.Key("p", ui.ModifierControl|ui.ModifierShift), openCommands),
+		commands.Action("view.editor", "Show Editor", showDocuments),
+		commands.Action("view.docs", "Show Documentation", showDocs),
+		commands.Action("view.console", "Show Console", showConsole),
+		commands.Action("view.preview", "Show Preview", showPreview),
+		commands.Action("view.reset", "Reset Workspace Layout", resetWorkspace),
+		commands.Action("target.jit", "Use JIT Development", func() { chooseBuildMode("JIT development") }),
+		commands.Action("target.wasm", "Use Wasm AOT Release", func() { chooseBuildMode("Wasm AOT release") }),
+		commands.Action("target.native", "Use Native AOT Release", func() { chooseBuildMode("Native AOT release") }),
+	)
+}
+
+func paletteItems(items []commands.Command) []kit.CommandItem {
+	result := make([]kit.CommandItem, 0, len(items))
+	for _, item := range items {
+		shortcut := ""
+		if item.ID == "file.save" {
+			shortcut = "Ctrl S"
+		} else if item.ID == "project.run" {
+			shortcut = "Ctrl Enter"
+		} else if item.ID == "commands.open" {
+			shortcut = "Ctrl Shift P"
+		}
+		result = append(result, kit.CommandItem{
+			Key: item.ID, Label: item.Label, Detail: item.Description, Shortcut: shortcut,
+			Disabled: !item.Enabled,
+		})
+	}
+	return result
+}
+
+func fileTreeItems() []kit.TreeItem {
+	items := []kit.TreeItem{{
+		Key: "project", Label: "studio-workbench", HasChildren: true, Expanded: projectExpanded,
+	}}
+	if !projectExpanded {
+		return items
+	}
+	mainLabel := "main.vo"
+	moduleLabel := "vo.mod"
+	readmeLabel := "README.md"
+	if isDirty("main.vo") {
+		mainLabel += " •"
+	}
+	if isDirty("vo.mod") {
+		moduleLabel += " •"
+	}
+	if isDirty("README.md") {
+		readmeLabel += " •"
+	}
+	return append(items,
+		kit.TreeItem{Key: "main.vo", Label: mainLabel, Depth: 1, Selected: selectedFile == "main.vo"},
+		kit.TreeItem{Key: "vo.mod", Label: moduleLabel, Depth: 1, Selected: selectedFile == "vo.mod"},
+		kit.TreeItem{Key: "README.md", Label: readmeLabel, Depth: 1, Selected: selectedFile == "README.md"},
+	)
+}
+
+func FilesPanel() ui.View {
+	return ui.Gap(ui.Column(
+		ui.Row(ui.Flex(kit.Caption("EXPLORER"), 1), kit.Badge("3 FILES", kit.IntentInfo)),
+		kit.Tree("Project files", fileTreeItems(), func(key string) {
+			if key == "project" {
+				projectExpanded = !projectExpanded
+				ui.Invalidate()
+			}
+		}, func(key string) {
+			if key == "project" {
+				projectExpanded = !projectExpanded
+				ui.Invalidate()
+			} else {
+				selectFile(key)
+			}
+		}),
+		kit.Separator(kit.AxisHorizontal, "Project actions"),
+		kit.Caption("TARGETS"),
+		ui.Role(ui.Column(
+			ui.Selected(ui.Button("JIT development", ui.Action(func() { chooseBuildMode("JIT development") })), buildMode == "JIT development"),
+			ui.Selected(ui.Button("Wasm AOT release", ui.Action(func() { chooseBuildMode("Wasm AOT release") })), buildMode == "Wasm AOT release"),
+			ui.Selected(ui.Button("Native AOT release", ui.Action(func() { chooseBuildMode("Native AOT release") })), buildMode == "Native AOT release"),
+		), "listbox"),
+	), 12)
+}
+
+func EditorPanel() ui.View {
+	options := editor.DefaultOptions()
+	options.Width = 0
+	options.AccessibleName = selectedFile + " code editor"
+	options.OnChange = func(edit document.Edit, version uint64) {
+		projectStatus = "Unsaved changes in " + selectedFile + " at version " + strconv.FormatUint(version, 10)
+	}
+	status := "SAVED"
+	intent := kit.FeedbackIntent(kit.IntentSuccess)
+	if activeDocument().Version() != savedVersion() {
+		status = "UNSAVED"
+		intent = kit.IntentWarning
+	}
+	header := ui.Align(ui.Row(
+		ui.Flex(ui.Gap(ui.Row(kit.Caption("workspace"), ui.Text("/"), ui.Text(selectedFile)), 8), 1),
+		kit.Badge(status, intent),
+	), ui.AlignCenter)
+	return ui.Gap(ui.Column(header, editor.View(activeEditor(), options)), 8)
+}
+
+func PreviewPanel() ui.View {
+	program := graphics.NewProgram(graphics.DefaultLimits())
+	program.Clear(0xff0b0f18)
+	program.Fill(graphics.Rect{X: 18, Y: 18, Width: 356, Height: 164}, 0xff18233b)
+	program.Fill(graphics.Rect{X: 34, Y: 38, Width: 6, Height: 104}, 0xff6c8cff)
+	program.DrawText(graphics.Point{X: 58, Y: 72}, "Hello from Volang Studio", 0xffffffff, 20)
+	program.DrawText(graphics.Point{X: 58, Y: 108}, buildMode, 0xffa8b8d8, 14)
+	program.DrawText(graphics.Point{X: 58, Y: 138}, "Run " + strconv.FormatInt(runCount, 10), 0xff75e6a4, 14)
+	preview := graphics.Canvas(program, "Embedded application preview")
+	preview = ui.Width(preview, 392)
+	preview = ui.Height(preview, 200)
+	state := "Run the project to update this preview"
+	if runCount > 0 {
+		state = "Preview synchronized after run " + strconv.FormatInt(runCount, 10)
+	}
+	return ui.Gap(ui.Column(
+		ui.Row(ui.Flex(kit.Caption("APPLICATION PREVIEW"), 1), kit.Badge(buildMode, kit.IntentSuccess)),
+		preview,
+		ui.Role(ui.Text(state), "status"),
+		kit.Caption("Separate desktop windows share the same document snapshot and retain independent focus."),
+	), 10)
+}
+
+func ConsolePanel() ui.View {
+	lines := make([]ui.View, 0, len(consoleLines)+1)
+	lines = append(lines, ui.Row(ui.Flex(kit.Caption("OUTPUT · VOLANG"), 1), kit.Badge("0 PROBLEMS", kit.IntentSuccess)))
+	for index, line := range consoleLines {
+		lines = append(lines, ui.Key(ui.Text(line), "console-"+strconv.Itoa(index)))
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(lines...), 6), "log"), "Build output")
+}
+
+func DocsPanel() ui.View {
+	return ui.Gap(ui.Column(
+		ui.Row(ui.Flex(kit.Caption("DOCUMENTATION"), 1), kit.Badge("LOCAL", kit.IntentInfo)),
+		kit.Title("Build once, run everywhere"),
+		kit.Paragraph("Use the VM while iterating, turn on JIT for longer development sessions, then publish the same typed component graph as Wasm AOT or Native AOT."),
+		kit.Alert("Structured concurrency", "Editor analysis, builds, previews, and file watching run in scoped goroutines. Generation checks keep stale work from committing into the UI.", kit.IntentInfo, false),
+		kit.Caption("Ctrl S · save    Ctrl Enter · run    Ctrl Shift P · commands"),
+	), 12)
+}
+
+func Workbench() ui.View {
+	paletteOpen := false
+	paletteQuery := ""
+	paletteSelected := int64(0)
+	paletteFocusToken := int64(0)
+	openCommands := func() {
+		paletteQuery = ""
+		paletteSelected = 0
+		paletteFocusToken++
+		paletteOpen = true
+	}
+	closeCommands := func() {
+		paletteOpen = false
+	}
+	scope := commandScope(openCommands)
+	toolbar := scope.Toolbar("Workbench actions", "file.save", "edit.undo", "edit.redo", "project.run", "commands.open")
+	viewTabs := scope.Toolbar("Workbench views", "view.editor", "view.docs", "view.console", "view.preview", "view.reset")
+	header := ui.Gap(ui.Column(
+		ui.Align(ui.Row(
+			kit.ActionButton("Toggle Explorer", false, toggleExplorer),
+			ui.Flex(kit.Title("Volang Studio"), 1),
+			kit.Badge(buildMode, kit.IntentInfo),
+		), ui.AlignCenter),
+		ui.Row(ui.Flex(toolbar, 1), viewTabs),
+		ui.AccessibleName(ui.Role(ui.Text(projectStatus), "status"), "Project status"),
+	), 10)
+	palette := kit.CommandPalette("Command palette", paletteQuery, "Search files, views, targets, and actions", paletteOpen, paletteSelected, paletteFocusToken, paletteItems(scope.Search(paletteQuery, 12)), func(value string) {
+		paletteQuery = value
+		paletteSelected = 0
+	}, func(value int64) {
+		paletteSelected = value
+	}, func(key string) {
+		if scope.Invoke(key) {
+			closeCommands()
+		}
+	}, closeCommands)
+	body := ui.MinHeight(layout.View(), 680)
+	return scope.Bind(kit.Page(ui.Gap(ui.Column(header, body, palette), 14)))
+}
+
+func Offline() ui.View {
+	return kit.Page(ui.Gap(ui.Column(
+		kit.Badge("OFFLINE READY", kit.IntentSuccess),
+		kit.Title("Your local workspace remains available"),
+		kit.Paragraph("Cached tools, documentation, source files, and the local VM continue to work without a network connection."),
+		navigation.Link("Return to Studio", "/"),
+	), 16))
+}
+
+func App() ui.View {
+	return kit.Application(func() ui.View {
+		return navigation.ResolveTyped(func(location navigation.Location) ui.View {
+			return Workbench()
+		}, navigation.ViewRoute(navigation.NewPattern("studio"), func(match navigation.Match) ui.View {
+			return Workbench()
+		}), navigation.ViewRoute(navigation.NewPattern("offline", navigation.Static("offline")), func(match navigation.Match) ui.View {
+			return Offline()
+		}))
+	})
+}
+
+func main() {
+	mainWindow := desktop.NewWindowID(1, 1)
+	previewWindow := desktop.NewWindowID(2, 1)
+	geometry := desktop.Geometry{Width: 1440, Height: 900}
+	if err := windows.Open(desktop.WindowOptions{ID: mainWindow, Title: "Volang Studio", Geometry: geometry, MinWidth: 720, MinHeight: 480}); err != nil {
+		panic(err.Error())
+	}
+	if err := windows.Open(desktop.WindowOptions{ID: previewWindow, Owner: mainWindow, Title: "Preview", Geometry: desktop.Geometry{Width: 900, Height: 640}, MinWidth: 360, MinHeight: 240}); err != nil {
+		panic(err.Error())
+	}
+	var err error
+	layout, err = workspace.New(
+		workspace.Split("outer", workspace.Horizontal, 0.2,
+			workspace.PanelLayout("files", "files"),
+			workspace.Split("work", workspace.Vertical, 0.72,
+				workspace.Tabs("documents", 0, workspace.PanelLayout("editor", "editor"), workspace.PanelLayout("docs", "docs")),
+				workspace.Tabs("bottom", 0, workspace.PanelLayout("console", "console"), workspace.PanelLayout("preview", "preview")),
+			),
+		),
+		[]workspace.Panel{
+			{ID: "files", Title: "Explorer", Content: FilesPanel},
+			{ID: "editor", Title: "Editor", Content: EditorPanel},
+			{ID: "docs", Title: "Docs", Content: DocsPanel},
+			{ID: "console", Title: "Console", Content: ConsolePanel},
+			{ID: "preview", Title: "Preview", Content: PreviewPanel},
+		},
+	)
+	if err != nil {
+		panic(err.Error())
+	}
+	initialLayoutSnapshot = layout.Snapshot()
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

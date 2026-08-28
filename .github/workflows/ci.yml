@@ -41,20 +41,18 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
 
       - name: Check Rust formatting
-        run: |
-          cargo fmt --all -- --check
-          cargo fmt --manifest-path apps/studio/wasm/Cargo.toml -- --check
-          cargo fmt --manifest-path apps/studio/src-tauri/Cargo.toml -- --check
+        run: cargo fmt --all -- --check
 
       - name: Check repository contracts
         run: |
           ./target/debug/vo-dev lint all
+          ./target/debug/vo-dev ui-certify --check
           ./target/debug/vo-dev test lint --suite lang --strict
           ./target/debug/vo-dev test fmt --suite lang
 
@@ -113,10 +111,21 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
+
+      - name: Exercise Native AOT delivery
+        if: matrix.shard == 'smoke' || matrix.shard == '1/2'
+        shell: bash
+        run: |
+          cargo build --locked -p vo -p vo-aot-runtime -p vo-ui-aot-runtime-native --no-default-features
+          ./target/debug/vo build examples/basics/hello.vo \
+            --runtime=target/debug/libvo_aot_runtime.a \
+            --no-cache \
+            -o target/hello-aot
+          test "$(./target/hello-aot)" = "Hello, hello!"
 
       - name: Run pull request language targets
         if: matrix.shard == 'smoke'
@@ -148,16 +157,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: |
-            apps/studio/package-lock.json
-            lang/crates/vo-web/package-lock.json
+          cache-dependency-path: lang/crates/vo-web/package-lock.json
 
       - name: Cache wasm-pack
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -174,12 +181,122 @@ jobs:
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
 
+      - name: Build browser AOT fixture
+        run: |
+          cargo build --locked -p vo --no-default-features
+          ./target/debug/vo build examples/basics/hello.vo \
+            --kind=wasm \
+            --no-cache \
+            -o target/hello-aot.wasm
+
+      - name: Build Core Wasm AOT host
+        working-directory: lang/crates/vo-web
+        run: |
+          npm ci
+          npm run build:aot-support
+          npm run build:wasm:release
+          npm run build:js
+
+      - name: Build production Core Wasm AOT component application
+        env:
+          VOWORK: "off"
+        run: |
+          ./target/debug/vo ui build ui/tests/nested-component-list \
+            -o target/ui-nested-component-aot \
+            --runtime-dir=lang/crates/vo-web
+          ./target/debug/vo ui build ui/showcases/component-gallery \
+            -o target/ui-component-gallery-aot \
+            --runtime-dir=lang/crates/vo-web
+          ./target/debug/vo ui build ui/showcases/data-application \
+            -o target/data-application-aot \
+            --runtime-dir=lang/crates/vo-web
+          ./target/debug/vo ui build ui/showcases/content-site \
+            -o target/content-site-aot \
+            --runtime-dir=lang/crates/vo-web
+          ./target/debug/vo ui build ui/showcases/media-application \
+            -o target/media-application-aot \
+            --runtime-dir=lang/crates/vo-web
+          ./target/debug/vo ui build ui/showcases/studio-workbench \
+            -o target/studio-workbench-aot \
+            --runtime-dir=lang/crates/vo-web
+          ./target/debug/vo ui build apps/studio \
+            -o target/studio-aot \
+            --runtime-dir=lang/crates/vo-web
+
+      - name: Enforce Core Wasm AOT image budgets
+        run: |
+          mkdir -p target/ui-certification/web-size
+          node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 358400 --output target/ui-certification/web-size/component-gallery.json
+          node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/data-application.json
+          node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/content-site.json
+          node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/media-application.json
+          node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ui-certification/web-size/studio-workbench.json
+          node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/studio-aot/app.wasm --brotli-limit 921600 --output target/ui-certification/web-size/studio.json
+
+      - name: Publish Core Wasm AOT image reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-web-image-size
+          path: target/ui-certification/web-size/*.json
+          if-no-files-found: error
+
+      - name: Run official UIKit VM and JIT interaction matrix
+        run: |
+          ./eng/run-uikit-gallery-contracts.sh
+          ./eng/run-data-application-contracts.sh
+          ./eng/run-content-site-contracts.sh
+          ./eng/run-media-application-contracts.sh
+          ./eng/run-studio-workbench-contracts.sh
+
+      - name: Run Core Wasm AOT semantic gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cases=(
+            tests/lang/cases/runtime/defer/defer_repanic_chain.vo
+            tests/lang/cases/runtime/defer/nested_unwind_state_stack.vo
+            tests/lang/cases/runtime/defer/bug_defer_recover_mixed_named_return.vo
+            tests/lang/cases/runtime/defer/closure_defer_interact.vo
+            tests/lang/cases/runtime/defer/bug_defer_closure_iface_arg.vo
+            tests/lang/cases/runtime/panic/nil_pointer_method_panic.vo
+            tests/lang/cases/runtime/panic/closure_panic_recover.vo
+            tests/lang/cases/jit/runtime_traps.vo
+            tests/lang/cases/runtime/numeric/integer_div_mod_edge.vo
+            tests/lang/cases/bugs/2026_05_28_jit_slice_addr_nil_panic.vo
+            tests/lang/cases/bugs/2026_05_28_jit_slice_addr_oob_panic.vo
+            tests/lang/cases/bugs/2026_05_28_jit_array_addr_oob_panic.vo
+            tests/lang/cases/runtime/interface/iface_to_iface_assign.vo
+            tests/lang/cases/runtime/map/array_as_map_key.vo
+            tests/lang/cases/runtime/slice/slice_append_semantics.vo
+            tests/lang/cases/runtime/slice/slice_func_elem_call.vo
+            tests/lang/cases/runtime/scheduler/select_multi_ready.vo
+            tests/lang/cases/runtime/scheduler/closure_goroutine_immediate.vo
+            tests/lang/cases/runtime/scheduler/direct_method_value_cross_island_multi_slot.vo
+            tests/lang/cases/runtime/scheduler/island_deep_graph_transfer.vo
+            tests/lang/cases/runtime/scheduler/island_transfer_source_isolation.vo
+            tests/lang/cases/gc/gc_deep_pointer_graph.vo
+            tests/lang/cases/gc/gc_spread_append_layout.vo
+            tests/lang/cases/gc/wasm_aot_shadow_root_stack.vo
+            tests/lang/cases/stdlib/fmt_scan.vo
+            tests/lang/cases/stdlib/filepath_basic.vo
+            tests/lang/cases/stdlib/log_semantics.vo
+            tests/lang/cases/stdlib/regexp.vo
+            tests/lang/cases/net/net_basic.vo
+            benchmarks/binary-trees/trees.vo
+            benchmarks/channel-block-wake/block_wake.vo
+          )
+          for source in "${cases[@]}"; do
+            image="target/aot-$(basename "${source%.vo}").wasm"
+            ./target/debug/vo build "$source" --kind=wasm --no-cache -o "$image"
+            node cmd/vo-dev/src/bench_wasm_aot_runner.mjs "$image"
+          done
+
       - name: Run WebAssembly language target
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            ./target/debug/vo-dev test run --suite lang --tags smoke --targets wasm
+            ./target/debug/vo-dev test run --suite lang --tags smoke --targets wasm,wasm-aot
           else
-            ./target/debug/vo-dev test run --suite lang --targets wasm
+            ./target/debug/vo-dev test run --suite lang --targets wasm,wasm-aot
           fi
 
       - name: Check no-std target closure
@@ -202,35 +319,33 @@ jobs:
           cargo check --locked -p vo-vm --target wasm32-unknown-unknown --no-default-features
           cargo check --locked -p vo-ext --target wasm32-unknown-unknown \
             --no-default-features --features wasm --tests
+          cargo check --locked --target wasm32-unknown-unknown \
+            -p vo-ui-core -p vo-ui-protocol -p vo-ui-reactive -p vo-ui-plan \
+            -p vo-ui-system -p vo-ui-web --no-default-features
 
       - name: Test vo-web JavaScript
         working-directory: lang/crates/vo-web
         run: |
-          npm ci
           npm run test:vfs
+          npm run test:ui
+          npm run test:ui-browser
+          npm run test:ui-component-browser
+          npm run test:uikit-gallery-browser
+          npm run test:data-application-browser
+          npm run test:content-site-browser
+          npm run test:media-application-browser
+          npm run test:studio-workbench-browser
+          npm run test:studio-aot-browser
+          VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
 
-      - name: Test and build Studio Web
-        working-directory: apps/studio
-        run: |
-          npm ci
-          npm run build:wasm
-          npm run check
-          npm run test:site
-          npm run test:guest-exit
-          npm run build
-
-      - name: Test standalone Studio WebAssembly host
-        working-directory: apps/studio/wasm
-        run: wasm-pack test --node --release . --locked
-
-  studio_native:
-    name: studio-native (${{ matrix.os }})
+  ui_platform:
+    name: ui-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2025]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -238,8 +353,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        shell: bash
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --component clippy
+          rustup toolchain install 1.94.0 --profile minimal
           rustup default 1.94.0
 
       - name: Cache Cargo downloads
@@ -248,19 +364,361 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'apps/studio/wasm/Cargo.lock', 'apps/studio/src-tauri/Cargo.lock') }}
+          key: cargo-ui-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build repository tooling
-        run: cargo build -p vo-dev --locked
+      - name: Install Linux window smoke dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes mesa-vulkan-drivers xvfb
 
-      - name: Run native language smoke matrix
-        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets native,gc-vm,gc-osr
+      - name: Compile the production desktop shell
+        run: cargo check --locked -p vo-ui-shell-native --features desktop-window
 
-      - name: Run Studio native Clippy
-        run: cargo clippy --manifest-path apps/studio/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Run native platform contracts
+        run: cargo test --locked -p vo-ui-host-native -p vo-ui-system-native -p vo-ui-accesskit -p vo-ui-present-wgpu
 
-      - name: Run Studio native tests
-        run: cargo test --manifest-path apps/studio/src-tauri/Cargo.toml --locked
+      - name: Run desktop shell contracts
+        run: cargo test --locked -p vo-ui-shell-native --features desktop-window
+
+      - name: Run VM and JIT native UI differential
+        run: cargo test --locked -p vo-engine official_ui_native_vm_jit
+
+      - name: Enforce UI performance budgets
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p target/ui-certification
+          cargo run --locked --profile release-native -p vo-ui-benchmark > target/ui-certification/performance.json
+          cat target/ui-certification/performance.json
+
+      - name: Publish UI performance dashboard data
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-performance-${{ runner.os }}-${{ runner.arch }}
+          path: target/ui-certification/performance.json
+          if-no-files-found: error
+
+      - name: Build production UI CLI
+        run: cargo build --locked -p vo
+
+      - name: Build production Studio desktop host
+        run: cargo build --locked -p vo-studio-native
+
+      - name: Package production Native AOT applications
+        shell: bash
+        run: |
+          cargo build --locked -p vo-studio-native --lib --release
+          cargo build --locked -p vo-ui-aot-runtime-native --release
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            studio_runtime=target/release/vo_studio_native.lib
+            ui_runtime=target/release/vo_ui_aot_runtime_native.lib
+          else
+            studio_runtime=target/release/libvo_studio_native.a
+            ui_runtime=target/release/libvo_ui_aot_runtime_native.a
+          fi
+          ./target/debug/vo ui package apps/studio \
+            -o target/studio-native-aot \
+            --runtime="$studio_runtime"
+          ./target/debug/vo ui package ui/showcases/component-gallery \
+            -o target/uikit-gallery-native-aot \
+            --runtime="$ui_runtime"
+          ./target/debug/vo ui package ui/showcases/data-application \
+            -o target/data-application-native-aot \
+            --runtime="$ui_runtime"
+          ./target/debug/vo ui package ui/showcases/media-application \
+            -o target/media-application-native-aot \
+            --runtime="$ui_runtime"
+          ./target/debug/vo ui package ui/showcases/studio-workbench \
+            -o target/studio-workbench-native-aot \
+            --runtime="$ui_runtime"
+
+      - name: Link a production Native AOT UI application
+        shell: bash
+        run: |
+          cargo build --locked -p vo-ui-aot-runtime-native
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            runtime=target/debug/vo_ui_aot_runtime_native.lib
+            output=target/component-ui-aot.exe
+          else
+            runtime=target/debug/libvo_ui_aot_runtime_native.a
+            output=target/component-ui-aot
+          fi
+          VOWORK=off ./target/debug/vo build ui/tests/nested-component-list \
+            --runtime="$runtime" \
+            --no-cache \
+            -o "$output"
+
+      - name: Present one real Linux Native AOT window frame
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Alpha 0|Reorder|Remove Beta|Insert Beta|Replace Alpha"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Complete|Alpha 0|Beta 0"
+        run: xvfb-run --auto-servernum ./target/component-ui-aot
+
+      - name: Present one real macOS Native AOT window frame
+        if: runner.os == 'macOS'
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Alpha 0|Reorder|Remove Beta|Insert Beta|Replace Alpha"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Complete|Alpha 0|Beta 0"
+        run: ./target/component-ui-aot
+
+      - name: Present one real Windows Native AOT window frame
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Alpha 0|Reorder|Remove Beta|Insert Beta|Replace Alpha"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Complete|Alpha 0|Beta 0"
+        run: ./target/component-ui-aot.exe
+
+      - name: Present one real Linux window frame
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        run: xvfb-run --auto-servernum ./target/debug/vo ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame
+
+      - name: Present one real macOS window frame
+        if: runner.os == 'macOS'
+        run: ./target/debug/vo ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame
+
+      - name: Present one real Windows window frame
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./target/debug/vo.exe ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame
+
+      - name: Present one real Linux Studio JIT window
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
+        run: |
+          studio_workspace="$(mktemp -d)"
+          trap 'rm -rf "$studio_workspace"' EXIT
+          VOLANG_STUDIO_WORKSPACE="$studio_workspace" xvfb-run --auto-servernum ./target/debug/vo-studio-native
+
+      - name: Present one real macOS Studio JIT window
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
+        run: |
+          studio_workspace="$(mktemp -d)"
+          trap 'rm -rf "$studio_workspace"' EXIT
+          VOLANG_STUDIO_WORKSPACE="$studio_workspace" ./target/debug/vo-studio-native
+
+      - name: Present one real Windows Studio JIT window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
+        run: |
+          $studioWorkspace = Join-Path $env:RUNNER_TEMP "volang-studio-window"
+          New-Item -ItemType Directory -Force -Path $studioWorkspace | Out-Null
+          $env:VOLANG_STUDIO_WORKSPACE = $studioWorkspace
+          ./target/debug/vo-studio-native.exe
+
+      - name: Present one real Linux Studio Native AOT window
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
+        run: |
+          studio_workspace="$(mktemp -d)"
+          trap 'rm -rf "$studio_workspace"' EXIT
+          studio_executable="$(find target/studio-native-aot -type f -path '*/usr/bin/volang-studio' -print -quit)"
+          test -n "$studio_executable"
+          VOLANG_STUDIO_WORKSPACE="$studio_workspace" xvfb-run --auto-servernum "$studio_executable"
+
+      - name: Present one real macOS Studio Native AOT window
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
+        run: |
+          studio_workspace="$(mktemp -d)"
+          trap 'rm -rf "$studio_workspace"' EXIT
+          studio_executable="$(find target/studio-native-aot -type f -path '*/Contents/MacOS/volang-studio' -print -quit)"
+          test -n "$studio_executable"
+          VOLANG_STUDIO_WORKSPACE="$studio_workspace" "$studio_executable"
+
+      - name: Present one real Windows Studio Native AOT window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
+        run: |
+          $studioWorkspace = Join-Path $env:RUNNER_TEMP "volang-studio-aot-window"
+          New-Item -ItemType Directory -Force -Path $studioWorkspace | Out-Null
+          $studioExecutable = Get-ChildItem target/studio-native-aot -Recurse -Filter volang-studio.exe | Select-Object -First 1
+          if ($null -eq $studioExecutable) { throw "Studio Native AOT executable is missing" }
+          $env:VOLANG_STUDIO_WORKSPACE = $studioWorkspace
+          & $studioExecutable.FullName
+
+      - name: Present one real Linux UIKit Gallery Native AOT window
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Primary|Open drawer|Close|Show toast"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Primary activated|Release ready"
+        run: |
+          gallery_executable="$(find target/uikit-gallery-native-aot -type f -path '*/usr/bin/volang-app' -print -quit)"
+          test -n "$gallery_executable"
+          xvfb-run --auto-servernum "$gallery_executable"
+
+      - name: Present one real macOS UIKit Gallery Native AOT window
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Primary|Open drawer|Close|Show toast"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Primary activated|Release ready"
+        run: |
+          gallery_executable="$(find target/uikit-gallery-native-aot -type f -path '*/Contents/MacOS/volang-app' -print -quit)"
+          test -n "$gallery_executable"
+          "$gallery_executable"
+
+      - name: Present one real Windows UIKit Gallery Native AOT window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Primary|Open drawer|Close|Show toast"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Primary activated|Release ready"
+        run: |
+          $galleryExecutable = Get-ChildItem target/uikit-gallery-native-aot -Recurse -Filter volang-app.exe | Select-Object -First 1
+          if ($null -eq $galleryExecutable) { throw "UIKit Gallery Native AOT executable is missing" }
+          & $galleryExecutable.FullName
+
+      - name: Present one real Linux Data Application Native AOT window
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Archived member-0|Operations dashboard"
+        run: |
+          data_executable="$(find target/data-application-native-aot -type f -path '*/usr/bin/volang-data' -print -quit)"
+          test -n "$data_executable"
+          xvfb-run --auto-servernum "$data_executable"
+
+      - name: Present one real macOS Data Application Native AOT window
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Archived member-0|Operations dashboard"
+        run: |
+          data_executable="$(find target/data-application-native-aot -type f -path '*/Contents/MacOS/volang-data' -print -quit)"
+          test -n "$data_executable"
+          "$data_executable"
+
+      - name: Present one real Windows Data Application Native AOT window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Archived member-0|Operations dashboard"
+        run: |
+          $dataExecutable = Get-ChildItem target/data-application-native-aot -Recurse -Filter volang-data.exe | Select-Object -First 1
+          if ($null -eq $dataExecutable) { throw "Data Application Native AOT executable is missing" }
+          & $dataExecutable.FullName
+
+      - name: Present one real Linux Media Application Native AOT window
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Camera session recovered; permission is ready to request"
+        run: |
+          media_executable="$(find target/media-application-native-aot -type f -path '*/usr/bin/volang-media' -print -quit)"
+          test -n "$media_executable"
+          xvfb-run --auto-servernum "$media_executable"
+
+      - name: Present one real macOS Media Application Native AOT window
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Camera session recovered; permission is ready to request"
+        run: |
+          media_executable="$(find target/media-application-native-aot -type f -path '*/Contents/MacOS/volang-media' -print -quit)"
+          test -n "$media_executable"
+          "$media_executable"
+
+      - name: Present one real Windows Media Application Native AOT window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Camera session recovered; permission is ready to request"
+        run: |
+          $mediaExecutable = Get-ChildItem target/media-application-native-aot -Recurse -Filter volang-media.exe | Select-Object -First 1
+          if ($null -eq $mediaExecutable) { throw "Media Application Native AOT executable is missing" }
+          & $mediaExecutable.FullName
+
+      - name: Present one real Linux Studio Workbench Native AOT window
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WGPU_BACKEND: vulkan
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Build once, run everywhere|Structured concurrency"
+        run: |
+          workbench_executable="$(find target/studio-workbench-native-aot -type f -path '*/usr/bin/volang-studio' -print -quit)"
+          test -n "$workbench_executable"
+          xvfb-run --auto-servernum "$workbench_executable"
+
+      - name: Present one real macOS Studio Workbench Native AOT window
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Build once, run everywhere|Structured concurrency"
+        run: |
+          workbench_executable="$(find target/studio-workbench-native-aot -type f -path '*/Contents/MacOS/volang-studio' -print -quit)"
+          test -n "$workbench_executable"
+          "$workbench_executable"
+
+      - name: Present one real Windows Studio Workbench Native AOT window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
+          VO_UI_AUTOMATION_CLICKS: "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation"
+          VO_UI_AUTOMATION_EXPECT_TEXT: "Build once, run everywhere|Structured concurrency"
+        run: |
+          $workbenchExecutable = Get-ChildItem target/studio-workbench-native-aot -Recurse -Filter volang-studio.exe | Select-Object -First 1
+          if ($null -eq $workbenchExecutable) { throw "Studio Workbench Native AOT executable is missing" }
+          & $workbenchExecutable.FullName
 
   required:
     name: required
@@ -268,8 +726,8 @@ jobs:
     needs:
       - quality_rust
       - language_native
+      - ui_platform
       - wasm_web
-      - studio_native
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -277,10 +735,10 @@ jobs:
         env:
           QUALITY_RUST: ${{ needs.quality_rust.result }}
           LANGUAGE_NATIVE: ${{ needs.language_native.result }}
+          UI_PLATFORM: ${{ needs.ui_platform.result }}
           WASM_WEB: ${{ needs.wasm_web.result }}
-          STUDIO_NATIVE: ${{ needs.studio_native.result }}
         run: |
-          for result in "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$WASM_WEB" "$STUDIO_NATIVE"; do
+          for result in "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB"; do
             if [ "$result" != "success" ]; then
               echo "required CI job ended with: $result"
               exit 1

@@ -1640,8 +1640,7 @@ fn fast_complete_heap_return(
         Err(result) => return result,
     };
 
-    let result = write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize);
-    result
+    write_return_values(fiber, &ret_vals, frame.ret_reg, frame.ret_count as usize)
 }
 
 /// Read heap-return values from the returning frame.

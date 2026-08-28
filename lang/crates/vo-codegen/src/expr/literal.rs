@@ -645,7 +645,15 @@ pub(crate) fn lower_func_lit(
             })?;
             closure_builder.define_capture(sym, capture_index);
         }
-        // Get the captured variable's type for cross-island serialization
+        // Get the captured variable's physical transfer type. Adapter-owned
+        // locals capture one opaque handle even when their source type is a
+        // managed reference such as string.
+        if ctx.externalized_local(*obj_key).is_some() {
+            let transfer = ctx.opaque_handle_transfer_type();
+            closure_builder.add_capture_type(transfer.meta_raw, transfer.rttid_raw, transfer.slots);
+            closure_builder.add_capture_slot_types(&[SlotType::GcBase]);
+            continue;
+        }
         let type_key = info.obj_type(*obj_key, "capture must have type");
         // Ordinary closure captures are stored physically as one GcRef to the
         // escaped variable. Cross-island transfer reconstructs the captured
@@ -876,6 +884,7 @@ pub(crate) fn lower_func_lit(
     let (closure_func, debug_locs) = closure_builder.build_with_debug_locs();
     let func_id = ctx.add_function(closure_func);
     ctx.record_function_debug_locs(func_id, &debug_locs, &info.project.source_map);
+    ctx.record_expression_function(info.package_key(), expr.id, func_id);
 
     Ok((func_id, captures))
 }

@@ -96,6 +96,15 @@ pub enum LValue {
         value_slots: u16,
     },
 
+    /// Source-typed value stored behind an adapter-owned opaque handle.
+    /// Reads and writes become calls to the declared external cell contract.
+    Externalized {
+        handle: ExternalizedHandle,
+        read_extern: String,
+        write_extern: String,
+        value_slot_types: Vec<SlotType>,
+    },
+
     /// Stack array element field: arr[i].field where arr is on stack
     /// Needs dynamic index calculation: base_slot + index * elem_slots + field_offset
     StackArrayField {
@@ -107,6 +116,12 @@ pub enum LValue {
         field_slots: u16,
         elem_slot_types: Vec<SlotType>,
     },
+}
+
+#[derive(Debug)]
+pub enum ExternalizedHandle {
+    Variable(StorageKind),
+    Capture { capture_index: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,13 +410,32 @@ fn resolve_lvalue_with_mode(
     match &expr.kind {
         // === Identifier ===
         ExprKind::Ident(ident) => {
+            let obj_key = info.get_use(ident);
+            if let Some(spec) = ctx.externalized_local(obj_key).cloned() {
+                let handle = if let Some(local) = func.lookup_local(ident.symbol) {
+                    ExternalizedHandle::Variable(local.storage)
+                } else if let Some(capture) = func.lookup_capture(ident.symbol) {
+                    ExternalizedHandle::Capture {
+                        capture_index: capture.index,
+                    }
+                } else {
+                    return Err(CodegenError::VariableNotFound(format!(
+                        "externalized local {obj_key:?} has no physical handle"
+                    )));
+                };
+                return Ok(LValue::Externalized {
+                    handle,
+                    read_extern: spec.read_extern,
+                    write_extern: spec.write_extern,
+                    value_slot_types: info.type_slot_types(info.expr_type(expr.id)),
+                });
+            }
             // Check local variable first - storage is already computed in LocalVar
             if let Some(local) = func.lookup_local(ident.symbol) {
                 return Ok(LValue::Variable(local.storage));
             }
 
             // Check global variable
-            let obj_key = info.get_use(ident);
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 let type_key = info.obj_type(obj_key, "global must have type");
                 return Ok(LValue::Variable(StorageKind::package_global(
@@ -1310,6 +1344,22 @@ pub fn emit_lvalue_load(
             func.emit_ptr_get(dst, gcref_slot, 0, *value_slots);
         }
 
+        LValue::Externalized {
+            handle,
+            read_extern,
+            value_slot_types,
+            ..
+        } => {
+            let argument = externalized_handle_value(handle, func);
+            let extern_id = ctx.get_or_register_declared_extern_with_return_shape(
+                read_extern,
+                vo_runtime::bytecode::ReturnShape::try_with_slot_types(value_slot_types.clone())
+                    .map_err(CodegenError::Internal)?,
+                crate::context::ext_slot_kinds_for_slot_types(&[SlotType::Value]),
+            );
+            func.emit_call_extern(dst, extern_id, argument, 1, value_slot_types);
+        }
+
         LValue::StackArrayField {
             base_slot,
             elem_slots,
@@ -1350,6 +1400,32 @@ pub fn emit_lvalue_store(
     match lv {
         LValue::Variable(storage) => {
             func.emit_storage_store(*storage, src, slot_types);
+        }
+
+        LValue::Externalized {
+            handle,
+            write_extern,
+            value_slot_types,
+            ..
+        } => {
+            if slot_types != value_slot_types {
+                return Err(CodegenError::Internal(
+                    "externalized local store layout changed after type checking".to_string(),
+                ));
+            }
+            let mut arguments_layout = Vec::with_capacity(1 + value_slot_types.len());
+            arguments_layout.push(SlotType::Value);
+            arguments_layout.extend_from_slice(value_slot_types);
+            let arguments = func.alloc_slots(&arguments_layout);
+            let handle_value = externalized_handle_value(handle, func);
+            func.emit_copy(arguments, handle_value, 1);
+            func.emit_copy(arguments + 1, src, value_slot_types.len() as u16);
+            let extern_id = ctx.get_or_register_declared_extern_with_return_shape(
+                write_extern,
+                vo_runtime::bytecode::ReturnShape::slots(0),
+                crate::context::ext_slot_kinds_for_slot_types(&arguments_layout),
+            );
+            func.emit_call_extern(arguments, extern_id, arguments, arguments_layout.len(), &[]);
         }
 
         LValue::Deref {
@@ -1508,6 +1584,19 @@ pub fn emit_lvalue_store(
         }
     }
     Ok(())
+}
+
+fn externalized_handle_value(handle: &ExternalizedHandle, func: &mut FuncBuilder) -> u16 {
+    let value = func.alloc_slots(&[SlotType::Value]);
+    match handle {
+        ExternalizedHandle::Variable(storage) => func.emit_storage_load(*storage, value),
+        ExternalizedHandle::Capture { capture_index } => {
+            let box_ref = func.alloc_slots(&[SlotType::GcBase]);
+            func.emit_op(Opcode::ClosureGet, box_ref, *capture_index, 0);
+            func.emit_ptr_get_with_slot_types(value, box_ref, 0, &[SlotType::Value]);
+        }
+    }
+    value
 }
 
 /// Snapshot every already-evaluated operand that determines an indirect
@@ -1743,7 +1832,10 @@ fn try_flatten_field(lv: &LValue) -> Option<FlattenedBase> {
             capture_index: *capture_index,
             offset: 0,
         }),
-        LValue::Index { .. } | LValue::ArrayElement { .. } | LValue::StackArrayField { .. } => None,
+        LValue::Externalized { .. }
+        | LValue::Index { .. }
+        | LValue::ArrayElement { .. }
+        | LValue::StackArrayField { .. } => None,
     }
 }
 

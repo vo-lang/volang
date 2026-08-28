@@ -1,0 +1,268 @@
+// Package core contains renderer-independent locale algorithms. It has no UI
+// host dependency and is safe in command-line tools and server Native AOT.
+package core
+
+import (
+	"math"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+const (
+	DirectionLTR int64 = iota
+	DirectionRTL
+)
+
+type Locale struct {
+	Tag string
+	Language string
+	Region string
+	Direction int64
+}
+
+func Parse(tag string) Locale {
+	canonical := strings.Replace(tag, "_", "-", -1)
+	parts := strings.Split(canonical, "-")
+	if len(parts) == 0 || parts[0] == "" {
+		panic("i18n locale cannot be empty")
+	}
+	language := strings.ToLower(parts[0])
+	region := ""
+	if len(parts) > 1 && len(parts[1]) == 2 {
+		region = strings.ToUpper(parts[1])
+	}
+	direction := DirectionLTR
+	if language == "ar" || language == "fa" || language == "he" || language == "ur" {
+		direction = DirectionRTL
+	}
+	canonical = language
+	if region != "" {
+		canonical += "-" + region
+	}
+	return Locale{Tag: canonical, Language: language, Region: region, Direction: direction}
+}
+
+type PluralCategory int64
+
+const (
+	PluralZero PluralCategory = iota
+	PluralOne
+	PluralTwo
+	PluralFew
+	PluralMany
+	PluralOther
+)
+
+func Plural(locale Locale, value int64) PluralCategory {
+	n := value % 1000000
+	if n < 0 {
+		n = -n
+	}
+	if locale.Language == "ar" {
+		if n == 0 { return PluralZero }
+		if n == 1 { return PluralOne }
+		if n == 2 { return PluralTwo }
+		mod100 := n % 100
+		if mod100 >= 3 && mod100 <= 10 { return PluralFew }
+		if mod100 >= 11 && mod100 <= 99 { return PluralMany }
+		return PluralOther
+	}
+	if locale.Language == "ru" || locale.Language == "uk" {
+		mod10 := n % 10
+		mod100 := n % 100
+		if mod10 == 1 && mod100 != 11 { return PluralOne }
+		if mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) { return PluralFew }
+		if mod10 == 0 || mod10 >= 5 || mod100 >= 11 && mod100 <= 14 { return PluralMany }
+		return PluralOther
+	}
+	if locale.Language == "pl" {
+		if n == 1 { return PluralOne }
+		mod10 := n % 10
+		mod100 := n % 100
+		if mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) { return PluralFew }
+		return PluralMany
+	}
+	if locale.Language == "cs" || locale.Language == "sk" {
+		if n == 1 { return PluralOne }
+		if n >= 2 && n <= 4 { return PluralFew }
+		return PluralOther
+	}
+	if locale.Language == "fr" {
+		if n == 0 || n == 1 { return PluralOne }
+		return PluralOther
+	}
+	if locale.Language == "ja" || locale.Language == "ko" || locale.Language == "zh" {
+		return PluralOther
+	}
+	if n == 1 { return PluralOne }
+	return PluralOther
+}
+
+type Argument struct {
+	Name string
+	Value string
+}
+
+type PluralForms struct {
+	Zero string
+	One string
+	Two string
+	Few string
+	Many string
+	Other string
+}
+
+type Catalog struct {
+	Locale Locale
+	Messages map[string]string
+}
+
+func NewCatalog(locale string, messages map[string]string) Catalog {
+	return Catalog{Locale: Parse(locale), Messages: messages}
+}
+
+func interpolate(template string, arguments []Argument) string {
+	result := template
+	for _, argument := range arguments {
+		result = strings.Replace(result, "{" + argument.Name + "}", argument.Value, -1)
+	}
+	return result
+}
+
+func (catalog Catalog) Message(id string, arguments ...Argument) string {
+	template, ok := catalog.Messages[id]
+	if !ok { return id }
+	return interpolate(template, arguments)
+}
+
+func (catalog Catalog) PluralMessage(value int64, forms PluralForms, arguments ...Argument) string {
+	template := forms.Other
+	category := Plural(catalog.Locale, value)
+	if category == PluralZero && forms.Zero != "" {
+		template = forms.Zero
+	} else if category == PluralOne && forms.One != "" {
+		template = forms.One
+	} else if category == PluralTwo && forms.Two != "" {
+		template = forms.Two
+	} else if category == PluralFew && forms.Few != "" {
+		template = forms.Few
+	} else if category == PluralMany && forms.Many != "" {
+		template = forms.Many
+	}
+	return interpolate(template, append(arguments, Argument{
+		Name: "count", Value: FormatInteger(catalog.Locale, value),
+	}))
+}
+
+func separators(locale Locale) (string, string) {
+	if locale.Language == "de" { return ".", "," }
+	if locale.Language == "fr" { return " ", "," }
+	if locale.Language == "es" || locale.Language == "it" || locale.Language == "pt" { return ".", "," }
+	if locale.Language == "ar" { return "٬", "٫" }
+	return ",", "."
+}
+
+func groupInteger(digits string, separator string) string {
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign = "-"
+		digits = digits[1:]
+	}
+	result := ""
+	for index := 0; index < len(digits); index++ {
+		if index > 0 && (len(digits) - index) % 3 == 0 { result += separator }
+		result += digits[index:index + 1]
+	}
+	return sign + result
+}
+
+func FormatInteger(locale Locale, value int64) string {
+	group, _ := separators(locale)
+	return groupInteger(strconv.FormatInt(value, 10), group)
+}
+
+func FormatDecimal(locale Locale, value float64, fractionDigits int64) string {
+	if math.IsNaN(value) || math.IsInf(value, 0) || fractionDigits < 0 || fractionDigits > 12 {
+		panic("i18n decimal requires a finite value and 0..12 fraction digits")
+	}
+	raw := strconv.FormatFloat(value, 'f', int(fractionDigits), 64)
+	parts := strings.Split(raw, ".")
+	group, decimal := separators(locale)
+	result := groupInteger(parts[0], group)
+	if len(parts) == 2 { result += decimal + parts[1] }
+	return result
+}
+
+type Date struct {
+	Year int64
+	Month int64
+	Day int64
+}
+
+func FormatDate(locale Locale, date Date) string {
+	if date.Year < 1 || date.Month < 1 || date.Month > 12 || date.Day < 1 || date.Day > 31 {
+		panic("i18n date fields are out of range")
+	}
+	year := strconv.FormatInt(date.Year, 10)
+	month := strconv.FormatInt(date.Month, 10)
+	day := strconv.FormatInt(date.Day, 10)
+	if locale.Language == "en" && locale.Region == "US" { return month + "/" + day + "/" + year }
+	if locale.Language == "zh" || locale.Language == "ja" || locale.Language == "ko" { return year + "/" + month + "/" + day }
+	return day + "/" + month + "/" + year
+}
+
+func Graphemes(value string) []string {
+	segments := []string{}
+	current := ""
+	previousJoiner := false
+	regionalCount := int64(0)
+	for _, character := range value {
+		regional := character >= 0x1f1e6 && character <= 0x1f1ff
+		join := unicode.IsMark(character) || character == 0xfe0f || character == 0x200d || previousJoiner ||
+			character >= 0x1f3fb && character <= 0x1f3ff || regional && regionalCount % 2 == 1
+		if current != "" && !join {
+			segments = append(segments, current)
+			current = ""
+		}
+		current += string(character)
+		previousJoiner = character == 0x200d
+		if regional { regionalCount++ } else { regionalCount = 0 }
+	}
+	if current != "" { segments = append(segments, current) }
+	return segments
+}
+
+func collationKey(locale Locale, value string) string {
+	key := strings.ToLower(value)
+	if locale.Language == "tr" || locale.Language == "az" {
+		key = strings.Replace(key, "ı", "i", -1)
+		key = strings.Replace(key, "İ", "i", -1)
+	}
+	return key
+}
+
+func Compare(locale Locale, left string, right string) int64 {
+	leftKey := collationKey(locale, left)
+	rightKey := collationKey(locale, right)
+	if leftKey < rightKey { return -1 }
+	if leftKey > rightKey { return 1 }
+	if left < right { return -1 }
+	if left > right { return 1 }
+	return 0
+}
+
+func DirectionOf(value string) int64 {
+	for _, character := range value {
+		if character >= 0x0590 && character <= 0x08ff || character >= 0xfb1d && character <= 0xfdff ||
+			character >= 0xfe70 && character <= 0xfefc {
+			return DirectionRTL
+		}
+		if unicode.IsLetter(character) { return DirectionLTR }
+	}
+	return DirectionLTR
+}
+
+func Isolate(value string) string {
+	return "⁨" + value + "⁩"
+}

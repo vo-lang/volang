@@ -381,40 +381,34 @@ fn build_function_map(
     }
 
     if effects.is_empty() {
-        let mut sets = Vec::new();
-        let mut slots = Vec::new();
-        let mut interned = BTreeMap::<Vec<u16>, u32>::new();
-        let initialization = intern_root_set(
-            func_id,
-            0,
-            func,
-            &BTreeSet::new(),
-            &mut interned,
-            &mut sets,
-            &mut slots,
-            budget,
-        )?;
+        let mut root_sets = RootSetInterner::new(func, budget);
+        let initialization = root_sets.intern(func_id, 0, &BTreeSet::new())?;
+        let (sets, slots) = root_sets.finish();
         return Ok(FunctionFrameRootMap {
             initialization,
             before: Box::new([]),
             suspended: Box::new([]),
-            sets: sets.into_boxed_slice(),
-            slots: slots.into_boxed_slice(),
+            sets,
+            slots,
         });
     }
 
     let mut blocks = build_blocks(func_id, &func.code, budget)?;
     compute_liveness(func_id, &mut blocks, &effects, budget)?;
-    // A reused stack cell needs its language zero value only when its old
-    // contents can flow into the function from entry. Backward liveness has
-    // already proved exactly that property: roots written on every path before
-    // their first use do not appear in the entry block's live-in set.
-    let initialization_roots = blocks[0]
-        .live_in
-        .iter()
-        .copied()
-        .filter(|slot| *slot >= func.param_slots)
-        .collect::<BTreeSet<_>>();
+    // A conservative root state can expose a local at a call suspension before
+    // that local has received its first language value. Track definite writes
+    // forward so reused stack cells are cleared exactly when any published root
+    // state can observe them. Entry liveness alone is insufficient around
+    // lowered select/control-flow dispatch blocks.
+    let definitely_initialized = compute_definitely_initialized_roots(
+        func_id,
+        func,
+        &blocks,
+        &effects,
+        &logical_roots,
+        budget,
+    )?;
+    let mut initialization_roots = BTreeSet::new();
 
     budget.charge_bytes(
         func_id,
@@ -426,29 +420,8 @@ fn build_function_map(
     )?;
     let mut before = vec![0_u32; func.code.len()];
     let mut suspended = vec![NO_SUSPENDED_STATE; func.code.len()];
-    let mut sets = Vec::new();
-    let mut slots = Vec::new();
-    let mut interned = BTreeMap::<Vec<u16>, u32>::new();
-    intern_root_set(
-        func_id,
-        0,
-        func,
-        &BTreeSet::new(),
-        &mut interned,
-        &mut sets,
-        &mut slots,
-        budget,
-    )?;
-    let initialization = intern_root_set(
-        func_id,
-        0,
-        func,
-        &initialization_roots,
-        &mut interned,
-        &mut sets,
-        &mut slots,
-        budget,
-    )?;
+    let mut root_sets = RootSetInterner::new(func, budget);
+    root_sets.intern(func_id, 0, &BTreeSet::new())?;
 
     for block in &blocks {
         let mut live = block.live_out.clone();
@@ -461,41 +434,125 @@ fn build_function_map(
                 if call_replays_while_suspended(module, func.code[pc]) {
                     suspended_live.extend(effects[pc].reads.iter().copied());
                 }
-                suspended[pc] = intern_root_set(
-                    func_id,
-                    pc,
-                    func,
-                    &suspended_live,
-                    &mut interned,
-                    &mut sets,
-                    &mut slots,
-                    budget,
-                )?;
+                initialization_roots.extend(
+                    suspended_live
+                        .difference(&definitely_initialized[pc])
+                        .copied()
+                        .filter(|slot| *slot >= func.param_slots),
+                );
+                suspended[pc] = root_sets.intern(func_id, pc, &suspended_live)?;
             }
             for root in &effects[pc].writes {
                 live.remove(root);
             }
             live.extend(effects[pc].reads.iter().copied());
-            before[pc] = intern_root_set(
-                func_id,
-                pc,
-                func,
-                &live,
-                &mut interned,
-                &mut sets,
-                &mut slots,
-                budget,
-            )?;
+            initialization_roots.extend(
+                live.difference(&definitely_initialized[pc])
+                    .copied()
+                    .filter(|slot| *slot >= func.param_slots),
+            );
+            before[pc] = root_sets.intern(func_id, pc, &live)?;
         }
     }
+
+    let initialization = root_sets.intern(func_id, 0, &initialization_roots)?;
+
+    let (sets, slots) = root_sets.finish();
 
     Ok(FunctionFrameRootMap {
         initialization,
         before: before.into_boxed_slice(),
         suspended: suspended.into_boxed_slice(),
-        sets: sets.into_boxed_slice(),
-        slots: slots.into_boxed_slice(),
+        sets,
+        slots,
     })
+}
+
+fn compute_definitely_initialized_roots(
+    func_id: usize,
+    func: &FunctionDef,
+    blocks: &[Block],
+    effects: &[RootEffects],
+    logical_roots: &[u16],
+    budget: &mut BuildBudget,
+) -> Result<Vec<BTreeSet<u16>>, FrameRootMapBuildError> {
+    let parameter_roots = logical_roots
+        .iter()
+        .copied()
+        .filter(|slot| *slot < func.param_slots)
+        .collect::<BTreeSet<_>>();
+    let universe = logical_roots.iter().copied().collect::<BTreeSet<_>>();
+    let mut block_in = Vec::new();
+    let mut block_out = Vec::new();
+    block_in
+        .try_reserve_exact(blocks.len())
+        .map_err(|_| FrameRootMapBuildError::resource(func_id, 0, "definite root inputs"))?;
+    block_out
+        .try_reserve_exact(blocks.len())
+        .map_err(|_| FrameRootMapBuildError::resource(func_id, 0, "definite root outputs"))?;
+    for index in 0..blocks.len() {
+        let initial = if index == 0 {
+            parameter_roots.clone()
+        } else {
+            universe.clone()
+        };
+        block_in.push(initial.clone());
+        block_out.push(initial);
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (index, block) in blocks.iter().enumerate() {
+            budget.charge_work(
+                func_id,
+                block.start,
+                logical_roots.len().saturating_add(block.predecessors.len()),
+                "definite root dataflow",
+            )?;
+            let next_in = if index == 0 {
+                parameter_roots.clone()
+            } else if let Some((&first, rest)) = block.predecessors.split_first() {
+                let mut intersection = block_out[first].clone();
+                for &predecessor in rest {
+                    intersection = intersection
+                        .intersection(&block_out[predecessor])
+                        .copied()
+                        .collect();
+                }
+                intersection
+            } else {
+                BTreeSet::new()
+            };
+            let mut next_out = next_in.clone();
+            for effect in &effects[block.start..block.end] {
+                next_out.extend(effect.writes.iter().copied());
+            }
+            if next_in != block_in[index] || next_out != block_out[index] {
+                block_in[index] = next_in;
+                block_out[index] = next_out;
+                changed = true;
+            }
+        }
+    }
+
+    budget.charge_bytes(
+        func_id,
+        0,
+        func.code
+            .len()
+            .saturating_mul(core::mem::size_of::<BTreeSet<u16>>()),
+        "definite roots before instructions",
+    )?;
+    let mut before = vec![BTreeSet::new(); func.code.len()];
+    for (index, block) in blocks.iter().enumerate() {
+        let mut initialized = block_in[index].clone();
+        for pc in block.start..block.end {
+            before[pc] = initialized.clone();
+            initialized.extend(effects[pc].writes.iter().copied());
+        }
+    }
+    Ok(before)
 }
 
 fn logical_root_slots(func: &FunctionDef) -> Vec<u16> {
@@ -551,59 +608,79 @@ fn add_range_roots(
     Ok(())
 }
 
-fn intern_root_set(
-    func_id: usize,
-    pc: usize,
-    func: &FunctionDef,
-    live: &BTreeSet<u16>,
-    interned: &mut BTreeMap<Vec<u16>, u32>,
-    sets: &mut Vec<RootSetSpan>,
-    slots: &mut Vec<u16>,
-    budget: &mut BuildBudget,
-) -> Result<u32, FrameRootMapBuildError> {
-    budget.charge_work(func_id, pc, live.len(), "root-set interning")?;
-    let mut key = Vec::new();
-    key.try_reserve_exact(live.len())
-        .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root set"))?;
-    key.extend(live.iter().copied().filter(|&slot| {
-        func.slot_types
-            .get(slot as usize)
-            .is_some_and(SlotType::is_managed_ref)
-    }));
-    let direct_count = u16::try_from(key.len())
-        .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "direct roots"))?;
-    key.extend(
-        live.iter()
-            .copied()
-            .filter(|&slot| func.slot_types.get(slot as usize) == Some(&SlotType::Interface0)),
-    );
-    if let Some(&state) = interned.get(&key) {
-        return Ok(state);
+struct RootSetInterner<'a> {
+    func: &'a FunctionDef,
+    interned: BTreeMap<Vec<u16>, u32>,
+    sets: Vec<RootSetSpan>,
+    slots: Vec<u16>,
+    budget: &'a mut BuildBudget,
+}
+
+impl<'a> RootSetInterner<'a> {
+    fn new(func: &'a FunctionDef, budget: &'a mut BuildBudget) -> Self {
+        Self {
+            func,
+            interned: BTreeMap::new(),
+            sets: Vec::new(),
+            slots: Vec::new(),
+            budget,
+        }
     }
-    budget.charge_bytes(
-        func_id,
-        pc,
-        core::mem::size_of::<RootSetSpan>()
-            .saturating_add(key.len().saturating_mul(core::mem::size_of::<u16>() * 2)),
-        "interned frame roots",
-    )?;
-    let total_count = u16::try_from(key.len())
-        .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "frame roots"))?;
-    let state = u32::try_from(sets.len())
-        .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root states"))?;
-    let start = u32::try_from(slots.len())
-        .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root slots"))?;
-    slots
-        .try_reserve_exact(key.len())
-        .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root slots"))?;
-    slots.extend_from_slice(&key);
-    sets.push(RootSetSpan {
-        start,
-        direct_count,
-        total_count,
-    });
-    interned.insert(key, state);
-    Ok(state)
+
+    fn intern(
+        &mut self,
+        func_id: usize,
+        pc: usize,
+        live: &BTreeSet<u16>,
+    ) -> Result<u32, FrameRootMapBuildError> {
+        self.budget
+            .charge_work(func_id, pc, live.len(), "root-set interning")?;
+        let mut key = Vec::new();
+        key.try_reserve_exact(live.len())
+            .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root set"))?;
+        key.extend(live.iter().copied().filter(|&slot| {
+            self.func
+                .slot_types
+                .get(slot as usize)
+                .is_some_and(SlotType::is_managed_ref)
+        }));
+        let direct_count = u16::try_from(key.len())
+            .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "direct roots"))?;
+        key.extend(live.iter().copied().filter(|&slot| {
+            self.func.slot_types.get(slot as usize) == Some(&SlotType::Interface0)
+        }));
+        if let Some(&state) = self.interned.get(&key) {
+            return Ok(state);
+        }
+        self.budget.charge_bytes(
+            func_id,
+            pc,
+            core::mem::size_of::<RootSetSpan>()
+                .saturating_add(key.len().saturating_mul(core::mem::size_of::<u16>() * 2)),
+            "interned frame roots",
+        )?;
+        let total_count = u16::try_from(key.len())
+            .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "frame roots"))?;
+        let state = u32::try_from(self.sets.len())
+            .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root states"))?;
+        let start = u32::try_from(self.slots.len())
+            .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root slots"))?;
+        self.slots
+            .try_reserve_exact(key.len())
+            .map_err(|_| FrameRootMapBuildError::resource(func_id, pc, "root slots"))?;
+        self.slots.extend_from_slice(&key);
+        self.sets.push(RootSetSpan {
+            start,
+            direct_count,
+            total_count,
+        });
+        self.interned.insert(key, state);
+        Ok(state)
+    }
+
+    fn finish(self) -> (Box<[RootSetSpan]>, Box<[u16]>) {
+        (self.sets.into_boxed_slice(), self.slots.into_boxed_slice())
+    }
 }
 
 fn build_blocks(

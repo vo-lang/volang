@@ -577,7 +577,7 @@ mod tests {
 
     fn test_artifact() -> Artifact {
         Artifact {
-            name: "studio.generated-doc".to_string(),
+            name: "sample.generated-doc".to_string(),
             class_name: "generated-checked-in".to_string(),
             path: "generated/page.md".to_string(),
             owner: Some("docs".to_string()),
@@ -683,7 +683,7 @@ mod tests {
         ));
         fs::create_dir_all(root.join("generated/package")).expect("artifact directory");
         let mut artifact = test_artifact();
-        artifact.name = "studio.generated.fixture".to_string();
+        artifact.name = "sample.generated.fixture".to_string();
         artifact.path = "generated/package".to_string();
         artifact.provenance = Some("generated/package/provenance.json".to_string());
         artifact.inputs = vec!["source/package/**".to_string()];

@@ -1,0 +1,235 @@
+// Package web defines the renderer-neutral production Web application model.
+// A server host can execute loaders and actions, render useful HTML, and emit
+// a selective activation manifest; the client receives only public page data.
+package web
+
+import (
+	"context"
+	"errors"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/navigation"
+	"strings"
+	"time"
+)
+
+const (
+	MaxRoutes = 1024
+	MaxAssets = 4096
+	MaxPayloadBytes = 8 * 1024 * 1024
+	MaxHeaderBytes = 64 * 1024
+)
+
+type Activation int64
+
+const (
+	ActivateNone Activation = iota
+	ActivateImmediate
+	ActivateVisible
+	ActivateInteraction
+)
+
+type CacheVisibility int64
+
+const (
+	CacheNoStore CacheVisibility = iota
+	CachePrivate
+	CachePublic
+)
+
+type CachePolicy struct {
+	Visibility CacheVisibility
+	MaxAge time.Duration
+	StaleWhileRevalidate time.Duration
+	Vary []string
+}
+
+func (policy CachePolicy) Validate() error {
+	if policy.Visibility < CacheNoStore || policy.Visibility > CachePublic || policy.MaxAge < 0 ||
+		policy.StaleWhileRevalidate < 0 || len(policy.Vary) > 32 {
+		return errors.New("web cache policy is invalid")
+	}
+	if policy.Visibility == CacheNoStore && (policy.MaxAge != 0 || policy.StaleWhileRevalidate != 0) {
+		return errors.New("web no-store policy cannot declare freshness")
+	}
+	return nil
+}
+
+type Asset struct {
+	Path string
+	Kind string
+	Integrity string
+	Preload bool
+}
+
+type Metadata struct {
+	Language string
+	Direction string
+	Title string
+	Description string
+	CanonicalURL string
+	ThemeColor string
+	Robots string
+	Assets []Asset
+}
+
+func (metadata Metadata) Validate() error {
+	if metadata.Language == "" || (metadata.Direction != "ltr" && metadata.Direction != "rtl" && metadata.Direction != "auto") ||
+		metadata.Title == "" || len(metadata.Assets) > MaxAssets {
+		return errors.New("web document metadata is invalid")
+	}
+	for _, asset := range metadata.Assets {
+		if asset.Path == "" || asset.Path[0] != '/' ||
+			(asset.Kind != "style" && asset.Kind != "preload" && asset.Kind != "icon" && asset.Kind != "manifest") ||
+			(asset.Integrity != "" && !strings.HasPrefix(asset.Integrity, "sha256-")) {
+			return errors.New("web document asset is invalid")
+		}
+	}
+	return nil
+}
+
+type PWA struct {
+	Enabled bool
+	Name string
+	ShortName string
+	StartURL string
+	Scope string
+	Display string
+	OfflineURL string
+	CacheVersion string
+}
+
+func (pwa PWA) Validate() error {
+	if !pwa.Enabled { return nil }
+	if pwa.Name == "" || pwa.ShortName == "" || pwa.StartURL == "" || pwa.StartURL[0] != '/' ||
+		pwa.Scope == "" || pwa.Scope[0] != '/' || pwa.CacheVersion == "" ||
+		(pwa.Display != "standalone" && pwa.Display != "minimal-ui" && pwa.Display != "browser") {
+		return errors.New("web PWA policy is invalid")
+	}
+	return nil
+}
+
+type Security struct {
+	AllowedOrigins []string
+	ContentSecurityPolicy string
+	PermissionsPolicy string
+	CrossOriginOpenerPolicy string
+	RequireHTTPS bool
+	MaxBodyBytes int64
+}
+
+func (security Security) Validate() error {
+	if len(security.AllowedOrigins) > 64 || security.ContentSecurityPolicy == "" || security.MaxBodyBytes < 1 ||
+		security.MaxBodyBytes > MaxPayloadBytes {
+		return errors.New("web security policy is invalid")
+	}
+	for _, origin := range security.AllowedOrigins {
+		if !strings.HasPrefix(origin, "https://") && origin != "http://localhost" {
+			return errors.New("web allowed origin must be HTTPS or localhost")
+		}
+	}
+	return nil
+}
+
+type Request struct {
+	Method string
+	Path string
+	Headers map[string]string
+	Query map[string][]string
+	Body []byte
+	SessionID string
+	CSRFToken string
+}
+
+type PageData struct {
+	Status int64
+	Payload string
+	Headers map[string]string
+}
+
+type ActionResult struct {
+	Status int64
+	Payload string
+	Redirect string
+	FieldErrors map[string]string
+}
+
+type Loader func(context.Context, Request, navigation.Match) (PageData, error)
+type Action func(context.Context, Request, navigation.Match) (ActionResult, error)
+
+type Route struct {
+	Pattern navigation.Pattern
+	Metadata func(navigation.Match, PageData) Metadata
+	Load Loader
+	Act Action
+	Render func(navigation.Match, PageData) ui.View
+	Cache CachePolicy
+	Activation Activation
+}
+
+func (route Route) Validate() error {
+	if route.Pattern.Name == "" || route.Metadata == nil || route.Render == nil || route.Activation < ActivateNone ||
+		route.Activation > ActivateInteraction {
+		return errors.New("web route is incomplete")
+	}
+	return route.Cache.Validate()
+}
+
+type Site struct {
+	Routes []Route
+	Security Security
+	PWA PWA
+}
+
+func NewSite(security Security, pwa PWA, routes ...Route) (Site, error) {
+	if len(routes) == 0 || len(routes) > MaxRoutes {
+		return Site{}, errors.New("web site route count is invalid")
+	}
+	if err := security.Validate(); err != nil { return Site{}, err }
+	if err := pwa.Validate(); err != nil { return Site{}, err }
+	seen := make(map[string]bool)
+	for _, route := range routes {
+		if err := route.Validate(); err != nil { return Site{}, err }
+		if seen[route.Pattern.Name] { return Site{}, errors.New("web route identities must be unique") }
+		seen[route.Pattern.Name] = true
+	}
+	return Site{Routes: routes, Security: security, PWA: pwa}, nil
+}
+
+type Resolved struct {
+	Route Route
+	Match navigation.Match
+}
+
+func (site Site) Resolve(rawLocation string) (Resolved, bool, error) {
+	location, err := navigation.ParseLocation(rawLocation)
+	if err != nil { return Resolved{}, false, err }
+	for _, route := range site.Routes {
+		matched, ok := route.Pattern.Match(location)
+		if ok { return Resolved{Route: route, Match: matched}, true, nil }
+	}
+	return Resolved{}, false, nil
+}
+
+func ValidateRequest(request Request, security Security) error {
+	if request.Method == "" || request.Path == "" || request.Path[0] != '/' || len(request.Body) > int(security.MaxBodyBytes) {
+		return errors.New("web request is invalid or oversized")
+	}
+	headerBytes := 0
+	for key, value := range request.Headers { headerBytes += len(key) + len(value) }
+	if headerBytes > MaxHeaderBytes { return errors.New("web request headers exceed the bounded size") }
+	return nil
+}
+
+func ValidateActionOrigin(request Request, expectedOrigin string, expectedToken string) error {
+	if request.Method == "GET" || request.Method == "HEAD" {
+		return nil
+	}
+	if request.Headers["Origin"] != expectedOrigin || request.CSRFToken == "" || request.CSRFToken != expectedToken {
+		return errors.New("web action origin or CSRF token is invalid")
+	}
+	return nil
+}
+
+type Adapter interface {
+	Serve(context.Context, Site) error
+}

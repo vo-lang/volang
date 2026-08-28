@@ -1,0 +1,31 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Volang",
+  "scopeName": "source.volang",
+  "patterns": [
+    {"include": "#comments"},
+    {"include": "#strings"},
+    {"include": "#numbers"},
+    {"include": "#keywords"},
+    {"include": "#types"},
+    {"include": "#functions"}
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {"name": "comment.line.double-slash.volang", "match": "//.*$"},
+        {"name": "comment.block.volang", "begin": "/\\*", "end": "\\*/"}
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {"name": "string.quoted.double.volang", "begin": "\"", "end": "\"", "patterns": [{"name": "constant.character.escape.volang", "match": "\\\\."}]},
+        {"name": "string.quoted.raw.volang", "begin": "`", "end": "`"}
+      ]
+    },
+    "numbers": {"patterns": [{"name": "constant.numeric.volang", "match": "\\b(?:0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9]+(?:\\.[0-9]+)?)\\b"}]},
+    "keywords": {"patterns": [{"name": "keyword.control.volang", "match": "\\b(?:break|case|chan|const|continue|default|defer|else|fallthrough|for|go|goto|if|import|interface|map|package|range|return|select|struct|switch|type|var)\\b"}]},
+    "types": {"patterns": [{"name": "storage.type.volang", "match": "\\b(?:bool|byte|complex64|complex128|error|float32|float64|int|int8|int16|int32|int64|rune|string|uint|uint8|uint16|uint32|uint64|uintptr)\\b"}]},
+    "functions": {"patterns": [{"name": "entity.name.function.volang", "match": "(?<=\\bfunc\\s)[A-Za-z_][A-Za-z0-9_]*"}]}
+  }
+}

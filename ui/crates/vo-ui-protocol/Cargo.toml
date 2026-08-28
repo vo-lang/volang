@@ -1,0 +1,16 @@
+[package]
+name = "vo-ui-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Atomic renderer mutation protocol for Volang UI"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+vo-ui-core.workspace = true

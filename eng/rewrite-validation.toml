@@ -18,6 +18,7 @@ working_directory = "volang"
 evidence_kinds = ["ci", "generation", "install-smoke", "release-dry-run"]
 commands = [
   "cargo run -p vo-dev --locked -- generate app-protocol --check",
+  "cargo run -p vo-dev --locked -- generate studio-docs --check",
   "cargo run -p vo-dev --locked -- generate vogui-protocol --check",
   "cargo run -p vo-dev --locked -- generate voplay-protocol --check",
   "sh eng/run-rewrite-consumer-smoke-report.sh ci-consumer-smoke",
@@ -26,6 +27,7 @@ commands = [
 ]
 required_artifacts = [
   "lang/protocol/app-runtime/generated/provenance.json",
+  "apps/studio/documentation/provenance.json",
   "../vogui/protocol/generated/provenance.json",
   "../voplay/protocol/generated/provenance.json",
   "eng/run-rewrite-consumer-smoke.sh",
@@ -44,12 +46,13 @@ commands = [
   "cargo run -p vo-dev --locked -- lint traceability",
   "cargo run -p vo-dev --locked -- lint docs",
   "sh eng/run-rewrite-release-matrix-report.sh delivery-release-matrix.json",
-  "npm --prefix apps/studio run check",
   "cargo check --manifest-path ../vogui/rust/Cargo.toml --workspace --all-targets --locked",
   "cargo check --manifest-path ../voplay/rust/Cargo.toml --workspace --all-targets --locked",
 ]
 required_artifacts = [
   "rewrite-traceability.toml",
+  "lang/docs/README.md",
+  "lang/docs/catalog.toml",
   "docs/vogui-voplay-full-rewrite-development-plan.md",
   "eng/artifacts.toml",
   "eng/release.toml",
@@ -66,7 +69,6 @@ commands = [
   "cargo test -p vo-runtime host_services --locked",
   "cargo test -p vo-vm runtime_boundary --locked",
   "cargo test --target-dir target/rewrite-validation/cargo/rt-vo-web -p vo-web --locked",
-  "npm --prefix apps/studio run check",
 ]
 required_artifacts = []
 
@@ -77,7 +79,6 @@ evidence_kinds = ["golden", "malformed", "property", "fuzz"]
 commands = [
   "cargo test -p vo-app-protocol --locked",
   "cargo run -p vo-dev --locked -- generate app-protocol --check",
-  "npm --prefix apps/studio run test:app-protocol",
   "sh eng/run-rewrite-protocol-fuzz-report.sh app",
 ]
 required_artifacts = [
@@ -320,20 +321,11 @@ id = "TEST-COMPOSE-001"
 working_directory = "volang"
 evidence_kinds = ["integration", "browser-smoke", "native-smoke"]
 commands = [
-  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-vogui --locked",
-  "node eng/run-browser-smoke.mjs --project eng/browser-compose-smoke --bundle-entry eng/browser-compose-smoke/src/browser_smoke.ts --global __voplayVoguiBrowserComposeSmoke --output target/rewrite-validation/voplay-vogui-browser-compose-smoke.json",
-  "sh eng/run-voplay-vogui-macos-gpu-smoke.sh compose-macos-gpu-smoke.json",
-  "sh eng/run-macos-window-lifecycle-smoke.sh compose-macos-window-lifecycle-smoke.json",
-  "sh eng/run-studio-webview-native-smoke.sh",
+  "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime engine_command --locked",
 ]
 required_artifacts = [
-  "eng/browser-compose-smoke/browser-smoke.html",
-  "eng/browser-compose-smoke/src/browser_smoke.ts",
-  "eng/run-voplay-vogui-macos-gpu-smoke.sh",
-  "target/rewrite-validation/voplay-vogui-browser-compose-smoke.json",
-  "target/rewrite-validation/compose-macos-gpu-smoke.json",
-  "target/rewrite-validation/compose-macos-window-lifecycle-smoke.json",
-  "target/rewrite-validation/webview-native-smoke.json",
+  "../voplay/web/browser-smoke.html",
+  "../voplay/rust/crates/voplay-runtime/src/lib.rs",
 ]
 
 [[case]]

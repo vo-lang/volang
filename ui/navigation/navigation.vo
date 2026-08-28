@@ -1,0 +1,319 @@
+// Package navigation supplies application-level routing over the official
+// renderer-neutral History boundary. Route selection is ordinary Volang
+// control flow and remains independent from DOM or desktop window APIs.
+package navigation
+
+import (
+	"context"
+	"errors"
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/task"
+	"net/url"
+	"strings"
+	"sync"
+)
+
+type Route struct {
+	Path string
+	View ui.View
+}
+
+func Resolve(fallback ui.View, routes ...Route) ui.View {
+	location := ui.LocationPath()
+	for _, route := range routes {
+		if route.Path == location {
+			return route.View
+		}
+	}
+	return fallback
+}
+
+func Link(label string, path string) ui.View {
+	return ui.Role(ui.Button(label, func(event ui.Event) {
+		ui.Navigate(path)
+	}), "link")
+}
+
+type SegmentKind int64
+
+const (
+	StaticSegment SegmentKind = iota
+	ParameterSegment
+	RestSegment
+)
+
+type Segment struct {
+	Kind SegmentKind
+	Value string
+}
+
+func Static(value string) Segment {
+	if value == "" || strings.Contains(value, "/") {
+		panic("navigation static segment must be one path segment")
+	}
+	return Segment{Kind: StaticSegment, Value: value}
+}
+
+func Parameter(name string) Segment {
+	if name == "" || strings.Contains(name, "/") {
+		panic("navigation parameter requires a name")
+	}
+	return Segment{Kind: ParameterSegment, Value: name}
+}
+
+func Rest(name string) Segment {
+	if name == "" || strings.Contains(name, "/") {
+		panic("navigation rest parameter requires a name")
+	}
+	return Segment{Kind: RestSegment, Value: name}
+}
+
+type Pattern struct {
+	Name string
+	Segments []Segment
+}
+
+func NewPattern(name string, segments ...Segment) Pattern {
+	if name == "" || len(segments) > 64 {
+		panic("navigation pattern requires a bounded identity")
+	}
+	seen := make(map[string]bool)
+	for index, segment := range segments {
+		if segment.Value == "" || segment.Kind < StaticSegment || segment.Kind > RestSegment {
+			panic("navigation pattern contains an invalid segment")
+		}
+		if segment.Kind == RestSegment && index + 1 != len(segments) {
+			panic("navigation rest segment must be last")
+		}
+		if segment.Kind != StaticSegment {
+			if seen[segment.Value] {
+				panic("navigation parameter names must be unique")
+			}
+			seen[segment.Value] = true
+		}
+	}
+	return Pattern{Name: name, Segments: segments}
+}
+
+func (pattern Pattern) Child(name string, segments ...Segment) Pattern {
+	combined := append([]Segment{}, pattern.Segments...)
+	combined = append(combined, segments...)
+	return NewPattern(name, combined...)
+}
+
+type Location struct {
+	Path string
+	Query url.Values
+	Fragment string
+}
+
+func ParseLocation(raw string) (Location, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return Location{}, err
+	}
+	if parsed.IsAbs() || parsed.Host != "" || (parsed.Path != "" && parsed.Path[0] != '/') {
+		return Location{}, errors.New("navigation location must be an absolute application path")
+	}
+	path := parsed.Path
+	if path == "" {
+		path = "/"
+	}
+	return Location{Path: path, Query: parsed.Query(), Fragment: parsed.Fragment}, nil
+}
+
+func pathSegments(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return []string{}
+	}
+	return strings.Split(trimmed, "/")
+}
+
+type Match struct {
+	RouteName string
+	Location Location
+	Params map[string]string
+}
+
+func (match Match) Param(name string) (string, bool) {
+	value, found := match.Params[name]
+	return value, found
+}
+
+func (match Match) Query(name string) string {
+	return match.Location.Query.Get(name)
+}
+
+func (pattern Pattern) Match(location Location) (Match, bool) {
+	parts := pathSegments(location.Path)
+	params := make(map[string]string)
+	part := 0
+	for index, segment := range pattern.Segments {
+		if segment.Kind == RestSegment {
+			params[segment.Value] = strings.Join(parts[part:], "/")
+			part = len(parts)
+			continue
+		}
+		if part >= len(parts) {
+			return Match{}, false
+		}
+		if segment.Kind == StaticSegment && segment.Value != parts[part] {
+			return Match{}, false
+		}
+		if segment.Kind == ParameterSegment {
+			decoded, err := url.PathUnescape(parts[part])
+			if err != nil {
+				return Match{}, false
+			}
+			params[segment.Value] = decoded
+		}
+		part++
+		if index + 1 == len(pattern.Segments) && part != len(parts) {
+			return Match{}, false
+		}
+	}
+	if part != len(parts) {
+		return Match{}, false
+	}
+	return Match{RouteName: pattern.Name, Location: location, Params: params}, true
+}
+
+func (pattern Pattern) Path(params map[string]string) string {
+	parts := []string{}
+	for _, segment := range pattern.Segments {
+		if segment.Kind == StaticSegment {
+			parts = append(parts, segment.Value)
+			continue
+		}
+		value, found := params[segment.Value]
+		if !found {
+			panic("navigation path is missing a required parameter")
+		}
+		if segment.Kind == ParameterSegment {
+			parts = append(parts, url.PathEscape(value))
+		} else if value != "" {
+			parts = append(parts, strings.Trim(value, "/"))
+		}
+	}
+	return "/" + strings.Join(parts, "/")
+}
+
+type TypedRoute struct {
+	Pattern Pattern
+	Guard func(Match) bool
+	Redirect func(Match) string
+	Render func(Match) ui.View
+}
+
+func ViewRoute(pattern Pattern, render func(Match) ui.View) TypedRoute {
+	if render == nil {
+		panic("navigation view route requires a renderer")
+	}
+	return TypedRoute{Pattern: pattern, Render: render}
+}
+
+func RedirectRoute(pattern Pattern, redirect func(Match) string) TypedRoute {
+	if redirect == nil {
+		panic("navigation redirect route requires a target")
+	}
+	return TypedRoute{Pattern: pattern, Redirect: redirect}
+}
+
+// ResolveTyped lazily evaluates one matched route. Redirects publish after a
+// successful commit through a scoped effect, and guards simply skip a route.
+func ResolveTyped(fallback func(Location) ui.View, routes ...TypedRoute) ui.View {
+	if fallback == nil || len(routes) > 256 {
+		panic("navigation resolver requires a fallback and bounded routes")
+	}
+	var location Location
+	var err error
+	location, err = ParseLocation(ui.LocationPath())
+	if err != nil {
+		return fallback(Location{Path: "/"})
+	}
+	seen := make(map[string]bool)
+	for _, route := range routes {
+		if route.Pattern.Name == "" || seen[route.Pattern.Name] ||
+			(route.Render == nil) == (route.Redirect == nil) {
+			panic("navigation typed routes require unique identities and one outcome")
+		}
+		seen[route.Pattern.Name] = true
+		var matched Match
+		var ok bool
+		matched, ok = route.Pattern.Match(location)
+		if !ok || (route.Guard != nil && !route.Guard(matched)) {
+			continue
+		}
+		if route.Redirect != nil {
+			target := route.Redirect(matched)
+			if target == "" || target[0] != '/' {
+				panic("navigation redirect target must be an absolute application path")
+			}
+			task.UseEffect("navigation:redirect:" + target, func(ctx context.Context) func() {
+				ui.ReplaceLocation(target)
+				return nil
+			})
+			return ui.Role(ui.Text("Redirecting"), "status")
+		}
+		return route.Render(matched)
+	}
+	return fallback(location)
+}
+
+type Restoration struct {
+	ScrollX float64
+	ScrollY float64
+	FocusToken int64
+}
+
+type RestorationStore struct {
+	mu sync.Mutex
+	items map[string]Restoration
+	capacity int
+}
+
+func NewRestorationStore(capacity int) *RestorationStore {
+	if capacity < 1 || capacity > 4096 {
+		panic("navigation restoration capacity is outside bounded limits")
+	}
+	return &RestorationStore{items: make(map[string]Restoration), capacity: capacity}
+}
+
+func (store *RestorationStore) Save(path string, restoration Restoration) {
+	if store == nil || path == "" || restoration.ScrollX < 0 || restoration.ScrollY < 0 || restoration.FocusToken < 0 {
+		panic("navigation restoration is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, found := store.items[path]; !found && len(store.items) >= store.capacity {
+		panic("navigation restoration capacity exceeded")
+	}
+	store.items[path] = restoration
+}
+
+func (store *RestorationStore) Load(path string) (Restoration, bool) {
+	if store == nil {
+		return Restoration{}, false
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	value, found := store.items[path]
+	return value, found
+}
+
+func ApplyRestoration(view ui.View, restoration Restoration) ui.View {
+	view = ui.ScrollX(ui.ScrollY(view, restoration.ScrollY), restoration.ScrollX)
+	if restoration.FocusToken > 0 {
+		view = ui.FocusRequest(view, restoration.FocusToken)
+	}
+	return view
+}
+
+func Back() {
+	ui.NavigateBack()
+}
+
+func Forward() {
+	ui.NavigateForward()
+}

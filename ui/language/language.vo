@@ -1,0 +1,175 @@
+// Package language defines cancellation-aware editor language services without
+// coupling the UI framework to a specific compiler or LSP transport.
+package language
+
+import (
+	"context"
+	"errors"
+)
+
+const MaxItems = 100000
+
+type Position struct { Line int; CharacterUTF16 int }
+type Range struct { Start Position; End Position }
+
+type Severity int64
+const (
+	Error Severity = iota
+	Warning
+	Information
+	Hint
+)
+
+type Diagnostic struct { Range Range; Severity Severity; Code string; Message string; Source string }
+type Completion struct { Label string; Detail string; InsertText string; SortText string }
+type Hover struct { Range Range; Markdown string }
+type Symbol struct { Name string; Kind string; Range Range; Selection Range }
+type TextEdit struct { Range Range; Text string }
+type Location struct { URI string; Range Range }
+type WorkspaceEdit struct { URI string; Edits []TextEdit }
+
+type Snapshot struct { URI string; LanguageID string; Version uint64; Text string }
+
+func (snapshot Snapshot) Validate(maximumBytes int) error {
+	if snapshot.URI == "" || len(snapshot.URI) > 4096 || len(snapshot.LanguageID) > 255 || maximumBytes <= 0 || len(snapshot.Text) > maximumBytes {
+		return errors.New("language snapshot is invalid or exceeds its byte limit")
+	}
+	return nil
+}
+
+type Service interface {
+	Diagnostics(context.Context, Snapshot) ([]Diagnostic, error)
+	Complete(context.Context, Snapshot, Position) ([]Completion, error)
+	Hover(context.Context, Snapshot, Position) (Hover, bool, error)
+	Symbols(context.Context, Snapshot) ([]Symbol, error)
+	Format(context.Context, Snapshot) ([]TextEdit, error)
+}
+
+// NavigationService is kept separate so small embedded services can implement
+// completion/diagnostics without paying for workspace-wide indexes.
+type NavigationService interface {
+	Definition(context.Context, Snapshot, Position) ([]Location, error)
+	References(context.Context, Snapshot, Position) ([]Location, error)
+	Rename(context.Context, Snapshot, Position, string) ([]WorkspaceEdit, error)
+}
+
+func ValidateRange(value Range) error {
+	if value.Start.Line < 0 || value.Start.CharacterUTF16 < 0 || value.End.Line < value.Start.Line ||
+		value.End.CharacterUTF16 < 0 || (value.End.Line == value.Start.Line && value.End.CharacterUTF16 < value.Start.CharacterUTF16) {
+		return errors.New("language range is invalid")
+	}
+	return nil
+}
+
+func NormalizeDiagnostics(values []Diagnostic) ([]Diagnostic, error) {
+	if len(values) > MaxItems { return nil, errors.New("language diagnostic limit exceeded") }
+	result := append([]Diagnostic(nil), values...)
+	for _, value := range result {
+		if err := ValidateRange(value.Range); err != nil { return nil, err }
+		if value.Severity < Error || value.Severity > Hint || value.Message == "" || len(value.Message) > 65536 { return nil, errors.New("language diagnostic is invalid") }
+	}
+	for index := 1; index < len(result); index++ {
+		current := result[index]; position := index
+		for position > 0 && diagnosticAfter(result[position-1], current) { result[position] = result[position-1]; position-- }
+		result[position] = current
+	}
+	return result, nil
+}
+
+func diagnosticAfter(left Diagnostic, right Diagnostic) bool {
+	if left.Range.Start.Line != right.Range.Start.Line { return left.Range.Start.Line > right.Range.Start.Line }
+	return left.Range.Start.CharacterUTF16 > right.Range.Start.CharacterUTF16
+}
+
+func NormalizeCompletions(values []Completion) ([]Completion, error) {
+	if len(values) > MaxItems { return nil, errors.New("language completion limit exceeded") }
+	result := append([]Completion(nil), values...)
+	for _, value := range result { if value.Label == "" || len(value.Label) > 4096 || len(value.InsertText) > 65536 { return nil, errors.New("language completion is invalid") } }
+	for index := 1; index < len(result); index++ {
+		current := result[index]; position := index
+		for position > 0 && completionKey(result[position-1]) > completionKey(current) { result[position] = result[position-1]; position-- }
+		result[position] = current
+	}
+	return result, nil
+}
+
+func NormalizeLocations(values []Location) ([]Location, error) {
+	if len(values) > MaxItems { return nil, errors.New("language location limit exceeded") }
+	result := append([]Location(nil), values...)
+	for _, value := range result {
+		if value.URI == "" || len(value.URI) > 4096 { return nil, errors.New("language location URI is invalid") }
+		if err := ValidateRange(value.Range); err != nil { return nil, err }
+	}
+	for index := 1; index < len(result); index++ {
+		current := result[index]; position := index
+		for position > 0 && locationAfter(result[position-1], current) { result[position] = result[position-1]; position-- }
+		result[position] = current
+	}
+	return result, nil
+}
+
+func locationAfter(left Location, right Location) bool {
+	if left.URI != right.URI { return left.URI > right.URI }
+	if left.Range.Start.Line != right.Range.Start.Line { return left.Range.Start.Line > right.Range.Start.Line }
+	return left.Range.Start.CharacterUTF16 > right.Range.Start.CharacterUTF16
+}
+
+func NormalizeWorkspaceEdits(values []WorkspaceEdit) ([]WorkspaceEdit, error) {
+	if len(values) > MaxItems { return nil, errors.New("language workspace edit limit exceeded") }
+	result := append([]WorkspaceEdit(nil), values...); total := 0
+	for _, value := range result {
+		if value.URI == "" || len(value.URI) > 4096 { return nil, errors.New("language workspace edit URI is invalid") }
+		total += len(value.Edits); if total > MaxItems { return nil, errors.New("language text edit limit exceeded") }
+		for _, edit := range value.Edits {
+			if err := ValidateRange(edit.Range); err != nil { return nil, err }
+			if len(edit.Text) > 1048576 { return nil, errors.New("language text edit is too large") }
+		}
+	}
+	return result, nil
+}
+
+func completionKey(value Completion) string { if value.SortText != "" { return value.SortText }; return value.Label }
+
+// StaticService is useful for tests, previews, generated languages, and an
+// offline fallback while preserving the production Service contract.
+type StaticService struct {
+	Items []Completion
+	Problems []Diagnostic
+	Outline []Symbol
+	HoverValue Hover
+	HasHover bool
+	FormatEdits []TextEdit
+	Definitions []Location
+	ReferenceLocations []Location
+	RenameEdits []WorkspaceEdit
+}
+func (service *StaticService) Diagnostics(ctx context.Context, snapshot Snapshot) ([]Diagnostic, error) {
+	if err := ctx.Err(); err != nil { return nil, err }; return NormalizeDiagnostics(service.Problems)
+}
+func (service *StaticService) Complete(ctx context.Context, snapshot Snapshot, position Position) ([]Completion, error) {
+	if err := ctx.Err(); err != nil { return nil, err }; return NormalizeCompletions(service.Items)
+}
+func (service *StaticService) Hover(ctx context.Context, snapshot Snapshot, position Position) (Hover, bool, error) {
+	if err := ctx.Err(); err != nil { return Hover{}, false, err }
+	if service.HasHover { if err := ValidateRange(service.HoverValue.Range); err != nil { return Hover{}, false, err } }
+	return service.HoverValue, service.HasHover, nil
+}
+func (service *StaticService) Symbols(ctx context.Context, snapshot Snapshot) ([]Symbol, error) {
+	if err := ctx.Err(); err != nil { return nil, err }; return append([]Symbol(nil), service.Outline...), nil
+}
+func (service *StaticService) Format(ctx context.Context, snapshot Snapshot) ([]TextEdit, error) {
+	if err := ctx.Err(); err != nil { return nil, err }
+	for _, edit := range service.FormatEdits { if err := ValidateRange(edit.Range); err != nil { return nil, err } }
+	return append([]TextEdit(nil), service.FormatEdits...), nil
+}
+func (service *StaticService) Definition(ctx context.Context, snapshot Snapshot, position Position) ([]Location, error) {
+	if err := ctx.Err(); err != nil { return nil, err }; return NormalizeLocations(service.Definitions)
+}
+func (service *StaticService) References(ctx context.Context, snapshot Snapshot, position Position) ([]Location, error) {
+	if err := ctx.Err(); err != nil { return nil, err }; return NormalizeLocations(service.ReferenceLocations)
+}
+func (service *StaticService) Rename(ctx context.Context, snapshot Snapshot, position Position, name string) ([]WorkspaceEdit, error) {
+	if err := ctx.Err(); err != nil { return nil, err }
+	if name == "" || len(name) > 4096 { return nil, errors.New("language rename target is invalid") }
+	return NormalizeWorkspaceEdits(service.RenameEdits)
+}

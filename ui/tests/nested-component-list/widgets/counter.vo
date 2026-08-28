@@ -1,0 +1,15 @@
+// Package widgets deliberately lives behind an import boundary so the probe
+// certifies package component discovery and canonical linked identities.
+package widgets
+
+import (
+	"github.com/vo-lang/ui"
+	"strconv"
+)
+
+func Counter(label string) ui.View {
+	count := int64(0)
+	return ui.TestID(ui.Button(label+" "+strconv.FormatInt(count, 10), func(event ui.Event) {
+		count++
+	}), label)
+}

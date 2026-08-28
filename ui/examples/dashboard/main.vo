@@ -1,0 +1,31 @@
+package main
+
+import (
+	"github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/kit"
+)
+
+func App() ui.View {
+	theme := kit.LightTheme()
+	header := kit.Toolbar(theme, kit.Heading(theme, "Dashboard"), kit.MutedText(theme, "Native and Web"))
+	navigation := kit.Card(theme, ui.Gap(ui.Column(
+		kit.PrimaryButton(theme, "Overview", false, func(event ui.Event) {}),
+		kit.PrimaryButton(theme, "Activity", false, func(event ui.Event) {}),
+	), theme.Space))
+	content := kit.Card(theme, ui.Gap(ui.Column(
+		kit.Heading(theme, "Overview"),
+		kit.Body(theme, "One Volang component tree drives DOM and native layout."),
+		ui.GridColumns(ui.Gap(ui.Grid(
+			kit.Card(theme, kit.Body(theme, "Builds: 128")),
+			kit.Card(theme, kit.Body(theme, "Latency: 12 ms")),
+			kit.Card(theme, kit.Body(theme, "Targets: Web + Desktop")),
+		), theme.Space), "repeat(3, minmax(120px, 1fr))"),
+	), theme.Space * 2))
+	return kit.Screen(theme, kit.AppShell(theme, header, navigation, content))
+}
+
+func main() {
+	if err := ui.Mount(App); err != nil {
+		panic(err.Error())
+	}
+}

@@ -1,0 +1,654 @@
+// Package document supplies one Unicode-scalar indexed, line-aware,
+// undoable document model for plain text, rich spans, Markdown, and editors.
+// Every operation is bounded and safe to share across window goroutines.
+package document
+
+import (
+	"errors"
+	"strings"
+	"sync"
+	"unicode/utf8"
+)
+
+type Limits struct {
+	MaxRunes int
+	MaxHistory int
+	MaxMatches int
+	MaxRichSpans int
+}
+
+func DefaultLimits() Limits {
+	return Limits{MaxRunes: 10000000, MaxHistory: 10000, MaxMatches: 100000, MaxRichSpans: 100000}
+}
+
+func (limits Limits) Validate() {
+	if limits.MaxRunes <= 0 || limits.MaxRunes > 100000000 || limits.MaxHistory < 0 ||
+		limits.MaxHistory > 1000000 ||
+		limits.MaxMatches <= 0 ||
+		limits.MaxMatches > 1000000 ||
+		limits.MaxRichSpans <= 0 ||
+		limits.MaxRichSpans > 1000000 {
+		panic("document limits are invalid")
+	}
+}
+
+type Selection struct {
+	Anchor int
+	Focus int
+}
+
+func (selection Selection) Start() int {
+	if selection.Anchor < selection.Focus {
+		return selection.Anchor
+	}
+	return selection.Focus
+}
+
+func (selection Selection) End() int {
+	if selection.Anchor > selection.Focus {
+		return selection.Anchor
+	}
+	return selection.Focus
+}
+
+func (selection Selection) Collapsed() bool {
+	return selection.Anchor == selection.Focus
+}
+
+type Edit struct {
+	Start int
+	End int
+	Text string
+}
+
+type change struct {
+	Start int
+	Before string
+	After string
+	BeforeSelection Selection
+	AfterSelection Selection
+}
+
+type Document struct {
+	mu sync.RWMutex
+	text []rune
+	lineStarts []int
+	selection Selection
+	version uint64
+	undo []change
+	redo []change
+	limits Limits
+}
+
+func New(text string, limits Limits) *Document {
+	limits.Validate()
+	runes := []rune(text)
+	if len(runes) > limits.MaxRunes {
+		panic("document initial text exceeds its rune limit")
+	}
+	document := &Document{text: runes, limits: limits}
+	document.reindex()
+	return document
+}
+
+func NewText(text string) *Document {
+	return New(text, DefaultLimits())
+}
+
+func (document *Document) reindex() {
+	document.lineStarts = []int{0}
+	for index, value := range document.text {
+		if value == '\n' {
+			document.lineStarts = append(document.lineStarts, index + 1)
+		}
+	}
+}
+
+func (document *Document) reindexEdit(start int, end int, insert []rune) {
+	delta := len(insert) - (end - start)
+	next := make([]int, 0, len(document.lineStarts) + len(insert))
+	for _, offset := range document.lineStarts {
+		if offset <= start {
+			next = append(next, offset)
+		} else {
+			break
+		}
+	}
+	for index, value := range insert {
+		if value == '\n' {
+			next = append(next, start + index + 1)
+		}
+	}
+	for _, offset := range document.lineStarts {
+		if offset > end {
+			next = append(next, offset + delta)
+		}
+	}
+	document.lineStarts = next
+}
+
+func (document *Document) Len() int {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	return len(document.text)
+}
+
+func (document *Document) Version() uint64 {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	return document.version
+}
+
+func (document *Document) Text() string {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	return string(document.text)
+}
+
+// Snapshot returns text and version from the same read transaction so worker
+// goroutines can reject stale save, analysis, and compile completions.
+func (document *Document) Snapshot() (string, uint64) {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	return string(document.text), document.version
+}
+
+func (document *Document) Selection() Selection {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	return document.selection
+}
+
+func (document *Document) LineCount() int {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	return len(document.lineStarts)
+}
+
+func (document *Document) validateSelection(selection Selection) error {
+	if selection.Anchor < 0 || selection.Focus < 0 || selection.Anchor > len(document.text) ||
+		selection.Focus > len(document.text) {
+		return errors.New("document selection is out of bounds")
+	}
+	return nil
+}
+
+func (document *Document) SetSelection(selection Selection) error {
+	document.mu.Lock()
+	defer document.mu.Unlock()
+	if err := document.validateSelection(selection); err != nil {
+		return err
+	}
+	document.selection = selection
+	return nil
+}
+
+func (document *Document) applyRaw(edit Edit) (string, error) {
+	if edit.Start < 0 || edit.End < edit.Start || edit.End > len(document.text) {
+		return "", errors.New("document edit range is invalid")
+	}
+	insert := []rune(edit.Text)
+	if len(document.text) - (edit.End - edit.Start) + len(insert) > document.limits.MaxRunes {
+		return "", errors.New("document edit exceeds the rune limit")
+	}
+	before := string(document.text[edit.Start:edit.End])
+	document.reindexEdit(edit.Start, edit.End, insert)
+	next := make([]rune, 0, len(document.text) - (edit.End - edit.Start) + len(insert))
+	next = append(next, document.text[:edit.Start]...)
+	next = append(next, insert...)
+	next = append(next, document.text[edit.End:]...)
+	document.text = next
+	document.selection = Selection{Anchor: edit.Start + len(insert), Focus: edit.Start + len(insert)}
+	document.version++
+	return before, nil
+}
+
+func trimHistory(history []change, maximum int) []change {
+	if maximum == 0 {
+		return nil
+	}
+	if len(history) <= maximum {
+		return history
+	}
+	return append([]change(nil), history[len(history) - maximum:]...)
+}
+
+func (document *Document) apply(edit Edit, selection Selection, explicitSelection bool) error {
+	document.mu.Lock()
+	defer document.mu.Unlock()
+	if edit.Start < 0 || edit.End < edit.Start || edit.End > len(document.text) {
+		return errors.New("document edit range is invalid")
+	}
+	nextLength := len(document.text) - (edit.End - edit.Start) + len([]rune(edit.Text))
+	if explicitSelection && (selection.Anchor < 0 || selection.Focus < 0 || selection.Anchor > nextLength ||
+		selection.Focus > nextLength) {
+		return errors.New("document selection is out of bounds")
+	}
+	beforeSelection := document.selection
+	before, err := document.applyRaw(edit)
+	if err != nil {
+		return err
+	}
+	if explicitSelection {
+		document.selection = selection
+	}
+	document.undo = append(document.undo, change{
+		Start: edit.Start, Before: before, After: edit.Text, BeforeSelection: beforeSelection,
+		AfterSelection: document.selection,
+	})
+	document.undo = trimHistory(document.undo, document.limits.MaxHistory)
+	document.redo = nil
+	return nil
+}
+
+func (document *Document) Apply(edit Edit) error {
+	return document.apply(edit, Selection{}, false)
+}
+
+// ApplyWithSelection commits the platform's post-edit selection in the same
+// undo transaction as the text change. Offsets use Unicode scalars after the
+// edit; Web adapters convert their UTF-16 indices before calling this method.
+func (document *Document) ApplyWithSelection(edit Edit, selection Selection) error {
+	return document.apply(edit, selection, true)
+}
+
+func (document *Document) Undo() bool {
+	document.mu.Lock()
+	defer document.mu.Unlock()
+	if len(document.undo) == 0 {
+		return false
+	}
+	record := document.undo[len(document.undo) - 1]
+	document.undo = document.undo[:len(document.undo) - 1]
+	_, err := document.applyRaw(Edit{
+		Start: record.Start, End: record.Start + len([]rune(record.After)), Text: record.Before,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	document.selection = record.BeforeSelection
+	document.redo = append(document.redo, record)
+	return true
+}
+
+func (document *Document) Redo() bool {
+	document.mu.Lock()
+	defer document.mu.Unlock()
+	if len(document.redo) == 0 {
+		return false
+	}
+	record := document.redo[len(document.redo) - 1]
+	document.redo = document.redo[:len(document.redo) - 1]
+	_, err := document.applyRaw(Edit{
+		Start: record.Start, End: record.Start + len([]rune(record.Before)), Text: record.After,
+	})
+	if err != nil {
+		panic(err.Error())
+	}
+	document.selection = record.AfterSelection
+	document.undo = append(document.undo, record)
+	return true
+}
+
+type Position struct {
+	Line int
+	Column int
+}
+
+func (document *Document) Offset(position Position) (int, error) {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	if position.Line < 0 || position.Line >= len(document.lineStarts) || position.Column < 0 {
+		return 0, errors.New("document position is invalid")
+	}
+	start := document.lineStarts[position.Line]
+	end := len(document.text)
+	if position.Line + 1 < len(document.lineStarts) {
+		end = document.lineStarts[position.Line + 1] - 1
+	}
+	if start + position.Column > end {
+		return 0, errors.New("document column is out of bounds")
+	}
+	return start + position.Column, nil
+}
+
+func (document *Document) Position(offset int) (Position, error) {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	if offset < 0 || offset > len(document.text) {
+		return Position{}, errors.New("document offset is out of bounds")
+	}
+	low := 0
+	high := len(document.lineStarts)
+	for low + 1 < high {
+		middle := (low + high) / 2
+		if document.lineStarts[middle] <= offset {
+			low = middle
+		} else {
+			high = middle
+		}
+	}
+	return Position{Line: low, Column: offset - document.lineStarts[low]}, nil
+}
+
+func (document *Document) Line(line int) (string, error) {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	if line < 0 || line >= len(document.lineStarts) {
+		return "", errors.New("document line is out of bounds")
+	}
+	start := document.lineStarts[line]
+	end := len(document.text)
+	if line + 1 < len(document.lineStarts) {
+		end = document.lineStarts[line + 1] - 1
+	}
+	return string(document.text[start:end]), nil
+}
+
+type Match struct {
+	Start int
+	End int
+}
+
+func findRunes(haystack []rune, needle []rune, from int) int {
+	if len(needle) == 0 {
+		return from
+	}
+	for index := from; index + len(needle) <= len(haystack); index++ {
+		match := true
+		for offset, value := range needle {
+			if haystack[index + offset] != value {
+				match = false
+				break
+			}
+		}
+		if match {
+			return index
+		}
+	}
+	return -1
+}
+
+func (document *Document) Find(query string, caseSensitive bool) []Match {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	if query == "" {
+		return nil
+	}
+	haystack := document.text
+	needle := []rune(query)
+	if !caseSensitive {
+		haystack = []rune(strings.ToLower(string(haystack)))
+		needle = []rune(strings.ToLower(query))
+	}
+	matches := make([]Match, 0)
+	for from := 0; from <= len(haystack) - len(needle);  {
+		index := findRunes(haystack, needle, from)
+		if index < 0 {
+			break
+		}
+		matches = append(matches, Match{Start: index, End: index + len(needle)})
+		if len(matches) >= document.limits.MaxMatches {
+			break
+		}
+		from = index + len(needle)
+	}
+	return matches
+}
+
+func (document *Document) ReplaceAll(query string, replacement string, caseSensitive bool) (int, error) {
+	matches := document.Find(query, caseSensitive)
+	for index := len(matches) - 1; index >= 0; index-- {
+		if err := document.Apply(Edit{
+			Start: matches[index].Start, End: matches[index].End, Text: replacement,
+		}); err != nil {
+			return len(matches) - 1 - index, err
+		}
+	}
+	return len(matches), nil
+}
+
+func (document *Document) UTF16Offset(offset int) (int, error) {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	if offset < 0 || offset > len(document.text) {
+		return 0, errors.New("document UTF-16 offset source is out of bounds")
+	}
+	result := 0
+	for _, value := range document.text[:offset] {
+		if utf8.RuneLen(value) == 4 {
+			result += 2
+		} else {
+			result++
+		}
+	}
+	return result, nil
+}
+
+// RuneOffsetFromUTF16 converts the platform text-system coordinate back to
+// the document's Unicode-scalar coordinate. An offset in the middle of a
+// surrogate pair is rejected so selections cannot silently split a scalar.
+func (document *Document) RuneOffsetFromUTF16(offset int) (int, error) {
+	document.mu.RLock()
+	defer document.mu.RUnlock()
+	if offset < 0 {
+		return 0, errors.New("document UTF-16 offset is out of bounds")
+	}
+	units := 0
+	for index, value := range document.text {
+		if units == offset {
+			return index, nil
+		}
+		width := 1
+		if utf8.RuneLen(value) == 4 {
+			width = 2
+		}
+		if units + width > offset {
+			return 0, errors.New("document UTF-16 offset splits a surrogate pair")
+		}
+		units += width
+	}
+	if units == offset {
+		return len(document.text), nil
+	}
+	return 0, errors.New("document UTF-16 offset is out of bounds")
+}
+
+type SpanKind int64
+
+const (
+	Plain SpanKind = iota
+	Strong
+	Emphasis
+	Code
+	Link
+)
+
+type RichSpan struct {
+	Start int
+	End int
+	Kind SpanKind
+	Metadata string
+}
+
+func ValidateSpans(length int, spans []RichSpan, limits Limits) error {
+	if len(spans) > limits.MaxRichSpans {
+		return errors.New("document rich-span limit exceeded")
+	}
+	for _, span := range spans {
+		if span.Start < 0 || span.End < span.Start || span.End > length || span.Kind < Plain ||
+			span.Kind > Link ||
+			len(span.Metadata) > 4096 {
+			return errors.New("document rich span is invalid")
+		}
+	}
+	return nil
+}
+
+type BlockKind int64
+
+const (
+	Paragraph BlockKind = iota
+	Heading
+	Quote
+	CodeBlock
+	ListItem
+	Rule
+)
+
+type Block struct {
+	Kind BlockKind
+	Level int
+	Text string
+	Info string
+}
+
+func appendMarkdownBlock(blocks []Block, block Block, maximumBlocks int) ([]Block, error) {
+	if len(blocks) >= maximumBlocks {
+		return nil, errors.New("Markdown block limit exceeded")
+	}
+	return append(blocks, block), nil
+}
+
+func markdownHeading(line string) (Block, bool) {
+	if strings.HasPrefix(line, "### ") {
+		return Block{Kind: Heading, Level: 3, Text: strings.TrimSpace(line[4:])}, true
+	}
+	if strings.HasPrefix(line, "## ") {
+		return Block{Kind: Heading, Level: 2, Text: strings.TrimSpace(line[3:])}, true
+	}
+	if strings.HasPrefix(line, "# ") {
+		return Block{Kind: Heading, Level: 1, Text: strings.TrimSpace(line[2:])}, true
+	}
+	return Block{}, false
+}
+
+func markdownListItem(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		return strings.TrimSpace(trimmed[2:]), "", true
+	}
+	dot := strings.Index(trimmed, ". ")
+	if dot <= 0 || dot > 4 {
+		return "", "", false
+	}
+	for _, value := range trimmed[:dot] {
+		if value < '0' || value > '9' {
+			return "", "", false
+		}
+	}
+	return strings.TrimSpace(trimmed[dot + 2:]), trimmed[:dot + 1], true
+}
+
+func startsMarkdownBlock(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || trimmed == "---" || trimmed == "***" ||
+		strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, ">") ||
+		strings.HasPrefix(trimmed, "|") {
+		return true
+	}
+	if _, ok := markdownHeading(trimmed); ok {
+		return true
+	}
+	_, _, ok := markdownListItem(trimmed)
+	return ok
+}
+
+// ParseMarkdown parses the bounded Markdown subset used by product
+// documentation. It preserves whole paragraphs and fenced code blocks so a
+// renderer receives semantic blocks instead of one visual node per source
+// line. Tables remain monospaced blocks until the portable table view lands.
+func ParseMarkdown(source string, maximumBlocks int) ([]Block, error) {
+	if maximumBlocks <= 0 || maximumBlocks > 1000000 {
+		return nil, errors.New("Markdown block limit is invalid")
+	}
+	lines := strings.Split(source, "\n")
+	blocks := make([]Block, 0, len(lines))
+	for index := 0; index < len(lines); {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			index++
+			continue
+		}
+		if strings.HasPrefix(line, "```") {
+			info := strings.TrimSpace(strings.TrimPrefix(line, "```"))
+			index++
+			code := make([]string, 0)
+			for index < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[index]), "```") {
+				code = append(code, lines[index])
+				index++
+			}
+			if index >= len(lines) {
+				return nil, errors.New("Markdown code fence is not closed")
+			}
+			var err error
+			blocks, err = appendMarkdownBlock(blocks, Block{Kind: CodeBlock, Text: strings.Join(code, "\n"), Info: info}, maximumBlocks)
+			if err != nil {
+				return nil, err
+			}
+			index++
+			continue
+		}
+		if heading, ok := markdownHeading(line); ok {
+			var err error
+			blocks, err = appendMarkdownBlock(blocks, heading, maximumBlocks)
+			if err != nil { return nil, err }
+			index++
+			continue
+		}
+		if line == "---" || line == "***" {
+			var err error
+			blocks, err = appendMarkdownBlock(blocks, Block{Kind: Rule}, maximumBlocks)
+			if err != nil { return nil, err }
+			index++
+			continue
+		}
+		if strings.HasPrefix(line, ">") {
+			quote := make([]string, 0)
+			for index < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index]), ">") {
+				value := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[index]), ">"))
+				quote = append(quote, value)
+				index++
+			}
+			var err error
+			blocks, err = appendMarkdownBlock(blocks, Block{Kind: Quote, Text: strings.Join(quote, " ")}, maximumBlocks)
+			if err != nil { return nil, err }
+			continue
+		}
+		if text, marker, ok := markdownListItem(line); ok {
+			index++
+			parts := []string{text}
+			for index < len(lines) && !startsMarkdownBlock(lines[index]) {
+				parts = append(parts, strings.TrimSpace(lines[index]))
+				index++
+			}
+			var err error
+			blocks, err = appendMarkdownBlock(blocks, Block{Kind: ListItem, Text: strings.Join(parts, " "), Info: marker}, maximumBlocks)
+			if err != nil { return nil, err }
+			continue
+		}
+		if strings.HasPrefix(line, "|") {
+			table := make([]string, 0)
+			for index < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index]), "|") {
+				table = append(table, strings.TrimSpace(lines[index]))
+				index++
+			}
+			var err error
+			blocks, err = appendMarkdownBlock(blocks, Block{Kind: CodeBlock, Text: strings.Join(table, "\n"), Info: "table"}, maximumBlocks)
+			if err != nil { return nil, err }
+			continue
+		}
+		paragraph := make([]string, 0)
+		for index < len(lines) && !startsMarkdownBlock(lines[index]) {
+			paragraph = append(paragraph, strings.TrimSpace(lines[index]))
+			index++
+		}
+		if len(paragraph) == 0 {
+			return nil, errors.New("Markdown parser made no progress")
+		}
+		var err error
+		blocks, err = appendMarkdownBlock(blocks, Block{Kind: Paragraph, Text: strings.Join(paragraph, " ")}, maximumBlocks)
+		if err != nil { return nil, err }
+	}
+	return blocks, nil
+}
