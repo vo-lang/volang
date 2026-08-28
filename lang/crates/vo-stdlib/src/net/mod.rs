@@ -11,7 +11,7 @@ mod tcp;
 mod udp;
 #[cfg(all(feature = "std", unix))]
 mod unix;
-#[cfg(all(feature = "std", any(not(unix), test)))]
+#[cfg(all(feature = "std", not(unix)))]
 mod unsupported_unix;
 
 #[cfg(all(feature = "std", unix))]
