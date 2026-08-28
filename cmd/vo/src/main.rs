@@ -829,10 +829,11 @@ fn link_native_aot(
         .output()
         .map_err(|error| format!("failed to start AOT linker {:?}: {error}", linker))?;
     if !result.status.success() {
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(format!(
-            "AOT linker failed with {}:\n{}",
-            result.status,
-            String::from_utf8_lossy(&result.stderr)
+            "AOT linker failed with {}:\nstdout:\n{}\nstderr:\n{}",
+            result.status, stdout, stderr
         ));
     }
     replace_file_atomically(&linked_file.0, output)
