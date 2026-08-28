@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 #[cfg(not(debug_assertions))]
 use std::sync::OnceLock;
 use vo_common::stable_hash::StableHasher;
-use vo_common::vfs::{sort_fs_paths, FileSystem, FileSystemEntryKind};
+use vo_common::vfs::{normalize_fs_path, sort_fs_paths, FileSystem, FileSystemEntryKind};
 
 const STDLIB_SOURCE_FINGERPRINT_NAMESPACE: &str = "vo-stdlib-source-v1";
 #[cfg(not(debug_assertions))]
@@ -30,7 +30,10 @@ impl EmbeddedStdlib {
         for file_path in vo_stdlib_source::iter() {
             if let Some(content) = vo_stdlib_source::get(file_path.as_ref()) {
                 if let Ok(s) = std::str::from_utf8(content.as_ref()) {
-                    files.insert(PathBuf::from(file_path.to_string()), s.to_string());
+                    files.insert(
+                        normalize_fs_path(Path::new(file_path.as_ref())),
+                        s.to_string(),
+                    );
                 }
             }
         }
@@ -47,7 +50,8 @@ impl EmbeddedStdlib {
         fingerprint_assets(self.files.iter().map(|(path, source)| {
             (
                 path.to_str()
-                    .expect("standard-library asset paths are valid UTF-8"),
+                    .expect("standard-library asset paths are valid UTF-8")
+                    .replace('\\', "/"),
                 source.as_bytes(),
             )
         }))
@@ -87,7 +91,8 @@ where
 
 impl FileSystem for EmbeddedStdlib {
     fn read_file(&self, path: &Path) -> io::Result<String> {
-        self.files.get(path).cloned().ok_or_else(|| {
+        let path = normalize_fs_path(path);
+        self.files.get(&path).cloned().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("file not found: {:?}", path),
@@ -96,8 +101,9 @@ impl FileSystem for EmbeddedStdlib {
     }
 
     fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let path = normalize_fs_path(path);
         self.files
-            .get(path)
+            .get(&path)
             .map(|s| s.as_bytes().to_vec())
             .ok_or_else(|| {
                 io::Error::new(
@@ -108,7 +114,8 @@ impl FileSystem for EmbeddedStdlib {
     }
 
     fn read_bytes_limited(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
-        let source = self.files.get(path).ok_or_else(|| {
+        let path = normalize_fs_path(path);
+        let source = self.files.get(&path).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("file not found: {path:?}"))
         })?;
         if source.len() > max_bytes {
@@ -129,7 +136,8 @@ impl FileSystem for EmbeddedStdlib {
     }
 
     fn read_text_limited(&self, path: &Path, max_bytes: usize) -> io::Result<String> {
-        let source = self.files.get(path).ok_or_else(|| {
+        let path = normalize_fs_path(path);
+        let source = self.files.get(&path).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("file not found: {path:?}"))
         })?;
         if source.len() > max_bytes {
@@ -149,36 +157,26 @@ impl FileSystem for EmbeddedStdlib {
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let path = normalize_fs_path(path);
         let mut seen = HashSet::new();
-        let is_root =
-            path == Path::new(".") || path == Path::new("") || path.as_os_str().is_empty();
+        let is_root = path == Path::new(".");
 
         for file_path in self.files.keys() {
-            let entry = if is_root {
-                file_path
-                    .components()
-                    .next()
-                    .map(|c| PathBuf::from(c.as_os_str()))
+            let relative = if is_root {
+                file_path.as_path()
             } else {
-                let path_str = format!("{}/", path.to_string_lossy());
-                let file_str = file_path.to_string_lossy();
-                if file_str.starts_with(&path_str) {
-                    let rest = &file_str[path_str.len()..];
-                    if !rest.is_empty() {
-                        Some(if let Some(idx) = rest.find('/') {
-                            path.join(&rest[..idx])
-                        } else {
-                            path.join(rest)
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                let Ok(relative) = file_path.strip_prefix(&path) else {
+                    continue;
+                };
+                relative
             };
-            if let Some(e) = entry {
-                seen.insert(e);
+            if let Some(component) = relative.components().next() {
+                let entry = if is_root {
+                    PathBuf::from(component.as_os_str())
+                } else {
+                    path.join(component.as_os_str())
+                };
+                seen.insert(entry);
             }
         }
         let mut entries: Vec<_> = seen.into_iter().collect();
@@ -187,18 +185,16 @@ impl FileSystem for EmbeddedStdlib {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        if self.files.contains_key(path) {
+        let path = normalize_fs_path(path);
+        if self.files.contains_key(&path) {
             return true;
         }
-        if path == Path::new(".") || path == Path::new("") {
+        if path == Path::new(".") {
             return !self.files.is_empty();
         }
-        let path_str = path.to_string_lossy();
-        self.files.keys().any(|p| {
-            let p_str = p.to_string_lossy();
-            p_str.starts_with(&*path_str)
-                && p_str.len() > path_str.len()
-                && p_str.chars().nth(path_str.len()) == Some('/')
+        self.files.keys().any(|file| {
+            file.strip_prefix(&path)
+                .is_ok_and(|relative| !relative.as_os_str().is_empty())
         })
     }
 
@@ -207,9 +203,10 @@ impl FileSystem for EmbeddedStdlib {
     }
 
     fn entry_kind(&self, path: &Path) -> io::Result<FileSystemEntryKind> {
-        Ok(if self.files.contains_key(path) {
+        let path = normalize_fs_path(path);
+        Ok(if self.files.contains_key(&path) {
             FileSystemEntryKind::RegularFile
-        } else if self.exists(path) {
+        } else if self.exists(&path) {
             FileSystemEntryKind::Directory
         } else {
             FileSystemEntryKind::Missing
@@ -238,7 +235,9 @@ mod tests {
             .iter()
             .map(|(path, source)| {
                 (
-                    path.to_str().expect("embedded paths are UTF-8").to_string(),
+                    path.to_str()
+                        .expect("embedded paths are UTF-8")
+                        .replace('\\', "/"),
                     source.as_bytes().to_vec(),
                 )
             })
@@ -247,6 +246,17 @@ mod tests {
             stdlib.source_fingerprint(),
             fingerprint_assets(resolver_assets)
         );
+    }
+
+    #[test]
+    fn nested_embedded_packages_use_native_normalized_paths() {
+        let stdlib = EmbeddedStdlib::new();
+        let package = Path::new("unicode").join("utf8");
+        let source = package.join("utf8.vo");
+
+        assert!(stdlib.is_dir(&package));
+        assert!(stdlib.read_dir(&package).unwrap().contains(&source));
+        assert!(stdlib.read_file(&source).unwrap().contains("package utf8"));
     }
 
     #[test]
