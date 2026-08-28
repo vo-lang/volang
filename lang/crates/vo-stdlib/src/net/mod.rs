@@ -11,6 +11,13 @@ mod tcp;
 mod udp;
 #[cfg(all(feature = "std", unix))]
 mod unix;
+#[cfg(all(feature = "std", any(not(unix), test)))]
+mod unsupported_unix;
+
+#[cfg(all(feature = "std", unix))]
+use self::unix as platform_unix;
+#[cfg(all(feature = "std", not(unix)))]
+use self::unsupported_unix as platform_unix;
 
 #[cfg(feature = "std")]
 use std::collections::HashMap;
@@ -364,64 +371,54 @@ pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[
         func: udp::net_udp_conn_set_write_deadline,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixDial"),
-        func: unix::net_unix_dial,
+        func: platform_unix::net_unix_dial,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixListen"),
-        func: unix::net_unix_listen,
+        func: platform_unix::net_unix_listen,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "blocking_unixConnRead"),
-        func: unix::net_unix_conn_read,
+        func: platform_unix::net_unix_conn_read,
         effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "blocking_unixConnWrite"),
-        func: unix::net_unix_conn_write,
+        func: platform_unix::net_unix_conn_write,
         effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixConnSetDeadline"),
-        func: unix::net_unix_conn_set_deadline,
+        func: platform_unix::net_unix_conn_set_deadline,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixConnSetReadDeadline"),
-        func: unix::net_unix_conn_set_read_deadline,
+        func: platform_unix::net_unix_conn_set_read_deadline,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixConnSetWriteDeadline"),
-        func: unix::net_unix_conn_set_write_deadline,
+        func: platform_unix::net_unix_conn_set_write_deadline,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixConnClose"),
-        func: unix::net_unix_conn_close,
+        func: platform_unix::net_unix_conn_close,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "blocking_unixListenerAccept"),
-        func: unix::net_unix_listener_accept,
+        func: platform_unix::net_unix_listener_accept,
         effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
     },
-    #[cfg(unix)]
     StdlibEntry {
         name: vo_runtime::vo_extern_name!("net", "unixListenerClose"),
-        func: unix::net_unix_listener_close,
+        func: platform_unix::net_unix_listener_close,
         effects: vo_runtime::bytecode::ExternEffects::NONE,
     },
     StdlibEntry {
