@@ -5,7 +5,11 @@ const PROTOCOL = 'volang.studio.preview.v1';
 const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
 const root = document.querySelector('#preview-root');
 const diagnostic = document.querySelector('#preview-error');
-const embeddingOrigin = document.referrer ? new URL(document.referrer).origin : location.origin;
+// `srcdoc` documents can expose an empty referrer and a serialized `null`
+// location origin even though the module itself is served by the embedding
+// application. Derive the authority from this same-origin module URL so the
+// postMessage boundary remains strict in every browser and deployment host.
+const embeddingOrigin = new URL(import.meta.url).origin;
 let session;
 let runtimeReady;
 
