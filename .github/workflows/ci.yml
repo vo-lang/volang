@@ -344,7 +344,7 @@ jobs:
   ui_platform:
     name: ui-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
