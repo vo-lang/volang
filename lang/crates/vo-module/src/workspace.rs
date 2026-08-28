@@ -897,6 +897,7 @@ enum WorkspaceDirectoryIdentity {
     },
     #[cfg(not(any(all(unix, not(target_arch = "wasm32")), windows)))]
     HostPath(PathBuf),
+    Opaque(Vec<u8>),
     Virtual(PathBuf),
 }
 
@@ -914,6 +915,10 @@ impl WorkspaceDirectoryIdentity {
             Self::HostPath(path) => {
                 hasher.update_str("kind", "host-path");
                 hasher.update_path("path", path);
+            }
+            Self::Opaque(identity) => {
+                hasher.update_str("kind", "opaque");
+                hasher.update_bytes("identity", identity);
             }
             Self::Virtual(path) => {
                 hasher.update_str("kind", "virtual");
@@ -974,6 +979,23 @@ fn workspace_directory_identity<F: FileSystem>(
     label: &str,
 ) -> Result<WorkspaceDirectoryIdentity, Error> {
     require_directory_components(fs, anchor, path, label)?;
+    if let Some(identity) = fs.opaque_directory_identity(path).map_err(|error| {
+        source_read_error(
+            error.kind(),
+            format!(
+                "cannot resolve opaque directory identity for {label} {}: {error}",
+                path.display(),
+            ),
+        )
+    })? {
+        if identity.is_empty() || identity.len() > 64 {
+            return Err(Error::WorkFileParse(format!(
+                "{label} {} returned an invalid opaque directory identity",
+                path.display(),
+            )));
+        }
+        return Ok(WorkspaceDirectoryIdentity::Opaque(identity));
+    }
     let host_anchor = fs.resolve_host_path(anchor).map_err(|error| {
         source_read_error(
             error.kind(),

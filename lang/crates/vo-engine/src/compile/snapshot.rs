@@ -21,6 +21,7 @@ pub(super) const MAX_COMPILE_SNAPSHOT_FILES: usize = 100_000;
 #[derive(Debug, Default)]
 pub(super) struct CompileInputSnapshot {
     files: BTreeMap<PathBuf, Vec<u8>>,
+    directory_identities: BTreeMap<PathBuf, [u8; 24]>,
     total_bytes: usize,
 }
 
@@ -59,6 +60,31 @@ impl CompileInputSnapshot {
         }
         self.files.insert(path, bytes);
         self.total_bytes = total_bytes;
+        Ok(())
+    }
+
+    pub(super) fn record_host_parent_directory_identity(&mut self, path: &Path) -> io::Result<()> {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let parent = normalize_fs_path(parent);
+        let generation = super::host_input::validate_stable_directory_path(&parent)?;
+        let mut identity = [0; 24];
+        identity[..8].copy_from_slice(&generation.identity.volume.to_le_bytes());
+        identity[8..].copy_from_slice(&generation.identity.file);
+        if let Some(existing) = self.directory_identities.get(&parent) {
+            if existing != &identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "compile input directory {} changed identity while capturing aliases",
+                        parent.display()
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        self.directory_identities.insert(parent, identity);
         Ok(())
     }
 
@@ -325,6 +351,14 @@ impl FileSystem for CompileInputSnapshot {
             FileSystemEntryKind::Missing
         })
     }
+
+    fn opaque_directory_identity(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        let path = normalize_fs_path(path);
+        Ok(self
+            .directory_identities
+            .get(&path)
+            .map(|identity| identity.to_vec()))
+    }
 }
 
 /// Filesystem used for dependency and workspace-source resolution. Both variants
@@ -402,6 +436,13 @@ impl FileSystem for ResolverFs {
         }
     }
 
+    fn opaque_directory_identity(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Snapshot(fs) => fs.opaque_directory_identity(path),
+            Self::SnapshotGlobal(fs) => fs.opaque_directory_identity(path),
+        }
+    }
+
     fn root(&self) -> Option<&Path> {
         match self {
             Self::Snapshot(fs) => FileSystem::root(fs),
@@ -453,6 +494,35 @@ mod tests {
             snapshot.read_dir(&root).unwrap(),
             vec![root.join("artifacts"), root.join("pkg")]
         );
+    }
+
+    #[test]
+    fn snapshot_preserves_authenticated_parent_directory_identity() {
+        let root = canonical_temp_dir().join(format!(
+            "vo-engine-snapshot-directory-identity-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.vo");
+        let second = root.join("second.vo");
+        std::fs::write(&first, "package sample\n").unwrap();
+        std::fs::write(&second, "package sample\n").unwrap();
+        let mut snapshot = CompileInputSnapshot::default();
+
+        snapshot
+            .record_host_parent_directory_identity(&first)
+            .unwrap();
+        snapshot
+            .record_host_parent_directory_identity(&second)
+            .unwrap();
+
+        let identity = snapshot
+            .opaque_directory_identity(&root)
+            .unwrap()
+            .expect("captured parent identity");
+        assert_eq!(identity.len(), 24);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

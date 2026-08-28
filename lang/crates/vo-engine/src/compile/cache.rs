@@ -194,6 +194,7 @@ impl CompileInputCaptureSink for CompileInputSnapshot {
     }
 
     fn capture_file<'a>(&'a mut self, path: &Path) -> io::Result<CapturedInput<'a>> {
+        self.record_host_parent_directory_identity(path)?;
         let bytes = CompileInputSnapshot::capture_file(self, path)?;
         Ok(CapturedInput {
             digest: Sha256::digest(bytes).into(),
@@ -206,6 +207,7 @@ impl CompileInputCaptureSink for CompileInputSnapshot {
         path: PathBuf,
         bytes: Vec<u8>,
     ) -> io::Result<CapturedInput<'a>> {
+        self.record_host_parent_directory_identity(&path)?;
         let bytes = CompileInputSnapshot::insert_consistent(self, path, bytes)?;
         Ok(CapturedInput {
             digest: Sha256::digest(bytes).into(),

@@ -157,6 +157,16 @@ pub trait FileSystem: Send + Sync {
         Ok(FileSystemEntryKind::Unknown)
     }
 
+    /// Return an authenticated, filesystem-local identity for a directory.
+    ///
+    /// Immutable filesystems may use this to preserve host alias equivalence
+    /// after the live host namespace has been removed. Equal non-empty tokens
+    /// must identify the same captured directory generation. Implementations
+    /// without such an identity retain the path-based fallback.
+    fn opaque_directory_identity(&self, _path: &Path) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Return the host executable-bit state when this filesystem can express
     /// POSIX source modes securely. Virtual filesystems and Windows return
     /// `None` while still authenticating mode through package metadata.
@@ -338,6 +348,10 @@ impl<T: FileSystem + ?Sized> FileSystem for Arc<T> {
 
     fn entry_kind(&self, path: &Path) -> io::Result<FileSystemEntryKind> {
         (**self).entry_kind(path)
+    }
+
+    fn opaque_directory_identity(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        (**self).opaque_directory_identity(path)
     }
 
     fn executable_mode(&self, path: &Path) -> io::Result<Option<bool>> {
@@ -750,6 +764,11 @@ impl<F: FileSystem> FileSystem for ScopedFs<F> {
 
     fn entry_kind(&self, path: &Path) -> io::Result<FileSystemEntryKind> {
         self.base.entry_kind(&self.resolve_for_read(path)?)
+    }
+
+    fn opaque_directory_identity(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.base
+            .opaque_directory_identity(&self.resolve_for_read(path)?)
     }
 
     fn root(&self) -> Option<&Path> {
@@ -1399,6 +1418,14 @@ impl<P: FileSystem, S: FileSystem> FileSystem for OverlayFs<P, S> {
         match self.primary.entry_kind(path)? {
             FileSystemEntryKind::Missing => self.secondary.entry_kind(path),
             kind => Ok(kind),
+        }
+    }
+
+    fn opaque_directory_identity(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        if self.primary.exists(path) {
+            self.primary.opaque_directory_identity(path)
+        } else {
+            self.secondary.opaque_directory_identity(path)
         }
     }
 
