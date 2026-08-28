@@ -701,6 +701,7 @@ fn msvc_aot_link_arguments(
     runtime: &Path,
     output: &Path,
     extension_archives: &[PathBuf],
+    ui: bool,
 ) -> Vec<OsString> {
     let mut arguments = vec![
         OsString::from("/NOLOGO"),
@@ -715,16 +716,16 @@ fn msvc_aot_link_arguments(
             .iter()
             .map(|archive| msvc_path_argument("/WHOLEARCHIVE:", archive)),
     );
-    // `staticlib` contains Rust dependencies but its dynamic native
-    // dependencies remain a responsibility of the final linker invocation.
-    // These are the stable Windows dependencies used by Rust's standard
-    // library; Windows API crates carry their exact DLL imports as raw-dylib
-    // records in the archived objects.
+    // `staticlib` contains Rust dependencies, while native dynamic imports
+    // remain the responsibility of the final linker invocation. Keep this
+    // list aligned with `rustc --print native-static-libs` for the runtimes.
     arguments.extend(
         [
             "advapi32.lib",
             "bcrypt.lib",
+            "dbghelp.lib",
             "kernel32.lib",
+            "legacy_stdio_definitions.lib",
             "ntdll.lib",
             "userenv.lib",
             "ws2_32.lib",
@@ -732,6 +733,22 @@ fn msvc_aot_link_arguments(
         .into_iter()
         .map(OsString::from),
     );
+    if ui {
+        arguments.extend(
+            [
+                "d3dcompiler.lib",
+                "dwmapi.lib",
+                "gdi32.lib",
+                "imm32.lib",
+                "opengl32.lib",
+                "shell32.lib",
+                "user32.lib",
+                "windowscodecs.lib",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+    }
     arguments
 }
 
@@ -778,6 +795,7 @@ fn link_native_aot(
         &runtime,
         &linked_file.0,
         extension_archives,
+        ui,
     ));
     #[cfg(not(windows))]
     command
@@ -3245,6 +3263,7 @@ mod tests {
             Path::new("vo_ui_aot_runtime_native.lib"),
             Path::new("program.exe"),
             &extensions,
+            true,
         );
         assert_eq!(
             &arguments[..8],
@@ -3262,13 +3281,33 @@ mod tests {
         for library in [
             "advapi32.lib",
             "bcrypt.lib",
+            "d3dcompiler.lib",
+            "dbghelp.lib",
+            "dwmapi.lib",
+            "gdi32.lib",
+            "imm32.lib",
             "kernel32.lib",
+            "legacy_stdio_definitions.lib",
             "ntdll.lib",
+            "opengl32.lib",
+            "shell32.lib",
+            "user32.lib",
             "userenv.lib",
+            "windowscodecs.lib",
             "ws2_32.lib",
         ] {
             assert!(arguments.contains(&OsString::from(library)));
         }
+
+        let core_arguments = msvc_aot_link_arguments(
+            Path::new("program.obj"),
+            Path::new("vo_aot_runtime.lib"),
+            Path::new("program.exe"),
+            &[],
+            false,
+        );
+        assert!(!core_arguments.contains(&OsString::from("d3dcompiler.lib")));
+        assert!(!core_arguments.contains(&OsString::from("user32.lib")));
     }
 
     #[test]
