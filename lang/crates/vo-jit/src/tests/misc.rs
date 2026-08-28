@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(target_arch = "aarch64")]
 fn call_native_lane0(
     entry: NativeJitFunc,
     ctx: *mut JitContext,
@@ -9,31 +8,6 @@ fn call_native_lane0(
     lane0: u64,
 ) -> JitResult {
     entry(ctx, frame_bp, ret, lane0, 0, 0, 0, 0)
-}
-
-#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-fn call_native_lane0(
-    entry: NativeJitFunc,
-    ctx: *mut JitContext,
-    frame_bp: u64,
-    ret: *mut u64,
-    lane0: u64,
-) -> JitResult {
-    entry(ctx, frame_bp, ret, lane0, 0, 0)
-}
-
-#[cfg(any(
-    all(target_arch = "x86_64", target_os = "windows"),
-    not(any(target_arch = "aarch64", target_arch = "x86_64"))
-))]
-fn call_native_lane0(
-    entry: NativeJitFunc,
-    ctx: *mut JitContext,
-    frame_bp: u64,
-    ret: *mut u64,
-    lane0: u64,
-) -> JitResult {
-    entry(ctx, frame_bp, ret, lane0)
 }
 
 #[test]
