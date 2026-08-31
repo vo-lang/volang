@@ -707,6 +707,13 @@ fn msvc_aot_link_arguments(
         OsString::from("/NOLOGO"),
         OsString::from("/INCREMENTAL:NO"),
         OsString::from("/SUBSYSTEM:CONSOLE"),
+        // MSVC executables reserve only 1 MiB for the main thread by default,
+        // while the equivalent Unix launchers normally receive 8 MiB. Volang
+        // programs can build substantial UI trees during their first VM
+        // revision, so keep Native AOT launch capacity consistent across the
+        // supported desktop platforms. This reserves address space; Windows
+        // still commits stack pages on demand.
+        OsString::from("/STACK:8388608"),
         object.as_os_str().to_owned(),
         runtime.as_os_str().to_owned(),
         msvc_path_argument("/OUT:", output),
@@ -3281,11 +3288,12 @@ mod tests {
             true,
         );
         assert_eq!(
-            &arguments[..8],
+            &arguments[..9],
             &[
                 OsString::from("/NOLOGO"),
                 OsString::from("/INCREMENTAL:NO"),
                 OsString::from("/SUBSYSTEM:CONSOLE"),
+                OsString::from("/STACK:8388608"),
                 OsString::from("program.obj"),
                 OsString::from("vo_ui_aot_runtime_native.lib"),
                 OsString::from("/OUT:program.exe"),
