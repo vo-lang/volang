@@ -3073,7 +3073,7 @@ func main() {
             mutation,
             vo_ui_protocol::Mutation::SetProperty { property, .. }
                 if property.id == vo_ui_core::PropertyId::RADIUS
-                    && property.value == vo_ui_core::Value::Length(vo_ui_core::Length::Px(8.0))
+                    && property.value == vo_ui_core::Value::Length(vo_ui_core::Length::Px(10.0))
         )));
         for (id, value) in [
             (

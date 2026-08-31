@@ -1,18 +1,20 @@
 VPX2 revision=1 viewport=760.000,520.000
-fill node=1:1 rect=0.000,0.000,760.000,327.750 clip=- color=fff7f7f8 radius=0.000
-fill node=2:1 rect=24.000,24.000,712.000,279.750 clip=- color=ffffffff radius=8.000
-stroke node=2:1 rect=24.000,24.000,712.000,279.750 clip=- color=ffc8ccd4 radius=8.000 width=1.000
-text node=4:1 rect=40.000,40.000,92.400,30.000 clip=- color=ff16181d size=24.000 weight=700 value="Account"
-text node=7:1 rect=40.000,86.000,92.400,17.500 clip=- color=ff16181d size=14.000 weight=600 value="Display name"
-fill node=8:1 rect=40.000,107.500,160.000,40.000 clip=- color=ffffffff radius=8.000
-stroke node=8:1 rect=40.000,107.500,160.000,40.000 clip=- color=ffc8ccd4 radius=8.000 width=1.000
-editor node=8:1 rect=40.000,107.500,160.000,40.000 clip=- color=ff000000 size=14.000 weight=400 selection=0,0 value="Ada" placeholder="Your name"
-text node=10:1 rect=40.000,151.500,114.400,16.250 clip=- color=ffc4314b size=13.000 weight=400 value="Name is required"
-fill node=12:1 rect=40.000,183.750,40.000,24.000 clip=- color=ff315efb radius=12.000
-fill node=12:1 rect=59.000,186.750,18.000,18.000 clip=- color=ffffffff radius=9.000
-text node=14:1 rect=88.000,183.750,100.100,17.500 clip=- color=ff16181d size=14.000 weight=400 value="Email updates"
-fill node=16:1 rect=40.000,223.750,100.000,8.000 clip=- color=ff646b76 radius=8.000
-fill node=17:1 rect=40.000,223.750,42.000,8.000 clip=- color=ff315efb radius=8.000
-fill node=19:1 rect=40.000,247.750,54.800,40.000 clip=- color=ff315efb radius=8.000
-stroke node=19:1 rect=40.000,247.750,54.800,40.000 clip=- color=ff315efb radius=8.000 width=1.000
-text node=20:1 rect=52.000,259.750,30.800,17.500 clip=- color=ffffffff size=14.000 weight=600 value="Save"
+fill node=1:1 rect=0.000,0.000,760.000,338.750 clip=- color=fff4f6fa radius=0.000
+fill node=2:1 rect=31.200,32.600,697.600,276.350 clip=- color=0f000000 radius=10.800
+fill node=2:1 rect=31.650,32.200,696.700,275.450 clip=- color=0c000000 radius=10.350
+fill node=2:1 rect=32.000,32.000,696.000,274.750 clip=- color=ffffffff radius=10.000
+stroke node=2:1 rect=32.000,32.000,696.000,274.750 clip=- color=ffd4dae5 radius=10.000 width=1.000
+text node=4:1 rect=48.000,48.000,77.000,25.000 clip=- color=ff111827 size=20.000 weight=700 value="Account"
+text node=7:1 rect=48.000,89.000,92.400,17.500 clip=- color=ff111827 size=14.000 weight=600 value="Display name"
+fill node=8:1 rect=48.000,110.500,160.000,40.000 clip=- color=ffffffff radius=10.000
+stroke node=8:1 rect=48.000,110.500,160.000,40.000 clip=- color=ffd4dae5 radius=10.000 width=1.000
+editor node=8:1 rect=48.000,110.500,160.000,40.000 clip=- color=ff111827 size=14.000 weight=400 selection=0,0 value="Ada" placeholder="Your name"
+text node=10:1 rect=48.000,154.500,114.400,16.250 clip=- color=ffc12f4f size=13.000 weight=400 value="Name is required"
+fill node=12:1 rect=48.000,186.750,40.000,24.000 clip=- color=ff365cf5 radius=12.000
+fill node=12:1 rect=67.000,189.750,18.000,18.000 clip=- color=ffffffff radius=9.000
+text node=14:1 rect=96.000,186.750,100.100,17.500 clip=- color=ff111827 size=14.000 weight=400 value="Email updates"
+fill node=16:1 rect=48.000,226.750,100.000,8.000 clip=- color=ff596274 radius=10.000
+fill node=17:1 rect=48.000,226.750,42.000,8.000 clip=- color=ff365cf5 radius=10.000
+fill node=19:1 rect=48.000,250.750,54.800,40.000 clip=- color=ff365cf5 radius=10.000
+stroke node=19:1 rect=48.000,250.750,54.800,40.000 clip=- color=ff365cf5 radius=10.000 width=1.000
+text node=20:1 rect=60.000,262.750,30.800,17.500 clip=- color=ffffffff size=14.000 weight=600 value="Save"

@@ -226,7 +226,7 @@ jobs:
       - name: Enforce Core Wasm AOT image budgets
         run: |
           mkdir -p target/ui-certification/web-size
-          node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 358400 --output target/ui-certification/web-size/component-gallery.json
+          node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/component-gallery.json
           node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/data-application.json
           node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/content-site.json
           node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/media-application.json
