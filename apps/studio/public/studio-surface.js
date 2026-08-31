@@ -22,8 +22,12 @@ function showError(cause) {
 window.addEventListener('message', (event) => {
   if (event.source !== window.parent || event.origin !== embeddingOrigin) return;
   const message = event.data;
-  if (message?.protocol !== PROTOCOL || !(message.artifact instanceof ArrayBuffer)
-    || message.artifact.byteLength === 0 || message.artifact.byteLength > MAX_ARTIFACT_BYTES) {
+  // Studio and the embedded application share one same-origin parent/child
+  // channel. Messages for other Studio services are unrelated to this surface
+  // and must remain invisible to the preview.
+  if (message?.protocol !== PROTOCOL) return;
+  if (!(message.artifact instanceof ArrayBuffer) || message.artifact.byteLength === 0
+    || message.artifact.byteLength > MAX_ARTIFACT_BYTES) {
     showError(new Error('Studio preview payload is invalid'));
     return;
   }

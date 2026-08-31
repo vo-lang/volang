@@ -3625,6 +3625,34 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     (value) => typeof value === "string" && value.includes("Count: 1"),
     timeoutMilliseconds,
   );
+  const unrelatedMessagePosted = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const frame = document.querySelector('iframe[title="Volang application preview"]');
+      if (!(frame instanceof HTMLIFrameElement) || frame.contentWindow === null) return false;
+      frame.contentWindow.postMessage({
+        protocol: 'volang.studio.host.v1',
+        kind: 'workspace-status',
+      }, location.origin);
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (unrelatedMessagePosted.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not exercise preview message isolation");
+  }
+  checkpoints.previewMessageIsolation = await pollEvaluation(
+    browser,
+    sessionId,
+    `(() => {
+      const frame = document.querySelector('iframe[title="Volang application preview"]');
+      return {
+        text: frame?.contentDocument?.body?.innerText ?? "",
+        error: frame?.contentDocument?.querySelector('#preview-error')?.textContent ?? "",
+      };
+    })()`,
+    (value) => value?.text.includes("Count: 1") && value?.error === "",
+    timeoutMilliseconds,
+  );
   await activateButton("Source Control");
   await activateButton("GitHub account");
   checkpoints.account = await pollEvaluation(
