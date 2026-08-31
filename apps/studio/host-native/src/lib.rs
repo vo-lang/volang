@@ -1731,15 +1731,27 @@ fn collect_files(
 }
 
 fn diagnostic(path: &str, message: &str) -> Value {
+    let (line, column) = compiler_position(message).unwrap_or((1, 1));
     json!({
         "path": path,
-        "line": 1,
-        "column": 1,
-        "endLine": 1,
-        "endColumn": 1,
+        "line": line,
+        "column": column,
+        "endLine": line,
+        "endColumn": column.saturating_add(1),
         "severity": 3,
         "code": "volang/compiler",
         "message": message,
+    })
+}
+
+fn compiler_position(message: &str) -> Option<(usize, usize)> {
+    message.lines().rev().find_map(|message_line| {
+        let location = message_line.rsplit_once(" at ")?.1.trim();
+        let mut fields = location.rsplitn(3, ':');
+        let column = fields.next()?.parse::<usize>().ok()?;
+        let line = fields.next()?.parse::<usize>().ok()?;
+        let source = fields.next()?;
+        (line > 0 && column > 0 && !source.is_empty()).then_some((line, column))
     })
 }
 
@@ -2026,6 +2038,27 @@ mod tests {
     use vo_app_protocol::GenerationalHandle;
     use vo_ui_core::{PropertyId, Value as UiValue};
     use vo_ui_protocol::NodeKind;
+
+    #[test]
+    fn compiler_diagnostic_uses_the_reported_source_position() {
+        let value = diagnostic(
+            "main.vo",
+            "parse error: 1 error(s)\n  - expected type, found EOF at main.vo:3:11\n",
+        );
+        assert_eq!(value["line"], 3);
+        assert_eq!(value["column"], 11);
+        assert_eq!(value["endLine"], 3);
+        assert_eq!(value["endColumn"], 12);
+    }
+
+    #[test]
+    fn compiler_diagnostic_position_handles_colons_and_falls_back_safely() {
+        assert_eq!(
+            compiler_position("type check failed\n  - invalid at C:/workspace/main.vo:9:4"),
+            Some((9, 4))
+        );
+        assert_eq!(compiler_position("compiler unavailable"), None);
+    }
 
     #[test]
     fn cancellable_child_fixture() {

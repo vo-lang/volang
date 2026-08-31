@@ -124,15 +124,35 @@ struct InheritedStyle {
 struct SceneBuilder<'a> {
     tree: &'a TreeMirror,
     layout: &'a LayoutSnapshot,
+    interaction: PaintInteractionState,
     limits: PaintLimits,
     commands: Vec<DrawCommand>,
     text_bytes: usize,
+}
+
+/// Retained host interaction projected into a paint frame. Targets may be
+/// leaves; authored state colors on ancestors apply while the target remains
+/// inside that ancestor's logical subtree.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PaintInteractionState {
+    pub hovered: Option<NodeId>,
+    pub pressed: Option<NodeId>,
+    pub focused: Option<NodeId>,
 }
 
 pub fn build_paint_scene(
     tree: &TreeMirror,
     layout: &LayoutSnapshot,
     limits: PaintLimits,
+) -> Result<PaintScene, PaintError> {
+    build_paint_scene_with_interaction(tree, layout, limits, PaintInteractionState::default())
+}
+
+pub fn build_paint_scene_with_interaction(
+    tree: &TreeMirror,
+    layout: &LayoutSnapshot,
+    limits: PaintLimits,
+    interaction: PaintInteractionState,
 ) -> Result<PaintScene, PaintError> {
     if limits.max_commands == 0 || limits.max_depth == 0 || limits.max_text_bytes == 0 {
         return Err(PaintError::InvalidLimits);
@@ -143,6 +163,7 @@ pub fn build_paint_scene(
     let mut builder = SceneBuilder {
         tree,
         layout,
+        interaction,
         limits,
         commands: Vec::new(),
         text_bytes: 0,
@@ -167,6 +188,17 @@ pub fn build_paint_scene(
 }
 
 impl SceneBuilder<'_> {
+    fn target_is_within(&self, ancestor: NodeId, target: Option<NodeId>) -> bool {
+        let mut current = target;
+        while let Some(node) = current {
+            if node == ancestor {
+                return true;
+            }
+            current = self.tree.node(node).and_then(|snapshot| snapshot.parent);
+        }
+        false
+    }
+
     fn visit(
         &mut self,
         id: NodeId,
@@ -198,8 +230,50 @@ impl SceneBuilder<'_> {
                 .unwrap_or(inherited.font_weight),
             opacity: inherited.opacity * local_opacity,
         };
+        if let Some(level) = integer_property(&node, PropertyId::ELEVATION, id)? {
+            if !(0..=5).contains(&level) {
+                return Err(PaintError::InvalidProperty(id, PropertyId::ELEVATION));
+            }
+            if level > 0 {
+                let amount = level as f64;
+                let radius = number_property(&node, PropertyId::RADIUS, id)?.unwrap_or(0.0);
+                for (spread, offset, alpha) in [
+                    (amount * 0.8, amount * 1.4, 10_u32 + level as u32 * 5),
+                    (amount * 0.35, amount * 0.55, 8_u32 + level as u32 * 4),
+                ] {
+                    self.push(DrawCommand::FillRect {
+                        node: id,
+                        rect: Rect::new(
+                            layout.rect.x - spread,
+                            layout.rect.y + offset - spread,
+                            layout.rect.width + spread * 2.0,
+                            layout.rect.height + spread * 2.0,
+                        ),
+                        clip: layout.clip,
+                        color: color_with_opacity(alpha << 24, style.opacity),
+                        radius: radius + spread,
+                    })?;
+                }
+            }
+        }
         if node.kind != NodeKind::Element(vo_ui_core::Primitive::Slider) {
-            if let Some(color) = color_property(&node, PropertyId::BACKGROUND, id)? {
+            let disabled = boolean_property(&node, PropertyId::DISABLED, id)?.unwrap_or(false);
+            let background_property = if !disabled
+                && self.target_is_within(id, self.interaction.pressed)
+                && node
+                    .properties
+                    .contains_key(&PropertyId::PRESSED_BACKGROUND)
+            {
+                PropertyId::PRESSED_BACKGROUND
+            } else if !disabled
+                && self.target_is_within(id, self.interaction.hovered)
+                && node.properties.contains_key(&PropertyId::HOVER_BACKGROUND)
+            {
+                PropertyId::HOVER_BACKGROUND
+            } else {
+                PropertyId::BACKGROUND
+            };
+            if let Some(color) = color_property(&node, background_property, id)? {
                 self.push(DrawCommand::FillRect {
                     node: id,
                     rect: layout.rect,
@@ -222,6 +296,18 @@ impl SceneBuilder<'_> {
                     color: color_with_opacity(color, style.opacity),
                     radius: number_property(&node, PropertyId::RADIUS, id)?.unwrap_or(0.0),
                     width,
+                })?;
+            }
+        }
+        if self.target_is_within(id, self.interaction.focused) {
+            if let Some(color) = color_property(&node, PropertyId::FOCUS_RING, id)? {
+                self.push(DrawCommand::StrokeRect {
+                    node: id,
+                    rect: layout.rect,
+                    clip: layout.clip,
+                    color: color_with_opacity(color, style.opacity),
+                    radius: number_property(&node, PropertyId::RADIUS, id)?.unwrap_or(0.0),
+                    width: 3.0,
                 })?;
             }
         }
@@ -940,6 +1026,143 @@ mod tests {
                 value,
                 ..
             } if value == "hello"
+        ));
+    }
+
+    #[test]
+    fn retained_interaction_states_resolve_on_authored_ancestors() {
+        let (mut tree, _) = fixture();
+        let card = NodeId::new(1, 1);
+        let text = NodeId::new(2, 1);
+        tree.apply(&MutationBatch::new(
+            7,
+            2,
+            alloc::vec![
+                Mutation::SetProperty {
+                    id: card,
+                    property: Property::new(
+                        PropertyId::HOVER_BACKGROUND,
+                        Value::Color(0xff223344),
+                    ),
+                },
+                Mutation::SetProperty {
+                    id: card,
+                    property: Property::new(
+                        PropertyId::PRESSED_BACKGROUND,
+                        Value::Color(0xff334455),
+                    ),
+                },
+                Mutation::SetProperty {
+                    id: card,
+                    property: Property::new(
+                        PropertyId::FOCUS_RING,
+                        Value::Color(0xff445566),
+                    ),
+                },
+            ],
+        ))
+        .unwrap();
+        let layout = compute_layout(
+            &tree,
+            Size::new(300.0, 200.0),
+            LayoutLimits::default(),
+            &mut ApproximateTextMeasurer,
+        )
+        .unwrap();
+        let hovered = build_paint_scene_with_interaction(
+            &tree,
+            &layout,
+            PaintLimits::default(),
+            PaintInteractionState {
+                hovered: Some(text),
+                ..PaintInteractionState::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            hovered.commands()[0],
+            DrawCommand::FillRect {
+                color: 0xff223344,
+                ..
+            }
+        ));
+
+        let pressed_and_focused = build_paint_scene_with_interaction(
+            &tree,
+            &layout,
+            PaintLimits::default(),
+            PaintInteractionState {
+                hovered: Some(text),
+                pressed: Some(text),
+                focused: Some(text),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            pressed_and_focused.commands()[0],
+            DrawCommand::FillRect {
+                color: 0xff334455,
+                ..
+            }
+        ));
+        assert!(pressed_and_focused
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                DrawCommand::StrokeRect {
+                    node,
+                    color: 0xff445566,
+                    width: 3.0,
+                    ..
+                } if *node == card
+            )));
+    }
+
+    #[test]
+    fn bounded_elevation_adds_effect_commands_before_surface_paint() {
+        let (mut tree, _) = fixture();
+        let card = NodeId::new(1, 1);
+        tree.apply(&MutationBatch::new(
+            7,
+            2,
+            alloc::vec![Mutation::SetProperty {
+                id: card,
+                property: Property::new(PropertyId::ELEVATION, Value::I64(3)),
+            }],
+        ))
+        .unwrap();
+        let layout = compute_layout(
+            &tree,
+            Size::new(300.0, 200.0),
+            LayoutLimits::default(),
+            &mut ApproximateTextMeasurer,
+        )
+        .unwrap();
+        let scene = build_paint_scene(&tree, &layout, PaintLimits::default()).unwrap();
+        assert!(matches!(
+            scene.commands()[0],
+            DrawCommand::FillRect {
+                node,
+                color: 0x19000000,
+                ..
+            } if node == card
+        ));
+        assert!(matches!(
+            scene.commands()[1],
+            DrawCommand::FillRect {
+                node,
+                color: 0x14000000,
+                ..
+            } if node == card
+        ));
+        assert!(matches!(
+            scene.commands()[2],
+            DrawCommand::FillRect {
+                node,
+                color: 0xff112233,
+                ..
+            } if node == card
         ));
     }
 

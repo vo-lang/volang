@@ -72,6 +72,21 @@ status = "implemented"
 acceptance = "Resizable workspace, explorer, multi-buffer editor, save/save-all, undo/redo, find, diagnostics, search, console, preview, and commands work from one state model."
 
 [[capability]]
+id = "responsive-workbench"
+status = "implemented"
+acceptance = "Desktop and compact layouts keep project actions, explorer, editor, contextual output, documentation, preview, and source control usable without page-level horizontal overflow."
+
+[[capability]]
+id = "diagnostic-navigation"
+status = "implemented"
+acceptance = "Compiler failures retain their reported file, line, and column; activating a problem opens the file, scrolls to the range, moves the selection, and returns focus to the editor on Web and desktop."
+
+[[capability]]
+id = "command-palette"
+status = "implemented"
+acceptance = "The accessible filtered command palette covers navigation, editing, preview, sharing, and explicit VM/JIT execution with a full-viewport modal overlay."
+
+[[capability]]
 id = "independent-runner"
 status = "implemented"
 acceptance = "A shareable chromeless runner owns loading, failure recovery, stop, and return-to-Studio flows on Web and desktop."

@@ -231,6 +231,18 @@ fn length(value: &Length) -> String {
     }
 }
 
+fn elevation_shadow(level: i64) -> Option<&'static str> {
+    match level {
+        0 => Some("none"),
+        1 => Some("0 1px 2px rgb(15 23 42 / 0.10),0 1px 4px rgb(15 23 42 / 0.08)"),
+        2 => Some("0 3px 8px rgb(15 23 42 / 0.12),0 1px 3px rgb(15 23 42 / 0.10)"),
+        3 => Some("0 8px 20px rgb(15 23 42 / 0.16),0 2px 6px rgb(15 23 42 / 0.10)"),
+        4 => Some("0 14px 34px rgb(15 23 42 / 0.20),0 4px 10px rgb(15 23 42 / 0.12)"),
+        5 => Some("0 24px 56px rgb(15 23 42 / 0.24),0 8px 18px rgb(15 23 42 / 0.14)"),
+        _ => None,
+    }
+}
+
 fn style(node: &NodeSnapshot) -> Result<String, SsrError> {
     // Keep server HTML geometrically equivalent to the live DOM renderer.
     // Nested flex/grid children need zero minimums so a Scroll node can own
@@ -294,8 +306,47 @@ fn style(node: &NodeSnapshot) -> Result<String, SsrError> {
         )
         .expect("writing to String cannot fail");
     }
+    for (property, name) in [
+        (PropertyId::HOVER_BACKGROUND, "--volang-hover-background"),
+        (
+            PropertyId::PRESSED_BACKGROUND,
+            "--volang-pressed-background",
+        ),
+        (PropertyId::FOCUS_RING, "--volang-focus-ring"),
+    ] {
+        if let Some(Value::Color(value)) = node.properties.get(&property) {
+            let [alpha, red, green, blue] = value.to_be_bytes();
+            write!(output, "{name}:#{red:02x}{green:02x}{blue:02x}{alpha:02x};")
+                .expect("writing to String cannot fail");
+        } else if node.properties.contains_key(&property) {
+            return Err(SsrError::InvalidProperty(node.id, property));
+        }
+    }
+    if let Some(value) = node.properties.get(&PropertyId::ELEVATION) {
+        let Value::I64(level) = value else {
+            return Err(SsrError::InvalidProperty(node.id, PropertyId::ELEVATION));
+        };
+        let shadow = elevation_shadow(*level)
+            .ok_or(SsrError::InvalidProperty(node.id, PropertyId::ELEVATION))?;
+        write!(output, "box-shadow:{shadow};").expect("writing to String cannot fail");
+    }
     if let Some(Value::I64(value)) = node.properties.get(&PropertyId::FONT_WEIGHT) {
         write!(output, "font-weight:{value};").expect("writing to String cannot fail");
+    }
+    if let Some(value) = text_property(node, PropertyId::FONT_FAMILY)? {
+        if !matches!(value, "system-ui" | "sans-serif" | "serif" | "monospace") {
+            return Err(SsrError::InvalidProperty(node.id, PropertyId::FONT_FAMILY));
+        }
+        write!(output, "font-family:{value};").expect("writing to String cannot fail");
+    }
+    if let Some(value) = text_property(node, PropertyId::WHITE_SPACE)? {
+        if !matches!(
+            value,
+            "normal" | "pre" | "pre-wrap" | "nowrap" | "break-spaces"
+        ) {
+            return Err(SsrError::InvalidProperty(node.id, PropertyId::WHITE_SPACE));
+        }
+        write!(output, "white-space:{value};").expect("writing to String cannot fail");
     }
     if let Some(Value::Text(value)) = node.properties.get(&PropertyId::GRID_COLUMNS) {
         write!(output, "grid-template-columns:{value};").expect("writing to String cannot fail");
@@ -425,6 +476,10 @@ impl Renderer<'_> {
             (PropertyId::ACCESSIBLE_DESCRIPTION, "aria-description"),
             (PropertyId::PLACEHOLDER, "placeholder"),
             (PropertyId::TEST_ID, "data-testid"),
+            (PropertyId::ELEMENT_ID, "id"),
+            (PropertyId::ACTIVE_DESCENDANT, "aria-activedescendant"),
+            (PropertyId::CONTROLS, "aria-controls"),
+            (PropertyId::AUTO_COMPLETE, "aria-autocomplete"),
             (PropertyId::CURRENT, "aria-current"),
             (PropertyId::SOURCE, "src"),
             (PropertyId::CONTENT_TYPE, "data-volang-content-type"),
@@ -436,21 +491,65 @@ impl Renderer<'_> {
                 attribute(&mut self.html, name, value);
             }
         }
+        if let Some(Value::I64(level)) = node.properties.get(&PropertyId::ELEVATION) {
+            attribute(&mut self.html, "data-volang-elevation", &level.to_string());
+        }
+        if let Some(Value::Bool(value)) = node.properties.get(&PropertyId::MULTI_SELECTABLE) {
+            attribute(
+                &mut self.html,
+                "aria-multiselectable",
+                if *value { "true" } else { "false" },
+            );
+        }
         for (property, name) in [
-            (PropertyId::VALUE, "value"),
-            (PropertyId::MIN_VALUE, "min"),
-            (PropertyId::MAX_VALUE, "max"),
-            (PropertyId::STEP_VALUE, "step"),
+            (PropertyId::HOVER_BACKGROUND, "data-volang-hover-background"),
+            (
+                PropertyId::PRESSED_BACKGROUND,
+                "data-volang-pressed-background",
+            ),
+            (PropertyId::FOCUS_RING, "data-volang-focus-ring"),
         ] {
-            if let Some(value) = scalar_property(&node, property)? {
-                attribute(&mut self.html, name, &value);
+            if node.properties.contains_key(&property) {
+                attribute(&mut self.html, name, "");
             }
         }
-        boolean_attribute(
-            &mut self.html,
-            "disabled",
-            bool_property(&node, PropertyId::DISABLED)?,
-        );
+        let role = text_property(&node, PropertyId::ROLE)?;
+        if let Some(value) = scalar_property(&node, PropertyId::VALUE)? {
+            attribute(&mut self.html, "value", &value);
+            if role == Some("spinbutton") {
+                attribute(&mut self.html, "aria-valuenow", &value);
+            }
+        }
+        for (property, native_name, composed_name) in [
+            (PropertyId::MIN_VALUE, "min", "aria-valuemin"),
+            (PropertyId::MAX_VALUE, "max", "aria-valuemax"),
+            (PropertyId::STEP_VALUE, "step", "data-volang-step"),
+        ] {
+            if let Some(value) = scalar_property(&node, property)? {
+                attribute(
+                    &mut self.html,
+                    if primitive == Primitive::Slider {
+                        native_name
+                    } else {
+                        composed_name
+                    },
+                    &value,
+                );
+            }
+        }
+        let disabled = bool_property(&node, PropertyId::DISABLED)?;
+        if matches!(
+            primitive,
+            Primitive::Button
+                | Primitive::TextInput
+                | Primitive::TextArea
+                | Primitive::Toggle
+                | Primitive::Slider
+        ) {
+            boolean_attribute(&mut self.html, "disabled", disabled);
+        } else {
+            aria_boolean(&mut self.html, "aria-disabled", disabled);
+        }
         boolean_attribute(
             &mut self.html,
             "required",
@@ -799,6 +898,28 @@ mod tests {
                     id: row,
                     property: Property::new(PropertyId::FOREGROUND, Value::Color(0xff44_5566)),
                 },
+                Mutation::SetProperty {
+                    id: row,
+                    property: Property::new(
+                        PropertyId::HOVER_BACKGROUND,
+                        Value::Color(0xff55_6677),
+                    ),
+                },
+                Mutation::SetProperty {
+                    id: row,
+                    property: Property::new(
+                        PropertyId::PRESSED_BACKGROUND,
+                        Value::Color(0xff66_7788),
+                    ),
+                },
+                Mutation::SetProperty {
+                    id: row,
+                    property: Property::new(PropertyId::FOCUS_RING, Value::Color(0xff77_8899)),
+                },
+                Mutation::SetProperty {
+                    id: row,
+                    property: Property::new(PropertyId::ELEVATION, Value::I64(3)),
+                },
                 Mutation::InsertBefore {
                     parent: root,
                     child: row,
@@ -810,8 +931,14 @@ mod tests {
         let rendered =
             render_document(&tree, &DocumentMetadata::default(), SsrLimits::default()).unwrap();
         assert!(rendered.html.contains(
-            "style=\"min-width:0;min-height:0;display:flex;flex-direction:row;background-color:#11223380;color:#445566ff;\""
+            "style=\"min-width:0;min-height:0;display:flex;flex-direction:row;background-color:#11223380;color:#445566ff;--volang-hover-background:#556677ff;--volang-pressed-background:#667788ff;--volang-focus-ring:#778899ff;box-shadow:0 8px 20px rgb(15 23 42 / 0.16),0 2px 6px rgb(15 23 42 / 0.10);\""
         ));
+        assert!(rendered.html.contains("data-volang-hover-background=\"\""));
+        assert!(rendered
+            .html
+            .contains("data-volang-pressed-background=\"\""));
+        assert!(rendered.html.contains("data-volang-focus-ring=\"\""));
+        assert!(rendered.html.contains("data-volang-elevation=\"3\""));
     }
 
     #[test]
@@ -863,5 +990,188 @@ mod tests {
         assert!(rendered.html.contains("min=\"0\""));
         assert!(rendered.html.contains("max=\"100\""));
         assert!(rendered.html.contains("step=\"0.5\""));
+    }
+
+    #[test]
+    fn code_text_preserves_font_family_and_whitespace_before_activation() {
+        let root = NodeId::new(0, 1);
+        let code = NodeId::new(1, 1);
+        let mut tree = TreeMirror::new(12, root, ProtocolLimits::default());
+        tree.apply(&MutationBatch::new(
+            12,
+            1,
+            vec![
+                Mutation::Create {
+                    id: code,
+                    kind: NodeKind::Element(Primitive::Text),
+                },
+                Mutation::SetProperty {
+                    id: code,
+                    property: Property::new(PropertyId::FONT_FAMILY, "monospace"),
+                },
+                Mutation::SetProperty {
+                    id: code,
+                    property: Property::new(PropertyId::WHITE_SPACE, "pre"),
+                },
+                Mutation::InsertBefore {
+                    parent: root,
+                    child: code,
+                    before: None,
+                },
+            ],
+        ))
+        .unwrap();
+        let rendered =
+            render_document(&tree, &DocumentMetadata::default(), SsrLimits::default()).unwrap();
+        assert!(rendered
+            .html
+            .contains("font-family:monospace;white-space:pre;"));
+    }
+
+    #[test]
+    fn composite_choice_relationships_render_before_activation() {
+        let root = NodeId::new(0, 1);
+        let input = NodeId::new(1, 1);
+        let listbox = NodeId::new(2, 1);
+        let mut tree = TreeMirror::new(13, root, ProtocolLimits::default());
+        tree.apply(&MutationBatch::new(
+            13,
+            1,
+            vec![
+                Mutation::Create {
+                    id: input,
+                    kind: NodeKind::Element(Primitive::TextInput),
+                },
+                Mutation::SetProperty {
+                    id: input,
+                    property: Property::new(PropertyId::ELEMENT_ID, "package-input"),
+                },
+                Mutation::SetProperty {
+                    id: input,
+                    property: Property::new(PropertyId::ACTIVE_DESCENDANT, "package-option-1"),
+                },
+                Mutation::SetProperty {
+                    id: input,
+                    property: Property::new(PropertyId::CONTROLS, "package-listbox"),
+                },
+                Mutation::SetProperty {
+                    id: input,
+                    property: Property::new(PropertyId::AUTO_COMPLETE, "list"),
+                },
+                Mutation::Create {
+                    id: listbox,
+                    kind: NodeKind::Element(Primitive::Column),
+                },
+                Mutation::SetProperty {
+                    id: listbox,
+                    property: Property::new(PropertyId::ELEMENT_ID, "package-listbox"),
+                },
+                Mutation::SetProperty {
+                    id: listbox,
+                    property: Property::new(PropertyId::ROLE, "listbox"),
+                },
+                Mutation::SetProperty {
+                    id: listbox,
+                    property: Property::new(PropertyId::MULTI_SELECTABLE, true),
+                },
+                Mutation::InsertBefore {
+                    parent: root,
+                    child: input,
+                    before: None,
+                },
+                Mutation::InsertBefore {
+                    parent: root,
+                    child: listbox,
+                    before: None,
+                },
+            ],
+        ))
+        .unwrap();
+        let rendered =
+            render_document(&tree, &DocumentMetadata::default(), SsrLimits::default()).unwrap();
+        assert!(rendered.html.contains("id=\"package-input\""));
+        assert!(rendered
+            .html
+            .contains("aria-activedescendant=\"package-option-1\""));
+        assert!(rendered.html.contains("aria-controls=\"package-listbox\""));
+        assert!(rendered.html.contains("aria-autocomplete=\"list\""));
+        assert!(rendered
+            .html
+            .contains("role=\"listbox\" id=\"package-listbox\""));
+        assert!(rendered.html.contains("aria-multiselectable=\"true\""));
+    }
+
+    #[test]
+    fn composed_controls_render_aria_state_before_activation() {
+        let root = NodeId::new(0, 1);
+        let spin = NodeId::new(1, 1);
+        let action = NodeId::new(2, 1);
+        let mut tree = TreeMirror::new(11, root, ProtocolLimits::default());
+        tree.apply(&MutationBatch::new(
+            11,
+            1,
+            vec![
+                Mutation::Create {
+                    id: spin,
+                    kind: NodeKind::Element(Primitive::TextInput),
+                },
+                Mutation::SetProperty {
+                    id: spin,
+                    property: Property::new(PropertyId::ROLE, "spinbutton"),
+                },
+                Mutation::SetProperty {
+                    id: spin,
+                    property: Property::new(PropertyId::VALUE, "3"),
+                },
+                Mutation::SetProperty {
+                    id: spin,
+                    property: Property::new(PropertyId::MIN_VALUE, 1.0_f64),
+                },
+                Mutation::SetProperty {
+                    id: spin,
+                    property: Property::new(PropertyId::MAX_VALUE, 10.0_f64),
+                },
+                Mutation::SetProperty {
+                    id: spin,
+                    property: Property::new(PropertyId::STEP_VALUE, 1.0_f64),
+                },
+                Mutation::Create {
+                    id: action,
+                    kind: NodeKind::Element(Primitive::Row),
+                },
+                Mutation::SetProperty {
+                    id: action,
+                    property: Property::new(PropertyId::ROLE, "button"),
+                },
+                Mutation::SetProperty {
+                    id: action,
+                    property: Property::new(PropertyId::DISABLED, true),
+                },
+                Mutation::InsertBefore {
+                    parent: root,
+                    child: spin,
+                    before: None,
+                },
+                Mutation::InsertBefore {
+                    parent: root,
+                    child: action,
+                    before: None,
+                },
+            ],
+        ))
+        .unwrap();
+        let rendered =
+            render_document(&tree, &DocumentMetadata::default(), SsrLimits::default()).unwrap();
+        assert!(rendered.html.contains("role=\"spinbutton\""));
+        assert!(rendered.html.contains("aria-valuenow=\"3\""));
+        assert!(rendered.html.contains("aria-valuemin=\"1\""));
+        assert!(rendered.html.contains("aria-valuemax=\"10\""));
+        assert!(rendered.html.contains("data-volang-step=\"1\""));
+        assert!(rendered
+            .html
+            .contains("data-volang-primitive=\"row\" role=\"button\" aria-disabled=\"true\""));
+        assert!(!rendered
+            .html
+            .contains("data-volang-primitive=\"row\" role=\"button\" disabled"));
     }
 }

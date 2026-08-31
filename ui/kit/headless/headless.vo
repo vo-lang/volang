@@ -27,7 +27,8 @@ func Pressable(label string, disabled bool, content ui.View, onActivate func()) 
 		}
 	})
 	return ui.OnKeyDown(control, func(event ui.Event) {
-		if !disabled && !event.Repeat && (event.Key == "Enter" || event.Key == " " || event.Key == "Space") {
+		if !disabled && !event.Repeat &&
+			(event.Key == "Enter" || event.Key == " " || event.Key == "Space") {
 			onActivate()
 		}
 	})
@@ -157,7 +158,7 @@ func movedEnabledIndex(event ui.Event, index int64, count int64, orientation Ori
 	return index
 }
 
-func RadioOption(label string, index int64, count int64, selected bool, disabled bool, orientation Orientation, focusToken int64, isDisabled func(int64) bool, onSelect func(int64)) ui.View {
+func RadioOption(label string, index int64, count int64, selected bool, tabStop bool, disabled bool, orientation Orientation, focusToken int64, isDisabled func(int64) bool, onSelect func(int64)) ui.View {
 	control := ui.Role(ui.Disabled(ui.Button(label, func(event ui.Event) {
 		if !disabled {
 			onSelect(index)
@@ -165,6 +166,7 @@ func RadioOption(label string, index int64, count int64, selected bool, disabled
 	}), disabled), "radio")
 	control = ui.Selected(control, selected)
 	control = ui.Checked(control, selected)
+	control = ui.Focusable(control, tabStop && !disabled)
 	control = ui.FocusRequest(control, focusToken)
 	return ui.OnKeyDown(control, func(event ui.Event) {
 		if disabled || count <= 0 {
@@ -194,6 +196,7 @@ func Tab(label string, index int64, count int64, selected bool, disabled bool, o
 		}
 	}), disabled), "tab")
 	control = ui.Selected(control, selected)
+	control = ui.Focusable(control, selected && !disabled)
 	control = ui.FocusRequest(control, focusToken)
 	return ui.OnKeyDown(control, func(event ui.Event) {
 		if disabled || count <= 0 {

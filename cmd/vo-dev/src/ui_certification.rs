@@ -176,12 +176,32 @@ struct UIKitCatalogFile {
     product: String,
     delivery: String,
     status: String,
+    market_baseline: UIKitMarketBaseline,
     families: Vec<String>,
     targets: Vec<String>,
     themes: Vec<String>,
     densities: Vec<String>,
     directions: Vec<String>,
     component: Vec<UIKitComponent>,
+    parity_gap: Vec<UIKitParityGap>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UIKitMarketBaseline {
+    status: String,
+    benchmarks: Vec<String>,
+    components: Vec<String>,
+    quality_dimensions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UIKitParityGap {
+    id: String,
+    priority: String,
+    benchmarks: Vec<String>,
+    acceptance: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +419,9 @@ struct CertificationSummary<'a> {
     product_gate_count: usize,
     active_increment: &'a str,
     contract_probe_count: usize,
+    uikit_market_status: &'a str,
+    uikit_component_count: usize,
+    uikit_parity_gap_count: usize,
     status: &'static str,
 }
 
@@ -411,6 +434,7 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
     };
     let (certification, roadmap, product_roadmap, capabilities, delivery) =
         load_and_validate(root)?;
+    let uikit = load_uikit_catalog(root, &product_roadmap)?;
     let stable_capability_count = capabilities
         .capability
         .iter()
@@ -432,7 +456,12 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
         product_gate_count: product_roadmap.gate.len(),
         active_increment: &delivery.active_increment,
         contract_probe_count: delivery.contract_probe.len(),
-        status: if product_roadmap.status == "complete" {
+        uikit_market_status: &uikit.market_baseline.status,
+        uikit_component_count: uikit.component.len(),
+        uikit_parity_gap_count: uikit.parity_gap.len(),
+        status: if product_roadmap.status == "complete"
+            && uikit.market_baseline.status == "complete"
+        {
             "product-certified"
         } else {
             "foundation-certified"
@@ -442,7 +471,7 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
         println!("{}", serde_json::to_string(&summary)?);
     } else {
         println!(
-            "{} {}: {} ({} milestones, {} foundation gates, {} protocols); product {} {} ({} domains, {} capabilities, {} stable, active {}, {} contract probes, {} showcases, {} product gates)",
+            "{} {}: {} ({} milestones, {} foundation gates, {} protocols); product {} {} ({} domains, {} capabilities, {} stable, active {}, {} contract probes, {} showcases, {} product gates); UIKit market parity {} ({} implemented, {} governed gaps)",
             summary.product,
             summary.framework_version,
             summary.status,
@@ -458,6 +487,9 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
             summary.contract_probe_count,
             summary.product_showcase_count,
             summary.product_gate_count,
+            summary.uikit_market_status,
+            summary.uikit_component_count,
+            summary.uikit_parity_gap_count,
         );
     }
     Ok(())
@@ -465,11 +497,21 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
 
 pub(crate) fn certification_status(root: &Path) -> Result<&'static str> {
     let (_, _, product_roadmap, _, _) = load_and_validate(root)?;
-    Ok(if product_roadmap.status == "complete" {
-        "product-certified"
-    } else {
-        "foundation-certified"
-    })
+    let uikit = load_uikit_catalog(root, &product_roadmap)?;
+    Ok(
+        if product_roadmap.status == "complete" && uikit.market_baseline.status == "complete" {
+            "product-certified"
+        } else {
+            "foundation-certified"
+        },
+    )
+}
+
+fn load_uikit_catalog(root: &Path, roadmap: &ProductRoadmapFile) -> Result<UIKitCatalogFile> {
+    let path = checked_repo_path(root, &roadmap.uikit_catalog, "UIKit catalog")?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))
 }
 
 fn load_and_validate(
@@ -1021,7 +1063,7 @@ fn validate_product_roadmap(
 
     validate_capability_catalog(root, roadmap, capabilities, &required_domains, delivery)?;
     validate_delivery_plan(roadmap, capabilities, delivery)?;
-    validate_uikit_catalog(root, roadmap, delivery)?;
+    let uikit_market_complete = validate_uikit_catalog(root, roadmap, delivery)?;
 
     if roadmap.completion.required_capability_maturity != "stable" {
         bail!("UI 1.0 requires stable capability maturity");
@@ -1041,6 +1083,7 @@ fn validate_product_roadmap(
         .is_some_and(|increment| increment.status == "complete");
     let all_complete = capabilities_complete
         && delivery_complete
+        && uikit_market_complete
         && roadmap
             .showcase
             .iter()
@@ -1131,17 +1174,36 @@ fn validate_uikit_catalog(
     root: &Path,
     roadmap: &ProductRoadmapFile,
     delivery: &DeliveryPlanFile,
-) -> Result<()> {
+) -> Result<bool> {
     let path = checked_repo_path(root, &roadmap.uikit_catalog, "UIKit catalog")?;
     let text =
         fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
     let catalog: UIKitCatalogFile =
         toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))?;
-    if catalog.schema_version != 1 || catalog.product != roadmap.product || catalog.delivery != "E3"
+    if catalog.schema_version != 2 || catalog.product != roadmap.product || catalog.delivery != "E3"
     {
         bail!("UI UIKit catalog schema, product, or delivery differs from the product roadmap");
     }
     validate_progress_status("UIKit catalog", &catalog.status)?;
+    validate_progress_status("UIKit market baseline", &catalog.market_baseline.status)?;
+    validate_unique_texts(
+        "UIKit market benchmark",
+        &catalog.market_baseline.benchmarks,
+    )?;
+    validate_unique_texts(
+        "UIKit market component",
+        &catalog.market_baseline.components,
+    )?;
+    validate_unique_texts(
+        "UIKit quality dimension",
+        &catalog.market_baseline.quality_dimensions,
+    )?;
+    if catalog.market_baseline.benchmarks.len() < 4
+        || catalog.market_baseline.components.len() < 40
+        || catalog.market_baseline.quality_dimensions.len() < 8
+    {
+        bail!("UIKit market baseline is too narrow to represent a mainstream product surface");
+    }
     let required_families = [
         "content",
         "form",
@@ -1205,6 +1267,42 @@ fn validate_uikit_catalog(
             )?;
         }
     }
+    let mut gap_ids = BTreeSet::new();
+    for gap in &catalog.parity_gap {
+        validate_token("UIKit parity gap id", &gap.id)?;
+        if ids.contains(gap.id.as_str()) || !gap_ids.insert(gap.id.as_str()) {
+            bail!(
+                "duplicate or already implemented UIKit parity gap {}",
+                gap.id
+            );
+        }
+        validate_enum(
+            "UIKit parity gap priority",
+            &gap.priority,
+            &["critical", "high", "normal"],
+        )?;
+        validate_unique_texts("UIKit parity gap benchmark", &gap.benchmarks)?;
+        validate_unique_texts("UIKit parity gap acceptance", &gap.acceptance)?;
+    }
+    let baseline_ids = catalog
+        .market_baseline
+        .components
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let covered_ids = ids
+        .iter()
+        .copied()
+        .chain(gap_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if baseline_ids != covered_ids {
+        bail!(
+            "UIKit implemented components and parity gaps must exactly cover the market baseline"
+        );
+    }
+    if (catalog.market_baseline.status == "complete") != catalog.parity_gap.is_empty() {
+        bail!("UIKit market parity may complete only after every governed gap is closed");
+    }
     if represented_families.len() != required_families.len() {
         bail!("UIKit catalog must represent every Wave 1 family");
     }
@@ -1220,7 +1318,7 @@ fn validate_uikit_catalog(
     if (catalog.status == "complete") != catalog_complete || e3_complete != catalog_complete {
         bail!("UIKit catalog, component rows, and E3 completion must advance together");
     }
-    Ok(())
+    Ok(catalog.market_baseline.status == "complete")
 }
 
 fn validate_capability_catalog(

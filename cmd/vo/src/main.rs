@@ -806,6 +806,10 @@ fn link_native_aot(
         .arg(&runtime)
         .arg("-o")
         .arg(&linked_file.0);
+    #[cfg(not(windows))]
+    if ui {
+        command.arg("-Wl,-S");
+    }
     #[cfg(target_vendor = "apple")]
     for archive in extension_archives {
         if archive.as_os_str().as_encoded_bytes().contains(&b',') {
@@ -824,6 +828,9 @@ fn link_native_aot(
     }
     #[cfg(target_vendor = "apple")]
     {
+        if ui {
+            command.args(["-Wl,-dead_strip", "-Wl,-x"]);
+        }
         for framework in ["Security", "CoreFoundation", "SystemConfiguration"] {
             command.arg("-framework").arg(framework);
         }
@@ -845,7 +852,12 @@ fn link_native_aot(
         }
     }
     #[cfg(all(unix, not(target_vendor = "apple")))]
-    command.args(["-ldl", "-lpthread", "-lm", "-lrt", "-lutil"]);
+    {
+        if ui {
+            command.arg("-Wl,--gc-sections");
+        }
+        command.args(["-ldl", "-lpthread", "-lm", "-lrt", "-lutil"]);
+    }
     let result = command
         .output()
         .map_err(|error| format!("failed to start AOT linker {:?}: {error}", linker))?;

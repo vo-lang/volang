@@ -47,6 +47,16 @@ type Point struct {
 	Value float64
 }
 
+func interactiveSurface(theme tokens.Theme, view ui.View, accent bool) ui.View {
+	hover := theme.Colors.SurfaceHover
+	pressed := theme.Colors.SurfacePressed
+	if accent {
+		hover = theme.Colors.AccentHover
+		pressed = theme.Colors.AccentPressed
+	}
+	return ui.FocusRing(ui.PressedBackground(ui.HoverBackground(view, hover), pressed), theme.Colors.Focus)
+}
+
 // BarChart is the compact UIKit chart baseline for dashboards. It exposes one
 // accessible image summary and keeps every visual bar decorative.
 func BarChart(theme tokens.Theme, label string, points []Point, maximum float64) ui.View {
@@ -119,6 +129,24 @@ func gridTracks(columns []Column) string {
 	return tracks
 }
 
+func gridMinimumWidth(columns []Column) float64 {
+	width := 0.0
+	for _, column := range columns {
+		if column.Width > 0 {
+			width += column.Width
+		} else {
+			width += 120
+		}
+	}
+	return width
+}
+
+func scrollableGrid(theme tokens.Theme, label string, columns []Column, children []ui.View) ui.View {
+	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
+	grid = ui.MinWidth(ui.Radius(ui.Background(grid, theme.Background), theme.Radius), gridMinimumWidth(columns))
+	return ui.Overflow(ui.Scroll(grid), ui.OverflowAuto)
+}
+
 func sortDescription(column Column, sort Sort) string {
 	if sort.ColumnKey != column.Key || sort.Direction == SortNone {
 		return "Not sorted"
@@ -144,6 +172,7 @@ func headerCell(theme tokens.Theme, column Column, sort Sort, onSort func(string
 		content = ui.Button(label, func(event ui.Event) {
 			onSort(column.Key)
 		})
+		content = interactiveSurface(theme, content, false)
 	} else {
 		content = ui.Text(label)
 	}
@@ -181,7 +210,14 @@ func bodyCell(theme tokens.Theme, row Row, column Column, first bool, onActivate
 		content = ui.Text(value)
 	}
 	content = ui.Disabled(ui.Selected(ui.AccessibleName(ui.Role(content, role), value), row.Selected), row.Disabled)
-	return ui.Padding(ui.Foreground(content, theme.Foreground), theme.Space)
+	if first {
+		content = interactiveSurface(theme, content, row.Selected)
+	}
+	foreground := theme.Foreground
+	if row.Selected {
+		foreground = theme.AccentForeground
+	}
+	return ui.Padding(ui.Foreground(content, foreground), theme.Space)
 }
 
 func bodyRow(theme tokens.Theme, columns []Column, row Row, onActivate func(string)) ui.View {
@@ -212,8 +248,7 @@ func Table(theme tokens.Theme, label string, columns []Column, rows []Row, sort 
 	for _, row := range rows {
 		children = append(children, bodyRow(theme, columns, row, onRowActivate))
 	}
-	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
-	return ui.Radius(ui.Background(grid, theme.Background), theme.Radius)
+	return scrollableGrid(theme, label, columns, children)
 }
 
 type VisibleRange struct {
@@ -264,8 +299,7 @@ func VirtualTable(theme tokens.Theme, label string, columns []Column, rows []Row
 			window.End) *
 			rowHeight), "presentation"), "data-after"))
 	}
-	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
-	return ui.Radius(ui.Background(grid, theme.Background), theme.Radius)
+	return scrollableGrid(theme, label, columns, children)
 }
 
 // VirtualTableProvider keeps both model construction and view materialization
@@ -295,8 +329,7 @@ func VirtualTableProvider(theme tokens.Theme, label string, columns []Column, co
 		children = append(children, ui.Key(ui.Role(ui.Height(ui.Box(), float64(count - window.End) *
 			rowHeight), "presentation"), "data-after"))
 	}
-	grid := ui.AccessibleName(ui.Role(ui.Column(children...), "grid"), label)
-	return ui.Radius(ui.Background(grid, theme.Background), theme.Radius)
+	return scrollableGrid(theme, label, columns, children)
 }
 
 type TreeItem struct {
@@ -334,7 +367,11 @@ func treeRow(theme tokens.Theme, item TreeItem, onToggle func(string), onSelect 
 		}
 	})
 	row = ui.Expanded(ui.Selected(ui.Disabled(ui.AccessibleName(ui.Role(row, "treeitem"), item.Label), item.Disabled), item.Selected), item.Expanded)
-	row = ui.Foreground(ui.Background(row, theme.Surface), theme.Foreground)
+	foreground := theme.Foreground
+	if item.Selected {
+		foreground = theme.AccentForeground
+	}
+	row = ui.Foreground(ui.Background(row, theme.Surface), foreground)
 	row = ui.BorderWidth(row, 0)
 	row = ui.Radius(row, theme.Radius)
 	if item.HasChildren {
@@ -344,6 +381,7 @@ func treeRow(theme tokens.Theme, item TreeItem, onToggle func(string), onSelect 
 	if item.Selected {
 		row = ui.Background(row, theme.Accent)
 	}
+	row = interactiveSurface(theme, row, item.Selected)
 	if item.Depth > 0 {
 		row = ui.Row(ui.Width(ui.Box(), float64(item.Depth) * theme.Space * 2), ui.Flex(row, 1))
 	}

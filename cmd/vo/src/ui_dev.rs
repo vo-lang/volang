@@ -1,5 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::OpenOptions;
@@ -134,6 +135,9 @@ const RELEASE_APP_JS: &str = r#"import { connectAotUiToDom, runAot, UiBrowserSys
 
 const root = document.querySelector('#volang-root');
 const diagnostic = document.querySelector('#volang-diagnostic');
+const boot = document.querySelector('#volang-boot');
+const bootMessage = document.querySelector('#volang-boot-message');
+const retry = document.querySelector('#volang-boot-retry');
 const mark = (name) => {
   if (typeof performance !== 'undefined' && typeof performance.mark === 'function') performance.mark(name);
 };
@@ -142,17 +146,38 @@ const measure = (name, start, end) => {
     performance.measure(name, start, end);
   }
 };
+const setPhase = (phase, message) => {
+  root.dataset.volangActivation = phase;
+  root.setAttribute('aria-busy', phase === 'ready' ? 'false' : 'true');
+  if (message !== undefined) bootMessage.textContent = message;
+};
+const activate = () => {
+  root.removeAttribute('inert');
+  setPhase('ready', 'Application ready');
+  boot.hidden = true;
+};
 mark('volang-aot-bootstrap-start');
 const showError = (cause) => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
+  root.setAttribute('inert', '');
+  root.setAttribute('aria-busy', 'false');
+  root.dataset.volangActivation = 'failed';
+  boot.hidden = false;
+  boot.setAttribute('role', 'alert');
+  bootMessage.textContent = 'Volang could not start this application.';
+  retry.hidden = false;
   diagnostic.textContent = error.stack ?? error.message;
   diagnostic.style.display = 'block';
 };
+retry.addEventListener('click', () => location.reload());
+root.setAttribute('inert', '');
+setPhase('loading-host', 'Preparing the application host…');
 
 try {
   /*__VOLANG_APPLICATION_HOST__*/
   mark('volang-aot-host-ready');
   measure('volang-aot-host-startup', 'volang-aot-bootstrap-start', 'volang-aot-host-ready');
+  setPhase('loading-image', 'Loading the compiled application…');
   const response = await fetch('/app.wasm');
   if (!response.ok) throw new Error(`failed to load application AOT image: HTTP ${response.status}`);
   const image = await response.arrayBuffer();
@@ -164,11 +189,13 @@ try {
     onCommit: () => {
       if (interactiveMarked) return;
       interactiveMarked = true;
+      activate();
       mark('volang-aot-interactive');
       measure('volang-aot-startup', 'volang-aot-bootstrap-start', 'volang-aot-interactive');
     },
   });
   mark('volang-aot-runtime-connected');
+  setPhase('starting-runtime', 'Starting the application…');
   void runAot(image, { externs, memoryLimitPages: 4096 }).then(({ result }) => {
     if (result.status === 'error') throw new Error(result.stderr || `application exited with status ${result.exitCode}`);
     mark('volang-aot-runtime-settled');
@@ -1072,27 +1099,61 @@ const RELEASE_SSR_HEAD: &str = r#"  <style>
     body { margin: 0; min-height: 100vh; background: #f7f7f8; color: #16181d; }
     #volang-root { display: flex; width: 100%; min-height: 100vh; }
     #volang-root > [data-volang-node] { min-width: 0; min-height: 0; flex: 1; }
+    #volang-root[inert] { user-select: none; }
     button, input, textarea { font: inherit; color: inherit; }
-    button { margin: 0; border: 0; appearance: none; cursor: pointer; text-align: inherit; }
+    button { margin: 0; border: 0; appearance: none; cursor: pointer; text-align: inherit;
+      transition: filter 120ms ease, transform 120ms ease, opacity 120ms ease; }
+    button:hover:not(:disabled) { filter: brightness(.97) saturate(1.04); }
+    button:active:not(:disabled) { transform: translateY(1px); filter: brightness(.94); }
+    [data-volang-hover-background]:hover:not(:disabled):not([aria-disabled="true"]) {
+      background: var(--volang-hover-background) !important; }
+    [data-volang-pressed-background]:active:not(:disabled):not([aria-disabled="true"]) {
+      background: var(--volang-pressed-background) !important; }
     button:disabled { cursor: not-allowed; opacity: .45; }
-    input, textarea { min-width: 0; border: 1px solid #2b3548; border-radius: 6px;
-      outline: none; background: #0d111a; color: #edf2fa; }
+    input, textarea { min-width: 0; padding-inline: 12px; border: 0; outline: none;
+      background: transparent; }
+    textarea { padding-block: 10px; }
+    input::placeholder, textarea::placeholder { color: currentColor; opacity: .42; }
     input:focus-visible, textarea:focus-visible, button:focus-visible {
-      outline: 2px solid #6c8cff; outline-offset: -2px;
+      outline: 3px solid color-mix(in srgb, currentColor 46%, transparent); outline-offset: 2px;
     }
-    [tabindex="0"]:focus-visible { outline: 2px solid #6c8cff; outline-offset: -2px; }
+    [tabindex="0"]:focus-visible { outline: 3px solid color-mix(in srgb, currentColor 46%, transparent);
+      outline-offset: 2px; }
+    [data-volang-focus-ring]:focus-visible {
+      outline-color: var(--volang-focus-ring) !important; }
+    input[role="checkbox"] { accent-color: currentColor; }
+    input[type="range"] { accent-color: currentColor; }
+    input[role="switch"] { position: relative; padding: 0; appearance: none; border: 1px solid currentColor;
+      border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent) !important;
+      cursor: pointer; transition: background 140ms ease, opacity 140ms ease; }
+    input[role="switch"]::after { content: ""; position: absolute; inset-block-start: 3px; inset-inline-start: 3px;
+      width: 16px; height: 16px; border-radius: 50%; background: currentColor;
+      transition: transform 140ms ease, background 140ms ease; }
+    input[role="switch"]:checked { background: currentColor !important; }
+    input[role="switch"]:checked::after { background: #fff; transform: translateX(16px); }
+    [dir="rtl"] input[role="switch"]:checked::after { transform: translateX(-16px); }
     textarea { resize: none; }
     [data-testid="volang-code-editor"], [data-testid="volang-code-editor-highlight"] {
       border: 0; border-radius: 0;
       tab-size: 4; white-space: pre; overflow: auto; font-family: ui-monospace, SFMono-Regular,
       Menlo, Monaco, Consolas, "Liberation Mono", monospace; line-height: 20px; }
     [data-testid="volang-code-editor"] { caret-color: #6c8cff; }
-    [role="tab"] { padding: 8px 12px; background: #111722; color: #9ca9bd; }
-    [role="tab"][aria-selected="true"] { background: #182131; color: #edf2fa;
-      box-shadow: inset 0 -2px #6c8cff; }
     [role="separator"] { padding: 0; border-radius: 0; }
-    #volang-diagnostic { display: none; position: fixed; inset: 16px; z-index: 9999;
-      overflow: auto; padding: 18px; border-radius: 10px; color: #fff;
+    @media (prefers-reduced-motion: reduce) {
+      button, input[role="switch"], input[role="switch"]::after { transition: none; }
+    }
+    #volang-boot { position: fixed; inset: 0; z-index: 9998; display: grid; place-items: center;
+      padding: 24px; background: rgba(7, 10, 16, .72); color: #edf2fa; }
+    #volang-boot[hidden] { display: none; }
+    #volang-boot-card { width: min(420px, 100%); padding: 20px; border: 1px solid #394862;
+      border-radius: 12px; background: #151d2b; box-shadow: 0 18px 60px rgba(0, 0, 0, .38); }
+    #volang-boot-title { margin: 0 0 8px; font-size: 17px; }
+    #volang-boot-message { margin: 0; color: #aab5c8; }
+    #volang-boot-retry { margin-top: 16px; padding: 9px 14px; border-radius: 8px;
+      background: #637eff; color: #fff; }
+    #volang-diagnostic { display: none; position: fixed; z-index: 9999; left: 50%;
+      bottom: 24px; width: min(720px, calc(100% - 32px)); max-height: 34vh;
+      transform: translateX(-50%); overflow: auto; padding: 18px; border-radius: 10px; color: #fff;
       background: rgba(92, 17, 28, .96); white-space: pre-wrap; font: 13px/1.5 ui-monospace, monospace; }
   </style>
 "#;
@@ -1132,10 +1193,15 @@ fn release_ssr_document(
         "  <meta http-equiv=\"Content-Security-Policy\" content=\"{}\">\n  <meta name=\"referrer\" content=\"strict-origin-when-cross-origin\">\n{RELEASE_SSR_HEAD}<script type=\"application/json\" id=\"volang-activation\">[{activation}]</script>\n</head>",
         config.security.content_security_policy,
     );
-    let body = "  <pre id=\"volang-diagnostic\"></pre>\n  <script type=\"module\" src=\"/app.js\"></script>\n</body>";
+    let body = "  <div id=\"volang-boot\" role=\"status\" aria-live=\"polite\">\n    <div id=\"volang-boot-card\">\n      <h1 id=\"volang-boot-title\">Starting Volang</h1>\n      <p id=\"volang-boot-message\">Preparing the application…</p>\n      <button id=\"volang-boot-retry\" type=\"button\" hidden>Try again</button>\n    </div>\n  </div>\n  <pre id=\"volang-diagnostic\" role=\"alert\"></pre>\n  <script type=\"module\" src=\"/app.js\"></script>\n</body>";
     Ok(rendered
         .html
         .replacen("</head>", &head, 1)
+        .replacen(
+            "<div id=\"volang-root\"",
+            "<div id=\"volang-root\" inert aria-busy=\"true\" data-volang-activation=\"pending\"",
+            1,
+        )
         .replacen("</body>", body, 1))
 }
 
@@ -1154,7 +1220,7 @@ fn release_app_javascript(config: &WebReleaseConfig) -> String {
     let mut script = RELEASE_APP_JS.replace("/*__VOLANG_APPLICATION_HOST__*/", &host);
     if config.pwa.enabled {
         script.push_str(&format!(
-            "\nif ('serviceWorker' in navigator) {{\n  void navigator.serviceWorker.register('/service-worker.js', {{ scope: {} }}).catch(showError);\n}}\n",
+            "\nif ('serviceWorker' in navigator) {{\n  void navigator.serviceWorker.register('/service-worker.js', {{ scope: {} }}).catch((error) => console.error('Volang service worker registration failed', error));\n}}\n",
             serde_json::to_string(&config.pwa.scope).expect("PWA scope is serializable"),
         ));
     }
@@ -1303,38 +1369,100 @@ const INDEX_HTML: &str = r#"<!doctype html>
     body { margin: 0; min-height: 100vh; background: #f7f7f8; color: #16181d; }
     #volang-root { display: flex; width: 100%; min-height: 100vh; }
     #volang-root > [data-volang-node] { min-width: 0; min-height: 0; flex: 1; }
+    #volang-root[inert] { user-select: none; }
     button, input, textarea { font: inherit; color: inherit; }
-    button { margin: 0; border: 0; appearance: none; cursor: pointer; text-align: inherit; }
+    button { margin: 0; border: 0; appearance: none; cursor: pointer; text-align: inherit;
+      transition: filter 120ms ease, transform 120ms ease, opacity 120ms ease; }
+    button:hover:not(:disabled) { filter: brightness(.97) saturate(1.04); }
+    button:active:not(:disabled) { transform: translateY(1px); filter: brightness(.94); }
+    [data-volang-hover-background]:hover:not(:disabled):not([aria-disabled="true"]) {
+      background: var(--volang-hover-background) !important; }
+    [data-volang-pressed-background]:active:not(:disabled):not([aria-disabled="true"]) {
+      background: var(--volang-pressed-background) !important; }
     button:disabled { cursor: not-allowed; opacity: .45; }
-    input, textarea { min-width: 0; border: 1px solid #2b3548; border-radius: 6px;
-      outline: none; background: #0d111a; color: #edf2fa; }
+    input, textarea { min-width: 0; padding-inline: 12px; border: 0; outline: none;
+      background: transparent; }
+    textarea { padding-block: 10px; }
+    input::placeholder, textarea::placeholder { color: currentColor; opacity: .42; }
     input:focus-visible, textarea:focus-visible, button:focus-visible {
-      outline: 2px solid #6c8cff; outline-offset: -2px;
+      outline: 3px solid color-mix(in srgb, currentColor 46%, transparent); outline-offset: 2px;
     }
-    [tabindex="0"]:focus-visible { outline: 2px solid #6c8cff; outline-offset: -2px; }
+    [tabindex="0"]:focus-visible { outline: 3px solid color-mix(in srgb, currentColor 46%, transparent);
+      outline-offset: 2px; }
+    [data-volang-focus-ring]:focus-visible {
+      outline-color: var(--volang-focus-ring) !important; }
+    input[role="checkbox"] { accent-color: currentColor; }
+    input[type="range"] { accent-color: currentColor; }
+    input[role="switch"] { position: relative; padding: 0; appearance: none; border: 1px solid currentColor;
+      border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent) !important;
+      cursor: pointer; transition: background 140ms ease, opacity 140ms ease; }
+    input[role="switch"]::after { content: ""; position: absolute; inset-block-start: 3px; inset-inline-start: 3px;
+      width: 16px; height: 16px; border-radius: 50%; background: currentColor;
+      transition: transform 140ms ease, background 140ms ease; }
+    input[role="switch"]:checked { background: currentColor !important; }
+    input[role="switch"]:checked::after { background: #fff; transform: translateX(16px); }
+    [dir="rtl"] input[role="switch"]:checked::after { transform: translateX(-16px); }
     textarea { resize: none; }
     [data-testid="volang-code-editor"], [data-testid="volang-code-editor-highlight"] {
       border: 0; border-radius: 0;
       tab-size: 4; white-space: pre; overflow: auto; font-family: ui-monospace, SFMono-Regular,
       Menlo, Monaco, Consolas, "Liberation Mono", monospace; line-height: 20px; }
     [data-testid="volang-code-editor"] { caret-color: #6c8cff; }
-    [role="tab"] { padding: 8px 12px; background: #111722; color: #9ca9bd; }
-    [role="tab"][aria-selected="true"] { background: #182131; color: #edf2fa;
-      box-shadow: inset 0 -2px #6c8cff; }
     [role="separator"] { padding: 0; border-radius: 0; }
-    #volang-diagnostic { display: none; position: fixed; inset: 16px; z-index: 9999;
-      overflow: auto; padding: 18px; border-radius: 10px; color: #fff;
+    @media (prefers-reduced-motion: reduce) {
+      button, input[role="switch"], input[role="switch"]::after { transition: none; }
+    }
+    #volang-boot { position: fixed; inset: 0; z-index: 9998; display: grid; place-items: center;
+      padding: 24px; background: rgba(7, 10, 16, .72); color: #edf2fa; }
+    #volang-boot[hidden] { display: none; }
+    #volang-boot-card { width: min(420px, 100%); padding: 20px; border: 1px solid #394862;
+      border-radius: 12px; background: #151d2b; box-shadow: 0 18px 60px rgba(0, 0, 0, .38); }
+    #volang-boot-title { margin: 0 0 8px; font-size: 17px; }
+    #volang-boot-message { margin: 0; color: #aab5c8; }
+    #volang-boot-retry { margin-top: 16px; padding: 9px 14px; border-radius: 8px;
+      background: #637eff; color: #fff; }
+    #volang-diagnostic { display: none; position: fixed; z-index: 9999; left: 50%;
+      bottom: 24px; width: min(720px, calc(100% - 32px)); max-height: 34vh;
+      transform: translateX(-50%); overflow: auto; padding: 18px; border-radius: 10px; color: #fff;
       background: rgba(92, 17, 28, .96); white-space: pre-wrap; font: 13px/1.5 ui-monospace, monospace; }
   </style>
 </head>
 <body>
-  <main id="volang-root"></main>
-  <pre id="volang-diagnostic"></pre>
+  <main id="volang-root" inert aria-busy="true" data-volang-activation="pending"></main>
+  <div id="volang-boot" role="status" aria-live="polite">
+    <div id="volang-boot-card">
+      <h1 id="volang-boot-title">Starting Volang</h1>
+      <p id="volang-boot-message">Preparing the development runtime…</p>
+      <button id="volang-boot-retry" type="button" hidden>Try again</button>
+    </div>
+  </div>
+  <pre id="volang-diagnostic" role="alert"></pre>
   <script type="module">
     import { init, createVmIsland, connectUiVmToDom, UiBrowserSystemHost } from '/runtime/dist/index.js';
     const root = document.querySelector('#volang-root');
     const diagnostic = document.querySelector('#volang-diagnostic');
+    const boot = document.querySelector('#volang-boot');
+    const bootMessage = document.querySelector('#volang-boot-message');
+    const retry = document.querySelector('#volang-boot-retry');
+    const setPhase = (phase, message) => {
+      root.dataset.volangActivation = phase;
+      root.setAttribute('aria-busy', phase === 'ready' ? 'false' : 'true');
+      if (message !== undefined) bootMessage.textContent = message;
+    };
+    const activate = () => {
+      root.removeAttribute('inert');
+      setPhase('ready', 'Application ready');
+      boot.hidden = true;
+      retry.hidden = true;
+    };
     const showError = (error) => {
+      root.setAttribute('inert', '');
+      root.setAttribute('aria-busy', 'false');
+      root.dataset.volangActivation = 'failed';
+      boot.hidden = false;
+      boot.setAttribute('role', 'alert');
+      bootMessage.textContent = 'Volang could not start this application.';
+      retry.hidden = false;
       diagnostic.textContent = error instanceof Error ? error.stack ?? error.message : String(error);
       diagnostic.style.display = 'block';
     };
@@ -1342,19 +1470,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
       diagnostic.textContent = '';
       diagnostic.style.display = 'none';
     };
+    retry.addEventListener('click', () => location.reload());
+    setPhase('loading-host', 'Preparing the development runtime…');
     let session;
     try {
       const currentDiagnostic = await fetch('/diagnostics', { cache: 'no-store' }).then((r) => r.text());
       if (currentDiagnostic.length > 0) throw new Error(currentDiagnostic);
       /*__VOLANG_DEV_APPLICATION_HOST__*/
+      setPhase('loading-runtime', 'Loading the Volang VM…');
       await init(new URL('/runtime/pkg/vo_web_bg.wasm', location.origin));
+      setPhase('loading-program', 'Loading the application bytecode…');
       const bytecode = new Uint8Array(await fetch('/app.vob', { cache: 'no-store' }).then((r) => {
         if (!r.ok) throw new Error(`failed to load application bytecode: HTTP ${r.status}`);
         return r.arrayBuffer();
       }));
       const island = createVmIsland(bytecode);
       session = connectUiVmToDom(island, root, { onError: showError, systemHost });
+      setPhase('starting-runtime', 'Starting the application…');
       session.start();
+      if (session.adapter.currentRevision < 1n) throw new Error('application did not publish an initial UI revision');
+      activate();
     } catch (error) { showError(error); }
     const events = new EventSource('/events');
     let reloadChain = Promise.resolve();
@@ -1371,6 +1506,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           return r.arrayBuffer();
         }));
         session.reload(nextBytecode);
+        activate();
         clearError();
       }).catch(showError);
     };
@@ -1898,6 +2034,19 @@ fn cmd_package(args: &[OsString]) -> i32 {
         if target.host_surface() != vo_target::HostSurface::Native {
             return Err("ui package requires a native target".to_string());
         }
+        let runtime = match runtime {
+            Some(runtime) => Some(runtime),
+            None if env::var_os("VO_UI_AOT_RUNTIME_LIB").is_some()
+                || env::var_os("VO_AOT_RUNTIME_LIB").is_some() =>
+            {
+                None
+            }
+            None => {
+                let executable = env::current_exe()
+                    .map_err(|error| format!("failed to locate the vo executable: {error}"))?;
+                release_runtime_for_debug_executable(&executable, &target)?
+            }
+        };
         let (config, format) = read_desktop_package_config(&project, &target)?;
         let compiled = super::compile_cli_path(&project)?;
         if !has_ui_mount(compiled.module.module()) {
@@ -1934,6 +2083,30 @@ fn cmd_package(args: &[OsString]) -> i32 {
             1
         }
     }
+}
+
+fn release_runtime_for_debug_executable(
+    executable: &Path,
+    target: &vo_target::TargetSpec,
+) -> Result<Option<PathBuf>, String> {
+    let profile = executable
+        .parent()
+        .ok_or_else(|| "vo executable has no parent directory".to_string())?;
+    if profile.file_name() != Some(OsStr::new("debug")) {
+        return Ok(None);
+    }
+    let release = profile
+        .parent()
+        .unwrap_or(profile)
+        .join("release")
+        .join(super::runtime_archive_filename(target, true));
+    if !release.is_file() {
+        return Err(format!(
+            "desktop release runtime is missing {}; build vo-ui-aot-runtime-native with the release profile or pass --runtime",
+            release.display()
+        ));
+    }
+    Ok(Some(release))
 }
 
 fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Result<usize, String> {
@@ -5059,6 +5232,11 @@ mod tests {
         assert!(RELEASE_APP_JS.contains("volang-aot-host-startup"));
         assert!(RELEASE_APP_JS.contains("volang-aot-image-fetch"));
         assert!(RELEASE_APP_JS.contains("volang-aot-startup"));
+        assert!(RELEASE_APP_JS.contains("root.setAttribute('inert', '')"));
+        assert!(RELEASE_APP_JS.contains("root.removeAttribute('inert')"));
+        assert!(RELEASE_APP_JS.contains("dataset.volangActivation"));
+        assert!(RELEASE_APP_JS.contains("activate();"));
+        assert!(RELEASE_SSR_HEAD.contains("#volang-boot"));
         assert!(!RELEASE_APP_JS.contains("createVmIsland"));
         fs::remove_dir_all(runtime).unwrap();
         fs::remove_dir_all(output).unwrap();
@@ -5211,6 +5389,10 @@ compiler = true
         assert!(development.contains("createStudioHost"));
         assert!(development.contains("new UiBrowserSystemHost"));
         assert!(development.contains("systemHost"));
+        assert!(development.contains("inert aria-busy=\"true\" data-volang-activation=\"pending\""));
+        assert!(development.contains("application did not publish an initial UI revision"));
+        assert!(development.contains("id=\"volang-boot-retry\""));
+        assert!(development.contains("root.removeAttribute('inert')"));
         assert!(!development.contains("/*__VOLANG_DEV_APPLICATION_HOST__*/"));
         fs::remove_dir_all(output).unwrap();
 
@@ -5252,6 +5434,33 @@ compiler = true
 
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn debug_cli_desktop_package_selects_the_release_ui_runtime() {
+        let root = temporary_project("desktop-release-runtime");
+        let debug = root.join("debug");
+        let release = root.join("release");
+        fs::create_dir_all(&debug).unwrap();
+        fs::create_dir_all(&release).unwrap();
+        let target = vo_target::TargetSpec::host().unwrap();
+        let archive = release.join(super::super::runtime_archive_filename(&target, true));
+        fs::write(&archive, b"release runtime fixture").unwrap();
+
+        assert_eq!(
+            release_runtime_for_debug_executable(&debug.join("vo"), &target).unwrap(),
+            Some(archive.clone())
+        );
+        assert!(
+            release_runtime_for_debug_executable(&root.join("profile/vo"), &target)
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_file(&archive).unwrap();
+        let error = release_runtime_for_debug_executable(&debug.join("vo"), &target).unwrap_err();
+        assert!(error.contains("desktop release runtime is missing"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

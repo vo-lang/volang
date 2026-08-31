@@ -95,6 +95,12 @@ It emits a macOS application bundle, Windows portable directory or Linux AppDir
 according to the target. Platform metadata, resources, update policy and a
 SHA-256 inventory live inside the package. Required signing calls the platform
 signer; optional signing records the unsigned policy when no identity exists.
+Desktop packaging always links a release-profile UI runtime. When a workspace
+debug CLI drives packaging, it selects the sibling `target/release` runtime and
+fails with an actionable build command if that archive is absent. Platform
+linkers strip symbols and discard unreachable runtime sections. Explicit
+`--runtime`, `VO_UI_AOT_RUNTIME_LIB`, and `VO_AOT_RUNTIME_LIB` selections retain
+their documented precedence for custom toolchains.
 
 Update manifests are Ed25519 authenticated. Source bytes must match their
 declared SHA-256, paths remain relative and symlink-free, staging is versioned,

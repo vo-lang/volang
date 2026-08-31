@@ -1445,8 +1445,19 @@ fn implementation(function: &str) -> Option<(ExternFn, ExternEffects)> {
         "Padding" => (padding, pure),
         "Background" => (background, pure),
         "Foreground" => (foreground, pure),
+        "HoverBackground" => (hover_background, pure),
+        "PressedBackground" => (pressed_background, pure),
+        "FocusRing" => (focus_ring, pure),
+        "Elevation" => (elevation, pure),
         "FontSize" => (font_size, pure),
         "FontWeight" => (font_weight, pure),
+        "FontFamily" => (font_family, pure),
+        "WhiteSpace" => (white_space, pure),
+        "ElementID" => (element_id, pure),
+        "ActiveDescendant" => (active_descendant, pure),
+        "Controls" => (controls, pure),
+        "AutoComplete" => (auto_complete, pure),
+        "MultiSelectable" => (multi_selectable, pure),
         "Align" => (align, pure),
         "Justify" => (justify, pure),
         "GridColumns" => (grid_columns, pure),
@@ -1464,6 +1475,9 @@ fn implementation(function: &str) -> Option<(ExternFn, ExternEffects)> {
         "AccessibleName" => (accessible_name, pure),
         "AccessibleDescription" => (accessible_description, pure),
         "AccessibleValue" => (accessible_value, pure),
+        "MinimumValue" => (minimum_value, pure),
+        "MaximumValue" => (maximum_value, pure),
+        "StepValue" => (step_value, pure),
         "Required" => (required, pure),
         "Invalid" => (invalid, pure),
         "Selected" => (selected, pure),
@@ -1516,6 +1530,14 @@ fn implementation(function: &str) -> Option<(ExternFn, ExternEffects)> {
         "runtimeOnPointerCancel" => (runtime_on_pointer_cancel, pure),
         "OnScroll" => (on_scroll, pure),
         "runtimeOnScroll" => (runtime_on_scroll, pure),
+        "OnContextMenu" => (on_context_menu, pure),
+        "runtimeOnContextMenu" => (runtime_on_context_menu, pure),
+        "OnDrop" => (on_drop, pure),
+        "runtimeOnDrop" => (runtime_on_drop, pure),
+        "OnDragEnter" => (on_drag_enter, pure),
+        "runtimeOnDragEnter" => (runtime_on_drag_enter, pure),
+        "OnDragLeave" => (on_drag_leave, pure),
+        "runtimeOnDragLeave" => (runtime_on_drag_leave, pure),
         "OnCompositionStart" => (on_composition_start, pure),
         "runtimeOnCompositionStart" => (runtime_on_composition_start, pure),
         "OnCompositionUpdate" => (on_composition_update, pure),
@@ -2673,12 +2695,16 @@ fn direct_property_value(
         | PropertyId::MIN_VALUE
         | PropertyId::MAX_VALUE
         | PropertyId::STEP_VALUE => Value::F64(f64::from_bits(raw)),
-        PropertyId::BACKGROUND | PropertyId::FOREGROUND | PropertyId::BORDER_COLOR => {
-            Value::Color(raw as u32)
-        }
+        PropertyId::BACKGROUND
+        | PropertyId::FOREGROUND
+        | PropertyId::BORDER_COLOR
+        | PropertyId::HOVER_BACKGROUND
+        | PropertyId::PRESSED_BACKGROUND
+        | PropertyId::FOCUS_RING => Value::Color(raw as u32),
         PropertyId::FONT_WEIGHT
         | PropertyId::SELECTION_START_UTF16
-        | PropertyId::SELECTION_LENGTH_UTF16 => Value::I64(raw as i64),
+        | PropertyId::SELECTION_LENGTH_UTF16
+        | PropertyId::ELEVATION => Value::I64(raw as i64),
         PropertyId::DISABLED
         | PropertyId::CHECKED
         | PropertyId::REQUIRED
@@ -2689,6 +2715,7 @@ fn direct_property_value(
         | PropertyId::HIDDEN
         | PropertyId::ACCESSIBILITY_HIDDEN
         | PropertyId::FOCUSABLE
+        | PropertyId::MULTI_SELECTABLE
         | PropertyId::MODAL
         | PropertyId::AUTO_FOCUS
         | PropertyId::POINTER_CAPTURE => Value::Bool(raw != 0),
@@ -2709,7 +2736,13 @@ fn direct_property_value(
         | PropertyId::ACCESSIBLE_DESCRIPTION
         | PropertyId::GRID_TEMPLATE_AREAS
         | PropertyId::GRID_AREA
-        | PropertyId::POINTER_EVENTS => Value::Text(direct_string(raw)?),
+        | PropertyId::POINTER_EVENTS
+        | PropertyId::FONT_FAMILY
+        | PropertyId::WHITE_SPACE
+        | PropertyId::ELEMENT_ID
+        | PropertyId::ACTIVE_DESCENDANT
+        | PropertyId::CONTROLS
+        | PropertyId::AUTO_COMPLETE => Value::Text(direct_string(raw)?),
         PropertyId::CURRENT | PropertyId::VALUE => Value::Text(direct_string(raw)?),
         _ => {
             return Err(format!(
@@ -4541,6 +4574,38 @@ fn foreground(call: &mut ExternCallContext<'_>) -> ExternResult {
     )
 }
 
+fn hover_background(call: &mut ExternCallContext<'_>) -> ExternResult {
+    modify(
+        call,
+        PropertyId::HOVER_BACKGROUND,
+        Value::Color(call.arg_u64(1) as u32),
+    )
+}
+
+fn pressed_background(call: &mut ExternCallContext<'_>) -> ExternResult {
+    modify(
+        call,
+        PropertyId::PRESSED_BACKGROUND,
+        Value::Color(call.arg_u64(1) as u32),
+    )
+}
+
+fn focus_ring(call: &mut ExternCallContext<'_>) -> ExternResult {
+    modify(
+        call,
+        PropertyId::FOCUS_RING,
+        Value::Color(call.arg_u64(1) as u32),
+    )
+}
+
+fn elevation(call: &mut ExternCallContext<'_>) -> ExternResult {
+    let level = call.arg_i64(1);
+    if !(0..=5).contains(&level) {
+        return ExternResult::Panic("UI elevation level must be between zero and five".to_string());
+    }
+    modify(call, PropertyId::ELEVATION, Value::I64(level))
+}
+
 fn font_size(call: &mut ExternCallContext<'_>) -> ExternResult {
     let value = Value::Length(Length::Px(call.arg_f64(1) as f32));
     modify(call, PropertyId::FONT_SIZE, value)
@@ -4548,6 +4613,35 @@ fn font_size(call: &mut ExternCallContext<'_>) -> ExternResult {
 
 fn font_weight(call: &mut ExternCallContext<'_>) -> ExternResult {
     modify(call, PropertyId::FONT_WEIGHT, Value::I64(call.arg_i64(1)))
+}
+
+fn font_family(call: &mut ExternCallContext<'_>) -> ExternResult {
+    text_property(call, PropertyId::FONT_FAMILY)
+}
+
+fn white_space(call: &mut ExternCallContext<'_>) -> ExternResult {
+    text_property(call, PropertyId::WHITE_SPACE)
+}
+
+fn element_id(call: &mut ExternCallContext<'_>) -> ExternResult {
+    text_property(call, PropertyId::ELEMENT_ID)
+}
+
+fn active_descendant(call: &mut ExternCallContext<'_>) -> ExternResult {
+    text_property(call, PropertyId::ACTIVE_DESCENDANT)
+}
+
+fn controls(call: &mut ExternCallContext<'_>) -> ExternResult {
+    text_property(call, PropertyId::CONTROLS)
+}
+
+fn auto_complete(call: &mut ExternCallContext<'_>) -> ExternResult {
+    text_property(call, PropertyId::AUTO_COMPLETE)
+}
+
+fn multi_selectable(call: &mut ExternCallContext<'_>) -> ExternResult {
+    let value = Value::Bool(call.arg_u64(1) != 0);
+    modify(call, PropertyId::MULTI_SELECTABLE, value)
 }
 
 fn text_property(call: &mut ExternCallContext<'_>, property: PropertyId) -> ExternResult {
@@ -4628,6 +4722,18 @@ fn accessible_description(call: &mut ExternCallContext<'_>) -> ExternResult {
 
 fn accessible_value(call: &mut ExternCallContext<'_>) -> ExternResult {
     text_property(call, PropertyId::VALUE)
+}
+
+fn minimum_value(call: &mut ExternCallContext<'_>) -> ExternResult {
+    modify(call, PropertyId::MIN_VALUE, Value::F64(call.arg_f64(1)))
+}
+
+fn maximum_value(call: &mut ExternCallContext<'_>) -> ExternResult {
+    modify(call, PropertyId::MAX_VALUE, Value::F64(call.arg_f64(1)))
+}
+
+fn step_value(call: &mut ExternCallContext<'_>) -> ExternResult {
+    modify(call, PropertyId::STEP_VALUE, Value::F64(call.arg_f64(1)))
 }
 
 fn required(call: &mut ExternCallContext<'_>) -> ExternResult {
@@ -4971,6 +5077,38 @@ fn on_scroll(call: &mut ExternCallContext<'_>) -> ExternResult {
 
 fn runtime_on_scroll(call: &mut ExternCallContext<'_>) -> ExternResult {
     runtime_listen(call, EventType::SCROLL)
+}
+
+fn on_context_menu(call: &mut ExternCallContext<'_>) -> ExternResult {
+    listen(call, EventType::CONTEXT_MENU)
+}
+
+fn runtime_on_context_menu(call: &mut ExternCallContext<'_>) -> ExternResult {
+    runtime_listen(call, EventType::CONTEXT_MENU)
+}
+
+fn on_drop(call: &mut ExternCallContext<'_>) -> ExternResult {
+    listen(call, EventType::DROP)
+}
+
+fn runtime_on_drop(call: &mut ExternCallContext<'_>) -> ExternResult {
+    runtime_listen(call, EventType::DROP)
+}
+
+fn on_drag_enter(call: &mut ExternCallContext<'_>) -> ExternResult {
+    listen(call, EventType::DRAG_ENTER)
+}
+
+fn runtime_on_drag_enter(call: &mut ExternCallContext<'_>) -> ExternResult {
+    runtime_listen(call, EventType::DRAG_ENTER)
+}
+
+fn on_drag_leave(call: &mut ExternCallContext<'_>) -> ExternResult {
+    listen(call, EventType::DRAG_LEAVE)
+}
+
+fn runtime_on_drag_leave(call: &mut ExternCallContext<'_>) -> ExternResult {
+    runtime_listen(call, EventType::DRAG_LEAVE)
 }
 
 fn on_composition_start(call: &mut ExternCallContext<'_>) -> ExternResult {

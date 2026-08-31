@@ -432,8 +432,14 @@ test('VUE1 encoder rejects out-of-range and non-finite host values', () => {
 });
 
 class FakeStyle {
+  setProperty(name, value) {
+    this[name] = String(value);
+  }
+
   removeProperty(name) {
-    const key = name.replace(/-([a-z])/g, (_, character) => character.toUpperCase());
+    const key = name.startsWith('--')
+      ? name
+      : name.replace(/-([a-z])/g, (_, character) => character.toUpperCase());
     this[key] = '';
   }
 }
@@ -863,6 +869,10 @@ test('Core-Wasm AOT UI host commits a root and returns a guest handler identity'
   invoke('FlowDirection', [data.getBigUint64(20 * 8, true), 1n], 20);
   invoke('BorderColor', [data.getBigUint64(20 * 8, true), 0xff63_7effn], 20);
   invoke('BorderWidth', [data.getBigUint64(20 * 8, true), floatBits(2)], 20);
+  invoke('HoverBackground', [data.getBigUint64(20 * 8, true), 0xff22_3344n], 20);
+  invoke('PressedBackground', [data.getBigUint64(20 * 8, true), 0xff33_4455n], 20);
+  invoke('FocusRing', [data.getBigUint64(20 * 8, true), 0xff44_5566n], 20);
+  invoke('Elevation', [data.getBigUint64(20 * 8, true), 3n], 20);
   const handle = data.getBigUint64(20 * 8, true);
   const waiting = invoke('runtimeCommitAndWait', [handle, 1n], 24);
   assert.equal(commits.length, 1);
@@ -872,6 +882,10 @@ test('Core-Wasm AOT UI host commits a root and returns a guest handler identity'
   assert.equal(root.childNodes[0].dir, 'rtl');
   assert.equal(root.childNodes[0].style.borderColor, '#637effff');
   assert.equal(root.childNodes[0].style.borderWidth, '2px');
+  assert.equal(root.childNodes[0].style['--volang-hover-background'], '#223344ff');
+  assert.equal(root.childNodes[0].style['--volang-pressed-background'], '#334455ff');
+  assert.equal(root.childNodes[0].style['--volang-focus-ring'], '#445566ff');
+  assert.match(root.childNodes[0].style.boxShadow, /0 8px 20px/);
   assert.equal(root.childNodes[0].childNodes[0].nodeValue, 'Save');
   root.childNodes[0].dispatch('click');
   assert.equal(await waiting, 0);
@@ -1463,6 +1477,53 @@ test('DOM adapter commits a revision atomically and queues listener events', () 
   assert.equal(root.childNodes[0].childNodes[0].nodeValue, 'updated');
 });
 
+test('DOM adapter projects and removes portable interaction state colors', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const button = { index: 1, generation: 1 };
+  adapter.applyBatch({
+    sessionEpoch: 12n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: button, primitive: 9 },
+      { type: 'set-property', id: button, property: 69, value: { type: 'color', value: 0xff223344 } },
+      { type: 'set-property', id: button, property: 70, value: { type: 'color', value: 0xff334455 } },
+      { type: 'set-property', id: button, property: 71, value: { type: 'color', value: 0xff445566 } },
+      { type: 'set-property', id: button, property: 72, value: { type: 'i64', value: 3n } },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: button },
+    ],
+  });
+  const element = root.childNodes[0];
+  assert.equal(element.style['--volang-hover-background'], '#223344ff');
+  assert.equal(element.style['--volang-pressed-background'], '#334455ff');
+  assert.equal(element.style['--volang-focus-ring'], '#445566ff');
+  assert.equal(element.hasAttribute('data-volang-hover-background'), true);
+  assert.equal(element.hasAttribute('data-volang-pressed-background'), true);
+  assert.equal(element.hasAttribute('data-volang-focus-ring'), true);
+  assert.match(element.style.boxShadow, /0 8px 20px/);
+  assert.equal(element.getAttribute('data-volang-elevation'), '3');
+
+  adapter.applyBatch({
+    sessionEpoch: 12n,
+    revision: 2n,
+    mutations: [
+      { type: 'remove-property', id: button, property: 69 },
+      { type: 'remove-property', id: button, property: 70 },
+      { type: 'remove-property', id: button, property: 71 },
+      { type: 'remove-property', id: button, property: 72 },
+    ],
+  });
+  assert.equal(element.style['--volang-hover-background'], '');
+  assert.equal(element.style['--volang-pressed-background'], '');
+  assert.equal(element.style['--volang-focus-ring'], '');
+  assert.equal(element.hasAttribute('data-volang-hover-background'), false);
+  assert.equal(element.hasAttribute('data-volang-pressed-background'), false);
+  assert.equal(element.hasAttribute('data-volang-focus-ring'), false);
+  assert.equal(element.style.boxShadow, '');
+  assert.equal(element.hasAttribute('data-volang-elevation'), false);
+});
+
 test('DOM adapter projects text area, asset, graphics, and media properties', () => {
   const document = new FakeDocument();
   const root = document.createElement('main');
@@ -1537,6 +1598,41 @@ test('DOM slider preserves range properties and emits a controlled numeric value
   assert.equal(event.payload.value, '75');
 });
 
+test('DOM composed spin buttons expose a complete numeric range', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const input = { index: 1, generation: 1 };
+  const action = { index: 2, generation: 1 };
+  adapter.applyBatch({
+    sessionEpoch: 2n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: input, primitive: 10 },
+      { type: 'set-property', id: input, property: 16, value: { type: 'text', value: '3' } },
+      { type: 'set-property', id: input, property: 19, value: { type: 'text', value: 'spinbutton' } },
+      { type: 'set-property', id: input, property: 20, value: { type: 'text', value: 'Replicas' } },
+      { type: 'set-property', id: input, property: 57, value: { type: 'f64', value: 1 } },
+      { type: 'set-property', id: input, property: 58, value: { type: 'f64', value: 10 } },
+      { type: 'set-property', id: input, property: 59, value: { type: 'f64', value: 1 } },
+      { type: 'create-element', id: action, primitive: 3 },
+      { type: 'set-property', id: action, property: 19, value: { type: 'text', value: 'button' } },
+      { type: 'set-property', id: action, property: 18, value: { type: 'bool', value: true } },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: input },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: action },
+    ],
+  });
+  const element = root.childNodes[0];
+  assert.equal(element.value, '3');
+  assert.equal(element.getAttribute('role'), 'spinbutton');
+  assert.equal(element.getAttribute('aria-valuenow'), '3');
+  assert.equal(element.getAttribute('aria-valuemin'), '1');
+  assert.equal(element.getAttribute('aria-valuemax'), '10');
+  assert.equal(element.getAttribute('data-volang-step'), '1');
+  assert.equal(root.childNodes[1].getAttribute('aria-disabled'), 'true');
+  assert.equal(root.childNodes[1].hasAttribute('disabled'), false);
+});
+
 test('DOM text input events preserve the UTF-16 selection after editing', () => {
   const document = new FakeDocument();
   const root = document.createElement('main');
@@ -1566,6 +1662,115 @@ test('DOM text input events preserve the UTF-16 selection after editing', () => 
   assert.equal(event.payload.value, 'a🙂Xbc');
   assert.equal(event.payload.selectionStartUtf16, 4);
   assert.equal(event.payload.selectionLengthUtf16, 0);
+});
+
+test('DOM scroll events preserve both viewport axes', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const area = { index: 1, generation: 1 };
+  adapter.applyBatch({
+    sessionEpoch: 6n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: area, primitive: 16 },
+      {
+        type: 'listen', id: area, listener: {
+          event: 12, handler: { index: 8, generation: 1 }, capture: false, passive: true, once: false,
+        },
+      },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: area },
+    ],
+  });
+  const input = root.childNodes[0];
+  input.scrollLeft = 41.5;
+  input.scrollTop = 72;
+  input.dispatch('scroll');
+  const event = decodeUiEvent(adapter.shiftEventFrame());
+  assert.equal(event.event, 12);
+  assert.equal(event.payload.type, 'scroll');
+  assert.equal(event.payload.x, 41.5);
+  assert.equal(event.payload.y, 72);
+  assert.equal(event.payload.deltaX, 0);
+  assert.equal(event.payload.deltaY, 0);
+});
+
+test('DOM controlled scroll synchronization does not echo renderer writes', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const area = { index: 1, generation: 1 };
+  adapter.applyBatch({
+    sessionEpoch: 7n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: area, primitive: 7 },
+      { type: 'set-property', id: area, property: 26, value: { type: 'f64', value: 12 } },
+      { type: 'set-property', id: area, property: 27, value: { type: 'f64', value: 24 } },
+      {
+        type: 'listen', id: area, listener: {
+          event: 12, handler: { index: 8, generation: 1 }, capture: false, passive: true, once: false,
+        },
+      },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: area },
+    ],
+  });
+  const viewport = root.childNodes[0];
+  viewport.dispatch('scroll');
+  assert.equal(adapter.shiftEventFrame(), undefined);
+  viewport.dispatch('scroll');
+  assert.equal(adapter.shiftEventFrame(), undefined);
+
+  viewport.scrollLeft = 41.5;
+  viewport.scrollTop = 72;
+  viewport.dispatch('scroll');
+  const userEvent = decodeUiEvent(adapter.shiftEventFrame());
+  assert.equal(userEvent.payload.type, 'scroll');
+  assert.equal(userEvent.payload.x, 41.5);
+  assert.equal(userEvent.payload.y, 72);
+
+  adapter.applyBatch({
+    sessionEpoch: 7n,
+    revision: 2n,
+    mutations: [
+      { type: 'set-property', id: area, property: 26, value: { type: 'f64', value: 41.5 } },
+      { type: 'set-property', id: area, property: 27, value: { type: 'f64', value: 72 } },
+    ],
+  });
+  viewport.dispatch('scroll');
+  assert.equal(adapter.shiftEventFrame(), undefined);
+  viewport.dispatch('scroll');
+  assert.equal(adapter.shiftEventFrame(), undefined);
+});
+
+test('DOM text recipes preserve portable font family and source whitespace', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const text = { index: 1, generation: 1 };
+  adapter.applyBatch({
+    sessionEpoch: 8n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: text, primitive: 15 },
+      { type: 'set-property', id: text, property: 62, value: { type: 'text', value: 'monospace' } },
+      { type: 'set-property', id: text, property: 63, value: { type: 'text', value: 'pre' } },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: text },
+    ],
+  });
+  const element = root.childNodes[0];
+  assert.equal(element.style.fontFamily, 'monospace');
+  assert.equal(element.style.whiteSpace, 'pre');
+  adapter.applyBatch({
+    sessionEpoch: 8n,
+    revision: 2n,
+    mutations: [
+      { type: 'remove-property', id: text, property: 62 },
+      { type: 'remove-property', id: text, property: 63 },
+    ],
+  });
+  assert.equal(element.style.fontFamily, '');
+  assert.equal(element.style.whiteSpace, '');
 });
 
 test('DOM selection events preserve value and UTF-16 range without an edit', () => {
@@ -1965,6 +2170,53 @@ test('DOM pointer capture preserves typed cancellation delivery', () => {
   assert.equal(cancelled.payload.pointerId, 41n);
 });
 
+test('DOM context menu and file drop events preserve typed host data', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const child = { index: 1, generation: 1 };
+  const handler = (index) => ({ index, generation: 1 });
+  adapter.applyBatch({
+    sessionEpoch: 82n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: child, primitive: 2 },
+      { type: 'listen', id: child, listener: { event: 21, handler: handler(21), capture: false, passive: false, once: false } },
+      { type: 'listen', id: child, listener: { event: 22, handler: handler(22), capture: false, passive: false, once: false } },
+      { type: 'listen', id: child, listener: { event: 23, handler: handler(23), capture: false, passive: false, once: false } },
+      { type: 'listen', id: child, listener: { event: 24, handler: handler(24), capture: false, passive: false, once: false } },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child },
+    ],
+  });
+  const target = root.childNodes[0];
+  let prevented = 0;
+  target.dispatch('contextmenu', {
+    clientX: 24, clientY: 48, button: 2, buttons: 0,
+    preventDefault: () => { prevented += 1; },
+  });
+  const context = decodeUiEvent(adapter.shiftEventFrame());
+  assert.equal(context.event, 21);
+  assert.equal(context.payload.type, 'pointer');
+  assert.equal(context.payload.button, 2);
+  target.dispatch('dragover', { type: 'dragover', preventDefault: () => { prevented += 1; } });
+  assert.equal(adapter.shiftEventFrame(), undefined);
+  target.dispatch('drop', {
+    preventDefault: () => { prevented += 1; },
+    dataTransfer: { files: [
+      { name: 'alpha.vo', webkitRelativePath: '' },
+      { name: 'beta.vo', webkitRelativePath: 'folder/beta.vo' },
+    ] },
+  });
+  const dropped = decodeUiEvent(adapter.shiftEventFrame());
+  assert.equal(dropped.event, 22);
+  assert.deepEqual(dropped.payload, { type: 'text', value: 'alpha.vo\0folder/beta.vo' });
+  target.dispatch('dragenter', { preventDefault: () => { prevented += 1; } });
+  assert.equal(decodeUiEvent(adapter.shiftEventFrame()).event, 23);
+  target.dispatch('dragleave', { preventDefault: () => { prevented += 1; } });
+  assert.equal(decodeUiEvent(adapter.shiftEventFrame()).event, 24);
+  assert.equal(prevented, 5);
+});
+
 test('DOM hidden property excludes a stable subtree and is reversible', () => {
   const document = new FakeDocument();
   const root = document.createElement('main');
@@ -2052,6 +2304,44 @@ test('DOM focusable turns composed elements into reversible tab stops', () => {
     mutations: [{ type: 'remove-property', id: child, property: 61 }],
   });
   assert.equal(element.getAttribute('tabindex'), null);
+});
+
+test('DOM composite choice relationships are explicit and reversible', () => {
+  const document = new FakeDocument();
+  const root = document.createElement('main');
+  const adapter = new UiDomAdapter(root);
+  const child = { index: 1, generation: 1 };
+  adapter.applyBatch({
+    sessionEpoch: 81n,
+    revision: 1n,
+    mutations: [
+      { type: 'create-element', id: child, primitive: 10 },
+      { type: 'set-property', id: child, property: 64, value: { type: 'text', value: 'package-input' } },
+      { type: 'set-property', id: child, property: 65, value: { type: 'text', value: 'package-option-2' } },
+      { type: 'set-property', id: child, property: 66, value: { type: 'text', value: 'package-listbox' } },
+      { type: 'set-property', id: child, property: 67, value: { type: 'text', value: 'list' } },
+      { type: 'set-property', id: child, property: 68, value: { type: 'bool', value: true } },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child },
+    ],
+  });
+  const element = root.childNodes[0];
+  assert.equal(element.getAttribute('id'), 'package-input');
+  assert.equal(element.getAttribute('aria-activedescendant'), 'package-option-2');
+  assert.equal(element.getAttribute('aria-controls'), 'package-listbox');
+  assert.equal(element.getAttribute('aria-autocomplete'), 'list');
+  assert.equal(element.getAttribute('aria-multiselectable'), 'true');
+  adapter.applyBatch({
+    sessionEpoch: 81n,
+    revision: 2n,
+    mutations: [64, 65, 66, 67, 68].map((property) => ({
+      type: 'remove-property', id: child, property,
+    })),
+  });
+  assert.equal(element.getAttribute('id'), null);
+  assert.equal(element.getAttribute('aria-activedescendant'), null);
+  assert.equal(element.getAttribute('aria-controls'), null);
+  assert.equal(element.getAttribute('aria-autocomplete'), null);
+  assert.equal(element.getAttribute('aria-multiselectable'), null);
 });
 
 test('DOM modal scope traps focus, isolates background, and restores focus', () => {

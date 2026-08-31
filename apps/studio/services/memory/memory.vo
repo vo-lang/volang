@@ -33,8 +33,7 @@ type Host struct {
 func New() *Host {
 	host := &Host{
 		projects: make(map[domain.ProjectID]*projectState), credentials: make(map[string]string),
-		deletedRemotes: make(map[domain.ProjectID]bool),
-		nextProject: 2, nextArtifact: 1,
+		deletedRemotes: make(map[domain.ProjectID]bool), nextProject: 2, nextArtifact: 1,
 	}
 	id := domain.ProjectID("welcome")
 	host.projects[id] = &projectState{
@@ -564,7 +563,9 @@ func (host *Host) State(ctx context.Context, id domain.ProjectID) (domain.Remote
 		return domain.RemoteState{}, nil
 	}
 	target := "vo-lang/" + string(id)
-	return domain.RemoteState{Provider: "github", Repository: target, DeleteTarget: target, Branch: "main"}, nil
+	return domain.RemoteState{
+		Provider: "github", Repository: target, DeleteTarget: target, Branch: "main",
+	}, nil
 }
 
 func (host *Host) Diff(ctx context.Context, id domain.ProjectID, path string) (domain.RemoteDiff, error) {
@@ -589,7 +590,9 @@ func (host *Host) Pull(ctx context.Context, id domain.ProjectID, progress func(s
 	}
 	host.mu.RLock()
 	defer host.mu.RUnlock()
-	if progress != nil { progress("Remote changes fetched") }
+	if progress != nil {
+		progress("Remote changes fetched")
+	}
 	_, err := host.project(id)
 	return err
 }
@@ -605,7 +608,9 @@ func (host *Host) Push(ctx context.Context, id domain.ProjectID, message string,
 	}
 	host.mu.RLock()
 	defer host.mu.RUnlock()
-	if progress != nil { progress("Commit uploaded") }
+	if progress != nil {
+		progress("Commit uploaded")
+	}
 	_, err := host.project(id)
 	return err
 }

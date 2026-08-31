@@ -300,7 +300,10 @@ export class AotUiHost {
         type: 'length', value: { unit: 'px', value: floatValue(call, 1, name) },
       }));
     }
-    const floats: Readonly<Record<string, number>> = { Flex: 7, ScrollX: 26, ScrollY: 27, Opacity: 50 };
+    const floats: Readonly<Record<string, number>> = {
+      Flex: 7, ScrollX: 26, ScrollY: 27, Opacity: 50,
+      MinimumValue: 57, MaximumValue: 58, StepValue: 59,
+    };
     for (const [name, property] of Object.entries(floats)) {
       bind(name, (call) => this.modify(call, property, {
         type: 'f64', value: floatValue(call, 1, name),
@@ -315,6 +318,8 @@ export class AotUiHost {
       Current: 45,
       Source: 47, ContentType: 48, Fit: 49, Transform: 51,
       GraphicsProgram: 52, MediaState: 53, Poster: 54,
+      FontFamily: 62, WhiteSpace: 63, ElementID: 64, ActiveDescendant: 65,
+      Controls: 66, AutoComplete: 67,
     };
     for (const [name, property] of Object.entries(texts)) {
       bind(name, (call) => this.modify(call, property, {
@@ -325,7 +330,7 @@ export class AotUiHost {
       Disabled: 18, Checked: 25, Required: 28, Invalid: 29, Modal: 35, AutoFocus: 36,
       CapturePointer: 38, Selected: 42, Expanded: 43, Pressed: 44, Hidden: 46,
       AccessibilityHidden: 60,
-      Focusable: 61,
+      Focusable: 61, MultiSelectable: 68,
     };
     for (const [name, property] of Object.entries(booleans)) {
       bind(name, (call) => this.modify(call, property, {
@@ -335,6 +340,14 @@ export class AotUiHost {
     bind('Background', (call) => this.color(call, 10));
     bind('Foreground', (call) => this.color(call, 11));
     bind('BorderColor', (call) => this.color(call, 55));
+    bind('HoverBackground', (call) => this.color(call, 69));
+    bind('PressedBackground', (call) => this.color(call, 70));
+    bind('FocusRing', (call) => this.color(call, 71));
+    bind('Elevation', (call) => {
+      const level = signed(argument(call, 1));
+      if (level < 0n || level > 5n) throw new Error('Volang UI elevation level must be between zero and five');
+      this.modify(call, 72, { type: 'i64', value: level });
+    });
     bind('FontWeight', (call) => this.modify(call, 13, {
       type: 'i64', value: signed(argument(call, 1)),
     }));
@@ -377,6 +390,10 @@ export class AotUiHost {
       runtimeOnSelectionChange: 20,
       runtimeOnWheel: 16,
       runtimeOnLayout: 19,
+      runtimeOnContextMenu: 21,
+      runtimeOnDrop: 22,
+      runtimeOnDragEnter: 23,
+      runtimeOnDragLeave: 24,
     };
     for (const [name, event] of Object.entries(listeners)) {
       bind(name, (call) => this.listen(call, event));

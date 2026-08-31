@@ -50,6 +50,14 @@ VM**. UIKit starters also expose **Open Preview**. Browser projects persist in
 OPFS for that origin. Run `npm --prefix lang/crates/vo-web run build` first when
 the local Web runtime artifacts have not been built yet.
 
+Use **Commands** to switch explicitly between **Run with VM** and **Run with
+JIT** on hosts that expose both modes. Search runs as a cancellable,
+latest-result-wins workspace operation. Compiler diagnostics open the owning
+file, scroll to the reported line, place the caret at the reported column, and
+return keyboard focus to the editor. The workbench adapts its explorer,
+editor, Problems/Console output, documentation, preview, and source-control
+surfaces to compact screens without horizontal page overflow.
+
 Use **Share** after saving to create two immutable snapshot links. The Studio
 link opens the project for editing; the Runner link restores, compiles, and
 mounts the application without workspace chrome. Small source projects travel
@@ -69,7 +77,8 @@ vo ui package apps/studio -o dist/studio-native --runtime=target/release/libvo_s
 
 The Web release gate builds the complete Core Wasm AOT Studio and drives a
 fresh browser through project open, source editing, save, VM execution,
-command dispatch, UIKit preview mounting, and stateful interaction:
+command dispatch, full-viewport overlays, responsive layout, actionable
+compiler diagnostics, UIKit preview mounting, and stateful interaction:
 
 ```sh
 vo ui build apps/studio -o target/studio-aot --runtime-dir=lang/crates/vo-web

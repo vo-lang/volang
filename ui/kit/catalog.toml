@@ -1,20 +1,39 @@
-schema_version = 1
+schema_version = 2
 product = "Volang UI"
 delivery = "E3"
 status = "complete"
+
 families = ["content", "form", "feedback", "overlay", "navigation", "data"]
 targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 themes = ["light", "dark", "high-contrast"]
 densities = ["compact", "comfortable", "spacious"]
 directions = ["ltr", "rtl"]
+parity_gap = []
+
+[market_baseline]
+status = "complete"
+benchmarks = ["Material 3", "Fluent 2", "Carbon", "shadcn-svelte", "WAI-ARIA APG"]
+components = [
+  "application", "typography", "surface", "card", "avatar", "avatar-group", "badge", "tag", "keyboard-key", "separator",
+  "button", "icon-button", "button-group", "loading-button", "text-field", "text-area", "search-box", "number-input", "checkbox", "switch",
+  "radio-group", "slider", "select", "segmented-control", "form", "input-group", "combobox", "multi-select", "date-picker", "calendar",
+  "file-uploader", "toggle-group", "alert", "progress", "step-indicator", "spinner", "inline-loading", "skeleton", "empty-state", "toast-region",
+  "dialog", "alert-dialog", "command-palette", "popover", "tooltip", "drawer", "menu", "context-menu", "tabs", "accordion",
+  "breadcrumb", "pagination", "navigation-rail", "navigation-menu", "data-table", "tree", "list", "bar-chart", "carousel", "scroll-area",
+  "resizable", "rating", "code-snippet",
+]
+quality_dimensions = [
+  "public API", "visual states", "keyboard interaction", "accessibility semantics", "responsive adaptation", "RTL",
+  "theme and density", "VM/JIT/AOT equivalence", "real browser", "real desktop", "documentation", "failure recovery",
+]
 
 [[component]]
 id = "application"
 family = "content"
 status = "conformant"
-api = "kit.Application"
-behavior = "environment and theme provider"
-variants = ["system", "explicit-environment"]
+api = "kit.Application, kit.AdaptiveShell"
+behavior = "environment, theme, and adaptive application-region provider"
+variants = ["system", "explicit-environment", "compact", "medium", "expanded"]
 states = ["light", "dark", "high-contrast", "reduced-motion"]
 keyboard = ["preserves descendant focus order"]
 semantics = ["inherits locale and flow direction"]
@@ -24,9 +43,9 @@ evidence = ["ui/kit/kit.vo", "ui/tests/adaptive-environment/main.vo"]
 id = "typography"
 family = "content"
 status = "conformant"
-api = "kit.Title, kit.Paragraph, kit.Caption"
+api = "kit.PageTitle, kit.Title, kit.Paragraph, kit.Caption"
 behavior = "semantic text recipes"
-variants = ["title", "paragraph", "caption"]
+variants = ["display title", "section title", "paragraph", "caption"]
 states = ["default", "high-contrast", "scaled-text"]
 keyboard = ["none"]
 semantics = ["heading and static text"]
@@ -39,7 +58,7 @@ status = "conformant"
 api = "kit.Page, kit.Panel"
 behavior = "content grouping"
 variants = ["page", "panel", "section"]
-states = ["default", "nested-theme"]
+states = ["default", "raised", "nested-theme"]
 keyboard = ["none"]
 semantics = ["group and region compatible"]
 evidence = ["ui/kit/kit.vo"]
@@ -55,6 +74,18 @@ states = ["default"]
 keyboard = ["none"]
 semantics = ["status text"]
 evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "avatar-group"
+family = "content"
+status = "conformant"
+api = "kit.AvatarGroup"
+behavior = "bounded overlapping identity collection with deterministic overflow summary"
+variants = ["named avatars", "overflow count"]
+states = ["within-limit", "overflowing", "rtl"]
+keyboard = ["non-interactive members remain outside sequential focus"]
+semantics = ["named group containing individually named images and one named overflow image"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
 
 [[component]]
 id = "separator"
@@ -75,7 +106,7 @@ status = "conformant"
 api = "kit.ActionButton, kit.DestructiveButton"
 behavior = "headless button activation"
 variants = ["primary", "secondary", "quiet", "danger"]
-states = ["default", "disabled", "focused", "pressed"]
+states = ["default", "hovered", "disabled", "focused", "pressed"]
 keyboard = ["Enter and Space activate once"]
 semantics = ["button with accessible name"]
 evidence = ["ui/kit/kit.vo", "ui/tests/modal-validation-form/main.vo"]
@@ -315,7 +346,7 @@ status = "conformant"
 api = "kit.MenuBar, kit.MenuGroup, kit.MenuAction"
 behavior = "portable command menu"
 variants = ["bar", "group", "action", "toggle-action"]
-states = ["default", "disabled", "checked"]
+states = ["default", "hovered", "disabled", "checked", "focused", "pressed"]
 keyboard = ["items retain logical command bindings"]
 semantics = ["menubar, menu, menuitem"]
 evidence = ["ui/kit/kit.vo", "ui/examples/menu/main.vo"]
@@ -327,7 +358,7 @@ status = "conformant"
 api = "kit.Tabs"
 behavior = "single active panel with roving focus"
 variants = ["line", "pill"]
-states = ["selected", "unselected", "disabled"]
+states = ["selected", "unselected", "hovered", "disabled", "focused", "pressed"]
 keyboard = ["Arrow keys move, Home and End jump"]
 semantics = ["tablist, tab, tabpanel"]
 evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
@@ -339,7 +370,7 @@ status = "conformant"
 api = "kit.Accordion"
 behavior = "controlled disclosure sections with stable keys"
 variants = ["single", "multiple-controlled"]
-states = ["expanded", "collapsed", "disabled"]
+states = ["expanded", "collapsed", "hovered", "disabled", "focused", "pressed"]
 keyboard = ["Enter and Space toggle each heading"]
 semantics = ["expanded disclosure buttons and named regions"]
 evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
@@ -351,7 +382,7 @@ status = "conformant"
 api = "kit.Breadcrumb"
 behavior = "hierarchical path navigation"
 variants = ["standard", "collapsed"]
-states = ["current", "link"]
+states = ["current", "link", "hovered", "focused", "pressed"]
 keyboard = ["links use normal order"]
 semantics = ["named navigation and current page"]
 evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
@@ -363,7 +394,7 @@ status = "conformant"
 api = "kit.Pagination"
 behavior = "bounded page navigation"
 variants = ["compact", "full"]
-states = ["current", "available", "disabled"]
+states = ["current", "available", "hovered", "disabled", "focused", "pressed"]
 keyboard = ["buttons use normal order"]
 semantics = ["named navigation and current page"]
 evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
@@ -385,9 +416,9 @@ id = "data-table"
 family = "data"
 status = "conformant"
 api = "kit.DataTable, kit.VirtualDataProvider"
-behavior = "sortable keyed grid with bounded provider materialization"
-variants = ["materialized", "virtual-provider"]
-states = ["loading", "selected", "disabled", "ascending", "descending"]
+behavior = "sortable keyed grid with bounded provider materialization and compact-width horizontal scrolling"
+variants = ["materialized", "virtual-provider", "overflow-scroll"]
+states = ["loading", "selected", "hovered", "disabled", "focused", "pressed", "ascending", "descending", "compact-overflow"]
 keyboard = ["sortable headers and row headers use normal activation"]
 semantics = ["grid, row, columnheader, rowheader, gridcell"]
 evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-engine/src/run.rs"]
@@ -399,10 +430,346 @@ status = "conformant"
 api = "kit.Tree, kit.VirtualTreeProvider"
 behavior = "flattened hierarchical selection and expansion"
 variants = ["materialized", "virtual-provider"]
-states = ["expanded", "collapsed", "selected", "disabled"]
+states = ["expanded", "collapsed", "selected", "hovered", "disabled", "focused", "pressed"]
 keyboard = ["ArrowRight expands and ArrowLeft collapses"]
 semantics = ["tree and treeitem"]
 evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo"]
+
+[[component]]
+id = "card"
+family = "content"
+status = "conformant"
+api = "kit.ContentCard"
+behavior = "named content surface with supporting copy and actions"
+variants = ["informational", "actionable"]
+states = ["default", "raised", "nested-theme", "high-contrast"]
+keyboard = ["contained actions use normal order"]
+semantics = ["named content group"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "avatar"
+family = "content"
+status = "conformant"
+api = "kit.Avatar"
+behavior = "bounded initials representation for a person or group"
+variants = ["small", "medium", "large"]
+states = ["default", "high-contrast"]
+keyboard = ["none"]
+semantics = ["named image"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "tag"
+family = "content"
+status = "conformant"
+api = "kit.Tag"
+behavior = "compact categorized value with optional removal"
+variants = ["info", "success", "warning", "danger", "removable"]
+states = ["default", "removable"]
+keyboard = ["remove action uses normal button behavior"]
+semantics = ["named group and remove action"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "keyboard-key"
+family = "content"
+status = "conformant"
+api = "kit.KeyboardKey"
+behavior = "compact keyboard shortcut token"
+variants = ["single-key", "composed-shortcut"]
+states = ["default", "high-contrast"]
+keyboard = ["none"]
+semantics = ["named note"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "icon-button"
+family = "form"
+status = "conformant"
+api = "kit.IconButton"
+behavior = "accessible icon-only activation with fixed control geometry"
+variants = ["primary", "secondary", "quiet", "danger"]
+states = ["default", "hovered", "disabled", "focused", "pressed"]
+keyboard = ["Enter and Space activate once"]
+semantics = ["button with mandatory accessible name"]
+evidence = ["ui/kit/components/components.vo", "ui/kit/icons/icons.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "button-group"
+family = "form"
+status = "conformant"
+api = "kit.ButtonGroup"
+behavior = "named grouping for related actions that stacks through the inherited compact viewport"
+variants = ["inline", "stacked-compact", "mixed-variant"]
+states = ["default", "compact", "contains-disabled"]
+keyboard = ["preserves child button order"]
+semantics = ["named group"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "loading-button"
+family = "form"
+status = "conformant"
+api = "kit.LoadingButton"
+behavior = "single action with atomic pending state"
+variants = ["primary", "secondary", "danger"]
+states = ["idle", "loading", "disabled"]
+keyboard = ["pending state prevents duplicate activation"]
+semantics = ["button exposes pending state in its accessible name"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "search-box"
+family = "form"
+status = "conformant"
+api = "kit.SearchBox"
+behavior = "controlled search entry with submit, clear, and focus restoration"
+variants = ["empty", "populated"]
+states = ["default", "disabled", "focused"]
+keyboard = ["Enter submits and Escape clears"]
+semantics = ["search landmark and named searchbox"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "number-input"
+family = "form"
+status = "conformant"
+api = "kit.NumberInput"
+behavior = "controlled finite numeric entry with bounded stepping"
+variants = ["integer", "decimal"]
+states = ["default", "minimum", "maximum", "disabled", "focused"]
+keyboard = ["Arrow keys step, Home and End reach bounds"]
+semantics = ["spinbutton with current, minimum, maximum, and step values"]
+evidence = ["ui/ui.vo", "ui/kit/components/components.vo", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "segmented-control"
+family = "form"
+status = "conformant"
+api = "kit.SegmentedControl"
+behavior = "compact mutually exclusive view selection"
+variants = ["two-through-eight-items"]
+states = ["selected", "unselected", "disabled"]
+keyboard = ["Arrow keys move and select with RTL-aware horizontal order"]
+semantics = ["radiogroup and radio"]
+evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "form"
+family = "form"
+status = "conformant"
+api = "kit.Form"
+behavior = "named form composition with description, fields, and actions"
+variants = ["single-column", "adaptive-content"]
+states = ["idle", "invalid", "submitting", "succeeded", "failed"]
+keyboard = ["preserves field and action order"]
+semantics = ["named and described form"]
+evidence = ["ui/forms/forms.vo", "ui/kit/components/components.vo", "ui/tests/modal-validation-form/main.vo"]
+
+[[component]]
+id = "input-group"
+family = "form"
+status = "conformant"
+api = "kit.InputGroup, kit.InputGroupField"
+behavior = "prefix, suffix, field, and inline action composition with one field owner"
+variants = ["prefix", "suffix", "inline-action", "validated"]
+states = ["default", "focused-field", "required", "invalid", "disabled-field"]
+keyboard = ["one field and authored actions preserve natural focus order"]
+semantics = ["named group with exactly one textbox and group/field validation descriptions"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "toggle-group"
+family = "form"
+status = "conformant"
+api = "kit.ToggleGroup"
+behavior = "controlled single or multiple pressed selection with independent roving focus"
+variants = ["single", "multiple", "horizontal", "vertical"]
+states = ["pressed", "unpressed", "disabled", "focused"]
+keyboard = ["one sequential tab stop; arrows, Home, and End move focus and skip disabled items; RTL reverses horizontal arrows"]
+semantics = ["named toolbar with pressed buttons"]
+evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "rating"
+family = "form"
+status = "conformant"
+api = "kit.Rating"
+behavior = "bounded display or controlled rating selection"
+variants = ["interactive", "read-only"]
+states = ["empty", "partial", "maximum", "hovered", "disabled", "focused", "pressed"]
+keyboard = ["one sequential tab stop; arrows change value, Home selects one, End selects maximum, RTL reverses horizontal arrows"]
+semantics = ["named radiogroup with checked option and textual value, or named read-only image"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "inline-loading"
+family = "feedback"
+status = "conformant"
+api = "kit.InlineLoading"
+behavior = "non-blocking operation status with supporting detail"
+variants = ["label", "label-and-detail"]
+states = ["active", "reduced-motion"]
+keyboard = ["none"]
+semantics = ["named and described status"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "step-indicator"
+family = "feedback"
+status = "conformant"
+api = "kit.StepIndicator"
+behavior = "ordered bounded process state"
+variants = ["vertical"]
+states = ["complete", "current", "upcoming"]
+keyboard = ["none"]
+semantics = ["named list with exactly one current step"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo"]
+
+[[component]]
+id = "list"
+family = "data"
+status = "conformant"
+api = "kit.List"
+behavior = "keyed selectable collection with supporting detail and metadata"
+variants = ["plain", "described", "metadata"]
+states = ["selected", "unselected", "hovered", "disabled", "focused", "pressed"]
+keyboard = ["Enter and Space activate focused items"]
+semantics = ["named listbox and options"]
+evidence = ["ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "scroll-area"
+family = "data"
+status = "conformant"
+api = "kit.ScrollArea"
+behavior = "bounded two-axis viewport with controlled logical position"
+variants = ["horizontal", "vertical", "two-axis"]
+states = ["origin", "scrolled", "content-resized", "direction-changed"]
+keyboard = ["uses native platform scroll keyboard behavior"]
+semantics = ["named region with visible platform scroll affordances"]
+evidence = ["ui/kit/components/components.vo", "lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "code-snippet"
+family = "content"
+status = "conformant"
+api = "kit.CodeSnippet"
+behavior = "safe source text presentation with optional renderer-neutral clipboard copy"
+variants = ["inline", "block", "copyable", "read-only"]
+states = ["idle", "copied", "copy-failed", "overflowing"]
+keyboard = ["copy action follows standard button activation; block source uses native scroll behavior"]
+semantics = ["named group or region with preserved whitespace and caller-owned copy feedback"]
+evidence = ["ui/ui.vo", "ui/kit/components/components.vo", "ui/system/system.vo", "ui/crates/vo-ui-web/src/ssr.rs", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs"]
+
+[[component]]
+id = "resizable"
+family = "data"
+status = "conformant"
+api = "kit.UseResizableState, kit.ResizableHandle"
+behavior = "controlled one-axis splitter with persistent pointer gesture state"
+variants = ["horizontal size", "vertical size", "collapsible"]
+states = ["minimum", "intermediate", "maximum", "disabled", "dragging"]
+keyboard = ["arrows change by one step, Home collapses to minimum, End reaches maximum, RTL reverses horizontal arrows"]
+semantics = ["named focusable separator with value, bounds, step, and orientation description"]
+evidence = ["ui/gesture/gesture.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "carousel"
+family = "data"
+status = "conformant"
+api = "kit.UseCarouselState, kit.Carousel"
+behavior = "controlled keyed paging with bounded prebuilt pages and persistent swipe recognition"
+variants = ["wrapping", "bounded"]
+states = ["first", "intermediate", "last", "dragging", "rtl", "reduced-motion"]
+keyboard = ["previous/next buttons and RTL-aware horizontal arrows page the visible slide"]
+semantics = ["named region, named current slide, position description, and live position status"]
+evidence = ["ui/gesture/gesture.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "navigation-menu"
+family = "navigation"
+status = "conformant"
+api = "kit.NavigationMenu"
+behavior = "grouped responsive navigation with controlled overflow and route ownership"
+variants = ["top", "side", "compact"]
+states = ["current", "hovered", "disabled", "focused", "pressed", "overflow-open", "overflow-closed", "rtl"]
+keyboard = ["links use native activation; overflow trigger supports standard disclosure keys"]
+semantics = ["named navigation landmark, named groups, current-page link, and disabled destinations"]
+evidence = ["ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "combobox"
+family = "form"
+status = "conformant"
+api = "kit.Combobox"
+behavior = "controlled editable filtering with local or asynchronously supplied results"
+variants = ["local results", "async loading", "disabled"]
+states = ["closed", "open", "filtered", "empty", "loading", "selected", "composing"]
+keyboard = ["arrows, Home, and End move the active result; Enter selects; Escape and Tab close; IME composition suppresses activation"]
+semantics = ["editable combobox, controlled listbox, stable element relationships, and active descendant"]
+evidence = ["ui/ui.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "multi-select"
+family = "form"
+status = "conformant"
+api = "kit.MultiSelect"
+behavior = "controlled filtering with removable selected values and a bounded selection limit"
+variants = ["local results", "async loading", "disabled"]
+states = ["empty", "selected", "maximum-reached", "filtered", "loading", "composing"]
+keyboard = ["combobox traversal plus Enter toggle and empty-query Backspace removal"]
+semantics = ["editable combobox, multi-selectable listbox, selected options, and named removable value groups"]
+evidence = ["ui/ui.vo", "ui/kit/components/components.vo", "ui/showcases/component-gallery/main.vo", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "calendar"
+family = "form"
+status = "conformant"
+api = "kit.Calendar, kit.CalendarConfig"
+behavior = "deterministic six-week month grid with caller-owned single or range selection"
+variants = ["single", "range", "Monday week start", "Sunday week start", "RTL"]
+states = ["selected", "range-selected", "outside-month", "hovered", "disabled", "focused", "pressed", "minimum", "maximum"]
+keyboard = ["logical arrows move by day or week, Home and End move within a week, PageUp and PageDown move by month, RTL reverses horizontal movement"]
+semantics = ["named grid, weekday column headers, named grid cells, roving focus, and selected range"]
+evidence = ["ui/kit/components/components.vo", "lang/stdlib/time/time.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "date-picker"
+family = "form"
+status = "conformant"
+api = "kit.DatePicker, kit.CalendarConfig"
+behavior = "controlled locale-layout text parsing composed with the official calendar grid"
+variants = ["typed date", "calendar selection", "disabled"]
+states = ["closed", "open", "valid", "invalid", "unavailable-date"]
+keyboard = ["Enter parses and commits, ArrowDown opens, Escape closes, calendar traversal follows kit.Calendar"]
+semantics = ["named textbox controlling a named calendar dialog with explicit invalid description"]
+evidence = ["ui/kit/components/components.vo", "lang/stdlib/time/time.vo", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "file-uploader"
+family = "form"
+status = "conformant"
+api = "kit.FileUploader, kit.FileUploaderOptions, kit.UploadFile"
+behavior = "filtered platform picker and file-drop intake with accepted-file quotas and application-owned size-validated goroutine transfer snapshots"
+variants = ["single", "multiple", "filtered", "disabled"]
+states = ["drag-active", "queued", "uploading", "complete", "failed", "rejected", "cancelled"]
+keyboard = ["drop zone uses standard button activation; cancel and retry are named buttons"]
+semantics = ["named drop-zone button, live file-count status, file list, per-file progress, cancellation, retry, and rejection reason"]
+evidence = ["ui/ui.vo", "ui/system/system.vo", "ui/kit/components/components.vo", "lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
+
+[[component]]
+id = "context-menu"
+family = "overlay"
+status = "conformant"
+api = "kit.ContextMenu, kit.ContextMenuItem"
+behavior = "controlled pointer and keyboard menu with bounded nesting, viewport collision clamping, and caller-owned activation"
+variants = ["pointer", "keyboard", "nested", "checkable", "RTL"]
+states = ["closed", "open", "active", "disabled", "checked", "submenu-open"]
+keyboard = ["ContextMenu and Shift+F10 open, arrows move and enter submenus, Enter and Space activate, typeahead moves, Escape dismisses"]
+semantics = ["named target, modal menu surface, roving menuitems, expanded submenu relation, and deterministic focus restoration"]
+evidence = ["ui/ui.vo", "ui/kit/headless/headless.vo", "ui/kit/components/components.vo", "lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "lang/crates/vo-ui-host-native/src/lib.rs", "ui/showcases/component-gallery/main.vo", "eng/run-browser-smoke.mjs", "eng/run-uikit-gallery-contracts.sh"]
 
 [[component]]
 id = "bar-chart"

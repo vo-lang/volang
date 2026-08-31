@@ -129,7 +129,9 @@ fn materialize(root: &Path) -> Result<GeneratedDocs> {
     inputs.push(STUDIO_WEB_MANIFEST.to_string());
     inputs.push(GENERATOR_PATH.to_string());
 
-    let catalog_vo = render_vo(&catalog, &loaded).into_bytes();
+    let catalog_vo = vo_syntax::format_source(&render_vo(&catalog, &loaded))
+        .map_err(anyhow::Error::msg)?
+        .into_bytes();
     let provenance = render_provenance(root, &inputs, &catalog_vo)?.into_bytes();
     Ok(GeneratedDocs {
         catalog_vo,

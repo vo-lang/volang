@@ -203,6 +203,32 @@ impl PropertyId {
     pub const ACCESSIBILITY_HIDDEN: Self = Self(60);
     /// Adds or removes an authored node from sequential keyboard focus.
     pub const FOCUSABLE: Self = Self(61);
+    /// Portable generic font family: system-ui, sans-serif, serif, or monospace.
+    pub const FONT_FAMILY: Self = Self(62);
+    /// Portable CSS-compatible white-space policy.
+    pub const WHITE_SPACE: Self = Self(63);
+    /// Stable platform element identifier used by semantic relationships.
+    pub const ELEMENT_ID: Self = Self(64);
+    /// Identifies the currently active descendant of a composite control.
+    pub const ACTIVE_DESCENDANT: Self = Self(65);
+    /// Identifies the controlled popup or region of a composite control.
+    pub const CONTROLS: Self = Self(66);
+    /// ARIA-compatible autocomplete token: none, inline, list, or both.
+    pub const AUTO_COMPLETE: Self = Self(67);
+    /// Declares that a listbox accepts multiple selected descendants.
+    pub const MULTI_SELECTABLE: Self = Self(68);
+    /// Background color applied while a pointing device hovers this node or
+    /// one of its descendants. Touch-only hosts leave it inactive.
+    pub const HOVER_BACKGROUND: Self = Self(69);
+    /// Background color applied while primary activation is held on this node
+    /// or one of its descendants.
+    pub const PRESSED_BACKGROUND: Self = Self(70);
+    /// Portable keyboard-focus ring color. Renderers own ring geometry so the
+    /// indicator remains visible without changing authored layout.
+    pub const FOCUS_RING: Self = Self(71);
+    /// Portable surface elevation level in the inclusive range zero through
+    /// five. Renderers map the level to bounded platform-native shadows.
+    pub const ELEVATION: Self = Self(72);
 
     pub const CUSTOM_START: u32 = 1 << 16;
 }
@@ -307,6 +333,12 @@ impl EventType {
     pub const LAYOUT: Self = Self(19);
     /// Controlled text selection changed without requiring a text edit.
     pub const SELECTION_CHANGE: Self = Self(20);
+    /// Secondary-pointer or platform context-menu invocation.
+    pub const CONTEXT_MENU: Self = Self(21);
+    /// Files dropped on a view, encoded as a NUL-separated path list in Text.
+    pub const DROP: Self = Self(22);
+    pub const DRAG_ENTER: Self = Self(23);
+    pub const DRAG_LEAVE: Self = Self(24);
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

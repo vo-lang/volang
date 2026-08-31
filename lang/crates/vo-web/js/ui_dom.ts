@@ -44,7 +44,7 @@ const MAX_MEASUREMENT_FEEDBACK_TURNS = 8;
 const MAX_PENDING_MEASUREMENT_EVENTS = 4_096;
 const MEASUREMENT_QUANTUM = 64;
 const PORTAL_LOGICAL_EVENT_TYPES = Object.freeze([
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18,
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 21, 22, 23, 24,
 ]);
 
 function cloneRecord(record: NodeRecord): NodeRecord {
@@ -256,6 +256,7 @@ function eventName(event: number): string {
     '', 'click', 'input', 'change', 'submit', 'focus', 'blur', 'keydown', 'keyup',
     'pointerdown', 'pointermove', 'pointerup', 'scroll', 'compositionstart',
     'compositionupdate', 'compositionend', 'wheel', '', 'pointercancel', 'volanglayout', 'selectionchange',
+    'contextmenu', 'drop', 'dragenter', 'dragleave',
   ];
   const name = names[event];
   if (name === undefined || name === '') throw new Error(`unsupported Volang UI event ${event}`);
@@ -386,6 +387,11 @@ function isInput(element: Element): element is HTMLInputElement | HTMLTextAreaEl
 
 function isCheckableInput(element: Element): element is HTMLInputElement {
   return element.tagName.toLowerCase() === 'input';
+}
+
+function supportsNativeDisabled(element: Element): boolean {
+  return ['button', 'fieldset', 'input', 'optgroup', 'option', 'select', 'textarea']
+    .includes(element.tagName.toLowerCase());
 }
 
 function textSelectionSignature(element: HTMLInputElement | HTMLTextAreaElement): string {
@@ -592,6 +598,18 @@ function applyMediaState(element: Element, encoded: string): void {
   } else if (state >= 4 && typeof host.pause === 'function') host.pause();
 }
 
+function elevationShadow(level: number): string {
+  switch (level) {
+    case 0: return 'none';
+    case 1: return '0 1px 2px rgb(15 23 42 / 0.10), 0 1px 4px rgb(15 23 42 / 0.08)';
+    case 2: return '0 3px 8px rgb(15 23 42 / 0.12), 0 1px 3px rgb(15 23 42 / 0.10)';
+    case 3: return '0 8px 20px rgb(15 23 42 / 0.16), 0 2px 6px rgb(15 23 42 / 0.10)';
+    case 4: return '0 14px 34px rgb(15 23 42 / 0.20), 0 4px 10px rgb(15 23 42 / 0.12)';
+    case 5: return '0 24px 56px rgb(15 23 42 / 0.24), 0 8px 18px rgb(15 23 42 / 0.14)';
+    default: throw new Error('Volang UI elevation level must be between zero and five');
+  }
+}
+
 function applyProperty(element: Element, property: number, value: UiValue): void {
   const html = element as HTMLElement;
   switch (property) {
@@ -620,18 +638,34 @@ function applyProperty(element: Element, property: number, value: UiValue): void
     case 14: html.style.alignItems = scalarText(value); return;
     case 15: html.style.justifyContent = scalarText(value); return;
     case 16:
-      if (isInput(element)) element.value = scalarText(value);
-      else element.setAttribute('aria-valuetext', scalarText(value));
+      if (isInput(element)) {
+        element.value = scalarText(value);
+        if (element.getAttribute('role') === 'spinbutton') {
+          element.setAttribute('aria-valuenow', scalarText(value));
+        }
+      } else element.setAttribute('aria-valuetext', scalarText(value));
       return;
     case 17:
       if (!isInput(element)) throw new Error('Volang UI placeholder requires an input');
       element.placeholder = scalarText(value);
       return;
     case 18:
-      if ('disabled' in element) (element as HTMLButtonElement | HTMLInputElement).disabled = value.type === 'bool' && value.value;
-      else element.toggleAttribute('aria-disabled', value.type === 'bool' && value.value);
+      if (supportsNativeDisabled(element)) {
+        (element as HTMLButtonElement | HTMLInputElement).disabled = booleanValue(value, 'disabled property');
+      } else if (booleanValue(value, 'disabled property')) {
+        element.setAttribute('aria-disabled', 'true');
+      } else {
+        element.removeAttribute('aria-disabled');
+      }
       return;
-    case 19: element.setAttribute('role', scalarText(value)); return;
+    case 19: {
+      const role = scalarText(value);
+      element.setAttribute('role', role);
+      if (role === 'spinbutton' && isInput(element)) {
+        element.setAttribute('aria-valuenow', element.value);
+      }
+      return;
+    }
     case 20: element.setAttribute('aria-label', scalarText(value)); return;
     case 21: element.setAttribute('data-testid', scalarText(value)); return;
     case 22: html.style.gridTemplateColumns = scalarText(value); return;
@@ -770,20 +804,79 @@ function applyProperty(element: Element, property: number, value: UiValue): void
     case 55: html.style.borderColor = scalarText(value); html.style.borderStyle = 'solid'; return;
     case 56: html.style.borderWidth = cssLength(value); html.style.borderStyle = 'solid'; return;
     case 57:
-      if (!isCheckableInput(element) || element.type !== 'range') throw new Error('Volang UI minimum requires a slider');
-      element.min = scalarText(value); return;
+      if (isCheckableInput(element) && element.type === 'range') element.min = scalarText(value);
+      else element.setAttribute('aria-valuemin', scalarText(value));
+      return;
     case 58:
-      if (!isCheckableInput(element) || element.type !== 'range') throw new Error('Volang UI maximum requires a slider');
-      element.max = scalarText(value); return;
+      if (isCheckableInput(element) && element.type === 'range') element.max = scalarText(value);
+      else element.setAttribute('aria-valuemax', scalarText(value));
+      return;
     case 59:
-      if (!isCheckableInput(element) || element.type !== 'range') throw new Error('Volang UI step requires a slider');
-      element.step = scalarText(value); return;
+      if (isCheckableInput(element) && element.type === 'range') element.step = scalarText(value);
+      else element.setAttribute('data-volang-step', scalarText(value));
+      return;
     case 60:
       element.setAttribute('aria-hidden', booleanValue(value, 'accessibility hidden property') ? 'true' : 'false');
       return;
     case 61:
       element.setAttribute('tabindex', booleanValue(value, 'focusable property') ? '0' : '-1');
       return;
+    case 62: {
+      const family = scalarText(value);
+      if (!['system-ui', 'sans-serif', 'serif', 'monospace'].includes(family)) {
+        throw new Error('Volang UI font family is invalid');
+      }
+      html.style.fontFamily = family;
+      return;
+    }
+    case 63: {
+      const policy = scalarText(value);
+      if (!['normal', 'pre', 'pre-wrap', 'nowrap', 'break-spaces'].includes(policy)) {
+        throw new Error('Volang UI white-space policy is invalid');
+      }
+      html.style.whiteSpace = policy;
+      return;
+    }
+    case 64: {
+      const id = boundedScalar(value, 255, 'element id');
+      if (!/^[A-Za-z][A-Za-z0-9_:.-]*$/u.test(id)) throw new Error('Volang UI element id is invalid');
+      element.setAttribute('id', id);
+      return;
+    }
+    case 65: {
+      const id = boundedScalar(value, 255, 'active descendant');
+      if (!/^[A-Za-z][A-Za-z0-9_:.-]*$/u.test(id)) throw new Error('Volang UI active descendant is invalid');
+      element.setAttribute('aria-activedescendant', id);
+      return;
+    }
+    case 66: element.setAttribute('aria-controls', boundedScalar(value, 255, 'controls')); return;
+    case 67: {
+      const token = scalarText(value);
+      if (!['none', 'inline', 'list', 'both'].includes(token)) throw new Error('Volang UI autocomplete token is invalid');
+      element.setAttribute('aria-autocomplete', token);
+      return;
+    }
+    case 68: element.setAttribute('aria-multiselectable', scalarText(value)); return;
+    case 69:
+      html.style.setProperty('--volang-hover-background', scalarText(value));
+      element.setAttribute('data-volang-hover-background', '');
+      return;
+    case 70:
+      html.style.setProperty('--volang-pressed-background', scalarText(value));
+      element.setAttribute('data-volang-pressed-background', '');
+      return;
+    case 71:
+      html.style.setProperty('--volang-focus-ring', scalarText(value));
+      element.setAttribute('data-volang-focus-ring', '');
+      return;
+    case 72: {
+      if (value.type !== 'i64' || value.value < 0n || value.value > 5n) {
+        throw new Error('Volang UI elevation level must be between zero and five');
+      }
+      html.style.boxShadow = elevationShadow(Number(value.value));
+      element.setAttribute('data-volang-elevation', value.value.toString());
+      return;
+    }
     default:
       if (property < 1 << 16) throw new Error(`unsupported Volang UI property ${property}`);
       element.setAttribute(`data-volang-${property}`, scalarText(value));
@@ -809,15 +902,17 @@ function removeProperty(element: Element, property: number): void {
     case 14: html.style.removeProperty('align-items'); return;
     case 15: html.style.removeProperty('justify-content'); return;
     case 16:
-      if (isInput(element)) element.value = '';
-      else element.removeAttribute('aria-valuetext');
+      if (isInput(element)) {
+        element.value = '';
+        element.removeAttribute('aria-valuenow');
+      } else element.removeAttribute('aria-valuetext');
       return;
     case 17: if (isInput(element)) element.placeholder = ''; return;
     case 18:
-      if ('disabled' in element) (element as HTMLButtonElement | HTMLInputElement).disabled = false;
+      if (supportsNativeDisabled(element)) (element as HTMLButtonElement | HTMLInputElement).disabled = false;
       element.removeAttribute('aria-disabled');
       return;
-    case 19: element.removeAttribute('role'); return;
+    case 19: element.removeAttribute('role'); element.removeAttribute('aria-valuenow'); return;
     case 20: element.removeAttribute('aria-label'); return;
     case 21: element.removeAttribute('data-testid'); return;
     case 22: html.style.removeProperty('grid-template-columns'); return;
@@ -878,11 +973,40 @@ function removeProperty(element: Element, property: number): void {
     case 54: element.removeAttribute('poster'); platformMediaChild(element)?.removeAttribute('poster'); return;
     case 55: html.style.removeProperty('border-color'); return;
     case 56: html.style.removeProperty('border-width'); return;
-    case 57: if (isCheckableInput(element)) element.removeAttribute('min'); return;
-    case 58: if (isCheckableInput(element)) element.removeAttribute('max'); return;
-    case 59: if (isCheckableInput(element)) element.removeAttribute('step'); return;
+    case 57:
+      if (isCheckableInput(element)) element.removeAttribute('min');
+      element.removeAttribute('aria-valuemin'); return;
+    case 58:
+      if (isCheckableInput(element)) element.removeAttribute('max');
+      element.removeAttribute('aria-valuemax'); return;
+    case 59:
+      if (isCheckableInput(element)) element.removeAttribute('step');
+      element.removeAttribute('data-volang-step'); return;
     case 60: element.removeAttribute('aria-hidden'); return;
     case 61: element.removeAttribute('tabindex'); return;
+    case 62: html.style.removeProperty('font-family'); return;
+    case 63: html.style.removeProperty('white-space'); return;
+    case 64: element.removeAttribute('id'); return;
+    case 65: element.removeAttribute('aria-activedescendant'); return;
+    case 66: element.removeAttribute('aria-controls'); return;
+    case 67: element.removeAttribute('aria-autocomplete'); return;
+    case 68: element.removeAttribute('aria-multiselectable'); return;
+    case 69:
+      html.style.removeProperty('--volang-hover-background');
+      element.removeAttribute('data-volang-hover-background');
+      return;
+    case 70:
+      html.style.removeProperty('--volang-pressed-background');
+      element.removeAttribute('data-volang-pressed-background');
+      return;
+    case 71:
+      html.style.removeProperty('--volang-focus-ring');
+      element.removeAttribute('data-volang-focus-ring');
+      return;
+    case 72:
+      html.style.removeProperty('box-shadow');
+      element.removeAttribute('data-volang-elevation');
+      return;
     default: element.removeAttribute(`data-volang-${property}`);
   }
 }
@@ -902,6 +1026,7 @@ export class UiDomAdapter {
   private readonly eventFrames: Uint8Array[] = [];
   private readonly composingNodes = new Set<string>();
   private readonly pendingCompositionSync = new Set<string>();
+  private readonly pendingControlledScroll = new Map<string, { x: number; y: number }>();
   private activeModalKey?: string;
   private restoreFocus?: Element;
   private restoreFocusKey?: string;
@@ -1539,6 +1664,7 @@ export class UiDomAdapter {
     this.textSelections = new Map();
     this.composingNodes.clear();
     this.pendingCompositionSync.clear();
+    this.pendingControlledScroll.clear();
   }
 
   private applyDomMutation(mutation: UiMutation): void {
@@ -1559,26 +1685,42 @@ export class UiDomAdapter {
         return;
       case 'set-property': {
         const node = this.requireDomNode(mutation.id);
+        const key = uiIdentityKey(mutation.id);
         if (!isElement(node)) {
           throw new Error(
             `Volang UI property ${mutation.property} target ${uiIdentityKey(mutation.id)} is not an element`
             + ` (nodeType=${node.nodeType}, text=${JSON.stringify(node.nodeValue ?? '')})`,
           );
         }
-        if (mutation.property === 16 && this.composingNodes.has(uiIdentityKey(mutation.id))) return;
+        if (mutation.property === 16 && this.composingNodes.has(key)) return;
         applyProperty(node, mutation.property, mutation.value);
+        if (mutation.property === 26 || mutation.property === 27) {
+          const scrollNode = node as HTMLElement;
+          this.pendingControlledScroll.set(key, {
+            x: Number.isFinite(scrollNode.scrollLeft) ? scrollNode.scrollLeft : 0,
+            y: Number.isFinite(scrollNode.scrollTop) ? scrollNode.scrollTop : 0,
+          });
+        }
         return;
       }
       case 'remove-property': {
         const node = this.requireDomNode(mutation.id);
+        const key = uiIdentityKey(mutation.id);
         if (!isElement(node)) {
           throw new Error(
             `Volang UI property ${mutation.property} target ${uiIdentityKey(mutation.id)} is not an element`
             + ` (nodeType=${node.nodeType}, text=${JSON.stringify(node.nodeValue ?? '')})`,
           );
         }
-        if (mutation.property === 16 && this.composingNodes.has(uiIdentityKey(mutation.id))) return;
+        if (mutation.property === 16 && this.composingNodes.has(key)) return;
         removeProperty(node, mutation.property);
+        if (mutation.property === 26 || mutation.property === 27) {
+          const scrollNode = node as HTMLElement;
+          this.pendingControlledScroll.set(key, {
+            x: Number.isFinite(scrollNode.scrollLeft) ? scrollNode.scrollLeft : 0,
+            y: Number.isFinite(scrollNode.scrollTop) ? scrollNode.scrollTop : 0,
+          });
+        }
         return;
       }
       case 'listen':
@@ -1602,6 +1744,7 @@ export class UiDomAdapter {
         this.clearNodeListeners(key);
         this.composingNodes.delete(key);
         this.pendingCompositionSync.delete(key);
+        this.pendingControlledScroll.delete(key);
         this.domNodes.delete(key);
         return;
       }
@@ -1755,7 +1898,15 @@ export class UiDomAdapter {
         : { type: 'text', value: target.value };
     }
     if (eventType === 12 && isElement(target)) {
-      return { type: 'scalar', value: BigInt(Math.trunc(target.scrollTop)) };
+      return {
+        type: 'scroll',
+        x: Number.isFinite(target.scrollLeft) ? target.scrollLeft : 0,
+        y: Number.isFinite(target.scrollTop) ? target.scrollTop : 0,
+        deltaX: 0,
+        deltaY: 0,
+        unit: 'pixel',
+        modifiers: { shift: false, control: false, alt: false, meta: false },
+      };
     }
     if (eventType === 7 || eventType === 8) {
       const keyboard = event as KeyboardEvent;
@@ -1768,7 +1919,7 @@ export class UiDomAdapter {
         composing: keyboard.isComposing === true,
       };
     }
-    if ((eventType >= 9 && eventType <= 11) || eventType === 18) {
+    if ((eventType >= 9 && eventType <= 11) || eventType === 18 || eventType === 21) {
       const pointer = event as PointerEvent;
       const pointerType = pointer.pointerType;
       return {
@@ -1808,6 +1959,11 @@ export class UiDomAdapter {
         modifiers: eventModifiers(event),
       };
     }
+    if (eventType === 22) {
+      const files = Array.from((event as DragEvent).dataTransfer?.files ?? []);
+      const paths = files.map((file) => file.webkitRelativePath || file.name);
+      return { type: 'text', value: paths.join('\u0000') };
+    }
     return { type: 'none' };
   }
 
@@ -1821,6 +1977,21 @@ export class UiDomAdapter {
     );
     const callback: EventListener = (event) => {
       if (this.sessionEpoch === undefined) return;
+      if (listener.event === 22 && event.type === 'dragover') {
+        event.preventDefault();
+        return;
+      }
+      if (listener.event >= 21 && listener.event <= 24) event.preventDefault();
+      if (listener.event === 12) {
+        const expected = this.pendingControlledScroll.get(key);
+        const scrollNode = node as HTMLElement;
+        if (expected !== undefined
+          && Math.abs(scrollNode.scrollLeft - expected.x) < 0.5
+          && Math.abs(scrollNode.scrollTop - expected.y) < 0.5) {
+          return;
+        }
+        this.pendingControlledScroll.delete(key);
+      }
       if (listener.event === 9
         && node.hasAttribute('data-volang-pointer-capture')
         && typeof node.setPointerCapture === 'function') {
@@ -1851,7 +2022,12 @@ export class UiDomAdapter {
         { target: node, name: 'keyup' },
         { target: node, name: 'pointerup' },
       ]
-      : [{ target: node as EventTarget, name: eventName(listener.event) }];
+      : listener.event === 22
+        ? [
+          { target: node as EventTarget, name: 'drop' },
+          { target: node as EventTarget, name: 'dragover' },
+        ]
+        : [{ target: node as EventTarget, name: eventName(listener.event) }];
     for (const attachment of attachments) {
       attachment.target.addEventListener(attachment.name, callback, {
         capture: listener.capture,
@@ -1914,12 +2090,14 @@ export class UiDomAdapter {
       }
     }
     this.textSelections.delete(key);
+    this.pendingControlledScroll.delete(key);
     this.domListeners.delete(key);
   }
 
   private rebuild(nodes: Map<string, NodeRecord>): void {
     this.composingNodes.clear();
     this.pendingCompositionSync.clear();
+    this.pendingControlledScroll.clear();
     for (const key of this.domListeners.keys()) this.clearNodeListeners(key);
     this.root.replaceChildren();
     this.domNodes = new Map([[this.rootKey, this.root]]);

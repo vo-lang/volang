@@ -568,9 +568,43 @@ func Background(view View, rgba uint32) View
 
 func Foreground(view View, rgba uint32) View
 
+// HoverBackground, PressedBackground, and FocusRing are renderer-neutral
+// interaction-state colors. Web maps them to native pseudo states; desktop
+// resolves them from retained hit-test and focus state without re-rendering the
+// application tree.
+func HoverBackground(view View, rgba uint32) View
+
+func PressedBackground(view View, rgba uint32) View
+
+func FocusRing(view View, rgba uint32) View
+
+// Elevation accepts a portable semantic level from zero through five.
+// Shadows remain renderer-owned effects and never participate in layout.
+func Elevation(view View, level int64) View
+
 func FontSize(view View, value float64) View
 
 func FontWeight(view View, value int64) View
+
+// FontFamily accepts system-ui, sans-serif, serif, or monospace.
+func FontFamily(view View, value string) View
+
+// WhiteSpace accepts normal, pre, pre-wrap, nowrap, or break-spaces.
+func WhiteSpace(view View, value string) View
+
+// ElementID and ActiveDescendant establish renderer-neutral semantic
+// relationships for editable composite controls such as comboboxes. Values
+// must be bounded HTML-compatible identifiers and are projected to equivalent
+// desktop accessibility relations.
+func ElementID(view View, value string) View
+
+func ActiveDescendant(view View, value string) View
+
+func Controls(view View, value string) View
+
+func AutoComplete(view View, value string) View
+
+func MultiSelectable(view View, value bool) View
 
 func Align(view View, value Alignment) View
 
@@ -615,6 +649,15 @@ func AccessibleDescription(view View, value string) View
 // AccessibleValue supplies a renderer-independent textual value for custom
 // controls such as progress indicators and meters.
 func AccessibleValue(view View, value string) View
+
+// MinimumValue, MaximumValue, and StepValue expose a finite numeric range for
+// composed controls such as spin buttons. Native sliders already carry the
+// same properties intrinsically.
+func MinimumValue(view View, value float64) View
+
+func MaximumValue(view View, value float64) View
+
+func StepValue(view View, value float64) View
 
 func Required(view View, value bool) View
 
@@ -787,6 +830,33 @@ func OnScroll(view View, handler func(Event)) View {
 }
 
 func runtimeOnScroll(view View, handler uint64) View
+
+// OnContextMenu receives a pointer payload and suppresses the host's default
+// context menu. OnDrop places a NUL-separated bounded path list in Event.Text;
+// file names cannot contain NUL on supported hosts.
+func OnContextMenu(view View, handler func(Event)) View {
+	return runtimeOnContextMenu(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnContextMenu(view View, handler uint64) View
+
+func OnDrop(view View, handler func(Event)) View {
+	return runtimeOnDrop(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnDrop(view View, handler uint64) View
+
+func OnDragEnter(view View, handler func(Event)) View {
+	return runtimeOnDragEnter(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnDragEnter(view View, handler uint64) View
+
+func OnDragLeave(view View, handler func(Event)) View {
+	return runtimeOnDragLeave(view, registerRuntimeHandler(handler))
+}
+
+func runtimeOnDragLeave(view View, handler uint64) View
 
 func OnCompositionStart(view View, handler func(Event)) View {
 	return runtimeOnCompositionStart(view, registerRuntimeHandler(handler))

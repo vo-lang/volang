@@ -9,8 +9,10 @@ import (
 	"github.com/vo-lang/ui/kit/components"
 	"github.com/vo-lang/ui/kit/data"
 	"github.com/vo-lang/ui/kit/headless"
+	"github.com/vo-lang/ui/kit/icons"
 	"github.com/vo-lang/ui/kit/tokens"
 	"github.com/vo-lang/ui/motion"
+	"github.com/vo-lang/ui/system"
 	"math"
 	"strconv"
 )
@@ -39,6 +41,8 @@ type FeedbackIntent = components.FeedbackIntent
 
 type Axis = components.Axis
 
+type CodeSnippetVariant = components.CodeSnippetVariant
+
 type ChoiceOption = components.ChoiceOption
 
 type TabItem = components.TabItem
@@ -50,6 +54,44 @@ type AccordionItem = components.AccordionItem
 type Toast = components.Toast
 
 type CommandItem = components.CommandItem
+
+type SegmentItem = components.SegmentItem
+
+type ToggleSelectionMode = components.ToggleSelectionMode
+
+type ListItem = components.ListItem
+
+type StepItem = components.StepItem
+
+type AvatarItem = components.AvatarItem
+
+type NavigationItem = components.NavigationItem
+
+type NavigationGroup = components.NavigationGroup
+
+type NavigationMode = components.NavigationMode
+
+type CarouselItem = components.CarouselItem
+
+type CarouselState = components.CarouselState
+
+type ResizableState = components.ResizableState
+
+type CalendarSelectionMode = components.CalendarSelectionMode
+
+type CalendarConfig = components.CalendarConfig
+
+type UploadStatus = components.UploadStatus
+
+type UploadFile = components.UploadFile
+
+type FileUploaderOptions = components.FileUploaderOptions
+
+type FileFilter = system.FileFilter
+
+type ContextMenuItem = components.ContextMenuItem
+
+type IconGlyph = icons.Glyph
 
 type DataSortDirection = data.SortDirection
 
@@ -84,11 +126,32 @@ const (
 	IntentDanger FeedbackIntent = components.IntentDanger
 	AxisHorizontal Axis = components.AxisHorizontal
 	AxisVertical Axis = components.AxisVertical
+	CodeSnippetInline CodeSnippetVariant = components.CodeSnippetInline
+	CodeSnippetBlock CodeSnippetVariant = components.CodeSnippetBlock
+	NavigationTop NavigationMode = components.NavigationTop
+	NavigationSide NavigationMode = components.NavigationSide
+	NavigationCompact NavigationMode = components.NavigationCompact
+	CalendarSingle CalendarSelectionMode = components.CalendarSingle
+	CalendarRange CalendarSelectionMode = components.CalendarRange
+	UploadQueued UploadStatus = components.UploadQueued
+	UploadRunning UploadStatus = components.UploadRunning
+	UploadComplete UploadStatus = components.UploadComplete
+	UploadFailed UploadStatus = components.UploadFailed
+	UploadRejected UploadStatus = components.UploadRejected
+	UploadCancelled UploadStatus = components.UploadCancelled
 	SortNone DataSortDirection = data.SortNone
 	SortAscending DataSortDirection = data.SortAscending
 	SortDescending DataSortDirection = data.SortDescending
 	Horizontal Orientation = headless.Horizontal
 	Vertical Orientation = headless.Vertical
+	ToggleMultiple ToggleSelectionMode = components.ToggleMultiple
+	ToggleSingle ToggleSelectionMode = components.ToggleSingle
+	IconAdd IconGlyph = icons.Add
+	IconClose IconGlyph = icons.Close
+	IconSearch IconGlyph = icons.Search
+	IconMenu IconGlyph = icons.Menu
+	IconSettings IconGlyph = icons.Settings
+	IconPlay IconGlyph = icons.Play
 )
 
 func LightTheme() Theme {
@@ -146,6 +209,18 @@ func Button(label string, variant ButtonVariant, size ControlSize, disabled bool
 	return components.Button(CurrentTheme(), label, variant, size, disabled, onActivate)
 }
 
+func IconButton(label string, glyph IconGlyph, variant ButtonVariant, size ControlSize, disabled bool, onActivate func()) ui.View {
+	return components.IconButton(CurrentTheme(), label, glyph, variant, size, disabled, onActivate)
+}
+
+func ButtonGroup(label string, children ...ui.View) ui.View {
+	return components.ButtonGroup(CurrentTheme(), label, children...)
+}
+
+func LoadingButton(label string, loading bool, variant ButtonVariant, size ControlSize, disabled bool, onActivate func()) ui.View {
+	return components.LoadingButton(CurrentTheme(), label, loading, variant, size, disabled, onActivate)
+}
+
 // ThemedButton is the explicit-theme counterpart used by design systems that
 // compose UIKit behavior while owning a product-specific visual language.
 func ThemedButton(theme Theme, label string, variant ButtonVariant, size ControlSize, disabled bool, onActivate func()) ui.View {
@@ -154,6 +229,42 @@ func ThemedButton(theme Theme, label string, variant ButtonVariant, size Control
 
 func Badge(label string, intent FeedbackIntent) ui.View {
 	return components.Badge(CurrentTheme(), label, intent)
+}
+
+func Tag(label string, intent FeedbackIntent, removable bool, onRemove func()) ui.View {
+	return components.Tag(CurrentTheme(), label, intent, removable, onRemove)
+}
+
+func Avatar(name string, initials string, size float64) ui.View {
+	return components.Avatar(CurrentTheme(), name, initials, size)
+}
+
+func AvatarGroup(label string, items []AvatarItem, maximumVisible int64, size float64) ui.View {
+	return components.AvatarGroup(CurrentTheme(), label, items, maximumVisible, size)
+}
+
+func ContentCard(title string, detail string, content ui.View, actions ui.View) ui.View {
+	return components.Card(CurrentTheme(), title, detail, content, actions)
+}
+
+func Form(title string, detail string, content ui.View, actions ui.View) ui.View {
+	return components.Form(CurrentTheme(), title, detail, content, actions)
+}
+
+func InputGroup(label string, leading ui.View, control ui.View, trailing ui.View, errorMessage string) ui.View {
+	return components.InputGroup(CurrentTheme(), label, leading, control, trailing, errorMessage)
+}
+
+func InputGroupField(label string, value string, placeholder string, required bool, disabled bool, errorMessage string, focusToken int64, onInput func(string)) ui.View {
+	return components.InputGroupField(CurrentTheme(), label, value, placeholder, required, disabled, errorMessage, focusToken, onInput)
+}
+
+func KeyboardKey(label string) ui.View {
+	return components.KeyboardKey(CurrentTheme(), label)
+}
+
+func CodeSnippet(label string, code string, variant CodeSnippetVariant, copyable bool, copied bool, onCopy func(error)) ui.View {
+	return components.CodeSnippet(CurrentTheme(), label, code, variant, copyable, copied, onCopy)
 }
 
 func Separator(axis Axis, label string) ui.View {
@@ -172,6 +283,10 @@ func Spinner(label string, size ControlSize) ui.View {
 	return components.Spinner(CurrentTheme(), label, size)
 }
 
+func InlineLoading(label string, detail string) ui.View {
+	return components.InlineLoading(CurrentTheme(), label, detail)
+}
+
 func Skeleton(width float64, height float64) ui.View {
 	return components.Skeleton(CurrentTheme(), width, height)
 }
@@ -184,8 +299,20 @@ func TextArea(label string, value string, placeholder string, height float64, re
 	return components.TextArea(CurrentTheme(), label, value, placeholder, height, required, disabled, errorMessage, onInput)
 }
 
+func SearchBox(label string, value string, placeholder string, disabled bool, focusToken int64, onInput func(string), onSubmit func(string), onClear func()) ui.View {
+	return components.SearchBox(CurrentTheme(), label, value, placeholder, disabled, focusToken, onInput, onSubmit, onClear)
+}
+
+func NumberInput(label string, value float64, minimum float64, maximum float64, step float64, disabled bool, focusToken int64, onChange func(float64)) ui.View {
+	return components.NumberInput(CurrentTheme(), label, value, minimum, maximum, step, disabled, focusToken, onChange)
+}
+
 func Slider(label string, value float64, minimum float64, maximum float64, step float64, disabled bool, onChange func(float64)) ui.View {
 	return components.Slider(CurrentTheme(), label, value, minimum, maximum, step, disabled, onChange)
+}
+
+func Rating(label string, value int64, maximum int64, readOnly bool, disabled bool, focusToken int64, onChange func(int64)) ui.View {
+	return components.Rating(CurrentTheme(), label, value, maximum, readOnly, disabled, focusToken, onChange)
 }
 
 func Accordion(label string, items []AccordionItem, onExpandedChange func(string, bool)) ui.View {
@@ -196,8 +323,40 @@ func RadioGroup(label string, options []ChoiceOption, value string, disabled boo
 	return components.RadioGroup(CurrentTheme(), label, options, value, disabled, orientation, focusToken, onChange)
 }
 
+func SegmentedControl(label string, items []SegmentItem, value string, disabled bool, focusToken int64, onChange func(string)) ui.View {
+	return components.SegmentedControl(CurrentTheme(), label, items, value, disabled, focusToken, onChange)
+}
+
+func ToggleGroup(label string, items []SegmentItem, values []string, mode ToggleSelectionMode, disabled bool, orientation Orientation, focusValue string, focusToken int64, onFocusChange func(string), onChange func(string, bool)) ui.View {
+	return components.ToggleGroup(CurrentTheme(), label, items, values, mode, disabled, orientation, focusValue, focusToken, onFocusChange, onChange)
+}
+
 func Select(label string, open bool, value string, options []ChoiceOption, disabled bool, onOpenChange func(bool), onChange func(string)) ui.View {
 	return components.Select(CurrentTheme(), label, open, value, options, disabled, onOpenChange, onChange)
+}
+
+func Combobox(id string, label string, query string, placeholder string, value string, activeValue string, options []ChoiceOption, open bool, loading bool, disabled bool, focusToken int64, onQueryChange func(string), onOpenChange func(bool), onActiveChange func(string), onChange func(string)) ui.View {
+	return components.Combobox(CurrentTheme(), id, label, query, placeholder, value, activeValue, options, open, loading, disabled, focusToken, onQueryChange, onOpenChange, onActiveChange, onChange)
+}
+
+func MultiSelect(id string, label string, query string, placeholder string, values []string, activeValue string, options []ChoiceOption, open bool, loading bool, disabled bool, maximum int64, focusToken int64, onQueryChange func(string), onOpenChange func(bool), onActiveChange func(string), onChange func(string, bool)) ui.View {
+	return components.MultiSelect(CurrentTheme(), id, label, query, placeholder, values, activeValue, options, open, loading, disabled, maximum, focusToken, onQueryChange, onOpenChange, onActiveChange, onChange)
+}
+
+func Calendar(label string, config CalendarConfig, mode CalendarSelectionMode, selectedStart string, selectedEnd string, focusDate string, focusToken int64, onVisibleMonthChange func(string), onFocusChange func(string), onSelect func(string)) ui.View {
+	return components.Calendar(CurrentTheme(), label, config, mode, selectedStart, selectedEnd, focusDate, focusToken, onVisibleMonthChange, onFocusChange, onSelect)
+}
+
+func DatePicker(id string, label string, input string, placeholder string, inputLayout string, value string, config CalendarConfig, open bool, focusDate string, focusToken int64, errorText string, disabled bool, onInput func(string), onOpenChange func(bool), onVisibleMonthChange func(string), onFocusChange func(string), onChange func(string), onInvalid func()) ui.View {
+	return components.DatePicker(CurrentTheme(), id, label, input, placeholder, inputLayout, value, config, open, focusDate, focusToken, errorText, disabled, onInput, onOpenChange, onVisibleMonthChange, onFocusChange, onChange, onInvalid)
+}
+
+func FileUploader(label string, files []UploadFile, options FileUploaderOptions, dragActive bool, disabled bool, onFiles func([]string), onRejected func([]string, string), onDragActiveChange func(bool), onCancel func(string), onRetry func(string), onError func(error)) ui.View {
+	return components.FileUploader(CurrentTheme(), label, files, options, dragActive, disabled, onFiles, onRejected, onDragActiveChange, onCancel, onRetry, onError)
+}
+
+func ContextMenu(label string, target ui.View, items []ContextMenuItem, open bool, x float64, y float64, activeKey string, openSubmenu string, focusToken int64, restoreFocusToken int64, onOpen func(float64, float64), onActiveChange func(string), onSubmenuChange func(string), onActivate func(string), onDismiss func()) ui.View {
+	return components.ContextMenu(CurrentTheme(), label, target, items, open, x, y, activeKey, openSubmenu, focusToken, restoreFocusToken, onOpen, onActiveChange, onSubmenuChange, onActivate, onDismiss)
 }
 
 func Tabs(label string, items []TabItem, selectedKey string, focusToken int64, onSelect func(string)) ui.View {
@@ -210,6 +369,38 @@ func Breadcrumb(label string, items []BreadcrumbItem) ui.View {
 
 func Pagination(label string, page int64, pageCount int64, onPageChange func(int64)) ui.View {
 	return components.Pagination(CurrentTheme(), label, page, pageCount, onPageChange)
+}
+
+func List(label string, items []ListItem, onActivate func(string)) ui.View {
+	return components.List(CurrentTheme(), label, items, onActivate)
+}
+
+func StepIndicator(label string, items []StepItem, currentKey string) ui.View {
+	return components.StepIndicator(CurrentTheme(), label, items, currentKey)
+}
+
+func NavigationMenu(label string, groups []NavigationGroup, mode NavigationMode, maximumVisible int64, overflowOpen bool, onOverflowChange func(bool)) ui.View {
+	return components.NavigationMenu(CurrentTheme(), label, groups, mode, maximumVisible, overflowOpen, onOverflowChange)
+}
+
+func ScrollArea(label string, content ui.View, width float64, height float64, scrollX float64, scrollY float64, onScroll func(float64, float64)) ui.View {
+	return components.ScrollArea(CurrentTheme(), label, content, width, height, scrollX, scrollY, onScroll)
+}
+
+func UseResizableState(initial float64) ResizableState {
+	return components.UseResizableState(initial)
+}
+
+func ResizableHandle(label string, state ResizableState, axis Axis, value float64, minimum float64, maximum float64, step float64, disabled bool, onChange func(float64)) ui.View {
+	return components.ResizableHandle(CurrentTheme(), label, state, axis, value, minimum, maximum, step, disabled, onChange)
+}
+
+func UseCarouselState() CarouselState {
+	return components.UseCarouselState()
+}
+
+func Carousel(label string, state CarouselState, items []CarouselItem, currentKey string, wrap bool, onChange func(string)) ui.View {
+	return components.Carousel(CurrentTheme(), label, state, items, currentKey, wrap, onChange)
 }
 
 func DataTable(label string, columns []DataColumn, rows []DataRow, sort DataSort, onSort func(string), onRowActivate func(string)) ui.View {
@@ -272,7 +463,9 @@ func Drawer(title string, open bool, width float64, content ui.View, onDismiss f
 // environment with ApplicationWithEnvironment for tests, previews, embedded
 // surfaces, and deterministic server rendering.
 func Application(content func() ui.View) ui.View {
-	return ui.FlowDirection(ProvideTheme(SystemTheme(), content), ui.CurrentEnvironment().Direction)
+	return ui.FlowDirection(ProvideTheme(SystemTheme(), func() ui.View {
+		return ui.Foreground(content(), CurrentTheme().Foreground)
+	}), ui.CurrentEnvironment().Direction)
 }
 
 func ApplicationWithEnvironment(environment ui.Environment, content func() ui.View) ui.View {
@@ -296,6 +489,14 @@ func Title(value string) ui.View {
 	return Heading(CurrentTheme(), value)
 }
 
+// PageTitle is the display-level heading for a screen. Section titles keep a
+// quieter scale so a complete page has an intentional visual hierarchy.
+func PageTitle(value string) ui.View {
+	theme := CurrentTheme()
+	return ui.Role(ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(value), theme.Foreground), theme.Typography.TitleSize *
+		1.6), theme.Typography.WeightStrong), "heading")
+}
+
 func Paragraph(value string) ui.View {
 	return ui.Role(Body(CurrentTheme(), value), "paragraph")
 }
@@ -317,22 +518,7 @@ func Input(label string, value string, placeholder string, disabled bool, onInpu
 }
 
 func ValidatedInput(label string, value string, placeholder string, required bool, disabled bool, errorMessage string, focusToken int64, onInput func(string)) ui.View {
-	theme := CurrentTheme()
-	control := ui.TextInput(value, placeholder, ui.TextChange(onInput))
-	control = ui.FocusRequest(control, focusToken)
-	control = ui.AccessibleName(control, label)
-	control = ui.AccessibleDescription(control, errorMessage)
-	control = ui.Required(control, required)
-	control = ui.Invalid(control, errorMessage != "")
-	control = ui.Disabled(control, disabled)
-	control = ui.Height(ui.Radius(ui.Background(control, theme.Surface), theme.Radius), theme.ControlHeight)
-	control = ui.BorderWidth(ui.BorderColor(control, theme.Colors.Border), 1)
-	if errorMessage != "" {
-		return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control, FieldError(theme, errorMessage)), theme.Space /
-			2)
-	}
-	return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control), theme.Space /
-		2)
+	return ValidatedTextFieldWithFocus(CurrentTheme(), label, value, placeholder, required, disabled, errorMessage, focusToken, ui.TextChange(onInput))
 }
 
 func Switch(label string, checked bool, disabled bool, onChange func(bool)) ui.View {
@@ -356,15 +542,20 @@ func ModalDialog(title string, open bool, content ui.View, onDismiss func()) ui.
 func Screen(theme Theme, content ui.View) ui.View {
 	body := ui.Flex(ui.MaxWidth(ui.Gap(content, theme.Space * 2), theme.ContentWidth), 1)
 	body = ui.Justify(ui.Row(body), ui.JustifyCenter)
-	return ui.Background(ui.Padding(body, theme.Space * 3), theme.Background)
+	pagePadding := theme.Spacing.PagePadding
+	if ui.CurrentEnvironment().ViewportWidth < 600 {
+		pagePadding = theme.Spacing.ContentGap
+	}
+	return ui.Background(ui.Padding(body, pagePadding), theme.Background)
 }
 
 func Card(theme Theme, child ui.View) ui.View {
-	return ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(ui.Padding(child, theme.Space * 2), theme.Surface), theme.Colors.Border), 1), theme.Radius)
+	view := ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(ui.Padding(child, theme.Space * 2), theme.Surface), theme.Colors.Border), 1), theme.Radius)
+	return ui.Elevation(view, theme.Elevation.Raised)
 }
 
 func Heading(theme Theme, value string) ui.View {
-	return ui.Role(ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(value), theme.Foreground), 24), 700), "heading")
+	return ui.Role(ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(value), theme.Foreground), theme.Typography.TitleSize), theme.Typography.WeightStrong), "heading")
 }
 
 func Body(theme Theme, value string) ui.View {
@@ -403,8 +594,21 @@ func FieldError(theme Theme, message string) ui.View {
 // ValidatedTextField keeps visual, input, and accessibility validation state in
 // one component contract on every renderer.
 func ValidatedTextField(theme Theme, label string, value string, placeholder string, required bool, disabled bool, errorMessage string, onInput func(ui.Event)) ui.View {
-	control := ui.Height(ui.Radius(ui.Background(ui.Disabled(ui.Invalid(ui.Required(ui.AccessibleDescription(ui.AccessibleName(ui.TextInput(value, placeholder, onInput), label), errorMessage), required), errorMessage !=
-		""), disabled), theme.Surface), theme.Radius), theme.ControlHeight)
+	return ValidatedTextFieldWithFocus(theme, label, value, placeholder, required, disabled, errorMessage, 0, onInput)
+}
+
+// ValidatedTextFieldWithFocus owns the complete visual, accessibility, and
+// recovery contract for one text field. A changing focus token moves focus to
+// the control after failed submission without coupling forms to a renderer.
+func ValidatedTextFieldWithFocus(theme Theme, label string, value string, placeholder string, required bool, disabled bool, errorMessage string, focusToken int64, onInput func(ui.Event)) ui.View {
+	control := ui.TextInput(value, placeholder, onInput)
+	control = ui.FocusRequest(control, focusToken)
+	control = ui.AccessibleName(control, label)
+	control = ui.AccessibleDescription(control, errorMessage)
+	control = ui.Required(control, required)
+	control = ui.Invalid(control, errorMessage != "")
+	control = ui.Disabled(control, disabled)
+	control = ui.Height(ui.Radius(ui.Foreground(ui.Background(control, theme.Surface), theme.Foreground), theme.Radius), theme.ControlHeight)
 	control = ui.BorderWidth(ui.BorderColor(control, theme.Colors.Border), 1)
 	if errorMessage != "" {
 		return ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600), control, FieldError(theme, errorMessage)), theme.Space /
@@ -449,7 +653,12 @@ func MenuGroup(theme Theme, label string, children ...ui.View) ui.View {
 }
 
 func MenuAction(theme Theme, label string, disabled bool, onActivate func(ui.Event)) ui.View {
-	action := ui.Height(ui.Padding(ui.Disabled(ui.Button(label, onActivate), disabled), theme.Space), theme.ControlHeight)
+	action := ui.Disabled(ui.Button(label, onActivate), disabled)
+	action = ui.Height(ui.Padding(ui.Radius(ui.Foreground(ui.Background(action, theme.Colors.SurfaceRaised), theme.Foreground), theme.Shape.SmallRadius), theme.Space), theme.ControlHeight)
+	action = ui.FocusRing(ui.PressedBackground(ui.HoverBackground(action, theme.Colors.SurfaceHover), theme.Colors.SurfacePressed), theme.Colors.Focus)
+	if disabled {
+		action = ui.Opacity(action, 0.55)
+	}
 	return ui.Role(action, "menuitem")
 }
 
@@ -474,6 +683,28 @@ func AppShell(theme Theme, header ui.View, navigation ui.View, content ui.View) 
 	main := ui.GridArea(ui.Role(content, "main"), "main")
 	return ui.Gap(ui.GridColumns(ui.GridTemplateAreas(ui.Grid(grid, nav, main), "header header / sidebar main"), "minmax(180px, 1fr) minmax(320px, 3fr)"), theme.Space *
 		2)
+}
+
+// AdaptiveAppShell keeps the primary application regions usable from compact
+// windows through desktop workspaces. Compact navigation moves below the main
+// surface, medium windows use a bounded rail, and expanded windows retain the
+// named two-column application grid.
+func AdaptiveAppShell(theme Theme, size WindowSizeClass, header ui.View, navigation ui.View, content ui.View) ui.View {
+	if size == Expanded {
+		return AppShell(theme, header, navigation, content)
+	}
+	header = ui.Role(header, "banner")
+	navigation = ui.Role(navigation, "navigation")
+	content = ui.MinWidth(ui.Role(content, "main"), 0)
+	if size == Compact {
+		shell := ui.Column(header, ui.Flex(content, 1), navigation)
+		return ui.MinWidth(shell, 0)
+	}
+	if size == Medium {
+		body := ui.Gap(ui.Row(ui.Width(navigation, 200), ui.Flex(content, 1)), theme.Space * 2)
+		return ui.MinWidth(ui.Gap(ui.Column(header, body), theme.Space * 2), 0)
+	}
+	panic("UIKit window size class is invalid")
 }
 
 func FormActions(theme Theme, children ...ui.View) ui.View {
@@ -546,6 +777,10 @@ func AdaptivePage(navigation ui.View, content ui.View) ui.View {
 	return AdaptiveScaffold(CurrentTheme(), ViewportSizeClass(), navigation, content)
 }
 
+func AdaptiveShell(header ui.View, navigation ui.View, content ui.View) ui.View {
+	return AdaptiveAppShell(CurrentTheme(), ViewportSizeClass(), header, navigation, content)
+}
+
 // ResponsiveGrid chooses a bounded one, two, or three-column grid while
 // preserving the same child identities across size-class changes.
 func ResponsiveGrid(theme Theme, size WindowSizeClass, children ...ui.View) ui.View {
@@ -594,7 +829,7 @@ func ResourceBoundary(theme Theme, pending bool, errorMessage string, content ui
 // NavigationLink applies standard button sizing and link semantics while the
 // platform adapter owns History integration.
 func NavigationLink(theme Theme, label string, path string) ui.View {
-	return ui.Role(PrimaryButton(theme, label, false, func(event ui.Event) {
+	return ui.Role(components.Button(theme, label, ButtonSecondary, ControlMedium, false, func() {
 		ui.Navigate(path)
 	}), "link")
 }

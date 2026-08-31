@@ -48,6 +48,28 @@ function validRelative(path) {
     && path.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 }
 function validName(name) { return typeof name === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(name); }
+function compilerDiagnostic(path, message, code = 'web/compiler') {
+  let line = 1;
+  let column = 1;
+  for (const match of message.matchAll(/(?:^|\s)at\s+.+:(\d+):(\d+)(?:\s|$)/gmu)) {
+    const candidateLine = Number.parseInt(match[1], 10);
+    const candidateColumn = Number.parseInt(match[2], 10);
+    if (candidateLine > 0 && candidateColumn > 0) {
+      line = candidateLine;
+      column = candidateColumn;
+    }
+  }
+  return {
+    path,
+    line,
+    column,
+    endLine: line,
+    endColumn: column + 1,
+    severity: 3,
+    code,
+    message,
+  };
+}
 function base64UrlEncode(bytes) {
   let binary = '';
   for (let offset = 0; offset < bytes.byteLength; offset += 0x4000) {
@@ -514,7 +536,7 @@ export async function createStudioHost({ root }) {
     if (operation === 'files.delete') { project(request.projectID); check(vfs.removeAll(projectPath(request.projectID, request.path)), 'delete file'); await flushVFS(); return encode({}); }
     if (operation === 'language.analyze') {
       try { await compile({ projectID: request.projectID, entry: request.path, mode: 0, forPreview: false, overlays: [{ path: request.path, text: request.text, version: request.version }] }); return encode({ diagnostics: [] }); }
-      catch (error) { return encode({ diagnostics: [{ path: request.path, line: 1, column: 1, endLine: 1, endColumn: 1, severity: 3, code: 'web/compiler', message: error.message }] }); }
+      catch (error) { return encode({ diagnostics: [compilerDiagnostic(request.path, error.message)] }); }
     }
     if (operation === 'compiler.compile') { const artifact = await compile(request); return encode({ ...artifact, artifact }); }
     if (operation === 'preview.open') {

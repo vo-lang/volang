@@ -54,10 +54,8 @@ func volangIdentifierContinue(value rune) bool {
 
 func volangKeyword(value string) bool {
 	switch value {
-	case "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
-		"for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return",
-		"select", "struct", "switch", "type", "var", "dynamic", "match", "try", "catch", "throw":
-		return true
+		case "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type", "var", "dynamic", "match", "try", "catch", "throw":
+			return true
 	}
 	return false
 }
@@ -73,7 +71,7 @@ func HighlightVolangLine(text string) []LineSegment {
 			segments = append(segments, LineSegment{Text: string(values[start:end]), Kind: kind})
 		}
 	}
-	for index := 0; index < len(values); {
+	for index := 0; index < len(values);  {
 		start := index
 		value := values[index]
 		if value == '/' && index + 1 < len(values) && values[index + 1] == '/' {
@@ -115,10 +113,18 @@ func HighlightVolangLine(text string) []LineSegment {
 			for index < len(values) {
 				current := values[index]
 				signedExponent := (current == '+' || current == '-') && index > start &&
-					(values[index - 1] == 'e' || values[index - 1] == 'E' || values[index - 1] == 'p' || values[index - 1] == 'P')
+					(values[index - 1] == 'e' || values[index - 1] == 'E' || values[index - 1] == 'p' ||
+						values[index - 1] == 'P')
 				if !(current >= '0' && current <= '9' || current >= 'a' && current <= 'f' ||
-					current >= 'A' && current <= 'F' || current == '.' || current == '_' || current == 'x' ||
-					current == 'X' || current == 'e' || current == 'E' || current == 'p' || current == 'P' ||
+					current >= 'A' && current <= 'F' ||
+					current == '.' ||
+					current == '_' ||
+					current == 'x' ||
+					current == 'X' ||
+					current == 'e' ||
+					current == 'E' ||
+					current == 'p' ||
+					current == 'P' ||
 					signedExponent) {
 					break
 				}
@@ -192,6 +198,7 @@ type Model struct {
 	completions []language.Completion
 	folds []Fold
 	languageVersion uint64
+	scrollX float64
 	scrollY float64
 }
 
@@ -273,9 +280,7 @@ func (model *Model) snapshot() language.Snapshot {
 	languageID := model.LanguageID
 	model.mu.RUnlock()
 	text, version := model.Document.Snapshot()
-	return language.Snapshot{
-		URI: uri, LanguageID: languageID, Version: version, Text: text,
-	}
+	return language.Snapshot{URI: uri, LanguageID: languageID, Version: version, Text: text}
 }
 
 // RefreshLanguage is designed for a component-scoped goroutine context. A
@@ -543,11 +548,15 @@ func (model *Model) ApplyInput(value string, startUTF16 int64, lengthUTF16 int64
 	return edit, true, nil
 }
 
-func (model *Model) updateScroll(scrollY float64, lineHeight float64) {
+func (model *Model) updateScroll(scrollX float64, scrollY float64, lineHeight float64) {
+	if scrollX < 0 {
+		scrollX = 0
+	}
 	if scrollY < 0 {
 		scrollY = 0
 	}
 	model.mu.Lock()
+	model.scrollX = scrollX
 	model.scrollY = scrollY
 	viewport := model.viewport
 	viewport.FirstLine = int(scrollY / lineHeight)
@@ -560,6 +569,12 @@ func (model *Model) updateScroll(scrollY float64, lineHeight float64) {
 	}
 	model.viewport = viewport
 	model.mu.Unlock()
+}
+
+func (model *Model) ScrollX() float64 {
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	return model.scrollX
 }
 
 func (model *Model) ScrollY() float64 {
@@ -615,7 +630,9 @@ func (model *Model) VisibleLines() []VisibleLine {
 		if err != nil {
 			panic(err.Error())
 		}
-		result = append(result, VisibleLine{Number: line + 1, Start: start, Text: text, DiagnosticCount: count})
+		result = append(result, VisibleLine{
+			Number: line + 1, Start: start, Text: text, DiagnosticCount: count,
+		})
 	}
 	return result
 }
@@ -637,6 +654,7 @@ type Options struct {
 	ReadOnly bool
 	ShowLineNumbers bool
 	ShowStatusBar bool
+	FocusToken int64
 	Width float64
 	Height float64
 	LineHeight float64
@@ -702,18 +720,18 @@ func statusView(model *Model) ui.View {
 
 func tokenColor(kind TokenKind) uint32 {
 	switch kind {
-	case Keyword:
-		return 0xffc792ea
-	case String:
-		return 0xffc3e88d
-	case Number:
-		return 0xfff78c6c
-	case Comment:
-		return 0xff69758a
-	case Punctuation:
-		return 0xff89ddff
-	case Identifier:
-		return 0xffd8dee9
+		case Keyword:
+			return 0xffc792ea
+		case String:
+			return 0xffc3e88d
+		case Number:
+			return 0xfff78c6c
+		case Comment:
+			return 0xff69758a
+		case Punctuation:
+			return 0xff89ddff
+		case Identifier:
+			return 0xffd8dee9
 	}
 	return 0xffd8dee9
 }
@@ -773,7 +791,19 @@ func highlightedLineView(model *Model, line VisibleLine, options Options) ui.Vie
 		part = ui.Key(part, "token-" + strconv.Itoa(line.Number) + "-" + strconv.Itoa(index))
 		views = append(views, part)
 	}
-	lineView := ui.Height(ui.Row(views...), options.LineHeight)
+	// The DOM renderer allows flex children to shrink so nested scroll views
+	// remain bounded. Give each code row its intrinsic monospace width to keep
+	// token spans aligned with the transparent native text control on long lines.
+	columns := 0
+	for _, character := range line.Text {
+		if character == '\t' {
+			columns += 4 - columns % 4
+		} else {
+			columns++
+		}
+	}
+	lineWidth := float64(columns) * 9.64
+	lineView := ui.MinWidth(ui.Height(ui.Row(views...), options.LineHeight), lineWidth)
 	lineView = ui.Key(lineView, "line-" + strconv.Itoa(line.Number))
 	if line.DiagnosticCount > 0 {
 		lineView = ui.AccessibleDescription(lineView, strconv.Itoa(line.DiagnosticCount) + " diagnostics")
@@ -808,6 +838,7 @@ func highlightedEditorSurface(model *Model, options Options) ui.View {
 		views = append(views, ui.Height(ui.Box(), float64(remaining) * options.LineHeight))
 	}
 	surface := ui.Scroll(ui.Padding(ui.Column(views...), 8))
+	surface = ui.ScrollX(surface, model.ScrollX())
 	surface = ui.ScrollY(surface, model.ScrollY())
 	surface = ui.PointerEvents(surface, ui.PointerEventsNone)
 	surface = ui.Role(surface, "presentation")
@@ -825,7 +856,8 @@ func View(model *Model, options Options) ui.View {
 	}
 	if !options.ReadOnly && model.Document.Len() <= 1000000 {
 		input := ui.TextArea(model.Document.Text(), "Enter source", func(event ui.Event) {
-			if edit, changed, err := model.ApplyInput(event.Text, event.SelectionStartUTF16, event.SelectionLengthUTF16); err != nil {
+			if edit, changed, err := model.ApplyInput(event.Text, event.SelectionStartUTF16, event.SelectionLengthUTF16); err !=
+				nil {
 				panic(err.Error())
 			} else if changed {
 				if options.OnChange != nil {
@@ -836,6 +868,7 @@ func View(model *Model, options Options) ui.View {
 		})
 		input = ui.AccessibleName(input, options.AccessibleName)
 		input = ui.TestID(input, "volang-code-editor")
+		input = ui.FocusRequest(input, options.FocusToken)
 		selection := model.Document.Selection()
 		start, err := model.Document.UTF16Offset(selection.Start())
 		if err != nil {
@@ -849,7 +882,8 @@ func View(model *Model, options Options) ui.View {
 		input = ui.SelectionLengthUTF16(input, int64(end - start))
 		input = ui.OnSelectionChange(input, func(event ui.Event) {
 			before := model.Document.Selection()
-			if edit, changed, err := model.ApplyInput(event.Text, event.SelectionStartUTF16, event.SelectionLengthUTF16); err != nil {
+			if edit, changed, err := model.ApplyInput(event.Text, event.SelectionStartUTF16, event.SelectionLengthUTF16); err !=
+				nil {
 				panic(err.Error())
 			} else if changed {
 				// Browsers may publish selectionchange before input for one native
@@ -867,7 +901,7 @@ func View(model *Model, options Options) ui.View {
 			}
 		})
 		input = ui.OnScroll(input, func(event ui.Event) {
-			model.updateScroll(event.Y, options.LineHeight)
+			model.updateScroll(event.X, event.Y, options.LineHeight)
 			ui.Invalidate()
 		})
 		// Transparent glyphs reveal the renderer-neutral highlighted mirror.

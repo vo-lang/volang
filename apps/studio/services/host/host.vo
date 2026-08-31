@@ -362,7 +362,9 @@ func remoteOperation(ctx context.Context, operation string, request interface{},
 			default:
 		}
 		var next remoteNextResponse
-		if err := call(context.Background(), "remote.next", remoteNextRequest{SessionID: started.SessionID}, &next); err != nil {
+		if err := call(context.Background(), "remote.next", remoteNextRequest{
+			SessionID: started.SessionID,
+		}, &next); err != nil {
 			if ctx.Err() != nil {
 				stop()
 				return ctx.Err()

@@ -1732,12 +1732,57 @@ impl<'a> Lowerer<'a> {
             "Foreground" => {
                 self.lower_modifier(expression.span, call, PropertyId::FOREGROUND, function)
             }
+            "HoverBackground" => self.lower_modifier(
+                expression.span,
+                call,
+                PropertyId::HOVER_BACKGROUND,
+                function,
+            ),
+            "PressedBackground" => self.lower_modifier(
+                expression.span,
+                call,
+                PropertyId::PRESSED_BACKGROUND,
+                function,
+            ),
+            "FocusRing" => {
+                self.lower_modifier(expression.span, call, PropertyId::FOCUS_RING, function)
+            }
+            "Elevation" => {
+                self.lower_modifier(expression.span, call, PropertyId::ELEVATION, function)
+            }
             "FontSize" => {
                 self.lower_modifier(expression.span, call, PropertyId::FONT_SIZE, function)
             }
             "FontWeight" => {
                 self.lower_modifier(expression.span, call, PropertyId::FONT_WEIGHT, function)
             }
+            "FontFamily" => {
+                self.lower_modifier(expression.span, call, PropertyId::FONT_FAMILY, function)
+            }
+            "WhiteSpace" => {
+                self.lower_modifier(expression.span, call, PropertyId::WHITE_SPACE, function)
+            }
+            "ElementID" => {
+                self.lower_modifier(expression.span, call, PropertyId::ELEMENT_ID, function)
+            }
+            "ActiveDescendant" => self.lower_modifier(
+                expression.span,
+                call,
+                PropertyId::ACTIVE_DESCENDANT,
+                function,
+            ),
+            "Controls" => {
+                self.lower_modifier(expression.span, call, PropertyId::CONTROLS, function)
+            }
+            "AutoComplete" => {
+                self.lower_modifier(expression.span, call, PropertyId::AUTO_COMPLETE, function)
+            }
+            "MultiSelectable" => self.lower_modifier(
+                expression.span,
+                call,
+                PropertyId::MULTI_SELECTABLE,
+                function,
+            ),
             "Align" => self.lower_modifier(expression.span, call, PropertyId::ALIGN, function),
             "Justify" => self.lower_modifier(expression.span, call, PropertyId::JUSTIFY, function),
             "GridColumns" => {
@@ -1780,6 +1825,15 @@ impl<'a> Lowerer<'a> {
             ),
             "AccessibleValue" => {
                 self.lower_modifier(expression.span, call, PropertyId::VALUE, function)
+            }
+            "MinimumValue" => {
+                self.lower_modifier(expression.span, call, PropertyId::MIN_VALUE, function)
+            }
+            "MaximumValue" => {
+                self.lower_modifier(expression.span, call, PropertyId::MAX_VALUE, function)
+            }
+            "StepValue" => {
+                self.lower_modifier(expression.span, call, PropertyId::STEP_VALUE, function)
             }
             "Required" => {
                 self.lower_modifier(expression.span, call, PropertyId::REQUIRED, function)
@@ -1902,6 +1956,21 @@ impl<'a> Lowerer<'a> {
             ),
             "OnScroll" => {
                 self.lower_listener_modifier(expression.span, call, EventType::SCROLL, function)
+            }
+            "OnContextMenu" => self.lower_listener_modifier(
+                expression.span,
+                call,
+                EventType::CONTEXT_MENU,
+                function,
+            ),
+            "OnDrop" => {
+                self.lower_listener_modifier(expression.span, call, EventType::DROP, function)
+            }
+            "OnDragEnter" => {
+                self.lower_listener_modifier(expression.span, call, EventType::DRAG_ENTER, function)
+            }
+            "OnDragLeave" => {
+                self.lower_listener_modifier(expression.span, call, EventType::DRAG_LEAVE, function)
             }
             "OnCompositionStart" => self.lower_listener_modifier(
                 expression.span,
@@ -2649,6 +2718,10 @@ mod tests {
                 include_str!("../../../../ui/kit/kit.vo"),
             )
             .with_file(
+                "github.com/vo-lang/ui/kit/icons/icons.vo",
+                include_str!("../../../../ui/kit/icons/icons.vo"),
+            )
+            .with_file(
                 "github.com/vo-lang/ui/kit/components/components.vo",
                 include_str!("../../../../ui/kit/components/components.vo"),
             )
@@ -2677,6 +2750,10 @@ mod tests {
                 include_str!("../../../../ui/gesture/gesture.vo"),
             )
             .with_file(
+                "github.com/vo-lang/ui/graphics/graphics.vo",
+                include_str!("../../../../ui/graphics/graphics.vo"),
+            )
+            .with_file(
                 "github.com/vo-lang/ui/i18n/core/core.vo",
                 include_str!("../../../../ui/i18n/core/core.vo"),
             )
@@ -2695,6 +2772,10 @@ mod tests {
             .with_file(
                 "github.com/vo-lang/ui/task/task.vo",
                 include_str!("../../../../ui/task/task.vo"),
+            )
+            .with_file(
+                "github.com/vo-lang/ui/system/system.vo",
+                include_str!("../../../../ui/system/system.vo"),
             )
             .with_file(
                 "github.com/vo-lang/ui/commands/commands.vo",
@@ -3643,20 +3724,115 @@ func main() {
     }
 
     #[test]
+    fn interaction_visual_modifiers_lower_to_typed_color_sites() {
+        let project = analyze(
+            r#"
+package main
+import "github.com/vo-lang/ui"
+var hover uint32 = 0xff223344
+var pressed uint32 = 0xff334455
+var focus uint32 = 0xff445566
+func App() ui.View {
+	return ui.Elevation(ui.FocusRing(ui.PressedBackground(ui.HoverBackground(
+		ui.Background(ui.Button("Save", func(event ui.Event) {}), 0xff112233), hover,
+	), pressed), focus), 3)
+}
+func main() {
+	if err := ui.Mount(App); err != nil { panic(err.Error()) }
+}
+"#,
+        );
+        let program = compile_project_ui(&project, PlanLimits::default())
+            .unwrap()
+            .unwrap();
+        for property in [
+            PropertyId::HOVER_BACKGROUND,
+            PropertyId::PRESSED_BACKGROUND,
+            PropertyId::FOCUS_RING,
+            PropertyId::ELEVATION,
+        ] {
+            assert!(program.root.plan.as_plan().updates.iter().any(|update| {
+                matches!(
+                    update.mutation,
+                    vo_ui_plan::DirectMutation::SetProperty {
+                        property: found,
+                        ..
+                    } if found == property
+                )
+            }));
+        }
+    }
+
+    #[test]
+    fn composite_choice_relationship_modifiers_lower_to_typed_property_sites() {
+        let project = analyze(
+            r#"
+package main
+import "github.com/vo-lang/ui"
+var inputID = "package-input"
+var activeID = "package-option-1"
+var popupID = "package-listbox"
+var autocomplete = "list"
+var multiple = true
+func App() ui.View {
+	return ui.MultiSelectable(ui.AutoComplete(ui.Controls(ui.ActiveDescendant(ui.ElementID(
+		ui.TextInput("", "Filter", func(event ui.Event) {}), inputID,
+	), activeID), popupID), autocomplete), multiple)
+}
+func main() {
+	if err := ui.Mount(App); err != nil { panic(err.Error()) }
+}
+"#,
+        );
+        let program = compile_project_ui(&project, PlanLimits::default())
+            .unwrap()
+            .unwrap();
+        for property in [
+            PropertyId::ELEMENT_ID,
+            PropertyId::ACTIVE_DESCENDANT,
+            PropertyId::CONTROLS,
+            PropertyId::AUTO_COMPLETE,
+            PropertyId::MULTI_SELECTABLE,
+        ] {
+            assert!(program.root.plan.as_plan().updates.iter().any(|update| {
+                matches!(
+                    update.mutation,
+                    vo_ui_plan::DirectMutation::SetProperty {
+                        property: found,
+                        ..
+                    } if found == property
+                )
+            }));
+        }
+    }
+
+    #[test]
     fn typed_event_modifiers_lower_to_static_listener_sites() {
         let project = analyze(
             r#"
 package main
 import "github.com/vo-lang/ui"
 func App() ui.View {
-	return ui.OnLayout(
-		ui.OnSelectionChange(ui.OnCompositionEnd(
-			ui.OnPointerMove(
-				ui.OnKeyDownCapture(ui.Box(), func(event ui.Event) {}),
+	return ui.OnDragLeave(
+		ui.OnDragEnter(
+			ui.OnDrop(
+				ui.OnContextMenu(
+					ui.OnLayout(
+						ui.OnSelectionChange(ui.OnCompositionEnd(
+							ui.OnPointerMove(
+								ui.OnKeyDownCapture(ui.Box(), func(event ui.Event) {}),
+								func(event ui.Event) {},
+							),
+							func(event ui.Event) {},
+						), func(event ui.Event) {}),
+						func(event ui.Event) {},
+					),
+					func(event ui.Event) {},
+				),
 				func(event ui.Event) {},
 			),
 			func(event ui.Event) {},
-		), func(event ui.Event) {}),
+		),
 		func(event ui.Event) {},
 	)
 }
@@ -3668,7 +3844,7 @@ func main() {
         let program = compile_project_ui(&project, PlanLimits::default())
             .unwrap()
             .unwrap();
-        assert_eq!(program.root.handler_bindings.len(), 5);
+        assert_eq!(program.root.handler_bindings.len(), 9);
         let listeners = &program.root.plan.nodes()[0].listeners;
         let events = listeners
             .iter()
@@ -3682,6 +3858,10 @@ func main() {
                 EventType::COMPOSITION_END,
                 EventType::SELECTION_CHANGE,
                 EventType::LAYOUT,
+                EventType::CONTEXT_MENU,
+                EventType::DROP,
+                EventType::DRAG_ENTER,
+                EventType::DRAG_LEAVE,
             ]
         );
         assert!(listeners[0].options.capture);

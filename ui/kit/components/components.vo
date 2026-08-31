@@ -2,10 +2,15 @@ package components
 
 import (
 	ui "github.com/vo-lang/ui"
+	"github.com/vo-lang/ui/gesture"
 	"github.com/vo-lang/ui/kit/headless"
+	"github.com/vo-lang/ui/kit/icons"
 	"github.com/vo-lang/ui/kit/tokens"
+	"github.com/vo-lang/ui/system"
 	"math"
 	"strconv"
+	"strings"
+	"time"
 )
 
 type FeedbackIntent int64
@@ -24,6 +29,123 @@ const (
 	AxisVertical
 )
 
+type CodeSnippetVariant int64
+
+const (
+	CodeSnippetInline CodeSnippetVariant = iota
+	CodeSnippetBlock
+)
+
+type AvatarItem struct {
+	Key string
+	Name string
+	Initials string
+}
+
+type NavigationItem struct {
+	Key string
+	Label string
+	CompactLabel string
+	Path string
+	Current bool
+	Disabled bool
+}
+
+type NavigationGroup struct {
+	Key string
+	Label string
+	Items []NavigationItem
+}
+
+type NavigationMode int64
+
+const (
+	NavigationTop NavigationMode = iota
+	NavigationSide
+	NavigationCompact
+)
+
+type CalendarSelectionMode int64
+
+const (
+	CalendarSingle CalendarSelectionMode = iota
+	CalendarRange
+)
+
+type CalendarConfig struct {
+	VisibleMonth string
+	MonthLabel string
+	Minimum string
+	Maximum string
+	DisabledDates []string
+	WeekStartsMonday bool
+	WeekdayLabels []string
+}
+
+type UploadStatus int64
+
+const (
+	UploadQueued UploadStatus = iota
+	UploadRunning
+	UploadComplete
+	UploadFailed
+	UploadRejected
+	UploadCancelled
+)
+
+type UploadFile struct {
+	Key string
+	Name string
+	Path string
+	Size int64
+	Progress float64
+	Status UploadStatus
+	Message string
+}
+
+type FileUploaderOptions struct {
+	Multiple bool
+	MaximumFiles int64
+	MaximumBytes int64
+	Filters []system.FileFilter
+}
+
+type ContextMenuItem struct {
+	Key string
+	Label string
+	Shortcut string
+	Disabled bool
+	Checked bool
+	Checkable bool
+	Children []ContextMenuItem
+}
+
+type CarouselItem struct {
+	Key string
+	Label string
+	Content ui.View
+}
+
+type CarouselState struct {
+	drag gesture.Drag
+}
+
+func UseCarouselState() CarouselState {
+	return CarouselState{drag: gesture.UseDrag()}
+}
+
+type ResizableState struct {
+	drag gesture.Drag
+	startValue ui.FloatState
+}
+
+func UseResizableState(initial float64) ResizableState {
+	if math.IsNaN(initial) || math.IsInf(initial, 0) || initial < 0 {
+		panic("UIKit resizable initial value is invalid")
+	}
+	return ResizableState{drag: gesture.UseDrag(), startValue: ui.UseFloatState(initial)}
+}
+
 func intentColor(theme tokens.Theme, intent FeedbackIntent) uint32 {
 	if intent == IntentInfo {
 		return theme.Colors.Accent
@@ -40,13 +162,69 @@ func intentColor(theme tokens.Theme, intent FeedbackIntent) uint32 {
 	panic("UIKit feedback intent is invalid")
 }
 
+func buttonInteraction(control ui.View, recipe tokens.ButtonRecipe) ui.View {
+	return ui.FocusRing(ui.PressedBackground(ui.HoverBackground(control, recipe.HoverBackground), recipe.PressedBackground), recipe.FocusRing)
+}
+
+func interactiveSurface(theme tokens.Theme, control ui.View, accent bool) ui.View {
+	hover := theme.Colors.SurfaceHover
+	pressed := theme.Colors.SurfacePressed
+	if accent {
+		hover = theme.Colors.AccentHover
+		pressed = theme.Colors.AccentPressed
+	}
+	return ui.FocusRing(ui.PressedBackground(ui.HoverBackground(control, hover), pressed), theme.Colors.Focus)
+}
+
 // Button composes headless activation with one resolved visual recipe.
 func Button(theme tokens.Theme, label string, variant tokens.ButtonVariant, size tokens.ControlSize, disabled bool, onActivate func()) ui.View {
 	recipe := tokens.ResolveButtonRecipe(theme, variant, size, disabled)
 	control := headless.Button(label, disabled, onActivate)
 	control = ui.FontWeight(ui.FontSize(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.FontSize), recipe.FontWeight)
+	control = buttonInteraction(control, recipe)
 	control = ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
 	return ui.Padding(ui.Height(ui.Radius(control, recipe.Radius), recipe.Height), recipe.Padding)
+}
+
+func IconButton(theme tokens.Theme, label string, glyph icons.Glyph, variant tokens.ButtonVariant, size tokens.ControlSize, disabled bool, onActivate func()) ui.View {
+	if label == "" || onActivate == nil {
+		panic("UIKit icon button requires a label and activation handler")
+	}
+	recipe := tokens.ResolveButtonRecipe(theme, variant, size, disabled)
+	iconSize := recipe.FontSize + 4
+	icon := ui.AccessibilityHidden(icons.Icon(glyph, iconSize, recipe.Foreground, label), true)
+	content := ui.Justify(ui.Align(ui.Box(icon), ui.AlignCenter), ui.JustifyCenter)
+	control := headless.Pressable(label, disabled, content, onActivate)
+	control = ui.Width(ui.Height(ui.Radius(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Height)
+	control = buttonInteraction(control, recipe)
+	return ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
+}
+
+func ButtonGroup(theme tokens.Theme, label string, children ...ui.View) ui.View {
+	if label == "" || len(children) == 0 || len(children) > 16 {
+		panic("UIKit button group contract is invalid")
+	}
+	group := ui.Gap(ui.Row(children...), theme.Spacing.ControlGap / 2)
+	if ui.CurrentEnvironment().ViewportWidth < 600 {
+		group = ui.Gap(ui.Column(children...), theme.Spacing.ControlGap / 2)
+	}
+	return ui.AccessibleName(ui.Role(group, "group"), label)
+}
+
+func LoadingButton(theme tokens.Theme, label string, loading bool, variant tokens.ButtonVariant, size tokens.ControlSize, disabled bool, onActivate func()) ui.View {
+	if label == "" || onActivate == nil {
+		panic("UIKit loading button requires a label and activation handler")
+	}
+	if !loading {
+		return Button(theme, label, variant, size, disabled, onActivate)
+	}
+	spinner := ui.AccessibilityHidden(Spinner(theme, label + " in progress", size), true)
+	recipe := tokens.ResolveButtonRecipe(theme, variant, size, true)
+	content := ui.Justify(ui.Align(ui.Gap(ui.Row(spinner, ui.Text(label)), theme.Spacing.ControlGap), ui.AlignCenter), ui.JustifyCenter)
+	control := headless.Pressable(label + ", in progress", true, content, onActivate)
+	control = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+	control = buttonInteraction(control, recipe)
+	return ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
 }
 
 func Badge(theme tokens.Theme, label string, intent FeedbackIntent) ui.View {
@@ -54,6 +232,154 @@ func Badge(theme tokens.Theme, label string, intent FeedbackIntent) ui.View {
 	view = ui.Padding(ui.Radius(ui.Background(view, theme.Colors.SurfaceRaised), theme.Shape.SmallRadius), theme.Spacing.ControlGap /
 		2)
 	return ui.AccessibleName(ui.Role(view, "status"), label)
+}
+
+func Tag(theme tokens.Theme, label string, intent FeedbackIntent, removable bool, onRemove func()) ui.View {
+	if label == "" || removable && onRemove == nil {
+		panic("UIKit tag contract is invalid")
+	}
+	text := ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(label), intentColor(theme, intent)), theme.Typography.CaptionSize), theme.Typography.WeightMedium)
+	content := ui.Row(text)
+	if removable {
+		remove := IconButton(theme, "Remove " + label, icons.Close, tokens.ButtonQuiet, tokens.ControlSmall, false, onRemove)
+		content = ui.Align(ui.Gap(ui.Row(text, remove), theme.Spacing.ControlGap / 2), ui.AlignCenter)
+	}
+	view := ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), intentColor(theme, intent)), 1), theme.Shape.LargeRadius), theme.Spacing.ControlGap)
+	return ui.AccessibleName(ui.Role(view, "group"), label)
+}
+
+func Avatar(theme tokens.Theme, name string, initials string, size float64) ui.View {
+	if name == "" || initials == "" || size < 24 || size > 128 || math.IsNaN(size) ||
+		math.IsInf(size, 0) {
+		panic("UIKit avatar contract is invalid")
+	}
+	text := ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(initials), theme.Colors.OnAccent), size *
+		0.36), theme.Typography.WeightStrong)
+	view := ui.Justify(ui.Align(ui.Width(ui.Height(ui.Radius(ui.Background(ui.Box(text), theme.Colors.Accent), size /
+		2), size), size), ui.AlignCenter), ui.JustifyCenter)
+	return ui.AccessibleName(ui.Role(view, "img"), name)
+}
+
+func AvatarGroup(theme tokens.Theme, label string, items []AvatarItem, maximumVisible int64, size float64) ui.View {
+	if label == "" || len(items) == 0 || len(items) > 32 || maximumVisible < 1 ||
+		maximumVisible > int64(len(items)) {
+		panic("UIKit avatar group contract is invalid")
+	}
+	views := []ui.View{}
+	step := size * 0.72
+	for index, item := range items {
+		if item.Key == "" || item.Name == "" || item.Initials == "" {
+			panic("UIKit avatar group item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit avatar group keys must be unique")
+			}
+		}
+		if int64(index) < maximumVisible {
+			views = append(views, ui.Key(ui.Width(ui.Box(Avatar(theme, item.Name, item.Initials, size)), step), item.Key))
+		}
+	}
+	remaining := int64(len(items)) - maximumVisible
+	if remaining > 0 {
+		more := "+" + strconv.FormatInt(remaining, 10)
+		moreView := ui.AccessibleName(ui.Role(ui.Justify(ui.Align(ui.Width(ui.Height(ui.Radius(ui.Background(ui.Text(more), theme.Colors.SurfaceRaised), size /
+			2), size), size), ui.AlignCenter), ui.JustifyCenter), "img"), more + " more people")
+		views = append(views, ui.Width(ui.Box(moreView), step))
+	}
+	return ui.AccessibleName(ui.Role(ui.Row(views...), "group"), label)
+}
+
+func Card(theme tokens.Theme, title string, detail string, content ui.View, actions ui.View) ui.View {
+	if title == "" {
+		panic("UIKit card title must not be empty")
+	}
+	copy := ui.Gap(ui.Column(titleView(theme, title), paragraphView(theme, detail)), theme.Spacing.ControlGap)
+	body := ui.Gap(ui.Column(copy, content, actions), theme.Spacing.ContentGap)
+	view := ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(body, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.LargeRadius), theme.Spacing.SectionGap)
+	view = ui.Elevation(view, theme.Elevation.Raised)
+	return ui.AccessibleName(ui.Role(view, "group"), title)
+}
+
+func Form(theme tokens.Theme, title string, detail string, content ui.View, actions ui.View) ui.View {
+	if title == "" {
+		panic("UIKit form title must not be empty")
+	}
+	header := ui.Gap(ui.Column(titleView(theme, title), paragraphView(theme, detail)), theme.Spacing.ControlGap)
+	body := ui.Gap(ui.Column(header, content, ui.Justify(actions, ui.JustifyEnd)), theme.Spacing.SectionGap)
+	return ui.AccessibleDescription(ui.AccessibleName(ui.Role(body, "form"), title), detail)
+}
+
+func InputGroup(theme tokens.Theme, label string, leading ui.View, control ui.View, trailing ui.View, errorMessage string) ui.View {
+	if label == "" {
+		panic("UIKit input group label must not be empty")
+	}
+	group := ui.Align(ui.Gap(ui.Row(leading, ui.Flex(control, 1), trailing), theme.Spacing.ControlGap), ui.AlignCenter)
+	group = ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(group, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ControlGap)
+	return ui.Invalid(ui.AccessibleDescription(ui.AccessibleName(ui.Role(group, "group"), label), errorMessage), errorMessage !=
+		"")
+}
+
+func InputGroupField(theme tokens.Theme, label string, value string, placeholder string, required bool, disabled bool, errorMessage string, focusToken int64, onInput func(string)) ui.View {
+	if label == "" || onInput == nil {
+		panic("UIKit input group field contract is invalid")
+	}
+	control := ui.TextInput(value, placeholder, func(event ui.Event) {
+		onInput(event.Text)
+	})
+	control = ui.AccessibleName(control, label)
+	control = ui.AccessibleDescription(control, errorMessage)
+	control = ui.Required(control, required)
+	control = ui.Invalid(control, errorMessage != "")
+	control = ui.Disabled(control, disabled)
+	control = ui.FocusRequest(control, focusToken)
+	return ui.Height(ui.Foreground(ui.Background(control, theme.Colors.SurfaceRaised), theme.Colors.Text), theme.ControlHeight)
+}
+
+func KeyboardKey(theme tokens.Theme, label string) ui.View {
+	if label == "" || len(label) > 32 {
+		panic("UIKit keyboard key label is invalid")
+	}
+	view := ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.CaptionSize), theme.Typography.WeightMedium), theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.SmallRadius), theme.Spacing.ControlGap /
+		2)
+	return ui.AccessibleName(ui.Role(view, "note"), "Keyboard key " + label)
+}
+
+func CodeSnippet(theme tokens.Theme, label string, code string, variant CodeSnippetVariant, copyable bool, copied bool, onCopy func(error)) ui.View {
+	if label == "" || code == "" || len(code) > 65536 || variant < CodeSnippetInline ||
+		variant > CodeSnippetBlock ||
+		copyable && onCopy == nil {
+		panic("UIKit code snippet contract is invalid")
+	}
+	policy := ui.DerivedString("nowrap")
+	if variant == CodeSnippetBlock {
+		policy = "pre"
+	}
+	source := ui.FontFamily(ui.WhiteSpace(ui.FontSize(ui.Foreground(ui.Text(code), theme.Colors.Text), theme.Typography.BodySize), policy), "monospace")
+	copyLabel := ui.DerivedString("Copy " + label)
+	copyText := ui.DerivedString("Copy")
+	if copied {
+		copyLabel = "Copied " + label
+		copyText = "Copied"
+	}
+	copyAction := ui.Fragment()
+	if copyable {
+		copyAction = Button(theme, copyLabel, tokens.ButtonQuiet, tokens.ControlSmall, false, func() {
+			err := system.WriteClipboardText(code)
+			onCopy(err)
+		})
+		copyAction = ui.AccessibleDescription(copyAction, copyText)
+	}
+	if variant == CodeSnippetInline {
+		content := ui.Align(ui.Gap(ui.Row(ui.Padding(ui.Radius(ui.Background(source, theme.Colors.SurfaceRaised), theme.Shape.SmallRadius), theme.Spacing.ControlGap), copyAction), theme.Spacing.ControlGap /
+			2), ui.AlignCenter)
+		return ui.AccessibleName(ui.Role(content, "group"), label)
+	}
+	header := ui.Align(ui.Row(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.WeightMedium), ui.Flex(ui.Box(), 1), copyAction), ui.AlignCenter)
+	viewport := ui.MaxHeight(ui.Scroll(ui.Padding(source, theme.Spacing.ContentGap)), 320)
+	content := ui.Gap(ui.Column(header, viewport), theme.Spacing.ControlGap)
+	content = ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap)
+	return ui.AccessibleName(ui.Role(content, "region"), label)
 }
 
 func Separator(theme tokens.Theme, axis Axis, label string) ui.View {
@@ -118,6 +444,20 @@ func Spinner(theme tokens.Theme, label string, size tokens.ControlSize) ui.View 
 	return ui.AccessibleName(ui.Role(indicator, "status"), label)
 }
 
+func InlineLoading(theme tokens.Theme, label string, detail string) ui.View {
+	if label == "" {
+		panic("UIKit inline loading label must not be empty")
+	}
+	indicator := ui.AccessibilityHidden(Spinner(theme, label, tokens.ControlSmall), true)
+	copy := ui.FontWeight(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.WeightMedium)
+	if detail != "" {
+		copy = ui.Gap(ui.Column(copy, ui.FontSize(ui.Foreground(ui.Text(detail), theme.Colors.TextMuted), theme.Typography.CaptionSize)), theme.Spacing.ControlGap /
+			2)
+	}
+	view := ui.Align(ui.Gap(ui.Row(indicator, copy), theme.Spacing.ControlGap), ui.AlignCenter)
+	return ui.AccessibleDescription(ui.AccessibleName(ui.Role(view, "status"), label), detail)
+}
+
 func Skeleton(theme tokens.Theme, width float64, height float64) ui.View {
 	if width < 0 || height < 0 || math.IsNaN(width) || math.IsNaN(height) || math.IsInf(width, 0) ||
 		math.IsInf(height, 0) {
@@ -135,7 +475,7 @@ func Checkbox(theme tokens.Theme, label string, checked bool, disabled bool, onC
 	control := ui.Role(ui.Toggle(checked, label, func(event ui.Event) {
 		onChange(event.Checked)
 	}), "checkbox")
-	control = ui.Checked(ui.Disabled(control, disabled), checked)
+	control = ui.Foreground(ui.Checked(ui.Disabled(control, disabled), checked), theme.Colors.Accent)
 	control = ui.AccessibleName(control, label)
 	indicatorSize := theme.ControlHeight * 0.45
 	control = ui.Width(ui.Height(control, indicatorSize), indicatorSize)
@@ -159,7 +499,7 @@ func TextArea(theme tokens.Theme, label string, value string, placeholder string
 	control = ui.Required(control, required)
 	control = ui.Invalid(control, errorMessage != "")
 	control = ui.Disabled(control, disabled)
-	control = ui.Height(ui.Radius(ui.Background(control, theme.Colors.SurfaceRaised), theme.Shape.MediumRadius), height)
+	control = ui.Height(ui.Radius(ui.Foreground(ui.Background(control, theme.Colors.SurfaceRaised), theme.Colors.Text), theme.Shape.MediumRadius), height)
 	border := textAreaBorder(theme, errorMessage)
 	control = ui.BorderWidth(ui.BorderColor(control, border), 1)
 	views := []ui.View{
@@ -177,6 +517,114 @@ func textAreaBorder(theme tokens.Theme, errorMessage string) uint32 {
 		return theme.Colors.Danger
 	}
 	return theme.Colors.Border
+}
+
+func SearchBox(theme tokens.Theme, label string, value string, placeholder string, disabled bool, focusToken int64, onInput func(string), onSubmit func(string), onClear func()) ui.View {
+	if label == "" || onInput == nil || onSubmit == nil || onClear == nil {
+		panic("UIKit search box contract is invalid")
+	}
+	input := ui.TextInput(value, placeholder, func(event ui.Event) {
+		onInput(event.Text)
+	})
+	input = ui.Role(input, "searchbox")
+	input = ui.AccessibleName(input, label)
+	input = ui.Disabled(input, disabled)
+	input = ui.FocusRequest(input, focusToken)
+	input = ui.Flex(ui.Height(ui.Foreground(ui.Background(input, theme.Colors.SurfaceRaised), theme.Colors.Text), theme.ControlHeight), 1)
+	input = ui.OnKeyDown(input, func(event ui.Event) {
+		if disabled {
+			return
+		}
+		if event.Key == "Enter" {
+			onSubmit(value)
+		} else if event.Key == "Escape" && value != "" {
+			onClear()
+		}
+	})
+	searchIcon := ui.AccessibilityHidden(icons.Icon(icons.Search, theme.Typography.BodySize + 4, theme.Colors.TextMuted, label), true)
+	children := []ui.View{searchIcon, input}
+	if value != "" {
+		children = append(children, IconButton(theme, "Clear " + label, icons.Close, tokens.ButtonQuiet, tokens.ControlSmall, disabled, onClear))
+	}
+	control := ui.Align(ui.Gap(ui.Row(children...), theme.Spacing.ControlGap), ui.AlignCenter)
+	control = ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(control, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ControlGap)
+	return ui.AccessibleName(ui.Role(control, "search"), label)
+}
+
+func boundedNumber(value float64, minimum float64, maximum float64) float64 {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func numberStepButton(theme tokens.Theme, label string, glyph string, disabled bool, onActivate func()) ui.View {
+	content := ui.FontWeight(ui.FontSize(ui.Text(glyph), theme.Typography.TitleSize), theme.Typography.WeightMedium)
+	control := headless.Pressable(label, disabled, ui.Justify(ui.Align(ui.Box(content), ui.AlignCenter), ui.JustifyCenter), onActivate)
+	control = ui.Width(ui.Height(ui.Radius(ui.Foreground(ui.Background(control, theme.Colors.SurfaceRaised), theme.Colors.Text), theme.Shape.MediumRadius), theme.ControlHeight), theme.ControlHeight)
+	control = interactiveSurface(theme, control, false)
+	return ui.BorderWidth(ui.BorderColor(control, theme.Colors.Border), 1)
+}
+
+func NumberInput(theme tokens.Theme, label string, value float64, minimum float64, maximum float64, step float64, disabled bool, focusToken int64, onChange func(float64)) ui.View {
+	if label == "" || onChange == nil || math.IsNaN(value) || math.IsInf(value, 0) ||
+		math.IsNaN(minimum) ||
+		math.IsInf(minimum, 0) ||
+		math.IsNaN(maximum) ||
+		math.IsInf(maximum, 0) ||
+		math.IsNaN(step) ||
+		math.IsInf(step, 0) ||
+		maximum <= minimum ||
+		step <= 0 ||
+		value < minimum ||
+		value > maximum {
+		panic("UIKit number input range is invalid")
+	}
+	formatted := ui.DerivedString(strconv.FormatFloat(value, 'f', -1, 64))
+	input := ui.TextInput(formatted, formatted, func(event ui.Event) {
+		next, err := strconv.ParseFloat(event.Text, 64)
+		if err == nil && !math.IsNaN(next) && !math.IsInf(next, 0) && next >= minimum && next <= maximum {
+			onChange(next)
+		}
+	})
+	input = ui.Role(input, "spinbutton")
+	input = ui.AccessibleName(input, label)
+	input = ui.AccessibleValue(input, formatted)
+	input = ui.MinimumValue(input, minimum)
+	input = ui.MaximumValue(input, maximum)
+	input = ui.StepValue(input, step)
+	input = ui.Disabled(input, disabled)
+	input = ui.FocusRequest(input, focusToken)
+	input = ui.Flex(ui.Height(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Foreground(ui.Background(input, theme.Colors.SurfaceRaised), theme.Colors.Text), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.ControlHeight), 1)
+	input = ui.OnKeyDown(input, func(event ui.Event) {
+		if disabled {
+			return
+		}
+		if event.Key == "ArrowUp" {
+			onChange(boundedNumber(value + step, minimum, maximum))
+		} else if event.Key == "ArrowDown" {
+			onChange(boundedNumber(value - step, minimum, maximum))
+		} else if event.Key == "Home" {
+			onChange(minimum)
+		} else if event.Key == "End" {
+			onChange(maximum)
+		}
+	})
+	decrease := numberStepButton(theme, "Decrease " + label, "−", disabled || value <= minimum, func() {
+		onChange(boundedNumber(value - step, minimum, maximum))
+	})
+	increase := numberStepButton(theme, "Increase " + label, "+", disabled || value >= maximum, func() {
+		onChange(boundedNumber(value + step, minimum, maximum))
+	})
+	control := ui.Gap(ui.Row(decrease, input, increase), theme.Spacing.ControlGap / 2)
+	view := ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.WeightMedium), control), theme.Spacing.ControlGap)
+	if disabled {
+		view = ui.Opacity(view, 0.55)
+	}
+	return view
 }
 
 func Slider(theme tokens.Theme, label string, value float64, minimum float64, maximum float64, step float64, disabled bool, onChange func(float64)) ui.View {
@@ -205,6 +653,86 @@ func Slider(theme tokens.Theme, label string, value float64, minimum float64, ma
 	valueLabel := ui.DerivedString(strconv.FormatFloat(value, 'f', -1, 64))
 	heading := ui.Row(ui.FontWeight(ui.Foreground(ui.Text(label), theme.Colors.Text), theme.Typography.WeightMedium), ui.Flex(ui.Box(), 1), ui.FontSize(ui.Foreground(ui.Text(valueLabel), theme.Colors.TextMuted), theme.Typography.CaptionSize))
 	view := ui.Gap(ui.Column(heading, control), theme.Spacing.ControlGap)
+	if disabled {
+		view = ui.Opacity(view, 0.55)
+	}
+	return view
+}
+
+func movedRating(event ui.Event, current int64, maximum int64) int64 {
+	next := current
+	if event.Key == "Home" {
+		return 1
+	}
+	if event.Key == "End" {
+		return maximum
+	}
+	forward := event.Key == "ArrowRight" || event.Key == "ArrowUp"
+	backward := event.Key == "ArrowLeft" || event.Key == "ArrowDown"
+	if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+		forward, backward = backward, forward
+	}
+	if forward && current < maximum {
+		next++
+	} else if backward && current > 1 {
+		next--
+	}
+	return next
+}
+
+func Rating(theme tokens.Theme, label string, value int64, maximum int64, readOnly bool, disabled bool, focusToken int64, onChange func(int64)) ui.View {
+	if label == "" || maximum < 1 || maximum > 10 || value < 0 || value > maximum ||
+		!readOnly && onChange == nil {
+		panic("UIKit rating contract is invalid")
+	}
+	stars := make([]ui.View, 0, maximum)
+	for index := int64(1); index <= maximum; index++ {
+		glyph := ui.DerivedString("☆")
+		color := theme.Colors.TextMuted
+		if index <= value {
+			glyph = "★"
+			color = theme.Colors.Warning
+		}
+		star := ui.FontSize(ui.Foreground(ui.Text(glyph), color), theme.Typography.TitleSize)
+		if readOnly {
+			stars = append(stars, ui.AccessibilityHidden(star, true))
+			continue
+		}
+		current := index
+		control := headless.Pressable(label + ", " + strconv.FormatInt(current, 10) + " of " +
+			strconv.FormatInt(maximum, 10) +
+			" stars", disabled, star, func() {
+			if !disabled {
+				onChange(current)
+			}
+		})
+		control = ui.Role(control, "radio")
+		control = ui.Checked(control, current == value)
+		tabStop := current == value || value == 0 && current == 1
+		control = ui.Focusable(control, tabStop && !disabled)
+		if tabStop {
+			control = ui.FocusRequest(control, focusToken)
+		}
+		control = ui.OnKeyDown(control, func(event ui.Event) {
+			if disabled {
+				return
+			}
+			next := movedRating(event, current, maximum)
+			if next != current {
+				onChange(next)
+			}
+		})
+		control = interactiveSurface(theme, control, current <= value)
+		stars = append(stars, ui.Key(control, strconv.FormatInt(current, 10)))
+	}
+	view := ui.Gap(ui.Row(stars...), theme.Spacing.ControlGap / 2)
+	valueText := ui.DerivedString(strconv.FormatInt(value, 10) + " of " +
+		strconv.FormatInt(maximum, 10) +
+		" stars")
+	if readOnly {
+		return ui.AccessibleValue(ui.AccessibleName(ui.Role(view, "img"), label), valueText)
+	}
+	view = ui.Disabled(ui.AccessibleValue(ui.AccessibleName(ui.Role(view, "radiogroup"), label), valueText), disabled)
 	if disabled {
 		view = ui.Opacity(view, 0.55)
 	}
@@ -244,6 +772,7 @@ func Accordion(theme tokens.Theme, label string, items []AccordionItem, onExpand
 			onExpandedChange(current.Key, value)
 		})
 		trigger = ui.Padding(ui.Height(ui.Foreground(trigger, theme.Colors.Text), theme.ControlHeight), theme.Spacing.ControlGap)
+		trigger = interactiveSurface(theme, trigger, current.Expanded)
 		trigger = ui.BorderWidth(ui.BorderColor(trigger, theme.Colors.Border), 1)
 		panel := ui.Hidden(ui.Padding(ui.Role(current.Content, "region"), theme.Spacing.ContentGap), !current.Expanded)
 		panel = ui.AccessibleName(panel, current.Title)
@@ -257,6 +786,19 @@ type ChoiceOption struct {
 	Label string
 	Disabled bool
 }
+
+type SegmentItem struct {
+	Value string
+	Label string
+	Disabled bool
+}
+
+type ToggleSelectionMode int64
+
+const (
+	ToggleMultiple ToggleSelectionMode = iota
+	ToggleSingle
+)
 
 func choiceIndex(options []ChoiceOption, value string) int64 {
 	for index, option := range options {
@@ -320,6 +862,16 @@ func movedChoiceIndex(event ui.Event, options []ChoiceOption, current int64) int
 func RadioGroup(theme tokens.Theme, label string, options []ChoiceOption, value string, disabled bool, orientation headless.Orientation, focusToken int64, onChange func(string)) ui.View {
 	views := []ui.View{}
 	count := int64(len(options))
+	tabStopIndex := choiceIndex(options, value)
+	if tabStopIndex < 0 || tabStopIndex >= count || options[tabStopIndex].Disabled {
+		tabStopIndex = -1
+		for index, option := range options {
+			if !option.Disabled {
+				tabStopIndex = int64(index)
+				break
+			}
+		}
+	}
 	for index, option := range options {
 		selected := option.Value == value
 		token := int64(0)
@@ -327,8 +879,8 @@ func RadioGroup(theme tokens.Theme, label string, options []ChoiceOption, value 
 			token = focusToken
 		}
 		optionIndex := int64(index)
-		control := headless.RadioOption(option.Label, optionIndex, count, selected, disabled ||
-			option.Disabled, orientation, token, func(candidate int64) bool {
+		control := headless.RadioOption(option.Label, optionIndex, count, selected, optionIndex ==
+			tabStopIndex, disabled || option.Disabled, orientation, token, func(candidate int64) bool {
 			return disabled || candidate < 0 || candidate >= int64(len(options)) ||
 				options[candidate].Disabled
 		}, func(next int64) {
@@ -336,13 +888,206 @@ func RadioGroup(theme tokens.Theme, label string, options []ChoiceOption, value 
 				onChange(options[next].Value)
 			}
 		})
-		recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonQuiet, tokens.ControlMedium, disabled ||
+		variant := tokens.ButtonQuiet
+		if selected {
+			variant = tokens.ButtonPrimary
+		}
+		recipe := tokens.ResolveButtonRecipe(theme, variant, tokens.ControlMedium, disabled ||
 			option.Disabled)
 		control = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+		control = buttonInteraction(control, recipe)
 		control = ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
 		views = append(views, ui.Key(control, option.Value))
 	}
 	return headless.RadioGroup(label, orientation, views...)
+}
+
+func SegmentedControl(theme tokens.Theme, label string, items []SegmentItem, value string, disabled bool, focusToken int64, onChange func(string)) ui.View {
+	if label == "" || onChange == nil || len(items) < 2 || len(items) > 8 {
+		panic("UIKit segmented control contract is invalid")
+	}
+	options := make([]ChoiceOption, 0, len(items))
+	for _, item := range items {
+		if item.Value == "" || item.Label == "" {
+			panic("UIKit segmented control item is invalid")
+		}
+		options = append(options, ChoiceOption{
+			Value: item.Value, Label: item.Label, Disabled: item.Disabled,
+		})
+	}
+	return RadioGroup(theme, label, options, value, disabled, headless.Horizontal, focusToken, onChange)
+}
+
+func selectedValue(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func segmentIndex(items []SegmentItem, value string) int64 {
+	for index, item := range items {
+		if item.Value == value {
+			return int64(index)
+		}
+	}
+	return -1
+}
+
+func movedSegmentIndex(event ui.Event, items []SegmentItem, current int64, orientation headless.Orientation) int64 {
+	count := int64(len(items))
+	if count <= 0 {
+		return -1
+	}
+	candidate := current
+	step := int64(0)
+	wrap := true
+	if event.Key == "Home" {
+		candidate = 0
+		step = 1
+		wrap = false
+	} else if event.Key == "End" {
+		candidate = count - 1
+		step = -1
+		wrap = false
+	} else {
+		forward := event.Key == "ArrowDown"
+		backward := event.Key == "ArrowUp"
+		if orientation == headless.Horizontal {
+			forward = event.Key == "ArrowRight"
+			backward = event.Key == "ArrowLeft"
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				forward, backward = backward, forward
+			}
+		} else if orientation != headless.Vertical {
+			return current
+		}
+		if forward {
+			step = 1
+			candidate++
+		} else if backward {
+			step = -1
+			candidate--
+		} else {
+			return current
+		}
+	}
+	for visited := int64(0); visited < count; visited++ {
+		if candidate < 0 || candidate >= count {
+			if !wrap {
+				return current
+			}
+			if candidate < 0 {
+				candidate = count - 1
+			} else {
+				candidate = 0
+			}
+		}
+		if !items[candidate].Disabled {
+			return candidate
+		}
+		candidate += step
+	}
+	return current
+}
+
+func ToggleGroup(theme tokens.Theme, label string, items []SegmentItem, values []string, mode ToggleSelectionMode, disabled bool, orientation headless.Orientation, focusValue string, focusToken int64, onFocusChange func(string), onChange func(string, bool)) ui.View {
+	if label == "" || onFocusChange == nil || onChange == nil || len(items) == 0 || len(items) > 12 ||
+		mode < ToggleMultiple ||
+		mode > ToggleSingle ||
+		orientation < headless.Horizontal ||
+		orientation > headless.Vertical ||
+		mode == ToggleSingle && len(values) > 1 {
+		panic("UIKit toggle group contract is invalid")
+	}
+	for index, value := range values {
+		if segmentIndex(items, value) < 0 {
+			panic("UIKit toggle group value is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if values[previous] == value {
+				panic("UIKit toggle group values must be unique")
+			}
+		}
+	}
+	focusIndex := ui.DerivedInt(segmentIndex(items, focusValue))
+	if focusIndex < 0 || focusIndex >= int64(len(items)) || items[focusIndex].Disabled {
+		focusIndex = -1
+		for index, item := range items {
+			if !item.Disabled && selectedValue(values, item.Value) {
+				focusIndex = int64(index)
+				break
+			}
+		}
+	}
+	if focusIndex < 0 {
+		for index, item := range items {
+			if !item.Disabled {
+				focusIndex = int64(index)
+				break
+			}
+		}
+	}
+	views := make([]ui.View, 0, len(items))
+	for index, item := range items {
+		if item.Value == "" || item.Label == "" {
+			panic("UIKit toggle group item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Value == item.Value {
+				panic("UIKit toggle group values must be unique")
+			}
+		}
+		current := item
+		itemIndex := int64(index)
+		pressed := selectedValue(values, current.Value)
+		control := headless.ToggleButton(current.Label, pressed, disabled || current.Disabled, func(value bool) {
+			if mode == ToggleMultiple {
+				onChange(current.Value, value)
+			} else if !pressed {
+				onChange(current.Value, true)
+			}
+		})
+		tabStop := !disabled && !current.Disabled && itemIndex == focusIndex
+		control = ui.Focusable(control, tabStop)
+		if tabStop {
+			control = ui.FocusRequest(control, focusToken)
+		}
+		control = ui.OnFocus(control, func(event ui.Event) {
+			if !disabled && !current.Disabled && current.Value != focusValue {
+				onFocusChange(current.Value)
+			}
+		})
+		control = ui.OnKeyDown(control, func(event ui.Event) {
+			if disabled || current.Disabled {
+				return
+			}
+			next := movedSegmentIndex(event, items, itemIndex, orientation)
+			if next != itemIndex {
+				onFocusChange(items[next].Value)
+			}
+		})
+		recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonQuiet, tokens.ControlMedium, disabled ||
+			current.Disabled)
+		if pressed {
+			recipe.Background = theme.Colors.Accent
+			recipe.HoverBackground = theme.Colors.AccentHover
+			recipe.PressedBackground = theme.Colors.AccentPressed
+			recipe.Foreground = theme.Colors.OnAccent
+			recipe.Border = theme.Colors.Accent
+		}
+		control = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(control, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+		control = buttonInteraction(control, recipe)
+		control = ui.BorderWidth(ui.BorderColor(control, recipe.Border), recipe.BorderWidth)
+		views = append(views, ui.Key(control, current.Value))
+	}
+	content := ui.Gap(ui.Row(views...), theme.Spacing.ControlGap / 2)
+	if orientation == headless.Vertical {
+		content = ui.Gap(ui.Column(views...), theme.Spacing.ControlGap / 2)
+	}
+	return ui.AccessibleName(ui.Role(content, "toolbar"), label)
 }
 
 func Select(theme tokens.Theme, label string, open bool, value string, options []ChoiceOption, disabled bool, onOpenChange func(bool), onChange func(string)) ui.View {
@@ -355,6 +1100,7 @@ func Select(theme tokens.Theme, label string, open bool, value string, options [
 	trigger := headless.SelectTrigger(label, selectedLabel, open, disabled, onOpenChange)
 	recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonSecondary, tokens.ControlMedium, disabled)
 	trigger = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+	trigger = buttonInteraction(trigger, recipe)
 	trigger = ui.BorderWidth(ui.BorderColor(trigger, recipe.Border), recipe.BorderWidth)
 	trigger = ui.OnKeyDown(trigger, func(event ui.Event) {
 		if disabled {
@@ -401,6 +1147,1088 @@ func Select(theme tokens.Theme, label string, open bool, value string, options [
 	return ui.Stack(ui.Key(trigger, "select-trigger"), ui.Key(popup, "select-popup"))
 }
 
+func filteredChoices(options []ChoiceOption, query string) []ChoiceOption {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return options
+	}
+	filtered := make([]ChoiceOption, 0, len(options))
+	for _, option := range options {
+		if strings.Contains(strings.ToLower(option.Label), needle) {
+			filtered = append(filtered, option)
+		}
+	}
+	return filtered
+}
+
+func validateCompositeChoices(id string, label string, options []ChoiceOption) {
+	if id == "" || label == "" || len(options) > 256 {
+		panic("UIKit composite choice contract is invalid")
+	}
+	for index, option := range options {
+		if option.Value == "" || option.Label == "" {
+			panic("UIKit composite choice option is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if options[previous].Value == option.Value {
+				panic("UIKit composite choice values must be unique")
+			}
+		}
+	}
+}
+
+func activeChoiceIndex(options []ChoiceOption, value string) int64 {
+	index := choiceIndex(options, value)
+	if index >= 0 && !options[index].Disabled {
+		return index
+	}
+	for candidate, option := range options {
+		if !option.Disabled {
+			return int64(candidate)
+		}
+	}
+	return -1
+}
+
+func choiceOptionID(id string, index int64) string {
+	return id + "-option-" + strconv.FormatInt(index, 10)
+}
+
+func compositeChoiceInput(theme tokens.Theme, id string, label string, query string, placeholder string, open bool, activeIndex int64, disabled bool, onInput func(ui.Event), onKeyDown func(ui.Event), onOpen func()) ui.View {
+	input := ui.TextInput(query, placeholder, onInput)
+	input = ui.ElementID(ui.Controls(ui.AutoComplete(ui.Expanded(ui.AccessibleName(ui.Role(input, "combobox"), label), open), "list"), id +
+		"-listbox"), id + "-input")
+	if open && activeIndex >= 0 {
+		input = ui.ActiveDescendant(input, choiceOptionID(id, activeIndex))
+	}
+	input = ui.Disabled(input, disabled)
+	input = ui.OnClick(input, func(event ui.Event) {
+		if !disabled {
+			onOpen()
+		}
+	})
+	input = ui.OnKeyDown(input, onKeyDown)
+	input = ui.Height(ui.Radius(ui.Foreground(ui.Background(input, theme.Colors.Surface), theme.Colors.Text), theme.Shape.MediumRadius), theme.ControlHeight)
+	return ui.BorderWidth(ui.BorderColor(input, theme.Colors.Border), 1)
+}
+
+func compositeChoicePopup(theme tokens.Theme, id string, label string, rows []ui.View, open bool, loading bool, multiple bool) ui.View {
+	content := ui.AccessibleName(ui.Role(ui.Gap(ui.Column(rows...), theme.Spacing.ControlGap / 2), "listbox"), label +
+		" results")
+	content = ui.MultiSelectable(content, multiple)
+	content = ui.ElementID(content, id + "-listbox")
+	if loading {
+		content = ui.Column(InlineLoading(theme, "Loading " + label, "Results are updating"), content)
+	} else if len(rows) == 0 {
+		content = ui.Column(ui.AccessibleName(ui.Role(ui.Foreground(ui.Text("No results"), theme.Colors.TextMuted), "status"), "No " +
+			label +
+			" results"))
+	}
+	popup := ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap)
+	popup = ui.Portal(ui.Justify(ui.Align(ui.Column(popup), "center"), "center"), ui.OverlayPopup)
+	return ui.Hidden(popup, !open)
+}
+
+// Combobox owns filtering, active-descendant semantics, keyboard traversal,
+// IME-safe activation, async loading presentation, and controlled selection.
+func Combobox(theme tokens.Theme, id string, label string, query string, placeholder string, value string, activeValue string, options []ChoiceOption, open bool, loading bool, disabled bool, focusToken int64, onQueryChange func(string), onOpenChange func(bool), onActiveChange func(string), onChange func(string)) ui.View {
+	validateCompositeChoices(id, label, options)
+	if placeholder == "" || onQueryChange == nil || onOpenChange == nil || onActiveChange == nil ||
+		onChange == nil {
+		panic("UIKit combobox contract is invalid")
+	}
+	if value != "" && choiceIndex(options, value) < 0 {
+		panic("UIKit combobox value is invalid")
+	}
+	filtered := filteredChoices(options, query)
+	activeIndex := ui.DerivedInt(activeChoiceIndex(filtered, activeValue))
+	rows := make([]ui.View, 0, len(filtered))
+	for index, option := range filtered {
+		current := option
+		itemIndex := int64(index)
+		row := headless.SelectOption(current.Label, itemIndex, current.Value == value, current.Disabled, func(next int64) {
+			if next >= 0 && next < int64(len(filtered)) {
+				onChange(filtered[next].Value)
+				onQueryChange(filtered[next].Label)
+				onOpenChange(false)
+			}
+		})
+		row = ui.ElementID(row, choiceOptionID(id, itemIndex))
+		row = ui.Focusable(row, false)
+		if itemIndex == activeIndex {
+			row = ui.Background(row, theme.Colors.Surface)
+		}
+		row = ui.Padding(ui.Height(ui.Radius(row, theme.Shape.SmallRadius), theme.ControlHeight), theme.Spacing.ControlGap)
+		rows = append(rows, ui.Key(row, current.Value))
+	}
+	input := compositeChoiceInput(theme, id, label, query, placeholder, open, activeIndex, disabled, func(event ui.Event) {
+		onQueryChange(event.Text)
+		if !open {
+			onOpenChange(true)
+		}
+	}, func(event ui.Event) {
+		if disabled || event.Composing {
+			return
+		}
+		if event.Key == "Escape" || event.Key == "Tab" {
+			if open {
+				onOpenChange(false)
+			}
+			return
+		}
+		if event.Key == "Enter" {
+			if open && activeIndex >= 0 {
+				onChange(filtered[activeIndex].Value)
+				onQueryChange(filtered[activeIndex].Label)
+				onOpenChange(false)
+			}
+			return
+		}
+		if event.Key == "ArrowDown" || event.Key == "ArrowUp" || event.Key == "Home" || event.Key == "End" {
+			if !open {
+				onOpenChange(true)
+			}
+			next := movedChoiceIndex(event, filtered, activeIndex)
+			if next >= 0 && next < int64(len(filtered)) {
+				onActiveChange(filtered[next].Value)
+			}
+		}
+	}, func() {
+		onOpenChange(true)
+	})
+	input = ui.FocusRequest(input, focusToken)
+	popup := compositeChoicePopup(theme, id, label, rows, open, loading, false)
+	return ui.Stack(ui.Key(input, "combobox-input"), ui.Key(popup, "combobox-popup"))
+}
+
+func selectedChoice(values []string, value string) bool {
+	for _, selected := range values {
+		if selected == value {
+			return true
+		}
+	}
+	return false
+}
+
+// MultiSelect extends the combobox interaction model with removable values,
+// multiple listbox semantics, selection limits, and empty-query Backspace.
+func MultiSelect(theme tokens.Theme, id string, label string, query string, placeholder string, values []string, activeValue string, options []ChoiceOption, open bool, loading bool, disabled bool, maximum int64, focusToken int64, onQueryChange func(string), onOpenChange func(bool), onActiveChange func(string), onChange func(string, bool)) ui.View {
+	validateCompositeChoices(id, label, options)
+	if placeholder == "" || onQueryChange == nil || onOpenChange == nil || onActiveChange == nil ||
+		onChange == nil ||
+		maximum < 1 ||
+		maximum > 256 ||
+		int64(len(values)) > maximum {
+		panic("UIKit multi-select contract is invalid")
+	}
+	for index, value := range values {
+		if choiceIndex(options, value) < 0 {
+			panic("UIKit multi-select value is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if values[previous] == value {
+				panic("UIKit multi-select values must be unique")
+			}
+		}
+	}
+	filtered := filteredChoices(options, query)
+	activeIndex := ui.DerivedInt(activeChoiceIndex(filtered, activeValue))
+	rows := make([]ui.View, 0, len(filtered))
+	for index, option := range filtered {
+		current := option
+		itemIndex := int64(index)
+		selected := selectedChoice(values, current.Value)
+		blocked := current.Disabled || !selected && int64(len(values)) >= maximum
+		row := headless.SelectOption(current.Label, itemIndex, selected, blocked, func(next int64) {
+			if next >= 0 && next < int64(len(filtered)) {
+				chosen := filtered[next]
+				onChange(chosen.Value, !selectedChoice(values, chosen.Value))
+				onQueryChange("")
+			}
+		})
+		row = ui.ElementID(ui.Focusable(row, false), choiceOptionID(id, itemIndex))
+		if itemIndex == activeIndex {
+			row = ui.Background(row, theme.Colors.Surface)
+		}
+		row = ui.Padding(ui.Height(ui.Radius(row, theme.Shape.SmallRadius), theme.ControlHeight), theme.Spacing.ControlGap)
+		rows = append(rows, ui.Key(row, current.Value))
+	}
+	tags := make([]ui.View, 0, len(values))
+	for _, selectedValue := range values {
+		currentValue := selectedValue
+		index := choiceIndex(options, currentValue)
+		if index >= 0 {
+			current := options[index]
+			tags = append(tags, ui.Key(Tag(theme, current.Label, IntentInfo, !disabled && !current.Disabled, func() {
+				onChange(currentValue, false)
+			}), currentValue))
+		}
+	}
+	input := compositeChoiceInput(theme, id, label, query, placeholder, open, activeIndex, disabled, func(event ui.Event) {
+		onQueryChange(event.Text)
+		if !open {
+			onOpenChange(true)
+		}
+	}, func(event ui.Event) {
+		if disabled || event.Composing {
+			return
+		}
+		if event.Key == "Escape" || event.Key == "Tab" {
+			if open {
+				onOpenChange(false)
+			}
+			return
+		}
+		if event.Key == "Backspace" && query == "" && len(values) > 0 {
+			last := values[len(values) - 1]
+			lastIndex := choiceIndex(options, last)
+			if lastIndex >= 0 && !options[lastIndex].Disabled {
+				onChange(last, false)
+			}
+			return
+		}
+		if event.Key == "Enter" && open && activeIndex >= 0 {
+			chosen := filtered[activeIndex]
+			selected := selectedChoice(values, chosen.Value)
+			if !chosen.Disabled && (selected || int64(len(values)) < maximum) {
+				onChange(chosen.Value, !selected)
+				onQueryChange("")
+			}
+			return
+		}
+		if event.Key == "ArrowDown" || event.Key == "ArrowUp" || event.Key == "Home" || event.Key == "End" {
+			if !open {
+				onOpenChange(true)
+			}
+			next := movedChoiceIndex(event, filtered, activeIndex)
+			if next >= 0 && next < int64(len(filtered)) {
+				onActiveChange(filtered[next].Value)
+			}
+		}
+	}, func() {
+		onOpenChange(true)
+	})
+	input = ui.FocusRequest(input, focusToken)
+	field := ui.Gap(ui.Column(ui.AccessibleName(ui.Role(ui.Gap(ui.Row(tags...), theme.Spacing.ControlGap /
+		2), "group"), label + " selected values"), input), theme.Spacing.ControlGap)
+	popup := compositeChoicePopup(theme, id, label, rows, open, loading, true)
+	return ui.Stack(ui.Key(field, "multi-select-field"), ui.Key(popup, "multi-select-popup"))
+}
+
+func parseCalendarDate(value string) (time.Time, error) {
+	return time.Parse("2006-01-02", value)
+}
+
+func validateCalendarConfig(config CalendarConfig) time.Time {
+	if config.VisibleMonth == "" || config.MonthLabel == "" || len(config.WeekdayLabels) != 7 ||
+		len(config.DisabledDates) > 366 {
+		panic("UIKit calendar configuration is invalid")
+	}
+	month, err := time.Parse("2006-01", config.VisibleMonth)
+	if err != nil {
+		panic("UIKit calendar visible month is invalid")
+	}
+	if config.Minimum != "" {
+		if _, err := parseCalendarDate(config.Minimum); err != nil {
+			panic("UIKit calendar minimum is invalid")
+		}
+	}
+	if config.Maximum != "" {
+		if _, err := parseCalendarDate(config.Maximum); err != nil {
+			panic("UIKit calendar maximum is invalid")
+		}
+	}
+	if config.Minimum != "" && config.Maximum != "" && config.Minimum > config.Maximum {
+		panic("UIKit calendar range is invalid")
+	}
+	for index, value := range config.DisabledDates {
+		if _, err := parseCalendarDate(value); err != nil {
+			panic("UIKit calendar disabled date is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if config.DisabledDates[previous] == value {
+				panic("UIKit calendar disabled dates must be unique")
+			}
+		}
+	}
+	return month
+}
+
+func calendarDateDisabled(value string, config CalendarConfig) bool {
+	if config.Minimum != "" && value < config.Minimum || config.Maximum != "" && value > config.Maximum {
+		return true
+	}
+	for _, disabled := range config.DisabledDates {
+		if disabled == value {
+			return true
+		}
+	}
+	return false
+}
+
+func calendarSelected(value string, start string, end string, mode CalendarSelectionMode) bool {
+	if mode == CalendarSingle {
+		return value == start
+	}
+	if start == "" {
+		return false
+	}
+	if end == "" {
+		return value == start
+	}
+	return value >= start && value <= end
+}
+
+func calendarGridStart(month time.Time, monday bool) time.Time {
+	first := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
+	offset := int(first.Weekday())
+	if monday {
+		offset = (offset + 6) % 7
+	}
+	return first.AddDate(0, 0, -offset)
+}
+
+func calendarFocusedDate(config CalendarConfig, month time.Time, focusDate string) string {
+	gridStart := calendarGridStart(month, config.WeekStartsMonday)
+	gridEnd := gridStart.AddDate(0, 0, 41)
+	if focusDate != "" {
+		if focused, err := parseCalendarDate(focusDate); err == nil && !focused.Before(gridStart) &&
+			!focused.After(gridEnd) &&
+			!calendarDateDisabled(focusDate, config) {
+			return focusDate
+		}
+	}
+	for day := 1; day <= 31; day++ {
+		candidate := time.Date(month.Year(), month.Month(), day, 0, 0, 0, 0, time.UTC)
+		if candidate.Month() != month.Month() {
+			break
+		}
+		value := candidate.Format("2006-01-02")
+		if !calendarDateDisabled(value, config) {
+			return value
+		}
+	}
+	return ""
+}
+
+func calendarMovedDate(event ui.Event, current time.Time) (time.Time, bool) {
+	days := 0
+	months := 0
+	if event.Key == "ArrowRight" {
+		days = 1
+		if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			days = -1
+		}
+	} else if event.Key == "ArrowLeft" {
+		days = -1
+		if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			days = 1
+		}
+	} else if event.Key == "ArrowDown" {
+		days = 7
+	} else if event.Key == "ArrowUp" {
+		days = -7
+	} else if event.Key == "Home" {
+		weekday := int(current.Weekday())
+		if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			weekday = 6 - weekday
+		}
+		days = -weekday
+	} else if event.Key == "End" {
+		weekday := int(current.Weekday())
+		if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			weekday = 6 - weekday
+		}
+		days = 6 - weekday
+	} else if event.Key == "PageUp" {
+		months = -1
+	} else if event.Key == "PageDown" {
+		months = 1
+	} else {
+		return current, false
+	}
+	return current.AddDate(0, months, days), true
+}
+
+// Calendar renders a deterministic six-week grid so every renderer preserves
+// keyed day identity while months, range selection, and locale week starts
+// change around it.
+func Calendar(theme tokens.Theme, label string, config CalendarConfig, mode CalendarSelectionMode, selectedStart string, selectedEnd string, focusDate string, focusToken int64, onVisibleMonthChange func(string), onFocusChange func(string), onSelect func(string)) ui.View {
+	month := validateCalendarConfig(config)
+	if label == "" || mode < CalendarSingle || mode > CalendarRange || onVisibleMonthChange == nil ||
+		onFocusChange == nil ||
+		onSelect == nil {
+		panic("UIKit calendar contract is invalid")
+	}
+	if selectedStart != "" {
+		if _, err := parseCalendarDate(selectedStart); err != nil {
+			panic("UIKit calendar selection is invalid")
+		}
+	}
+	if selectedEnd != "" {
+		if mode != CalendarRange || selectedStart == "" || selectedEnd < selectedStart {
+			panic("UIKit calendar range selection is invalid")
+		}
+		if _, err := parseCalendarDate(selectedEnd); err != nil {
+			panic("UIKit calendar range selection is invalid")
+		}
+	}
+	resolvedFocus := ui.DerivedString(calendarFocusedDate(config, month, focusDate))
+	previous := IconButton(theme, "Previous month", icons.ArrowBack, tokens.ButtonQuiet, tokens.ControlSmall, false, func() {
+		onVisibleMonthChange(month.AddDate(0, -1, 0).Format("2006-01"))
+	})
+	next := IconButton(theme, "Next month", icons.ArrowForward, tokens.ButtonQuiet, tokens.ControlSmall, false, func() {
+		onVisibleMonthChange(month.AddDate(0, 1, 0).Format("2006-01"))
+	})
+	heading := ui.Align(ui.Row(previous, ui.Flex(ui.Justify(ui.FontWeight(ui.Text(config.MonthLabel), theme.Typography.WeightStrong), ui.JustifyCenter), 1), next), ui.AlignCenter)
+	cells := make([]ui.View, 0, 49)
+	for _, weekday := range config.WeekdayLabels {
+		cells = append(cells, ui.AccessibleName(ui.Role(ui.Justify(ui.FontSize(ui.Foreground(ui.Text(weekday), theme.Colors.TextMuted), theme.Typography.CaptionSize), ui.JustifyCenter), "columnheader"), weekday))
+	}
+	gridStart := calendarGridStart(month, config.WeekStartsMonday)
+	for index := int64(0); index < 42; index++ {
+		date := gridStart.AddDate(0, 0, int(index))
+		currentDate := date
+		value := ui.DerivedString(currentDate.Format("2006-01-02"))
+		disabled := calendarDateDisabled(value, config)
+		selected := calendarSelected(value, selectedStart, selectedEnd, mode)
+		cell := ui.Button(strconv.Itoa(currentDate.Day()), func(event ui.Event) {
+			if !disabled {
+				if currentDate.Month() != month.Month() {
+					onVisibleMonthChange(currentDate.Format("2006-01"))
+				}
+				onFocusChange(value)
+				onSelect(value)
+			}
+		})
+		cell = ui.Role(ui.Disabled(cell, disabled), "gridcell")
+		cell = ui.AccessibleName(ui.Selected(cell, selected), label + " " + value)
+		cell = ui.Current(cell, ui.CurrentNone)
+		cell = ui.Focusable(cell, !disabled && value == resolvedFocus)
+		if value == resolvedFocus {
+			cell = ui.FocusRequest(cell, focusToken)
+		}
+		cell = ui.OnFocus(cell, func(event ui.Event) {
+			if !disabled && value != focusDate {
+				onFocusChange(value)
+			}
+		})
+		cell = ui.OnKeyDown(cell, func(event ui.Event) {
+			if disabled || event.Composing {
+				return
+			}
+			moved, ok := calendarMovedDate(event, currentDate)
+			if !ok {
+				return
+			}
+			nextValue := moved.Format("2006-01-02")
+			if calendarDateDisabled(nextValue, config) {
+				return
+			}
+			if moved.Month() != month.Month() {
+				onVisibleMonthChange(moved.Format("2006-01"))
+			}
+			onFocusChange(nextValue)
+		})
+		background := theme.Colors.SurfaceRaised
+		foreground := theme.Colors.Text
+		if currentDate.Month() != month.Month() {
+			foreground = theme.Colors.TextMuted
+		}
+		if selected {
+			background = theme.Colors.Accent
+			foreground = theme.Colors.OnAccent
+		}
+		cell = ui.Justify(ui.Height(ui.Radius(ui.Foreground(ui.Background(cell, background), foreground), theme.Shape.SmallRadius), theme.ControlHeight), ui.JustifyCenter)
+		cell = interactiveSurface(theme, cell, selected)
+		cells = append(cells, ui.Key(cell, value))
+	}
+	grid := ui.GridColumns(ui.Gap(ui.Grid(cells...), theme.Spacing.ControlGap / 2), "repeat(7, minmax(0, 1fr))")
+	grid = ui.AccessibleName(ui.Role(grid, "grid"), label + " dates")
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(heading, grid), theme.Spacing.ContentGap), "group"), label)
+}
+
+func parsedDateInput(input string, layout string, config CalendarConfig) (string, bool) {
+	parsed, err := time.Parse(layout, strings.TrimSpace(input))
+	if err != nil {
+		return "", false
+	}
+	value := parsed.Format("2006-01-02")
+	if calendarDateDisabled(value, config) {
+		return "", false
+	}
+	return value, true
+}
+
+// DatePicker composes a locale-configurable text parser and the same Calendar
+// grid used independently by scheduling and range-selection surfaces.
+func DatePicker(theme tokens.Theme, id string, label string, input string, placeholder string, inputLayout string, value string, config CalendarConfig, open bool, focusDate string, focusToken int64, errorText string, disabled bool, onInput func(string), onOpenChange func(bool), onVisibleMonthChange func(string), onFocusChange func(string), onChange func(string), onInvalid func()) ui.View {
+	validateCalendarConfig(config)
+	if id == "" || label == "" || placeholder == "" || inputLayout == "" || onInput == nil ||
+		onOpenChange == nil ||
+		onVisibleMonthChange == nil ||
+		onFocusChange == nil ||
+		onChange == nil ||
+		onInvalid == nil {
+		panic("UIKit date picker contract is invalid")
+	}
+	if value != "" {
+		if _, err := parseCalendarDate(value); err != nil {
+			panic("UIKit date picker value is invalid")
+		}
+	}
+	commit := func() {
+		if parsed, ok := parsedDateInput(input, inputLayout, config); ok {
+			onChange(parsed)
+			onOpenChange(false)
+		} else {
+			onInvalid()
+		}
+	}
+	field := ui.TextInput(input, placeholder, ui.TextChange(onInput))
+	field = ui.ElementID(ui.Controls(ui.Expanded(ui.AccessibleName(field, label), open), id +
+		"-calendar"), id + "-input")
+	field = ui.Disabled(field, disabled)
+	field = ui.Invalid(field, errorText != "")
+	if errorText != "" {
+		field = ui.AccessibleDescription(field, errorText)
+	}
+	field = ui.OnKeyDown(field, func(event ui.Event) {
+		if disabled || event.Composing {
+			return
+		}
+		if event.Key == "ArrowDown" {
+			onOpenChange(true)
+		} else if event.Key == "Escape" {
+			onOpenChange(false)
+		} else if event.Key == "Enter" {
+			commit()
+		}
+	})
+	field = ui.Height(ui.Radius(ui.Foreground(ui.Background(field, theme.Colors.Surface), theme.Colors.Text), theme.Shape.MediumRadius), theme.ControlHeight)
+	field = ui.BorderWidth(ui.BorderColor(field, theme.Colors.Border), 1)
+	trigger := IconButton(theme, "Open " + label, icons.File, tokens.ButtonSecondary, tokens.ControlMedium, disabled, func() {
+		onOpenChange(!open)
+	})
+	calendar := Calendar(theme, label, config, CalendarSingle, value, "", focusDate, focusToken, onVisibleMonthChange, onFocusChange, func(selected string) {
+		parsed, err := parseCalendarDate(selected)
+		if err != nil {
+			onInvalid()
+			return
+		}
+		onInput(parsed.Format(inputLayout))
+		onChange(selected)
+		onOpenChange(false)
+	})
+	popup := ui.ElementID(ui.AccessibleName(ui.Role(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(calendar, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap), "dialog"), label +
+		" calendar"), id + "-calendar")
+	popup = ui.Portal(ui.Justify(ui.Align(ui.Column(popup), "center"), "center"), ui.OverlayPopup)
+	popup = ui.Hidden(popup, !open)
+	return ui.Stack(ui.Key(ui.Gap(ui.Row(field, trigger), theme.Spacing.ControlGap), "date-picker-field"), ui.Key(popup, "date-picker-popup"))
+}
+
+func uploadStatusLabel(status UploadStatus) string {
+	if status == UploadQueued {
+		return "Queued"
+	}
+	if status == UploadRunning {
+		return "Uploading"
+	}
+	if status == UploadComplete {
+		return "Complete"
+	}
+	if status == UploadFailed {
+		return "Failed"
+	}
+	if status == UploadRejected {
+		return "Rejected"
+	}
+	if status == UploadCancelled {
+		return "Cancelled"
+	}
+	panic("UIKit upload status is invalid")
+}
+
+func validateFileUploader(options FileUploaderOptions, files []UploadFile) {
+	if options.MaximumFiles < 1 || options.MaximumFiles > 256 || options.MaximumBytes < 1 ||
+		len(files) > 256 {
+		panic("UIKit file uploader options are invalid")
+	}
+	for _, filter := range options.Filters {
+		if filter.Name == "" || len(filter.Extensions) == 0 || len(filter.Extensions) > 64 {
+			panic("UIKit file uploader filter is invalid")
+		}
+		for _, extension := range filter.Extensions {
+			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(extension)), ".") == "" {
+				panic("UIKit file uploader filter extension is invalid")
+			}
+		}
+	}
+	accepted := int64(0)
+	for index, file := range files {
+		if file.Key == "" || file.Name == "" || file.Path == "" || file.Size < 0 ||
+			math.IsNaN(file.Progress) ||
+			math.IsInf(file.Progress, 0) ||
+			file.Progress < 0 ||
+			file.Progress > 100 ||
+			file.Status < UploadQueued ||
+			file.Status > UploadCancelled {
+			panic("UIKit upload file is invalid")
+		}
+		if file.Status != UploadRejected {
+			accepted++
+			if file.Size > options.MaximumBytes || !filePathAccepted(options.Filters, file.Path) {
+				panic("UIKit accepted upload file violates uploader constraints")
+			}
+		}
+		for previous := 0; previous < index; previous++ {
+			if files[previous].Key == file.Key {
+				panic("UIKit upload file keys must be unique")
+			}
+		}
+	}
+	if accepted > options.MaximumFiles {
+		panic("UIKit accepted upload file limit is exceeded")
+	}
+}
+
+func filePathAccepted(filters []system.FileFilter, path string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(path))
+	for _, filter := range filters {
+		for _, extension := range filter.Extensions {
+			extension = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(extension)), ".")
+			if extension != "" && strings.HasSuffix(lower, "." + extension) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func acceptedUploadCount(files []UploadFile) int64 {
+	count := int64(0)
+	for _, file := range files {
+		if file.Status != UploadRejected {
+			count++
+		}
+	}
+	return count
+}
+
+func droppedPaths(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, "\x00")
+	paths := make([]string, 0, len(parts))
+	for _, path := range parts {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// FileUploader integrates the shared platform picker and renderer drop events
+// while keeping transfer ownership, goroutine scheduling, and persistence in
+// the application service that supplies UploadFile snapshots.
+func FileUploader(theme tokens.Theme, label string, files []UploadFile, options FileUploaderOptions, dragActive bool, disabled bool, onFiles func([]string), onRejected func([]string, string), onDragActiveChange func(bool), onCancel func(string), onRetry func(string), onError func(error)) ui.View {
+	validateFileUploader(options, files)
+	if label == "" || onFiles == nil || onRejected == nil || onDragActiveChange == nil ||
+		onCancel == nil ||
+		onRetry == nil ||
+		onError == nil {
+		panic("UIKit file uploader contract is invalid")
+	}
+	accept := func(paths []string) {
+		if len(paths) == 0 {
+			return
+		}
+		if !options.Multiple && len(paths) > 1 {
+			onRejected(paths, "Only one file is allowed")
+			return
+		}
+		for _, path := range paths {
+			if !filePathAccepted(options.Filters, path) {
+				onRejected(paths, "File type is not accepted")
+				return
+			}
+		}
+		if acceptedUploadCount(files) + int64(len(paths)) > options.MaximumFiles {
+			onRejected(paths, "File limit exceeded")
+			return
+		}
+		onFiles(paths)
+	}
+	pick := func() {
+		if disabled {
+			return
+		}
+		dialog := system.FileDialogOptions{Title: "Select " + label, Filters: options.Filters}
+		if options.Multiple {
+			paths, err := system.OpenFiles(dialog)
+			if err != nil {
+				onError(err)
+				return
+			}
+			accept(paths)
+			return
+		}
+		path, present, err := system.OpenFile(dialog)
+		if err != nil {
+			onError(err)
+			return
+		}
+		if present {
+			accept([]string{path})
+		}
+	}
+	dropCopy := ui.Gap(ui.Column(ui.FontWeight(ui.Text("Drop files here"), theme.Typography.WeightStrong), ui.Foreground(ui.Text("or choose from this device"), theme.Colors.TextMuted)), theme.Spacing.ControlGap)
+	dropzone := ui.AccessibleName(ui.Role(ui.Focusable(ui.Justify(ui.Align(ui.Padding(ui.Radius(ui.Background(dropCopy, theme.Colors.SurfaceRaised), theme.Shape.MediumRadius), theme.Spacing.SectionGap), ui.AlignCenter), ui.JustifyCenter), !disabled), "button"), label)
+	dropzone = ui.Disabled(dropzone, disabled)
+	dropzone = ui.BorderWidth(ui.BorderColor(dropzone, theme.Colors.Border), 1)
+	if dragActive {
+		dropzone = ui.BorderColor(ui.Background(dropzone, theme.Colors.Surface), theme.Colors.Accent)
+	}
+	dropzone = ui.OnClick(dropzone, func(event ui.Event) {
+		pick()
+	})
+	dropzone = ui.OnKeyDown(dropzone, func(event ui.Event) {
+		if !disabled && !event.Repeat &&
+			(event.Key == "Enter" || event.Key == " " || event.Key == "Space") {
+			pick()
+		}
+	})
+	dropzone = ui.OnDragEnter(dropzone, func(event ui.Event) {
+		if !disabled {
+			onDragActiveChange(true)
+		}
+	})
+	dropzone = ui.OnDragLeave(dropzone, func(event ui.Event) {
+		onDragActiveChange(false)
+	})
+	dropzone = ui.OnDrop(dropzone, func(event ui.Event) {
+		onDragActiveChange(false)
+		if !disabled {
+			accept(droppedPaths(event.Text))
+		}
+	})
+	rows := make([]ui.View, 0, len(files))
+	for _, file := range files {
+		current := file
+		status := uploadStatusLabel(current.Status)
+		detail := status
+		if current.Message != "" {
+			detail += ": " + current.Message
+		}
+		copy := ui.Gap(ui.Column(ui.FontWeight(ui.Text(current.Name), theme.Typography.WeightMedium), ui.FontSize(ui.Foreground(ui.Text(detail), theme.Colors.TextMuted), theme.Typography.CaptionSize)), theme.Spacing.ControlGap /
+			2)
+		content := ui.Row(ui.Flex(copy, 1))
+		if current.Status == UploadRunning || current.Status == UploadQueued {
+			content = ui.Row(ui.Flex(copy, 1), IconButton(theme, "Cancel " + current.Name, icons.Close, tokens.ButtonQuiet, tokens.ControlSmall, false, func() {
+				onCancel(current.Key)
+			}))
+		} else if current.Status == UploadFailed || current.Status == UploadCancelled {
+			content = ui.Row(ui.Flex(copy, 1), Button(theme, "Retry " + current.Name, tokens.ButtonQuiet, tokens.ControlSmall, false, func() {
+				onRetry(current.Key)
+			}))
+		}
+		row := ui.Gap(ui.Column(ui.Align(content, ui.AlignCenter), Progress(theme, current.Name +
+			" upload progress", current.Progress, 100)), theme.Spacing.ControlGap)
+		row = ui.Padding(ui.Radius(ui.Background(row, theme.Colors.SurfaceRaised), theme.Shape.SmallRadius), theme.Spacing.ContentGap)
+		row = ui.AccessibleName(ui.Role(row, "listitem"), current.Name + ", " + detail)
+		rows = append(rows, ui.Key(row, current.Key))
+	}
+	list := ui.AccessibleName(ui.Role(ui.Gap(ui.Column(rows...), theme.Spacing.ControlGap), "list"), label +
+		" files")
+	summary := ui.DerivedString(strconv.FormatInt(acceptedUploadCount(files), 10) + " of " +
+		strconv.FormatInt(options.MaximumFiles, 10) +
+		" accepted files")
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(dropzone, ui.AccessibleName(ui.Role(ui.Text(summary), "status"), label +
+		" summary"), list), theme.Spacing.ContentGap), "group"), label + " uploader")
+}
+
+func validateContextMenuItems(items []ContextMenuItem, nested bool) int64 {
+	if len(items) == 0 || len(items) > 32 {
+		panic("UIKit context menu collection is invalid")
+	}
+	total := ui.DerivedInt(0)
+	for index, item := range items {
+		if item.Key == "" || item.Label == "" || item.Checked && !item.Checkable ||
+			nested && len(item.Children) > 0 {
+			panic("UIKit context menu item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit context menu keys must be unique")
+			}
+		}
+		total++
+		if len(item.Children) > 0 {
+			total += validateContextMenuItems(item.Children, true)
+		}
+	}
+	return total
+}
+
+func contextMenuIndex(items []ContextMenuItem, key string) int64 {
+	for index, item := range items {
+		if item.Key == key {
+			return int64(index)
+		}
+	}
+	return -1
+}
+
+func contextMenuActiveIndex(items []ContextMenuItem, key string) int64 {
+	index := contextMenuIndex(items, key)
+	if index >= 0 && index < int64(len(items)) && !items[index].Disabled {
+		return index
+	}
+	for candidate, item := range items {
+		if !item.Disabled {
+			return int64(candidate)
+		}
+	}
+	return -1
+}
+
+func contextMenuMovedIndex(event ui.Event, items []ContextMenuItem, current int64) int64 {
+	choices := make([]ChoiceOption, 0, len(items))
+	for _, item := range items {
+		choices = append(choices, ChoiceOption{
+			Value: item.Key, Label: item.Label, Disabled: item.Disabled,
+		})
+	}
+	return movedChoiceIndex(event, choices, current)
+}
+
+func contextMenuTypeahead(items []ContextMenuItem, current int64, key string) int64 {
+	if len(key) != 1 {
+		return current
+	}
+	needle := strings.ToLower(key)
+	for offset := int64(1); offset <= int64(len(items)); offset++ {
+		candidate := (current + offset) % int64(len(items))
+		if !items[candidate].Disabled &&
+			strings.HasPrefix(strings.ToLower(items[candidate].Label), needle) {
+			return candidate
+		}
+	}
+	return current
+}
+
+func contextMenuRows(theme tokens.Theme, label string, items []ContextMenuItem, activeKey string, focusToken int64, openSubmenu string, nested bool, onActiveChange func(string), onSubmenuChange func(string), onActivate func(string), onDismiss func()) ui.View {
+	activeIndex := ui.DerivedInt(contextMenuActiveIndex(items, activeKey))
+	declaredActiveIndex := ui.DerivedInt(contextMenuIndex(items, activeKey))
+	showChecks := ui.DerivedBool(false)
+	for _, item := range items {
+		if item.Checkable {
+			showChecks = true
+		}
+	}
+	rows := make([]ui.View, 0, len(items))
+	for index, item := range items {
+		current := item
+		itemIndex := int64(index)
+		hasChildren := ui.DerivedBool(len(current.Children) > 0)
+		firstChildKey := ui.DerivedString("")
+		for _, child := range current.Children {
+			if firstChildKey == "" && !child.Disabled {
+				firstChildKey = child.Key
+			}
+		}
+		content := make([]ui.View, 0, 4)
+		if showChecks {
+			marker := ui.DerivedString("")
+			if current.Checkable && current.Checked {
+				marker = "✓"
+			}
+			content = append(content, ui.Width(ui.Justify(ui.Text(marker), ui.JustifyCenter), 20))
+		}
+		content = append(content, ui.Text(current.Label), ui.Flex(ui.Box(), 1))
+		trailing := ui.DerivedString(current.Shortcut)
+		if hasChildren {
+			trailing = "›"
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				trailing = "‹"
+			}
+		}
+		if trailing != "" {
+			content = append(content, ui.FontSize(ui.Foreground(ui.Text(trailing), theme.Colors.TextMuted), theme.Typography.CaptionSize))
+		}
+		role := ui.DerivedString("menuitem")
+		if current.Checkable {
+			role = "menuitemcheckbox"
+		}
+		row := ui.AccessibleName(ui.Role(ui.Disabled(ui.Align(ui.Row(content...), ui.AlignCenter), current.Disabled), role), current.Label)
+		if current.Checkable {
+			row = ui.Checked(row, current.Checked)
+		}
+		row = ui.OnClick(row, func(event ui.Event) {
+			if current.Disabled {
+				return
+			}
+			if hasChildren {
+				onSubmenuChange(current.Key)
+				if firstChildKey != "" {
+					onActiveChange(firstChildKey)
+				}
+			} else {
+				onActivate(current.Key)
+			}
+		})
+		if current.Shortcut != "" {
+			row = ui.AccessibleDescription(row, current.Shortcut)
+		}
+		row = ui.OnPointerMove(row, func(event ui.Event) {
+			if current.Disabled {
+				return
+			}
+			if current.Key != activeKey {
+				onActiveChange(current.Key)
+			}
+			if hasChildren && openSubmenu != current.Key {
+				onSubmenuChange(current.Key)
+			} else if !hasChildren && openSubmenu != "" {
+				onSubmenuChange("")
+			}
+		})
+		row = ui.Focusable(row, !current.Disabled && itemIndex == activeIndex)
+		row = ui.AutoFocus(row, itemIndex == activeIndex && declaredActiveIndex >= 0)
+		if itemIndex == activeIndex && declaredActiveIndex >= 0 {
+			row = ui.FocusRequest(row, focusToken)
+		}
+		if hasChildren {
+			row = ui.Expanded(ui.AccessibleDescription(row, "Submenu"), openSubmenu == current.Key)
+		}
+		background := theme.Colors.SurfaceRaised
+		if itemIndex == activeIndex {
+			background = theme.Colors.Surface
+		}
+		row = ui.Padding(ui.MinWidth(ui.Height(ui.Radius(ui.Background(row, background), theme.Shape.SmallRadius), theme.ControlHeight), 220), theme.Spacing.ControlGap)
+		row = interactiveSurface(theme, row, false)
+		rows = append(rows, ui.Key(row, current.Key))
+	}
+	menu := ui.AccessibleName(ui.Role(ui.Gap(ui.Column(rows...), theme.Spacing.ControlGap / 2), "menu"), label)
+	activeSubmenuKey := ui.DerivedString("")
+	activeFirstChildKey := ui.DerivedString("")
+	activationKey := ui.DerivedString("")
+	if declaredActiveIndex >= 0 && declaredActiveIndex < int64(len(items)) {
+		activationKey = items[declaredActiveIndex].Key
+	}
+	if activeIndex >= 0 && activeIndex < int64(len(items)) && len(items[activeIndex].Children) > 0 {
+		activeSubmenuKey = items[activeIndex].Key
+		for _, child := range items[activeIndex].Children {
+			if activeFirstChildKey == "" && !child.Disabled {
+				activeFirstChildKey = child.Key
+			}
+		}
+	}
+	menu = ui.OnKeyDown(menu, func(event ui.Event) {
+		if event.Composing || activeIndex < 0 {
+			return
+		}
+		if event.Key == "Escape" {
+			onDismiss()
+			return
+		}
+		if activationKey != "" && (event.Key == "Enter" || event.Key == " " || event.Key == "Space") {
+			if activeSubmenuKey != "" {
+				onSubmenuChange(activeSubmenuKey)
+				if activeFirstChildKey != "" {
+					onActiveChange(activeFirstChildKey)
+				}
+			} else {
+				onActivate(activationKey)
+			}
+			return
+		}
+		forward := event.Key == "ArrowRight"
+		backward := event.Key == "ArrowLeft"
+		if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			forward, backward = backward, forward
+		}
+		if forward && !nested && activeSubmenuKey != "" {
+			onSubmenuChange(activeSubmenuKey)
+			if activeFirstChildKey != "" {
+				onActiveChange(activeFirstChildKey)
+			}
+			return
+		}
+		if backward && nested {
+			onSubmenuChange("")
+			return
+		}
+		next := contextMenuMovedIndex(event, items, activeIndex)
+		if next == activeIndex {
+			next = contextMenuTypeahead(items, activeIndex, event.Key)
+		}
+		if next >= 0 && next < int64(len(items)) && next != activeIndex {
+			onActiveChange(items[next].Key)
+		}
+	})
+	menu = ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(menu, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ControlGap)
+	return ui.Elevation(menu, theme.Elevation.Overlay)
+}
+
+// ContextMenu supports pointer and keyboard invocation, a bounded nested
+// submenu, typeahead, viewport collision clamping, and caller-owned focus
+// restoration after dismissal.
+func ContextMenu(theme tokens.Theme, label string, target ui.View, items []ContextMenuItem, open bool, x float64, y float64, activeKey string, openSubmenu string, focusToken int64, restoreFocusToken int64, onOpen func(float64, float64), onActiveChange func(string), onSubmenuChange func(string), onActivate func(string), onDismiss func()) ui.View {
+	validateContextMenuItems(items, false)
+	if label == "" || math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) || x < 0 ||
+		y < 0 ||
+		onOpen == nil ||
+		onActiveChange == nil ||
+		onSubmenuChange == nil ||
+		onActivate == nil ||
+		onDismiss == nil {
+		panic("UIKit context menu contract is invalid")
+	}
+	target = ui.Focusable(target, true)
+	target = ui.FocusRequest(target, restoreFocusToken)
+	target = ui.OnContextMenu(target, func(event ui.Event) {
+		onOpen(event.X, event.Y)
+	})
+	target = ui.OnKeyDown(target, func(event ui.Event) {
+		if event.Key == "ContextMenu" || event.Key == "F10" && event.Modifiers & ui.ModifierShift != 0 {
+			onOpen(16, 16)
+		}
+	})
+	main := contextMenuRows(theme, label, items, activeKey, focusToken, openSubmenu, false, onActiveChange, onSubmenuChange, onActivate, onDismiss)
+	panels := ui.Row(main)
+	panelCount := float64(1)
+	if openSubmenu != "" {
+		for _, item := range items {
+			if item.Key == openSubmenu && len(item.Children) > 0 {
+				panels = ui.Gap(ui.Row(main, contextMenuRows(theme, item.Label + " submenu", item.Children, activeKey, focusToken, "", true, onActiveChange, onSubmenuChange, onActivate, onDismiss)), theme.Spacing.ControlGap)
+				panelCount = 2
+				break
+			}
+		}
+	}
+	environment := ui.CurrentEnvironment()
+	maximumX := environment.ViewportWidth - panelCount * 240 - environment.SafeAreaRight
+	maximumY := environment.ViewportHeight - float64(len(items) + 2) * theme.ControlHeight -
+		environment.SafeAreaBottom
+	positionX := math.Max(environment.SafeAreaLeft, math.Min(x, math.Max(environment.SafeAreaLeft, maximumX)))
+	positionY := math.Max(environment.SafeAreaTop, math.Min(y, math.Max(environment.SafeAreaTop, maximumY)))
+	translation := "translate(" + strconv.FormatFloat(positionX, 'f', -1, 64) + "px," +
+		strconv.FormatFloat(positionY, 'f', -1, 64) +
+		"px)"
+	panels = ui.Transform(ui.Align(ui.Justify(panels, ui.JustifyStart), ui.AlignStart), translation)
+	backdrop := ui.OnClick(ui.PointerEvents(ui.Box(), ui.PointerEventsAuto), func(event ui.Event) {
+		onDismiss()
+	})
+	overlay := ui.Portal(ui.Modal(ui.Stack(backdrop, panels), open), ui.OverlayPopup)
+	overlay = ui.Hidden(overlay, !open)
+	return ui.Stack(ui.Key(target, "context-menu-target"), ui.Key(overlay, "context-menu-popup"))
+}
+
 type TabItem struct {
 	Key string
 	Label string
@@ -427,9 +2255,24 @@ func Tabs(theme tokens.Theme, label string, items []TabItem, selectedKey string,
 				onSelect(items[next].Key)
 			}
 		})
+		background := theme.Colors.Surface
+		foreground := theme.Colors.TextMuted
+		border := theme.Colors.Border
+		if selected {
+			background = theme.Colors.Accent
+			foreground = theme.Colors.OnAccent
+			border = theme.Colors.Accent
+		}
+		tab = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(tab, background), foreground), theme.Shape.MediumRadius), theme.ControlHeight), theme.Spacing.ContentGap)
+		tab = interactiveSurface(theme, tab, selected)
+		tab = ui.BorderWidth(ui.BorderColor(tab, border), 1)
+		if item.Disabled {
+			tab = ui.Opacity(tab, 0.55)
+		}
 		tabs = append(tabs, ui.Key(tab, item.Key))
 	}
-	list := headless.TabList(label, headless.Horizontal, tabs...)
+	list := ui.Padding(ui.Radius(ui.Background(headless.TabList(label, headless.Horizontal, tabs...), theme.Colors.SurfaceRaised), theme.Shape.LargeRadius), theme.Spacing.ControlGap /
+		2)
 	return ui.Gap(ui.Column(list, panel), theme.Spacing.ContentGap)
 }
 
@@ -446,12 +2289,25 @@ func Breadcrumb(theme tokens.Theme, label string, items []BreadcrumbItem) ui.Vie
 		if item.Current {
 			current = ui.CurrentPage
 		}
-		views = append(views, ui.Key(headless.CurrentLink(item.Label, item.Path, current), item.Path))
+		link := headless.CurrentLink(item.Label, item.Path, current)
+		foreground := theme.Colors.Accent
+		if item.Current {
+			foreground = theme.Colors.Text
+			link = ui.FontWeight(link, theme.Typography.WeightMedium)
+		}
+		link = ui.Padding(ui.Radius(ui.Foreground(link, foreground), theme.Shape.SmallRadius), theme.Spacing.ControlGap /
+			2)
+		link = interactiveSurface(theme, link, false)
+		views = append(views, ui.Key(link, item.Path))
 		if index < len(items) - 1 {
-			views = append(views, ui.Text("/"))
+			separator := ui.DerivedString("›")
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				separator = "‹"
+			}
+			views = append(views, ui.Foreground(ui.Text(separator), theme.Colors.TextMuted))
 		}
 	}
-	return ui.AccessibleName(ui.Role(ui.Gap(ui.Row(views...), theme.Spacing.ControlGap), "navigation"), label)
+	return ui.AccessibleName(ui.Role(ui.Align(ui.Gap(ui.Row(views...), theme.Spacing.ControlGap / 2), ui.AlignCenter), "navigation"), label)
 }
 
 func Pagination(theme tokens.Theme, label string, page int64, pageCount int64, onPageChange func(int64)) ui.View {
@@ -469,6 +2325,17 @@ func Pagination(theme tokens.Theme, label string, page int64, pageCount int64, o
 		button := ui.Current(headless.Button(strconv.FormatInt(index + 1, 10), false, func() {
 			onPageChange(itemIndex)
 		}), current)
+		background := theme.Colors.Surface
+		foreground := theme.Colors.Text
+		border := theme.Colors.Border
+		if index == page {
+			background = theme.Colors.Accent
+			foreground = theme.Colors.OnAccent
+			border = theme.Colors.Accent
+		}
+		button = ui.Justify(ui.Align(ui.Width(ui.Height(ui.Radius(ui.Foreground(ui.Background(button, background), foreground), theme.Shape.MediumRadius), theme.ControlHeight), theme.ControlHeight), ui.AlignCenter), ui.JustifyCenter)
+		button = interactiveSurface(theme, button, index == page)
+		button = ui.BorderWidth(ui.BorderColor(button, border), 1)
 		items = append(items, ui.Key(button, strconv.FormatInt(index, 10)))
 	}
 	if pageCount <= 9 {
@@ -493,6 +2360,443 @@ func Pagination(theme tokens.Theme, label string, page int64, pageCount int64, o
 	return ui.AccessibleName(ui.Role(ui.Gap(ui.Row(items...), theme.Spacing.ControlGap), "navigation"), label)
 }
 
+type ListItem struct {
+	Key string
+	Title string
+	Detail string
+	Meta string
+	Selected bool
+	Disabled bool
+}
+
+func List(theme tokens.Theme, label string, items []ListItem, onActivate func(string)) ui.View {
+	if label == "" || onActivate == nil || len(items) > 256 {
+		panic("UIKit list contract is invalid")
+	}
+	rows := make([]ui.View, 0, len(items))
+	for index, item := range items {
+		if item.Key == "" || item.Title == "" {
+			panic("UIKit list item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit list item keys must be unique")
+			}
+		}
+		current := item
+		copy := ui.Column(ui.FontWeight(ui.Foreground(ui.Text(current.Title), theme.Colors.Text), theme.Typography.WeightMedium))
+		if current.Detail != "" {
+			copy = ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(current.Title), theme.Colors.Text), theme.Typography.WeightMedium), ui.FontSize(ui.Foreground(ui.Text(current.Detail), theme.Colors.TextMuted), theme.Typography.CaptionSize)), theme.Spacing.ControlGap /
+				2)
+		}
+		content := ui.Row(ui.Flex(copy, 1))
+		if current.Meta != "" {
+			content = ui.Align(ui.Row(ui.Flex(copy, 1), ui.FontSize(ui.Foreground(ui.Text(current.Meta), theme.Colors.TextMuted), theme.Typography.CaptionSize)), ui.AlignCenter)
+		}
+		row := headless.Pressable(current.Title, current.Disabled, content, func() {
+			onActivate(current.Key)
+		})
+		row = ui.Role(row, "option")
+		row = ui.Selected(row, current.Selected)
+		row = ui.AccessibleDescription(row, current.Detail)
+		background := theme.Colors.Surface
+		border := theme.Colors.Border
+		if current.Selected {
+			background = theme.Colors.SurfaceRaised
+			border = theme.Colors.Accent
+		}
+		row = ui.Padding(ui.Radius(ui.Background(row, background), theme.Shape.MediumRadius), theme.Spacing.ContentGap)
+		row = interactiveSurface(theme, row, current.Selected)
+		row = ui.BorderWidth(ui.BorderColor(row, border), 1)
+		if current.Disabled {
+			row = ui.Opacity(row, 0.55)
+		}
+		rows = append(rows, ui.Key(row, current.Key))
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(rows...), theme.Spacing.ControlGap), "listbox"), label)
+}
+
+type StepItem struct {
+	Key string
+	Label string
+	Detail string
+}
+
+func StepIndicator(theme tokens.Theme, label string, items []StepItem, currentKey string) ui.View {
+	if label == "" || currentKey == "" || len(items) < 2 || len(items) > 12 {
+		panic("UIKit step indicator contract is invalid")
+	}
+	currentIndex := -1
+	for index, item := range items {
+		if item.Key == currentKey {
+			currentIndex = index
+		}
+	}
+	if currentIndex < 0 {
+		panic("UIKit step indicator current key is invalid")
+	}
+	views := make([]ui.View, 0, len(items))
+	for index, item := range items {
+		if item.Key == "" || item.Label == "" {
+			panic("UIKit step indicator item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit step indicator keys must be unique")
+			}
+		}
+		marker := ui.DerivedString(strconv.FormatInt(int64(index + 1), 10))
+		markerColor := theme.Colors.TextMuted
+		if index < currentIndex {
+			marker = "✓"
+			markerColor = theme.Colors.Success
+		} else if index == currentIndex {
+			markerColor = theme.Colors.Accent
+		}
+		markerView := ui.Justify(ui.Align(ui.Width(ui.Height(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Foreground(ui.Box(ui.Text(marker)), markerColor), markerColor), 1), theme.ControlHeight /
+			2), theme.ControlHeight), theme.ControlHeight), ui.AlignCenter), ui.JustifyCenter)
+		copy := ui.Column(ui.FontWeight(ui.Foreground(ui.Text(item.Label), theme.Colors.Text), theme.Typography.WeightMedium))
+		if item.Detail != "" {
+			copy = ui.Gap(ui.Column(ui.FontWeight(ui.Foreground(ui.Text(item.Label), theme.Colors.Text), theme.Typography.WeightMedium), ui.FontSize(ui.Foreground(ui.Text(item.Detail), theme.Colors.TextMuted), theme.Typography.CaptionSize)), theme.Spacing.ControlGap /
+				2)
+		}
+		view := ui.Align(ui.Gap(ui.Row(markerView, copy), theme.Spacing.ControlGap), ui.AlignCenter)
+		current := ui.CurrentNone
+		if index == currentIndex {
+			current = ui.CurrentStep
+		}
+		view = ui.Current(ui.AccessibleName(ui.Role(view, "listitem"), item.Label), current)
+		views = append(views, ui.Key(view, item.Key))
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(views...), theme.Spacing.ContentGap), "list"), label)
+}
+
+func navigationLink(theme tokens.Theme, item NavigationItem, compact bool) ui.View {
+	current := ui.CurrentNone
+	if item.Current {
+		current = ui.CurrentPage
+	}
+	link := headless.CurrentLink(item.Label, item.Path, current)
+	if compact {
+		link = ui.Role(ui.Disabled(ui.Button(item.CompactLabel, func(event ui.Event) {
+			if !item.Disabled {
+				ui.Navigate(item.Path)
+			}
+		}), item.Disabled), "link")
+		link = ui.AccessibleName(ui.Current(link, current), item.Label)
+	}
+	link = ui.Disabled(link, item.Disabled)
+	link = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(link, theme.Colors.SurfaceRaised), theme.Colors.Text), theme.Shape.MediumRadius), theme.ControlHeight), theme.Spacing.ContentGap)
+	if item.Current {
+		link = ui.Foreground(ui.Background(link, theme.Colors.Accent), theme.Colors.OnAccent)
+	}
+	link = interactiveSurface(theme, link, item.Current)
+	return link
+}
+
+func NavigationMenu(theme tokens.Theme, label string, groups []NavigationGroup, mode NavigationMode, maximumVisible int64, overflowOpen bool, onOverflowChange func(bool)) ui.View {
+	if label == "" || onOverflowChange == nil || len(groups) == 0 || len(groups) > 16 ||
+		mode < NavigationTop ||
+		mode > NavigationCompact ||
+		maximumVisible < 1 ||
+		maximumVisible > 64 {
+		panic("UIKit navigation menu contract is invalid")
+	}
+	total := ui.DerivedInt(0)
+	currentCount := ui.DerivedInt(0)
+	for groupIndex, group := range groups {
+		if group.Key == "" || group.Label == "" || len(group.Items) == 0 {
+			panic("UIKit navigation group is invalid")
+		}
+		for previousGroup := 0; previousGroup < groupIndex; previousGroup++ {
+			if groups[previousGroup].Key == group.Key {
+				panic("UIKit navigation group keys must be unique")
+			}
+		}
+		for itemIndex, item := range group.Items {
+			if item.Key == "" || item.Label == "" || item.Path == "" ||
+				mode == NavigationCompact && item.CompactLabel == "" {
+				panic("UIKit navigation menu item is invalid")
+			}
+			if item.Current {
+				currentCount++
+			}
+			for previous := 0; previous < itemIndex; previous++ {
+				if group.Items[previous].Key == item.Key {
+					panic("UIKit navigation item keys must be unique")
+				}
+			}
+			for previousGroup := 0; previousGroup < groupIndex; previousGroup++ {
+				for _, previousItem := range groups[previousGroup].Items {
+					if previousItem.Key == item.Key {
+						panic("UIKit navigation item keys must be globally unique")
+					}
+				}
+			}
+			total++
+		}
+	}
+	if total > 64 || currentCount > 1 {
+		panic("UIKit navigation menu collection is invalid")
+	}
+	if mode == NavigationTop {
+		visibleGroups := []ui.View{}
+		overflow := []ui.View{}
+		visibleCount := ui.DerivedInt(0)
+		for _, group := range groups {
+			visible := []ui.View{}
+			for _, item := range group.Items {
+				current := item
+				link := ui.Key(navigationLink(theme, current, false), current.Key)
+				if visibleCount < maximumVisible {
+					visible = append(visible, link)
+					visibleCount++
+				} else {
+					overflow = append(overflow, link)
+				}
+			}
+			if len(visible) > 0 {
+				groupView := ui.AccessibleName(ui.Role(ui.Gap(ui.Row(visible...), theme.Spacing.ControlGap), "group"), group.Label)
+				visibleGroups = append(visibleGroups, ui.Key(groupView, group.Key))
+			}
+		}
+		bar := ui.Gap(ui.Row(visibleGroups...), theme.Spacing.ContentGap)
+		if len(overflow) > 0 {
+			trigger := headless.DisclosureTrigger("More " + label, overflowOpen, false, onOverflowChange)
+			recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonQuiet, tokens.ControlMedium, false)
+			trigger = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+			trigger = buttonInteraction(trigger, recipe)
+			panel := ui.Hidden(ui.AccessibleName(ui.Role(ui.Padding(ui.Gap(ui.Column(overflow...), theme.Spacing.ControlGap), theme.Spacing.ControlGap), "group"), label +
+				" overflow"), !overflowOpen)
+			return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(ui.Gap(ui.Row(bar, trigger), theme.Spacing.ControlGap), panel), theme.Spacing.ControlGap), "navigation"), label)
+		}
+		return ui.AccessibleName(ui.Role(bar, "navigation"), label)
+	}
+	groupViews := make([]ui.View, 0, len(groups))
+	for _, group := range groups {
+		links := make([]ui.View, 0, len(group.Items))
+		for _, item := range group.Items {
+			current := item
+			links = append(links, ui.Key(navigationLink(theme, current, mode == NavigationCompact), current.Key))
+		}
+		groupView := ui.Gap(ui.Column(ui.FontSize(ui.Foreground(ui.Text(group.Label), theme.Colors.TextMuted), theme.Typography.CaptionSize), ui.Gap(ui.Column(links...), theme.Spacing.ControlGap)), theme.Spacing.ControlGap)
+		groupViews = append(groupViews, ui.Key(ui.AccessibleName(ui.Role(groupView, "group"), group.Label), group.Key))
+	}
+	return ui.AccessibleName(ui.Role(ui.Gap(ui.Column(groupViews...), theme.Spacing.ContentGap), "navigation"), label)
+}
+
+func ScrollArea(theme tokens.Theme, label string, content ui.View, width float64, height float64, scrollX float64, scrollY float64, onScroll func(float64, float64)) ui.View {
+	if label == "" || onScroll == nil || width <= 0 || height <= 0 || scrollX < 0 || scrollY < 0 ||
+		math.IsNaN(width) ||
+		math.IsNaN(height) ||
+		math.IsNaN(scrollX) ||
+		math.IsNaN(scrollY) ||
+		math.IsInf(width, 0) ||
+		math.IsInf(height, 0) ||
+		math.IsInf(scrollX, 0) ||
+		math.IsInf(scrollY, 0) {
+		panic("UIKit scroll area contract is invalid")
+	}
+	view := ui.Width(ui.Height(ui.Scroll(content), height), width)
+	view = ui.ScrollX(ui.ScrollY(view, scrollY), scrollX)
+	view = ui.OnScroll(view, func(event ui.Event) {
+		onScroll(event.X, event.Y)
+	})
+	view = ui.BorderWidth(ui.BorderColor(ui.Radius(ui.Background(view, theme.Colors.SurfaceRaised), theme.Shape.MediumRadius), theme.Colors.Border), 1)
+	return ui.AccessibleName(ui.Role(view, "region"), label)
+}
+
+func boundedResizable(value float64, minimum float64, maximum float64) float64 {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func ResizableHandle(theme tokens.Theme, label string, state ResizableState, axis Axis, value float64, minimum float64, maximum float64, step float64, disabled bool, onChange func(float64)) ui.View {
+	if label == "" || onChange == nil || axis < AxisHorizontal || axis > AxisVertical ||
+		math.IsNaN(value) ||
+		math.IsInf(value, 0) ||
+		math.IsNaN(minimum) ||
+		math.IsInf(minimum, 0) ||
+		math.IsNaN(maximum) ||
+		math.IsInf(maximum, 0) ||
+		math.IsNaN(step) ||
+		math.IsInf(step, 0) ||
+		minimum < 0 ||
+		maximum <= minimum ||
+		step <= 0 ||
+		value < minimum ||
+		value > maximum {
+		panic("UIKit resizable contract is invalid")
+	}
+	formatted := ui.DerivedString(strconv.FormatFloat(value, 'f', -1, 64))
+	bar := ui.Radius(ui.Background(ui.Box(), theme.Colors.Border), theme.Shape.SmallRadius)
+	description := ui.DerivedString("Vertical resize handle")
+	if axis == AxisHorizontal {
+		bar = ui.Width(ui.Height(bar, theme.ControlHeight * 2), 8)
+	} else {
+		description = "Horizontal resize handle"
+		bar = ui.Height(ui.MinWidth(bar, theme.ControlHeight * 2), 8)
+	}
+	handle := ui.AccessibleDescription(ui.AccessibleName(ui.Role(ui.Disabled(ui.Focusable(bar, !disabled), disabled), "separator"), label), description)
+	handle = ui.AccessibleValue(handle, formatted)
+	handle = ui.MinimumValue(ui.MaximumValue(ui.StepValue(handle, step), maximum), minimum)
+	handle = ui.OnKeyDown(handle, func(event ui.Event) {
+		if disabled {
+			return
+		}
+		next := value
+		if event.Key == "Home" {
+			next = minimum
+		} else if event.Key == "End" {
+			next = maximum
+		} else if axis == AxisHorizontal {
+			forward := event.Key == "ArrowRight"
+			backward := event.Key == "ArrowLeft"
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				forward, backward = backward, forward
+			}
+			if forward {
+				next += step
+			} else if backward {
+				next -= step
+			}
+		} else if event.Key == "ArrowDown" {
+			next += step
+		} else if event.Key == "ArrowUp" {
+			next -= step
+		}
+		next = boundedResizable(next, minimum, maximum)
+		if next != value {
+			onChange(next)
+		}
+	})
+	options := gesture.DragOptions{Axis: gesture.Horizontal, MinDistance: 1}
+	if axis == AxisVertical {
+		options.Axis = gesture.Vertical
+	}
+	handle = gesture.BindDrag(handle, state.drag, options, func(snapshot gesture.DragSnapshot) {
+		if disabled || snapshot.Phase == gesture.Cancelled {
+			return
+		}
+		base := ui.FloatStateValue(state.startValue)
+		if snapshot.Phase == gesture.Started {
+			base = value
+			ui.SetFloatState(state.startValue, value)
+		}
+		delta := snapshot.DeltaX
+		if axis == AxisVertical {
+			delta = snapshot.DeltaY
+		} else if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+			delta = -delta
+		}
+		next := boundedResizable(base + delta, minimum, maximum)
+		if next != value {
+			onChange(next)
+		}
+	})
+	if disabled {
+		handle = ui.Opacity(handle, 0.5)
+	}
+	return handle
+}
+
+func Carousel(theme tokens.Theme, label string, state CarouselState, items []CarouselItem, currentKey string, wrap bool, onChange func(string)) ui.View {
+	if label == "" || onChange == nil || len(items) < 2 || len(items) > 32 {
+		panic("UIKit carousel contract is invalid")
+	}
+	pages := make([]ui.View, 0, len(items))
+	position := ui.DerivedString("")
+	currentFound := ui.DerivedBool(false)
+	for index, item := range items {
+		if item.Key == "" || item.Label == "" {
+			panic("UIKit carousel item is invalid")
+		}
+		for previous := 0; previous < index; previous++ {
+			if items[previous].Key == item.Key {
+				panic("UIKit carousel keys must be unique")
+			}
+		}
+		current := item
+		isCurrent := ui.DerivedBool(current.Key == currentKey)
+		pagePosition := strconv.FormatInt(int64(index + 1), 10) + " of " +
+			strconv.FormatInt(int64(len(items)), 10)
+		if isCurrent {
+			position = pagePosition
+			currentFound = true
+		}
+		previousIndex := index - 1
+		nextIndex := index + 1
+		if wrap && previousIndex < 0 {
+			previousIndex = len(items) - 1
+		}
+		if wrap && nextIndex >= len(items) {
+			nextIndex = 0
+		}
+		previousDisabled := previousIndex < 0
+		nextDisabled := nextIndex >= len(items)
+		previousKey := ui.DerivedString("")
+		nextKey := ui.DerivedString("")
+		if !previousDisabled {
+			previousKey = items[previousIndex].Key
+		}
+		if !nextDisabled {
+			nextKey = items[nextIndex].Key
+		}
+		previous := Button(theme, "Previous, " + current.Label, tokens.ButtonSecondary, tokens.ControlSmall, previousDisabled, func() {
+			if !previousDisabled {
+				onChange(previousKey)
+			}
+		})
+		next := Button(theme, "Next, " + current.Label, tokens.ButtonSecondary, tokens.ControlSmall, nextDisabled, func() {
+			if !nextDisabled {
+				onChange(nextKey)
+			}
+		})
+		slide := ui.AccessibleDescription(ui.AccessibleName(ui.Role(current.Content, "group"), current.Label), pagePosition)
+		controls := ui.Align(ui.Row(previous, ui.Flex(ui.AccessibleName(ui.Role(ui.Text(pagePosition), "status"), pagePosition), 1), next), ui.AlignCenter)
+		page := ui.Gap(ui.Column(slide, controls), theme.Spacing.ContentGap)
+		page = ui.OnKeyDown(page, func(event ui.Event) {
+			backward := event.Key == "ArrowLeft"
+			forward := event.Key == "ArrowRight"
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				backward, forward = forward, backward
+			}
+			if backward && !previousDisabled {
+				onChange(previousKey)
+			} else if forward && !nextDisabled {
+				onChange(nextKey)
+			}
+		})
+		page = gesture.BindDrag(page, state.drag, gesture.DragOptions{
+			Axis: gesture.Horizontal, MinDistance: 12,
+		}, func(snapshot gesture.DragSnapshot) {
+			if snapshot.Phase != gesture.Ended || math.Abs(snapshot.DeltaX) < 40 {
+				return
+			}
+			forward := snapshot.DeltaX < 0
+			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
+				forward = !forward
+			}
+			if forward && !nextDisabled {
+				onChange(nextKey)
+			} else if !forward && !previousDisabled {
+				onChange(previousKey)
+			}
+		})
+		page = ui.Hidden(page, !isCurrent)
+		pages = append(pages, ui.Key(page, current.Key))
+	}
+	if !currentFound {
+		panic("UIKit carousel current key is invalid")
+	}
+	return ui.AccessibleDescription(ui.AccessibleName(ui.Role(ui.Column(pages...), "region"), label), position)
+}
+
 func titleView(theme tokens.Theme, value string) ui.View {
 	return ui.FontWeight(ui.FontSize(ui.Foreground(ui.Text(value), theme.Colors.Text), theme.Typography.TitleSize), theme.Typography.WeightStrong)
 }
@@ -512,6 +2816,7 @@ func dialogOverlay(theme tokens.Theme, role string, title string, detail string,
 	}))
 	panelContent := ui.Gap(ui.Column(titleView(theme, title), paragraphView(theme, detail), content), theme.Spacing.ContentGap)
 	panel := ui.PointerEvents(ui.MinWidth(ui.MaxWidth(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(panelContent, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.LargeRadius), theme.Spacing.SectionGap), 520), 320), ui.PointerEventsAuto)
+	panel = ui.Elevation(panel, theme.Elevation.Modal)
 	overlay := ui.PointerEvents(ui.Stack(backdrop, ui.Justify(ui.Align(ui.Column(panel), "center"), "center")), ui.PointerEventsNone)
 	overlay = ui.AccessibleDescription(ui.AccessibleName(ui.Role(overlay, role), title), detail)
 	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
@@ -531,8 +2836,10 @@ func Popover(theme tokens.Theme, triggerLabel string, title string, open bool, f
 	trigger := headless.DisclosureTrigger(triggerLabel, open, false, onOpenChange)
 	recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonSecondary, tokens.ControlMedium, false)
 	trigger = ui.FocusRequest(ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding), focusToken)
+	trigger = buttonInteraction(trigger, recipe)
 	trigger = ui.BorderWidth(ui.BorderColor(trigger, recipe.Border), recipe.BorderWidth)
 	panel := ui.AccessibleName(ui.Role(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(ui.Gap(ui.Column(titleView(theme, title), content), theme.Spacing.ContentGap), theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap), "group"), title)
+	panel = ui.Elevation(panel, theme.Elevation.Overlay)
 	panel = ui.OnKeyDown(panel, func(event ui.Event) {
 		if event.Key == "Escape" {
 			onOpenChange(false)
@@ -547,6 +2854,7 @@ func Tooltip(theme tokens.Theme, triggerLabel string, label string, visible bool
 	trigger := headless.Button(triggerLabel, false, func() {})
 	recipe := tokens.ResolveButtonRecipe(theme, tokens.ButtonSecondary, tokens.ControlMedium, false)
 	trigger = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(trigger, recipe.Background), recipe.Foreground), recipe.Radius), recipe.Height), recipe.Padding)
+	trigger = buttonInteraction(trigger, recipe)
 	trigger = ui.BorderWidth(ui.BorderColor(trigger, recipe.Border), recipe.BorderWidth)
 	trigger = ui.OnFocus(trigger, func(event ui.Event) {
 		onVisibleChange(true)
@@ -556,6 +2864,7 @@ func Tooltip(theme tokens.Theme, triggerLabel string, label string, visible bool
 	})
 	trigger = ui.FocusRequest(trigger, focusToken)
 	view := ui.AccessibleName(ui.Role(ui.Padding(ui.Radius(ui.Background(content, theme.Colors.Text), theme.Shape.SmallRadius), theme.Spacing.ControlGap), "tooltip"), label)
+	view = ui.Elevation(view, theme.Elevation.Overlay)
 	popup := ui.Portal(ui.PointerEvents(ui.Justify(ui.Align(ui.Column(view), "center"), "center"), ui.PointerEventsNone), ui.OverlayTooltip)
 	popup = ui.Hidden(popup, !visible)
 	return ui.Stack(ui.Key(trigger, "tooltip-trigger"), ui.Key(popup, "tooltip-popup"))
@@ -669,7 +2978,7 @@ func CommandPalette(theme tokens.Theme, title string, query string, placeholder 
 	input = ui.AccessibleName(input, title + " query")
 	input = ui.FocusRequest(input, focusToken)
 	input = ui.AutoFocus(input, true)
-	input = ui.Height(ui.Radius(ui.Background(input, theme.Colors.Surface), theme.Shape.MediumRadius), theme.ControlHeight)
+	input = ui.Height(ui.Radius(ui.Foreground(ui.Background(input, theme.Colors.Surface), theme.Colors.Text), theme.Shape.MediumRadius), theme.ControlHeight)
 	input = ui.BorderWidth(ui.BorderColor(input, theme.Colors.Border), 1)
 	input = ui.OnKeyDown(input, func(event ui.Event) {
 		if event.Key == "Escape" {
@@ -717,6 +3026,7 @@ func CommandPalette(theme tokens.Theme, title string, query string, placeholder 
 			foreground = theme.Colors.Accent
 		}
 		row = ui.Padding(ui.Height(ui.Radius(ui.Foreground(ui.Background(row, background), foreground), theme.Shape.SmallRadius), theme.ControlHeight), theme.Spacing.ControlGap)
+		row = interactiveSurface(theme, row, itemIndex == selected)
 		if current.Disabled {
 			row = ui.Opacity(row, 0.5)
 		}
@@ -730,9 +3040,11 @@ func CommandPalette(theme tokens.Theme, title string, query string, placeholder 
 	list = ui.MaxHeight(ui.Scroll(list), 420)
 	content := ui.Gap(ui.Column(input, list), theme.Spacing.ContentGap)
 	panel := ui.PointerEvents(ui.MaxWidth(ui.MinWidth(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), theme.Colors.Border), 1), theme.Shape.LargeRadius), theme.Spacing.SectionGap), 680), 680), ui.PointerEventsAuto)
+	panel = ui.Elevation(panel, theme.Elevation.Modal)
 	backdrop := ui.OnClick(ui.Background(ui.Box(), theme.Colors.Overlay), ui.Action(onDismiss))
-	overlay := ui.PointerEvents(ui.Stack(backdrop, ui.Justify(ui.Align(ui.Column(panel), ui.AlignCenter), ui.JustifyStart)), ui.PointerEventsNone)
-	overlay = ui.Padding(overlay, theme.Spacing.SectionGap * 3)
+	placement := ui.Padding(ui.Justify(ui.Align(ui.Column(panel), ui.AlignCenter), ui.JustifyStart), theme.Spacing.SectionGap *
+		3)
+	overlay := ui.PointerEvents(ui.Stack(backdrop, placement), ui.PointerEventsNone)
 	overlay = ui.AccessibleName(ui.Role(overlay, "dialog"), title)
 	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
 		if event.Key == "Escape" {
@@ -773,6 +3085,7 @@ func ToastRegion(theme tokens.Theme, label string, toasts []Toast, onDismiss fun
 			role = "alert"
 		}
 		view := ui.MinWidth(ui.MaxWidth(ui.Padding(ui.Radius(ui.BorderWidth(ui.BorderColor(ui.Background(content, theme.Colors.SurfaceRaised), intentColor(theme, current.Intent)), 1), theme.Shape.MediumRadius), theme.Spacing.ContentGap), 420), 280)
+		view = ui.Elevation(view, theme.Elevation.Overlay)
 		view = ui.PointerEvents(ui.AccessibleName(ui.Role(view, role), current.Title), ui.PointerEventsAuto)
 		views = append(views, ui.Key(view, current.Key))
 	}
@@ -793,6 +3106,7 @@ func Drawer(theme tokens.Theme, title string, open bool, width float64, content 
 	close := Button(theme, "Close", tokens.ButtonQuiet, tokens.ControlMedium, false, onDismiss)
 	header := ui.Align(ui.Row(titleView(theme, title), ui.Flex(ui.Box(), 1), close), ui.AlignCenter)
 	panel := ui.PointerEvents(ui.Width(ui.Padding(ui.Background(ui.Gap(ui.Column(header, content), theme.Spacing.SectionGap), theme.Colors.SurfaceRaised), theme.Spacing.SectionGap), width), ui.PointerEventsAuto)
+	panel = ui.Elevation(panel, theme.Elevation.Modal)
 	positioned := ui.PointerEvents(ui.Justify(ui.Row(ui.Flex(ui.Box(), 1), panel), ui.JustifyEnd), ui.PointerEventsNone)
 	overlay := ui.AccessibleName(ui.Role(ui.Stack(backdrop, positioned), "dialog"), title)
 	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {

@@ -27,8 +27,8 @@ on the root's single writer.
 
 ## Design system extension
 
-Use `kit.ProvideTheme` to scope semantic color, spacing, type, shape, motion
-and density tokens. `kit/tokens.ExportCSS` and `ExportManifest` produce
+Use `kit.ProvideTheme` to scope semantic color, spacing, type, shape, motion,
+elevation, interaction-state, and density tokens. `kit/tokens.ExportCSS` and `ExportManifest` produce
 deterministic design interchange. `kit/icons` provides bounded vector symbols
 without an icon font.
 
@@ -39,6 +39,34 @@ behavior, replace recipes or export maintained source:
 vo ui source --list
 vo ui source kit/components -o components.vo
 ```
+
+Use `kit.PageTitle` once for the screen heading and `kit.Title` for section
+headings. `kit.ButtonGroup` follows the inherited viewport and stacks actions
+on compact screens. Official data grids retain their semantic column model and
+gain a bounded horizontal scroll surface when fixed tracks exceed the
+available width.
+
+Use `ui.HoverBackground`, `ui.PressedBackground`, `ui.FocusRing`, and
+`ui.Elevation` when authoring a custom recipe. These properties stay in the
+portable UI tree: Web maps them to pseudo states and bounded CSS shadows;
+desktop resolves retained pointer/focus state and paint effects without an
+application render transaction. Official UIKit recipes already apply them to
+buttons, menus, tabs, calendars, lists, navigation, data controls, and overlays.
+
+## Editor focus and diagnostics
+
+`editor.Options.FocusToken` targets the editor's native text control. Increase
+the token after an external action such as activating a diagnostic or opening
+a search result. Update the document selection and viewport first, then publish
+the new token in the same application turn. Web focuses the textarea; desktop
+focuses the corresponding native editor surface. A stable token has no focus
+side effect.
+
+Diagnostic adapters should preserve one-based source line and column values at
+the host boundary. Convert them to document offsets in product state, clamp
+invalid ranges, reveal a few context lines above the target, and only then
+request focus. This keeps Problems lists, compiler hosts, and the editor model
+independent while producing one cross-platform navigation contract.
 
 The sibling provenance receipt lets an upgrade tool identify the exact source
 that was customized.

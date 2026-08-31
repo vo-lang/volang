@@ -11,19 +11,11 @@ func metric(title string, value string) ui.View {
 
 func App() ui.View {
 	return kit.Application(func() ui.View {
-		navigation := ui.Gap(ui.Column(
-			kit.Link("Overview", "/"),
-			kit.Link("Activity", "/activity"),
-		), kit.CurrentTheme().Space)
-		content := ui.Gap(ui.Column(
-			kit.Caption("Viewport-driven layout"),
-			kit.AdaptiveGrid(
-				metric("Requests", "12,480"),
-				metric("Latency", "18 ms"),
-				metric("Errors", "0.04%"),
-			),
-		), kit.CurrentTheme().Space*2)
-		return kit.Page(kit.AdaptivePage(navigation, content))
+		navigation := ui.Gap(ui.Column(kit.Link("Overview", "/"), kit.Link("Activity", "/activity")), kit.CurrentTheme().Space)
+		content := ui.Gap(ui.Column(kit.Caption("Viewport-driven layout"), kit.AdaptiveGrid(metric("Requests", "12,480"), metric("Latency", "18 ms"), metric("Errors", "0.04%"))), kit.CurrentTheme().Space *
+			2)
+		header := kit.Panel(kit.Title("Adaptive dashboard"))
+		return kit.Page(kit.AdaptiveShell(header, navigation, content))
 	})
 }
 

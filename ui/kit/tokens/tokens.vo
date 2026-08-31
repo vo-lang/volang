@@ -12,6 +12,7 @@ type Theme struct {
 	Typography TypographyTokens
 	Shape ShapeTokens
 	Motion MotionTokens
+	Elevation ElevationTokens
 	Density float64
 	Background uint32
 	Surface uint32
@@ -42,6 +43,12 @@ type ColorTokens struct {
 	Border uint32
 	Focus uint32
 	Overlay uint32
+	SurfaceHover uint32
+	SurfacePressed uint32
+	AccentHover uint32
+	AccentPressed uint32
+	DangerHover uint32
+	DangerPressed uint32
 }
 
 type SpacingTokens struct {
@@ -73,6 +80,12 @@ type MotionTokens struct {
 	SlowMilliseconds float64
 }
 
+type ElevationTokens struct {
+	Raised int64
+	Overlay int64
+	Modal int64
+}
+
 type DensityPreset int64
 
 const (
@@ -102,7 +115,10 @@ const (
 // activation and semantics; this value owns only renderer-neutral appearance.
 type ButtonRecipe struct {
 	Background uint32
+	HoverBackground uint32
+	PressedBackground uint32
 	Foreground uint32
+	FocusRing uint32
 	Border uint32
 	BorderWidth float64
 	Height float64
@@ -114,17 +130,21 @@ type ButtonRecipe struct {
 
 func ThemeFor(dark bool, highContrast bool) Theme {
 	colors := ColorTokens{
-		Canvas: 0xfff7f7f8, Surface: 0xffffffff, SurfaceRaised: 0xffffffff, Text: 0xff16181d,
-		TextMuted: 0xff646b76, Accent: 0xff315efb, OnAccent: 0xffffffff, Danger: 0xffc4314b,
-		Success: 0xff137333, Warning: 0xff8a4b08, Border: 0xffc8ccd4, Focus: 0xff174ea6,
-		Overlay: 0x99000000,
+		Canvas: 0xfff4f6fa, Surface: 0xffffffff, SurfaceRaised: 0xffedf1f7, Text: 0xff111827,
+		TextMuted: 0xff596274, Accent: 0xff365cf5, OnAccent: 0xffffffff, Danger: 0xffc12f4f,
+		Success: 0xff14733b, Warning: 0xff8a4b08, Border: 0xffd4dae5, Focus: 0xff2447d8,
+		Overlay: 0x99000000, SurfaceHover: 0xfff5f7fb, SurfacePressed: 0xffe3e8f0,
+		AccentHover: 0xff2f52de, AccentPressed: 0xff2847c7, DangerHover: 0xffa92745,
+		DangerPressed: 0xff8f203a,
 	}
 	if dark {
 		colors = ColorTokens{
-			Canvas: 0xff111318, Surface: 0xff1d2027, SurfaceRaised: 0xff272b34, Text: 0xfff4f5f7,
-			TextMuted: 0xffa2a9b3, Accent: 0xff7694ff, OnAccent: 0xff0d1224, Danger: 0xffff6b82,
-			Success: 0xff63d892, Warning: 0xffffbd66, Border: 0xff555c68, Focus: 0xffa9bbff,
-			Overlay: 0xb3000000,
+			Canvas: 0xff0f131b, Surface: 0xff171c26, SurfaceRaised: 0xff222937, Text: 0xfff5f7fb,
+			TextMuted: 0xffa9b2c3, Accent: 0xff7f9cff, OnAccent: 0xff0b1020, Danger: 0xffff718b,
+			Success: 0xff68db99, Warning: 0xffffbd66, Border: 0xff394354, Focus: 0xffb4c3ff,
+			Overlay: 0xb3000000, SurfaceHover: 0xff2a3343, SurfacePressed: 0xff313c4f,
+			AccentHover: 0xff91a9ff, AccentPressed: 0xff6888f4, DangerHover: 0xffff879d,
+			DangerPressed: 0xffeb5c78,
 		}
 	}
 	if highContrast && dark {
@@ -132,29 +152,34 @@ func ThemeFor(dark bool, highContrast bool) Theme {
 			Canvas: 0xff000000, Surface: 0xff000000, SurfaceRaised: 0xff111111, Text: 0xffffffff,
 			TextMuted: 0xffeeeeee, Accent: 0xffffff00, OnAccent: 0xff000000, Danger: 0xffff8080,
 			Success: 0xff80ff80, Warning: 0xffffff80, Border: 0xffffffff, Focus: 0xffffff00,
-			Overlay: 0xcc000000,
+			Overlay: 0xcc000000, SurfaceHover: 0xff222222, SurfacePressed: 0xff333333,
+			AccentHover: 0xffffff00, AccentPressed: 0xffffffff, DangerHover: 0xffff8080,
+			DangerPressed: 0xffffffff,
 		}
 	} else if highContrast {
 		colors = ColorTokens{
 			Canvas: 0xffffffff, Surface: 0xffffffff, SurfaceRaised: 0xfff4f4f4, Text: 0xff000000,
 			TextMuted: 0xff202020, Accent: 0xff0000cc, OnAccent: 0xffffffff, Danger: 0xff9b0000,
 			Success: 0xff005a00, Warning: 0xff6a3500, Border: 0xff000000, Focus: 0xff0000cc,
-			Overlay: 0xaa000000,
+			Overlay: 0xaa000000, SurfaceHover: 0xffeeeeee, SurfacePressed: 0xffdddddd,
+			AccentHover: 0xff000099, AccentPressed: 0xff000066, DangerHover: 0xff780000,
+			DangerPressed: 0xff550000,
 		}
 	}
-	spacing := SpacingTokens{Step: 8, ControlGap: 8, ContentGap: 12, SectionGap: 24, PagePadding: 24}
+	spacing := SpacingTokens{Step: 8, ControlGap: 8, ContentGap: 12, SectionGap: 24, PagePadding: 32}
 	typography := TypographyTokens{
-		BodySize: 14, CaptionSize: 13, TitleSize: 24, WeightRegular: 400, WeightMedium: 600,
+		BodySize: 14, CaptionSize: 13, TitleSize: 20, WeightRegular: 400, WeightMedium: 600,
 		WeightStrong: 700,
 	}
-	shape := ShapeTokens{SmallRadius: 5, MediumRadius: 8, LargeRadius: 12}
+	shape := ShapeTokens{SmallRadius: 6, MediumRadius: 10, LargeRadius: 16}
 	motion := MotionTokens{FastMilliseconds: 100, NormalMilliseconds: 180, SlowMilliseconds: 280}
+	elevation := ElevationTokens{Raised: 1, Overlay: 3, Modal: 4}
 	return Theme{
 		Colors: colors, Spacing: spacing, Typography: typography, Shape: shape, Motion: motion,
-		Density: 1, Background: colors.Canvas, Surface: colors.Surface, Foreground: colors.Text,
-		MutedForeground: colors.TextMuted, Accent: colors.Accent, AccentForeground: colors.OnAccent,
-		Danger: colors.Danger, Radius: shape.MediumRadius, Space: spacing.Step, ControlHeight: 40,
-		ContentWidth: 1120,
+		Elevation: elevation, Density: 1, Background: colors.Canvas, Surface: colors.Surface,
+		Foreground: colors.Text, MutedForeground: colors.TextMuted, Accent: colors.Accent,
+		AccentForeground: colors.OnAccent, Danger: colors.Danger, Radius: shape.MediumRadius,
+		Space: spacing.Step, ControlHeight: 40, ContentWidth: 1120,
 	}
 }
 
@@ -165,7 +190,27 @@ func CompleteTheme(theme Theme) Theme {
 			Text: theme.Foreground, TextMuted: theme.MutedForeground, Accent: theme.Accent,
 			OnAccent: theme.AccentForeground, Danger: theme.Danger, Success: 0xff137333, Warning: 0xff8a4b08,
 			Border: theme.MutedForeground, Focus: theme.Accent, Overlay: 0x99000000,
+			SurfaceHover: theme.Surface, SurfacePressed: theme.MutedForeground, AccentHover: theme.Accent,
+			AccentPressed: theme.Accent, DangerHover: theme.Danger, DangerPressed: theme.Danger,
 		}
+	}
+	if theme.Colors.SurfaceHover == 0 {
+		theme.Colors.SurfaceHover = theme.Colors.SurfaceRaised
+	}
+	if theme.Colors.SurfacePressed == 0 {
+		theme.Colors.SurfacePressed = theme.Colors.Border
+	}
+	if theme.Colors.AccentHover == 0 {
+		theme.Colors.AccentHover = theme.Colors.Focus
+	}
+	if theme.Colors.AccentPressed == 0 {
+		theme.Colors.AccentPressed = theme.Colors.Focus
+	}
+	if theme.Colors.DangerHover == 0 {
+		theme.Colors.DangerHover = theme.Colors.Danger
+	}
+	if theme.Colors.DangerPressed == 0 {
+		theme.Colors.DangerPressed = theme.Colors.Danger
 	}
 	if theme.Spacing.Step == 0 {
 		theme.Spacing = SpacingTokens{
@@ -175,7 +220,7 @@ func CompleteTheme(theme Theme) Theme {
 	}
 	if theme.Typography.BodySize == 0 {
 		theme.Typography = TypographyTokens{
-			BodySize: 14, CaptionSize: 13, TitleSize: 24, WeightRegular: 400, WeightMedium: 600,
+			BodySize: 14, CaptionSize: 13, TitleSize: 20, WeightRegular: 400, WeightMedium: 600,
 			WeightStrong: 700,
 		}
 	}
@@ -186,6 +231,9 @@ func CompleteTheme(theme Theme) Theme {
 	}
 	if theme.Motion.NormalMilliseconds == 0 {
 		theme.Motion = MotionTokens{FastMilliseconds: 100, NormalMilliseconds: 180, SlowMilliseconds: 280}
+	}
+	if theme.Elevation.Raised == 0 && theme.Elevation.Overlay == 0 && theme.Elevation.Modal == 0 {
+		theme.Elevation = ElevationTokens{Raised: 1, Overlay: 3, Modal: 4}
 	}
 	if theme.Density == 0 {
 		theme.Density = 1
@@ -201,7 +249,13 @@ func ValidateTheme(theme Theme) {
 		math.IsNaN(theme.ContentWidth) ||
 		math.IsInf(theme.Space, 0) ||
 		math.IsInf(theme.ControlHeight, 0) ||
-		math.IsInf(theme.ContentWidth, 0) {
+		math.IsInf(theme.ContentWidth, 0) ||
+		theme.Elevation.Raised < 0 ||
+		theme.Elevation.Raised > 5 ||
+		theme.Elevation.Overlay < 0 ||
+		theme.Elevation.Overlay > 5 ||
+		theme.Elevation.Modal < 0 ||
+		theme.Elevation.Modal > 5 {
 		panic("UIKit theme geometry must be finite and positive")
 	}
 }
@@ -237,59 +291,118 @@ func ThemeWithDensity(theme Theme, density DensityPreset) Theme {
 
 func paddedHex(value uint32) string {
 	encoded := strconv.FormatUint(uint64(value), 16)
-	return strings.Repeat("0", 8-len(encoded)) + encoded
+	return strings.Repeat("0", 8 - len(encoded)) + encoded
 }
 
 // ExportCSS produces deterministic renderer-neutral design-token variables.
 // AARRGGBB remains explicit in the variable value to avoid target-dependent
 // color parsing during package or design-tool interchange.
 func ExportCSS(theme Theme) string {
-	theme = CompleteTheme(theme); ValidateTheme(theme)
-	return ":root {\n" +
-		"  --vo-color-canvas: #" + paddedHex(theme.Colors.Canvas) + ";\n" +
-		"  --vo-color-surface: #" + paddedHex(theme.Colors.Surface) + ";\n" +
-		"  --vo-color-text: #" + paddedHex(theme.Colors.Text) + ";\n" +
-		"  --vo-color-muted: #" + paddedHex(theme.Colors.TextMuted) + ";\n" +
-		"  --vo-color-accent: #" + paddedHex(theme.Colors.Accent) + ";\n" +
-		"  --vo-color-danger: #" + paddedHex(theme.Colors.Danger) + ";\n" +
-		"  --vo-space-step: " + strconv.FormatFloat(theme.Spacing.Step, 'g', -1, 64) + "px;\n" +
-		"  --vo-space-page: " + strconv.FormatFloat(theme.Spacing.PagePadding, 'g', -1, 64) + "px;\n" +
-		"  --vo-font-body: " + strconv.FormatFloat(theme.Typography.BodySize, 'g', -1, 64) + "px;\n" +
-		"  --vo-radius-control: " + strconv.FormatFloat(theme.Shape.MediumRadius, 'g', -1, 64) + "px;\n" +
-		"  --vo-motion-normal: " + strconv.FormatFloat(theme.Motion.NormalMilliseconds, 'g', -1, 64) + "ms;\n" +
+	theme = CompleteTheme(theme)
+	ValidateTheme(theme)
+	return ":root {\n" + "  --vo-color-canvas: #" + paddedHex(theme.Colors.Canvas) + ";\n" +
+		"  --vo-color-surface: #" +
+		paddedHex(theme.Colors.Surface) +
+		";\n" +
+		"  --vo-color-text: #" +
+		paddedHex(theme.Colors.Text) +
+		";\n" +
+		"  --vo-color-muted: #" +
+		paddedHex(theme.Colors.TextMuted) +
+		";\n" +
+		"  --vo-color-accent: #" +
+		paddedHex(theme.Colors.Accent) +
+		";\n" +
+		"  --vo-color-danger: #" +
+		paddedHex(theme.Colors.Danger) +
+		";\n" +
+		"  --vo-space-step: " +
+		strconv.FormatFloat(theme.Spacing.Step, 'g', -1, 64) +
+		"px;\n" +
+		"  --vo-space-page: " +
+		strconv.FormatFloat(theme.Spacing.PagePadding, 'g', -1, 64) +
+		"px;\n" +
+		"  --vo-font-body: " +
+		strconv.FormatFloat(theme.Typography.BodySize, 'g', -1, 64) +
+		"px;\n" +
+		"  --vo-radius-control: " +
+		strconv.FormatFloat(theme.Shape.MediumRadius, 'g', -1, 64) +
+		"px;\n" +
+		"  --vo-motion-normal: " +
+		strconv.FormatFloat(theme.Motion.NormalMilliseconds, 'g', -1, 64) +
+		"ms;\n" +
+		"  --vo-elevation-raised: " +
+		strconv.FormatInt(theme.Elevation.Raised, 10) +
+		";\n" +
+		"  --vo-elevation-overlay: " +
+		strconv.FormatInt(theme.Elevation.Overlay, 10) +
+		";\n" +
+		"  --vo-elevation-modal: " +
+		strconv.FormatInt(theme.Elevation.Modal, 10) +
+		";\n" +
 		"}\n"
 }
 
 // ExportManifest is a compact versioned token interchange format consumed by
 // design adapters without adding JSON or JavaScript to the application graph.
 func ExportManifest(theme Theme) string {
-	theme = CompleteTheme(theme); ValidateTheme(theme)
-	return "VUT1\n" +
-		"canvas=" + paddedHex(theme.Colors.Canvas) + "\n" +
-		"surface=" + paddedHex(theme.Colors.Surface) + "\n" +
-		"text=" + paddedHex(theme.Colors.Text) + "\n" +
-		"accent=" + paddedHex(theme.Colors.Accent) + "\n" +
-		"danger=" + paddedHex(theme.Colors.Danger) + "\n" +
-		"density=" + strconv.FormatFloat(theme.Density, 'g', -1, 64) + "\n" +
-		"space=" + strconv.FormatFloat(theme.Space, 'g', -1, 64) + "\n" +
-		"control-height=" + strconv.FormatFloat(theme.ControlHeight, 'g', -1, 64) + "\n"
+	theme = CompleteTheme(theme)
+	ValidateTheme(theme)
+	return "VUT1\n" + "canvas=" + paddedHex(theme.Colors.Canvas) + "\n" + "surface=" +
+		paddedHex(theme.Colors.Surface) +
+		"\n" +
+		"text=" +
+		paddedHex(theme.Colors.Text) +
+		"\n" +
+		"accent=" +
+		paddedHex(theme.Colors.Accent) +
+		"\n" +
+		"danger=" +
+		paddedHex(theme.Colors.Danger) +
+		"\n" +
+		"density=" +
+		strconv.FormatFloat(theme.Density, 'g', -1, 64) +
+		"\n" +
+		"space=" +
+		strconv.FormatFloat(theme.Space, 'g', -1, 64) +
+		"\n" +
+		"control-height=" +
+		strconv.FormatFloat(theme.ControlHeight, 'g', -1, 64) +
+		"\n" +
+		"elevation-raised=" +
+		strconv.FormatInt(theme.Elevation.Raised, 10) +
+		"\n" +
+		"elevation-overlay=" +
+		strconv.FormatInt(theme.Elevation.Overlay, 10) +
+		"\n" +
+		"elevation-modal=" +
+		strconv.FormatInt(theme.Elevation.Modal, 10) +
+		"\n"
 }
 
 func ResolveButtonRecipe(theme Theme, variant ButtonVariant, size ControlSize, disabled bool) ButtonRecipe {
 	theme = CompleteTheme(theme)
 	background := theme.Colors.Accent
+	hoverBackground := theme.Colors.AccentHover
+	pressedBackground := theme.Colors.AccentPressed
 	foreground := theme.Colors.OnAccent
 	border := theme.Colors.Accent
 	if variant == ButtonSecondary {
 		background = theme.Colors.SurfaceRaised
+		hoverBackground = theme.Colors.SurfaceHover
+		pressedBackground = theme.Colors.SurfacePressed
 		foreground = theme.Colors.Text
 		border = theme.Colors.Border
 	} else if variant == ButtonQuiet {
 		background = theme.Colors.Surface
+		hoverBackground = theme.Colors.SurfaceHover
+		pressedBackground = theme.Colors.SurfacePressed
 		foreground = theme.Colors.Text
 		border = theme.Colors.Border
 	} else if variant == ButtonDanger {
 		background = theme.Colors.Danger
+		hoverBackground = theme.Colors.DangerHover
+		pressedBackground = theme.Colors.DangerPressed
 		foreground = theme.Colors.OnAccent
 		border = theme.Colors.Danger
 	} else if variant != ButtonPrimary {
@@ -310,12 +423,15 @@ func ResolveButtonRecipe(theme Theme, variant ButtonVariant, size ControlSize, d
 	}
 	if disabled {
 		background = theme.Colors.SurfaceRaised
+		hoverBackground = background
+		pressedBackground = background
 		foreground = theme.Colors.TextMuted
 		border = theme.Colors.Border
 	}
 	return ButtonRecipe{
-		Background: background, Foreground: foreground, Border: border, BorderWidth: 1,
-		Height: height, Padding: padding,
-		Radius: theme.Shape.MediumRadius, FontSize: fontSize, FontWeight: theme.Typography.WeightMedium,
+		Background: background, HoverBackground: hoverBackground, PressedBackground: pressedBackground,
+		Foreground: foreground, FocusRing: theme.Colors.Focus, Border: border, BorderWidth: 1,
+		Height: height, Padding: padding, Radius: theme.Shape.MediumRadius, FontSize: fontSize,
+		FontWeight: theme.Typography.WeightMedium,
 	}
 }

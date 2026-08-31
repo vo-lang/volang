@@ -4,8 +4,9 @@ package design
 
 import (
 	"github.com/vo-lang/ui"
-	"github.com/vo-lang/ui/kit"
+	kitcomponents "github.com/vo-lang/ui/kit/components"
 	"github.com/vo-lang/ui/kit/icons"
+	kittokens "github.com/vo-lang/ui/kit/tokens"
 )
 
 const (
@@ -21,10 +22,15 @@ const (
 	TextMuted uint32 = 0xff748198
 	Accent uint32 = 0xff91a2ff
 	AccentStrong uint32 = 0xff637eff
+	AccentHover uint32 = 0xff7690ff
+	AccentPressed uint32 = 0xff536fe6
 	AccentSoft uint32 = 0xff222e5c
 	Success uint32 = 0xff55d39a
 	Warning uint32 = 0xffffc96b
 	Danger uint32 = 0xffff7185
+	DangerHover uint32 = 0xffff8798
+	DangerPressed uint32 = 0xffe85d72
+	SurfacePressed uint32 = 0xff253249
 )
 
 const (
@@ -41,8 +47,8 @@ const (
 // StudioTheme layers Studio's visual language on the official UIKit contract.
 // Generic controls stay owned by UIKit while this package owns product-level
 // compositions such as project cards, editor tabs, and the activity rail.
-func StudioTheme() kit.Theme {
-	theme := kit.DarkTheme()
+func StudioTheme() kittokens.Theme {
+	theme := kittokens.ThemeFor(true, false)
 	theme.Colors.Canvas = Canvas
 	theme.Colors.Surface = Surface
 	theme.Colors.SurfaceRaised = SurfaceRaised
@@ -55,6 +61,12 @@ func StudioTheme() kit.Theme {
 	theme.Colors.Warning = Warning
 	theme.Colors.Border = Divider
 	theme.Colors.Focus = Accent
+	theme.Colors.SurfaceHover = SurfaceHover
+	theme.Colors.SurfacePressed = SurfacePressed
+	theme.Colors.AccentHover = AccentHover
+	theme.Colors.AccentPressed = AccentPressed
+	theme.Colors.DangerHover = DangerHover
+	theme.Colors.DangerPressed = DangerPressed
 	theme.Background = Canvas
 	theme.Surface = Surface
 	theme.Foreground = TextPrimary
@@ -108,29 +120,32 @@ func TopBar(view ui.View) ui.View {
 	view = ui.MinHeight(ui.Padding(view, Space2), 54)
 	view = ui.Background(view, Surface)
 	separator := ui.Height(ui.Background(ui.Box(), Divider), 1)
-	return ui.Column(view, separator)
+	return ui.Elevation(ui.Column(view, separator), 1)
 }
 
 func PrimaryButton(label string, action func()) ui.View {
-	return kit.ThemedButton(StudioTheme(), label, kit.ButtonPrimary, kit.ControlMedium, false, action)
+	return kitcomponents.Button(StudioTheme(), label, kittokens.ButtonPrimary, kittokens.ControlMedium, false, action)
 }
 
 func QuietButton(label string, action func()) ui.View {
-	return kit.ThemedButton(StudioTheme(), label, kit.ButtonQuiet, kit.ControlMedium, false, action)
+	return kitcomponents.Button(StudioTheme(), label, kittokens.ButtonQuiet, kittokens.ControlMedium, false, action)
 }
 
 func DangerButton(label string, action func()) ui.View {
-	return kit.ThemedButton(StudioTheme(), label, kit.ButtonDanger, kit.ControlMedium, false, action)
+	return kitcomponents.Button(StudioTheme(), label, kittokens.ButtonDanger, kittokens.ControlMedium, false, action)
 }
 
 func NavigationButton(label string, selected bool, action func()) ui.View {
-	button := kit.ThemedButton(StudioTheme(), label, kit.ButtonQuiet, kit.ControlMedium, false, action)
+	button := kitcomponents.Button(StudioTheme(), label, kittokens.ButtonQuiet, kittokens.ControlMedium, false, action)
 	button = ui.Selected(button, selected)
 	if selected {
 		button = ui.Foreground(button, TextPrimary)
 		button = ui.Background(button, SurfaceHover)
 		button = ui.BorderColor(button, DividerStrong)
 	}
+	button = ui.HoverBackground(button, SurfaceHover)
+	button = ui.PressedBackground(button, SurfacePressed)
+	button = ui.FocusRing(button, Accent)
 	return button
 }
 
@@ -149,6 +164,9 @@ func SidebarItem(label string, selected bool, action func()) ui.View {
 	button = ui.MinHeight(ui.Padding(button, 9), 34)
 	button = ui.FontSize(ui.FontWeight(ui.Foreground(button, foreground), 580), 12)
 	button = ui.Background(button, background)
+	button = ui.HoverBackground(button, SurfaceHover)
+	button = ui.PressedBackground(button, SurfacePressed)
+	button = ui.FocusRing(button, Accent)
 	button = ui.BorderWidth(button, 0)
 	button = ui.Radius(button, 7)
 	return button
@@ -159,8 +177,17 @@ func DocumentTab(label string, path string, selected bool, activate func(), clos
 	tab = ui.Role(tab, "tab")
 	tab = ui.Selected(tab, selected)
 	tab = ui.AccessibleName(tab, "Open editor " + path)
+	fill := Surface
+	if selected {
+		fill = SurfaceRaised
+	}
 	tab = ui.Foreground(tab, TextSecondary)
 	tab = ui.FontSize(ui.FontWeight(tab, 600), 12)
+	tab = ui.Background(tab, fill)
+	tab = ui.HoverBackground(tab, SurfaceHover)
+	tab = ui.PressedBackground(tab, SurfacePressed)
+	tab = ui.FocusRing(tab, Accent)
+	tab = ui.BorderWidth(tab, 0)
 	if selected {
 		tab = ui.Foreground(tab, TextPrimary)
 	}
@@ -168,14 +195,22 @@ func DocumentTab(label string, path string, selected bool, activate func(), clos
 	closeButton := ui.Button("×", ui.Action(close))
 	closeButton = ui.AccessibleName(closeButton, "Close editor " + path)
 	closeButton = ui.Foreground(closeButton, TextMuted)
+	closeButton = ui.Background(closeButton, fill)
+	closeButton = ui.HoverBackground(closeButton, SurfaceHover)
+	closeButton = ui.PressedBackground(closeButton, SurfacePressed)
+	closeButton = ui.FocusRing(closeButton, Accent)
+	closeButton = ui.BorderWidth(closeButton, 0)
+	closeButton = ui.Radius(closeButton, 6)
 	closeButton = ui.Padding(closeButton, Space2)
 	view := ui.Row(tab, closeButton)
 	view = ui.Align(view, ui.AlignCenter)
-	view = ui.Background(view, Surface)
+	view = ui.Background(view, fill)
+	indicatorColor := fill
 	if selected {
-		view = ui.Background(view, SurfaceRaised)
+		indicatorColor = AccentStrong
 	}
-	return view
+	indicator := ui.Height(ui.Background(ui.Box(), indicatorColor), 2)
+	return ui.Column(view, indicator)
 }
 
 func BrandMark() ui.View {
@@ -205,7 +240,13 @@ func ActivityButton(glyph icons.Glyph, name string, label string, selected bool,
 	button := ui.AccessibleName(ui.Button(" ", ui.Action(action)), name)
 	button = ui.AccessibleDescription(button, label)
 	button = ui.Selected(button, selected)
-	button = ui.Opacity(ui.Height(ui.Width(button, 42), 42), 0.001)
+	button = ui.Height(ui.Width(button, 42), 42)
+	button = ui.Background(button, 0x00000000)
+	button = ui.HoverBackground(button, 0x551d2940)
+	button = ui.PressedBackground(button, 0x88253249)
+	button = ui.FocusRing(button, Accent)
+	button = ui.BorderWidth(button, 0)
+	button = ui.Radius(button, 10)
 	control := ui.Height(ui.Width(ui.Stack(visual, button), 42), 42)
 	indicator := ui.Height(ui.Width(ui.Radius(ui.Background(ui.Box(), indicatorColor), 2), 3), 28)
 	return ui.Align(ui.Gap(ui.Row(indicator, control), Space1), ui.AlignCenter)
@@ -233,6 +274,9 @@ func StatusPill(value string, color uint32) ui.View {
 
 func SectionHeading(kicker string, title string, detail string, action ui.View) ui.View {
 	copy := ui.Gap(ui.Column(ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(kicker), Accent), 740), 10), ui.FontSize(ui.FontWeight(ui.Text(title), 760), 25), ui.Foreground(ui.Text(detail), TextSecondary)), Space1)
+	if ui.CurrentEnvironment().ViewportWidth < 600 {
+		return ui.Gap(ui.Column(copy, action), Space3)
+	}
 	return ui.Align(ui.Row(ui.Flex(copy, 1), action), ui.AlignCenter)
 }
 
@@ -245,14 +289,10 @@ func Hero(view ui.View) ui.View {
 // It keeps hierarchy and spacing consistent without pulling product copy into
 // the generic UIKit layer.
 func DashboardPanel(kicker string, title string, detail string, content ui.View) ui.View {
-	heading := ui.Gap(ui.Column(
-		ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(kicker), Accent), 740), 10),
-		ui.FontSize(ui.FontWeight(ui.Text(title), 740), 17),
-		ui.FontSize(ui.Foreground(ui.Text(detail), TextSecondary), 12),
-	), Space1)
+	heading := ui.Gap(ui.Column(ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(kicker), Accent), 740), 10), ui.FontSize(ui.FontWeight(ui.Text(title), 740), 17), ui.FontSize(ui.Foreground(ui.Text(detail), TextSecondary), 12)), Space1)
 	body := ui.Gap(ui.Column(heading, content), Space4)
 	body = ui.MinHeight(ui.Padding(body, Space4), 184)
-	return framed(body, Surface, Divider, 12)
+	return ui.Elevation(framed(body, Surface, Divider, 12), 1)
 }
 
 func CapabilityRow(label string, value string, color uint32) ui.View {
@@ -296,7 +336,7 @@ func StarterCard(monogram string, title string, file string, description string,
 	content := ui.Gap(ui.Column(header, ui.FontSize(ui.FontWeight(ui.Text(title), 740), 18), ui.Foreground(ui.Text(description), TextSecondary), ui.Flex(ui.Box(), 1), footer), Space3)
 	content = ui.MinHeight(ui.Padding(content, Space4), 172)
 	stripe := ui.Height(ui.Background(ui.Box(), accent), 3)
-	return framed(ui.Column(stripe, content), Surface, Divider, 14)
+	return ui.Elevation(framed(ui.Column(stripe, content), Surface, Divider, 14), 1)
 }
 
 func ProjectCard(name string, root string, selected bool, managed bool, open func(), rename func(), remove func()) ui.View {
@@ -321,9 +361,43 @@ func ProjectCard(name string, root string, selected bool, managed bool, open fun
 	if selected {
 		border = AccentStrong
 	}
-	return framed(content, Surface, border, 12)
+	return ui.Elevation(framed(content, Surface, border, 12), 1)
 }
 
 func ModalDialog(title string, open bool, content ui.View, onDismiss func()) ui.View {
-	return kit.Dialog(StudioTheme(), title, open, content, ui.Action(onDismiss))
+	if !open {
+		return ui.Fragment()
+	}
+	backdrop := ui.TestID(ui.OnClick(ui.Background(ui.Box(), 0x99000000), ui.Action(onDismiss)), "dialog-backdrop")
+	heading := ui.FontSize(ui.FontWeight(ui.Text(title), 720), 18)
+	actions := ui.Justify(ui.Row(PrimaryButton("Close dialog", onDismiss)), ui.JustifyEnd)
+	panelContent := ui.Gap(ui.Column(heading, content, actions), Space3)
+	panel := ui.PointerEvents(ui.MinWidth(ui.MaxWidth(ui.Padding(framed(panelContent, SurfaceRaised, Divider, 12), Space4), 480), 320), ui.PointerEventsAuto)
+	positioned := ui.PointerEvents(ui.Justify(ui.Align(ui.Column(panel), ui.AlignCenter), ui.JustifyCenter), ui.PointerEventsNone)
+	overlay := ui.AccessibleName(ui.Role(ui.Stack(backdrop, positioned), "dialog"), title)
+	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
+		if event.Key == "Escape" {
+			onDismiss()
+		}
+	})
+	return ui.Portal(ui.Modal(overlay, true), ui.OverlayModal)
+}
+
+func ValidatedTextFieldWithFocus(label string, value string, placeholder string, required bool, disabled bool, errorMessage string, focusToken int64, onInput func(ui.Event)) ui.View {
+	theme := StudioTheme()
+	control := ui.TextInput(value, placeholder, onInput)
+	control = ui.FocusRequest(control, focusToken)
+	control = ui.AccessibleName(control, label)
+	control = ui.AccessibleDescription(control, errorMessage)
+	control = ui.Required(control, required)
+	control = ui.Invalid(control, errorMessage != "")
+	control = ui.Disabled(control, disabled)
+	control = ui.Height(ui.Radius(ui.Foreground(ui.Background(control, theme.Surface), theme.Foreground), theme.Radius), theme.ControlHeight)
+	control = ui.BorderWidth(ui.BorderColor(control, theme.Colors.Border), 1)
+	labelView := ui.FontWeight(ui.Foreground(ui.Text(label), theme.Foreground), 600)
+	if errorMessage != "" {
+		errorView := ui.Role(ui.FontSize(ui.Foreground(ui.Text(errorMessage), theme.Danger), 13), "alert")
+		return ui.Gap(ui.Column(labelView, control, errorView), theme.Space / 2)
+	}
+	return ui.Gap(ui.Column(labelView, control), theme.Space / 2)
 }

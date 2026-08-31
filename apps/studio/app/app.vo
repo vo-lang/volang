@@ -15,7 +15,8 @@ import (
 	"github.com/vo-lang/ui/commands"
 	"github.com/vo-lang/ui/document"
 	"github.com/vo-lang/ui/editor"
-	"github.com/vo-lang/ui/kit"
+	kitcomponents "github.com/vo-lang/ui/kit/components"
+	kitdata "github.com/vo-lang/ui/kit/data"
 	"github.com/vo-lang/ui/kit/icons"
 	"github.com/vo-lang/ui/language"
 	uisystem "github.com/vo-lang/ui/system"
@@ -45,6 +46,35 @@ func supportsRuntimeMode(host domain.HostInfo, mode domain.RuntimeMode) bool {
 		}
 	}
 	return false
+}
+
+func studioStatusColor(value string, busy bool) uint32 {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "failed") || strings.Contains(lower, "error") ||
+		strings.Contains(lower, "unavailable") ||
+		(strings.Contains(lower, "problems") && !strings.HasPrefix(lower, "0 ")) {
+		return design.Danger
+	}
+	if busy || strings.Contains(lower, "building") || strings.Contains(lower, "analyzing") ||
+		strings.Contains(lower, "creating") ||
+		strings.Contains(lower, "opening") ||
+		strings.Contains(lower, "loading") ||
+		strings.Contains(lower, "saving") ||
+		strings.Contains(lower, "in progress") ||
+		strings.Contains(lower, "connecting") ||
+		strings.Contains(lower, "deleting") ||
+		strings.Contains(lower, "renaming") {
+		return design.Warning
+	}
+	if strings.Contains(lower, "ready") || strings.Contains(lower, "finished") ||
+		strings.Contains(lower, "saved") ||
+		strings.Contains(lower, "complete") ||
+		strings.Contains(lower, "connected") ||
+		strings.Contains(lower, "copied") ||
+		strings.HasPrefix(lower, "0 problems") {
+		return design.Success
+	}
+	return design.Accent
 }
 
 func applicationPath(location string) string {
@@ -114,6 +144,7 @@ type State struct {
 	files []domain.FileEntry
 	activePath string
 	editor *editor.Model
+	editorFocusToken int64
 	buffers map[string]*editor.Model
 	openPaths []string
 	openGeneration uint64
@@ -125,6 +156,7 @@ type State struct {
 	activity Activity
 	searchQuery string
 	searchResults []string
+	searching bool
 	searchGeneration uint64
 	searchCancel context.CancelFunc
 	findVisible bool
@@ -149,6 +181,9 @@ type State struct {
 	accountLoaded bool
 	account domain.AccountState
 	newProjectName string
+	newProjectError string
+	newProjectFocusToken int64
+	projectCreationBusy bool
 	projectSearchQuery string
 	newFilePath string
 	newFileVisible bool
@@ -835,28 +870,47 @@ func (state *State) completeProjectRemoval(project domain.Project, verb string) 
 }
 
 func (state *State) CreateProject() {
-	state.mu.RLock()
+	state.mu.Lock()
 	name := strings.TrimSpace(state.newProjectName)
-	state.mu.RUnlock()
+	if state.projectCreationBusy {
+		state.mu.Unlock()
+		return
+	}
 	if name == "" {
-		state.mu.Lock()
 		state.projectCreatorVisible = true
+		state.activity = ActivityExplorer
+		state.newProjectError = "Enter a project name"
+		state.newProjectFocusToken++
 		state.status = "Enter a project name"
 		state.mu.Unlock()
 		ui.Invalidate()
 		return
 	}
+	state.projectCreationBusy = true
+	state.newProjectError = ""
+	state.status = "Creating " + name
+	state.mu.Unlock()
+	ui.Invalidate()
 	go func() {
 		project, err := state.services.Files.CreateProject(context.Background(), protocol.CreateProjectRequest{
 			Name: name, Template: "ui",
 		})
 		if err != nil {
-			state.log(domain.ConsoleError, "project", err.Error())
+			state.mu.Lock()
+			state.projectCreationBusy = false
+			state.newProjectError = err.Error()
+			state.newProjectFocusToken++
+			state.status = "Project creation failed"
+			state.appendConsoleLocked(domain.ConsoleError, "project", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
 			return
 		}
 		state.mu.Lock()
 		state.projects = append(state.projects, project)
 		state.newProjectName = ""
+		state.newProjectError = ""
+		state.projectCreationBusy = false
 		state.projectCreatorVisible = false
 		state.activity = ActivityExplorer
 		state.mu.Unlock()
@@ -869,7 +923,16 @@ func (state *State) CreateProject() {
 
 func (state *State) ToggleProjectCreator() {
 	state.mu.Lock()
+	if state.projectCreationBusy {
+		state.mu.Unlock()
+		return
+	}
 	state.projectCreatorVisible = !state.projectCreatorVisible
+	state.newProjectError = ""
+	if state.projectCreatorVisible {
+		state.activity = ActivityExplorer
+		state.newProjectFocusToken++
+	}
 	state.mu.Unlock()
 	ui.Invalidate()
 }
@@ -877,6 +940,7 @@ func (state *State) ToggleProjectCreator() {
 func (state *State) SetNewProjectName(value string) {
 	state.mu.Lock()
 	state.newProjectName = value
+	state.newProjectError = ""
 	state.mu.Unlock()
 	ui.Invalidate()
 }
@@ -985,6 +1049,41 @@ func (state *State) OpenFile(path string) {
 		}
 		ui.Invalidate()
 	}()
+}
+
+func (state *State) OpenDiagnostic(value domain.Diagnostic) {
+	state.OpenFile(value.Path)
+	state.mu.RLock()
+	code := state.buffers[value.Path]
+	state.mu.RUnlock()
+	if code == nil {
+		return
+	}
+	line := value.Line - 1
+	column := value.Column - 1
+	if line < 0 {
+		line = 0
+	}
+	if column < 0 {
+		column = 0
+	}
+	offset, err := code.Document.Offset(document.Position{Line: line, Column: column})
+	if err != nil {
+		offset, err = code.Document.Offset(document.Position{Line: line, Column: 0})
+	}
+	if err == nil {
+		_ = code.Document.SetSelection(document.Selection{Anchor: offset, Focus: offset})
+	}
+	viewport := code.Viewport()
+	viewport.FirstLine = line - 3
+	if viewport.FirstLine < 0 {
+		viewport.FirstLine = 0
+	}
+	_ = code.SetViewport(viewport)
+	state.mu.Lock()
+	state.editorFocusToken++
+	state.mu.Unlock()
+	ui.Invalidate()
 }
 
 func (state *State) closeBufferLocked(path string) *editor.Model {
@@ -2133,12 +2232,14 @@ func (state *State) Search(value string) {
 	query := strings.ToLower(strings.TrimSpace(value))
 	if query == "" {
 		state.searchResults = nil
+		state.searching = false
 		state.searchCancel = nil
 		state.mu.Unlock()
 		cancel()
 		ui.Invalidate()
 		return
 	}
+	state.searching = true
 	state.mu.Unlock()
 	go func() {
 		results := make([]string, 0)
@@ -2161,6 +2262,7 @@ func (state *State) Search(value string) {
 		state.mu.Lock()
 		if generation == state.searchGeneration && ctx.Err() == nil {
 			state.searchResults = results
+			state.searching = false
 			state.searchCancel = nil
 		}
 		state.mu.Unlock()
@@ -2184,6 +2286,13 @@ func (state *State) ActivityRail() ui.View {
 		state.SetActivity(ActivitySourceControl)
 	})
 	docs := design.ActivityButton(icons.Book, "Documentation", "Docs", selected == ActivityDocs, state.ShowDocs)
+	if ui.CurrentEnvironment().ViewportWidth < 840 {
+		activities := ui.Justify(ui.Row(home, explorer, search, sourceControl, docs), ui.JustifySpaceAround)
+		view := ui.MinHeight(ui.Padding(activities, design.Space1), 54)
+		view = ui.Background(view, design.Canvas)
+		view = ui.Role(view, "navigation")
+		return ui.AccessibleName(view, "Studio activities")
+	}
 	activities := ui.Gap(ui.Column(home, explorer, search, sourceControl, docs), design.Space2)
 	view := ui.Padding(ui.Column(activities, ui.Flex(ui.Box(), 1)), design.Space2)
 	view = ui.Width(view, 64)
@@ -2208,7 +2317,11 @@ func (state *State) Home() ui.View {
 	openConcurrency := design.QuietButton("Open goroutine lab", func() {
 		state.OpenExample("channels")
 	})
-	quickActions := ui.GridColumns(ui.Gap(ui.Grid(newProject, openCounter, openConcurrency, design.QuietButton("Read documentation", state.ShowDocs)), design.Space2), "repeat(2, minmax(0px, 1fr))")
+	quickActionColumns := "repeat(2, minmax(0px, 1fr))"
+	if viewportWidth < 600 {
+		quickActionColumns = "minmax(0px, 1fr)"
+	}
+	quickActions := ui.GridColumns(ui.Gap(ui.Grid(newProject, openCounter, openConcurrency, design.QuietButton("Read documentation", state.ShowDocs)), design.Space2), quickActionColumns)
 	quickStart := design.DashboardPanel("QUICK START", "Create and run", "Start from a focused project or an editable example.", quickActions)
 	platform := host.Platform
 	if platform == "" {
@@ -2290,7 +2403,11 @@ func (state *State) Home() ui.View {
 	content := ui.Gap(ui.Column(pageHeading, startGrid, uiHeading, uiExamplesGrid, projectHeading, projectContent, languageHeading, languageExamplesGrid), design.Space5)
 	content = ui.Flex(ui.MaxWidth(content, 1280), 1)
 	content = ui.Justify(ui.Row(content), ui.JustifyCenter)
-	return ui.Scroll(ui.Padding(content, design.Space6))
+	pagePadding := design.Space6
+	if viewportWidth < 600 {
+		pagePadding = design.Space3
+	}
+	return ui.TestID(ui.Scroll(ui.Padding(content, pagePadding)), "studio-home")
 }
 
 func (state *State) ProjectRenameDialog() ui.View {
@@ -2363,7 +2480,7 @@ func (state *State) RemoteDeleteDialog() ui.View {
 	if busy {
 		actions = design.Muted("Deletion in progress…")
 	}
-	content := ui.Gap(ui.Column(kit.Alert("Permanent operation", detail, kit.IntentDanger, true), input, actions), design.Space3)
+	content := ui.Gap(ui.Column(kitcomponents.Alert(design.StudioTheme(), "Permanent operation", detail, kitcomponents.IntentDanger, true), input, actions), design.Space3)
 	return design.ModalDialog("Delete GitHub repository", true, content, state.HideRemoteDelete)
 }
 
@@ -2510,12 +2627,16 @@ func (state *State) Explorer() ui.View {
 	active := state.activePath
 	projectCreatorVisible := state.projectCreatorVisible
 	newProjectName := state.newProjectName
+	newProjectError := state.newProjectError
+	newProjectFocusToken := state.newProjectFocusToken
+	projectCreationBusy := state.projectCreationBusy
 	canOpenLocal := state.host.CanOpenLocal
 	dirty := make(map[string]bool)
 	for path, value := range state.dirty {
 		dirty[path] = value
 	}
 	state.mu.RUnlock()
+	compact := ui.CurrentEnvironment().ViewportWidth < 840
 	projectViews := make([]ui.View, 0, len(projects))
 	for _, project := range projects {
 		item := project
@@ -2527,13 +2648,22 @@ func (state *State) Explorer() ui.View {
 			state.SelectProject(item.ID)
 		})
 		projectButton = ui.AccessibleName(projectButton, "Open project " + item.Name)
-		projectViews = append(projectViews, ui.Key(projectButton, string(item.ID)))
+		projectView := ui.Key(projectButton, string(item.ID))
+		if compact && item.ID == current.ID {
+			projectViews = append([]ui.View{projectView}, projectViews...)
+		} else {
+			projectViews = append(projectViews, projectView)
+		}
 	}
 	projectCreator := ui.Box()
 	if projectCreatorVisible {
-		name := ui.TextInput(newProjectName, "project-name", ui.TextChange(state.SetNewProjectName))
-		name = ui.AccessibleName(name, "New project name")
-		projectCreator = ui.Padding(ui.Row(ui.Flex(name, 1), design.PrimaryButton("Create project", state.CreateProject)), design.Space2)
+		name := design.ValidatedTextFieldWithFocus("Project name", newProjectName, "my-app", true, projectCreationBusy, newProjectError, newProjectFocusToken, ui.TextChange(state.SetNewProjectName))
+		createLabel := "Create project"
+		if projectCreationBusy {
+			createLabel = "Creating…"
+		}
+		create := ui.Disabled(design.PrimaryButton(createLabel, state.CreateProject), projectCreationBusy)
+		projectCreator = ui.Padding(ui.Gap(ui.Column(name, create), design.Space2), design.Space2)
 	}
 	fileViews := make([]ui.View, 0, len(files))
 	for _, file := range files {
@@ -2555,6 +2685,9 @@ func (state *State) Explorer() ui.View {
 	secondaryActions := ui.Gap(ui.Row(design.QuietButton("Rename", state.ShowRenameFileDialog), design.QuietButton("Delete", state.DeleteActiveFile)), design.Space2)
 	fileActions := ui.Gap(ui.Column(newFileButton, secondaryActions), design.Space2)
 	fileActions = ui.Padding(fileActions, design.Space3)
+	if compact {
+		fileActions = ui.Padding(ui.Gap(ui.Row(ui.Flex(newFileButton, 1), design.QuietButton("Rename", state.ShowRenameFileDialog), design.QuietButton("Delete", state.DeleteActiveFile)), design.Space2), design.Space2)
+	}
 	newProjectButton := ui.AccessibleName(design.QuietButton("New", state.ToggleProjectCreator), "New project")
 	projectActions := ui.Row(newProjectButton)
 	if canOpenLocal {
@@ -2563,7 +2696,11 @@ func (state *State) Explorer() ui.View {
 	refresh := ui.AccessibleName(design.QuietButton("Refresh", func() {
 		state.SelectProject(current.ID)
 	}), "Refresh project")
-	content := ui.Column(design.PanelHeader("PROJECTS", projectActions), projectCreator, ui.Column(projectViews...), design.PanelHeader(strings.ToUpper(current.Name), refresh), ui.Flex(ui.Scroll(ui.Column(fileViews...)), 1), fileActions)
+	projectList := ui.Column(projectViews...)
+	if compact {
+		projectList = ui.Height(ui.Scroll(projectList), 40)
+	}
+	content := ui.Column(design.PanelHeader("PROJECTS", projectActions), projectCreator, projectList, design.PanelHeader(strings.ToUpper(current.Name), refresh), ui.Flex(ui.Scroll(ui.Column(fileViews...)), 1), fileActions)
 	content = ui.Gap(content, design.Space1)
 	return design.Panel(content)
 }
@@ -2572,20 +2709,33 @@ func (state *State) SearchPanel() ui.View {
 	state.mu.RLock()
 	query := state.searchQuery
 	results := append([]string(nil), state.searchResults...)
+	searching := state.searching
 	state.mu.RUnlock()
 	input := ui.TextInput(query, "Search files and source", ui.TextChange(state.Search))
 	input = ui.AccessibleName(input, "Search workspace")
-	views := []ui.View{design.PanelHeader("SEARCH", ui.Box()), ui.Padding(input, design.Space2)}
+	status := design.Badge(strconv.Itoa(len(results)), design.TextSecondary)
+	if searching {
+		status = design.Badge("searching", design.Accent)
+	}
+	views := make([]ui.View, 0, len(results))
 	for _, path := range results {
 		current := path
-		views = append(views, design.QuietButton(current, func() {
+		views = append(views, design.SidebarItem(current, false, func() {
 			state.OpenFile(current)
 		}))
 	}
+	resultsView := ui.Column(views...)
 	if query != "" && len(results) == 0 {
-		views = append(views, design.Muted("No matches"))
+		message := "No matches"
+		if searching {
+			message = "Searching workspace…"
+		}
+		resultsView = ui.Column(ui.Padding(design.Muted(message), design.Space2))
+	} else if query == "" {
+		resultsView = ui.Column(ui.Padding(design.Muted("Search file names and source text."), design.Space2))
 	}
-	return design.Panel(ui.Column(views...))
+	panel := design.Panel(ui.Column(design.PanelHeader("SEARCH", status), ui.Padding(input, design.Space2), ui.Flex(ui.Scroll(resultsView), 1)))
+	return ui.TestID(panel, "studio-search-panel")
 }
 
 func (state *State) SourceControlPanel() ui.View {
@@ -2650,10 +2800,10 @@ func (state *State) SourceControlPanel() ui.View {
 	}
 	warning := ui.Box()
 	if remote.Conflicts > 0 {
-		warning = kit.Alert("Resolve conflicts", strconv.Itoa(remote.Conflicts) +
-			" files require resolution before pull or push.", kit.IntentDanger, false)
+		warning = kitcomponents.Alert(design.StudioTheme(), "Resolve conflicts", strconv.Itoa(remote.Conflicts) +
+			" files require resolution before pull or push.", kitcomponents.IntentDanger, false)
 	} else if remote.Diverged {
-		warning = kit.Alert("Branches diverged", "Inspect local changes, then pull or reconcile before pushing.", kit.IntentWarning, false)
+		warning = kitcomponents.Alert(design.StudioTheme(), "Branches diverged", "Inspect local changes, then pull or reconcile before pushing.", kitcomponents.IntentWarning, false)
 	}
 	actions := ui.Row(ui.Disabled(design.QuietButton("Pull", state.PullRemote), busy ||
 		remote.Conflicts > 0), ui.Disabled(design.PrimaryButton("Commit & Push", state.PushRemote), busy ||
@@ -2683,7 +2833,7 @@ func (state *State) DocsNavigation() ui.View {
 	input := ui.TextInput(query, "Search documentation", ui.TextChange(state.SetDocQuery))
 	input = ui.AccessibleName(input, "Search documentation")
 	pages := documentationPages()
-	items := make([]kit.TreeItem, 0, len(pages) + len(documentation.Sections()))
+	items := make([]kitdata.TreeItem, 0, len(pages) + len(documentation.Sections()))
 	matchingPages := 0
 	searching := strings.TrimSpace(query) != ""
 	for _, section := range documentation.Sections() {
@@ -2698,21 +2848,21 @@ func (state *State) DocsNavigation() ui.View {
 		}
 		matchingPages += len(sectionPages)
 		sectionExpanded := searching || expanded[section.ID]
-		items = append(items, kit.TreeItem{
+		items = append(items, kitdata.TreeItem{
 			Key: "section/" + section.ID,
 			Label: section.Title + " (" + strconv.Itoa(len(sectionPages)) + ")", Depth: 0, HasChildren: true,
 			Expanded: sectionExpanded,
 		})
 		if sectionExpanded {
 			for _, page := range sectionPages {
-				items = append(items, kit.TreeItem{
+				items = append(items, kitdata.TreeItem{
 					Key: "page/" + page.ID, Label: page.Title, Depth: 1, Selected: page.ID == selected,
 				})
 			}
 		}
 	}
 	badge := strconv.Itoa(documentation.PageCount()) + " pages"
-	tree := kit.ThemedTree(design.StudioTheme(), "Volang documentation", items, state.ToggleDocSection, state.SelectDocTreeItem)
+	tree := kitdata.Tree(design.StudioTheme(), "Volang documentation", items, state.ToggleDocSection, state.SelectDocTreeItem)
 	content := ui.Column(design.PanelHeader("VOLANG DOCUMENTATION", design.Badge(badge, design.Accent)), ui.Padding(input, design.Space2), ui.Flex(ui.Scroll(tree), 1))
 	if matchingPages == 0 {
 		content = ui.Column(design.PanelHeader("VOLANG DOCUMENTATION", design.Badge(badge, design.Accent)), ui.Padding(input, design.Space2), design.EmptyState("No documentation found", "Try language, errors, goroutines, modules, CLI, AOT, components, or testing.", ui.Box()))
@@ -2724,16 +2874,15 @@ func (state *State) SidePanel() ui.View {
 	state.mu.RLock()
 	activity := state.activity
 	state.mu.RUnlock()
+	panel := state.Explorer()
 	if activity == ActivitySearch {
-		return state.SearchPanel()
+		panel = state.SearchPanel()
+	} else if activity == ActivitySourceControl {
+		panel = state.SourceControlPanel()
+	} else if activity == ActivityDocs {
+		panel = state.DocsNavigation()
 	}
-	if activity == ActivitySourceControl {
-		return state.SourceControlPanel()
-	}
-	if activity == ActivityDocs {
-		return state.DocsNavigation()
-	}
-	return state.Explorer()
+	return ui.TestID(panel, "studio-side-panel")
 }
 
 func shortPath(path string) string {
@@ -2778,6 +2927,7 @@ func (state *State) EditorPanel() ui.View {
 	state.mu.RLock()
 	code := state.editor
 	path := state.activePath
+	focusToken := state.editorFocusToken
 	state.mu.RUnlock()
 	if code == nil {
 		return design.EmptyState("Open a project", "Choose a project and source file to begin.", design.PrimaryButton("Create project", state.CreateProject))
@@ -2786,8 +2936,9 @@ func (state *State) EditorPanel() ui.View {
 	options.Width = 0
 	options.Height = 0
 	options.AccessibleName = "Editor for " + path
+	options.FocusToken = focusToken
 	options.OnChange = state.DocumentChanged
-	return design.Panel(ui.Column(state.DocumentTabs(), ui.Flex(editor.View(code, options), 1)))
+	return ui.TestID(design.Panel(ui.Column(state.DocumentTabs(), ui.Flex(editor.View(code, options), 1))), "studio-editor-panel")
 }
 
 func (state *State) FindBar() ui.View {
@@ -2797,7 +2948,12 @@ func (state *State) FindBar() ui.View {
 	state.mu.RUnlock()
 	input := ui.TextInput(findQuery, "Find in active file", ui.TextChange(state.SetFindQuery))
 	input = ui.AccessibleName(input, "Find in active file")
-	findBar := ui.Padding(ui.Row(ui.Flex(input, 1), design.QuietButton("Previous", state.FindPrevious), design.QuietButton("Next", state.FindNext), design.QuietButton("Close", state.HideFind)), design.Space2)
+	actions := ui.Row(design.QuietButton("Previous", state.FindPrevious), design.QuietButton("Next", state.FindNext), design.QuietButton("Close", state.HideFind))
+	findContent := ui.Row(ui.Flex(input, 1), actions)
+	if ui.CurrentEnvironment().ViewportWidth < 600 {
+		findContent = ui.Gap(ui.Column(input, ui.Justify(actions, ui.JustifyEnd)), design.Space2)
+	}
+	findBar := ui.Padding(findContent, design.Space2)
 	findBar = ui.Background(findBar, design.SurfaceRaised)
 	findBar = ui.Hidden(findBar, !findVisible)
 	return findBar
@@ -2833,7 +2989,7 @@ func (state *State) ConsolePanel() ui.View {
 	}
 	log := ui.Role(ui.Scroll(ui.Column(lines...)), "log")
 	log = ui.AccessibleName(log, "Studio console")
-	return design.Panel(ui.Column(design.PanelHeader("CONSOLE", action), ui.Padding(ui.Flex(log, 1), design.Space2)))
+	return ui.TestID(design.Panel(ui.Column(design.PanelHeader("CONSOLE", action), ui.Padding(ui.Flex(log, 1), design.Space2))), "studio-console-panel")
 }
 
 func (state *State) ProblemsPanel() ui.View {
@@ -2854,9 +3010,7 @@ func (state *State) ProblemsPanel() ui.View {
 			values = append(values, item)
 		}
 	}
-	views := []ui.View{
-		design.PanelHeader("PROBLEMS", design.Badge(strconv.Itoa(len(values)), design.TextSecondary)),
-	}
+	views := make([]ui.View, 0, len(values))
 	for index, value := range values {
 		current := value
 		color := design.TextSecondary
@@ -2865,20 +3019,30 @@ func (state *State) ProblemsPanel() ui.View {
 		} else if value.Severity == domain.DiagnosticWarning {
 			color = design.Warning
 		}
-		message := design.NavigationButton(value.Message, false, func() {
-			state.OpenFile(current.Path)
-		})
-		message = ui.Foreground(message, color)
-		item := ui.Column(message, design.Muted(value.Path + ":" + strconv.Itoa(value.Line) + ":" +
+		message := ui.Button(value.Message, ui.Action(func() {
+			state.OpenDiagnostic(current)
+		}))
+		message = ui.AccessibleDescription(message, value.Path + ":" + strconv.Itoa(value.Line) + ":" +
+			strconv.Itoa(value.Column))
+		message = ui.MinHeight(ui.Padding(ui.WhiteSpace(ui.FontSize(ui.Foreground(message, color), 12), "normal"), design.Space2), 36)
+		message = ui.Background(message, design.Surface)
+		message = ui.HoverBackground(message, design.SurfaceHover)
+		message = ui.PressedBackground(message, design.SurfacePressed)
+		message = ui.FocusRing(message, design.Accent)
+		message = ui.BorderWidth(message, 0)
+		message = ui.Radius(message, 7)
+		location := ui.FontSize(design.Muted(value.Path + ":" + strconv.Itoa(value.Line) + ":" +
 			strconv.Itoa(value.Column) +
 			" · " +
-			value.Code))
+			value.Code), 10)
+		item := ui.Gap(ui.Column(message, location), design.Space1)
 		views = append(views, ui.Key(ui.Padding(item, design.Space2), "problem-" + strconv.Itoa(index)))
 	}
 	if len(values) == 0 {
 		views = append(views, design.EmptyState("No problems", "The latest analysis completed cleanly.", ui.Box()))
 	}
-	return design.Panel(ui.Column(views...))
+	content := ui.Flex(ui.Scroll(ui.Column(views...)), 1)
+	return ui.TestID(design.Panel(ui.Column(design.PanelHeader("PROBLEMS", design.Badge(strconv.Itoa(len(values)), design.TextSecondary)), content)), "studio-problems-panel")
 }
 
 func (state *State) RemoteDiffPanel() ui.View {
@@ -2943,7 +3107,7 @@ func (state *State) PreviewPanel() ui.View {
 		}))
 	}
 	view := ui.PlatformView("volang-studio-preview/v1", surface, "Embedded Volang application preview")
-	view = ui.MinWidth(view, 320)
+	view = ui.MinWidth(view, 0)
 	view = ui.MinHeight(view, 220)
 	view = ui.Flex(view, 1)
 	view = ui.Background(view, design.Canvas)
@@ -2976,10 +3140,7 @@ func (state *State) RunnerView() ui.View {
 	if hasProject {
 		name = project.Name
 	}
-	statusColor := design.Success
-	if running {
-		statusColor = design.Warning
-	}
+	statusColor := studioStatusColor(status, running)
 	action := design.PrimaryButton("Reload", func() {
 		state.StartRun(mode, true)
 	})
@@ -2988,13 +3149,18 @@ func (state *State) RunnerView() ui.View {
 	}
 	returnButton := ui.AccessibleName(design.QuietButton("Edit in Studio", state.ReturnToStudio), "Return to Studio workspace")
 	header := ui.Align(ui.Gap(ui.Row(design.BrandLockup(), ui.Width(ui.Height(ui.Background(ui.Box(), design.DividerStrong), 24), 1), ui.Column(ui.FontWeight(ui.Text(name), 700), design.Muted("Portable Runner")), ui.Flex(ui.Box(), 1), design.StatusPill(status, statusColor), returnButton, action), design.Space3), ui.AlignCenter)
+	if ui.CurrentEnvironment().ViewportWidth < 600 {
+		identity := ui.Align(ui.Row(design.BrandMark(), ui.Gap(ui.Column(ui.FontWeight(ui.Text(name), 700), design.Muted("Portable Runner")), design.Space1), ui.Flex(ui.Box(), 1), returnButton), ui.AlignCenter)
+		controls := ui.Align(ui.Row(design.StatusPill(status, statusColor), ui.Flex(ui.Box(), 1), action), ui.AlignCenter)
+		header = ui.Gap(ui.Column(identity, controls), design.Space2)
+	}
 	header = design.TopBar(header)
 	preview := ui.Flex(state.PreviewPanel(), 1)
 	if !hasProject {
 		preview = ui.Flex(design.EmptyState("Loading project", "Studio is restoring the shared source snapshot.", design.Badge("loading", design.Accent)), 1)
 	}
 	content := design.AppSurface(ui.Column(header, preview))
-	content = ui.MinWidth(content, 360)
+	content = ui.MinWidth(content, 0)
 	content = ui.MinHeight(content, 320)
 	viewportHeight := ui.CurrentEnvironment().ViewportHeight
 	if viewportHeight > 0 {
@@ -3096,7 +3262,7 @@ func renderDocumentation(blocks []document.Block, headings []documentationHeadin
 			}
 			view = ui.Align(ui.Gap(ui.Row(marker, ui.Foreground(ui.Text(block.Text), design.TextSecondary)), design.Space2), ui.AlignCenter)
 		} else if block.Kind == document.Quote {
-			view = kit.Alert("Note", block.Text, kit.IntentInfo, false)
+			view = kitcomponents.Alert(design.StudioTheme(), "Note", block.Text, kitcomponents.IntentInfo, false)
 		} else if block.Kind == document.Rule {
 			view = ui.Height(ui.Background(ui.Box(), design.Divider), 1)
 		} else if block.Text == "" {
@@ -3110,14 +3276,14 @@ func renderDocumentation(blocks []document.Block, headings []documentationHeadin
 }
 
 func (state *State) documentationOutline(pageID string, headings []documentationHeading, selected string) ui.View {
-	items := make([]kit.TreeItem, 0, len(headings))
+	items := make([]kitdata.TreeItem, 0, len(headings))
 	for _, heading := range headings {
-		items = append(items, kit.TreeItem{
+		items = append(items, kitdata.TreeItem{
 			Key: heading.ID, Label: heading.Title, Depth: int64(heading.Level - 2),
 			Selected: heading.ID == selected,
 		})
 	}
-	tree := kit.ThemedTree(design.StudioTheme(), "On this page", items, func(key string) {}, func(key string) {
+	tree := kitdata.Tree(design.StudioTheme(), "On this page", items, func(key string) {}, func(key string) {
 		state.OpenDocHeading(pageID, key)
 	})
 	header := design.PanelHeader("ON THIS PAGE", design.Badge(strconv.Itoa(len(headings)), design.TextSecondary))
@@ -3147,7 +3313,7 @@ func (state *State) DocsPanel() ui.View {
 	}
 	blocks, err := document.ParseMarkdown(page.Markdown, 4096)
 	if err != nil {
-		return design.Panel(kit.Alert("Documentation unavailable", err.Error(), kit.IntentDanger, false))
+		return design.Panel(kitcomponents.Alert(design.StudioTheme(), "Documentation unavailable", err.Error(), kitcomponents.IntentDanger, false))
 	}
 	headings := documentationHeadings(blocks)
 	breadcrumb := ui.Gap(ui.Row(design.Muted("Documentation"), design.Muted("/"), design.Muted(page.Section), design.Muted("/"), ui.Text(page.Title)), design.Space2)
@@ -3227,6 +3393,8 @@ func (state *State) executeCommand(id string, preferredMode domain.RuntimeMode) 
 			state.ShowDocs()
 		case "run.preferred":
 			state.StartRun(preferredMode, false)
+		case "run.vm":
+			state.StartRun(domain.RuntimeVM, false)
 		case "run.jit":
 			state.StartRun(domain.RuntimeJIT, false)
 		case "view.preview":
@@ -3236,6 +3404,12 @@ func (state *State) executeCommand(id string, preferredMode domain.RuntimeMode) 
 }
 
 func (state *State) commandScope(preferredMode domain.RuntimeMode) commands.Scope {
+	vm := commands.Action("run.vm", "Run with VM", func() {
+		state.executeCommand("run.vm", preferredMode)
+	})
+	state.mu.RLock()
+	vm.Enabled = supportsRuntimeMode(state.host, domain.RuntimeVM)
+	state.mu.RUnlock()
 	jit := commands.Action("run.jit", "Run with JIT", func() {
 		state.executeCommand("run.jit", preferredMode)
 	})
@@ -3300,7 +3474,7 @@ func (state *State) commandScope(preferredMode domain.RuntimeMode) commands.Scop
 		state.executeCommand("view.docs", preferredMode)
 	}), commands.New("run.preferred", "Run " + preferredMode.String(), commands.Key("Enter", ui.ModifierMeta), func() {
 		state.executeCommand("run.preferred", preferredMode)
-	}), jit, commands.New("view.preview", "Open preview", commands.Key("Enter", ui.ModifierMeta |
+	}), vm, jit, commands.New("view.preview", "Open preview", commands.Key("Enter", ui.ModifierMeta |
 		ui.ModifierShift), func() {
 		state.executeCommand("view.preview", preferredMode)
 	}))
@@ -3339,13 +3513,13 @@ func (state *State) CommandPalette(scope commands.Scope, preferredMode domain.Ru
 	}
 	derivedQuery := ui.DerivedString(query)
 	commandsFound := scope.Search(derivedQuery, 24)
-	items := make([]kit.CommandItem, 0, len(commandsFound))
+	items := make([]kitcomponents.CommandItem, 0, len(commandsFound))
 	for _, item := range commandsFound {
 		current := item
 		if strings.HasSuffix(current.ID, ".control") {
 			continue
 		}
-		items = append(items, kit.CommandItem{
+		items = append(items, kitcomponents.CommandItem{
 			Key: current.ID, Label: current.Label, Detail: current.Description,
 			Shortcut: commandShortcutLabel(current.Shortcut), Disabled: !current.Enabled,
 		})
@@ -3355,18 +3529,16 @@ func (state *State) CommandPalette(scope commands.Scope, preferredMode domain.Ru
 	} else if selected < 0 || selected >= int64(len(items)) {
 		selected = 0
 	}
-	return kit.ProvideTheme(kit.DarkTheme(), func() ui.View {
-		return kit.CommandPalette("Command palette", query, "Type a command", true, selected, focusToken, items, state.SetPaletteQuery, state.SetPaletteSelection, func(commandID string) {
-			state.mu.Lock()
-			state.paletteVisible = false
-			state.paletteQuery = ""
-			state.paletteSelected = 0
-			state.status = "Ready"
-			state.mu.Unlock()
-			state.executeCommand(commandID, preferredMode)
-			ui.Invalidate()
-		}, state.HideCommandPalette)
-	})
+	return kitcomponents.CommandPalette(design.StudioTheme(), "Command palette", query, "Type a command", true, selected, focusToken, items, state.SetPaletteQuery, state.SetPaletteSelection, func(commandID string) {
+		state.mu.Lock()
+		state.paletteVisible = false
+		state.paletteQuery = ""
+		state.paletteSelected = 0
+		state.status = "Ready"
+		state.mu.Unlock()
+		state.executeCommand(commandID, preferredMode)
+		ui.Invalidate()
+	}, state.HideCommandPalette)
 }
 
 func (state *State) TopBar() ui.View {
@@ -3384,7 +3556,7 @@ func (state *State) TopBar() ui.View {
 	run := design.QuietButton("Loading workspace…", func() {})
 	preview := design.QuietButton("Preview unavailable", func() {})
 	if hasProject && activity != ActivityHome {
-		run = ui.AccessibleName(design.PrimaryButton("Run", func() {
+		run = ui.AccessibleName(design.PrimaryButton("Run " + preferredMode.String(), func() {
 			state.StartRun(preferredMode, false)
 		}), "Run " + preferredMode.String())
 		preview = ui.AccessibleName(design.QuietButton("Preview", func() {
@@ -3393,7 +3565,8 @@ func (state *State) TopBar() ui.View {
 		}), "Open Preview")
 	}
 	if running && activity != ActivityHome {
-		run = ui.AccessibleName(design.QuietButton("Stop", state.StopRun), "Stop " + mode.String())
+		run = ui.AccessibleName(design.QuietButton("Stop " + mode.String(), state.StopRun), "Stop " +
+			mode.String())
 	}
 	location := "Home"
 	if activity == ActivityHome {
@@ -3407,10 +3580,17 @@ func (state *State) TopBar() ui.View {
 	locationView := ui.FontSize(ui.Foreground(ui.Text(location), design.TextSecondary), 12)
 	separator := ui.Width(ui.Height(ui.Background(ui.Box(), design.DividerStrong), 24), 1)
 	left := ui.Align(ui.Gap(ui.Row(design.BrandLockup(), separator, locationView), design.Space3), ui.AlignCenter)
-	statusColor := design.Success
-	if running {
-		statusColor = design.Warning
+	if viewportWidth < 840 {
+		compactLeft := ui.Align(ui.Gap(ui.Row(design.BrandMark(), ui.Flex(locationView, 1)), design.Space2), ui.AlignCenter)
+		compactActions := ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File"), run), design.Space1)
+		if activity == ActivityHome {
+			compactActions = ui.Row(design.PrimaryButton("New project", state.ToggleProjectCreator))
+		}
+		bar := ui.Align(ui.Row(ui.Flex(compactLeft, 1), compactActions), ui.AlignCenter)
+		bar = ui.AccessibleDescription(bar, status)
+		return ui.TestID(ui.Role(design.TopBar(bar), "toolbar"), "studio-topbar")
 	}
+	statusColor := studioStatusColor(status, running)
 	statusView := design.StatusPill(status, statusColor)
 	find := design.QuietButton("Find", state.ShowFind)
 	save := ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File")
@@ -3434,7 +3614,7 @@ func (state *State) TopBar() ui.View {
 	bar := ui.Row(left, ui.Flex(ui.Box(), 1), statusView, actions)
 	bar = ui.Gap(bar, design.Space3)
 	bar = ui.Align(bar, ui.AlignCenter)
-	return ui.Role(design.TopBar(bar), "toolbar")
+	return ui.TestID(ui.Role(design.TopBar(bar), "toolbar"), "studio-topbar")
 }
 
 func (state *State) View() ui.View {
@@ -3444,7 +3624,10 @@ func (state *State) View() ui.View {
 	state.mu.RLock()
 	preferredMode := preferredRuntimeMode(state.host)
 	activity := state.activity
+	previewState := state.previewState
+	problemCount := len(state.diagnostics)
 	state.mu.RUnlock()
+	viewportWidth := ui.CurrentEnvironment().ViewportWidth
 	workspaceOptions := workspace.DefaultOptions()
 	workspaceOptions.SplitterSize = 2
 	workspaceOptions.TabPadding = 10
@@ -3459,9 +3642,30 @@ func (state *State) View() ui.View {
 		body = ui.Flex(state.Home(), 1)
 	}
 	content := ui.Column(state.TopBar(), state.FindBar(), ui.Flex(ui.Row(state.ActivityRail(), body), 1))
+	if viewportWidth < 840 {
+		if activity == ActivityExplorer {
+			output := state.ConsolePanel()
+			if previewState != domain.PreviewIdle {
+				output = state.PreviewPanel()
+			} else if problemCount > 0 {
+				output = state.ProblemsPanel()
+			}
+			side := ui.Overflow(ui.MinHeight(ui.Height(state.SidePanel(), 250), 0), ui.OverflowHidden)
+			body = ui.Column(side, ui.Flex(ui.MinHeight(state.EditorPanel(), 0), 1), ui.Height(output, 150))
+		} else if activity == ActivityDocs {
+			body = ui.Column(ui.Height(state.SidePanel(), 180), ui.Flex(state.DocsPanel(), 1))
+		} else if activity == ActivitySearch {
+			body = ui.Column(ui.Height(state.SidePanel(), 220), ui.Flex(ui.MinHeight(state.EditorPanel(), 0), 1))
+		} else if activity == ActivitySourceControl {
+			body = ui.Column(ui.Height(state.SidePanel(), 280), ui.Flex(ui.MinHeight(state.RemoteDiffPanel(), 0), 1))
+		} else if activity != ActivityHome {
+			body = ui.Flex(state.SidePanel(), 1)
+		}
+		content = ui.Column(state.TopBar(), state.FindBar(), ui.Flex(body, 1), state.ActivityRail())
+	}
 	content = design.AppSurface(content)
-	content = ui.MinWidth(content, 680)
-	content = ui.MinHeight(content, 480)
+	content = ui.MinWidth(content, 0)
+	content = ui.MinHeight(content, 320)
 	viewportHeight := ui.CurrentEnvironment().ViewportHeight
 	if viewportHeight > 0 {
 		// Bound the application shell to the host viewport so each workspace

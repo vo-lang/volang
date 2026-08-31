@@ -20,7 +20,9 @@ use vo_ui_layout::{
     compute_layout, compute_layout_with_scroll_offsets, IntrinsicMeasurer, LayoutError,
     LayoutLimits, LayoutSnapshot, ScrollOffsetProvider, Size,
 };
-use vo_ui_paint::{build_paint_scene, PaintError, PaintLimits, PaintScene};
+use vo_ui_paint::{
+    build_paint_scene_with_interaction, PaintError, PaintInteractionState, PaintLimits, PaintScene,
+};
 use vo_ui_protocol::{
     ApplyError, EventEnvelope, Mutation, MutationBatch, NodeKind, ProtocolLimits, TreeMirror,
 };
@@ -260,6 +262,7 @@ pub struct NativeUiHost {
     last_focus_request: Option<(NodeId, i64)>,
     measurements: BTreeMap<NodeId, (i64, i64)>,
     measurement_feedback_turns: u8,
+    hovered: Option<NodeId>,
     pressed_pointers: BTreeMap<(u64, NativePointerButton), NodeId>,
     captured_pointers: BTreeMap<u64, NodeId>,
     scroll: BTreeMap<NodeId, NativeScrollState>,
@@ -310,6 +313,7 @@ impl NativeUiHost {
             last_focus_request: None,
             measurements: BTreeMap::new(),
             measurement_feedback_turns: 0,
+            hovered: None,
             pressed_pointers: BTreeMap::new(),
             captured_pointers: BTreeMap::new(),
             scroll: BTreeMap::new(),
@@ -341,6 +345,14 @@ impl NativeUiHost {
 
     pub const fn focused_node(&self) -> Option<NodeId> {
         self.focused
+    }
+
+    fn paint_interaction(&self) -> PaintInteractionState {
+        PaintInteractionState {
+            hovered: self.hovered,
+            pressed: self.pressed_pointers.values().next().copied(),
+            focused: self.focused,
+        }
     }
 
     pub fn scroll_snapshot(&self, node: NodeId) -> Option<NativeScrollSnapshot> {
@@ -558,7 +570,7 @@ impl NativeUiHost {
         layout: &LayoutSnapshot,
         limits: PaintLimits,
     ) -> Result<PaintScene, PaintError> {
-        build_paint_scene(&self.tree, layout, limits)
+        build_paint_scene_with_interaction(&self.tree, layout, limits, self.paint_interaction())
     }
 
     /// Computes, shapes, and rasterizes one complete native frame before
@@ -591,8 +603,13 @@ impl NativeUiHost {
             return Err(NativeUiPresentationError::Text(error));
         }
         sync_scroll_metrics(&mut staged_scroll, &layout);
-        let scene = build_paint_scene(&self.tree, &layout, paint_limits)
-            .map_err(NativeUiPresentationError::Paint)?;
+        let scene = build_paint_scene_with_interaction(
+            &self.tree,
+            &layout,
+            paint_limits,
+            self.paint_interaction(),
+        )
+        .map_err(NativeUiPresentationError::Paint)?;
         let accessibility = build_accessibility_tree(
             &self.tree,
             &layout,
@@ -699,16 +716,25 @@ impl NativeUiHost {
             return self.route_pointer_button(*device, *button, *pressed, *x_milli, *y_milli);
         }
         let slider_dragged = if let NativeInputKind::PointerMoved {
-            device, x_milli, ..
+            device,
+            x_milli,
+            y_milli,
+            ..
         } = &event.kind
         {
+            self.hovered =
+                self.hit_test(f64::from(*x_milli) / 1_000.0, f64::from(*y_milli) / 1_000.0);
             self.route_slider_pointer(*device, f64::from(*x_milli) / 1_000.0)?
         } else {
             false
         };
         let cancelled = match &event.kind {
-            NativeInputKind::FocusChanged(false) => self.cancel_captured_pointers(None)?,
+            NativeInputKind::FocusChanged(false) => {
+                self.hovered = None;
+                self.cancel_captured_pointers(None)?
+            }
             NativeInputKind::DeviceDisconnected { device, .. } => {
+                self.hovered = None;
                 return self.cancel_captured_pointers(Some(*device));
             }
             _ => false,
@@ -940,6 +966,7 @@ impl NativeUiHost {
     ) -> Result<bool, NativeUiHostError> {
         let (x, y) = points(x_milli, y_milli);
         let hit = self.hit_test(x, y);
+        self.hovered = hit;
         let captured = self.captured_pointers.get(&device).copied();
         let Some(start) = captured.or(hit) else {
             if !pressed {
@@ -960,15 +987,21 @@ impl NativeUiHost {
                 0
             },
         );
-        let mut events = Vec::with_capacity(2);
+        let mut events = Vec::with_capacity(3);
         let pointer_event = if pressed {
             EventType::POINTER_DOWN
         } else {
             EventType::POINTER_UP
         };
         let pointer_listener = self.listener_target(start, pointer_event);
+        let context_listener = if pressed && button == NativePointerButton::Secondary {
+            self.listener_target(start, EventType::CONTEXT_MENU)
+        } else {
+            None
+        };
         let focus_target = pointer_listener
             .map(|(target, _)| target)
+            .or_else(|| context_listener.map(|(target, _)| target))
             .or_else(|| {
                 self.listener_target(start, EventType::CLICK)
                     .map(|(target, _)| target)
@@ -984,6 +1017,14 @@ impl NativeUiHost {
             .unwrap_or(start);
         if let Some((target, handler)) = pointer_listener {
             events.push((handler, pointer_event, target, pointer));
+        }
+        if let Some((target, handler)) = context_listener {
+            events.push((
+                handler,
+                EventType::CONTEXT_MENU,
+                target,
+                pointer_payload(device, x, y, button_index, 0),
+            ));
         }
         let pressed_target = self.pressed_pointers.get(&(device, button)).copied();
         if !pressed && button == NativePointerButton::Primary && pressed_target == hit {
@@ -1608,6 +1649,12 @@ impl DesktopHost for NativeUiHost {
         self.scroll = staged_scroll;
         self.pressed_pointers
             .retain(|_, node| self.tree.node(*node).is_some());
+        if self
+            .hovered
+            .is_some_and(|node| self.tree.node(node).is_none())
+        {
+            self.hovered = None;
+        }
         self.captured_pointers
             .retain(|_, node| self.tree.node(*node).is_some());
         Ok(())
@@ -2187,6 +2234,7 @@ mod tests {
     use vo_ui_core::{HandlerId, Listener, Primitive, Property};
     use vo_ui_desktop::DesktopRenderer;
     use vo_ui_layout::ApproximateTextMeasurer;
+    use vo_ui_paint::DrawCommand;
     use vo_ui_protocol::{NodeKind, Renderer};
 
     fn handles() -> (WindowHandle, ViewHandle) {
@@ -2251,6 +2299,10 @@ mod tests {
                     Mutation::Listen {
                         id: input,
                         listener: Listener::new(EventType::SELECTION_CHANGE, HandlerId::new(6, 1)),
+                    },
+                    Mutation::Listen {
+                        id: input,
+                        listener: Listener::new(EventType::CONTEXT_MENU, HandlerId::new(7, 1)),
                     },
                     Mutation::SetProperty {
                         id: input,
@@ -2402,6 +2454,141 @@ mod tests {
                 ..
             }) if key == "Enter"
         ));
+    }
+
+    #[test]
+    fn pointer_and_focus_state_feed_the_native_paint_scene() {
+        let mut renderer = renderer();
+        let input = NodeId::new(1, 1);
+        renderer
+            .apply(&MutationBatch::new(
+                7,
+                2,
+                vec![
+                    Mutation::SetProperty {
+                        id: input,
+                        property: Property::new(PropertyId::BACKGROUND, Value::Color(0xff112233)),
+                    },
+                    Mutation::SetProperty {
+                        id: input,
+                        property: Property::new(
+                            PropertyId::HOVER_BACKGROUND,
+                            Value::Color(0xff223344),
+                        ),
+                    },
+                    Mutation::SetProperty {
+                        id: input,
+                        property: Property::new(
+                            PropertyId::PRESSED_BACKGROUND,
+                            Value::Color(0xff334455),
+                        ),
+                    },
+                    Mutation::SetProperty {
+                        id: input,
+                        property: Property::new(PropertyId::FOCUS_RING, Value::Color(0xff445566)),
+                    },
+                ],
+            ))
+            .unwrap();
+        let layout = renderer
+            .host_mut()
+            .compute_and_set_layout(
+                Size::new(300.0, 200.0),
+                LayoutLimits::default(),
+                &mut ApproximateTextMeasurer,
+            )
+            .unwrap();
+        assert!(!renderer
+            .host_mut()
+            .route_input(&event(NativeInputKind::PointerMoved {
+                device: 4,
+                x_milli: 20_000,
+                y_milli: 20_000,
+                delta_x_milli: 0,
+                delta_y_milli: 0,
+                pressure_milli: 0,
+            }))
+            .unwrap());
+        let hovered = renderer
+            .host()
+            .build_paint_scene(&layout, PaintLimits::default())
+            .unwrap();
+        assert!(hovered.commands().iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRect {
+                node,
+                color: 0xff223344,
+                ..
+            } if *node == input
+        )));
+
+        assert!(renderer
+            .host_mut()
+            .route_input(&event(NativeInputKind::PointerButton {
+                device: 4,
+                button: NativePointerButton::Primary,
+                pressed: true,
+                click_count: 1,
+                x_milli: 20_000,
+                y_milli: 20_000,
+            }))
+            .unwrap());
+        let pressed = renderer
+            .host()
+            .build_paint_scene(&layout, PaintLimits::default())
+            .unwrap();
+        assert!(pressed.commands().iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRect {
+                node,
+                color: 0xff334455,
+                ..
+            } if *node == input
+        )));
+        assert!(pressed.commands().iter().any(|command| matches!(
+            command,
+            DrawCommand::StrokeRect {
+                node,
+                color: 0xff445566,
+                width: 3.0,
+                ..
+            } if *node == input
+        )));
+    }
+
+    #[test]
+    fn secondary_press_emits_pointer_and_context_menu_with_native_coordinates() {
+        let mut renderer = renderer();
+        assert!(renderer
+            .host_mut()
+            .route_input(&event(NativeInputKind::PointerButton {
+                device: 4,
+                button: NativePointerButton::Secondary,
+                pressed: true,
+                click_count: 1,
+                x_milli: 20_000,
+                y_milli: 30_000,
+            }))
+            .unwrap());
+        let pointer = renderer.poll_event().unwrap().unwrap();
+        assert_eq!(pointer.event, EventType::POINTER_DOWN);
+        let context = renderer.poll_event().unwrap().unwrap();
+        assert_eq!(context.event, EventType::CONTEXT_MENU);
+        assert_eq!(context.handler, HandlerId::new(7, 1));
+        assert_eq!(context.target, NodeId::new(1, 1));
+        assert!(matches!(
+            context.payload,
+            EventPayload::Pointer(PointerEventData {
+                x: 20.0,
+                y: 30.0,
+                button: 2,
+                buttons: 0,
+                pointer_id: 4,
+                kind: PointerKind::Mouse,
+                ..
+            })
+        ));
+        assert_eq!(renderer.poll_event().unwrap(), None);
     }
 
     #[test]

@@ -48,16 +48,16 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:ceaa4444dd7f480e06945f6be17a7ab4850f7ca6e0245d4f787ea2e267e074c3",
+      "digest": "sha256:7f2d6244f69d9aa1aefc93e5c05c87786362bc1363585725945f282cab52d115",
       "path": "catalog.vo",
-      "size": 290671
+      "size": 292571
     }
   ],
   "path": "apps/studio/documentation",
   "schemaVersion": 2,
   "sourceDigests": {
     "apps/studio/ui.web.toml": "sha256:bc74dde6f55cb01145de1813e4a55cb70fac072e26fb611907564525d528428b",
-    "cmd/vo-dev/src/generate_docs.rs": "sha256:a8e794f435a7fd2e81828569d2d1842b3b028686e00d1a5fc765d6840d89fe4a",
+    "cmd/vo-dev/src/generate_docs.rs": "sha256:f8040a23c5799f7194ca8a1e0b0d8f0830a8f9ce6e94ffdab0cc2ef39e1ead49",
     "lang/docs/catalog.toml": "sha256:2b59baad53e3e11240e1c35a34a77f0a65cbec168afca586da880d1588634c0a",
     "lang/docs/guides/cli.md": "sha256:169871ae6a6493c96f98399a70e947bda41ddaec4caabc96df5da8d199c11332",
     "lang/docs/guides/concurrency.md": "sha256:bc4738dd9353df968930d2d3ae7f43e95ffb54a9909efef49d80c63693568f7a",
@@ -79,12 +79,12 @@
     "lang/docs/spec/runtime-memory.md": "sha256:507fe4b6cbed2ec579e467f47929b9e1078e7be7b571bc51bb91891c25ffca9b",
     "lang/docs/vo-for-gophers.md": "sha256:4c4357f24a55b188074be91688d9b2cc65bf22f7ef65daddb4f031aa40ff4061",
     "ui/docs/accessibility-localization.md": "sha256:1408efc55eb088b7d970caeee20e217b8a27980b259d0ec76333f908e7b237e8",
-    "ui/docs/authoring-guide.md": "sha256:81b4393c63edda50a7867687dd8a5b4b37f2c2a0af6b4939886da231856aa96d",
+    "ui/docs/authoring-guide.md": "sha256:62477c83bddb3e9f2f59f39635367faa60b66c76bc8d9d55fcf8acc03f2d1b25",
     "ui/docs/component-model-v2.md": "sha256:3adcdefef2004594efe9ab497c19a3671102be8e4534e44d8463b4e223b50544",
     "ui/docs/getting-started.md": "sha256:6f375ca6bf27376f16f5440a2193ecf49d810d61dfe9f8ad37b3f6316687044a",
     "ui/docs/security.md": "sha256:e101a0e62c634e4bd6175df013288b87cbbfd5145b41512622d8dd1b0407edda",
     "ui/docs/testing-troubleshooting.md": "sha256:38bd59530b86f50bcddd8f890a80eebe2e90919a72cdbc68f46b602ae0a5ab2d",
-    "ui/docs/web-desktop-products.md": "sha256:f6ae116e2ebb4d24c023ff1c03b52ec8a14f2380cde43fdda0478d26b8efe274"
+    "ui/docs/web-desktop-products.md": "sha256:5a220bfcb9a328799f893a69b35a5067d5ce3a8a84c61c2ab762e4e8ad2d9a64"
   },
   "toolchain": {
     "rust": "workspace-1.94.0"
