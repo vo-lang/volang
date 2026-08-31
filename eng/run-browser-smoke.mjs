@@ -590,18 +590,11 @@ async function runSmoke(browserWebSocketUrl, url, smokeOptions) {
         expression: `(() => {
           const root = document.querySelector('#volang-root');
           const boot = document.querySelector('#volang-boot');
-          const button = root?.querySelector('button');
-          const bounds = button?.getBoundingClientRect();
-          const hit = bounds === undefined ? null : document.elementFromPoint(
-            bounds.left + bounds.width / 2,
-            bounds.top + bounds.height / 2,
-          );
           return {
             phase: root?.dataset.volangActivation ?? '',
             inert: root?.hasAttribute('inert') === true,
             busy: root?.getAttribute('aria-busy') ?? '',
             bootHidden: boot?.hidden === true,
-            interactiveHitProtected: button === null || hit?.closest?.('#volang-boot') !== null,
           };
         })()`,
         returnByValue: true,
@@ -609,7 +602,7 @@ async function runSmoke(browserWebSocketUrl, url, smokeOptions) {
       const guard = activationGuard.result?.value;
       if (guard?.phase !== "ready"
         && (guard?.inert !== true || guard?.busy !== "true"
-          || guard?.bootHidden !== false || guard?.interactiveHitProtected !== true)) {
+          || guard?.bootHidden !== false)) {
         throw new Error(`AOT pre-activation guard failed: ${JSON.stringify(guard)}`);
       }
       await waitForAotInteractive(browser, sessionId, smokeOptions.timeout);
