@@ -164,9 +164,10 @@ impl NativeUiVmSession {
             return Err(NativeUiSessionError::InvalidConfig);
         }
         automation_log("running initial UI VM revision");
-        let outcome = vm
-            .run()
-            .map_err(|error| NativeUiSessionError::Vm(format!("{error:?}")))?;
+        let outcome = vm.run().map_err(|error| {
+            automation_log(&format!("initial UI VM revision failed: {error:?}"));
+            NativeUiSessionError::Vm(format!("{error:?}"))
+        })?;
         automation_log("initial UI VM revision reached its replay boundary");
         Self::validate_outcome(outcome)?;
         let frame = vm
