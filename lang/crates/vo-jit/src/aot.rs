@@ -89,6 +89,10 @@ fn build_isa(target: &str) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Jit
     flags
         .set("enable_verifier", "true")
         .map_err(|error| JitError::Internal(error.to_string()))?;
+    super::configure_required_stack_probes(
+        &mut flags,
+        triple.operating_system == target_lexicon::OperatingSystem::Windows,
+    )?;
 
     let builder = cranelift_codegen::isa::lookup(triple).map_err(|error| {
         JitError::Internal(format!(
@@ -549,5 +553,13 @@ mod tests {
                 .map(|artifact| artifact.payload.as_slice()),
             Some([0x56, 0x55, 0x42, 0x31].as_slice())
         );
+    }
+
+    #[test]
+    fn windows_native_aot_uses_inline_stack_probes() {
+        let isa = build_isa("x86_64-pc-windows-msvc").expect("build Windows AOT ISA");
+        let flags = isa.flags().to_string();
+        assert!(flags.contains("enable_probestack = true"));
+        assert!(flags.contains("probestack_strategy = \"inline\""));
     }
 }

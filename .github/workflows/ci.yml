@@ -620,7 +620,11 @@ jobs:
         run: |
           $galleryExecutable = Get-ChildItem target/uikit-gallery-native-aot -Recurse -Filter volang-app.exe | Select-Object -First 1
           if ($null -eq $galleryExecutable) { throw "UIKit Gallery Native AOT executable is missing" }
-          & $galleryExecutable.FullName
+          $galleryProcess = Start-Process -FilePath $galleryExecutable.FullName -NoNewWindow -PassThru -Wait
+          Write-Host ("UIKit Gallery Native AOT exit code: {0} (0x{0:X8})" -f $galleryProcess.ExitCode)
+          if ($galleryProcess.ExitCode -ne 0) {
+            throw "UIKit Gallery Native AOT window certification failed"
+          }
 
       - name: Present one real Linux Data Application Native AOT window
         if: runner.os == 'Linux'

@@ -73,6 +73,21 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 
 use helpers::{HelperFuncIds, HelperRefs};
 
+fn configure_required_stack_probes(
+    flags: &mut settings::Builder,
+    windows_target: bool,
+) -> Result<(), JitError> {
+    if windows_target {
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|error| JitError::Internal(error.to_string()))?;
+        flags
+            .set("probestack_strategy", "inline")
+            .map_err(|error| JitError::Internal(error.to_string()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn test_frontend_config() -> cranelift_codegen::isa::TargetFrontendConfig {
     cranelift_native::builder()
@@ -1083,6 +1098,7 @@ impl JitCompiler {
         flag_builder
             .set("opt_level", "speed")
             .map_err(|e| JitError::Internal(e.to_string()))?;
+        configure_required_stack_probes(&mut flag_builder, cfg!(target_os = "windows"))?;
 
         let isa_builder =
             cranelift_native::builder().map_err(|e| JitError::Internal(e.to_string()))?;
