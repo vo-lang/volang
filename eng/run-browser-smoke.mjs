@@ -2746,7 +2746,7 @@ async function runUikitGallerySmoke(browser, sessionId, timeoutMilliseconds) {
 }
 
 async function runComponentStateSmoke(browser, sessionId, timeoutMilliseconds) {
-  const buttonTexts = `Array.from(document.querySelectorAll("button"), (button) =>
+  const buttonTexts = `Array.from(document.querySelectorAll("#volang-root button"), (button) =>
     (button.textContent ?? "").trim())`;
   const expectButtons = async (expected) => {
     const observed = await pollEvaluation(
@@ -2769,7 +2769,7 @@ async function runComponentStateSmoke(browser, sessionId, timeoutMilliseconds) {
       browser,
       sessionId,
       `(() => {
-        const button = Array.from(document.querySelectorAll("button")).find(
+        const button = Array.from(document.querySelectorAll("#volang-root button")).find(
           (candidate) => (candidate.textContent ?? "").trim() === ${JSON.stringify(text)},
         );
         if (!(button instanceof HTMLButtonElement) || button.disabled) return null;
