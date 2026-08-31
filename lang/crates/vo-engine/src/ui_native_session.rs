@@ -15,6 +15,14 @@ use crate::run::PreparedNativeUiReload;
 
 const ROOT_NODE: NodeId = NodeId::new(0, 1);
 
+fn automation_log(message: &str) {
+    if std::env::var_os("VO_UI_AUTOMATION_EXIT_AFTER_FRAMES").is_some()
+        || std::env::var_os("VO_UI_AUTOMATION_CLICKS").is_some()
+    {
+        eprintln!("[VO:UI:CERTIFY] {message}");
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeUiSessionConfig {
     pub protocol_limits: ProtocolLimits,
@@ -155,13 +163,16 @@ impl NativeUiVmSession {
         if !window.is_valid() || !view.is_valid() || config.max_scheduler_turns_per_pump == 0 {
             return Err(NativeUiSessionError::InvalidConfig);
         }
+        automation_log("running initial UI VM revision");
         let outcome = vm
             .run()
             .map_err(|error| NativeUiSessionError::Vm(format!("{error:?}")))?;
+        automation_log("initial UI VM revision reached its replay boundary");
         Self::validate_outcome(outcome)?;
         let frame = vm
             .take_host_output()
             .ok_or(NativeUiSessionError::MissingInitialFrame)?;
+        automation_log("decoding initial UI mutation batch");
         let batch = decode_batch(&frame, config.protocol_limits)
             .map_err(|error| NativeUiSessionError::Codec(error.to_string()))?;
         if batch.revision != 1 {
@@ -178,6 +189,7 @@ impl NativeUiVmSession {
         .map_err(NativeUiSessionError::Host)?;
         let mut renderer =
             DesktopRenderer::new(host, batch.session_epoch, ROOT_NODE, config.protocol_limits);
+        automation_log("applying initial UI mutation batch");
         renderer.apply(&batch).map_err(Self::renderer_error)?;
         let mut session = Self {
             vm,
@@ -188,6 +200,7 @@ impl NativeUiVmSession {
             timers: BTreeMap::new(),
             last_outcome: outcome,
         };
+        automation_log("reconciling initial UI timers");
         session.reconcile_timers(now)?;
         let mut report = NativeUiSessionReport {
             revision: session.renderer.revision(),
@@ -196,7 +209,9 @@ impl NativeUiVmSession {
             outcome: Some(outcome),
             ..NativeUiSessionReport::default()
         };
+        automation_log("pumping initial UI follow-up work");
         let follow_up = session.pump(now)?;
+        automation_log("initial UI session is ready");
         report.revision = follow_up.revision;
         report.applied_frames += follow_up.applied_frames;
         report.delivered_events += follow_up.delivered_events;

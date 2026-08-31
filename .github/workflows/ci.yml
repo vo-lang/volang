@@ -428,6 +428,12 @@ jobs:
 
       - name: Package production Native AOT applications
         shell: bash
+        env:
+          # Match the published native SDK runtime. The workspace's plain
+          # release profile is size-optimized for Wasm, while release builds
+          # distributed for desktop override it to opt-level 3 + thin LTO.
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+          CARGO_PROFILE_RELEASE_LTO: "thin"
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             cargo rustc --locked -p vo-studio-aot-runtime-native --release -- --print native-static-libs
