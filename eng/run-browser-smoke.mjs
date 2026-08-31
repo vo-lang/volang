@@ -2685,7 +2685,8 @@ async function runUikitGallerySmoke(browser, sessionId, timeoutMilliseconds) {
         } : null,
       };
     })()`,
-    (value) => value?.viewport === 390 && value?.documentWidth === 390
+    (value) => value?.viewport === 390
+      && value?.documentWidth > 0 && value.documentWidth <= value.viewport
       && value?.actionColumns === 1 && value?.fullWidthActions === true
       && value?.grid?.client > 0 && value?.grid?.scroll > value.grid.client
       && value?.grid?.overflow === "auto",
@@ -3496,6 +3497,27 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
   await pollEvaluation(
     browser,
     sessionId,
+    `Array.from(document.querySelectorAll('[role="status"]')).some(
+      (status) => (status.textContent ?? '').includes('1 problems'),
+    )`,
+    (value) => value === true,
+    timeoutMilliseconds,
+  );
+  const problemsActivated = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const button = document.querySelector('[data-testid="workspace-tab-problems"]');
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      button.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (problemsActivated.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not open the Problems panel");
+  }
+  await pollEvaluation(
+    browser,
+    sessionId,
     `(() => {
       const panel = document.querySelector('[data-testid="studio-problems-panel"]');
       const button = panel?.querySelector('button');
@@ -3557,6 +3579,19 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     sessionId,
     `document.querySelector('[role="status"]')?.textContent ?? ""`,
     (value) => typeof value === "string" && value.includes("0 problems"),
+    timeoutMilliseconds,
+  );
+  await activateButton("Save File");
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `(() => {
+      const tab = Array.from(document.querySelectorAll('[role="tab"]')).find(
+        (candidate) => (candidate.textContent ?? '').includes('main.vo'),
+      );
+      return tab?.textContent ?? '';
+    })()`,
+    (value) => typeof value === "string" && value.includes("main.vo") && !value.includes("●"),
     timeoutMilliseconds,
   );
   await activateButton("Open Preview");

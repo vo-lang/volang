@@ -1179,7 +1179,7 @@ func (state *State) saveSnapshots(project domain.Project, snapshots []saveSnapsh
 			state.mu.Lock()
 			current, present := state.buffers[snapshot.Path]
 			if present && current == snapshot.Code && current.Document.Version() == snapshot.Version {
-				state.dirty[snapshot.Path] = false
+				delete(state.dirty, snapshot.Path)
 			}
 			state.status = "Saved " + snapshot.Path
 			state.appendConsoleLocked(domain.ConsoleSuccess, "save", "Saved " + snapshot.Path)
