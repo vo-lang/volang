@@ -9,25 +9,31 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use vo_engine::{CompileOutput, GeneratedSource, RunMode};
+use vo_engine::{CompileOutput, RunMode, SourceOverlay};
 use vo_runtime::output::OutputSink;
 use vo_ui_shell_native::NativeHostInvocationHandler;
 use vo_ui_system::{HostInvocation, SystemFailure, SystemFailureKind};
 
-pub const PROTOCOL_VERSION: &str = "volang.studio.host.v1";
+pub const PROTOCOL_VERSION: &str = "volang.studio.host.v3";
 const MAX_PROJECTS: usize = 512;
 const MAX_FILES: usize = 5_000;
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_STARTER_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 32;
+const MAX_OVERLAYS: usize = 64;
 const MAX_RUNS: usize = 16;
+const MAX_RUN_ARGUMENTS: usize = 256;
+const MAX_RUN_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_PREVIEWS: usize = 4;
 const MAX_REMOTE_CHANGES: usize = 256;
 const MAX_REMOTE_DIFF_BYTES: usize = 256 * 1024;
 const MAX_REMOTE_OPERATIONS: usize = 8;
 const MAX_REMOTE_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+const PROJECT_CATALOG_SCHEMA: &str = "volang.studio.native-projects.v2";
+const PROJECT_CATALOG_LEGACY_SCHEMA: &str = "volang.studio.native-projects.v1";
+const PROJECT_CATALOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const RUN_BATCH_WAIT: Duration = Duration::from_millis(40);
 static NEXT_PREVIEW_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -51,16 +57,26 @@ impl std::error::Error for NativeStudioHostError {}
 #[derive(Default)]
 struct HostState {
     projects: HashMap<String, PathBuf>,
+    last_opened_project: Option<PathBuf>,
     artifacts: HashMap<String, StoredArtifact>,
     artifact_order: VecDeque<String>,
     runs: HashMap<String, Arc<RunSession>>,
     remote_operations: HashMap<String, Arc<RemoteSession>>,
     previews: HashMap<String, PreviewSession>,
     preview_order: VecDeque<String>,
-    credentials: HashMap<String, String>,
+    provider_state: HashMap<String, String>,
     next_artifact: u64,
     next_run: u64,
     next_remote_operation: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeProjectCatalog {
+    schema: String,
+    paths: Vec<String>,
+    #[serde(default)]
+    last_opened_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -93,6 +109,7 @@ struct RemoteSession {
 pub struct NativeStudioHost {
     workspace: PathBuf,
     state: Mutex<HostState>,
+    project_catalog: Mutex<()>,
 }
 
 impl NativeStudioHost {
@@ -109,14 +126,18 @@ impl NativeStudioHost {
                 workspace.display()
             )));
         }
+        let (projects, last_opened_project) = load_project_catalog(&workspace);
         Ok(Arc::new(Self {
             workspace,
             state: Mutex::new(HostState {
+                projects,
+                last_opened_project,
                 next_artifact: 1,
                 next_run: 1,
                 next_remote_operation: 1,
                 ..HostState::default()
             }),
+            project_catalog: Mutex::new(()),
         }))
     }
 
@@ -142,6 +163,7 @@ impl NativeStudioHost {
                 "canPreview": true,
             }})),
             "projects.list" => self.projects_list(),
+            "projects.activate" => self.projects_activate(&request.payload),
             "projects.create" => self.projects_create(&request.payload),
             "projects.open" => self.projects_open(&request.payload),
             "projects.rename" => self.projects_rename(&request.payload),
@@ -149,6 +171,7 @@ impl NativeStudioHost {
             "projects.forget" => self.projects_forget(&request.payload),
             "files.list" => self.files_list(&request.payload),
             "files.read" => self.files_read(&request.payload),
+            "files.create" => self.files_create(&request.payload),
             "files.write" => self.files_write(&request.payload),
             "files.rename" => self.files_rename(&request.payload),
             "files.delete" => self.files_delete(&request.payload),
@@ -170,9 +193,6 @@ impl NativeStudioHost {
             "remote.next" => self.remote_next(&request.payload),
             "remote.stop" => self.remote_stop(&request.payload),
             "remote.delete" => self.remote_delete(&request.payload),
-            "credentials.get" => self.credentials_get(&request.payload),
-            "credentials.set" => self.credentials_set(&request.payload),
-            "credentials.delete" => self.credentials_delete(&request.payload),
             operation => Err(failure(
                 SystemFailureKind::Unsupported,
                 format!("unsupported Studio host operation {operation}"),
@@ -197,12 +217,16 @@ impl NativeStudioHost {
             let entries = fs::read_dir(&directory).map_err(io_failure)?;
             for entry in entries {
                 let entry = entry.map_err(io_failure)?;
-                let path = entry.path();
-                if !path.is_dir() {
+                let file_type = entry.file_type().map_err(io_failure)?;
+                if !file_type.is_dir() {
                     continue;
                 }
+                let path = entry.path();
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
+                if name.starts_with(".studio-create-") {
+                    continue;
+                }
                 if matches!(
                     name.as_ref(),
                     ".git" | ".volang" | "target" | "node_modules"
@@ -224,12 +248,22 @@ impl NativeStudioHost {
     }
 
     fn projects_list(&self) -> Result<Vec<u8>, SystemFailure> {
+        let _mutation = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut paths = self.discover_projects()?;
         let mut values = Vec::with_capacity(paths.len());
         let mut state = self.lock_state();
         for path in state.projects.values() {
-            if path.is_dir() && path.join("vo.mod").is_file() {
-                paths.push(path.clone());
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if canonical.as_path() == path.as_path()
+                && canonical.is_dir()
+                && canonical.join("vo.mod").is_file()
+            {
+                paths.push(canonical);
             }
         }
         paths.sort();
@@ -237,6 +271,7 @@ impl NativeStudioHost {
         if paths.len() > MAX_PROJECTS {
             paths.truncate(MAX_PROJECTS);
         }
+        let last_opened_project = state.last_opened_project.clone();
         state.projects.clear();
         for path in paths {
             let managed = path.starts_with(&self.workspace);
@@ -246,12 +281,13 @@ impl NativeStudioHost {
                 .and_then(|value| value.to_str())
                 .unwrap_or("volang-project");
             state.projects.insert(id.clone(), path.clone());
+            let last_opened = last_opened_project.as_ref() == Some(&path);
             values.push(json!({
                 "id": id,
                 "name": name,
                 "root": path.to_string_lossy(),
                 "kind": 0,
-                "lastOpenedUnixMillis": 0,
+                "lastOpenedUnixMillis": if last_opened { 1 } else { 0 },
                 "pinned": values.is_empty(),
                 "managed": managed,
             }));
@@ -259,10 +295,37 @@ impl NativeStudioHost {
         encode(&json!({"projects": values}))
     }
 
+    fn projects_activate(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
+        let request: ProjectRequest = decode(payload)?;
+        let _catalog = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = self.project_path(&request.ProjectID)?;
+        let previous = self.lock_state().last_opened_project.replace(path.clone());
+        if let Err(error) = self.persist_project_catalog() {
+            self.lock_state().last_opened_project = previous;
+            return Err(error);
+        }
+        encode(&json!({}))
+    }
+
     fn projects_create(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: CreateProjectRequest = decode(payload)?;
         validate_project_name(&request.Name)?;
         let starter_files = validate_starter_files(&request.Files)?;
+        let _mutation = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut known_projects = self
+            .discover_projects()?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        known_projects.extend(self.lock_state().projects.values().cloned());
+        if known_projects.len() >= MAX_PROJECTS {
+            return Err(failed("Studio project catalog is full"));
+        }
         let path = if request.Root.trim().is_empty() {
             self.workspace.join(&request.Name)
         } else {
@@ -280,23 +343,32 @@ impl NativeStudioHost {
         if !parent.starts_with(&self.workspace) {
             return Err(denied("project root must stay inside the Studio workspace"));
         }
-        if path.exists() {
-            return Err(failed("project root already exists"));
-        }
-        fs::create_dir(&path).map_err(io_failure)?;
+        let temporary = (0..100_u32)
+            .find_map(|attempt| {
+                let candidate = parent.join(format!(".studio-create-{}-{attempt}", process::id()));
+                match fs::create_dir(&candidate) {
+                    Ok(()) => Some(Ok(candidate)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()
+            .map_err(io_failure)?
+            .ok_or_else(|| failed("could not allocate a temporary Studio project directory"))?;
         let module = format!(
             "format = 1\nmodule = \"local/{}\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/vo-lang/ui\" = \"^0.1.4\"\n",
             request.Name
         );
+        let mut published = false;
         let publication = (|| {
             if starter_files.is_empty() {
                 write_file_atomically(
-                    &path.join("main.vo"),
+                    &temporary.join("main.vo"),
                     b"package main\n\nimport \"github.com/vo-lang/ui\"\n\nfunc App() ui.View {\n\treturn ui.Text(\"Hello from Volang\")\n}\n\nfunc main() {\n\tif err := ui.Mount(App); err != nil { panic(err.Error()) }\n}\n",
                 )?;
             } else {
                 for (relative, text) in &starter_files {
-                    let target = path.join(relative);
+                    let target = temporary.join(relative);
                     if let Some(parent) = target.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -305,11 +377,19 @@ impl NativeStudioHost {
             }
             // Publish vo.mod last. Project discovery therefore never observes
             // a partially initialized Studio project.
-            write_file_atomically(&path.join("vo.mod"), module.as_bytes())?;
-            sync_parent_directory(&path.join("vo.mod"))
+            write_file_atomically(&temporary.join("vo.mod"), module.as_bytes())?;
+            sync_parent_directory(&temporary.join("vo.mod"))?;
+            rename_entry_noreplace(&temporary, &path)?;
+            published = true;
+            sync_parent_directory(&path)
         })();
         if let Err(error) = publication {
-            let _ = fs::remove_dir_all(&path);
+            if published {
+                let _ = fs::remove_dir_all(&path);
+                let _ = sync_parent_directory(&path);
+            } else {
+                let _ = fs::remove_dir_all(&temporary);
+            }
             return Err(io_failure(error));
         }
         let path = path.canonicalize().map_err(io_failure)?;
@@ -344,12 +424,25 @@ impl NativeStudioHost {
             .to_string();
         let id = project_id(&path);
         let managed = path.starts_with(&self.workspace);
+        let _catalog = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self.lock_state();
         if !state.projects.contains_key(&id) && state.projects.len() >= MAX_PROJECTS {
             return Err(failed("Studio project catalog is full"));
         }
-        state.projects.insert(id.clone(), path.clone());
+        let previous = state.projects.insert(id.clone(), path.clone());
         drop(state);
+        if let Err(error) = self.persist_project_catalog() {
+            let mut state = self.lock_state();
+            if let Some(previous) = previous {
+                state.projects.insert(id.clone(), previous);
+            } else {
+                state.projects.remove(&id);
+            }
+            return Err(error);
+        }
         encode(&json!({"project": {
             "id": id,
             "name": name,
@@ -364,6 +457,10 @@ impl NativeStudioHost {
     fn projects_rename(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: RenameProjectRequest = decode(payload)?;
         validate_project_name(&request.Name)?;
+        let _mutation = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let source = self.project_path(&request.ProjectID)?;
         let parent = source
             .parent()
@@ -377,9 +474,9 @@ impl NativeStudioHost {
         if destination.exists() {
             return Err(failed("project root already exists"));
         }
-        fs::rename(&source, &destination).map_err(io_failure)?;
+        rename_entry_noreplace(&source, &destination).map_err(io_failure)?;
         if let Err(error) = sync_parent_directory(&destination) {
-            let _ = fs::rename(&destination, &source);
+            let _ = rename_entry_noreplace(&destination, &source);
             return Err(io_failure(error));
         }
         let destination = destination.canonicalize().map_err(io_failure)?;
@@ -401,6 +498,10 @@ impl NativeStudioHost {
 
     fn projects_delete(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: ProjectRequest = decode(payload)?;
+        let _mutation = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = self.project_path(&request.ProjectID)?;
         if path == self.workspace || !path.starts_with(&self.workspace) {
             return Err(denied(
@@ -415,13 +516,23 @@ impl NativeStudioHost {
 
     fn projects_forget(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: ProjectRequest = decode(payload)?;
-        if self
-            .lock_state()
-            .projects
-            .remove(&request.ProjectID)
-            .is_none()
-        {
+        let _catalog = self
+            .project_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.project_path(&request.ProjectID)?;
+        if current.starts_with(&self.workspace) {
+            return Err(denied(
+                "managed projects must be deleted instead of forgotten",
+            ));
+        }
+        let removed = self.lock_state().projects.remove(&request.ProjectID);
+        let Some(path) = removed else {
             return Err(failed("project is unavailable; refresh the project center"));
+        };
+        if let Err(error) = self.persist_project_catalog() {
+            self.lock_state().projects.insert(request.ProjectID, path);
+            return Err(error);
         }
         encode(&json!({}))
     }
@@ -462,15 +573,25 @@ impl NativeStudioHost {
         encode(&json!({}))
     }
 
+    fn files_create(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
+        let request: WriteFileRequest = decode(payload)?;
+        if request.Text.len() as u64 > MAX_FILE_BYTES {
+            return Err(failed("file exceeds the Studio text limit"));
+        }
+        let root = self.project_path(&request.ProjectID)?;
+        validate_portable_relative(&request.Path)?;
+        let path = resolve_write_file(&root, &request.Path)?;
+        create_file_atomically(&path, request.Text.as_bytes()).map_err(io_failure)?;
+        encode(&json!({}))
+    }
+
     fn files_rename(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: RenameEntryRequest = decode(payload)?;
         let root = self.project_path(&request.ProjectID)?;
         let source = resolve_existing_entry(&root, &request.From)?;
+        validate_portable_relative(&request.To)?;
         let destination = resolve_write_file(&root, &request.To)?;
-        if destination.exists() {
-            return Err(failed("destination already exists"));
-        }
-        fs::rename(source, destination).map_err(io_failure)?;
+        rename_entry_noreplace(&source, &destination).map_err(io_failure)?;
         encode(&json!({}))
     }
 
@@ -489,10 +610,12 @@ impl NativeStudioHost {
     fn language_analyze(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: AnalyzeRequest = decode(payload)?;
         let root = self.project_path(&request.ProjectID)?;
-        let source = GeneratedSource::new(PathBuf::from(&request.Path), request.Text.into_bytes())
+        validate_relative(&request.Path)?;
+        resolve_existing_file(&root, &request.Path)?;
+        let source = SourceOverlay::new(PathBuf::from(&request.Path), request.Text.into_bytes())
             .map_err(|error| failed(error.to_string()))?;
-        let diagnostics = match vo_engine::compile_path_with_generated_sources_and_auto_install(
-            &root,
+        let diagnostics = match vo_engine::check_path_with_source_overlays_and_auto_install(
+            &root.join(&request.Path),
             vec![source],
         ) {
             Ok(_) => Vec::new(),
@@ -503,18 +626,34 @@ impl NativeStudioHost {
 
     fn compiler_compile(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: CompileRequest = decode(payload)?;
+        if !matches!(request.Mode, 0 | 1) {
+            return Err(failed("compiler runtime mode is unavailable"));
+        }
+        if request.Overlays.len() > MAX_OVERLAYS {
+            return Err(failed("compiler overlay list exceeds its limit"));
+        }
         let root = self.project_path(&request.ProjectID)?;
+        validate_relative(&request.Entry)?;
+        resolve_existing_file(&root, &request.Entry)?;
+        let mut overlay_paths = HashSet::with_capacity(request.Overlays.len());
         let overlays = request
             .Overlays
             .into_iter()
             .map(|overlay| {
-                GeneratedSource::new(PathBuf::from(overlay.Path), overlay.Text.into_bytes())
+                validate_relative(&overlay.Path)?;
+                resolve_existing_file(&root, &overlay.Path)?;
+                if !overlay_paths.insert(overlay.Path.clone()) {
+                    return Err(failed("compiler overlay path is duplicated"));
+                }
+                SourceOverlay::new(PathBuf::from(overlay.Path), overlay.Text.into_bytes())
                     .map_err(|error| failed(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output =
-            vo_engine::compile_path_with_generated_sources_and_auto_install(&root, overlays)
-                .map_err(|error| failed(error.to_string()))?;
+        let output = vo_engine::compile_path_with_source_overlays_and_auto_install(
+            &root.join(&request.Entry),
+            overlays,
+        )
+        .map_err(|error| failed(error.to_string()))?;
         let mut state = self.lock_state();
         let id = format!("native-artifact-{}", state.next_artifact);
         state.next_artifact = state.next_artifact.saturating_add(1);
@@ -551,7 +690,21 @@ impl NativeStudioHost {
 
     fn run_start(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: RunRequest = decode(payload)?;
-        let (id, artifact) = {
+        if !matches!(request.Mode, 0 | 1) {
+            return Err(failed("run mode is unavailable"));
+        }
+        if request.Arguments.len() > MAX_RUN_ARGUMENTS
+            || request
+                .Arguments
+                .iter()
+                .try_fold(0_usize, |total, argument| total.checked_add(argument.len()))
+                .is_none_or(|total| total > MAX_RUN_ARGUMENT_BYTES)
+        {
+            return Err(failed("run arguments exceed the Studio limit"));
+        }
+        let (sender, receiver) = mpsc::sync_channel(256);
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let (id, artifact, session) = {
             let mut state = self.lock_state();
             if state.runs.len() == MAX_RUNS {
                 return Err(failed("too many Studio run sessions are active"));
@@ -563,20 +716,18 @@ impl NativeStudioHost {
                 .ok_or_else(|| failed("compiled artifact is unavailable"))?;
             let id = format!("native-run-{}", state.next_run);
             state.next_run = state.next_run.saturating_add(1);
-            (id, artifact)
+            let session = Arc::new(RunSession {
+                events: Mutex::new(receiver),
+                interrupt: Arc::clone(&interrupt),
+                done: AtomicBool::new(artifact.preview),
+            });
+            state.runs.insert(id.clone(), Arc::clone(&session));
+            (id, artifact, session)
         };
-        let (sender, receiver) = mpsc::sync_channel(256);
-        let interrupt = Arc::new(AtomicBool::new(false));
-        let session = Arc::new(RunSession {
-            events: Mutex::new(receiver),
-            interrupt: Arc::clone(&interrupt),
-            done: AtomicBool::new(artifact.preview),
-        });
         if artifact.preview {
             let _ = sender.send(run_event(0, "Preview session started".to_string(), 0, 0));
             let _ = sender.send(run_event(4, "preview ready".to_string(), 0, 0));
             let _ = sender.send(run_event(5, "preview session ready".to_string(), 0, 0));
-            self.lock_state().runs.insert(id.clone(), session);
             return encode(&json!({"sessionID": id}));
         }
         let mode = if request.Mode == 1 {
@@ -585,50 +736,49 @@ impl NativeStudioHost {
             RunMode::Vm
         };
         let worker_session = Arc::clone(&session);
-        std::thread::Builder::new()
-            .name(id.clone())
-            .spawn(move || {
-                let started = Instant::now();
-                let _ = sender.send(run_event(
-                    0,
-                    format!("{} session started", mode_name(mode)),
-                    0,
-                    0,
-                ));
-                let sink = Arc::new(ChannelSink {
-                    sender: sender.clone(),
-                });
-                let result = vo_engine::run_with_output_interruptible(
-                    artifact.output,
-                    mode,
-                    request.Arguments,
-                    sink,
-                    Some(interrupt),
-                );
-                let elapsed = started.elapsed().as_nanos().min(i64::MAX as u128) as i64;
-                match result {
-                    Ok(()) => {
-                        let _ = sender.send(run_event(
-                            5,
-                            "process exited successfully".to_string(),
-                            0,
-                            elapsed,
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = sender.send(run_event(2, error.to_string(), 1, elapsed));
-                        let _ = sender.send(run_event(
-                            5,
-                            "process exited with errors".to_string(),
-                            1,
-                            elapsed,
-                        ));
-                    }
+        if let Err(error) = std::thread::Builder::new().name(id.clone()).spawn(move || {
+            let started = Instant::now();
+            let _ = sender.send(run_event(
+                0,
+                format!("{} session started", mode_name(mode)),
+                0,
+                0,
+            ));
+            let sink = Arc::new(ChannelSink {
+                sender: sender.clone(),
+            });
+            let result = vo_engine::run_with_output_interruptible(
+                artifact.output,
+                mode,
+                request.Arguments,
+                sink,
+                Some(interrupt),
+            );
+            let elapsed = started.elapsed().as_nanos().min(i64::MAX as u128) as i64;
+            match result {
+                Ok(()) => {
+                    let _ = sender.send(run_event(
+                        5,
+                        "process exited successfully".to_string(),
+                        0,
+                        elapsed,
+                    ));
                 }
-                worker_session.done.store(true, Ordering::Release);
-            })
-            .map_err(|error| failed(format!("could not start run worker: {error}")))?;
-        self.lock_state().runs.insert(id.clone(), session);
+                Err(error) => {
+                    let _ = sender.send(run_event(2, error.to_string(), 1, elapsed));
+                    let _ = sender.send(run_event(
+                        5,
+                        "process exited with errors".to_string(),
+                        1,
+                        elapsed,
+                    ));
+                }
+            }
+            worker_session.done.store(true, Ordering::Release);
+        }) {
+            self.lock_state().runs.remove(&id);
+            return Err(failed(format!("could not start run worker: {error}")));
+        }
         encode(&json!({"sessionID": id}))
     }
 
@@ -673,8 +823,7 @@ impl NativeStudioHost {
 
     fn run_stop(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let request: RunStopRequest = decode(payload)?;
-        let session = self.lock_state().runs.get(&request.SessionID).cloned();
-        if let Some(session) = session {
+        if let Some(session) = self.lock_state().runs.remove(&request.SessionID) {
             session.interrupt.store(true, Ordering::Release);
         }
         encode(&json!({}))
@@ -682,9 +831,9 @@ impl NativeStudioHost {
 
     fn preview_open(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
         let artifact: ArtifactReference = decode(payload)?;
-        let (artifact, sequence) = {
-            let state = self.lock_state();
-            if state.previews.len() >= MAX_PREVIEWS {
+        let (artifact, sequence, surface) = {
+            let mut state = self.lock_state();
+            if state.preview_order.len() >= MAX_PREVIEWS {
                 return Err(failed("too many native preview windows are active"));
             }
             let artifact = state
@@ -696,49 +845,55 @@ impl NativeStudioHost {
                 return Err(failed("artifact was not compiled for preview"));
             }
             let sequence = NEXT_PREVIEW_ID.fetch_add(1, Ordering::Relaxed);
-            (artifact, sequence)
+            let surface = format!("native-window://{sequence}");
+            state.preview_order.push_back(surface.clone());
+            (artifact, sequence, surface)
         };
         let directory = std::env::temp_dir().join(format!(
             "volang-studio-preview-{}-{sequence}",
             process::id()
         ));
-        fs::create_dir(&directory).map_err(io_failure)?;
-        let bytecode = artifact
-            .output
-            .module
-            .module()
-            .serialize()
-            .map_err(|error| failed(format!("cannot serialize preview artifact: {error}")))?;
-        let bytecode_path = directory.join("preview.vob");
-        if let Err(error) = write_file_atomically(&bytecode_path, &bytecode) {
-            let _ = fs::remove_dir_all(&directory);
-            return Err(io_failure(error));
-        }
-        let bytecode_path = match bytecode_path.canonicalize() {
-            Ok(path) => path,
+        let prepared = (|| {
+            fs::create_dir(&directory).map_err(io_failure)?;
+            let bytecode = artifact
+                .output
+                .module
+                .module()
+                .serialize()
+                .map_err(|error| failed(format!("cannot serialize preview artifact: {error}")))?;
+            let bytecode_path = directory.join("preview.vob");
+            write_file_atomically(&bytecode_path, &bytecode).map_err(io_failure)?;
+            let bytecode_path = bytecode_path.canonicalize().map_err(io_failure)?;
+            let executable = std::env::current_exe().map_err(io_failure)?;
+            let child = Command::new(executable)
+                .arg("--studio-preview-artifact")
+                .arg(&bytecode_path)
+                .spawn()
+                .map_err(io_failure)?;
+            Ok::<_, SystemFailure>(PreviewSession {
+                child,
+                directory: directory.clone(),
+            })
+        })();
+        let session = match prepared {
+            Ok(session) => session,
             Err(error) => {
+                let mut state = self.lock_state();
+                state.preview_order.retain(|value| value != &surface);
+                drop(state);
                 let _ = fs::remove_dir_all(&directory);
-                return Err(io_failure(error));
+                return Err(error);
             }
         };
-        let executable = std::env::current_exe().map_err(io_failure)?;
-        let child = match Command::new(executable)
-            .arg("--studio-preview-artifact")
-            .arg(&bytecode_path)
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&directory);
-                return Err(io_failure(error));
-            }
-        };
-        let surface = format!("native-window://{sequence}");
         let mut state = self.lock_state();
-        state.preview_order.push_back(surface.clone());
-        state
-            .previews
-            .insert(surface.clone(), PreviewSession { child, directory });
+        if state.previews.contains_key(&surface) {
+            state.preview_order.retain(|value| value != &surface);
+            drop(state);
+            stop_preview_session(session);
+            return Err(failed("native preview surface identifier was reused"));
+        }
+        state.previews.insert(surface.clone(), session);
+        drop(state);
         encode(&json!({"surfaceID": surface}))
     }
 
@@ -863,7 +1018,11 @@ impl NativeStudioHost {
     }
 
     fn account_state(&self) -> Result<Vec<u8>, SystemFailure> {
-        let stored = self.lock_state().credentials.get("github.account").cloned();
+        let stored = self
+            .lock_state()
+            .provider_state
+            .get("github.account")
+            .cloned();
         let account = stored
             .as_deref()
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
@@ -880,21 +1039,15 @@ impl NativeStudioHost {
     }
 
     fn account_connect(&self) -> Result<Vec<u8>, SystemFailure> {
-        let output = Command::new("gh")
-            .args(["api", "user"])
-            .output()
-            .map_err(|error| {
-                failed(format!(
-                    "GitHub CLI is required for Native Studio account connection: {error}"
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(failed(format!(
-                "GitHub CLI account connection failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let user: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        let output = cancellable_command_output(
+            Path::new("gh"),
+            &[OsString::from("api"), OsString::from("user")],
+            None,
+            &[],
+            &AtomicBool::new(false),
+        )
+        .map_err(|error| failed(format!("GitHub CLI account connection failed: {error}")))?;
+        let user: Value = serde_json::from_str(&output).map_err(|error| {
             failed(format!(
                 "GitHub returned an invalid account response: {error}"
             ))
@@ -911,13 +1064,13 @@ impl NativeStudioHost {
             "avatarURL": user["avatar_url"].as_str().unwrap_or(""),
         });
         self.lock_state()
-            .credentials
+            .provider_state
             .insert("github.account".to_string(), account.to_string());
         encode(&json!({"account": account}))
     }
 
     fn account_disconnect(&self) -> Result<Vec<u8>, SystemFailure> {
-        self.lock_state().credentials.remove("github.account");
+        self.lock_state().provider_state.remove("github.account");
         encode(&json!({}))
     }
 
@@ -979,31 +1132,34 @@ impl NativeStudioHost {
             + Send
             + 'static,
     {
-        let (id, interrupt) = {
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let worker_interrupt = Arc::clone(&interrupt);
+        let id = {
             let mut state = self.lock_state();
             if state.remote_operations.len() >= MAX_REMOTE_OPERATIONS {
                 return Err(failed("too many source control operations are active"));
             }
             let id = format!("native-remote-{}", state.next_remote_operation);
             state.next_remote_operation = state.next_remote_operation.saturating_add(1);
-            (id, Arc::new(AtomicBool::new(false)))
+            state.remote_operations.insert(
+                id.clone(),
+                Arc::new(RemoteSession {
+                    events: Mutex::new(receiver),
+                    interrupt,
+                }),
+            );
+            id
         };
-        let (sender, receiver) = mpsc::sync_channel(16);
-        let worker_interrupt = Arc::clone(&interrupt);
-        std::thread::Builder::new()
-            .name(id.clone())
-            .spawn(move || {
-                let result = operation(sender.clone(), worker_interrupt);
-                let _ = sender.send(RemoteEvent::Finished(result));
-            })
-            .map_err(|error| failed(format!("could not start source control worker: {error}")))?;
-        self.lock_state().remote_operations.insert(
-            id.clone(),
-            Arc::new(RemoteSession {
-                events: Mutex::new(receiver),
-                interrupt,
-            }),
-        );
+        if let Err(error) = std::thread::Builder::new().name(id.clone()).spawn(move || {
+            let result = operation(sender.clone(), worker_interrupt);
+            let _ = sender.send(RemoteEvent::Finished(result));
+        }) {
+            self.lock_state().remote_operations.remove(&id);
+            return Err(failed(format!(
+                "could not start source control worker: {error}"
+            )));
+        }
         encode(&json!({"sessionID": id}))
     }
 
@@ -1069,49 +1225,110 @@ impl NativeStudioHost {
                 "repository confirmation does not match the configured origin",
             ));
         }
-        let output = Command::new("gh")
-            .args(["repo", "delete", &expected, "--yes"])
-            .output()
-            .map_err(|error| failed(format!("GitHub CLI repository deletion failed: {error}")))?;
-        if !output.status.success() {
-            return Err(failed(format!(
-                "GitHub repository deletion failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
+        cancellable_command_output(
+            Path::new("gh"),
+            &[
+                OsString::from("repo"),
+                OsString::from("delete"),
+                OsString::from(&expected),
+                OsString::from("--yes"),
+            ],
+            Some(&root),
+            &[],
+            &AtomicBool::new(false),
+        )
+        .map_err(|error| failed(format!("GitHub repository deletion failed: {error}")))?;
         git_run(&root, &["remote", "remove", "origin"])?;
         encode(&json!({}))
     }
 
-    fn credentials_get(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
-        let request: CredentialRequest = decode(payload)?;
-        let value = self.lock_state().credentials.get(&request.Key).cloned();
-        encode(&json!({"value": value.clone().unwrap_or_default(), "present": value.is_some()}))
-    }
-
-    fn credentials_set(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
-        let request: CredentialSetRequest = decode(payload)?;
-        if request.Key.is_empty() || request.Value.is_empty() {
-            return Err(failed("credential key and value are required"));
-        }
-        self.lock_state()
-            .credentials
-            .insert(request.Key, request.Value);
-        encode(&json!({}))
-    }
-
-    fn credentials_delete(&self, payload: &[u8]) -> Result<Vec<u8>, SystemFailure> {
-        let request: CredentialRequest = decode(payload)?;
-        self.lock_state().credentials.remove(&request.Key);
-        encode(&json!({}))
-    }
-
     fn project_path(&self, id: &str) -> Result<PathBuf, SystemFailure> {
-        self.lock_state()
+        let path = self
+            .lock_state()
             .projects
             .get(id)
             .cloned()
-            .ok_or_else(|| failed("project is unavailable; refresh the project center"))
+            .ok_or_else(|| failed("project is unavailable; refresh the project center"))?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| denied("project root changed after it was opened"))?;
+        if canonical != path || !canonical.is_dir() {
+            return Err(denied("project root changed after it was opened"));
+        }
+        Ok(path)
+    }
+
+    fn persist_project_catalog(&self) -> Result<(), SystemFailure> {
+        let state = self.lock_state();
+        let mut paths = state
+            .projects
+            .values()
+            .filter_map(|path| {
+                let canonical = path.canonicalize().ok()?;
+                if canonical.as_path() != path.as_path()
+                    || !canonical.is_dir()
+                    || !canonical.join("vo.mod").is_file()
+                    || canonical.starts_with(&self.workspace)
+                {
+                    return None;
+                }
+                Some(canonical.to_string_lossy().into_owned())
+            })
+            .collect::<Vec<_>>();
+        let last_opened_path = state.last_opened_project.as_ref().and_then(|path| {
+            let canonical = path.canonicalize().ok()?;
+            if canonical.as_path() != path.as_path()
+                || !canonical.is_dir()
+                || !canonical.join("vo.mod").is_file()
+            {
+                return None;
+            }
+            Some(canonical.to_string_lossy().into_owned())
+        });
+        drop(state);
+        paths.sort();
+        paths.dedup();
+        if paths.len() > MAX_PROJECTS {
+            paths.truncate(MAX_PROJECTS);
+        }
+        let encoded = serde_json::to_vec(&NativeProjectCatalog {
+            schema: PROJECT_CATALOG_SCHEMA.to_string(),
+            paths,
+            last_opened_path,
+        })
+        .map_err(|error| {
+            failed(format!(
+                "could not encode the Studio project catalog: {error}"
+            ))
+        })?;
+        if encoded.len() as u64 > PROJECT_CATALOG_MAX_BYTES {
+            return Err(failed("Studio project catalog exceeds its size limit"));
+        }
+        let directory = self.workspace.join(".volang");
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(denied(
+                    "the Studio project catalog directory must be a real workspace directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&directory).map_err(io_failure)?;
+                sync_parent_directory(&directory).map_err(io_failure)?;
+            }
+            Err(error) => return Err(io_failure(error)),
+        }
+        let directory = directory.canonicalize().map_err(io_failure)?;
+        if !directory.starts_with(&self.workspace) || directory == self.workspace {
+            return Err(denied(
+                "the Studio project catalog directory escapes the workspace",
+            ));
+        }
+        let path = directory.join("studio-projects.json");
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(denied("the Studio project catalog file cannot be a link"));
+        }
+        write_file_atomically(&path, &encoded).map_err(io_failure)
     }
 }
 
@@ -1431,21 +1648,6 @@ struct RemoteDeleteRequest {
     Repository: String,
 }
 
-#[allow(non_snake_case)]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CredentialRequest {
-    Key: String,
-}
-
-#[allow(non_snake_case)]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CredentialSetRequest {
-    Key: String,
-    Value: String,
-}
-
 fn decode<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> Result<T, SystemFailure> {
     serde_json::from_slice(payload).map_err(|error| {
         failed(format!(
@@ -1476,6 +1678,74 @@ fn denied(message: impl Into<String>) -> SystemFailure {
 
 fn io_failure(error: std::io::Error) -> SystemFailure {
     failed(error.to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn rename_entry_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let from_parent = fs::File::open(from.parent().unwrap_or_else(|| Path::new(".")))?;
+    let to_parent = fs::File::open(to.parent().unwrap_or_else(|| Path::new(".")))?;
+    let from_name = from
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source has no file name"))?;
+    let to_name = to.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name")
+    })?;
+    rustix::fs::renameat_with(
+        &from_parent,
+        from_name,
+        &to_parent,
+        to_name,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
+))]
+fn rename_entry_noreplace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no atomic no-replace rename primitive",
+    ))
+}
+
+#[cfg(windows)]
+fn rename_entry_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let from = from
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let to = to
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rename_entry_noreplace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no atomic no-replace rename primitive",
+    ))
 }
 
 #[cfg(not(windows))]
@@ -1531,20 +1801,12 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
 
 fn write_file_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("studio-file");
     let permissions = fs::metadata(path)
         .ok()
         .map(|metadata| metadata.permissions());
 
     for attempt in 0..100_u32 {
-        let temporary = parent.join(format!(
-            ".{file_name}.studio-atomic.{}.{}.tmp",
-            process::id(),
-            attempt
-        ));
+        let temporary = parent.join(format!(".studio-atomic.{}.{}.tmp", process::id(), attempt));
         let mut file = match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1575,10 +1837,101 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     ))
 }
 
+fn create_file_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    for attempt in 0..100_u32 {
+        let temporary = parent.join(format!(".studio-create.{}.{}.tmp", process::id(), attempt));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let prepared: io::Result<()> = (|| {
+            file.write_all(contents)?;
+            file.sync_all()?;
+            drop(file);
+            fs::hard_link(&temporary, path)?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&temporary);
+        prepared?;
+        sync_parent_directory(path)?;
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate an atomic Studio create file",
+    ))
+}
+
 fn project_id(path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     format!("native-{:016x}", hasher.finish())
+}
+
+fn load_project_catalog(workspace: &Path) -> (HashMap<String, PathBuf>, Option<PathBuf>) {
+    let directory = workspace.join(".volang");
+    let Ok(directory_metadata) = fs::symlink_metadata(&directory) else {
+        return (HashMap::new(), None);
+    };
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return (HashMap::new(), None);
+    }
+    let Ok(directory) = directory.canonicalize() else {
+        return (HashMap::new(), None);
+    };
+    if !directory.starts_with(workspace) || directory == workspace {
+        return (HashMap::new(), None);
+    }
+    let path = directory.join("studio-projects.json");
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return (HashMap::new(), None);
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > PROJECT_CATALOG_MAX_BYTES
+    {
+        return (HashMap::new(), None);
+    }
+    let Ok(encoded) = fs::read(path) else {
+        return (HashMap::new(), None);
+    };
+    let Ok(catalog) = serde_json::from_slice::<NativeProjectCatalog>(&encoded) else {
+        return (HashMap::new(), None);
+    };
+    if (catalog.schema != PROJECT_CATALOG_SCHEMA && catalog.schema != PROJECT_CATALOG_LEGACY_SCHEMA)
+        || catalog.paths.len() > MAX_PROJECTS
+    {
+        return (HashMap::new(), None);
+    }
+    let last_opened_project = catalog.last_opened_path.and_then(|value| {
+        let authored = PathBuf::from(value);
+        let path = authored.canonicalize().ok()?;
+        if path != authored || !path.is_dir() || !path.join("vo.mod").is_file() {
+            return None;
+        }
+        Some(path)
+    });
+    let mut projects = HashMap::with_capacity(catalog.paths.len());
+    for value in catalog.paths {
+        let authored = PathBuf::from(value);
+        let Ok(path) = authored.canonicalize() else {
+            continue;
+        };
+        if path != authored || !path.is_dir() || !path.join("vo.mod").is_file() {
+            continue;
+        }
+        if path.starts_with(workspace) {
+            continue;
+        }
+        projects.insert(project_id(&path), path);
+    }
+    (projects, last_opened_project)
 }
 
 fn validate_project_name(name: &str) -> Result<(), SystemFailure> {
@@ -1592,7 +1945,45 @@ fn validate_project_name(name: &str) -> Result<(), SystemFailure> {
             "project name may contain letters, numbers, dash, and underscore",
         ));
     }
+    if reserved_portable_name(name) {
+        return Err(failed(
+            "project name must be available on every desktop platform",
+        ));
+    }
     Ok(())
+}
+
+fn reserved_portable_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default();
+    if ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
+        && matches!(bytes[3], b'1'..=b'9')
+}
+
+fn validate_portable_relative(path: &str) -> Result<PathBuf, SystemFailure> {
+    let normalized = validate_relative(path)?;
+    for segment in path.split('/') {
+        if segment.len() > 255
+            || segment.ends_with('.')
+            || segment.ends_with(' ')
+            || segment.bytes().any(|byte| {
+                byte < 32 || matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*')
+            })
+            || reserved_portable_name(segment)
+        {
+            return Err(denied(
+                "file path must be portable across Studio desktop platforms",
+            ));
+        }
+    }
+    Ok(normalized)
 }
 
 fn validate_starter_files(
@@ -1605,7 +1996,7 @@ fn validate_starter_files(
     let mut paths = HashSet::with_capacity(files.len());
     let mut validated = Vec::with_capacity(files.len());
     for file in files {
-        let relative = validate_relative(&file.Path)?;
+        let relative = validate_portable_relative(&file.Path)?;
         if matches!(file.Path.as_str(), "vo.mod" | "vo.lock") {
             return Err(denied(
                 "starter cannot replace the project manifest or lock",
@@ -1634,6 +2025,9 @@ fn validate_starter_files(
 }
 
 fn validate_relative(path: &str) -> Result<PathBuf, SystemFailure> {
+    if path.len() > 4096 || path.contains('\\') {
+        return Err(denied("file path must be normalized and project-relative"));
+    }
     let path = PathBuf::from(path);
     if path.as_os_str().is_empty()
         || path.is_absolute()
@@ -1642,6 +2036,13 @@ fn validate_relative(path: &str) -> Result<PathBuf, SystemFailure> {
             .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(denied("file path must be normalized and project-relative"));
+    }
+    if path
+        .components()
+        .next()
+        .is_some_and(|component| matches!(component, Component::Normal(name) if name == ".volang"))
+    {
+        return Err(denied("the .volang directory is reserved by Studio"));
     }
     Ok(path)
 }
@@ -1664,13 +2065,32 @@ fn resolve_existing_entry(root: &Path, relative: &str) -> Result<PathBuf, System
 }
 
 fn resolve_write_file(root: &Path, relative: &str) -> Result<PathBuf, SystemFailure> {
-    let path = root.join(validate_relative(relative)?);
-    let parent = path.parent().ok_or_else(|| denied("file has no parent"))?;
-    let parent = parent.canonicalize().map_err(io_failure)?;
-    if !parent.starts_with(root) {
-        return Err(denied("file path escapes the project root"));
+    let relative = validate_relative(relative)?;
+    let file_name = relative
+        .file_name()
+        .ok_or_else(|| denied("file has no name"))?;
+    let mut parent = root.to_path_buf();
+    if let Some(relative_parent) = relative.parent() {
+        for component in relative_parent.components() {
+            let Component::Normal(name) = component else {
+                return Err(denied("file path must be normalized and project-relative"));
+            };
+            let candidate = parent.join(name);
+            let canonical = match candidate.canonicalize() {
+                Ok(canonical) => canonical,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir(&candidate).map_err(io_failure)?;
+                    candidate.canonicalize().map_err(io_failure)?
+                }
+                Err(error) => return Err(io_failure(error)),
+            };
+            if !canonical.starts_with(root) || !canonical.is_dir() {
+                return Err(denied("file path escapes the project root"));
+            }
+            parent = canonical;
+        }
     }
-    Ok(path)
+    Ok(parent.join(file_name))
 }
 
 fn collect_files(
@@ -1684,6 +2104,10 @@ fn collect_files(
     }
     for entry in fs::read_dir(directory).map_err(io_failure)? {
         let entry = entry.map_err(io_failure)?;
+        let file_type = entry.file_type().map_err(io_failure)?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if matches!(
@@ -1696,7 +2120,7 @@ fn collect_files(
             .strip_prefix(root)
             .map_err(|_| denied("project file escaped its root"))?;
         let relative = relative.to_string_lossy().replace('\\', "/");
-        if path.is_dir() {
+        if file_type.is_dir() {
             files.push(json!({
                 "path": relative,
                 "name": name,
@@ -1705,7 +2129,7 @@ fn collect_files(
                 "modifiedUnixMillis": 0,
             }));
             collect_files(root, &path, depth + 1, files)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             let kind = if matches!(name.as_str(), "vo.mod" | "vo.lock") {
                 2
             } else if name.ends_with(".md") {
@@ -1915,15 +2339,19 @@ fn cancellable_git_output(
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, SystemFailure> {
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(root)
-        .output()
-        .map_err(io_failure)?;
-    if !output.status.success() {
-        return Err(failed(String::from_utf8_lossy(&output.stderr).trim()));
+    let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+    let output = cancellable_command_output(
+        Path::new("git"),
+        &arguments,
+        Some(root),
+        &[],
+        &AtomicBool::new(false),
+    )
+    .map_err(failed)?;
+    if output.ends_with("\n[output truncated]") {
+        return Err(failed("git output exceeds the Studio limit"));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output)
 }
 
 fn git_output_bounded(
@@ -1931,16 +2359,21 @@ fn git_output_bounded(
     arguments: &[&str],
     maximum: usize,
 ) -> Result<(String, bool), SystemFailure> {
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(root)
-        .output()
-        .map_err(io_failure)?;
-    if !output.status.success() {
-        return Err(failed(String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    let truncated = output.stdout.len() > maximum;
-    let bytes = &output.stdout[..output.stdout.len().min(maximum)];
+    let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+    let output = cancellable_command_output(
+        Path::new("git"),
+        &arguments,
+        Some(root),
+        &[],
+        &AtomicBool::new(false),
+    )
+    .map_err(failed)?;
+    let command_truncated = output.ends_with("\n[output truncated]");
+    let output = output
+        .strip_suffix("\n[output truncated]")
+        .unwrap_or(&output);
+    let truncated = command_truncated || output.len() > maximum;
+    let bytes = &output.as_bytes()[..output.len().min(maximum)];
     Ok((String::from_utf8_lossy(bytes).trim().to_string(), truncated))
 }
 
@@ -2385,6 +2818,60 @@ mod tests {
             .contains("studio-atomic")));
         invoke(
             &host,
+            "files.create",
+            json!({"projectID": id, "path": "src/generated.vo", "text": "package generated\n"}),
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("src/generated.vo")).unwrap(),
+            "package generated\n"
+        );
+        let duplicate = host.invoke(&HostInvocation {
+            service: PROTOCOL_VERSION.to_string(),
+            operation: "files.create".to_string(),
+            payload: serde_json::to_vec(&json!({
+                "projectID": id,
+                "path": "src/generated.vo",
+                "text": "truncated"
+            }))
+            .unwrap(),
+        });
+        assert!(duplicate.is_err());
+        assert_eq!(
+            fs::read_to_string(project.join("src/generated.vo")).unwrap(),
+            "package generated\n"
+        );
+        invoke(
+            &host,
+            "files.rename",
+            json!({"projectID": id, "from": "src/generated.vo", "to": "internal/generated/renamed.vo"}),
+        );
+        assert!(!project.join("src/generated.vo").exists());
+        assert_eq!(
+            fs::read_to_string(project.join("internal/generated/renamed.vo")).unwrap(),
+            "package generated\n"
+        );
+        fs::write(project.join("occupied.vo"), "package occupied\n").unwrap();
+        let occupied = host.invoke(&HostInvocation {
+            service: PROTOCOL_VERSION.to_string(),
+            operation: "files.rename".to_string(),
+            payload: serde_json::to_vec(&json!({
+                "projectID": id,
+                "from": "internal/generated/renamed.vo",
+                "to": "occupied.vo"
+            }))
+            .unwrap(),
+        });
+        assert!(occupied.is_err());
+        assert_eq!(
+            fs::read_to_string(project.join("occupied.vo")).unwrap(),
+            "package occupied\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("internal/generated/renamed.vo")).unwrap(),
+            "package generated\n"
+        );
+        invoke(
+            &host,
             "files.rename",
             json!({"projectID": id, "from": "main.vo", "to": "renamed.vo"}),
         );
@@ -2412,7 +2899,116 @@ mod tests {
                 ..
             })
         ));
+        let internal = host.invoke(&HostInvocation {
+            service: PROTOCOL_VERSION.to_string(),
+            operation: "files.write".to_string(),
+            payload: serde_json::to_vec(&json!({
+                "projectID": id,
+                "path": ".volang/private.json",
+                "text": "hidden"
+            }))
+            .unwrap(),
+        });
+        assert!(matches!(
+            internal,
+            Err(SystemFailure {
+                kind: SystemFailureKind::Denied,
+                ..
+            })
+        ));
+        #[cfg(unix)]
+        {
+            let external = temp_workspace();
+            fs::write(external.join("sentinel"), "outside").unwrap();
+            let original = workspace.join("sample-original");
+            fs::rename(&project, &original).unwrap();
+            std::os::unix::fs::symlink(&external, &project).unwrap();
+            let replaced_root = host.invoke(&HostInvocation {
+                service: PROTOCOL_VERSION.to_string(),
+                operation: "files.write".to_string(),
+                payload: serde_json::to_vec(&json!({
+                    "projectID": id,
+                    "path": "outside.vo",
+                    "text": "must stay inside the project"
+                }))
+                .unwrap(),
+            });
+            assert!(matches!(
+                replaced_root,
+                Err(SystemFailure {
+                    kind: SystemFailureKind::Denied,
+                    ..
+                })
+            ));
+            assert!(!external.join("outside.vo").exists());
+            fs::remove_file(&project).unwrap();
+            fs::rename(&original, &project).unwrap();
+            fs::remove_dir_all(external).unwrap();
+        }
         fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn stopping_a_run_releases_its_capacity_and_credentials_are_not_guest_operations() {
+        let workspace = temp_workspace();
+        let host = NativeStudioHost::open(&workspace).unwrap();
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let interrupt = Arc::new(AtomicBool::new(false));
+        host.lock_state().runs.insert(
+            "native-run-test".to_string(),
+            Arc::new(RunSession {
+                events: Mutex::new(receiver),
+                interrupt: Arc::clone(&interrupt),
+                done: AtomicBool::new(false),
+            }),
+        );
+        invoke(&host, "run.stop", json!({"sessionID": "native-run-test"}));
+        assert!(interrupt.load(Ordering::Acquire));
+        assert!(host.lock_state().runs.is_empty());
+
+        let error = host
+            .invoke(&HostInvocation {
+                service: PROTOCOL_VERSION.to_string(),
+                operation: "credentials.get".to_string(),
+                payload: serde_json::to_vec(&json!({"key": "github.token"})).unwrap(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, SystemFailureKind::Unsupported);
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_catalog_rejects_a_linked_internal_directory() {
+        let base = temp_workspace();
+        let workspace = base.join("workspace");
+        let external = base.join("external");
+        let redirected = base.join("redirected");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&external).unwrap();
+        fs::create_dir(&redirected).unwrap();
+        fs::write(
+            external.join("vo.mod"),
+            "format = 1\nmodule = \"local/external\"\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&redirected, workspace.join(".volang")).unwrap();
+        let host = NativeStudioHost::open(&workspace).unwrap();
+        let result = host.invoke(&HostInvocation {
+            service: PROTOCOL_VERSION.to_string(),
+            operation: "projects.open".to_string(),
+            payload: serde_json::to_vec(&json!({"root": external})).unwrap(),
+        });
+        assert!(matches!(
+            result,
+            Err(SystemFailure {
+                kind: SystemFailureKind::Denied,
+                ..
+            })
+        ));
+        assert!(!redirected.join("studio-projects.json").exists());
+        assert!(host.lock_state().projects.is_empty());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -2485,6 +3081,30 @@ mod tests {
         ));
         assert!(!workspace.join("escaped-starter").exists());
 
+        let reserved_name = host.invoke(&HostInvocation {
+            service: PROTOCOL_VERSION.to_string(),
+            operation: "projects.create".to_string(),
+            payload: serde_json::to_vec(&json!({"name": "CON", "root": "", "template": "ui"}))
+                .unwrap(),
+        });
+        assert!(reserved_name.is_err());
+        let reserved_file = host.invoke(&HostInvocation {
+            service: PROTOCOL_VERSION.to_string(),
+            operation: "projects.create".to_string(),
+            payload: serde_json::to_vec(&json!({
+                "name": "reserved-file",
+                "root": "",
+                "template": "studio-example/invalid",
+                "files": [
+                    {"path": "main.vo", "text": "package main\n"},
+                    {"path": "docs/AUX.txt", "text": "reserved"}
+                ]
+            }))
+            .unwrap(),
+        });
+        assert!(reserved_file.is_err());
+        assert!(!workspace.join("reserved-file").exists());
+
         let occupied = workspace.join("occupied");
         fs::create_dir(&occupied).unwrap();
         fs::write(occupied.join("sentinel"), "keep").unwrap();
@@ -2514,6 +3134,8 @@ mod tests {
         )
         .unwrap();
         fs::write(external.join("main.vo"), "package main\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&external, workspace.join("linked-external")).unwrap();
         let host = NativeStudioHost::open(&workspace).unwrap();
 
         let opened = invoke(
@@ -2529,6 +3151,18 @@ mod tests {
         );
         let listed = invoke(&host, "projects.list", json!({}));
         assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+        let project_id = listed["projects"][0]["id"].as_str().unwrap();
+        invoke(&host, "projects.activate", json!({"projectID": project_id}));
+
+        drop(host);
+        let host = NativeStudioHost::open(&workspace).unwrap();
+        let reopened = invoke(&host, "projects.list", json!({}));
+        assert_eq!(reopened["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(reopened["projects"][0]["lastOpenedUnixMillis"], 1);
+        assert_eq!(
+            PathBuf::from(reopened["projects"][0]["root"].as_str().unwrap()),
+            external.canonicalize().unwrap()
+        );
 
         let incomplete = external_parent.join("incomplete");
         fs::create_dir(&incomplete).unwrap();
@@ -2551,6 +3185,15 @@ mod tests {
             json!({"projectID": opened["project"]["id"]}),
         );
         assert!(external.join("main.vo").is_file());
+        assert_eq!(
+            invoke(&host, "projects.list", json!({}))["projects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        drop(host);
+        let host = NativeStudioHost::open(&workspace).unwrap();
         assert_eq!(
             invoke(&host, "projects.list", json!({}))["projects"]
                 .as_array()

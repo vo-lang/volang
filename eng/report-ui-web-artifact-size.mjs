@@ -35,12 +35,14 @@ const brotliBytes = brotliCompressSync(artifact, {
   params: { [constants.BROTLI_PARAM_QUALITY]: 11 },
 }).byteLength;
 const brotliLimit = byteLimit("brotli-limit");
+const gzipLimit = options.has("gzip-limit") ? byteLimit("gzip-limit") : null;
 const report = {
   schema: "volang.ui.web-artifact-size.v1",
   label: required("label"),
   artifact: artifactPath,
   raw_bytes: artifact.byteLength,
   gzip_bytes: gzipBytes,
+  gzip_limit_bytes: gzipLimit,
   brotli_bytes: brotliBytes,
   brotli_limit_bytes: brotliLimit,
   remaining_bytes: brotliLimit - brotliBytes,
@@ -52,4 +54,7 @@ if (output) writeFileSync(output, encoded);
 process.stdout.write(encoded);
 if (brotliBytes > brotliLimit) {
   throw new Error(`${report.label} Brotli image ${brotliBytes} exceeds ${brotliLimit}`);
+}
+if (gzipLimit !== null && gzipBytes > gzipLimit) {
+  throw new Error(`${report.label} gzip image ${gzipBytes} exceeds ${gzipLimit}`);
 }

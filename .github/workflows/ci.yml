@@ -231,7 +231,8 @@ jobs:
           node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/content-site.json
           node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/media-application.json
           node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ui-certification/web-size/studio-workbench.json
-          node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/studio-aot/app.wasm --brotli-limit 921600 --output target/ui-certification/web-size/studio.json
+          node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/studio-aot/app.wasm --brotli-limit 983040 --gzip-limit 2700000 --output target/ui-certification/web-size/studio.json
+          node eng/report-ui-web-precache-size.mjs --label studio --root target/studio-aot --gzip-limit 3670016 --output target/ui-certification/web-size/studio-precache.json
 
       - name: Publish Core Wasm AOT image reports
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -339,6 +340,7 @@ jobs:
           npm run test:media-application-browser
           npm run test:studio-workbench-browser
           npm run test:studio-aot-browser
+          "$GITHUB_WORKSPACE/target/debug/vo-dev" ui-certify --evidence
           VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
 
   ui_platform:

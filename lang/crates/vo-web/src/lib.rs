@@ -114,8 +114,10 @@ pub use browser_runtime_dev::{
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]
 pub use compile::{
-    compile_entry_with_vfs, compile_entry_with_vfs_with_options, compile_ephemeral_entry_with_vfs,
-    compile_project, compile_project_auto_install, compile_ready_entry_with_vfs,
+    analyze_project, analyze_project_auto_install, check_entry_with_vfs_with_options,
+    check_ready_entry_with_vfs, compile_entry_with_vfs, compile_entry_with_vfs_with_options,
+    compile_ephemeral_entry_with_vfs, compile_project, compile_project_auto_install,
+    compile_ready_entry_with_vfs,
 };
 
 #[cfg(all(feature = "compiler", target_arch = "wasm32"))]

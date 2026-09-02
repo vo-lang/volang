@@ -26,6 +26,10 @@ pub(super) struct CompileInputSnapshot {
 }
 
 impl CompileInputSnapshot {
+    pub(super) fn contains_file(&self, path: &Path) -> bool {
+        self.files.contains_key(&normalize_fs_path(path))
+    }
+
     pub(super) fn remaining_bytes(&self) -> usize {
         MAX_COMPILE_SNAPSHOT_BYTES.saturating_sub(self.total_bytes)
     }

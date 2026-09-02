@@ -685,6 +685,7 @@ func lineNumberView(model *Model, options Options) ui.View {
 	for _, line := range lines {
 		value := ui.Text(strconv.Itoa(line.Number))
 		value = ui.Height(value, options.LineHeight)
+		value = ui.MinHeight(value, options.LineHeight)
 		value = ui.Foreground(value, 0xff8490a7)
 		value = ui.Key(value, "gutter-" + strconv.Itoa(line.Number))
 		values = append(values, value)

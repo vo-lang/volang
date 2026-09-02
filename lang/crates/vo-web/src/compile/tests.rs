@@ -12,6 +12,38 @@ const LOCALDEP_MOD: &str =
     "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
 const LOCALDEP_TRANSITIVE_MOD: &str = "format = 1\nmodule = \"github.com/acme/localdep\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"github.com/acme/core\" = \"0.1.0\"\n";
 
+#[test]
+fn package_analysis_does_not_require_an_executable_entry() {
+    let mut local = MemoryFs::new();
+    local.add_file(
+        "vo.mod",
+        "format = 1\nmodule = \"local/browser-analysis\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    );
+    local.add_file(
+        "pkg/helper.vo",
+        "package pkg\nfunc Value() int { return 42 }\n",
+    );
+
+    check_entry_with_external_fs_with_options(
+        "pkg/helper.vo",
+        local.clone(),
+        build_stdlib_fs(),
+        MemoryFs::new(),
+        &ProjectContextOptions::default(),
+    )
+    .expect("library package must pass analysis without main");
+
+    let error = compile_entry_with_external_fs_with_options(
+        "pkg/helper.vo",
+        local,
+        build_stdlib_fs(),
+        MemoryFs::new(),
+        &ProjectContextOptions::default(),
+    )
+    .expect_err("library package must remain unavailable as an executable entry");
+    assert!(error.contains("package must be named `main`"));
+}
+
 fn registry_module_fixture(path: &str) -> (LockedModule, String, String, String, Vec<u8>) {
     let module = ModulePath::parse(path).unwrap();
     let version = ExactVersion::parse("0.1.0").unwrap();

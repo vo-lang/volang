@@ -22,7 +22,7 @@ func New() *Service {
 func (service *Service) Services() protocol.Services {
 	return protocol.Services{
 		Host: service, Files: service, Language: service, Compiler: service, Runner: service,
-		Preview: service, Share: service, Account: service, Remote: service, Credentials: service,
+		Preview: service, Share: service, Account: service, Remote: service,
 	}
 }
 
@@ -68,6 +68,10 @@ func (service *Service) Projects(ctx context.Context) ([]domain.Project, error) 
 	var response projectsResponse
 	err := call(ctx, "projects.list", struct{}{}, &response)
 	return response.Projects, err
+}
+
+func (service *Service) ActivateProject(ctx context.Context, id domain.ProjectID) error {
+	return call(ctx, "projects.activate", projectRequest{ProjectID: id}, nil)
 }
 
 type projectResponse struct {
@@ -136,6 +140,10 @@ func (service *Service) ReadFile(ctx context.Context, id domain.ProjectID, path 
 	var response readFileResponse
 	err := call(ctx, "files.read", readFileRequest{ProjectID: id, Path: path}, &response)
 	return response.Text, err
+}
+
+func (service *Service) CreateFile(ctx context.Context, id domain.ProjectID, path string, text string) error {
+	return call(ctx, "files.create", writeFileRequest{ProjectID: id, Path: path, Text: text}, nil)
 }
 
 type writeFileRequest struct {
@@ -230,9 +238,12 @@ func (service *Service) Run(ctx context.Context, request protocol.RunRequest) (<
 	}
 	output := make(chan domain.RunEvent, MaxRunBatch)
 	go func() {
+		stop := func() {
+			_ = call(context.Background(), "run.stop", runStopRequest{SessionID: started.SessionID}, nil)
+		}
 		for {
 			if ctx.Err() != nil {
-				_ = call(context.Background(), "run.stop", runStopRequest{SessionID: started.SessionID}, nil)
+				stop()
 				close(output)
 				return
 			}
@@ -240,7 +251,9 @@ func (service *Service) Run(ctx context.Context, request protocol.RunRequest) (<
 			if err := call(ctx, "run.next", runNextRequest{
 				SessionID: started.SessionID, Maximum: MaxRunBatch,
 			}, &response); err != nil {
-				if ctx.Err() == nil {
+				if ctx.Err() != nil {
+					stop()
+				} else {
 					publish(ctx, output, domain.RunEvent{Kind: domain.RunStderr, Text: err.Error()})
 				}
 				close(output)
@@ -248,6 +261,7 @@ func (service *Service) Run(ctx context.Context, request protocol.RunRequest) (<
 			}
 			for _, event := range response.Events {
 				if !publish(ctx, output, event) {
+					stop()
 					close(output)
 					return
 				}
@@ -403,32 +417,4 @@ type remoteDeleteRequest struct {
 
 func (service *Service) DeleteRepository(ctx context.Context, id domain.ProjectID, repository string) error {
 	return call(ctx, "remote.delete", remoteDeleteRequest{ProjectID: id, Repository: repository}, nil)
-}
-
-type credentialRequest struct {
-	Key string
-}
-
-type credentialSetRequest struct {
-	Key string
-	Value string
-}
-
-type credentialResponse struct {
-	Value string
-	Present bool
-}
-
-func (service *Service) Get(ctx context.Context, key string) (string, bool, error) {
-	var response credentialResponse
-	err := call(ctx, "credentials.get", credentialRequest{Key: key}, &response)
-	return response.Value, response.Present, err
-}
-
-func (service *Service) Set(ctx context.Context, key string, value string) error {
-	return call(ctx, "credentials.set", credentialSetRequest{Key: key, Value: value}, nil)
-}
-
-func (service *Service) Delete(ctx context.Context, key string) error {
-	return call(ctx, "credentials.delete", credentialRequest{Key: key}, nil)
 }

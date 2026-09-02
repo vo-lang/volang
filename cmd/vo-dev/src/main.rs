@@ -103,7 +103,7 @@ fn print_usage() {
   vo-dev first-party run <repo> <subdir> -- <command...>
   vo-dev first-party run-workspace <repo> <workspace> -- <command...>
   vo-dev first-party release-verify <repo>
-  vo-dev ui-certify --check|--json
+  vo-dev ui-certify --check|--json|--evidence
   vo-dev test lint --suite lang [--strict]
   vo-dev test fmt --suite lang
   vo-dev test stats --suite lang [--format text|json]

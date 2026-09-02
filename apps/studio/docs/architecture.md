@@ -63,6 +63,11 @@ and every listener still matching the committed tree retain their original
 monotonic sequence. The renderer continues to reject forged epochs, replayed
 sequences, missing targets, and mismatched listener identities.
 
-`volang.studio.host.v1` uses UTF-8 JSON payloads with lowerCamel field names.
+`volang.studio.host.v3` uses UTF-8 JSON payloads with lowerCamel field names.
+Version 3 adds explicit active-project persistence so development and release
+hosts can restore the user's latest workspace without coupling the application
+to browser storage or desktop filesystem details.
 Every request is bounded by the generic UI system limits. Responses may evolve
 by adding fields; changing or removing a field requires a new protocol version.
+Version 2 adds atomic file creation and keeps account credentials entirely
+outside the guest-callable capability surface.

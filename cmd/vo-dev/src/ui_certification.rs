@@ -80,6 +80,29 @@ const QUALITY_TARGETS: [&str; 10] = [
     "macos",
     "windows",
 ];
+const STUDIO_TARGETS: [&str; 2] = ["web", "desktop"];
+const STUDIO_CAPABILITIES: [&str; 20] = [
+    "home",
+    "starter-gallery",
+    "starter-edit-run",
+    "project-create",
+    "project-open-import-recent",
+    "project-search",
+    "project-rename-delete",
+    "project-share",
+    "github-account",
+    "remote-status",
+    "remote-diff-conflicts",
+    "remote-pull-push",
+    "remote-delete-authority",
+    "workbench",
+    "responsive-workbench",
+    "diagnostic-navigation",
+    "command-palette",
+    "independent-runner",
+    "documentation-center",
+    "release-backends",
+];
 const PRODUCT_DOCUMENTS: [&str; 8] = [
     "ui/docs/getting-started.md",
     "ui/docs/authoring-guide.md",
@@ -402,6 +425,24 @@ struct QualitySuite {
     evidence: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StudioParityFile {
+    schema: String,
+    baseline: String,
+    capability: Vec<StudioCapability>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StudioCapability {
+    id: String,
+    status: String,
+    targets: Vec<String>,
+    acceptance: String,
+    evidence: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct CertificationSummary<'a> {
     schema_version: u32,
@@ -422,18 +463,25 @@ struct CertificationSummary<'a> {
     uikit_market_status: &'a str,
     uikit_component_count: usize,
     uikit_parity_gap_count: usize,
+    studio_capability_count: usize,
     status: &'static str,
 }
 
 pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
-    let json = match args.as_slice() {
-        [] => false,
-        [arg] if arg == "--check" => false,
-        [arg] if arg == "--json" => true,
-        _ => bail!("usage: vo-dev ui-certify --check|--json"),
+    let (json, require_generated_evidence) = match args.as_slice() {
+        [] => (false, false),
+        [arg] if arg == "--check" => (false, false),
+        [arg] if arg == "--json" => (true, false),
+        [arg] if arg == "--evidence" => (false, true),
+        _ => bail!("usage: vo-dev ui-certify --check|--json|--evidence"),
     };
-    let (certification, roadmap, product_roadmap, capabilities, delivery) =
+    let (certification, roadmap, product_roadmap, capabilities, delivery, studio) =
         load_and_validate(root)?;
+    let verified_evidence = if require_generated_evidence {
+        validate_generated_evidence_artifacts(root)?
+    } else {
+        0
+    };
     let uikit = load_uikit_catalog(root, &product_roadmap)?;
     let stable_capability_count = capabilities
         .capability
@@ -459,6 +507,7 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
         uikit_market_status: &uikit.market_baseline.status,
         uikit_component_count: uikit.component.len(),
         uikit_parity_gap_count: uikit.parity_gap.len(),
+        studio_capability_count: studio.capability.len(),
         status: if product_roadmap.status == "complete"
             && uikit.market_baseline.status == "complete"
         {
@@ -471,7 +520,7 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
         println!("{}", serde_json::to_string(&summary)?);
     } else {
         println!(
-            "{} {}: {} ({} milestones, {} foundation gates, {} protocols); product {} {} ({} domains, {} capabilities, {} stable, active {}, {} contract probes, {} showcases, {} product gates); UIKit market parity {} ({} implemented, {} governed gaps)",
+            "{} {}: {} ({} milestones, {} foundation gates, {} protocols); product {} {} ({} domains, {} capabilities, {} stable, active {}, {} contract probes, {} showcases, {} product gates); UIKit market parity {} ({} implemented, {} governed gaps); Studio parity {} capabilities",
             summary.product,
             summary.framework_version,
             summary.status,
@@ -490,13 +539,17 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
             summary.uikit_market_status,
             summary.uikit_component_count,
             summary.uikit_parity_gap_count,
+            summary.studio_capability_count,
         );
+        if require_generated_evidence {
+            println!("verified {verified_evidence} generated evidence reports");
+        }
     }
     Ok(())
 }
 
 pub(crate) fn certification_status(root: &Path) -> Result<&'static str> {
-    let (_, _, product_roadmap, _, _) = load_and_validate(root)?;
+    let (_, _, product_roadmap, _, _, _) = load_and_validate(root)?;
     let uikit = load_uikit_catalog(root, &product_roadmap)?;
     Ok(
         if product_roadmap.status == "complete" && uikit.market_baseline.status == "complete" {
@@ -522,6 +575,7 @@ fn load_and_validate(
     ProductRoadmapFile,
     CapabilityCatalogFile,
     DeliveryPlanFile,
+    StudioParityFile,
 )> {
     let certification_path = root.join("ui/certification.toml");
     let certification_text = fs::read_to_string(&certification_path)
@@ -569,6 +623,7 @@ fn load_and_validate(
     validate_module_profiles(root, &certification)?;
     validate_authoring_assets(root, &certification)?;
     validate_quality_matrix(root, &certification)?;
+    let studio = load_and_validate_studio_parity(root)?;
     validate_product_certification(root, &product_roadmap)?;
     validate_workspace_version(root, &certification.framework_version)?;
     Ok((
@@ -577,6 +632,7 @@ fn load_and_validate(
         product_roadmap,
         capabilities,
         delivery,
+        studio,
     ))
 }
 
@@ -871,6 +927,153 @@ fn validate_quality_matrix(root: &Path, certification: &CertificationFile) -> Re
         }
     }
     Ok(())
+}
+
+fn load_and_validate_studio_parity(root: &Path) -> Result<StudioParityFile> {
+    let product_path = root.join("apps/studio/product.toml");
+    let product_text = fs::read_to_string(&product_path)
+        .with_context(|| format!("could not read {}", product_path.display()))?;
+    let product: toml::Value = toml::from_str(&product_text)
+        .with_context(|| format!("could not parse {}", product_path.display()))?;
+    let matrix_relative = product
+        .get("parity")
+        .and_then(|value| value.get("matrix"))
+        .and_then(toml::Value::as_str)
+        .context("Studio product parity matrix is missing")?;
+    if !Path::new(matrix_relative)
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!("Studio product parity matrix must be relative to apps/studio");
+    }
+    let matrix_path = root.join("apps/studio").join(matrix_relative);
+    let matrix_text = fs::read_to_string(&matrix_path)
+        .with_context(|| format!("could not read {}", matrix_path.display()))?;
+    let matrix: StudioParityFile = toml::from_str(&matrix_text)
+        .with_context(|| format!("could not parse {}", matrix_path.display()))?;
+    if matrix.schema != "volang.studio.product-parity.v1" {
+        bail!("Studio product parity schema is invalid");
+    }
+    validate_text("Studio product parity baseline", &matrix.baseline)?;
+    let expected = STUDIO_CAPABILITIES.map(str::to_string);
+    validate_required_set(
+        "Studio product capability",
+        &expected,
+        matrix
+            .capability
+            .iter()
+            .map(|capability| capability.id.as_str()),
+    )?;
+    let targets = STUDIO_TARGETS.into_iter().collect::<BTreeSet<_>>();
+    for capability in &matrix.capability {
+        validate_token("Studio capability id", &capability.id)?;
+        if capability.status != "implemented" {
+            bail!(
+                "Studio capability {} remains {} in a complete product matrix",
+                capability.id,
+                capability.status
+            );
+        }
+        validate_text("Studio capability acceptance", &capability.acceptance)?;
+        validate_unique_texts("Studio capability target", &capability.targets)?;
+        validate_unique_texts("Studio capability evidence", &capability.evidence)?;
+        for target in &capability.targets {
+            if !targets.contains(target.as_str()) {
+                bail!(
+                    "Studio capability {} has unknown target {target}",
+                    capability.id
+                );
+            }
+        }
+        for evidence in &capability.evidence {
+            validate_evidence_reference(
+                root,
+                evidence,
+                &format!("Studio capability {}", capability.id),
+            )?;
+        }
+    }
+    Ok(matrix)
+}
+
+fn collect_generated_evidence(value: &toml::Value, references: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::String(value) if value.starts_with(GENERATED_EVIDENCE_PREFIX) => {
+            references.insert(value.clone());
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                collect_generated_evidence(value, references);
+            }
+        }
+        toml::Value::Table(values) => {
+            for value in values.values() {
+                collect_generated_evidence(value, references);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_generated_evidence_artifacts(root: &Path) -> Result<usize> {
+    let mut references = BTreeSet::new();
+    for relative in [
+        "ui/certification.toml",
+        "ui/roadmap.toml",
+        "ui/product-roadmap.toml",
+        "ui/capabilities.toml",
+        "ui/delivery.toml",
+        "ui/kit/catalog.toml",
+        "ui/quality-matrix.toml",
+        "apps/studio/product-parity.toml",
+    ] {
+        let path = root.join(relative);
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        let value: toml::Value =
+            toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))?;
+        collect_generated_evidence(&value, &mut references);
+    }
+    if references.is_empty() {
+        bail!("UI certification declares no generated evidence reports");
+    }
+    for reference in &references {
+        validate_evidence_reference(root, reference, "generated evidence gate")?;
+        let relative = reference
+            .strip_prefix(GENERATED_EVIDENCE_PREFIX)
+            .expect("generated reference was collected by prefix");
+        let path = checked_repo_path(root, relative, "generated evidence report")?;
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("generated evidence is missing: {}", path.display()))?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 * 1024 {
+            bail!(
+                "generated evidence has invalid size or type: {}",
+                path.display()
+            );
+        }
+        let bytes = fs::read(&path)
+            .with_context(|| format!("could not read generated evidence {}", path.display()))?;
+        let report: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("could not parse generated evidence {}", path.display()))?;
+        let object = report
+            .as_object()
+            .with_context(|| format!("generated evidence must be an object: {}", path.display()))?;
+        if let Some(passed) = object.get("passed") {
+            if passed.as_bool() != Some(true) {
+                bail!("generated evidence did not pass: {}", path.display());
+            }
+        } else if object
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            bail!(
+                "generated evidence needs passed=true or a schema: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(references.len())
 }
 
 fn validate_certification(root: &Path, certification: &CertificationFile) -> Result<()> {

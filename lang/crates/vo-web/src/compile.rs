@@ -420,11 +420,11 @@ fn prepare_ephemeral_entry_input(
     })
 }
 
-fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
+fn analyze_with_package_resolver<R: vo_analysis::vfs::Resolver>(
     input: PreparedCompileInput,
     package_resolver: R,
     ready_modules: &[ReadyModule],
-) -> Result<Vec<u8>, WebCompileError> {
+) -> Result<vo_analysis::project::Project, WebCompileError> {
     let current_module = input.project_plan.current_module().map(str::to_string);
     let local_fs = input.local_fs;
     let project = match input.module_authority {
@@ -478,6 +478,15 @@ fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
                 )
             })?;
     }
+    Ok(project)
+}
+
+fn compile_with_package_resolver<R: vo_analysis::vfs::Resolver>(
+    input: PreparedCompileInput,
+    package_resolver: R,
+    ready_modules: &[ReadyModule],
+) -> Result<Vec<u8>, WebCompileError> {
+    let project = analyze_with_package_resolver(input, package_resolver, ready_modules)?;
     let module = vo_codegen::compile_project(&project).map_err(|error| {
         WebCompileError::new(
             WebCompileStage::Codegen,
@@ -573,6 +582,45 @@ fn compile_with_ready_fs_modules<M: FileSystem + Send + Sync>(
     compile_with_package_resolver(input, package_resolver, ready_modules)
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn check_with_fs_modules<M: FileSystem + Send + Sync>(
+    input: PreparedCompileInput,
+    std_fs: MemoryFs,
+    mod_fs: M,
+) -> Result<(), WebCompileError> {
+    validate_materialized_graph(&input, &mod_fs)?;
+    let ready_modules = vo_module::readiness::check_materialized_modules_readiness(
+        &mod_fs,
+        input.project_plan.locked_modules(),
+        WASM_TARGET,
+    )
+    .map_err(|error| {
+        WebCompileError::new(
+            WebCompileStage::Policy,
+            WebCompileErrorKind::Validation,
+            error.to_string(),
+        )
+    })?;
+    check_with_ready_fs_modules(input, std_fs, mod_fs, &ready_modules)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn check_with_ready_fs_modules<M: FileSystem + Send + Sync>(
+    input: PreparedCompileInput,
+    std_fs: MemoryFs,
+    mod_fs: M,
+    ready_modules: &[ReadyModule],
+) -> Result<(), WebCompileError> {
+    let package_resolver = project_package_resolver_with_workspace_sources(
+        std_fs,
+        mod_fs,
+        input.local_fs.clone(),
+        &input.project_plan,
+        input.workspace_sources.clone(),
+    );
+    analyze_with_package_resolver(input, package_resolver, ready_modules).map(|_| ())
+}
+
 fn is_external_import_path(import_path: &str) -> bool {
     matches!(
         vo_module::identity::classify_import(import_path),
@@ -622,6 +670,19 @@ fn compile_entry_with_external_fs_with_options<M: FileSystem + Send + Sync>(
     compile_with_fs_modules(input, std_fs, mod_fs).map_err(|error| error.to_string())
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn check_entry_with_external_fs_with_options<M: FileSystem + Send + Sync>(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+    mod_fs: M,
+    options: &ProjectContextOptions,
+) -> Result<(), String> {
+    let input = prepare_entry_input_with_options(entry, local_fs, options)
+        .map_err(|error| error.to_string())?;
+    check_with_fs_modules(input, std_fs, mod_fs).map_err(|error| error.to_string())
+}
+
 #[cfg(target_arch = "wasm32")]
 fn compile_entry_with_external_fs_and_ready<M: FileSystem + Send + Sync>(
     entry: &str,
@@ -635,6 +696,22 @@ fn compile_entry_with_external_fs_and_ready<M: FileSystem + Send + Sync>(
         .map_err(|error| error.to_string())?;
     validate_materialized_graph(&input, &mod_fs).map_err(|error| error.to_string())?;
     compile_with_ready_fs_modules(input, std_fs, mod_fs, ready_modules)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn check_entry_with_external_fs_and_ready<M: FileSystem + Send + Sync>(
+    entry: &str,
+    local_fs: MemoryFs,
+    std_fs: MemoryFs,
+    mod_fs: M,
+    options: &ProjectContextOptions,
+    ready_modules: &[ReadyModule],
+) -> Result<(), String> {
+    let input = prepare_entry_input_with_options(entry, local_fs, options)
+        .map_err(|error| error.to_string())?;
+    validate_materialized_graph(&input, &mod_fs).map_err(|error| error.to_string())?;
+    check_with_ready_fs_modules(input, std_fs, mod_fs, ready_modules)
         .map_err(|error| error.to_string())
 }
 
@@ -727,6 +804,33 @@ fn snapshot_browser_project(project_root: &str) -> Result<MemoryFs, String> {
     Ok(output)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn snapshot_browser_project_with_overlay(
+    project_root: &str,
+    overlay_path: Option<String>,
+    overlay_text: Option<String>,
+) -> Result<MemoryFs, String> {
+    let mut local = snapshot_browser_project(project_root)?;
+    match (overlay_path, overlay_text) {
+        (None, None) => {}
+        (Some(path), Some(text)) => {
+            let path = PathBuf::from(path);
+            vo_module::schema::portable_relative_path_from_path(&path)
+                .map_err(|error| error.to_string())?;
+            if !local.exists(&path) || local.is_dir(&path) {
+                return Err("browser compiler overlay file is unavailable".to_string());
+            }
+            local.add_file(path, text);
+        }
+        _ => {
+            return Err(
+                "browser compiler overlay path and text must be supplied together".to_string(),
+            )
+        }
+    }
+    Ok(local)
+}
+
 /// Compile a bounded browser-VFS project with one optional unsaved editor
 /// overlay. The immutable snapshot prevents concurrent OPFS persistence from
 /// changing the compiler's view midway through analysis.
@@ -740,27 +844,53 @@ pub fn compile_project(
     overlay_text: Option<String>,
 ) -> CompileResult {
     let result = (|| {
-        let mut local = snapshot_browser_project(project_root)?;
-        match (overlay_path, overlay_text) {
-            (None, None) => {}
-            (Some(path), Some(text)) => {
-                let path = PathBuf::from(path);
-                vo_module::schema::portable_relative_path_from_path(&path)
-                    .map_err(|error| error.to_string())?;
-                local.add_file(path, text);
-            }
-            _ => {
-                return Err(
-                    "browser compiler overlay path and text must be supplied together".to_string(),
-                )
-            }
-        }
+        let local =
+            snapshot_browser_project_with_overlay(project_root, overlay_path, overlay_text)?;
         compile_entry_with_vfs(entry, local, mod_root.as_deref().unwrap_or(""))
     })();
     match result {
         Ok(bytecode) => CompileResult {
             success: true,
             bytecode: Some(bytecode),
+            error_message: None,
+            error_line: None,
+            error_column: None,
+        },
+        Err(message) => CompileResult {
+            success: false,
+            bytecode: None,
+            error_message: Some(message),
+            error_line: None,
+            error_column: None,
+        },
+    }
+}
+
+/// Analyze one package from a bounded browser-VFS project without requiring
+/// an executable entry function or producing bytecode.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "analyzeProject")]
+pub fn analyze_project(
+    entry: &str,
+    project_root: &str,
+    mod_root: Option<String>,
+    overlay_path: Option<String>,
+    overlay_text: Option<String>,
+) -> CompileResult {
+    let result = (|| {
+        let local =
+            snapshot_browser_project_with_overlay(project_root, overlay_path, overlay_text)?;
+        check_entry_with_vfs_with_options(
+            entry,
+            local,
+            mod_root.as_deref().unwrap_or(""),
+            &ProjectContextOptions::default(),
+        )
+    })();
+    match result {
+        Ok(()) => CompileResult {
+            success: true,
+            bytecode: None,
             error_message: None,
             error_line: None,
             error_column: None,
@@ -787,21 +917,8 @@ pub async fn compile_project_auto_install(
     overlay_text: Option<String>,
 ) -> Result<CompileResult, wasm_bindgen::JsValue> {
     let compile = async move {
-        let mut local = snapshot_browser_project(&project_root)?;
-        match (overlay_path, overlay_text) {
-            (None, None) => {}
-            (Some(path), Some(text)) => {
-                let path = PathBuf::from(path);
-                vo_module::schema::portable_relative_path_from_path(&path)
-                    .map_err(|error| error.to_string())?;
-                local.add_file(path, text);
-            }
-            _ => {
-                return Err(
-                    "browser compiler overlay path and text must be supplied together".to_string(),
-                )
-            }
-        }
+        let local =
+            snapshot_browser_project_with_overlay(&project_root, overlay_path, overlay_text)?;
         let package_dir = Path::new(&entry).parent().unwrap_or(Path::new("."));
         let context = vo_module::project::load_project_context(&local, package_dir)
             .map_err(|error| error.to_string())?;
@@ -820,6 +937,51 @@ pub async fn compile_project_auto_install(
         Ok(bytecode) => CompileResult {
             success: true,
             bytecode: Some(bytecode),
+            error_message: None,
+            error_line: None,
+            error_column: None,
+        },
+        Err(message) => CompileResult {
+            success: false,
+            bytecode: None,
+            error_message: Some(message),
+            error_line: None,
+            error_column: None,
+        },
+    })
+}
+
+/// Resolve locked browser dependencies and analyze one package without
+/// applying executable-entry code generation rules.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "analyzeProjectAutoInstall")]
+pub async fn analyze_project_auto_install(
+    entry: String,
+    project_root: String,
+    overlay_path: Option<String>,
+    overlay_text: Option<String>,
+) -> Result<CompileResult, wasm_bindgen::JsValue> {
+    let analysis = async move {
+        let local =
+            snapshot_browser_project_with_overlay(&project_root, overlay_path, overlay_text)?;
+        let package_dir = Path::new(&entry).parent().unwrap_or(Path::new("."));
+        let context = vo_module::project::load_project_context(&local, package_dir)
+            .map_err(|error| error.to_string())?;
+        let ready = vo_module::async_install::ensure_project_plan(
+            &WasmVfs::new(""),
+            &crate::BrowserRegistry,
+            context.project_plan(),
+            vo_target::WASM32_UNKNOWN_UNKNOWN,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        check_ready_entry_with_vfs(&entry, local, "", &ProjectContextOptions::default(), &ready)
+    }
+    .await;
+    Ok(match analysis {
+        Ok(()) => CompileResult {
+            success: true,
+            bytecode: None,
             error_message: None,
             error_line: None,
             error_column: None,
@@ -997,6 +1159,22 @@ pub fn compile_entry_with_vfs_with_options(
     )
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn check_entry_with_vfs_with_options(
+    entry: &str,
+    local_fs: MemoryFs,
+    mod_root: &str,
+    options: &ProjectContextOptions,
+) -> Result<(), String> {
+    check_entry_with_external_fs_with_options(
+        entry,
+        local_fs,
+        build_stdlib_fs(),
+        WasmVfs::new(mod_root),
+        options,
+    )
+}
+
 /// Compile against the exact ready-module generation already authenticated by
 /// the browser installer. The caller must retain those modules together with
 /// the matching project context until this synchronous compile returns.
@@ -1009,6 +1187,24 @@ pub fn compile_ready_entry_with_vfs(
     ready_modules: &[ReadyModule],
 ) -> Result<Vec<u8>, String> {
     compile_entry_with_external_fs_and_ready(
+        entry,
+        local_fs,
+        build_stdlib_fs(),
+        WasmVfs::new(mod_root),
+        options,
+        ready_modules,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn check_ready_entry_with_vfs(
+    entry: &str,
+    local_fs: MemoryFs,
+    mod_root: &str,
+    options: &ProjectContextOptions,
+    ready_modules: &[ReadyModule],
+) -> Result<(), String> {
+    check_entry_with_external_fs_and_ready(
         entry,
         local_fs,
         build_stdlib_fs(),

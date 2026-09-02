@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+const MaxProjects = 512
+const MaxOverlays = 64
+const MaxRunArguments = 256
+const MaxRunArgumentBytes = 64 * 1024
+
 type projectState struct {
 	project domain.Project
 	files map[string]string
@@ -23,7 +28,6 @@ type projectState struct {
 type Host struct {
 	mu sync.RWMutex
 	projects map[domain.ProjectID]*projectState
-	credentials map[string]string
 	account domain.AccountState
 	deletedRemotes map[domain.ProjectID]bool
 	nextProject uint64
@@ -32,7 +36,7 @@ type Host struct {
 
 func New() *Host {
 	host := &Host{
-		projects: make(map[domain.ProjectID]*projectState), credentials: make(map[string]string),
+		projects: make(map[domain.ProjectID]*projectState),
 		deletedRemotes: make(map[domain.ProjectID]bool), nextProject: 2, nextArtifact: 1,
 	}
 	id := domain.ProjectID("welcome")
@@ -53,7 +57,7 @@ func New() *Host {
 func (host *Host) Services() protocol.Services {
 	return protocol.Services{
 		Host: host, Files: host, Language: host, Compiler: host, Runner: host, Preview: host, Share: host,
-		Account: host, Remote: host, Credentials: host,
+		Account: host, Remote: host,
 	}
 }
 
@@ -96,6 +100,22 @@ func (host *Host) Projects(ctx context.Context) ([]domain.Project, error) {
 	return result, nil
 }
 
+func (host *Host) ActivateProject(ctx context.Context, id domain.ProjectID) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(id)
+	if err != nil {
+		return err
+	}
+	state.project.LastOpenedUnixMillis = time.Now().UnixMilli()
+	return nil
+}
+
 func validName(value string) bool {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 128 {
@@ -109,6 +129,49 @@ func validName(value string) bool {
 			return false
 		}
 	}
+	return !reservedPortableName(value)
+}
+
+func reservedPortableName(value string) bool {
+	stem := strings.Split(value, ".")[0]
+	upper := strings.ToUpper(stem)
+	return upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" ||
+		upper == "COM1" || upper == "COM2" || upper == "COM3" || upper == "COM4" ||
+		upper == "COM5" || upper == "COM6" || upper == "COM7" || upper == "COM8" ||
+		upper == "COM9" || upper == "LPT1" || upper == "LPT2" || upper == "LPT3" ||
+		upper == "LPT4" || upper == "LPT5" || upper == "LPT6" || upper == "LPT7" ||
+		upper == "LPT8" || upper == "LPT9"
+}
+
+func validRelativePath(value string) bool {
+	if value == "" || len(value) > 4096 || strings.HasPrefix(value, "/") ||
+		strings.Contains(value, "\\") {
+		return false
+	}
+	for index, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." || (index == 0 && part == ".volang") {
+			return false
+		}
+	}
+	return true
+}
+
+func validPortableRelativePath(value string) bool {
+	if !validRelativePath(value) {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if len(part) > 255 || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") ||
+			reservedPortableName(part) {
+			return false
+		}
+		for _, character := range []byte(part) {
+			if character < 32 || character == '<' || character == '>' || character == ':' ||
+				character == '"' || character == '|' || character == '?' || character == '*' {
+				return false
+			}
+		}
+	}
 	return true
 }
 
@@ -120,14 +183,7 @@ func projectFiles(request protocol.CreateProjectRequest) (map[string]string, err
 		total := 0
 		for _, file := range request.Files {
 			path := strings.TrimSpace(file.Path)
-			validPath := path != "" && len(path) <= 4096 && !strings.HasPrefix(path, "/") &&
-				!strings.Contains(path, "\\")
-			for _, part := range strings.Split(path, "/") {
-				if part == "" || part == "." || part == ".." {
-					validPath = false
-				}
-			}
-			if !validPath || path == "vo.mod" || path == "vo.lock" {
+			if !validPortableRelativePath(path) || path == "vo.mod" || path == "vo.lock" {
 				return nil, errors.New("starter file path is invalid")
 			}
 			if _, exists := files[path]; exists {
@@ -163,6 +219,9 @@ func (host *Host) CreateProject(ctx context.Context, request protocol.CreateProj
 	}
 	host.mu.Lock()
 	defer host.mu.Unlock()
+	if len(host.projects) >= MaxProjects {
+		return domain.Project{}, errors.New("Studio project catalog is full")
+	}
 	for _, state := range host.projects {
 		if state.project.Name == request.Name {
 			return domain.Project{}, errors.New("project already exists")
@@ -234,7 +293,17 @@ func (host *Host) DeleteProject(ctx context.Context, id domain.ProjectID) error 
 }
 
 func (host *Host) ForgetProject(ctx context.Context, id domain.ProjectID) error {
-	return host.DeleteProject(ctx, id)
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	host.mu.RLock()
+	defer host.mu.RUnlock()
+	if _, err := host.project(id); err != nil {
+		return err
+	}
+	return errors.New("managed projects must be deleted instead of forgotten")
 }
 
 func (host *Host) project(id domain.ProjectID) (*projectState, error) {
@@ -270,15 +339,31 @@ func (host *Host) Files(ctx context.Context, id domain.ProjectID) ([]domain.File
 	if err != nil {
 		return nil, err
 	}
-	paths := make([]string, 0, len(state.files))
+	directories := make(map[string]bool)
+	for path := range state.files {
+		parts := strings.Split(path, "/")
+		for index := 1; index < len(parts); index++ {
+			directories[strings.Join(parts[:index], "/")] = true
+		}
+	}
+	paths := make([]string, 0, len(state.files) + len(directories))
+	for path := range directories {
+		paths = append(paths, path)
+	}
 	for path := range state.files {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 	result := make([]domain.FileEntry, 0, len(paths))
 	for _, path := range paths {
+		kind := fileKind(path)
+		if directories[path] {
+			kind = domain.Directory
+		}
+		parts := strings.Split(path, "/")
 		result = append(result, domain.FileEntry{
-			Path: path, Name: path, Kind: fileKind(path), ModifiedUnixMillis: time.Now().UnixMilli(),
+			Path: path, Name: parts[len(parts) - 1], Kind: kind, Depth: len(parts) - 1,
+			ModifiedUnixMillis: time.Now().UnixMilli(),
 		})
 	}
 	return result, nil
@@ -309,7 +394,7 @@ func (host *Host) WriteFile(ctx context.Context, id domain.ProjectID, path strin
 			return ctx.Err()
 		default:
 	}
-	if path == "" || len(path) > 4096 || strings.Contains(path, "..") {
+	if !validRelativePath(path) {
 		return errors.New("file path is invalid")
 	}
 	host.mu.Lock()
@@ -323,13 +408,36 @@ func (host *Host) WriteFile(ctx context.Context, id domain.ProjectID, path strin
 	return nil
 }
 
+func (host *Host) CreateFile(ctx context.Context, id domain.ProjectID, path string, value string) error {
+	select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+	}
+	if !validPortableRelativePath(path) {
+		return errors.New("file path is invalid")
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	state, err := host.project(id)
+	if err != nil {
+		return err
+	}
+	if _, exists := state.files[path]; exists {
+		return errors.New("file already exists")
+	}
+	state.files[path] = value
+	state.project.LastOpenedUnixMillis = time.Now().UnixMilli()
+	return nil
+}
+
 func (host *Host) RenameEntry(ctx context.Context, id domain.ProjectID, from string, to string) error {
 	select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 	}
-	if from == "" || to == "" || strings.Contains(from, "..") || strings.Contains(to, "..") {
+	if !validRelativePath(from) || !validPortableRelativePath(to) {
 		return errors.New("file path is invalid")
 	}
 	host.mu.Lock()
@@ -356,7 +464,7 @@ func (host *Host) DeleteEntry(ctx context.Context, id domain.ProjectID, path str
 			return ctx.Err()
 		default:
 	}
-	if path == "" || strings.Contains(path, "..") {
+	if !validRelativePath(path) {
 		return errors.New("file path is invalid")
 	}
 	host.mu.Lock()
@@ -377,6 +485,21 @@ func (host *Host) Analyze(ctx context.Context, request protocol.AnalyzeRequest) 
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
+	}
+	if !validRelativePath(request.Path) || len(request.Text) > 4 * 1024 * 1024 {
+		return nil, errors.New("analysis source is invalid")
+	}
+	host.mu.RLock()
+	state, err := host.project(request.ProjectID)
+	if err == nil {
+		_, exists := state.files[request.Path]
+		if !exists {
+			err = errors.New("analysis file was not found")
+		}
+	}
+	host.mu.RUnlock()
+	if err != nil {
+		return nil, err
 	}
 	result := make([]domain.Diagnostic, 0)
 	if !strings.HasPrefix(strings.TrimSpace(request.Text), "package ") {
@@ -402,6 +525,18 @@ func (host *Host) Compile(ctx context.Context, request protocol.CompileRequest) 
 			return domain.Artifact{}, ctx.Err()
 		default:
 	}
+	if (request.Mode != domain.RuntimeVM && request.Mode != domain.RuntimeJIT) ||
+		!validRelativePath(request.Entry) || len(request.Overlays) > MaxOverlays {
+		return domain.Artifact{}, errors.New("compile request is invalid")
+	}
+	overlayPaths := make(map[string]bool)
+	for _, overlay := range request.Overlays {
+		if !validRelativePath(overlay.Path) || len(overlay.Text) > 4 * 1024 * 1024 ||
+			overlayPaths[overlay.Path] {
+			return domain.Artifact{}, errors.New("compiler overlay is invalid")
+		}
+		overlayPaths[overlay.Path] = true
+	}
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	state, err := host.project(request.ProjectID)
@@ -413,6 +548,9 @@ func (host *Host) Compile(ctx context.Context, request protocol.CompileRequest) 
 		return domain.Artifact{}, errors.New("entry file was not found")
 	}
 	for _, overlay := range request.Overlays {
+		if _, exists := state.files[overlay.Path]; !exists {
+			return domain.Artifact{}, errors.New("compiler overlay file was not found")
+		}
 		if overlay.Path == request.Entry {
 			source = overlay.Text
 		}
@@ -436,6 +574,16 @@ func send(ctx context.Context, output chan domain.RunEvent, event domain.RunEven
 }
 
 func (host *Host) Run(ctx context.Context, request protocol.RunRequest) (<-chan domain.RunEvent, error) {
+	if request.Mode != domain.RuntimeVM && request.Mode != domain.RuntimeJIT {
+		return nil, errors.New("run mode is unavailable")
+	}
+	argumentBytes := 0
+	for _, argument := range request.Arguments {
+		argumentBytes += len(argument)
+	}
+	if len(request.Arguments) > MaxRunArguments || argumentBytes > MaxRunArgumentBytes {
+		return nil, errors.New("run arguments exceed the Studio limit")
+	}
 	if len(request.Artifact.Bytes) == 0 {
 		return nil, errors.New("run artifact is empty")
 	}
@@ -631,44 +779,5 @@ func (host *Host) DeleteRepository(ctx context.Context, id domain.ProjectID, rep
 		return errors.New("repository confirmation does not match")
 	}
 	host.deletedRemotes[id] = true
-	return nil
-}
-
-func (host *Host) Get(ctx context.Context, key string) (string, bool, error) {
-	select {
-		case <-ctx.Done():
-			return "", false, ctx.Err()
-		default:
-	}
-	host.mu.RLock()
-	defer host.mu.RUnlock()
-	value, ok := host.credentials[key]
-	return value, ok, nil
-}
-
-func (host *Host) Set(ctx context.Context, key string, value string) error {
-	select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-	}
-	if key == "" || value == "" {
-		return errors.New("credential key and value are required")
-	}
-	host.mu.Lock()
-	host.credentials[key] = value
-	host.mu.Unlock()
-	return nil
-}
-
-func (host *Host) Delete(ctx context.Context, key string) error {
-	select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-	}
-	host.mu.Lock()
-	delete(host.credentials, key)
-	host.mu.Unlock()
 	return nil
 }

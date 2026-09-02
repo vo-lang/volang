@@ -8,7 +8,7 @@ import (
 	"github.com/vo-lang/studio/domain"
 )
 
-const Version = "volang.studio.host.v1"
+const Version = "volang.studio.host.v3"
 
 type CreateProjectRequest struct {
 	Name string
@@ -19,6 +19,7 @@ type CreateProjectRequest struct {
 
 type ProjectFiles interface {
 	Projects(context.Context) ([]domain.Project, error)
+	ActivateProject(context.Context, domain.ProjectID) error
 	CreateProject(context.Context, CreateProjectRequest) (domain.Project, error)
 	OpenProject(context.Context, string) (domain.Project, error)
 	RenameProject(context.Context, domain.ProjectID, string) (domain.Project, error)
@@ -26,6 +27,7 @@ type ProjectFiles interface {
 	ForgetProject(context.Context, domain.ProjectID) error
 	Files(context.Context, domain.ProjectID) ([]domain.FileEntry, error)
 	ReadFile(context.Context, domain.ProjectID, string) (string, error)
+	CreateFile(context.Context, domain.ProjectID, string, string) error
 	WriteFile(context.Context, domain.ProjectID, string, string) error
 	RenameEntry(context.Context, domain.ProjectID, string, string) error
 	DeleteEntry(context.Context, domain.ProjectID, string) error
@@ -100,12 +102,6 @@ type RemoteProjectService interface {
 	DeleteRepository(context.Context, domain.ProjectID, string) error
 }
 
-type CredentialStore interface {
-	Get(context.Context, string) (string, bool, error)
-	Set(context.Context, string, string) error
-	Delete(context.Context, string) error
-}
-
 type Services struct {
 	Host HostService
 	Files ProjectFiles
@@ -116,7 +112,6 @@ type Services struct {
 	Share ProjectShareService
 	Account AccountService
 	Remote RemoteProjectService
-	Credentials CredentialStore
 }
 
 func (services Services) Validate() {
@@ -126,8 +121,7 @@ func (services Services) Validate() {
 		services.Preview == nil ||
 		services.Share == nil ||
 		services.Account == nil ||
-		services.Remote == nil ||
-		services.Credentials == nil {
+		services.Remote == nil {
 		panic("Studio host does not provide every required capability")
 	}
 }

@@ -160,6 +160,32 @@ impl CapturedCompileInputs {
                 ))
             })
     }
+
+    pub(super) fn apply_source_overlay(
+        &mut self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    ) -> Result<(), CompileError> {
+        let diagnostic_path = path.clone();
+        let snapshot = Arc::get_mut(&mut self.snapshot).ok_or_else(|| {
+            CompileError::Codegen(
+                "source overlays must be installed before the compile snapshot is shared"
+                    .to_string(),
+            )
+        })?;
+        if !snapshot.contains_file(&path) {
+            return Err(CompileError::Codegen(format!(
+                "source overlay {} does not name a captured project file",
+                diagnostic_path.display()
+            )));
+        }
+        snapshot.insert(path, bytes).map_err(|error| {
+            CompileError::Codegen(format!(
+                "source overlay {} could not be installed: {error}",
+                diagnostic_path.display()
+            ))
+        })
+    }
 }
 
 trait CompileInputCaptureSink {

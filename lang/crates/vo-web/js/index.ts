@@ -3340,6 +3340,18 @@ export function compileProject(
   return wasmModule.compileProject(entry, projectRoot, modRoot, overlayPath, overlayText);
 }
 
+/** Analyze one project package without requiring an executable entry point. */
+export function analyzeProject(
+  entry: string,
+  projectRoot: string,
+  modRoot = '',
+  overlayPath?: string,
+  overlayText?: string,
+) {
+  if (!wasmModule) throw new Error('vo-web not initialized. Call init() first.');
+  return wasmModule.analyzeProject(entry, projectRoot, modRoot, overlayPath, overlayText);
+}
+
 /** Install locked registry modules and compile a complete browser-VFS project. */
 export function compileProjectAutoInstall(
   entry: string,
@@ -3349,6 +3361,17 @@ export function compileProjectAutoInstall(
 ) {
   if (!wasmModule) throw new Error('vo-web not initialized. Call init() first.');
   return wasmModule.compileProjectAutoInstall(entry, projectRoot, overlayPath, overlayText);
+}
+
+/** Install locked registry modules and analyze one browser-VFS package. */
+export function analyzeProjectAutoInstall(
+  entry: string,
+  projectRoot: string,
+  overlayPath?: string,
+  overlayText?: string,
+) {
+  if (!wasmModule) throw new Error('vo-web not initialized. Call init() first.');
+  return wasmModule.analyzeProjectAutoInstall(entry, projectRoot, overlayPath, overlayText);
 }
 
 /** Create a frozen workspace-only lock for packaged browser modules. */

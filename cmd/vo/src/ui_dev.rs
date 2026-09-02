@@ -172,15 +172,31 @@ const showError = (cause) => {
 retry.addEventListener('click', () => location.reload());
 root.setAttribute('inert', '');
 setPhase('loading-host', 'Preparing the application host…');
+const loadAotImage = async () => {
+  const response = await fetch('/app.wasm');
+  if (!response.ok) throw new Error(`failed to load application AOT image: HTTP ${response.status}`);
+  if (typeof WebAssembly.compileStreaming === 'function') {
+    try {
+      return await WebAssembly.compileStreaming(response.clone());
+    } catch {
+      return response.arrayBuffer();
+    }
+  }
+  return response.arrayBuffer();
+};
+const imageResult = loadAotImage().then(
+  (image) => ({ image }),
+  (error) => ({ error }),
+);
 
 try {
   /*__VOLANG_APPLICATION_HOST__*/
   mark('volang-aot-host-ready');
   measure('volang-aot-host-startup', 'volang-aot-bootstrap-start', 'volang-aot-host-ready');
   setPhase('loading-image', 'Loading the compiled application…');
-  const response = await fetch('/app.wasm');
-  if (!response.ok) throw new Error(`failed to load application AOT image: HTTP ${response.status}`);
-  const image = await response.arrayBuffer();
+  const loadedImage = await imageResult;
+  if (loadedImage.error) throw loadedImage.error;
+  const image = loadedImage.image;
   mark('volang-aot-image-ready');
   measure('volang-aot-image-fetch', 'volang-aot-host-ready', 'volang-aot-image-ready');
   let interactiveMarked = false;
@@ -269,7 +285,7 @@ struct WebAssetConfig {
     integrity: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct WebPwaConfig {
     enabled: bool,
@@ -280,6 +296,25 @@ struct WebPwaConfig {
     display: String,
     offline_url: String,
     cache_version: String,
+    precache_routes: bool,
+    precache_compiler: bool,
+}
+
+impl Default for WebPwaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: String::new(),
+            short_name: String::new(),
+            start_url: String::new(),
+            scope: String::new(),
+            display: String::new(),
+            offline_url: String::new(),
+            cache_version: String::new(),
+            precache_routes: true,
+            precache_compiler: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -413,6 +448,14 @@ struct DesktopPackageFileEvidence {
 }
 
 #[derive(Serialize)]
+struct WebCompilerWorkspaceIndex {
+    schema: &'static str,
+    bundle: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Serialize)]
 struct WebCompilerWorkspaceBundle {
     schema: &'static str,
     modules: Vec<WebCompilerWorkspaceModule>,
@@ -423,7 +466,6 @@ struct WebCompilerWorkspaceModule {
     path: String,
     version: String,
     intent: String,
-    root: String,
     files: Vec<WebCompilerWorkspaceFile>,
 }
 
@@ -432,6 +474,7 @@ struct WebCompilerWorkspaceFile {
     path: String,
     bytes: u64,
     sha256: String,
+    text: String,
 }
 
 fn project_directory(project: &Path) -> &Path {
@@ -483,7 +526,7 @@ fn validate_web_release_config(config: &WebReleaseConfig) -> Result<(), String> 
         .as_deref()
         .is_some_and(|url| !url.starts_with("https://"))
         || config.document.assets.iter().any(|asset| {
-            !asset.href.starts_with('/')
+            !valid_web_route(&asset.href)
                 || !matches!(
                     asset.kind.as_str(),
                     "style" | "preload" | "icon" | "manifest"
@@ -1253,6 +1296,41 @@ fn append_web_precache_tree(
     Ok(())
 }
 
+fn web_precache_file(output: &Path, url: &str) -> PathBuf {
+    if url == "/" {
+        return output.join("index.html");
+    }
+    if url.ends_with('/') {
+        return output.join(url.trim_matches('/')).join("index.html");
+    }
+    output.join(url.trim_start_matches('/'))
+}
+
+fn web_cache_name(output: &Path, version: &str, precache: &[String]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(version.as_bytes());
+    for url in precache {
+        hasher.update(url.as_bytes());
+        let path = web_precache_file(output, url);
+        if path.is_file() {
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("cannot fingerprint {}: {error}", path.display()))?;
+            hasher.update(&bytes);
+        }
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(format!("{}-{}", version, &digest[..16]))
+}
+
+fn web_cache_namespace(config: &WebReleaseConfig) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(config.pwa.name.as_bytes());
+    hasher.update([0]);
+    hasher.update(config.pwa.scope.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("volang-ui-{}", &digest[..16])
+}
+
 fn write_web_policy_assets(output: &Path, config: &WebReleaseConfig) -> Result<(), String> {
     let mut headers = format!(
         "/*\n  Content-Security-Policy: {}\n  Permissions-Policy: {}\n  Cross-Origin-Opener-Policy: {}\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n",
@@ -1318,7 +1396,12 @@ fn write_web_policy_assets(output: &Path, config: &WebReleaseConfig) -> Result<(
         "/runtime/aot-support/vo_aot_support_wasm.js".to_string(),
         "/runtime/aot-support/vo_aot_support_wasm_bg.wasm".to_string(),
     ];
-    for route in &config.routes {
+    let cached_routes = if config.pwa.precache_routes {
+        config.routes.clone()
+    } else {
+        vec![config.pwa.start_url.clone(), config.pwa.offline_url.clone()]
+    };
+    for route in cached_routes {
         precache.push(if route == "/" {
             "/".to_string()
         } else {
@@ -1331,7 +1414,7 @@ fn write_web_policy_assets(output: &Path, config: &WebReleaseConfig) -> Result<(
     if !config.host.module.is_empty() {
         precache.push(config.host.module.clone());
     }
-    if config.host.compiler {
+    if config.host.compiler && config.pwa.precache_compiler {
         precache.push("/runtime/pkg/vo_web.js".to_string());
         precache.push("/runtime/pkg/vo_web_bg.wasm".to_string());
         let modules = output.join("runtime/workspace-modules");
@@ -1346,9 +1429,16 @@ fn write_web_policy_assets(output: &Path, config: &WebReleaseConfig) -> Result<(
     } else {
         format!("{}/", config.pwa.offline_url.trim_end_matches('/'))
     };
+    let cache_namespace = web_cache_namespace(config);
+    let cache_name = format!(
+        "{}-{}",
+        cache_namespace,
+        web_cache_name(output, &config.pwa.cache_version, &precache)?
+    );
     let worker = format!(
-        "const CACHE = {};\nconst PRECACHE = {};\nconst OFFLINE = {};\nself.addEventListener('install', event => {{ event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(PRECACHE)).then(() => self.skipWaiting())); }});\nself.addEventListener('activate', event => {{ event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())); }});\nself.addEventListener('fetch', event => {{ if (event.request.method !== 'GET') return; event.respondWith(fetch(event.request).then(response => {{ const copy = response.clone(); void caches.open(CACHE).then(cache => cache.put(event.request, copy)); return response; }}).catch(() => caches.match(event.request).then(response => response || caches.match(OFFLINE)))); }});\n",
-        serde_json::to_string(&config.pwa.cache_version).expect("cache version is serializable"),
+        "const CACHE_NAMESPACE = {};\nconst CACHE = {};\nconst PRECACHE = {};\nconst OFFLINE = {};\nself.addEventListener('install', event => {{ event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(PRECACHE)).then(() => self.skipWaiting())); }});\nself.addEventListener('activate', event => {{ event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith(CACHE_NAMESPACE) && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())); }});\nself.addEventListener('fetch', event => {{ const url = new URL(event.request.url); if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.search) return; event.respondWith((async () => {{ const cache = await caches.open(CACHE); const cached = await cache.match(event.request); if (cached) return cached; if (event.request.mode === 'navigate') {{ const shell = await cache.match('/'); if (shell) return shell; }} try {{ const response = await fetch(event.request); if (response.ok && response.type === 'basic') {{ const copy = response.clone(); event.waitUntil(cache.put(event.request, copy).catch(() => undefined)); }} return response; }} catch (error) {{ const fallback = await cache.match(event.request) || (event.request.mode === 'navigate' ? await cache.match(OFFLINE) : undefined); if (fallback) return fallback; throw error; }} }})()); }});\n",
+        serde_json::to_string(&cache_namespace).expect("cache namespace is serializable"),
+        serde_json::to_string(&cache_name).expect("cache name is serializable"),
         serde_json::to_string(&precache).expect("precache is serializable"),
         serde_json::to_string(&offline).expect("offline URL is serializable"),
     );
@@ -2171,7 +2261,6 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     let application_script = release_app_javascript(&config);
     super::write_file_atomically(&output.join("app.js"), application_script.as_bytes())
         .map_err(|error| error.to_string())?;
-    write_web_policy_assets(output, &config)?;
     super::write_file_atomically(&output.join(".volang-ui-build"), b"volang.ui.web-aot.v1\n")
         .map_err(|error| error.to_string())?;
     copy_runtime_tree(&runtime_dir.join("dist"), &output.join("runtime/dist"))?;
@@ -2182,6 +2271,7 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     if config.host.compiler {
         copy_runtime_tree(&runtime_dir.join("pkg"), &output.join("runtime/pkg"))?;
     }
+    write_web_policy_assets(output, &config)?;
     Ok(artifact.bytes.len())
 }
 
@@ -2193,9 +2283,7 @@ struct WebCompilerWorkspaceTotals {
 
 struct WebCompilerWorkspaceCollector<'a> {
     source_root: &'a Path,
-    asset_root: &'a str,
     files: Vec<WebCompilerWorkspaceFile>,
-    assets: &'a mut BTreeMap<String, Vec<u8>>,
     totals: &'a mut WebCompilerWorkspaceTotals,
 }
 
@@ -2265,16 +2353,19 @@ impl WebCompilerWorkspaceCollector<'_> {
             if self.totals.bytes > MAX_WEB_COMPILER_WORKSPACE_BYTES {
                 return Err("Web compiler workspace modules exceed 128 MiB".to_string());
             }
+            let text = String::from_utf8(bytes.clone()).map_err(|_| {
+                format!(
+                    "Web compiler workspace source {} is not valid UTF-8",
+                    path.display()
+                )
+            })?;
             let relative = relative.to_string_lossy().replace('\\', "/");
-            let asset_path = format!("{}/{relative}", self.asset_root);
-            if self.assets.insert(asset_path, bytes.clone()).is_some() {
-                return Err("Web compiler workspace contains a duplicate asset path".to_string());
-            }
             self.totals.files += 1;
             self.files.push(WebCompilerWorkspaceFile {
                 path: relative,
                 bytes: bytes.len() as u64,
                 sha256: format!("{:x}", Sha256::digest(&bytes)),
+                text,
             });
         }
         Ok(())
@@ -2290,7 +2381,7 @@ fn web_compiler_workspace_assets(project: &Path) -> Result<BTreeMap<String, Vec<
     let mut assets = BTreeMap::new();
     let mut bundled = Vec::with_capacity(modules.len());
     let mut totals = WebCompilerWorkspaceTotals::default();
-    for (index, module) in modules.iter().enumerate() {
+    for module in &modules {
         let source_root = module.directory().canonicalize().map_err(|error| {
             format!(
                 "cannot resolve workspace module {} at {}: {error}",
@@ -2298,13 +2389,9 @@ fn web_compiler_workspace_assets(project: &Path) -> Result<BTreeMap<String, Vec<
                 module.directory().display()
             )
         })?;
-        let relative_root = index.to_string();
-        let asset_root = format!("/runtime/workspace-modules/{relative_root}");
         let mut collector = WebCompilerWorkspaceCollector {
             source_root: &source_root,
-            asset_root: &asset_root,
             files: Vec::new(),
-            assets: &mut assets,
             totals: &mut totals,
         };
         collector.collect(&source_root, 0)?;
@@ -2316,15 +2403,24 @@ fn web_compiler_workspace_assets(project: &Path) -> Result<BTreeMap<String, Vec<
             intent: vo_module::lock::module_intent_digest(module.mod_file())
                 .map_err(|error| error.to_string())?
                 .to_string(),
-            root: format!("/runtime/workspace-modules/{relative_root}"),
             files,
         });
     }
-    let manifest = serde_json::to_vec_pretty(&WebCompilerWorkspaceBundle {
-        schema: "volang.web-compiler-workspace/v1",
+    let bundle = serde_json::to_vec(&WebCompilerWorkspaceBundle {
+        schema: "volang.web-compiler-workspace/v2",
         modules: bundled,
     })
     .map_err(|error| format!("cannot encode Web compiler workspace bundle: {error}"))?;
+    let bundle_digest = format!("{:x}", Sha256::digest(&bundle));
+    let bundle_path = format!("/runtime/workspace-modules/bundle-{bundle_digest}.json");
+    let manifest = serde_json::to_vec_pretty(&WebCompilerWorkspaceIndex {
+        schema: "volang.web-compiler-workspace-index/v1",
+        bundle: bundle_path.clone(),
+        bytes: bundle.len() as u64,
+        sha256: bundle_digest,
+    })
+    .map_err(|error| format!("cannot encode Web compiler workspace index: {error}"))?;
+    assets.insert(bundle_path, bundle);
     assets.insert(
         "/runtime/workspace-modules/manifest.json".to_string(),
         manifest,
@@ -5229,6 +5325,7 @@ mod tests {
         );
         assert!(RELEASE_APP_JS.contains("connectAotUiToDom"));
         assert!(RELEASE_APP_JS.contains("runAot"));
+        assert!(RELEASE_APP_JS.contains("WebAssembly.compileStreaming(response.clone())"));
         assert!(RELEASE_APP_JS.contains("volang-aot-host-startup"));
         assert!(RELEASE_APP_JS.contains("volang-aot-image-fetch"));
         assert!(RELEASE_APP_JS.contains("volang-aot-startup"));
@@ -5299,24 +5396,37 @@ mod tests {
 
         let manifest_path = output.join("runtime/workspace-modules/manifest.json");
         let first = fs::read(&manifest_path).unwrap();
-        let manifest: serde_json::Value = serde_json::from_slice(&first).unwrap();
-        assert_eq!(manifest["schema"], "volang.web-compiler-workspace/v1");
-        assert_eq!(manifest["modules"].as_array().unwrap().len(), 1);
-        let module = &manifest["modules"][0];
+        let index: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(index["schema"], "volang.web-compiler-workspace-index/v1");
+        let bundle_path = index["bundle"].as_str().unwrap();
+        assert!(bundle_path.starts_with("/runtime/workspace-modules/bundle-"));
+        assert!(bundle_path.ends_with(".json"));
+        let bundle = fs::read(output.join(bundle_path.trim_start_matches('/'))).unwrap();
+        assert_eq!(index["bytes"], bundle.len() as u64);
+        assert_eq!(index["sha256"], format!("{:x}", Sha256::digest(&bundle)));
+        let bundle: serde_json::Value = serde_json::from_slice(&bundle).unwrap();
+        assert_eq!(bundle["schema"], "volang.web-compiler-workspace/v2");
+        assert_eq!(bundle["modules"].as_array().unwrap().len(), 1);
+        let module = &bundle["modules"][0];
         assert_eq!(module["path"], "github.com/acme/sdk");
         assert_eq!(module["version"], "0.1.4");
-        assert_eq!(module["root"], "/runtime/workspace-modules/0");
         let files = module["files"].as_array().unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0]["path"], "sdk.vo");
         assert_eq!(files[1]["path"], "vo.mod");
         for file in files {
             let relative = file["path"].as_str().unwrap();
-            let bytes =
-                fs::read(output.join("runtime/workspace-modules/0").join(relative)).unwrap();
+            let bytes = fs::read(sdk.join(relative)).unwrap();
             assert_eq!(file["bytes"], bytes.len() as u64);
             assert_eq!(file["sha256"], format!("{:x}", Sha256::digest(&bytes)));
+            assert_eq!(file["text"], String::from_utf8(bytes).unwrap());
         }
+        assert_eq!(
+            fs::read_dir(output.join("runtime/workspace-modules"))
+                .unwrap()
+                .count(),
+            2
+        );
 
         package_web_compiler_workspace_modules(&app, &output).unwrap();
         assert_eq!(first, fs::read(manifest_path).unwrap());
@@ -5351,7 +5461,7 @@ module = "/studio-host.js"
 export = "createStudioHost"
 compiler = true
 "##;
-        let config: WebReleaseConfig = toml::from_str(source).unwrap();
+        let mut config: WebReleaseConfig = toml::from_str(source).unwrap();
         validate_web_release_config(&config).unwrap();
         assert_eq!(
             route_output_path(Path::new("dist"), "/articles/aot"),
@@ -5371,6 +5481,13 @@ compiler = true
         assert!(worker.contains("/studio-host.js"));
         assert!(worker.contains("/runtime/pkg/vo_web_bg.wasm"));
         assert!(worker.contains("const OFFLINE = \"/offline/\""));
+        assert!(worker.contains("-notes-v1-"));
+        assert!(worker.contains("key.startsWith(CACHE_NAMESPACE)"));
+        assert!(worker.contains("if (response.ok && response.type === 'basic')"));
+        assert!(worker.contains("const cached = await cache.match(event.request)"));
+        assert!(worker.contains("const shell = await cache.match('/')"));
+        assert!(worker.contains("event.waitUntil(cache.put(event.request, copy)"));
+        assert!(worker.contains("url.origin !== self.location.origin"));
         let deployment = fs::read_to_string(output.join("deployment.json")).unwrap();
         assert!(deployment.contains("static-ssr-with-client-activation"));
         assert!(deployment.contains("application-host-module"));
@@ -5382,6 +5499,7 @@ compiler = true
         let script = release_app_javascript(&config);
         assert!(script.contains("createStudioHost"));
         assert!(script.contains("new UiBrowserSystemHost"));
+        assert!(script.contains("WebAssembly.compileStreaming(response.clone())"));
         assert!(!script.contains("/*__VOLANG_APPLICATION_HOST__*/"));
         let development = development_index_html(&config);
         assert!(development.contains("<html lang=\"zh-CN\" dir=\"ltr\">"));
@@ -5394,7 +5512,18 @@ compiler = true
         assert!(development.contains("id=\"volang-boot-retry\""));
         assert!(development.contains("root.removeAttribute('inert')"));
         assert!(!development.contains("/*__VOLANG_DEV_APPLICATION_HOST__*/"));
+        config.pwa.precache_compiler = false;
+        config.pwa.precache_routes = false;
+        write_web_policy_assets(&output, &config).unwrap();
+        let lazy_worker = fs::read_to_string(output.join("service-worker.js")).unwrap();
+        assert!(!lazy_worker.contains("/runtime/pkg/vo_web_bg.wasm"));
+        assert!(!lazy_worker.contains("/articles/aot/"));
+        assert!(lazy_worker.contains("/offline/"));
         fs::remove_dir_all(output).unwrap();
+
+        let mut invalid_asset = config.clone();
+        invalid_asset.document.assets[0].href = "/../secret.css".to_string();
+        assert!(validate_web_release_config(&invalid_asset).is_err());
 
         let mut invalid = config;
         invalid.routes.push("/../secret".to_string());

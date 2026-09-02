@@ -115,8 +115,8 @@ cancellation calls `remote.stop`, and the Native host terminates the active Git
 child process before releasing the session. A cancelled local commit remains
 visible as an ahead change and can be pushed safely on the next attempt.
 GitHub identity stays
-inside the platform host: Browser Studio keeps a verified token only for the
-page session, while Native Studio reads the authenticated GitHub CLI identity.
+inside the platform host: Browser Studio uses a token once to verify the
+identity and discards it, while Native Studio reads the authenticated GitHub CLI identity.
 The pure Volang application receives display-only account data. Repository
 settings keep four authorities explicit: managed local deletion, external
 catalog forget, GitHub-only deletion, and GitHub plus local removal. Cloud

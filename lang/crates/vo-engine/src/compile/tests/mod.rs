@@ -639,6 +639,59 @@ fn generated_sources_extend_only_the_captured_compile_snapshot_authority() {
 }
 
 #[test]
+fn source_overlays_check_unsaved_subpackage_without_mutating_the_project() {
+    let root = temp_dir("vo_compile_source_overlay_subpackage");
+    let package = root.join("pkg");
+    fs::create_dir_all(&package).expect("create source overlay package");
+    fs::write(
+        root.join("vo.mod"),
+        "format = 1\nmodule = \"local/source-overlay\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
+    )
+    .expect("write source overlay vo.mod");
+    let entry = package.join("helper.vo");
+    let tracked = "package pkg\nfunc Value() int { return 1 }\n";
+    fs::write(&entry, tracked).expect("write tracked source overlay entry");
+
+    let valid = super::SourceOverlay::new(
+        PathBuf::from("pkg/helper.vo"),
+        b"package pkg\nfunc Value() int { return 2 }\n".to_vec(),
+    )
+    .expect("construct valid source overlay");
+    super::check_real_path_with_source_overlays(
+        &entry,
+        &vo_module::project::ProjectContextOptions::default(),
+        vec![valid],
+    )
+    .expect("library package overlay must analyze without an executable entry");
+    assert_eq!(
+        fs::read_to_string(&entry).expect("read tracked source after overlay"),
+        tracked
+    );
+
+    let invalid = super::SourceOverlay::new(
+        PathBuf::from("pkg/helper.vo"),
+        b"package pkg\nfunc Value() int { return \"wrong\" }\n".to_vec(),
+    )
+    .expect("construct invalid source overlay");
+    let error = super::check_real_path_with_source_overlays(
+        &entry,
+        &vo_module::project::ProjectContextOptions::default(),
+        vec![invalid],
+    )
+    .expect_err("unsaved type error must be diagnosed");
+    assert!(
+        error.to_string().contains("cannot use") || error.to_string().contains("string"),
+        "unexpected source overlay diagnostic: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(&entry).expect("read tracked source after invalid overlay"),
+        tracked
+    );
+
+    fs::remove_dir_all(root).expect("remove source overlay test root");
+}
+
+#[test]
 fn generated_source_may_match_but_never_replace_a_tracked_source() {
     let root = temp_dir("vo_compile_generated_tracked_source");
     fs::create_dir_all(&root).expect("create tracked generated source test root");

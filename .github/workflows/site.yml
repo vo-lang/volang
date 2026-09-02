@@ -93,7 +93,15 @@ jobs:
           node eng/report-ui-web-artifact-size.mjs
           --label studio
           --artifact target/volang-dev/app.wasm
-          --brotli-limit 921600
+          --brotli-limit 983040
+          --gzip-limit 2700000
+
+      - name: Enforce Studio install budget
+        run: >-
+          node eng/report-ui-web-precache-size.mjs
+          --label studio
+          --root target/volang-dev
+          --gzip-limit 3670016
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

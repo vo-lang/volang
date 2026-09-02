@@ -4921,6 +4921,7 @@ dependencies = [
 name = "vo-studio-native"
 version = "0.1.4"
 dependencies = [
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "vo-app-host-native",

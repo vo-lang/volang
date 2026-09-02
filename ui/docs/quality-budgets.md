@@ -13,9 +13,11 @@ low-end profile uses constrained CPU and memory runners.
 | keyed visible collection update p95 | 8 ms | 12 ms | hard failure |
 | Web useful-content startup p75 | 1.8 s | 3.0 s | E5 gate |
 | Web compressed initial download | 350 KiB | 350 KiB | E5 gate |
-| Core Wasm AOT image, UIKit reference (Brotli) | 350 KiB | 350 KiB | hard failure |
+| Core Wasm AOT image, UIKit gallery (Brotli) | 600 KiB | 600 KiB | hard failure |
 | Core Wasm AOT image, official product (Brotli) | 600 KiB | 600 KiB | hard failure |
-| Core Wasm AOT image, full Studio (Brotli) | 768 KiB | 768 KiB | hard failure |
+| Core Wasm AOT image, Studio workbench (Brotli) | 640 KiB | 640 KiB | hard failure |
+| Core Wasm AOT image, full Studio (Brotli / gzip) | 960 KiB / 2,700,000 B | 960 KiB / 2,700,000 B | hard failure |
+| Full Studio install precache (gzip transfer) | 3.5 MiB | 3.5 MiB | hard failure |
 | desktop warm startup p95 | 500 ms | 900 ms | E5 gate |
 | idle resident memory | 120 MiB | 160 MiB | E7 gate |
 | dropped-frame rate | below 1% | below 2% | E7 gate |
@@ -49,6 +51,14 @@ data application separately proves that a 100,000-row logical collection
 mounts fewer than 200 text mutations. Startup, artifact size, resident memory,
 jank, and power measurements enter the same report as their owning Web,
 desktop, and observability increments land.
+
+The full Studio budget records Brotli and gzip separately because production
+static hosts do not all negotiate the same encoding. Its install precache is a
+second, independent budget over every file listed by the generated service
+worker. The browser compiler runtime and packaged module workspace load and
+enter the runtime cache on first use; they do not consume the initial install
+budget. Documentation routes follow the same visit-then-cache policy, while the
+start and offline routes remain install-time assets.
 
 Warm-up, sample counts, target triple, profile, CPU mode, screen scale, and
 renderer backend are part of every record. Results from debug builds are

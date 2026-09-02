@@ -16,16 +16,18 @@ pub use aot::{compile_native_aot_object, compile_wasm_aot_image};
 pub use aot_cache::{AotArtifactCache, AotCacheArtifactKind, AotCacheKey};
 pub use compile::{
     check, check_path, check_path_with_auto_install, check_path_with_auto_install_with_options,
-    check_path_with_options, check_with_auto_install, check_with_auto_install_with_options,
-    check_with_options, compile, compile_from_memory, compile_output_packages, compile_path,
-    compile_path_with_auto_install, compile_path_with_generated_sources_and_auto_install,
-    compile_source_at, compile_string, compile_with_auto_install,
-    compile_with_auto_install_prepared_with_options, compile_with_auto_install_with_options,
-    compile_with_cache, compile_with_cache_with_options, compile_with_options,
-    default_mod_cache_root, is_bytecode_artifact, prepare_native_extension_specs,
-    prepare_path_dependencies, verify_compile_output_for_target, with_compile_log_sink,
-    CompileError, CompileLogRecord, CompileOutput, GeneratedSource, ModuleSystemError,
-    ModuleSystemErrorKind, ModuleSystemStage, PreparedCompileOutput, PreparedNativeExtension,
+    check_path_with_options, check_path_with_source_overlays_and_auto_install,
+    check_with_auto_install, check_with_auto_install_with_options, check_with_options, compile,
+    compile_from_memory, compile_output_packages, compile_path, compile_path_with_auto_install,
+    compile_path_with_generated_sources_and_auto_install,
+    compile_path_with_source_overlays_and_auto_install, compile_source_at, compile_string,
+    compile_with_auto_install, compile_with_auto_install_prepared_with_options,
+    compile_with_auto_install_with_options, compile_with_cache, compile_with_cache_with_options,
+    compile_with_options, default_mod_cache_root, is_bytecode_artifact,
+    prepare_native_extension_specs, prepare_path_dependencies, verify_compile_output_for_target,
+    with_compile_log_sink, CompileError, CompileLogRecord, CompileOutput, GeneratedSource,
+    ModuleSystemError, ModuleSystemErrorKind, ModuleSystemStage, PreparedCompileOutput,
+    PreparedNativeExtension, SourceOverlay,
 };
 pub use format::format_text;
 pub use run::{

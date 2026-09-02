@@ -4,99 +4,139 @@ baseline = "legacy-studio-product-surface"
 [[capability]]
 id = "home"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
 acceptance = "The initial surface presents product orientation, starters, and local projects without entering the editor first."
 
 [[capability]]
 id = "starter-gallery"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/examples/examples.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
 acceptance = "At least the eleven legacy language topics plus maintained UIKit starters open as persistent editable projects."
 
 [[capability]]
 id = "starter-edit-run"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "One click opens main.vo; edits participate in analysis/save; VM or JIT run and UI preview use the same snapshot."
 
 [[capability]]
 id = "project-create"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/public/studio-host.js", "apps/studio/host-native/src/lib.rs"]
 acceptance = "Web OPFS and desktop filesystems create complete projects from blank and starter snapshots."
 
 [[capability]]
 id = "project-open-import-recent"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/public/studio-host.js", "apps/studio/host-native/src/lib.rs"]
 acceptance = "Projects can be imported/opened, persisted, listed, and reopened across Studio sessions."
 
 [[capability]]
 id = "project-search"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
 acceptance = "The project catalog can be filtered by name without changing the persisted recent-project order."
 
 [[capability]]
 id = "project-rename-delete"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/public/studio-host.js", "apps/studio/host-native/src/lib.rs"]
 acceptance = "Project-level rename, delete, forget, and confirmation flows preserve local and remote authority boundaries."
 
 [[capability]]
 id = "project-share"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/public/studio-host.js", "apps/studio/host-native/src/lib.rs"]
 acceptance = "Eligible projects expose a canonical development or runner link with explicit non-shareable reasons."
 
 [[capability]]
 id = "github-account"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/public/studio-host.js", "apps/studio/host-native/src/lib.rs"]
 acceptance = "Connect, inspect, and disconnect a GitHub identity without exposing credentials to guest Volang code."
 
 [[capability]]
 id = "remote-status"
 status = "implemented"
+targets = ["desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/host-native/src/lib.rs", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Projects show provider, repository, branch, dirty state, ahead, and behind information on every supported host."
 
 [[capability]]
 id = "remote-diff-conflicts"
 status = "implemented"
+targets = ["desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/host-native/src/lib.rs", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Local and cloud snapshots can be compared per file, with explicit divergent and conflict states before mutation."
 
 [[capability]]
 id = "remote-pull-push"
 status = "implemented"
+targets = ["desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/host-native/src/lib.rs", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Pull and commit/push are cancellable, recoverable operations with progress and actionable failures."
 
 [[capability]]
 id = "remote-delete-authority"
 status = "implemented"
+targets = ["desktop"]
+evidence = ["apps/studio/app/app.vo", "apps/studio/host-native/src/lib.rs", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Remove local, forget catalog, delete cloud, and delete everywhere remain distinct confirmed operations."
 
 [[capability]]
 id = "workbench"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Resizable workspace, explorer, multi-buffer editor, save/save-all, undo/redo, find, diagnostics, search, console, preview, and commands work from one state model."
 
 [[capability]]
 id = "responsive-workbench"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Desktop and compact layouts keep project actions, explorer, editor, contextual output, documentation, preview, and source control usable without page-level horizontal overflow."
 
 [[capability]]
 id = "diagnostic-navigation"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
 acceptance = "Compiler failures retain their reported file, line, and column; activating a problem opens the file, scrolls to the range, moves the selection, and returns focus to the editor on Web and desktop."
 
 [[capability]]
 id = "command-palette"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
 acceptance = "The accessible filtered command palette covers navigation, editing, preview, sharing, and explicit VM/JIT execution with a full-viewport modal overlay."
 
 [[capability]]
 id = "independent-runner"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "A shareable chromeless runner owns loading, failure recovery, stop, and return-to-Studio flows on Web and desktop."
 
 [[capability]]
 id = "documentation-center"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = ["apps/studio/documentation/catalog.vo", "apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
 acceptance = "Searchable, routed, versioned documentation is generated from canonical language, specification, toolchain, and UI sources; its collapsible section tree, page outline, breadcrumb, and previous/next controls expose the maintained hierarchy; every page shows its source path and stale mirrors fail repository lint."
 
 [[capability]]
 id = "release-backends"
 status = "implemented"
+targets = ["web", "desktop"]
+evidence = [".github/workflows/ci.yml#wasm_web", ".github/workflows/ci.yml#ui_platform", "apps/studio/ui.web.toml", "apps/studio/ui.desktop.toml"]
 acceptance = "The same Studio source is exercised in VM/JIT development and released through Core Wasm AOT and Native AOT."

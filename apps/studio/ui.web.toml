@@ -1,5 +1,8 @@
 routes = [
   "/",
+  "/workspace",
+  "/search",
+  "/source-control",
   "/runner",
   "/docs/introduction",
   "/docs/installation",
@@ -51,6 +54,8 @@ scope = "/"
 display = "standalone"
 offline_url = "/offline"
 cache_version = "volang-studio-v1"
+precache_routes = false
+precache_compiler = false
 
 [security]
 content_security_policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://api.github.com https://github.com https://objects.githubusercontent.com; object-src 'none'; base-uri 'self'"

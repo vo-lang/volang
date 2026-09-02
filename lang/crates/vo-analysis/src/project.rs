@@ -150,8 +150,15 @@ pub struct PackageIdentity {
 impl PackageIdentity {
     pub fn new(path: impl Into<String>) -> Result<Self, String> {
         let path = path.into();
-        if path.starts_with(vo_module::identity::LOCAL_NAMESPACE_PREFIX) {
-            LocalName::parse(&path).map_err(|error| error.to_string())?;
+        if let Some(local_path) = path.strip_prefix(vo_module::identity::LOCAL_NAMESPACE_PREFIX) {
+            let module_name = local_path.split('/').next().unwrap_or_default();
+            let local_module = format!(
+                "{}{}",
+                vo_module::identity::LOCAL_NAMESPACE_PREFIX,
+                module_name
+            );
+            LocalName::parse(&local_module).map_err(|error| error.to_string())?;
+            identity::classify_import(&path).map_err(|error| error.to_string())?;
         } else {
             identity::classify_import(&path).map_err(|error| error.to_string())?;
         }
@@ -960,7 +967,6 @@ mod tests {
             "github.com/acme/app/../other",
             "github.com/acme/app/e\u{301}",
             "github.com/acme/app/CON",
-            "local/demo/child",
         ] {
             assert!(
                 PackageIdentity::new(path).is_err(),
@@ -968,6 +974,7 @@ mod tests {
             );
         }
         assert!(PackageIdentity::new("local/demo").is_ok());
+        assert!(PackageIdentity::new("local/demo/child").is_ok());
         assert!(PackageIdentity::new("github.com/acme/app/\u{56fe}\u{5f62}/\u{00e9}").is_ok());
     }
 

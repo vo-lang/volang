@@ -3115,6 +3115,7 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     await browser.call("Input.dispatchMouseEvent", {
       type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1,
     }, sessionId);
+    return point;
   };
   const activateButton = async (accessibleName) => {
     await pollEvaluation(
@@ -3237,7 +3238,6 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
   );
 
   await activateButton("New project");
-  await activateButton("Create project");
   checkpoints.projectValidation = await pollEvaluation(
     browser,
     sessionId,
@@ -3252,11 +3252,14 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
         description: input?.getAttribute('aria-description') ?? '',
         focused: document.activeElement === input,
         alert: alert?.textContent ?? '',
+        createDisabled: Array.from(document.querySelectorAll('button')).some(
+          (button) => (button.textContent ?? '').trim() === 'Create project' && button.disabled,
+        ),
       };
     })()`,
     (value) => value?.invalid === "true" && value?.required === true
-      && value?.description === "Enter a project name" && value?.focused === true
-      && value?.alert.includes("Enter a project name"),
+      && value?.description === "Enter a project name." && value?.focused === true
+      && value?.alert.includes("Enter a project name") && value?.createDisabled === true,
     timeoutMilliseconds,
   );
   await activateButton("Home");
@@ -3296,11 +3299,13 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     sessionId,
     `({
       source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? "",
-      status: document.querySelector('[role="status"]')?.textContent ?? "",
+      statuses: Array.from(document.querySelectorAll('[role="status"]'),
+        (status) => status.textContent ?? ''),
       diagnostic: document.getElementById("volang-diagnostic")?.textContent ?? "",
     })`,
-    (value) => value?.source === source && value?.status.includes("6 lines")
-      && value?.status.includes("0 problems") && value?.diagnostic === "",
+    (value) => value?.source === source && Array.isArray(value?.statuses)
+      && value.statuses.some((status) => status.includes("6 lines") && status.includes("0 problems"))
+      && value?.diagnostic === "",
     timeoutMilliseconds,
   );
   const scrolled = await browser.call("Runtime.evaluate", {
@@ -3333,16 +3338,234 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       && value?.editorWidth > 4_000 && value?.mirrorWidth > 4_000,
     timeoutMilliseconds,
   );
+  await activateButton("Search");
+  const searchedUnsaved = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const input = document.querySelector('input[aria-label="Search workspace"]');
+      if (!(input instanceof HTMLInputElement)) return false;
+      input.value = "studio AOT smoke";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (searchedUnsaved.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not search the unsaved editor snapshot");
+  }
+  checkpoints.unsavedSearch = await pollEvaluation(
+    browser,
+    sessionId,
+    `document.body.textContent ?? ""`,
+    (value) => typeof value === "string" && value.includes("main.vo:4")
+      && value.includes("studio AOT smoke"),
+    timeoutMilliseconds,
+  );
+  await activateButton("Explorer");
   await activateButton("Save File");
+  await activateButton("New file");
+  const duplicatePathEntered = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const input = document.querySelector('input[aria-label="New file path"]');
+      if (!(input instanceof HTMLInputElement)) return false;
+      input.value = 'main.vo';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (duplicatePathEntered.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not enter an existing file path");
+  }
+  const duplicateCreateActivated = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const button = Array.from(document.querySelectorAll('button')).find(
+        (candidate) => (candidate.textContent ?? '').trim() === 'Create file',
+      );
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      button.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (duplicateCreateActivated.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not submit an existing file path");
+  }
+  checkpoints.noOverwriteCreate = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
+      body: document.body.textContent ?? '',
+    })`,
+    (value) => value?.source === source && value?.body.includes('File creation failed'),
+    timeoutMilliseconds,
+  );
+  const duplicateDialogClosed = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const button = Array.from(document.querySelectorAll('button')).find(
+        (candidate) => (candidate.textContent ?? '').trim() === 'Close dialog',
+      );
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (duplicateDialogClosed.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not close the duplicate-file dialog");
+  }
+  await activateButton("New file");
+  const nestedPathEntered = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const input = document.querySelector('input[aria-label="New file path"]');
+      if (!(input instanceof HTMLInputElement)) return false;
+      input.value = 'feature/tools.vo';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (nestedPathEntered.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not enter a nested source path");
+  }
+  const nestedCreateActivated = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const button = Array.from(document.querySelectorAll('button')).find(
+        (candidate) => (candidate.textContent ?? '').trim() === 'Create file',
+      );
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      button.click();
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (nestedCreateActivated.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not create a nested source file");
+  }
+  checkpoints.nestedSourcePackage = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
+      label: document.querySelector('[data-testid="volang-code-editor"]')?.getAttribute('aria-label') ?? '',
+      statuses: Array.from(document.querySelectorAll('[role="status"]'),
+        (status) => status.textContent ?? ''),
+      folder: document.querySelector('[role="treeitem"][aria-label="Collapse folder feature"]') !== null,
+      file: document.querySelector('[role="treeitem"][aria-label="Open feature/tools.vo"]') !== null,
+    })`,
+    (value) => value?.source === "package feature\n"
+      && value?.label === "Editor for feature/tools.vo"
+      && Array.isArray(value?.statuses)
+      && value.statuses.some((status) => status.includes("0 problems"))
+      && value?.folder === true && value?.file === true,
+    timeoutMilliseconds,
+  );
+  await activateButton("Collapse folder feature");
+  checkpoints.directoryCollapse = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      collapsed: document.querySelector('[role="treeitem"][aria-label="Expand folder feature"]') !== null,
+      childVisible: document.querySelector('[role="treeitem"][aria-label="Open feature/tools.vo"]') !== null,
+    })`,
+    (value) => value?.collapsed === true && value?.childVisible === false,
+    timeoutMilliseconds,
+  );
+  await activateButton("Expand folder feature");
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `document.querySelector('[role="treeitem"][aria-label="Open feature/tools.vo"]') !== null`,
+    (value) => value === true,
+    timeoutMilliseconds,
+  );
+  await activateButton("Delete");
+  checkpoints.deleteConfirmation = await pollEvaluation(
+    browser,
+    sessionId,
+    `(() => {
+      const dialog = document.querySelector('[role="dialog"][aria-label="Delete feature/tools.vo"]');
+      return {
+        visible: dialog !== null,
+        destructive: Array.from(dialog?.querySelectorAll('button') ?? []).some(
+          (button) => (button.textContent ?? '').trim() === 'Delete file permanently',
+        ),
+        fileVisible: document.querySelector('[role="treeitem"][aria-label="Open feature/tools.vo"]') !== null,
+      };
+    })()`,
+    (value) => value?.visible === true && value?.destructive === true && value?.fileVisible === true,
+    timeoutMilliseconds,
+  );
+  await activateButton("Close dialog");
+  await activateButton("Open main.vo");
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `document.querySelector('[data-testid="volang-code-editor"]')?.value ?? ''`,
+    (value) => value === source,
+    timeoutMilliseconds,
+  );
   await activateButton("Run VM");
   checkpoints.run = await pollEvaluation(
     browser,
     sessionId,
     `document.querySelector('[role="log"]')?.textContent ?? ""`,
     (value) => typeof value === "string" && value.includes("studio AOT smoke")
-      && value.includes("process exited successfully"),
+      && value.includes("process exited successfully")
+      && /Duration [0-9.]+(?:ns|µs|ms|s|m|h)/.test(value),
     timeoutMilliseconds,
   );
+  const endlessSource = "package main\n\nfunc main() {\n\tfor {}\n}\n";
+  const endlessEdited = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const editor = document.querySelector('[data-testid="volang-code-editor"]');
+      if (!(editor instanceof HTMLTextAreaElement)) return false;
+      editor.focus();
+      editor.value = ${JSON.stringify(endlessSource)};
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (endlessEdited.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not prepare a cancellable run");
+  }
+  await activateButton("Run VM");
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `document.querySelector('[role="log"]')?.textContent ?? ''`,
+    (value) => typeof value === "string"
+      && (value.match(/Web VM session started/gu) ?? []).length >= 2,
+    timeoutMilliseconds,
+  );
+  await activateButton("Stop VM");
+  checkpoints.runCancellation = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      stopped: (document.body.textContent ?? '').includes('Stopped'),
+      runnable: Array.from(document.querySelectorAll('button')).some(
+        (button) => button.getAttribute('aria-label') === 'Run VM' && !button.disabled,
+      ),
+    })`,
+    (value) => value?.stopped === true && value?.runnable === true,
+    timeoutMilliseconds,
+  );
+  const sourceRestoredAfterCancellation = await browser.call("Runtime.evaluate", {
+    expression: `(() => {
+      const editor = document.querySelector('[data-testid="volang-code-editor"]');
+      if (!(editor instanceof HTMLTextAreaElement)) return false;
+      editor.value = ${JSON.stringify(source)};
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      return true;
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+  if (sourceRestoredAfterCancellation.result?.value !== true) {
+    throw new Error("Studio AOT smoke could not restore source after run cancellation");
+  }
 
   await activateButton("Commands");
   checkpoints.commandOverlay = await pollEvaluation(
@@ -3447,15 +3670,35 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     (value) => value === true,
     timeoutMilliseconds,
   );
-  await clickPoint(`(() => {
-    const button = Array.from(document.querySelectorAll('button')).find(
-      (candidate) => candidate.getAttribute('aria-label') === 'Open Interactive counter example in Studio',
-    );
-    if (!(button instanceof HTMLButtonElement) || button.disabled) return null;
-    button.scrollIntoView({ block: 'center', inline: 'center' });
-    const bounds = button.getBoundingClientRect();
-    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
-  })()`);
+  const languageExampleStarted = Date.now();
+  await activateButton("Open Select example in Studio");
+  checkpoints.languageExample = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
+      lock: document.querySelector('[role="treeitem"][aria-label="Open vo.lock"]') !== null,
+      work: document.querySelector('[role="treeitem"][aria-label="Open vo.work"]') !== null,
+      diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? '',
+    })`,
+    (value) => value?.source.includes('select {') && value?.lock === false
+      && value?.work === false && value?.diagnostic === '',
+    timeoutMilliseconds,
+  );
+  checkpoints.languageExampleOpenMs = Date.now() - languageExampleStarted;
+  if (checkpoints.languageExampleOpenMs > 3_000) {
+    throw new Error(`Studio language example took ${checkpoints.languageExampleOpenMs}ms to open`);
+  }
+  await activateButton("Home");
+  await pollEvaluation(
+    browser,
+    sessionId,
+    `location.pathname === '/' && document.body.textContent?.includes('QUICK START') === true`,
+    (value) => value === true,
+    timeoutMilliseconds,
+  );
+  const uiExampleStarted = Date.now();
+  await activateButton("Open Interactive counter example in Studio");
   await pollEvaluation(
     browser,
     sessionId,
@@ -3463,10 +3706,20 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? "",
       title: document.querySelector("header")?.textContent ?? document.body.textContent?.slice(0, 240) ?? "",
       diagnostic: document.getElementById("volang-diagnostic")?.textContent ?? "",
+      statuses: Array.from(document.querySelectorAll('[role="status"]')).map(
+        (value) => (value.textContent ?? '').trim(),
+      ),
+      exampleDisabled: Array.from(document.querySelectorAll('button')).find(
+        (candidate) => candidate.getAttribute('aria-label') === 'Open Interactive counter example in Studio',
+      )?.disabled ?? null,
     })`,
     (value) => value?.source.includes("UseIntState(0)"),
     timeoutMilliseconds,
   );
+  checkpoints.uiExampleOpenMs = Date.now() - uiExampleStarted;
+  if (checkpoints.uiExampleOpenMs > 10_000) {
+    throw new Error(`Studio UI example took ${checkpoints.uiExampleOpenMs}ms to open`);
+  }
   const starterSource = await browser.call("Runtime.evaluate", {
     expression: `document.querySelector('[data-testid="volang-code-editor"]')?.value ?? ""`,
     returnByValue: true,
@@ -3570,12 +3823,11 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
   await pollEvaluation(
     browser,
     sessionId,
-    `document.querySelector('[role="status"]')?.textContent ?? ""`,
-    (value) => typeof value === "string" && value.includes("0 problems"),
+    `Array.from(document.querySelectorAll('[role="status"]'), (status) => status.textContent ?? '')`,
+    (value) => Array.isArray(value) && value.some((status) => status.includes("0 problems")),
     timeoutMilliseconds,
   );
-  await activateButton("Save File");
-  await pollEvaluation(
+  checkpoints.dirtyRevert = await pollEvaluation(
     browser,
     sessionId,
     `(() => {
@@ -3585,6 +3837,22 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       return tab?.textContent ?? '';
     })()`,
     (value) => typeof value === "string" && value.includes("main.vo") && !value.includes("●"),
+    timeoutMilliseconds,
+  );
+  checkpoints.cleanSaveDisabled = await pollEvaluation(
+    browser,
+    sessionId,
+    `(() => {
+      const tab = Array.from(document.querySelectorAll('[role="tab"]')).find(
+        (candidate) => (candidate.textContent ?? '').includes('main.vo'),
+      );
+      const save = Array.from(document.querySelectorAll('button')).find(
+        (candidate) => candidate.getAttribute('aria-label') === 'Save File',
+      );
+      return { tab: tab?.textContent ?? '', saveDisabled: save?.disabled ?? false };
+    })()`,
+    (value) => value?.tab.includes("main.vo") && !value.tab.includes("●")
+      && value?.saveDisabled === true,
     timeoutMilliseconds,
   );
   await activateButton("Open Preview");
@@ -3668,7 +3936,40 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       };
     })()`,
     (value) => value?.text.includes("browser host")
-      && value?.text.includes("page session") && value?.connect === true,
+      && value?.text.includes("never persists") && value?.connect === true,
+    timeoutMilliseconds,
+  );
+  await activateButton("Connect GitHub account");
+  checkpoints.accountCredential = await pollEvaluation(
+    browser,
+    sessionId,
+    `(() => {
+      const dialog = document.querySelector('dialog[aria-label="Connect GitHub account"]');
+      const input = dialog?.querySelector('input[aria-label="GitHub token"]');
+      return {
+        open: dialog?.open === true,
+        type: input?.type ?? '',
+        autocomplete: input?.autocomplete ?? '',
+        focused: document.activeElement === input,
+      };
+    })()`,
+    (value) => value?.open === true && value?.type === "password"
+      && value?.autocomplete === "off" && value?.focused === true,
+    timeoutMilliseconds,
+  );
+  await activateButton("Cancel GitHub connection");
+  checkpoints.accountCancellation = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      credentialDialog: document.querySelector('dialog[aria-label="Connect GitHub account"]') !== null,
+      accountDialog: document.querySelector('[role="dialog"][aria-label="GitHub account"]') !== null,
+      status: Array.from(document.querySelectorAll('[role="status"]'),
+        (candidate) => candidate.textContent ?? ''),
+    })`,
+    (value) => value?.credentialDialog === false && value?.accountDialog === true
+      && Array.isArray(value?.status)
+      && value.status.some((status) => status.includes("GitHub connection cancelled")),
     timeoutMilliseconds,
   );
   await activateButton("Close dialog");
@@ -3711,8 +4012,13 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       && value?.preview.includes("Count: 0") && value?.error === "",
     timeoutMilliseconds,
   );
+  const warmReloadStarted = Date.now();
   await browser.call("Page.reload", { ignoreCache: true }, sessionId);
   await waitForAotInteractive(browser, sessionId, timeoutMilliseconds);
+  checkpoints.warmReloadMs = Date.now() - warmReloadStarted;
+  if (checkpoints.warmReloadMs > 5_000) {
+    throw new Error(`Studio warm reload took ${checkpoints.warmReloadMs}ms`);
+  }
   checkpoints.runnerColdStart = await pollEvaluation(
     browser,
     sessionId,
@@ -3747,7 +4053,38 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
       editor: document.querySelector('[data-testid="volang-code-editor"]') instanceof HTMLTextAreaElement,
       project: document.body.textContent?.includes('example-counter') === true,
     })`,
-    (value) => value?.path === "/" && value?.editor === true && value?.project === true,
+    (value) => value?.path === "/workspace" && value?.editor === true && value?.project === true,
+    timeoutMilliseconds,
+  );
+  await browser.call("Page.reload", { ignoreCache: true }, sessionId);
+  await waitForAotInteractive(browser, sessionId, timeoutMilliseconds);
+  checkpoints.sharedProjectPersistence = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      path: location.pathname,
+      project: Array.from(document.querySelectorAll('button')).some(
+        (button) => button.getAttribute('aria-label') === 'Open project example-counter',
+      ),
+      active: document.querySelector(
+        'button[aria-label="Open project example-counter"][aria-selected="true"]',
+      ) !== null,
+      editor: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
+      diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? '',
+    })`,
+    (value) => value?.path === "/workspace" && value?.project === true && value?.active === true
+      && value?.editor.includes('UseIntState(0)') && value?.diagnostic === "",
+    timeoutMilliseconds,
+  );
+  await activateButton("Open project example-counter");
+  checkpoints.sharedProjectReopen = await pollEvaluation(
+    browser,
+    sessionId,
+    `({
+      source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
+      diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? '',
+    })`,
+    (value) => value?.source.includes('UseIntState(0)') && value?.diagnostic === "",
     timeoutMilliseconds,
   );
   const origin = await browser.call("Runtime.evaluate", {
@@ -3778,11 +4115,22 @@ async function pollEvaluation(connection, sessionId, expression, predicate, time
   const deadline = Date.now() + timeoutMilliseconds;
   let lastValue = null;
   while (Date.now() < deadline) {
-    const evaluated = await connection.call("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    }, sessionId);
+    let evaluated;
+    try {
+      evaluated = await connection.call("Runtime.evaluate", {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      }, sessionId);
+    } catch (error) {
+      if (error instanceof Error
+        && (error.message.includes('Inspected target navigated or closed')
+          || error.message.includes('Cannot find context with specified id'))) {
+        await delay(50);
+        continue;
+      }
+      throw error;
+    }
     if (evaluated.exceptionDetails !== undefined) {
       throw new Error(`browser evaluation failed: ${evaluated.exceptionDetails.text}`);
     }

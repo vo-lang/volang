@@ -1,5 +1,5 @@
 schema = "volang.studio.product.v1"
-protocol = "volang.studio.host.v1"
+protocol = "volang.studio.host.v3"
 
 [product]
 application_language = "volang"
@@ -27,8 +27,8 @@ project_share = "implemented-portable-snapshot-studio-and-runner-links"
 independent_runner = "implemented-chromeless-cold-start-and-recovery"
 remote_sync = "implemented-memory-and-native-git"
 remote_status_diff = "implemented-native-branch-divergence-conflict-and-unified-diff"
-github_account = "implemented-host-owned-browser-session-and-native-gh-cli"
-credentials = "implemented-memory-session-only"
+github_account = "implemented-host-isolated-browser-verification-and-native-gh-cli"
+credentials = "excluded-from-guest-protocol-host-owned-account-only"
 native_host = "implemented-vm-jit"
 web_host = "implemented-opfs-worker-compiler"
 aot_release = "implemented-core-wasm-and-native-custom-host-aot"

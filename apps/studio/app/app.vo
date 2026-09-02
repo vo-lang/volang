@@ -5,7 +5,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/vo-lang/studio/design"
 	"github.com/vo-lang/studio/documentation"
 	"github.com/vo-lang/studio/domain"
@@ -26,6 +25,33 @@ import (
 	"sync"
 	"time"
 )
+
+func inferredSourcePackage(path string) string {
+	slash := strings.LastIndex(path, "/")
+	if slash < 0 {
+		return "main"
+	}
+	directory := path[:slash]
+	if parent := strings.LastIndex(directory, "/"); parent >= 0 {
+		directory = directory[parent+1:]
+	}
+	if directory == "" || isSourceKeyword(directory) {
+		return "main"
+	}
+	for index, value := range directory {
+		if value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' ||
+			value >= 128 || index > 0 && value >= '0' && value <= '9' {
+			continue
+		}
+		return "main"
+	}
+	return directory
+}
+
+func isSourceKeyword(value string) bool {
+	const keywords = "|break|case|chan|const|continue|default|defer|else|fallthrough|for|func|go|goto|if|import|interface|island|map|package|port|range|return|select|struct|switch|type|var|fail|errdefer|"
+	return strings.Contains(keywords, "|" + value + "|")
+}
 
 func preferredRuntimeMode(host domain.HostInfo) domain.RuntimeMode {
 	for _, mode := range host.RuntimeModes {
@@ -118,11 +144,136 @@ func documentationRoute(location string) (string, bool) {
 	return "introduction", true
 }
 
+func workspaceActivityRoute(location string) (Activity, bool) {
+	switch applicationPath(location) {
+		case "/workspace":
+			return ActivityExplorer, true
+		case "/search":
+			return ActivitySearch, true
+		case "/source-control":
+			return ActivitySourceControl, true
+	}
+	return ActivityHome, false
+}
+
+func workspaceActivityPath(activity Activity) string {
+	if activity == ActivityExplorer {
+		return "/workspace"
+	}
+	if activity == ActivitySearch {
+		return "/search"
+	}
+	if activity == ActivitySourceControl {
+		return "/source-control"
+	}
+	return "/"
+}
+
+func reservedPortableName(value string) bool {
+	stem := strings.Split(value, ".")[0]
+	upper := strings.ToUpper(stem)
+	return upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" ||
+		upper == "COM1" || upper == "COM2" || upper == "COM3" || upper == "COM4" ||
+		upper == "COM5" || upper == "COM6" || upper == "COM7" || upper == "COM8" ||
+		upper == "COM9" || upper == "LPT1" || upper == "LPT2" || upper == "LPT3" ||
+		upper == "LPT4" || upper == "LPT5" || upper == "LPT6" || upper == "LPT7" ||
+		upper == "LPT8" || upper == "LPT9"
+}
+
+func relativePathError(value string) string {
+	path := strings.TrimSpace(value)
+	if path == "" {
+		return ""
+	}
+	if len(path) > 4096 {
+		return "The path is too long."
+	}
+	if strings.HasPrefix(path, "/") || strings.Contains(path, "\\") {
+		return "Use a project-relative path with forward slashes."
+	}
+	for index, part := range strings.Split(path, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "The path cannot contain empty, current, or parent segments."
+		}
+		if index == 0 && part == ".volang" {
+			return "The .volang directory is reserved by Studio."
+		}
+		if len(part) > 255 {
+			return "Each path segment must use no more than 255 bytes."
+		}
+		if strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+			return "Path segments cannot end with a dot or space."
+		}
+		for _, character := range []byte(part) {
+			if character < 32 || character == '<' || character == '>' || character == ':' ||
+				character == '"' || character == '|' || character == '?' || character == '*' {
+				return "The path contains a character that is unavailable on desktop platforms."
+			}
+		}
+		if reservedPortableName(part) {
+			return "The path contains a reserved desktop device name."
+		}
+	}
+	return ""
+}
+
+func validRelativePath(value string) bool {
+	return strings.TrimSpace(value) != "" && relativePathError(value) == ""
+}
+
+func projectNameError(value string) string {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return "Enter a project name."
+	}
+	if len(name) > 128 {
+		return "Use no more than 128 characters."
+	}
+	for _, value := range []byte(name) {
+		if (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+			(value >= '0' && value <= '9') || value == '-' || value == '_' {
+			continue
+		}
+		return "Use letters, numbers, dashes, and underscores only."
+	}
+	if reservedPortableName(name) {
+		return "Choose a name that is available on every desktop platform."
+	}
+	return ""
+}
+
 const (
 	MaxConsoleEntries = 4000
 	MaxOpenBuffers = 256
 	MaxSearchResults = 500
+	MaxSaveQueue = 64
+	MaxSearchWorkers = 4
 )
+
+type workspaceSearchResult struct {
+	Path string
+	Line int
+	Column int
+	Preview string
+}
+
+type searchJob struct {
+	Index int
+	File domain.FileEntry
+	Text string
+	HasText bool
+}
+
+type searchFileMatches struct {
+	Index int
+	Values []workspaceSearchResult
+}
+
+type saveBatch struct {
+	Project domain.Project
+	ProjectGeneration uint64
+	Snapshots []saveSnapshot
+}
 
 type Activity int64
 
@@ -141,7 +292,17 @@ type State struct {
 	projects []domain.Project
 	current domain.Project
 	hasProject bool
+	projectGeneration uint64
+	projectLoadGeneration uint64
+	projectLoadCancel context.CancelFunc
+	projectSelectionGeneration uint64
+	pendingProject domain.Project
+	hasPendingProject bool
+	projectSwitchProject domain.Project
+	projectSwitchSelection uint64
+	filesGeneration uint64
 	files []domain.FileEntry
+	collapsedDirectories map[string]bool
 	activePath string
 	editor *editor.Model
 	editorFocusToken int64
@@ -149,13 +310,16 @@ type State struct {
 	openPaths []string
 	openGeneration uint64
 	dirty map[string]bool
+	savedText map[string]string
+	saveQueue chan saveBatch
+	savePending int
 	diagnostics []domain.Diagnostic
 	diagnosticsByPath map[string][]domain.Diagnostic
 	console []domain.ConsoleEntry
 	consoleSequence uint64
 	activity Activity
 	searchQuery string
-	searchResults []string
+	searchResults []workspaceSearchResult
 	searching bool
 	searchGeneration uint64
 	searchCancel context.CancelFunc
@@ -170,11 +334,13 @@ type State struct {
 	renameProjectVisible bool
 	renameProject domain.Project
 	renameProjectName string
+	renameProjectError string
 	deleteProjectVisible bool
 	deleteProject domain.Project
 	projectMutationBusy bool
 	shareVisible bool
 	shareLoading bool
+	shareGeneration uint64
 	share domain.ProjectShare
 	accountVisible bool
 	accountLoading bool
@@ -189,14 +355,22 @@ type State struct {
 	newFileVisible bool
 	renamePath string
 	renameFileVisible bool
+	closeFilePath string
+	closeFileProjectGeneration uint64
+	deleteFilePath string
+	deleteFileProject domain.Project
+	deleteFileProjectGeneration uint64
 	running bool
 	runMode domain.RuntimeMode
+	runPreview bool
 	runGeneration uint64
 	runCancel context.CancelFunc
 	analysisGeneration uint64
 	analysisCancel context.CancelFunc
 	previewState domain.PreviewState
 	previewSurface string
+	previewStale bool
+	previewError string
 	remote domain.RemoteState
 	remoteLoaded bool
 	remoteLoading bool
@@ -222,15 +396,16 @@ func New(services protocol.Services) *State {
 	services.Validate()
 	state := &State{
 		services: services, buffers: make(map[string]*editor.Model), dirty: make(map[string]bool),
+		savedText: make(map[string]string), saveQueue: make(chan saveBatch, MaxSaveQueue),
 		diagnosticsByPath: make(map[string][]domain.Diagnostic), docPageID: "introduction",
-		docExpanded: make(map[string]bool), status: "Ready",
+		docExpanded: make(map[string]bool), collapsedDirectories: make(map[string]bool), status: "Ready",
 	}
 	sections := documentation.Sections()
 	if len(sections) > 0 {
 		state.docExpanded[sections[0].ID] = true
 	}
 	var err error
-	state.layout, err = workspace.New(workspace.Split("studio-root", workspace.Horizontal, 0.19, workspace.PanelLayout("side-panel", "side-panel"), workspace.Split("studio-main", workspace.Vertical, 0.72, workspace.Tabs("documents", 0, workspace.PanelLayout("editor-panel", "editor"), workspace.PanelLayout("docs-panel", "docs")), workspace.Tabs("bottom", 0, workspace.PanelLayout("console-panel", "console"), workspace.PanelLayout("preview-panel", "preview"), workspace.PanelLayout("problems-panel", "problems"), workspace.PanelLayout("changes-panel", "changes")))), []workspace.Panel{
+	state.layout, err = workspace.New(workspace.Split("studio-root", workspace.Horizontal, 0.19, workspace.PanelLayout("side-panel", "side-panel"), workspace.Split("studio-main", workspace.Vertical, 0.65, workspace.Tabs("documents", 0, workspace.PanelLayout("editor-panel", "editor"), workspace.PanelLayout("docs-panel", "docs")), workspace.Tabs("bottom", 0, workspace.PanelLayout("console-panel", "console"), workspace.PanelLayout("preview-panel", "preview"), workspace.PanelLayout("problems-panel", "problems"), workspace.PanelLayout("changes-panel", "changes")))), []workspace.Panel{
 		{ID: "side-panel", Title: "Navigation", Content: state.SidePanel},
 		{ID: "editor", Title: "Editor", Content: state.EditorPanel},
 		{ID: "docs", Title: "Documentation", Content: state.DocsPanel},
@@ -242,6 +417,7 @@ func New(services protocol.Services) *State {
 	if err != nil {
 		panic(err.Error())
 	}
+	go state.saveLoop()
 	return state
 }
 
@@ -278,6 +454,7 @@ func (state *State) ReportFailure(source string, err error) {
 
 func (state *State) Bootstrap(ctx context.Context) error {
 	location := ui.LocationPath()
+	routeActivity, hasWorkspaceRoute := workspaceActivityRoute(location)
 	host, err := state.services.Host.Info(ctx)
 	if err != nil {
 		return err
@@ -294,6 +471,9 @@ func (state *State) Bootstrap(ctx context.Context) error {
 	}
 	state.mu.Lock()
 	state.projects = projects
+	if hasWorkspaceRoute {
+		state.activity = routeActivity
+	}
 	state.mu.Unlock()
 	pageID, hasDocumentationRoute := documentationRoute(location)
 	if len(projects) == 0 {
@@ -312,7 +492,13 @@ func (state *State) Bootstrap(ctx context.Context) error {
 		ui.Invalidate()
 		return nil
 	}
-	if err := state.loadProject(ctx, projects[0]); err != nil {
+	project := projects[0]
+	for _, candidate := range projects[1:] {
+		if candidate.LastOpenedUnixMillis > project.LastOpenedUnixMillis {
+			project = candidate
+		}
+	}
+	if err := state.loadProject(ctx, project, false); err != nil {
 		return err
 	}
 	if hasDocumentationRoute {
@@ -329,6 +515,8 @@ func (state *State) Bootstrap(ctx context.Context) error {
 	}
 	if runnerRoute(location) {
 		state.StartRun(preferredRuntimeMode(host), true)
+	} else if hasWorkspaceRoute && routeActivity == ActivitySourceControl && host.CanSyncRemote {
+		state.RefreshRemote()
 	}
 	return nil
 }
@@ -362,50 +550,189 @@ func (state *State) activateBufferLocked(path string, code *editor.Model) {
 	state.status = path
 }
 
-func (state *State) loadProject(ctx context.Context, project domain.Project) error {
-	files, err := state.services.Files.Files(ctx, project.ID)
-	if err != nil {
-		return err
-	}
-	path := preferredFile(files)
-	var code *editor.Model
-	if path != "" {
-		text, readErr := state.services.Files.ReadFile(ctx, project.ID, path)
-		if readErr != nil {
-			return readErr
+func (state *State) hasDirtyLocked() bool {
+	for _, dirty := range state.dirty {
+		if dirty {
+			return true
 		}
-		code = newEditor(project, path, text)
 	}
-	state.mu.Lock()
-	previousPreview := state.previewSurface
+	return false
+}
+
+func (state *State) cancelProjectWorkLocked() {
+	state.filesGeneration++
 	if state.runCancel != nil {
 		state.runCancel()
 		state.runCancel = nil
 	}
+	state.runGeneration++
+	state.running = false
+	state.runPreview = false
 	if state.analysisCancel != nil {
 		state.analysisCancel()
 		state.analysisCancel = nil
 	}
+	state.analysisGeneration++
 	if state.searchCancel != nil {
 		state.searchCancel()
 		state.searchCancel = nil
 	}
+	state.searchGeneration++
+	state.searching = false
 	if state.remoteCancel != nil {
 		state.remoteCancel()
 		state.remoteCancel = nil
 	}
 	state.remoteGeneration++
-	state.current = project
-	state.hasProject = true
-	state.files = files
+	state.remoteLoading = false
+	state.remoteBusy = false
+	state.remoteDiffLoading = false
+	state.shareGeneration++
+	state.shareLoading = false
+}
+
+// detachCurrentProjectLocked removes every guest-visible reference to the
+// current project before an asynchronous replacement project is opened. This
+// keeps editors and save actions from targeting a project that the host has
+// already deleted or forgotten.
+func (state *State) detachCurrentProjectLocked() string {
+	previousPreview := state.previewSurface
+	if state.projectLoadCancel != nil {
+		state.projectLoadCancel()
+		state.projectLoadCancel = nil
+	}
+	state.projectLoadGeneration++
+	state.projectSelectionGeneration++
+	state.cancelProjectWorkLocked()
+	state.projectGeneration++
+	state.hasProject = false
+	state.current = domain.Project{}
+	state.files = nil
+	state.activePath = ""
+	state.renamePath = ""
+	state.editor = nil
 	state.buffers = make(map[string]*editor.Model)
 	state.openPaths = nil
 	state.openGeneration++
 	state.dirty = make(map[string]bool)
+	state.savedText = make(map[string]string)
+	state.diagnostics = nil
+	state.diagnosticsByPath = make(map[string][]domain.Diagnostic)
+	state.searchResults = nil
+	state.findVisible = false
+	state.findQuery = ""
+	state.paletteVisible = false
+	state.paletteQuery = ""
+	state.pendingProject = domain.Project{}
+	state.hasPendingProject = false
+	state.projectSwitchProject = domain.Project{}
+	state.newFileVisible = false
+	state.newFilePath = ""
+	state.renameFileVisible = false
+	state.closeFilePath = ""
+	state.deleteFilePath = ""
+	state.deleteFileProject = domain.Project{}
+	state.shareVisible = false
+	state.share = domain.ProjectShare{}
+	state.previewState = domain.PreviewIdle
+	state.previewSurface = ""
+	state.previewStale = false
+	state.previewError = ""
+	state.remote = domain.RemoteState{}
+	state.remoteLoaded = false
+	state.remoteDiff = domain.RemoteDiff{}
+	return previousPreview
+}
+
+func (state *State) projectLoadFailed(generation uint64, cancel context.CancelFunc, err error) error {
+	cancel()
+	state.mu.Lock()
+	current := generation == state.projectLoadGeneration
+	if current {
+		state.projectLoadCancel = nil
+		state.status = "Project open failed"
+	}
+	state.mu.Unlock()
+	if !current {
+		return nil
+	}
+	return err
+}
+
+func (state *State) loadProject(ctx context.Context, project domain.Project, discardDirty bool) error {
+	state.mu.Lock()
+	if state.projectLoadCancel != nil {
+		state.projectLoadCancel()
+	}
+	loadCtx, cancel := context.WithCancel(ctx)
+	state.projectLoadCancel = cancel
+	state.projectLoadGeneration++
+	generation := state.projectLoadGeneration
+	state.status = "Opening " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+	files, err := state.services.Files.Files(loadCtx, project.ID)
+	if err != nil {
+		return state.projectLoadFailed(generation, cancel, err)
+	}
+	path := preferredFile(files)
+	var code *editor.Model
+	text := ""
+	if path != "" {
+		var readErr error
+		text, readErr = state.services.Files.ReadFile(loadCtx, project.ID, path)
+		if readErr != nil {
+			return state.projectLoadFailed(generation, cancel, readErr)
+		}
+		code = newEditor(project, path, text)
+	}
+	state.mu.Lock()
+	if generation != state.projectLoadGeneration {
+		state.mu.Unlock()
+		cancel()
+		return nil
+	}
+	if state.savePending > 0 || state.projectMutationBusy {
+		state.projectLoadCancel = nil
+		state.status = "Current project operation is still finishing; choose the project again"
+		state.mu.Unlock()
+		cancel()
+		ui.Invalidate()
+		return nil
+	}
+	if !discardDirty && state.hasProject && state.hasDirtyLocked() {
+		state.projectLoadCancel = nil
+		state.status = "Current project changed while opening; choose the project again to continue"
+		state.mu.Unlock()
+		cancel()
+		ui.Invalidate()
+		return nil
+	}
+	previousPreview := state.previewSurface
+	state.cancelProjectWorkLocked()
+	state.projectGeneration++
+	state.projectLoadCancel = nil
+	state.current = project
+	state.current.LastOpenedUnixMillis = time.Now().UnixMilli()
+	state.hasProject = true
+	for index, candidate := range state.projects {
+		if candidate.ID == project.ID {
+			state.projects[index] = state.current
+			break
+		}
+	}
+	state.files = files
+	state.collapsedDirectories = make(map[string]bool)
+	state.buffers = make(map[string]*editor.Model)
+	state.openPaths = nil
+	state.openGeneration++
+	state.dirty = make(map[string]bool)
+	state.savedText = make(map[string]string)
 	state.diagnosticsByPath = make(map[string][]domain.Diagnostic)
 	if code != nil {
 		state.buffers[path] = code
 		state.openPaths = append(state.openPaths, path)
+		state.savedText[path] = text
 	}
 	state.activePath = ""
 	state.renamePath = ""
@@ -419,18 +746,42 @@ func (state *State) loadProject(ctx context.Context, project domain.Project) err
 	state.paletteVisible = false
 	state.paletteQuery = ""
 	state.paletteSelected = 0
+	state.projectCreatorVisible = false
+	state.newProjectError = ""
+	state.renameProjectError = ""
+	state.pendingProject = domain.Project{}
+	state.hasPendingProject = false
+	state.newFileVisible = false
+	state.newFilePath = ""
+	state.renameFileVisible = false
+	state.shareVisible = false
+	state.share = domain.ProjectShare{}
 	state.previewState = domain.PreviewIdle
 	state.previewSurface = ""
+	state.previewStale = false
+	state.previewError = ""
 	state.remote = domain.RemoteState{}
 	state.remoteLoaded = false
 	state.remoteLoading = false
 	state.remoteBusy = false
 	state.remoteDiff = domain.RemoteDiff{}
 	state.remoteDiffLoading = false
+	state.remoteDeleteVisible = false
+	state.remoteDeleteBusy = false
+	state.remoteDeleteConfirmation = ""
 	state.commitMessage = "Update from Volang Studio"
 	state.status = "Ready"
 	state.appendConsoleLocked(domain.ConsoleSuccess, "workspace", "Opened " + project.Name)
+	activity := state.activity
 	state.mu.Unlock()
+	activationErr := state.services.Files.ActivateProject(loadCtx, project.ID)
+	cancel()
+	if activationErr != nil {
+		state.log(domain.ConsoleWarning, "workspace", "Could not remember the active project: " + activationErr.Error())
+	}
+	if _, docs := documentationRoute(ui.LocationPath()); !docs && !runnerRoute(ui.LocationPath()) && activity != ActivityHome {
+		ui.Navigate(workspaceActivityPath(activity))
+	}
 	_ = state.layout.Activate("documents", 0)
 	if previousPreview != "" {
 		_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
@@ -441,21 +792,111 @@ func (state *State) loadProject(ctx context.Context, project domain.Project) err
 	return nil
 }
 
+func (state *State) requestProjectLoad(project domain.Project) {
+	state.mu.Lock()
+	if state.hasProject && state.current.ID == project.ID {
+		state.pendingProject = domain.Project{}
+		state.hasPendingProject = false
+		state.activity = ActivityExplorer
+		state.status = project.Name
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if state.savePending > 0 {
+		state.projectSelectionGeneration++
+		state.pendingProject = project
+		state.hasPendingProject = true
+		state.activity = ActivityExplorer
+		state.status = "Finishing saves before opening " + project.Name
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if state.projectMutationBusy {
+		state.activity = ActivityExplorer
+		state.status = "Wait for the current project operation to finish"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.pendingProject = domain.Project{}
+	state.hasPendingProject = false
+	state.projectSelectionGeneration++
+	selection := state.projectSelectionGeneration
+	dirty := state.hasDirtyLocked()
+	state.activity = ActivityExplorer
+	if dirty {
+		state.projectSwitchProject = project
+		state.projectSwitchSelection = selection
+		state.status = "Confirm opening " + project.Name
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.status = "Opening " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		state.mu.RLock()
+		current := selection == state.projectSelectionGeneration
+		state.mu.RUnlock()
+		if !current {
+			return
+		}
+		if err := state.loadProject(context.Background(), project, false); err != nil {
+			state.log(domain.ConsoleError, "workspace", err.Error())
+		}
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) HideProjectSwitchDialog() {
+	state.mu.Lock()
+	if state.projectSwitchProject.ID != "" {
+		if state.projectSwitchSelection == state.projectSelectionGeneration {
+			state.status = "Kept current project"
+		}
+		state.projectSwitchProject = domain.Project{}
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ConfirmProjectSwitch() {
+	state.mu.Lock()
+	if state.projectSwitchProject.ID == "" || state.projectSwitchSelection != state.projectSelectionGeneration {
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	project := state.projectSwitchProject
+	selection := state.projectSwitchSelection
+	state.projectSwitchProject = domain.Project{}
+	state.status = "Opening " + project.Name
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		state.mu.RLock()
+		current := selection == state.projectSelectionGeneration
+		state.mu.RUnlock()
+		if !current {
+			return
+		}
+		if err := state.loadProject(context.Background(), project, true); err != nil {
+			state.log(domain.ConsoleError, "workspace", err.Error())
+		}
+		ui.Invalidate()
+	}()
+}
+
 func (state *State) SelectProject(id domain.ProjectID) {
 	state.mu.RLock()
 	projects := append([]domain.Project(nil), state.projects...)
 	state.mu.RUnlock()
 	for _, project := range projects {
 		if project.ID == id {
-			state.mu.Lock()
-			state.activity = ActivityExplorer
-			state.mu.Unlock()
-			go func() {
-				if err := state.loadProject(context.Background(), project); err != nil {
-					state.log(domain.ConsoleError, "workspace", err.Error())
-				}
-				ui.Invalidate()
-			}()
+			state.requestProjectLoad(project)
 			return
 		}
 	}
@@ -468,6 +909,12 @@ func (state *State) OpenExample(id string) {
 		return
 	}
 	state.mu.Lock()
+	if state.projectMutationBusy || state.projectCreationBusy {
+		state.status = "Wait for the current project operation before opening an example"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
 	if state.openingExample != "" {
 		state.mu.Unlock()
 		return
@@ -482,6 +929,7 @@ func (state *State) OpenExample(id string) {
 		}
 	}
 	state.openingExample = example.ID
+	state.projectMutationBusy = true
 	state.status = "Creating editable " + example.Title + " project"
 	state.mu.Unlock()
 	ui.Invalidate()
@@ -492,6 +940,7 @@ func (state *State) OpenExample(id string) {
 		if err != nil {
 			state.mu.Lock()
 			state.openingExample = ""
+			state.projectMutationBusy = false
 			state.status = "Example failed to open"
 			state.appendConsoleLocked(domain.ConsoleError, "examples", err.Error())
 			state.mu.Unlock()
@@ -501,13 +950,9 @@ func (state *State) OpenExample(id string) {
 		state.mu.Lock()
 		state.projects = append(state.projects, project)
 		state.openingExample = ""
-		state.activity = ActivityExplorer
-		state.status = "Opened " + example.Title
+		state.projectMutationBusy = false
 		state.mu.Unlock()
-		if err := state.loadProject(context.Background(), project); err != nil {
-			state.log(domain.ConsoleError, "examples", err.Error())
-		}
-		ui.Invalidate()
+		state.requestProjectLoad(project)
 	}()
 }
 
@@ -528,7 +973,14 @@ func (state *State) ShowShareProject() {
 	}
 	state.shareVisible = true
 	state.share = domain.ProjectShare{}
-	if len(state.dirty) > 0 {
+	if state.projectMutationBusy {
+		state.share = domain.ProjectShare{Reason: "Wait for the current project operation before sharing."}
+		state.status = "Project operation still in progress"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if state.hasDirtyLocked() || state.savePending > 0 {
 		state.share = domain.ProjectShare{
 			Reason: "Save all edited files before creating an immutable project link.",
 		}
@@ -538,13 +990,21 @@ func (state *State) ShowShareProject() {
 		return
 	}
 	state.shareLoading = true
+	state.shareGeneration++
+	generation := state.shareGeneration
 	project := state.current
+	projectGeneration := state.projectGeneration
 	state.status = "Creating portable project links"
 	state.mu.Unlock()
 	ui.Invalidate()
 	go func() {
 		result, err := state.services.Share.Share(context.Background(), project.ID)
 		state.mu.Lock()
+		if generation != state.shareGeneration || projectGeneration != state.projectGeneration ||
+			state.current.ID != project.ID {
+			state.mu.Unlock()
+			return
+		}
 		state.shareLoading = false
 		if err != nil {
 			state.share = domain.ProjectShare{Reason: err.Error()}
@@ -567,10 +1027,10 @@ func (state *State) ShowShareProject() {
 
 func (state *State) HideShareProject() {
 	state.mu.Lock()
-	if !state.shareLoading {
-		state.shareVisible = false
-		state.share = domain.ProjectShare{}
-	}
+	state.shareGeneration++
+	state.shareLoading = false
+	state.shareVisible = false
+	state.share = domain.ProjectShare{}
 	state.mu.Unlock()
 	ui.Invalidate()
 }
@@ -625,8 +1085,12 @@ func (state *State) ConnectAccount() {
 		state.mu.Lock()
 		state.accountLoading = false
 		if err != nil {
-			state.status = "GitHub connection failed"
-			state.appendConsoleLocked(domain.ConsoleError, "account", err.Error())
+			if strings.Contains(strings.ToLower(err.Error()), "cancelled") {
+				state.status = "GitHub connection cancelled"
+			} else {
+				state.status = "GitHub connection failed"
+				state.appendConsoleLocked(domain.ConsoleError, "account", err.Error())
+			}
 		} else {
 			state.account = account
 			state.accountLoaded = true
@@ -681,12 +1145,13 @@ func (state *State) copyProjectLink(value string, label string) {
 
 func (state *State) BeginRenameProject(project domain.Project) {
 	state.mu.Lock()
-	if state.projectMutationBusy {
+	if state.projectMutationBusy || state.projectCreationBusy {
 		state.mu.Unlock()
 		return
 	}
 	state.renameProject = project
 	state.renameProjectName = project.Name
+	state.renameProjectError = ""
 	state.renameProjectVisible = true
 	state.status = "Rename " + project.Name
 	state.mu.Unlock()
@@ -696,6 +1161,7 @@ func (state *State) BeginRenameProject(project domain.Project) {
 func (state *State) SetRenameProjectName(value string) {
 	state.mu.Lock()
 	state.renameProjectName = value
+	state.renameProjectError = projectNameError(value)
 	state.mu.Unlock()
 	ui.Invalidate()
 }
@@ -705,6 +1171,7 @@ func (state *State) HideRenameProject() {
 	if !state.projectMutationBusy {
 		state.renameProjectVisible = false
 		state.renameProjectName = ""
+		state.renameProjectError = ""
 	}
 	state.mu.Unlock()
 	ui.Invalidate()
@@ -714,8 +1181,22 @@ func (state *State) RenameProject() {
 	state.mu.Lock()
 	name := strings.TrimSpace(state.renameProjectName)
 	project := state.renameProject
-	if !state.renameProjectVisible || state.projectMutationBusy || name == "" {
+	nameError := projectNameError(name)
+	if !state.renameProjectVisible || state.projectMutationBusy {
 		state.mu.Unlock()
+		return
+	}
+	if nameError != "" {
+		state.renameProjectError = nameError
+		state.status = "Enter a valid project name"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if state.hasProject && state.current.ID == project.ID && state.savePending > 0 {
+		state.status = "Wait for pending saves before renaming"
+		state.mu.Unlock()
+		ui.Invalidate()
 		return
 	}
 	state.projectMutationBusy = true
@@ -725,31 +1206,66 @@ func (state *State) RenameProject() {
 	go func() {
 		renamed, err := state.services.Files.RenameProject(context.Background(), project.ID, name)
 		state.mu.Lock()
-		state.projectMutationBusy = false
 		if err != nil {
+			state.projectMutationBusy = false
 			state.status = "Project rename failed"
+			state.renameProjectError = err.Error()
 			state.appendConsoleLocked(domain.ConsoleError, "project", err.Error())
 			state.mu.Unlock()
 			ui.Invalidate()
 			return
 		}
 		wasCurrent := state.hasProject && state.current.ID == project.ID
+		previousPreview := ""
+		rebindPaths := make([]string, 0)
+		rebindEditors := make([]*editor.Model, 0)
+		var activeEditor *editor.Model
 		for index, existing := range state.projects {
 			if existing.ID == project.ID {
 				state.projects[index] = renamed
 				break
 			}
 		}
+		if wasCurrent {
+			previousPreview = state.previewSurface
+			state.cancelProjectWorkLocked()
+			state.projectGeneration++
+			state.current = renamed
+			state.previewState = domain.PreviewIdle
+			state.previewSurface = ""
+			state.previewStale = false
+			state.previewError = ""
+			state.remote = domain.RemoteState{}
+			state.remoteLoaded = false
+			state.remoteDiff = domain.RemoteDiff{}
+			for _, path := range state.openPaths {
+				if code := state.buffers[path]; code != nil {
+					rebindPaths = append(rebindPaths, path)
+					rebindEditors = append(rebindEditors, code)
+				}
+			}
+			activeEditor = state.editor
+		}
 		state.renameProjectVisible = false
 		state.renameProjectName = ""
+		state.renameProjectError = ""
 		state.status = "Renamed project to " + renamed.Name
 		state.appendConsoleLocked(domain.ConsoleSuccess, "project", "Renamed " + project.Name + " to " +
 			renamed.Name)
 		state.mu.Unlock()
-		if wasCurrent {
-			if err := state.loadProject(context.Background(), renamed); err != nil {
-				state.log(domain.ConsoleError, "project", err.Error())
+		for index, code := range rebindEditors {
+			if err := code.Rebind("file://" + renamed.Root + "/" + rebindPaths[index], "volang"); err != nil {
+				state.log(domain.ConsoleError, "editor", err.Error())
 			}
+		}
+		if previousPreview != "" {
+			_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
+		}
+		state.mu.Lock()
+		state.projectMutationBusy = false
+		state.mu.Unlock()
+		if activeEditor != nil {
+			state.scheduleAnalysis(activeEditor.Document.Version())
 		}
 		ui.Invalidate()
 	}()
@@ -757,7 +1273,7 @@ func (state *State) RenameProject() {
 
 func (state *State) BeginDeleteProject(project domain.Project) {
 	state.mu.Lock()
-	if state.projectMutationBusy {
+	if state.projectMutationBusy || state.projectCreationBusy {
 		state.mu.Unlock()
 		return
 	}
@@ -782,6 +1298,12 @@ func (state *State) ConfirmDeleteProject() {
 	project := state.deleteProject
 	if !state.deleteProjectVisible || state.projectMutationBusy {
 		state.mu.Unlock()
+		return
+	}
+	if state.hasProject && state.current.ID == project.ID && state.savePending > 0 {
+		state.status = "Wait for pending saves before removing this project"
+		state.mu.Unlock()
+		ui.Invalidate()
 		return
 	}
 	state.projectMutationBusy = true
@@ -823,33 +1345,8 @@ func (state *State) completeProjectRemoval(project domain.Project, verb string) 
 	state.projects = remaining
 	wasCurrent := state.hasProject && state.current.ID == project.ID
 	previousPreview := ""
-	if wasCurrent && len(remaining) == 0 {
-		previousPreview = state.previewSurface
-		if state.runCancel != nil {
-			state.runCancel()
-			state.runCancel = nil
-		}
-		if state.analysisCancel != nil {
-			state.analysisCancel()
-			state.analysisCancel = nil
-		}
-		if state.searchCancel != nil {
-			state.searchCancel()
-			state.searchCancel = nil
-		}
-		state.hasProject = false
-		state.current = domain.Project{}
-		state.files = nil
-		state.activePath = ""
-		state.editor = nil
-		state.buffers = make(map[string]*editor.Model)
-		state.openPaths = nil
-		state.dirty = make(map[string]bool)
-		state.diagnostics = nil
-		state.diagnosticsByPath = make(map[string][]domain.Diagnostic)
-		state.running = false
-		state.previewState = domain.PreviewIdle
-		state.previewSurface = ""
+	if wasCurrent {
+		previousPreview = state.detachCurrentProjectLocked()
 	}
 	state.projectMutationBusy = false
 	state.deleteProjectVisible = false
@@ -859,12 +1356,13 @@ func (state *State) completeProjectRemoval(project domain.Project, verb string) 
 	state.status = verb + project.Name
 	state.appendConsoleLocked(domain.ConsoleSuccess, "project", verb + project.Name)
 	state.mu.Unlock()
+	if previousPreview != "" {
+		_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
+	}
 	if wasCurrent && len(remaining) > 0 {
-		if err := state.loadProject(context.Background(), remaining[0]); err != nil {
+		if err := state.loadProject(context.Background(), remaining[0], true); err != nil {
 			state.log(domain.ConsoleError, "project", err.Error())
 		}
-	} else if previousPreview != "" {
-		_ = state.services.Preview.ClosePreview(context.Background(), previousPreview)
 	}
 	ui.Invalidate()
 }
@@ -872,14 +1370,18 @@ func (state *State) completeProjectRemoval(project domain.Project, verb string) 
 func (state *State) CreateProject() {
 	state.mu.Lock()
 	name := strings.TrimSpace(state.newProjectName)
-	if state.projectCreationBusy {
+	if state.projectCreationBusy || state.projectMutationBusy || state.savePending > 0 {
+		if state.projectMutationBusy || state.savePending > 0 {
+			state.status = "Wait for the current project operation before creating a project"
+		}
 		state.mu.Unlock()
 		return
 	}
-	if name == "" {
+	nameError := projectNameError(name)
+	if nameError != "" {
 		state.projectCreatorVisible = true
 		state.activity = ActivityExplorer
-		state.newProjectError = "Enter a project name"
+		state.newProjectError = nameError
 		state.newProjectFocusToken++
 		state.status = "Enter a project name"
 		state.mu.Unlock()
@@ -887,6 +1389,7 @@ func (state *State) CreateProject() {
 		return
 	}
 	state.projectCreationBusy = true
+	state.projectMutationBusy = true
 	state.newProjectError = ""
 	state.status = "Creating " + name
 	state.mu.Unlock()
@@ -898,6 +1401,7 @@ func (state *State) CreateProject() {
 		if err != nil {
 			state.mu.Lock()
 			state.projectCreationBusy = false
+			state.projectMutationBusy = false
 			state.newProjectError = err.Error()
 			state.newProjectFocusToken++
 			state.status = "Project creation failed"
@@ -911,13 +1415,11 @@ func (state *State) CreateProject() {
 		state.newProjectName = ""
 		state.newProjectError = ""
 		state.projectCreationBusy = false
+		state.projectMutationBusy = false
 		state.projectCreatorVisible = false
 		state.activity = ActivityExplorer
 		state.mu.Unlock()
-		if err := state.loadProject(context.Background(), project); err != nil {
-			state.log(domain.ConsoleError, "project", err.Error())
-		}
-		ui.Invalidate()
+		state.requestProjectLoad(project)
 	}()
 }
 
@@ -928,10 +1430,12 @@ func (state *State) ToggleProjectCreator() {
 		return
 	}
 	state.projectCreatorVisible = !state.projectCreatorVisible
-	state.newProjectError = ""
 	if state.projectCreatorVisible {
 		state.activity = ActivityExplorer
+		state.newProjectError = projectNameError(state.newProjectName)
 		state.newProjectFocusToken++
+	} else {
+		state.newProjectError = ""
 	}
 	state.mu.Unlock()
 	ui.Invalidate()
@@ -940,7 +1444,7 @@ func (state *State) ToggleProjectCreator() {
 func (state *State) SetNewProjectName(value string) {
 	state.mu.Lock()
 	state.newProjectName = value
-	state.newProjectError = ""
+	state.newProjectError = projectNameError(value)
 	state.mu.Unlock()
 	ui.Invalidate()
 }
@@ -953,25 +1457,44 @@ func (state *State) SetProjectSearchQuery(value string) {
 }
 
 func (state *State) OpenLocalProject() {
-	state.mu.RLock()
+	state.mu.Lock()
 	canOpen := state.host.CanOpenLocal
-	state.mu.RUnlock()
-	if !canOpen {
+	if !canOpen || state.projectMutationBusy || state.projectCreationBusy || state.savePending > 0 {
+		if canOpen && (state.projectMutationBusy || state.savePending > 0) {
+			state.status = "Wait for the current project operation before opening a folder"
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
 		return
 	}
+	state.projectMutationBusy = true
+	state.status = "Selecting a project folder"
+	state.mu.Unlock()
+	ui.Invalidate()
 	go func() {
 		root, selected, err := uisystem.OpenFolder(uisystem.FileDialogOptions{
 			Title: "Open Volang project", CanCreateDirectories: false,
 		})
 		if err != nil {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.mu.Unlock()
 			state.log(domain.ConsoleError, "project", err.Error())
 			return
 		}
 		if !selected {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "Folder selection cancelled"
+			state.mu.Unlock()
+			ui.Invalidate()
 			return
 		}
 		project, err := state.services.Files.OpenProject(context.Background(), root)
 		if err != nil {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.mu.Unlock()
 			state.log(domain.ConsoleError, "project", err.Error())
 			return
 		}
@@ -986,17 +1509,16 @@ func (state *State) OpenLocalProject() {
 		if !present {
 			state.projects = append(state.projects, project)
 		}
+		state.projectMutationBusy = false
 		state.mu.Unlock()
-		if err := state.loadProject(context.Background(), project); err != nil {
-			state.log(domain.ConsoleError, "project", err.Error())
-		}
-		ui.Invalidate()
+		state.requestProjectLoad(project)
 	}()
 }
 
-func (state *State) OpenFile(path string) {
+func (state *State) openFile(path string, after func(*editor.Model)) {
 	state.mu.Lock()
 	project := state.current
+	projectGeneration := state.projectGeneration
 	hasProject := state.hasProject
 	if code, present := state.buffers[path]; present {
 		state.openGeneration++
@@ -1005,6 +1527,9 @@ func (state *State) OpenFile(path string) {
 		state.mu.Unlock()
 		_ = state.layout.Activate("documents", 0)
 		state.scheduleAnalysis(version)
+		if after != nil {
+			after(code)
+		}
 		ui.Invalidate()
 		return
 	}
@@ -1028,7 +1553,7 @@ func (state *State) OpenFile(path string) {
 		}
 		code := newEditor(project, path, text)
 		state.mu.Lock()
-		if state.current.ID != project.ID {
+		if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
 			state.mu.Unlock()
 			return
 		}
@@ -1037,6 +1562,7 @@ func (state *State) OpenFile(path string) {
 		} else {
 			state.buffers[path] = code
 			state.openPaths = append(state.openPaths, path)
+			state.savedText[path] = text
 		}
 		active := generation == state.openGeneration
 		if active {
@@ -1046,19 +1572,19 @@ func (state *State) OpenFile(path string) {
 		if active {
 			_ = state.layout.Activate("documents", 0)
 			state.scheduleAnalysis(code.Document.Version())
+			if after != nil {
+				after(code)
+			}
 		}
 		ui.Invalidate()
 	}()
 }
 
-func (state *State) OpenDiagnostic(value domain.Diagnostic) {
-	state.OpenFile(value.Path)
-	state.mu.RLock()
-	code := state.buffers[value.Path]
-	state.mu.RUnlock()
-	if code == nil {
-		return
-	}
+func (state *State) OpenFile(path string) {
+	state.openFile(path, nil)
+}
+
+func (state *State) focusDiagnostic(value domain.Diagnostic, code *editor.Model) {
 	line := value.Line - 1
 	column := value.Column - 1
 	if line < 0 {
@@ -1081,9 +1607,17 @@ func (state *State) OpenDiagnostic(value domain.Diagnostic) {
 	}
 	_ = code.SetViewport(viewport)
 	state.mu.Lock()
-	state.editorFocusToken++
+	if state.editor == code && state.activePath == value.Path {
+		state.editorFocusToken++
+	}
 	state.mu.Unlock()
 	ui.Invalidate()
+}
+
+func (state *State) OpenDiagnostic(value domain.Diagnostic) {
+	state.openFile(value.Path, func(code *editor.Model) {
+		state.focusDiagnostic(value, code)
+	})
 }
 
 func (state *State) closeBufferLocked(path string) *editor.Model {
@@ -1102,6 +1636,7 @@ func (state *State) closeBufferLocked(path string) *editor.Model {
 	state.openPaths = nextPaths
 	delete(state.buffers, path)
 	delete(state.dirty, path)
+	delete(state.savedText, path)
 	delete(state.diagnosticsByPath, path)
 	state.openGeneration++
 	if state.activePath != path {
@@ -1127,29 +1662,72 @@ func (state *State) closeBufferLocked(path string) *editor.Model {
 func (state *State) CloseFile(path string) {
 	state.mu.RLock()
 	dirty := state.dirty[path]
+	code := state.buffers[path]
+	projectGeneration := state.projectGeneration
+	savePending := state.savePending
 	state.mu.RUnlock()
-	go func() {
-		if dirty {
-			result, err := uisystem.ShowMessage(uisystem.MessageDialogOptions{
-				Level: uisystem.MessageWarning, Buttons: uisystem.MessageOKCancel, Title: "Close " + path,
-				Description: "Unsaved changes in this editor will be discarded.",
-			})
-			if err != nil {
-				state.log(domain.ConsoleError, "editor", err.Error())
-				return
-			}
-			if result != uisystem.MessageResultOK {
-				return
-			}
-		}
+	if code == nil {
+		return
+	}
+	if savePending > 0 {
 		state.mu.Lock()
-		code := state.closeBufferLocked(path)
+		state.status = "Wait for pending saves before closing an editor"
 		state.mu.Unlock()
-		if code != nil {
-			state.scheduleAnalysis(code.Document.Version())
+		ui.Invalidate()
+		return
+	}
+	if !dirty {
+		state.mu.Lock()
+		if state.projectGeneration != projectGeneration || state.buffers[path] != code || state.dirty[path] {
+			state.mu.Unlock()
+			return
+		}
+		next := state.closeBufferLocked(path)
+		state.mu.Unlock()
+		if next != nil {
+			state.scheduleAnalysis(next.Document.Version())
 		}
 		ui.Invalidate()
-	}()
+		return
+	}
+	state.mu.Lock()
+	if state.projectGeneration == projectGeneration && state.buffers[path] == code {
+		state.closeFilePath = path
+		state.closeFileProjectGeneration = projectGeneration
+		state.status = "Confirm closing " + path
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) HideCloseFileDialog() {
+	state.mu.Lock()
+	if state.closeFilePath != "" {
+		state.status = "Kept " + state.closeFilePath + " open"
+	}
+	state.closeFilePath = ""
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ConfirmCloseFile() {
+	state.mu.Lock()
+	path := state.closeFilePath
+	if path == "" || state.projectGeneration != state.closeFileProjectGeneration ||
+		state.buffers[path] == nil {
+		state.closeFilePath = ""
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.closeFilePath = ""
+	next := state.closeBufferLocked(path)
+	state.status = "Closed " + path
+	state.mu.Unlock()
+	if next != nil {
+		state.scheduleAnalysis(next.Document.Version())
+	}
+	ui.Invalidate()
 }
 
 func (state *State) CloseActiveFile() {
@@ -1168,43 +1746,112 @@ type saveSnapshot struct {
 	Version uint64
 }
 
-func (state *State) saveSnapshots(project domain.Project, snapshots []saveSnapshot) {
-	go func() {
-		for _, snapshot := range snapshots {
-			if err := state.services.Files.WriteFile(context.Background(), project.ID, snapshot.Path, snapshot.Text); err !=
-				nil {
-				state.log(domain.ConsoleError, "save", err.Error())
-				continue
-			}
+func (state *State) updateDirtyLocked(path string, code *editor.Model) {
+	if code == nil {
+		delete(state.dirty, path)
+		return
+	}
+	text, _ := code.Document.Snapshot()
+	saved, present := state.savedText[path]
+	if !present || text != saved {
+		state.dirty[path] = true
+		return
+	}
+	delete(state.dirty, path)
+}
+
+func (state *State) saveLoop() {
+	for batch := range state.saveQueue {
+		for _, snapshot := range batch.Snapshots {
+			err := state.services.Files.WriteFile(context.Background(), batch.Project.ID, snapshot.Path, snapshot.Text)
 			state.mu.Lock()
-			current, present := state.buffers[snapshot.Path]
-			if present && current == snapshot.Code && current.Document.Version() == snapshot.Version {
-				delete(state.dirty, snapshot.Path)
+			if state.savePending > 0 {
+				state.savePending--
 			}
-			state.status = "Saved " + snapshot.Path
-			state.appendConsoleLocked(domain.ConsoleSuccess, "save", "Saved " + snapshot.Path)
+			currentProject := state.projectGeneration == batch.ProjectGeneration && state.hasProject &&
+				state.current.ID == batch.Project.ID
+			if err != nil {
+				if currentProject {
+					state.status = "Save failed"
+				}
+				state.appendConsoleLocked(domain.ConsoleError, "save", snapshot.Path + ": " + err.Error())
+			} else if currentProject {
+				current, present := state.buffers[snapshot.Path]
+				if present && current == snapshot.Code {
+					state.savedText[snapshot.Path] = snapshot.Text
+					state.updateDirtyLocked(snapshot.Path, current)
+				}
+				state.status = "Saved " + snapshot.Path
+			}
+			if err == nil {
+				state.appendConsoleLocked(domain.ConsoleSuccess, "save", "Saved " + snapshot.Path)
+			}
+			pendingProject := state.pendingProject
+			openPending := state.savePending == 0 && state.hasPendingProject &&
+				!state.projectMutationBusy
+			if openPending {
+				state.pendingProject = domain.Project{}
+				state.hasPendingProject = false
+			}
 			state.mu.Unlock()
 			ui.Invalidate()
+			if openPending {
+				state.requestProjectLoad(pendingProject)
+			}
 		}
-	}()
+	}
+}
+
+func (state *State) saveSnapshots(project domain.Project, projectGeneration uint64, snapshots []saveSnapshot) {
+	if len(snapshots) == 0 {
+		return
+	}
+	batch := saveBatch{Project: project, ProjectGeneration: projectGeneration, Snapshots: snapshots}
+	state.mu.Lock()
+	if state.projectGeneration != projectGeneration || !state.hasProject || state.current.ID != project.ID {
+		state.mu.Unlock()
+		return
+	}
+	select {
+		case state.saveQueue <- batch:
+			state.savePending += len(snapshots)
+			state.status = "Saving"
+		default:
+			state.status = "Save queue is full"
+			state.appendConsoleLocked(domain.ConsoleError, "save", "Wait for pending saves before saving again")
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
 }
 
 func (state *State) Save() {
 	state.mu.RLock()
 	project := state.current
+	projectGeneration := state.projectGeneration
 	path := state.activePath
 	code := state.editor
+	dirty := state.dirty[path]
+	mutationBusy := state.projectMutationBusy
 	state.mu.RUnlock()
-	if code == nil || path == "" {
+	if mutationBusy {
+		state.mu.Lock()
+		state.status = "Wait for the current project operation before saving"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if code == nil || path == "" || !dirty {
 		return
 	}
 	text, version := code.Document.Snapshot()
-	state.saveSnapshots(project, []saveSnapshot{{Path: path, Code: code, Text: text, Version: version}})
+	state.saveSnapshots(project, projectGeneration, []saveSnapshot{{Path: path, Code: code, Text: text, Version: version}})
 }
 
 func (state *State) SaveAll() {
 	state.mu.RLock()
 	project := state.current
+	projectGeneration := state.projectGeneration
+	mutationBusy := state.projectMutationBusy
 	paths := append([]string(nil), state.openPaths...)
 	dirty := make(map[string]bool)
 	for path, value := range state.dirty {
@@ -1215,6 +1862,13 @@ func (state *State) SaveAll() {
 		buffers[path] = code
 	}
 	state.mu.RUnlock()
+	if mutationBusy {
+		state.mu.Lock()
+		state.status = "Wait for the current project operation before saving"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
 	snapshots := make([]saveSnapshot, 0, len(paths))
 	for _, path := range paths {
 		code := buffers[path]
@@ -1227,7 +1881,7 @@ func (state *State) SaveAll() {
 	if len(snapshots) == 0 {
 		return
 	}
-	state.saveSnapshots(project, snapshots)
+	state.saveSnapshots(project, projectGeneration, snapshots)
 }
 
 func (state *State) SetNewFilePath(value string) {
@@ -1246,6 +1900,14 @@ func (state *State) SetRenamePath(value string) {
 
 func (state *State) ShowNewFileDialog() {
 	state.mu.Lock()
+	if !state.hasProject || state.projectMutationBusy || state.savePending > 0 {
+		if state.hasProject {
+			state.status = "Wait for pending project work before creating a file"
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
 	state.newFileVisible = true
 	state.newFilePath = ""
 	state.mu.Unlock()
@@ -1276,13 +1938,18 @@ func (state *State) HideRenameFileDialog() {
 	ui.Invalidate()
 }
 
-func (state *State) refreshFiles(ctx context.Context, project domain.Project) error {
+func (state *State) refreshFiles(ctx context.Context, project domain.Project, projectGeneration uint64) error {
+	state.mu.Lock()
+	state.filesGeneration++
+	filesGeneration := state.filesGeneration
+	state.mu.Unlock()
 	files, err := state.services.Files.Files(ctx, project.ID)
 	if err != nil {
 		return err
 	}
 	state.mu.Lock()
-	if state.current.ID == project.ID {
+	if state.projectGeneration == projectGeneration && state.current.ID == project.ID &&
+		state.filesGeneration == filesGeneration {
 		state.files = files
 	}
 	state.mu.Unlock()
@@ -1290,51 +1957,149 @@ func (state *State) refreshFiles(ctx context.Context, project domain.Project) er
 	return nil
 }
 
-func (state *State) CreateFile() {
-	state.mu.RLock()
-	project := state.current
-	path := strings.TrimSpace(state.newFilePath)
-	state.mu.RUnlock()
-	if path == "" {
+func (state *State) RefreshProject() {
+	state.mu.Lock()
+	if !state.hasProject {
+		state.mu.Unlock()
 		return
 	}
+	project := state.current
+	projectGeneration := state.projectGeneration
+	state.status = "Refreshing project files"
+	state.mu.Unlock()
+	ui.Invalidate()
 	go func() {
-		content := ""
-		if strings.HasSuffix(path, ".vo") {
-			content = "package main\n"
-		}
-		if err := state.services.Files.WriteFile(context.Background(), project.ID, path, content); err !=
-			nil {
+		if err := state.refreshFiles(context.Background(), project, projectGeneration); err != nil {
 			state.log(domain.ConsoleError, "files", err.Error())
 			return
 		}
 		state.mu.Lock()
+		if state.projectGeneration == projectGeneration && state.current.ID == project.ID {
+			state.status = "Project files refreshed"
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
+}
+
+func (state *State) CreateFile() {
+	state.mu.Lock()
+	project := state.current
+	projectGeneration := state.projectGeneration
+	path := strings.TrimSpace(state.newFilePath)
+	if !state.hasProject || state.projectMutationBusy || state.savePending > 0 {
+		if state.hasProject && state.savePending > 0 {
+			state.status = "Wait for pending saves before creating a file"
+		}
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if !validRelativePath(path) {
+		state.status = "Enter a valid project-relative file path"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.projectMutationBusy = true
+	state.status = "Creating " + path
+	state.mu.Unlock()
+	ui.Invalidate()
+	go func() {
+		content := ""
+		if strings.HasSuffix(path, ".vo") {
+			content = "package " + inferredSourcePackage(path) + "\n"
+		}
+		if err := state.services.Files.CreateFile(context.Background(), project.ID, path, content); err !=
+			nil {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "File creation failed"
+			state.appendConsoleLocked(domain.ConsoleError, "files", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
+			return
+		}
+		state.mu.Lock()
+		if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+			state.projectMutationBusy = false
+			state.mu.Unlock()
+			return
+		}
 		state.newFilePath = ""
 		state.newFileVisible = false
 		state.mu.Unlock()
-		if err := state.refreshFiles(context.Background(), project); err != nil {
-			state.log(domain.ConsoleError, "files", err.Error())
+		if err := state.refreshFiles(context.Background(), project, projectGeneration); err != nil {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "Created file; refresh failed"
+			state.appendConsoleLocked(domain.ConsoleError, "files", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
 			return
 		}
 		state.OpenFile(path)
+		state.mu.Lock()
+		state.projectMutationBusy = false
+		state.status = "Created " + path
+		state.mu.Unlock()
+		ui.Invalidate()
 	}()
 }
 
 func (state *State) RenameActiveFile() {
 	state.mu.RLock()
 	project := state.current
+	projectGeneration := state.projectGeneration
 	from := state.activePath
 	to := strings.TrimSpace(state.renamePath)
+	savePending := state.savePending
+	mutationBusy := state.projectMutationBusy
 	state.mu.RUnlock()
-	if from == "" || to == "" || from == to {
+	if mutationBusy {
 		return
 	}
+	if savePending > 0 {
+		state.mu.Lock()
+		state.status = "Wait for pending saves before renaming a file"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	if from == "" || !validRelativePath(to) || from == to {
+		if to != "" && relativePathError(to) != "" {
+			state.mu.Lock()
+			state.status = "Enter a valid project-relative file path"
+			state.mu.Unlock()
+			ui.Invalidate()
+		}
+		return
+	}
+	state.mu.Lock()
+	if state.projectMutationBusy || state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+		state.mu.Unlock()
+		return
+	}
+	state.projectMutationBusy = true
+	state.status = "Renaming " + from
+	state.mu.Unlock()
+	ui.Invalidate()
 	go func() {
 		if err := state.services.Files.RenameEntry(context.Background(), project.ID, from, to); err != nil {
-			state.log(domain.ConsoleError, "files", err.Error())
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "File rename failed"
+			state.appendConsoleLocked(domain.ConsoleError, "files", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
 			return
 		}
 		state.mu.Lock()
+		if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+			state.projectMutationBusy = false
+			state.mu.Unlock()
+			return
+		}
 		code := state.buffers[from]
 		if code != nil {
 			delete(state.buffers, from)
@@ -1344,10 +2109,18 @@ func (state *State) RenameActiveFile() {
 					state.openPaths[index] = to
 				}
 			}
-			state.dirty[to] = state.dirty[from]
+			if state.dirty[from] {
+				state.dirty[to] = true
+			} else {
+				delete(state.dirty, to)
+			}
+			if saved, present := state.savedText[from]; present {
+				state.savedText[to] = saved
+			}
 			state.diagnosticsByPath[to] = state.diagnosticsByPath[from]
 		}
 		delete(state.dirty, from)
+		delete(state.savedText, from)
 		delete(state.diagnosticsByPath, from)
 		if state.activePath == from {
 			state.activePath = to
@@ -1355,14 +2128,20 @@ func (state *State) RenameActiveFile() {
 			state.diagnostics = nil
 		}
 		state.renameFileVisible = false
+		state.status = "Renamed " + from + " to " + to
 		state.mu.Unlock()
 		if code != nil {
 			if err := code.Rebind("file://" + project.Root + "/" + to, "volang"); err != nil {
 				state.log(domain.ConsoleError, "editor", err.Error())
 			}
 		}
-		if err := state.refreshFiles(context.Background(), project); err != nil {
-			state.log(domain.ConsoleError, "files", err.Error())
+		if err := state.refreshFiles(context.Background(), project, projectGeneration); err != nil {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "Renamed file; refresh failed"
+			state.appendConsoleLocked(domain.ConsoleError, "files", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
 			return
 		}
 		if code != nil {
@@ -1370,6 +2149,9 @@ func (state *State) RenameActiveFile() {
 		} else {
 			state.OpenFile(to)
 		}
+		state.mu.Lock()
+		state.projectMutationBusy = false
+		state.mu.Unlock()
 		ui.Invalidate()
 	}()
 }
@@ -1377,37 +2159,108 @@ func (state *State) RenameActiveFile() {
 func (state *State) DeleteActiveFile() {
 	state.mu.RLock()
 	project := state.current
+	projectGeneration := state.projectGeneration
 	path := state.activePath
+	savePending := state.savePending
+	mutationBusy := state.projectMutationBusy
 	state.mu.RUnlock()
 	if path == "" {
 		return
 	}
+	if mutationBusy {
+		return
+	}
+	if savePending > 0 {
+		state.mu.Lock()
+		state.status = "Wait for pending saves before deleting a file"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.mu.Lock()
+	if state.projectMutationBusy || state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+		state.mu.Unlock()
+		return
+	}
+	state.deleteFilePath = path
+	state.deleteFileProject = project
+	state.deleteFileProjectGeneration = projectGeneration
+	state.status = "Confirm deletion of " + path
+	state.mu.Unlock()
+	ui.Invalidate()
+
+}
+
+func (state *State) HideDeleteFileDialog() {
+	state.mu.Lock()
+	if state.deleteFilePath != "" {
+		state.status = "Kept " + state.deleteFilePath
+	}
+	state.deleteFilePath = ""
+	state.deleteFileProject = domain.Project{}
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
+func (state *State) ConfirmDeleteFile() {
+	state.mu.Lock()
+	project := state.deleteFileProject
+	projectGeneration := state.deleteFileProjectGeneration
+	path := state.deleteFilePath
+	if path == "" || state.projectMutationBusy ||
+		state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+		state.deleteFilePath = ""
+		state.deleteFileProject = domain.Project{}
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
+	state.deleteFilePath = ""
+	state.deleteFileProject = domain.Project{}
+	state.projectMutationBusy = true
+	state.status = "Deleting " + path
+	state.mu.Unlock()
+	ui.Invalidate()
 	go func() {
-		result, err := uisystem.ShowMessage(uisystem.MessageDialogOptions{
-			Level: uisystem.MessageWarning, Buttons: uisystem.MessageOKCancel, Title: "Delete " + path,
-			Description: "This removes the file from the project.",
-		})
-		if err != nil {
-			state.log(domain.ConsoleError, "files", err.Error())
-			return
-		}
-		if result != uisystem.MessageResultOK {
+		state.mu.RLock()
+		current := state.projectGeneration == projectGeneration && state.current.ID == project.ID
+		state.mu.RUnlock()
+		if !current {
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.mu.Unlock()
 			return
 		}
 		if err := state.services.Files.DeleteEntry(context.Background(), project.ID, path); err != nil {
-			state.log(domain.ConsoleError, "files", err.Error())
-			return
-		}
-		if err := state.refreshFiles(context.Background(), project); err != nil {
-			state.log(domain.ConsoleError, "files", err.Error())
+			state.mu.Lock()
+			state.projectMutationBusy = false
+			state.status = "File deletion failed"
+			state.appendConsoleLocked(domain.ConsoleError, "files", err.Error())
+			state.mu.Unlock()
+			ui.Invalidate()
 			return
 		}
 		state.mu.Lock()
+		if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+			state.projectMutationBusy = false
+			state.mu.Unlock()
+			return
+		}
 		code := state.closeBufferLocked(path)
+		state.status = "Deleted " + path
 		state.mu.Unlock()
+		if err := state.refreshFiles(context.Background(), project, projectGeneration); err != nil {
+			state.mu.Lock()
+			state.status = "Deleted file; refresh failed"
+			state.appendConsoleLocked(domain.ConsoleError, "files", err.Error())
+			state.mu.Unlock()
+		}
 		if code != nil {
 			state.scheduleAnalysis(code.Document.Version())
 		}
+		state.mu.Lock()
+		state.projectMutationBusy = false
+		state.mu.Unlock()
 		ui.Invalidate()
 	}()
 }
@@ -1490,7 +2343,14 @@ func (state *State) scheduleAnalysis(version uint64) {
 		})
 		if err != nil {
 			if ctx.Err() == nil {
-				state.log(domain.ConsoleError, "analyzer", err.Error())
+				state.mu.Lock()
+				if generation == state.analysisGeneration && state.editor == code {
+					state.analysisCancel = nil
+					state.status = "Analysis failed"
+					state.appendConsoleLocked(domain.ConsoleError, "analyzer", err.Error())
+				}
+				state.mu.Unlock()
+				ui.Invalidate()
 			}
 			return
 		}
@@ -1515,8 +2375,18 @@ func (state *State) scheduleAnalysis(version uint64) {
 func (state *State) DocumentChanged(edit document.Edit, version uint64) {
 	state.mu.Lock()
 	path := state.activePath
-	state.dirty[path] = true
-	state.status = "Modified " + path
+	code := state.editor
+	if path != "" && code != nil {
+		state.updateDirtyLocked(path, code)
+		if state.dirty[path] {
+			state.status = "Modified " + path
+		} else {
+			state.status = "Reverted " + path
+		}
+		if state.previewState == domain.PreviewReady && state.previewSurface != "" {
+			state.previewStale = true
+		}
+	}
 	state.mu.Unlock()
 	state.scheduleAnalysis(version)
 }
@@ -1544,8 +2414,11 @@ func (state *State) changeHistory(redo bool) {
 	state.mu.Lock()
 	current, present := state.buffers[path]
 	if present && current == code {
-		state.dirty[path] = true
+		state.updateDirtyLocked(path, code)
 		state.status = label + " " + path
+		if state.previewState == domain.PreviewReady && state.previewSurface != "" {
+			state.previewStale = true
+		}
 	}
 	active := state.editor == code && state.activePath == path
 	state.mu.Unlock()
@@ -1565,6 +2438,12 @@ func (state *State) Redo() {
 
 func (state *State) StartRun(mode domain.RuntimeMode, preview bool) {
 	state.mu.Lock()
+	if state.projectMutationBusy {
+		state.status = "Wait for the current project operation before running"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
 	if !supportsRuntimeMode(state.host, mode) {
 		state.status = mode.String() + " is unavailable on " + state.host.Platform
 		state.mu.Unlock()
@@ -1586,9 +2465,11 @@ func (state *State) StartRun(mode domain.RuntimeMode, preview bool) {
 	generation := state.runGeneration
 	state.running = true
 	state.runMode = mode
+	state.runPreview = preview
 	state.status = "Building"
 	if preview {
 		state.previewState = domain.PreviewBuilding
+		state.previewError = ""
 	}
 	project := state.current
 	path := state.activePath
@@ -1608,17 +2489,27 @@ func (state *State) StartRun(mode domain.RuntimeMode, preview bool) {
 	go state.execute(ctx, generation, project, path, overlays, mode, preview)
 }
 
-func (state *State) failRun(generation uint64, source string, err error) {
+func (state *State) failRun(generation uint64, preview bool, source string, err error) {
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if generation != state.runGeneration {
+		state.mu.Unlock()
 		return
 	}
 	state.running = false
+	state.runPreview = false
 	state.status = err.Error()
-	state.previewState = domain.PreviewFailed
+	if preview {
+		state.previewError = err.Error()
+		if state.previewSurface != "" {
+			state.previewState = domain.PreviewReady
+			state.previewStale = true
+		} else {
+			state.previewState = domain.PreviewFailed
+		}
+	}
 	state.runCancel = nil
 	state.appendConsoleLocked(domain.ConsoleError, source, err.Error())
+	state.mu.Unlock()
 	ui.Invalidate()
 }
 
@@ -1628,18 +2519,34 @@ func (state *State) execute(ctx context.Context, generation uint64, project doma
 	})
 	if err != nil {
 		if ctx.Err() == nil {
-			state.failRun(generation, "compiler", err)
+			state.failRun(generation, preview, "compiler", err)
+		}
+		return
+	}
+	surface := ""
+	if preview {
+		var openErr error
+		surface, openErr = state.services.Preview.OpenPreview(ctx, artifact)
+		if openErr != nil {
+			if ctx.Err() == nil {
+				state.failRun(generation, true, "preview", openErr)
+			}
+			return
+		}
+	}
+	events, err := state.services.Runner.Run(ctx, protocol.RunRequest{
+		ProjectID: project.ID, Artifact: artifact, Mode: mode,
+	})
+	if err != nil {
+		if surface != "" {
+			_ = state.services.Preview.ClosePreview(context.Background(), surface)
+		}
+		if ctx.Err() == nil {
+			state.failRun(generation, preview, "runner", err)
 		}
 		return
 	}
 	if preview {
-		surface, openErr := state.services.Preview.OpenPreview(ctx, artifact)
-		if openErr != nil {
-			if ctx.Err() == nil {
-				state.failRun(generation, "preview", openErr)
-			}
-			return
-		}
 		state.mu.Lock()
 		previousPreview := ""
 		acceptedPreview := false
@@ -1647,6 +2554,8 @@ func (state *State) execute(ctx context.Context, generation uint64, project doma
 			previousPreview = state.previewSurface
 			state.previewSurface = surface
 			state.previewState = domain.PreviewReady
+			state.previewStale = false
+			state.previewError = ""
 			acceptedPreview = true
 		}
 		state.mu.Unlock()
@@ -1659,15 +2568,7 @@ func (state *State) execute(ctx context.Context, generation uint64, project doma
 		}
 		ui.Invalidate()
 	}
-	events, err := state.services.Runner.Run(ctx, protocol.RunRequest{
-		ProjectID: project.ID, Artifact: artifact, Mode: mode,
-	})
-	if err != nil {
-		if ctx.Err() == nil {
-			state.failRun(generation, "runner", err)
-		}
-		return
-	}
+	finished := false
 	for event := range events {
 		state.mu.Lock()
 		if generation != state.runGeneration {
@@ -1683,14 +2584,38 @@ func (state *State) execute(ctx context.Context, generation uint64, project doma
 		}
 		state.appendConsoleLocked(level, "run", event.Text)
 		if event.Kind == domain.RunFinished {
+			finished = true
 			state.running = false
+			state.runPreview = false
 			state.runCancel = nil
-			state.status = "Run finished"
-			state.appendConsoleLocked(domain.ConsoleInfo, "runner", fmt.Sprintf("Duration %v", event.Duration))
+			if preview && event.ExitCode == 0 {
+				state.status = "Preview ready"
+			} else if event.ExitCode == 0 {
+				state.status = "Run finished"
+			} else {
+				state.status = "Run failed"
+				if preview {
+					state.previewError = event.Text
+					state.previewStale = true
+				}
+			}
+			if event.Duration > 0 {
+				state.appendConsoleLocked(domain.ConsoleInfo, "runner", "Duration " + event.Duration.String())
+			}
 		}
 		state.mu.Unlock()
 		ui.Invalidate()
 	}
+	state.mu.Lock()
+	if generation == state.runGeneration && !finished && ctx.Err() == nil {
+		state.running = false
+		state.runPreview = false
+		state.runCancel = nil
+		state.status = "Run ended without a completion event"
+		state.appendConsoleLocked(domain.ConsoleWarning, "runner", "Run stream ended without a completion event")
+	}
+	state.mu.Unlock()
+	ui.Invalidate()
 }
 
 func (state *State) StopRun() {
@@ -1700,7 +2625,17 @@ func (state *State) StopRun() {
 		state.runCancel = nil
 	}
 	state.runGeneration++
+	wasPreview := state.runPreview
 	state.running = false
+	state.runPreview = false
+	if wasPreview && state.previewState == domain.PreviewBuilding {
+		if state.previewSurface != "" {
+			state.previewState = domain.PreviewReady
+			state.previewStale = true
+		} else {
+			state.previewState = domain.PreviewIdle
+		}
+	}
 	state.status = "Stopped"
 	state.appendConsoleLocked(domain.ConsoleWarning, "runner", "Run cancelled")
 	state.mu.Unlock()
@@ -1710,11 +2645,25 @@ func (state *State) StopRun() {
 func (state *State) SetActivity(activity Activity) {
 	state.mu.Lock()
 	state.activity = activity
+	if !state.running {
+		if activity == ActivityExplorer {
+			state.status = "Explorer"
+		} else if activity == ActivitySearch {
+			state.status = "Search workspace"
+		} else if activity == ActivitySourceControl {
+			state.status = "Source Control"
+		} else if activity == ActivityDocs {
+			state.status = "Documentation"
+		} else {
+			state.status = "Ready"
+		}
+	}
+	canSync := state.host.CanSyncRemote
 	state.mu.Unlock()
 	if activity != ActivityDocs {
-		ui.Navigate("/")
+		ui.Navigate(workspaceActivityPath(activity))
 	}
-	if activity == ActivitySourceControl {
+	if activity == ActivitySourceControl && canSync {
 		state.RefreshRemote()
 	}
 	ui.Invalidate()
@@ -1727,13 +2676,14 @@ func (state *State) RefreshRemote() {
 		return
 	}
 	project := state.current
+	projectGeneration := state.projectGeneration
 	state.remoteLoading = true
 	state.mu.Unlock()
 	ui.Invalidate()
 	go func() {
 		remote, err := state.services.Remote.State(context.Background(), project.ID)
 		state.mu.Lock()
-		if state.current.ID != project.ID {
+		if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
 			state.mu.Unlock()
 			return
 		}
@@ -1775,8 +2725,14 @@ func (state *State) PushRemote() {
 
 func (state *State) startRemoteOperation(label string, action func(context.Context, domain.ProjectID, func(string)) error) {
 	state.mu.Lock()
-	if !state.hasProject || state.remoteBusy {
+	if !state.hasProject || state.remoteBusy || state.projectMutationBusy {
 		state.mu.Unlock()
+		return
+	}
+	if state.hasDirtyLocked() || state.savePending > 0 {
+		state.status = "Save all editor changes before source control operations"
+		state.mu.Unlock()
+		ui.Invalidate()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1839,7 +2795,7 @@ func (state *State) CancelRemote() {
 func (state *State) ShowRemoteDelete() {
 	state.mu.Lock()
 	if !state.hasProject || state.remote.DeleteTarget == "" || state.remoteBusy ||
-		state.remoteDeleteBusy {
+		state.remoteDeleteBusy || state.projectMutationBusy {
 		state.mu.Unlock()
 		return
 	}
@@ -1870,13 +2826,24 @@ func (state *State) HideRemoteDelete() {
 func (state *State) DeleteRemote(deleteLocal bool) {
 	state.mu.Lock()
 	project := state.current
+	projectGeneration := state.projectGeneration
 	target := state.remote.DeleteTarget
 	confirmation := strings.TrimSpace(state.remoteDeleteConfirmation)
-	if !state.remoteDeleteVisible || state.remoteDeleteBusy || target == "" || confirmation != target {
+	if !state.remoteDeleteVisible || state.remoteDeleteBusy || target == "" || confirmation != target ||
+		(deleteLocal && state.projectMutationBusy) {
 		state.mu.Unlock()
 		return
 	}
+	if deleteLocal && state.savePending > 0 {
+		state.status = "Wait for pending saves before deleting the local project"
+		state.mu.Unlock()
+		ui.Invalidate()
+		return
+	}
 	state.remoteDeleteBusy = true
+	if deleteLocal {
+		state.projectMutationBusy = true
+	}
 	state.status = "Deleting " + target
 	state.appendConsoleLocked(domain.ConsoleWarning, "github", "Deleting cloud repository " + target)
 	state.mu.Unlock()
@@ -1885,7 +2852,19 @@ func (state *State) DeleteRemote(deleteLocal bool) {
 		if err := state.services.Remote.DeleteRepository(context.Background(), project.ID, target); err !=
 			nil {
 			state.mu.Lock()
+			if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+				if deleteLocal {
+					state.projectMutationBusy = false
+				}
+				state.appendConsoleLocked(domain.ConsoleError, "github", err.Error())
+				state.mu.Unlock()
+				ui.Invalidate()
+				return
+			}
 			state.remoteDeleteBusy = false
+			if deleteLocal {
+				state.projectMutationBusy = false
+			}
 			state.status = "Cloud repository deletion failed"
 			state.appendConsoleLocked(domain.ConsoleError, "github", err.Error())
 			state.mu.Unlock()
@@ -1901,7 +2880,15 @@ func (state *State) DeleteRemote(deleteLocal bool) {
 			}
 			if err != nil {
 				state.mu.Lock()
+				if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
+					state.projectMutationBusy = false
+					state.appendConsoleLocked(domain.ConsoleError, "project", err.Error())
+					state.mu.Unlock()
+					ui.Invalidate()
+					return
+				}
 				state.remoteDeleteBusy = false
+				state.projectMutationBusy = false
 				state.remoteDeleteVisible = false
 				state.remoteDeleteConfirmation = ""
 				state.remote = domain.RemoteState{}
@@ -1919,9 +2906,12 @@ func (state *State) DeleteRemote(deleteLocal bool) {
 			return
 		}
 		state.mu.Lock()
-		if state.current.ID == project.ID {
+		if state.projectGeneration == projectGeneration && state.current.ID == project.ID {
 			state.remote = domain.RemoteState{}
 			state.remoteLoaded = true
+		} else {
+			state.mu.Unlock()
+			return
 		}
 		state.remoteDeleteBusy = false
 		state.remoteDeleteVisible = false
@@ -1941,6 +2931,7 @@ func (state *State) OpenRemoteDiff(path string) {
 		return
 	}
 	project := state.current
+	projectGeneration := state.projectGeneration
 	state.remoteDiffLoading = true
 	state.remoteDiff = domain.RemoteDiff{Path: path}
 	state.status = "Loading changes for " + path
@@ -1950,7 +2941,7 @@ func (state *State) OpenRemoteDiff(path string) {
 	go func() {
 		diff, err := state.services.Remote.Diff(context.Background(), project.ID, path)
 		state.mu.Lock()
-		if state.current.ID != project.ID {
+		if state.projectGeneration != projectGeneration || state.current.ID != project.ID {
 			state.mu.Unlock()
 			return
 		}
@@ -2217,6 +3208,34 @@ func (state *State) SetPaletteSelection(value int64) {
 	ui.Invalidate()
 }
 
+func searchLinePreview(value string) string {
+	preview := strings.TrimSpace(value)
+	runes := []rune(preview)
+	if len(runes) > 140 {
+		preview = string(runes[:137]) + "…"
+	}
+	return preview
+}
+
+func searchFile(path string, text string, query string) []workspaceSearchResult {
+	results := make([]workspaceSearchResult, 0)
+	for index, line := range strings.Split(text, "\n") {
+		lower := strings.ToLower(line)
+		columnBytes := strings.Index(lower, query)
+		if columnBytes < 0 {
+			continue
+		}
+		column := len([]rune(lower[:columnBytes]))
+		results = append(results, workspaceSearchResult{
+			Path: path, Line: index + 1, Column: column + 1, Preview: searchLinePreview(line),
+		})
+	}
+	if len(results) == 0 && strings.Contains(strings.ToLower(path), query) {
+		results = append(results, workspaceSearchResult{Path: path, Preview: "File name match"})
+	}
+	return results
+}
+
 func (state *State) Search(value string) {
 	state.mu.Lock()
 	state.searchQuery = value
@@ -2228,7 +3247,18 @@ func (state *State) Search(value string) {
 	state.searchGeneration++
 	generation := state.searchGeneration
 	project := state.current
-	files := append([]domain.FileEntry(nil), state.files...)
+	projectGeneration := state.projectGeneration
+	jobsInput := make([]searchJob, 0, len(state.files))
+	for _, file := range state.files {
+		if file.Kind != domain.Directory {
+			job := searchJob{Index: len(jobsInput), File: file}
+			if code := state.buffers[file.Path]; code != nil {
+				job.Text, _ = code.Document.Snapshot()
+				job.HasText = true
+			}
+			jobsInput = append(jobsInput, job)
+		}
+	}
 	query := strings.ToLower(strings.TrimSpace(value))
 	if query == "" {
 		state.searchResults = nil
@@ -2242,25 +3272,67 @@ func (state *State) Search(value string) {
 	state.searching = true
 	state.mu.Unlock()
 	go func() {
-		results := make([]string, 0)
-		for _, file := range files {
-			if len(results) >= MaxSearchResults || ctx.Err() != nil {
+		jobs := make(chan searchJob, MaxSearchWorkers)
+		output := make(chan searchFileMatches, MaxSearchWorkers)
+		workers := MaxSearchWorkers
+		if len(jobsInput) < workers {
+			workers = len(jobsInput)
+		}
+		wg := &sync.WaitGroup{}
+		for worker := 0; worker < workers; worker++ {
+			wg.Go(func() {
+				for job := range jobs {
+					text := job.Text
+					var err error
+					if !job.HasText {
+						text, err = state.services.Files.ReadFile(ctx, project.ID, job.File.Path)
+					}
+					values := make([]workspaceSearchResult, 0)
+					if err == nil {
+						values = searchFile(job.File.Path, text, query)
+					}
+					select {
+						case output <- searchFileMatches{Index: job.Index, Values: values}:
+						case <-ctx.Done():
+							return
+					}
+				}
+			})
+		}
+		go func() {
+			for _, job := range jobsInput {
+				select {
+					case jobs <- job:
+					case <-ctx.Done():
+						close(jobs)
+						return
+				}
+			}
+			close(jobs)
+		}()
+		go func() {
+			wg.Wait()
+			close(output)
+		}()
+		buckets := make([][]workspaceSearchResult, len(jobsInput))
+		for matches := range output {
+			buckets[matches.Index] = matches.Values
+		}
+		results := make([]workspaceSearchResult, 0)
+		for _, values := range buckets {
+			for _, result := range values {
+				if len(results) >= MaxSearchResults {
+					break
+				}
+				results = append(results, result)
+			}
+			if len(results) >= MaxSearchResults {
 				break
-			}
-			if file.Kind == domain.Directory {
-				continue
-			}
-			text, err := state.services.Files.ReadFile(ctx, project.ID, file.Path)
-			if err != nil {
-				continue
-			}
-			if strings.Contains(strings.ToLower(file.Path), query) ||
-				strings.Contains(strings.ToLower(text), query) {
-				results = append(results, file.Path)
 			}
 		}
 		state.mu.Lock()
-		if generation == state.searchGeneration && ctx.Err() == nil {
+		if generation == state.searchGeneration && projectGeneration == state.projectGeneration &&
+			state.current.ID == project.ID && ctx.Err() == nil {
 			state.searchResults = results
 			state.searching = false
 			state.searchCancel = nil
@@ -2268,6 +3340,17 @@ func (state *State) Search(value string) {
 		state.mu.Unlock()
 		ui.Invalidate()
 	}()
+}
+
+func (state *State) OpenSearchResult(result workspaceSearchResult) {
+	if result.Line <= 0 {
+		state.OpenFile(result.Path)
+		return
+	}
+	state.OpenDiagnostic(domain.Diagnostic{
+		Path: result.Path, Line: result.Line, Column: result.Column,
+		EndLine: result.Line, EndColumn: result.Column + 1,
+	})
 }
 
 func (state *State) ActivityRail() ui.View {
@@ -2414,15 +3497,22 @@ func (state *State) ProjectRenameDialog() ui.View {
 	state.mu.RLock()
 	visible := state.renameProjectVisible
 	name := state.renameProjectName
+	originalName := state.renameProject.Name
+	errorMessage := state.renameProjectError
 	busy := state.projectMutationBusy
 	state.mu.RUnlock()
 	if !visible {
 		return ui.Fragment()
 	}
 	input := ui.AccessibleName(ui.TextInput(name, "project-name", ui.TextChange(state.SetRenameProjectName)), "Renamed project name")
+	feedback := ui.Box()
+	if errorMessage != "" {
+		input = ui.AccessibleDescription(input, errorMessage)
+		feedback = kitcomponents.Alert(design.StudioTheme(), "Invalid project name", errorMessage, kitcomponents.IntentDanger, false)
+	}
 	confirm := ui.Disabled(design.PrimaryButton("Rename project", state.RenameProject), busy ||
-		strings.TrimSpace(name) == "")
-	content := ui.Gap(ui.Column(design.Muted("Choose a filesystem-safe project name."), input, confirm), design.Space3)
+		projectNameError(name) != "" || strings.TrimSpace(name) == originalName)
+	content := ui.Gap(ui.Column(design.Muted("Choose a filesystem-safe project name."), input, feedback, confirm), design.Space3)
 	return design.ModalDialog("Rename project", true, content, state.HideRenameProject)
 }
 
@@ -2449,6 +3539,47 @@ func (state *State) ProjectDeleteDialog() ui.View {
 	confirm := ui.Disabled(design.PrimaryButton(buttonLabel, state.ConfirmDeleteProject), busy)
 	content := ui.Gap(ui.Column(ui.Foreground(ui.Text(message), design.TextSecondary), ui.Foreground(ui.Text(warning), design.Danger), confirm), design.Space3)
 	return design.ModalDialog(title, true, content, state.HideDeleteProject)
+}
+
+func (state *State) PendingConfirmationDialog() ui.View {
+	state.mu.RLock()
+	switchVisible := state.projectSwitchProject.ID != ""
+	project := state.projectSwitchProject
+	closeVisible := state.closeFilePath != ""
+	closePath := state.closeFilePath
+	deleteVisible := state.deleteFilePath != ""
+	deletePath := state.deleteFilePath
+	state.mu.RUnlock()
+	if !switchVisible && !closeVisible && !deleteVisible {
+		return ui.Fragment()
+	}
+	title := "Open " + project.Name
+	message := "Open “" + project.Name + "” and discard every unsaved editor change in the current project?"
+	warning := "Unsaved changes will be discarded."
+	buttonLabel := "Discard changes and open project"
+	confirm := state.ConfirmProjectSwitch
+	cancel := state.HideProjectSwitchDialog
+	if closeVisible {
+		title = "Close " + closePath
+		message = "Close “" + closePath + "” and discard its unsaved changes?"
+		warning = ""
+		buttonLabel = "Discard changes and close editor"
+		confirm = state.ConfirmCloseFile
+		cancel = state.HideCloseFileDialog
+	} else if deleteVisible {
+		title = "Delete " + deletePath
+		message = "Delete “" + deletePath + "” from the current project?"
+		warning = "This operation cannot be undone."
+		buttonLabel = "Delete file permanently"
+		confirm = state.ConfirmDeleteFile
+		cancel = state.HideDeleteFileDialog
+	}
+	views := []ui.View{ui.Foreground(ui.Text(message), design.TextSecondary)}
+	if warning != "" {
+		views = append(views, ui.Foreground(ui.Text(warning), design.Danger))
+	}
+	views = append(views, design.DangerButton(buttonLabel, confirm))
+	return design.ModalDialog(title, true, ui.Gap(ui.Column(views...), design.Space3), cancel)
 }
 
 func (state *State) RemoteDeleteDialog() ui.View {
@@ -2559,13 +3690,13 @@ func (state *State) AccountDialog() ui.View {
 		if name == "" {
 			name = account.Login
 		}
-		detail := "@" + account.Login + " · credentials remain in the platform host"
+		detail := "@" + account.Login + " · identity is isolated in the platform host"
 		content := ui.Gap(ui.Column(design.SectionHeading("GITHUB", name, detail, design.Badge("connected", design.Success)), design.Muted("Disconnecting Studio leaves GitHub CLI or the provider account itself unchanged."), design.QuietButton("Disconnect account", state.DisconnectAccount)), design.Space4)
 		return design.ModalDialog("GitHub account", true, content, state.HideAccount)
 	}
 	description := "Native Studio connects through the authenticated GitHub CLI and receives display-only identity data."
 	if platform == "web" {
-		description = "The browser host requests a token in its own prompt, verifies it with GitHub, and keeps it only for this page session."
+		description = "The browser host uses a secure one-time token dialog for account verification and never persists the credential."
 	}
 	content := ui.Gap(ui.Column(design.Muted(description), ui.AccessibleName(design.PrimaryButton("Connect GitHub", state.ConnectAccount), "Connect GitHub account")), design.Space4)
 	return design.ModalDialog("GitHub account", true, content, state.HideAccount)
@@ -2575,14 +3706,24 @@ func (state *State) NewFileDialog() ui.View {
 	state.mu.RLock()
 	visible := state.newFileVisible
 	path := state.newFilePath
+	busy := state.projectMutationBusy
+	savePending := state.savePending
 	state.mu.RUnlock()
 	if !visible {
 		return ui.Fragment()
 	}
+	errorMessage := relativePathError(path)
 	input := ui.AccessibleName(ui.TextInput(path, "path/to/file.vo", ui.TextChange(state.SetNewFilePath)), "New file path")
-	create := ui.Disabled(design.PrimaryButton("Create file", state.CreateFile), strings.TrimSpace(path) ==
-		"")
-	content := ui.Gap(ui.Column(design.Muted("Use a path relative to the current project."), input, create), design.Space3)
+	if errorMessage != "" {
+		input = ui.AccessibleDescription(input, errorMessage)
+	}
+	feedback := ui.Box()
+	if errorMessage != "" {
+		feedback = kitcomponents.Alert(design.StudioTheme(), "Invalid file path", errorMessage, kitcomponents.IntentDanger, false)
+	}
+	create := ui.Disabled(design.PrimaryButton("Create file", state.CreateFile), busy || savePending > 0 ||
+		!validRelativePath(path))
+	content := ui.Gap(ui.Column(design.Muted("Use a path relative to the current project."), input, feedback, create), design.Space3)
 	return design.ModalDialog("New file", true, content, state.HideNewFileDialog)
 }
 
@@ -2591,21 +3732,29 @@ func (state *State) RenameFileDialog() ui.View {
 	visible := state.renameFileVisible
 	from := state.activePath
 	path := state.renamePath
+	busy := state.projectMutationBusy
 	state.mu.RUnlock()
 	if !visible {
 		return ui.Fragment()
 	}
+	errorMessage := relativePathError(path)
 	input := ui.AccessibleName(ui.TextInput(path, "new/path.vo", ui.TextChange(state.SetRenamePath)), "Rename active file")
-	rename := ui.Disabled(design.PrimaryButton("Rename file", state.RenameActiveFile), strings.TrimSpace(path) ==
-		"" ||
-		path == from)
-	content := ui.Gap(ui.Column(design.Muted("Rename " + from + " inside the current project."), input, rename), design.Space3)
+	if errorMessage != "" {
+		input = ui.AccessibleDescription(input, errorMessage)
+	}
+	feedback := ui.Box()
+	if errorMessage != "" {
+		feedback = kitcomponents.Alert(design.StudioTheme(), "Invalid file path", errorMessage, kitcomponents.IntentDanger, false)
+	}
+	rename := ui.Disabled(design.PrimaryButton("Rename file", state.RenameActiveFile), busy ||
+		!validRelativePath(path) || path == from)
+	content := ui.Gap(ui.Column(design.Muted("Rename " + from + " inside the current project."), input, feedback, rename), design.Space3)
 	return design.ModalDialog("Rename file", true, content, state.HideRenameFileDialog)
 }
 
 func fileGlyph(kind domain.FileKind) string {
 	if kind == domain.Directory {
-		return "▸ "
+		return "▾ "
 	}
 	if kind == domain.ModuleFile {
 		return "◇ "
@@ -2619,6 +3768,22 @@ func fileGlyph(kind domain.FileKind) string {
 	return "· "
 }
 
+func fileHiddenByCollapsedDirectory(path string, collapsed map[string]bool) bool {
+	for directory, hidden := range collapsed {
+		if hidden && strings.HasPrefix(path, directory + "/") {
+			return true
+		}
+	}
+	return false
+}
+
+func (state *State) ToggleDirectory(path string) {
+	state.mu.Lock()
+	state.collapsedDirectories[path] = !state.collapsedDirectories[path]
+	state.mu.Unlock()
+	ui.Invalidate()
+}
+
 func (state *State) Explorer() ui.View {
 	state.mu.RLock()
 	projects := append([]domain.Project(nil), state.projects...)
@@ -2630,10 +3795,16 @@ func (state *State) Explorer() ui.View {
 	newProjectError := state.newProjectError
 	newProjectFocusToken := state.newProjectFocusToken
 	projectCreationBusy := state.projectCreationBusy
+	projectMutationBusy := state.projectMutationBusy
+	savePending := state.savePending
 	canOpenLocal := state.host.CanOpenLocal
 	dirty := make(map[string]bool)
 	for path, value := range state.dirty {
-		dirty[path] = value
+			dirty[path] = value
+	}
+	collapsed := make(map[string]bool)
+	for path, value := range state.collapsedDirectories {
+		collapsed[path] = value
 	}
 	state.mu.RUnlock()
 	compact := ui.CurrentEnvironment().ViewportWidth < 840
@@ -2662,45 +3833,70 @@ func (state *State) Explorer() ui.View {
 		if projectCreationBusy {
 			createLabel = "Creating…"
 		}
-		create := ui.Disabled(design.PrimaryButton(createLabel, state.CreateProject), projectCreationBusy)
+		create := ui.Disabled(design.PrimaryButton(createLabel, state.CreateProject), projectCreationBusy ||
+			projectMutationBusy || savePending > 0 || projectNameError(newProjectName) != "")
 		projectCreator = ui.Padding(ui.Gap(ui.Column(name, create), design.Space2), design.Space2)
 	}
 	fileViews := make([]ui.View, 0, len(files))
 	for _, file := range files {
 		item := file
-		label := fileGlyph(item.Kind) + item.Name
+		if fileHiddenByCollapsedDirectory(item.Path, collapsed) {
+			continue
+		}
+		glyph := fileGlyph(item.Kind)
+		if item.Kind == domain.Directory && collapsed[item.Path] {
+			glyph = "▸ "
+		}
+		label := glyph + item.Name
 		if dirty[item.Path] {
 			label += "  ●"
 		}
 		button := design.SidebarItem(label, item.Path == active, func() {
-			if item.Kind != domain.Directory {
+			if item.Kind == domain.Directory {
+				state.ToggleDirectory(item.Path)
+			} else {
 				state.OpenFile(item.Path)
 			}
 		})
 		button = ui.Selected(button, item.Path == active)
-		button = ui.AccessibleName(button, "Open " + item.Path)
+		button = ui.Role(button, "treeitem")
+		if item.Kind == domain.Directory {
+			button = ui.Expanded(button, !collapsed[item.Path])
+			if collapsed[item.Path] {
+				button = ui.AccessibleName(button, "Expand folder " + item.Path)
+			} else {
+				button = ui.AccessibleName(button, "Collapse folder " + item.Path)
+			}
+		} else {
+			button = ui.AccessibleName(button, "Open " + item.Path)
+		}
+		if item.Depth > 0 {
+			indent := ui.Width(ui.Box(), float64(item.Depth) * design.Space3)
+			button = ui.Row(indent, ui.Flex(button, 1))
+		}
 		fileViews = append(fileViews, ui.Key(button, item.Path))
 	}
-	newFileButton := ui.AccessibleName(design.PrimaryButton("New", state.ShowNewFileDialog), "New file")
-	secondaryActions := ui.Gap(ui.Row(design.QuietButton("Rename", state.ShowRenameFileDialog), design.QuietButton("Delete", state.DeleteActiveFile)), design.Space2)
+	fileActionsBusy := projectMutationBusy || savePending > 0
+	newFileButton := ui.AccessibleName(ui.Disabled(design.PrimaryButton("New", state.ShowNewFileDialog), fileActionsBusy), "New file")
+	secondaryActions := ui.Gap(ui.Row(ui.Disabled(design.QuietButton("Rename", state.ShowRenameFileDialog), projectMutationBusy), ui.Disabled(design.QuietButton("Delete", state.DeleteActiveFile), projectMutationBusy)), design.Space2)
 	fileActions := ui.Gap(ui.Column(newFileButton, secondaryActions), design.Space2)
 	fileActions = ui.Padding(fileActions, design.Space3)
 	if compact {
-		fileActions = ui.Padding(ui.Gap(ui.Row(ui.Flex(newFileButton, 1), design.QuietButton("Rename", state.ShowRenameFileDialog), design.QuietButton("Delete", state.DeleteActiveFile)), design.Space2), design.Space2)
+		fileActions = ui.Padding(ui.Gap(ui.Row(ui.Flex(newFileButton, 1), ui.Disabled(design.QuietButton("Rename", state.ShowRenameFileDialog), projectMutationBusy), ui.Disabled(design.QuietButton("Delete", state.DeleteActiveFile), projectMutationBusy)), design.Space2), design.Space2)
 	}
-	newProjectButton := ui.AccessibleName(design.QuietButton("New", state.ToggleProjectCreator), "New project")
+	projectActionsBusy := projectMutationBusy || savePending > 0
+	newProjectButton := ui.AccessibleName(ui.Disabled(design.QuietButton("New", state.ToggleProjectCreator), projectActionsBusy), "New project")
 	projectActions := ui.Row(newProjectButton)
 	if canOpenLocal {
-		projectActions = ui.Row(design.QuietButton("Open", state.OpenLocalProject), newProjectButton)
+		projectActions = ui.Row(ui.Disabled(design.QuietButton("Open", state.OpenLocalProject), projectActionsBusy), newProjectButton)
 	}
-	refresh := ui.AccessibleName(design.QuietButton("Refresh", func() {
-		state.SelectProject(current.ID)
-	}), "Refresh project")
+	refresh := ui.AccessibleName(design.QuietButton("Refresh", state.RefreshProject), "Refresh project")
 	projectList := ui.Column(projectViews...)
 	if compact {
 		projectList = ui.Height(ui.Scroll(projectList), 40)
 	}
-	content := ui.Column(design.PanelHeader("PROJECTS", projectActions), projectCreator, projectList, design.PanelHeader(strings.ToUpper(current.Name), refresh), ui.Flex(ui.Scroll(ui.Column(fileViews...)), 1), fileActions)
+	fileTree := ui.AccessibleName(ui.Role(ui.Column(fileViews...), "tree"), "Project files")
+	content := ui.Column(design.PanelHeader("PROJECTS", projectActions), projectCreator, projectList, design.PanelHeader(strings.ToUpper(current.Name), refresh), ui.Flex(ui.Scroll(fileTree), 1), fileActions)
 	content = ui.Gap(content, design.Space1)
 	return design.Panel(content)
 }
@@ -2708,7 +3904,7 @@ func (state *State) Explorer() ui.View {
 func (state *State) SearchPanel() ui.View {
 	state.mu.RLock()
 	query := state.searchQuery
-	results := append([]string(nil), state.searchResults...)
+	results := append([]workspaceSearchResult(nil), state.searchResults...)
 	searching := state.searching
 	state.mu.RUnlock()
 	input := ui.TextInput(query, "Search files and source", ui.TextChange(state.Search))
@@ -2718,11 +3914,19 @@ func (state *State) SearchPanel() ui.View {
 		status = design.Badge("searching", design.Accent)
 	}
 	views := make([]ui.View, 0, len(results))
-	for _, path := range results {
-		current := path
-		views = append(views, design.SidebarItem(current, false, func() {
-			state.OpenFile(current)
-		}))
+	for _, result := range results {
+		current := result
+		label := current.Path
+		if current.Line > 0 {
+			label += ":" + strconv.Itoa(current.Line) + "  " + current.Preview
+		} else if current.Preview != "" {
+			label += "  " + current.Preview
+		}
+		item := design.SidebarItem(label, false, func() {
+			state.OpenSearchResult(current)
+		})
+		item = ui.AccessibleDescription(item, current.Path + ":" + strconv.Itoa(current.Line) + ":" + strconv.Itoa(current.Column))
+		views = append(views, item)
 	}
 	resultsView := ui.Column(views...)
 	if query != "" && len(results) == 0 {
@@ -2748,14 +3952,26 @@ func (state *State) SourceControlPanel() ui.View {
 	selectedDiffPath := state.remoteDiff.Path
 	message := state.commitMessage
 	account := state.account
+	pendingSaves := state.savePending
+	dirtyEditors := 0
+	for _, dirty := range state.dirty {
+		if dirty {
+			dirtyEditors++
+		}
+	}
 	state.mu.RUnlock()
+	editorChangesPending := dirtyEditors > 0 || pendingSaves > 0
 	accountLabel := "Account"
 	if account.Connected {
 		accountLabel = "@" + account.Login
 	}
 	accountAction := ui.AccessibleName(design.QuietButton(accountLabel, state.ShowAccount), "GitHub account")
 	if !canSync {
-		return design.Panel(ui.Column(design.PanelHeader("SOURCE CONTROL", accountAction), design.EmptyState("Local browser workspace", "Connect a GitHub account for provider identity. Repository synchronization becomes available when a remote workspace provider is configured.", design.QuietButton("Open account", state.ShowAccount))))
+		description := "This browser workspace has no Git repository provider. GitHub sign-in supplies account identity only; pull, push, history, and repository diffs remain unavailable on this host."
+		if dirtyEditors > 0 {
+			description = strconv.Itoa(dirtyEditors) + " editor files have unsaved local changes. Save them before leaving this browser workspace. " + description
+		}
+		return design.Panel(ui.Column(design.PanelHeader("SOURCE CONTROL", accountAction), design.EmptyState("Git is unavailable in this browser host", description, design.QuietButton("Open account", state.ShowAccount))))
 	}
 	refreshLabel := "Refresh"
 	if loading {
@@ -2804,10 +4020,17 @@ func (state *State) SourceControlPanel() ui.View {
 			" files require resolution before pull or push.", kitcomponents.IntentDanger, false)
 	} else if remote.Diverged {
 		warning = kitcomponents.Alert(design.StudioTheme(), "Branches diverged", "Inspect local changes, then pull or reconcile before pushing.", kitcomponents.IntentWarning, false)
+	} else if editorChangesPending {
+		detail := strconv.Itoa(dirtyEditors) + " editor files have unsaved changes. Save all before pulling or pushing."
+		if pendingSaves > 0 {
+			detail = "Studio is finishing " + strconv.Itoa(pendingSaves) + " file saves. Source control will unlock when they complete."
+		}
+		warning = kitcomponents.Alert(design.StudioTheme(), "Editor changes pending", detail, kitcomponents.IntentWarning, false)
 	}
 	actions := ui.Row(ui.Disabled(design.QuietButton("Pull", state.PullRemote), busy ||
-		remote.Conflicts > 0), ui.Disabled(design.PrimaryButton("Commit & Push", state.PushRemote), busy ||
+		remote.Conflicts > 0 || editorChangesPending), ui.Disabled(design.PrimaryButton("Commit & Push", state.PushRemote), busy ||
 		remote.Conflicts > 0 ||
+		editorChangesPending ||
 		strings.TrimSpace(message) == ""))
 	if busy {
 		actions = ui.Row(design.QuietButton("Cancel operation", state.CancelRemote))
@@ -3086,6 +4309,8 @@ func (state *State) PreviewPanel() ui.View {
 	state.mu.RLock()
 	status := state.previewState
 	surface := state.previewSurface
+	stale := state.previewStale
+	previewError := state.previewError
 	mode := preferredRuntimeMode(state.host)
 	state.mu.RUnlock()
 	if status == domain.PreviewBuilding {
@@ -3102,18 +4327,32 @@ func (state *State) PreviewPanel() ui.View {
 		}))
 	}
 	if strings.HasPrefix(surface, "native-window://") {
-		return design.EmptyState("Preview window is open", "The native preview runs in an isolated desktop window and closes when it is replaced or the project changes.", design.PrimaryButton("Reload preview", func() {
+		description := "The native preview runs in an isolated desktop window and closes when it is replaced or the project changes."
+		if stale {
+			description = "The open preview is out of date. Reload it to run the current editor snapshot."
+		}
+		return design.EmptyState("Preview window is open", description, design.PrimaryButton("Reload preview", func() {
 			state.StartRun(mode, true)
 		}))
 	}
 	view := ui.PlatformView("volang-studio-preview/v1", surface, "Embedded Volang application preview")
 	view = ui.MinWidth(view, 0)
-	view = ui.MinHeight(view, 220)
+	view = ui.MinHeight(view, 0)
 	view = ui.Flex(view, 1)
 	view = ui.Background(view, design.Canvas)
-	return design.Panel(ui.Column(design.PanelHeader("PREVIEW", design.QuietButton("Reload", func() {
+	action := design.QuietButton("Reload", func() {
 		state.StartRun(mode, true)
-	})), view, ui.Padding(design.Muted(surface), design.Space2)))
+	})
+	if stale {
+		action = ui.Gap(ui.Row(design.Badge("outdated", design.Warning), action), design.Space2)
+	}
+	feedback := ui.Box()
+	if previewError != "" {
+		feedback = kitcomponents.Alert(design.StudioTheme(), "Preview update failed", previewError, kitcomponents.IntentWarning, false)
+	} else if stale {
+		feedback = kitcomponents.Alert(design.StudioTheme(), "Preview is out of date", "Reload to run the current editor snapshot.", kitcomponents.IntentWarning, false)
+	}
+	return design.Panel(ui.Column(design.PanelHeader("PREVIEW", action), feedback, view))
 }
 
 func (state *State) ReturnToStudio() {
@@ -3121,7 +4360,7 @@ func (state *State) ReturnToStudio() {
 	state.activity = ActivityExplorer
 	state.status = "Workspace ready"
 	state.mu.Unlock()
-	ui.Navigate("/")
+	ui.Navigate("/workspace")
 	ui.Invalidate()
 }
 
@@ -3367,6 +4606,12 @@ func (state *State) executeCommand(id string, preferredMode domain.RuntimeMode) 
 			state.ToggleProjectCreator()
 		case "project.open":
 			state.OpenLocalProject()
+		case "project.share":
+			state.ShowShareProject()
+		case "file.new":
+			state.ShowNewFileDialog()
+		case "file.rename":
+			state.ShowRenameFileDialog()
 		case "file.save", "file.save.control":
 			state.Save()
 		case "file.save-all", "file.save-all.control":
@@ -3391,13 +4636,13 @@ func (state *State) executeCommand(id string, preferredMode domain.RuntimeMode) 
 			state.SetActivity(ActivitySourceControl)
 		case "view.docs":
 			state.ShowDocs()
-		case "run.preferred":
+		case "run.preferred", "run.preferred.control":
 			state.StartRun(preferredMode, false)
 		case "run.vm":
 			state.StartRun(domain.RuntimeVM, false)
 		case "run.jit":
 			state.StartRun(domain.RuntimeJIT, false)
-		case "view.preview":
+		case "view.preview", "view.preview.control":
 			state.ShowPreview()
 			state.StartRun(preferredMode, true)
 	}
@@ -3429,7 +4674,13 @@ func (state *State) commandScope(preferredMode domain.RuntimeMode) commands.Scop
 		state.executeCommand("command.palette.control", preferredMode)
 	}), commands.Action("project.new", "Create project", func() {
 		state.executeCommand("project.new", preferredMode)
-	}), openProject, commands.New("file.save", "Save", commands.Key("s", ui.ModifierMeta), func() {
+	}), openProject, commands.Action("project.share", "Share current project", func() {
+		state.executeCommand("project.share", preferredMode)
+	}), commands.Action("file.new", "New file", func() {
+		state.executeCommand("file.new", preferredMode)
+	}), commands.Action("file.rename", "Rename active file", func() {
+		state.executeCommand("file.rename", preferredMode)
+	}), commands.New("file.save", "Save", commands.Key("s", ui.ModifierMeta), func() {
 		state.executeCommand("file.save", preferredMode)
 	}), commands.New("file.save.control", "Save", commands.Key("s", ui.ModifierControl), func() {
 		state.executeCommand("file.save.control", preferredMode)
@@ -3474,9 +4725,14 @@ func (state *State) commandScope(preferredMode domain.RuntimeMode) commands.Scop
 		state.executeCommand("view.docs", preferredMode)
 	}), commands.New("run.preferred", "Run " + preferredMode.String(), commands.Key("Enter", ui.ModifierMeta), func() {
 		state.executeCommand("run.preferred", preferredMode)
+	}), commands.New("run.preferred.control", "Run " + preferredMode.String(), commands.Key("Enter", ui.ModifierControl), func() {
+		state.executeCommand("run.preferred.control", preferredMode)
 	}), vm, jit, commands.New("view.preview", "Open preview", commands.Key("Enter", ui.ModifierMeta |
 		ui.ModifierShift), func() {
 		state.executeCommand("view.preview", preferredMode)
+	}), commands.New("view.preview.control", "Open preview", commands.Key("Enter", ui.ModifierControl |
+		ui.ModifierShift), func() {
+		state.executeCommand("view.preview.control", preferredMode)
 	}))
 }
 
@@ -3551,18 +4807,21 @@ func (state *State) TopBar() ui.View {
 	status := state.status
 	preferredMode := preferredRuntimeMode(state.host)
 	activity := state.activity
+	projectMutationBusy := state.projectMutationBusy
+	savePending := state.savePending
+	dirty := state.hasDirtyLocked()
 	state.mu.RUnlock()
 	viewportWidth := ui.CurrentEnvironment().ViewportWidth
 	run := design.QuietButton("Loading workspace…", func() {})
 	preview := design.QuietButton("Preview unavailable", func() {})
 	if hasProject && activity != ActivityHome {
-		run = ui.AccessibleName(design.PrimaryButton("Run " + preferredMode.String(), func() {
+		run = ui.Disabled(ui.AccessibleName(design.PrimaryButton("Run " + preferredMode.String(), func() {
 			state.StartRun(preferredMode, false)
-		}), "Run " + preferredMode.String())
-		preview = ui.AccessibleName(design.QuietButton("Preview", func() {
+		}), "Run " + preferredMode.String()), projectMutationBusy)
+		preview = ui.Disabled(ui.AccessibleName(design.QuietButton("Preview", func() {
 			state.ShowPreview()
 			state.StartRun(preferredMode, true)
-		}), "Open Preview")
+		}), "Open Preview"), projectMutationBusy)
 	}
 	if running && activity != ActivityHome {
 		run = ui.AccessibleName(design.QuietButton("Stop " + mode.String(), state.StopRun), "Stop " +
@@ -3582,7 +4841,9 @@ func (state *State) TopBar() ui.View {
 	left := ui.Align(ui.Gap(ui.Row(design.BrandLockup(), separator, locationView), design.Space3), ui.AlignCenter)
 	if viewportWidth < 840 {
 		compactLeft := ui.Align(ui.Gap(ui.Row(design.BrandMark(), ui.Flex(locationView, 1)), design.Space2), ui.AlignCenter)
-		compactActions := ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File"), run), design.Space1)
+		compactSave := ui.Disabled(ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File"),
+			projectMutationBusy || !dirty)
+		compactActions := ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), compactSave, run), design.Space1)
 		if activity == ActivityHome {
 			compactActions = ui.Row(design.PrimaryButton("New project", state.ToggleProjectCreator))
 		}
@@ -3593,8 +4854,10 @@ func (state *State) TopBar() ui.View {
 	statusColor := studioStatusColor(status, running)
 	statusView := design.StatusPill(status, statusColor)
 	find := design.QuietButton("Find", state.ShowFind)
-	save := ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File")
-	share := ui.AccessibleName(design.QuietButton("Share", state.ShowShareProject), "Share current project")
+	save := ui.Disabled(ui.AccessibleName(design.QuietButton("Save", state.Save), "Save File"),
+		projectMutationBusy || !dirty)
+	share := ui.Disabled(ui.AccessibleName(design.QuietButton("Share", state.ShowShareProject), "Share current project"),
+		projectMutationBusy || savePending > 0)
 	actions := ui.Gap(ui.Row(design.QuietButton("Commands", state.ShowCommandPalette), find, save, share, run, preview), design.Space2)
 	if activity == ActivityHome {
 		statusView = design.StatusPill("Workspace ready", design.Success)
@@ -3645,13 +4908,15 @@ func (state *State) View() ui.View {
 	if viewportWidth < 840 {
 		if activity == ActivityExplorer {
 			output := state.ConsolePanel()
+			outputHeight := 150.0
 			if previewState != domain.PreviewIdle {
 				output = state.PreviewPanel()
+				outputHeight = 220
 			} else if problemCount > 0 {
 				output = state.ProblemsPanel()
 			}
-			side := ui.Overflow(ui.MinHeight(ui.Height(state.SidePanel(), 250), 0), ui.OverflowHidden)
-			body = ui.Column(side, ui.Flex(ui.MinHeight(state.EditorPanel(), 0), 1), ui.Height(output, 150))
+			side := ui.Overflow(ui.MinHeight(ui.Height(state.SidePanel(), 300), 0), ui.OverflowHidden)
+			body = ui.Column(side, ui.Flex(ui.MinHeight(state.EditorPanel(), 0), 1), ui.Height(output, outputHeight))
 		} else if activity == ActivityDocs {
 			body = ui.Column(ui.Height(state.SidePanel(), 180), ui.Flex(state.DocsPanel(), 1))
 		} else if activity == ActivitySearch {
@@ -3674,6 +4939,6 @@ func (state *State) View() ui.View {
 		content = ui.Height(content, viewportHeight)
 	}
 	scope := state.commandScope(preferredMode)
-	content = ui.Stack(content, state.CommandPalette(scope, preferredMode), state.ProjectRenameDialog(), state.ProjectDeleteDialog(), state.RemoteDeleteDialog(), state.ProjectShareDialog(), state.AccountDialog(), state.NewFileDialog(), state.RenameFileDialog())
+	content = ui.Stack(content, state.CommandPalette(scope, preferredMode), state.ProjectRenameDialog(), state.ProjectDeleteDialog(), state.PendingConfirmationDialog(), state.RemoteDeleteDialog(), state.ProjectShareDialog(), state.AccountDialog(), state.NewFileDialog(), state.RenameFileDialog())
 	return scope.Bind(content)
 }

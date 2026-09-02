@@ -269,7 +269,7 @@ func StatusPill(value string, color uint32) ui.View {
 	dot := ui.Width(ui.Height(ui.Radius(ui.Background(ui.Box(), color), 4), 8), 8)
 	label := ui.FontSize(ui.FontWeight(ui.Foreground(ui.Text(value), TextSecondary), 600), 11)
 	content := ui.Align(ui.Gap(ui.Row(dot, label), Space2), ui.AlignCenter)
-	return framed(ui.Padding(content, 7), SurfaceRaised, Divider, 8)
+	return ui.Role(framed(ui.Padding(content, 7), SurfaceRaised, Divider, 8), "status")
 }
 
 func SectionHeading(kicker string, title string, detail string, action ui.View) ui.View {
