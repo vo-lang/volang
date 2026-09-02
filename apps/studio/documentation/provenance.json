@@ -56,7 +56,7 @@
   "path": "apps/studio/documentation",
   "schemaVersion": 2,
   "sourceDigests": {
-    "apps/studio/ui.web.toml": "sha256:d3b2440f2ac03e77d5899f4c033f382b4ea1346da8c0ca20d1c963c9bd6e6bb8",
+    "apps/studio/ui.web.toml": "sha256:8f8989d8e6ef8bbf07ced84cd732823e984d5389eea0cd52a4b5783e40d5a620",
     "cmd/vo-dev/src/generate_docs.rs": "sha256:f8040a23c5799f7194ca8a1e0b0d8f0830a8f9ce6e94ffdab0cc2ef39e1ead49",
     "lang/docs/catalog.toml": "sha256:2b59baad53e3e11240e1c35a34a77f0a65cbec168afca586da880d1588634c0a",
     "lang/docs/guides/cli.md": "sha256:169871ae6a6493c96f98399a70e947bda41ddaec4caabc96df5da8d199c11332",
