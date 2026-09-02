@@ -4915,7 +4915,7 @@ mod tests {
             )),
             UiTestStep::WaitText("EXAMPLE-COUNTER".to_string()),
             UiTestStep::Interaction(UiInteraction::Click("Open Preview".to_string())),
-            UiTestStep::WaitText("memory://preview/artifact-2".to_string()),
+            UiTestStep::WaitText("Reload".to_string()),
             UiTestStep::Interaction(UiInteraction::Click("Home".to_string())),
             UiTestStep::Interaction(UiInteraction::Click(
                 "Rename project example-counter".to_string(),
