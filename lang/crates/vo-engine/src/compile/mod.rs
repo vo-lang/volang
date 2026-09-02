@@ -696,6 +696,7 @@ fn load_real_path_compile_context_with_options(
     path: &Path,
     options: &ProjectContextOptions,
 ) -> Result<RealPathCompileContext, CompileError> {
+    #[cfg(not(windows))]
     if let WorkspaceDiscovery::Explicit(selected) = &options.workspace {
         if selected.is_absolute() {
             if let Ok(canonical) = selected.canonicalize() {
