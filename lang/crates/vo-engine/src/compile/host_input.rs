@@ -1339,14 +1339,23 @@ fn metadata_generation(file: &File) -> io::Result<HostMetadataGeneration> {
         FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     };
 
-    let before = query_windows_metadata(file)?;
-    let after = query_windows_metadata(file)?;
-    if before != after {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Windows file metadata changed during its handle query",
-        ));
+    const MAX_QUERY_ATTEMPTS: usize = 4;
+    let mut previous = query_windows_metadata(file)?;
+    let mut stable = None;
+    for _ in 1..MAX_QUERY_ATTEMPTS {
+        let current = query_windows_metadata(file)?;
+        if current == previous {
+            stable = Some(current);
+            break;
+        }
+        previous = current;
     }
+    let after = stable.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows file metadata changed during every bounded handle-query attempt",
+        )
+    })?;
     let attributes = after.attributes;
     Ok(HostMetadataGeneration {
         identity: HostEntryIdentity {
