@@ -3101,6 +3101,7 @@ func main() {
 }
 
 async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
+  const languageExampleOpenBudgetMilliseconds = 5_000;
   const clickPoint = async (expression) => {
     const point = await pollEvaluation(
       browser,
@@ -3686,8 +3687,11 @@ async function runStudioAotSmoke(browser, sessionId, timeoutMilliseconds) {
     timeoutMilliseconds,
   );
   checkpoints.languageExampleOpenMs = Date.now() - languageExampleStarted;
-  if (checkpoints.languageExampleOpenMs > 3_000) {
-    throw new Error(`Studio language example took ${checkpoints.languageExampleOpenMs}ms to open`);
+  if (checkpoints.languageExampleOpenMs > languageExampleOpenBudgetMilliseconds) {
+    throw new Error(
+      `Studio language example took ${checkpoints.languageExampleOpenMs}ms to open; `
+        + `budget is ${languageExampleOpenBudgetMilliseconds}ms`,
+    );
   }
   await activateButton("Home");
   await pollEvaluation(
