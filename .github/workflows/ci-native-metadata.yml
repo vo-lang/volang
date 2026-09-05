@@ -2,6 +2,11 @@ name: Native metadata diagnostic
 
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/ci-reliability]
+    paths:
+      - .github/workflows/ci-native-metadata.yml
+      - eng/probe-native-metadata.py
 
 permissions:
   contents: read
