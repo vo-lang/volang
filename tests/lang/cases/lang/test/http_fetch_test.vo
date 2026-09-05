@@ -17,4 +17,14 @@ func main() {
 		panic("Read body failed: " + err.Error())
 	}
 	assert(string(body) == "client-ok")
+	// References occupy language slots even when the host uses 32-bit pointers.
+	request, err := http.NewRequest("GET", "data:text/plain,headers-ok", nil)
+	assert(err == nil)
+	request.Header.Add("X-First", "one")
+	request.Header.Add("X-Second", "two")
+	response, err := http.DefaultClient.Do(request)
+	assert(err == nil)
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	assert(err == nil && string(data) == "headers-ok")
 }

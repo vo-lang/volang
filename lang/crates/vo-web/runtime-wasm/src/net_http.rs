@@ -501,7 +501,7 @@ fn read_string_slice(slice_ref: GcRef) -> Result<Vec<String>, String> {
     // Safety: the resolved extern ABI verifies this argument as a rooted
     // []string value before the host provider is invoked.
     let len = unsafe { slice::len(slice_ref) };
-    let elem_bytes = core::mem::size_of::<GcRef>();
+    let elem_bytes = vo_runtime::slot::SLOT_BYTES;
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
         let raw = unsafe { slice::get(slice_ref, i, elem_bytes) };

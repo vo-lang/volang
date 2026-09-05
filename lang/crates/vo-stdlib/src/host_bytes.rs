@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use vo_runtime::ffi::ExternCallContext;
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::{slice, string};
-use vo_runtime::slot::slot_to_ptr;
+use vo_runtime::slot::{slot_to_ptr, SLOT_BYTES};
 
 pub(crate) fn utf8_bytes(bytes: Vec<u8>, description: &str) -> Result<String, String> {
     String::from_utf8(bytes)
@@ -89,7 +89,7 @@ pub(crate) fn read_string_slice_bytes(slice_ref: GcRef) -> Vec<Vec<u8>> {
     let mut result = Vec::with_capacity(len);
     for index in 0..len {
         // Safety: `index` is in bounds and a string reference occupies one slot.
-        let raw = unsafe { slice::get(slice_ref, index, std::mem::size_of::<GcRef>()) };
+        let raw = unsafe { slice::get(slice_ref, index, SLOT_BYTES) };
         let string_ref: GcRef = slot_to_ptr(raw);
         if string_ref.is_null() {
             result.push(Vec::new());
@@ -104,6 +104,33 @@ pub(crate) fn read_string_slice_bytes(slice_ref: GcRef) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_slice_reads_language_slots_and_preserves_arbitrary_bytes() {
+        use vo_runtime::gc::Gc;
+        use vo_runtime::slot::ptr_to_slot;
+        use vo_runtime::{ValueKind, ValueMeta};
+        let mut gc = Gc::new();
+        let first = string::create(&mut gc, b"first");
+        let binary = string::create(&mut gc, &[0xff, 0, b'z']);
+        let values = slice::create(
+            &mut gc,
+            ValueMeta::new(0, ValueKind::String),
+            SLOT_BYTES,
+            3,
+            3,
+        );
+        unsafe {
+            slice::set(values, 0, ptr_to_slot(first), SLOT_BYTES);
+            slice::set(values, 1, 0, SLOT_BYTES);
+            slice::set(values, 2, ptr_to_slot(binary), SLOT_BYTES);
+        }
+        assert_eq!(
+            read_string_slice_bytes(values),
+            vec![b"first".to_vec(), vec![], vec![0xff, 0, b'z']]
+        );
+        assert!(read_string_slice_bytes(core::ptr::null_mut()).is_empty());
+    }
 
     #[test]
     fn text_decoding_reports_invalid_utf8_without_substitution() {
