@@ -2059,6 +2059,16 @@ export class UiDomAdapter {
       sequence: this.eventSequence,
       payload: this.eventPayload(listener.event, event, targetOverride),
     };
+    // An editable combobox with an application key handler owns Enter
+    // selection. Its handler may close the popup and restore a trigger before
+    // Chromium performs the key's native default, which would click that trigger.
+    // Cancel before notifying the host, including when delivery uses a microtask.
+    const target = this.domNodes.get(uiIdentityKey(id));
+    if (listener.event === 7 && !listener.passive && event.cancelable
+      && (event as KeyboardEvent).key === 'Enter' && isElement(target)
+      && isInput(target) && target.getAttribute('role') === 'combobox') {
+      event.preventDefault();
+    }
     this.eventFrames.push(encodeUiEvent(envelope, this.limits));
     this.onEvent?.();
   }

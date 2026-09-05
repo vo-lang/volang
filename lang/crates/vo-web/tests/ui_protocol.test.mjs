@@ -2966,3 +2966,27 @@ test('UI VM DOM session wakes timer goroutines and keeps GUI replay pending', as
   assert.equal(pending[0].source, 'replay-gui-event');
   session.dispose();
 });
+
+test('DOM editable combobox Enter is consumed before host delivery and ordinary typing is preserved', () => {
+  for (const [role, key, passive, expectedPrevented] of [
+    ['combobox', 'Enter', false, true], ['combobox', 'a', false, false],
+    ['combobox', ' ', false, false], ['textbox', 'Enter', false, false],
+    ['combobox', 'Enter', true, false],
+  ]) {
+    const document = new FakeDocument();
+    const root = document.createElement('main');
+    let prevented = false;
+    const adapter = new UiDomAdapter(root, { onEvent() { assert.equal(prevented, expectedPrevented); } });
+    const input = { index: 1, generation: 1 };
+    adapter.applyBatch({ sessionEpoch: 71n, revision: 1n, mutations: [
+      { type: 'create-element', id: input, primitive: 10 },
+      { type: 'listen', id: input, listener: { event: 7, handler: { index: 8, generation: 1 }, capture: false, passive, once: false } },
+      { type: 'insert-before', parent: { index: 0, generation: 1 }, child: input },
+    ] });
+    const node = root.childNodes[0]; node.setAttribute('role', role); node.focus();
+    node.dispatch('keydown', { key, cancelable: true, preventDefault() { prevented = true; } });
+    assert.equal(prevented, expectedPrevented, `${role}, ${key}, passive=${passive}`);
+    assert.equal(decodeUiEvent(adapter.shiftEventFrame()).payload.key, key);
+    assert.equal(adapter.shiftEventFrame(), undefined);
+  }
+});

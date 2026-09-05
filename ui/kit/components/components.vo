@@ -2758,9 +2758,7 @@ func Carousel(theme tokens.Theme, label string, state CarouselState, items []Car
 			}
 		})
 		slide := ui.AccessibleDescription(ui.AccessibleName(ui.Role(current.Content, "group"), current.Label), pagePosition)
-		controls := ui.Align(ui.Row(previous, ui.Flex(ui.AccessibleName(ui.Role(ui.Text(pagePosition), "status"), pagePosition), 1), next), ui.AlignCenter)
-		page := ui.Gap(ui.Column(slide, controls), theme.Spacing.ContentGap)
-		page = ui.OnKeyDown(page, func(event ui.Event) {
+		onKey := func(event ui.Event) {
 			backward := event.Key == "ArrowLeft"
 			forward := event.Key == "ArrowRight"
 			if ui.CurrentEnvironment().Direction == ui.DirectionRTL {
@@ -2771,8 +2769,9 @@ func Carousel(theme tokens.Theme, label string, state CarouselState, items []Car
 			} else if forward && !nextDisabled {
 				onChange(nextKey)
 			}
-		})
-		page = gesture.BindDrag(page, state.drag, gesture.DragOptions{
+		}
+		// Arrow controls remain outside the draggable surface.
+		slide = gesture.BindDrag(slide, state.drag, gesture.DragOptions{
 			Axis: gesture.Horizontal, MinDistance: 12,
 		}, func(snapshot gesture.DragSnapshot) {
 			if snapshot.Phase != gesture.Ended || math.Abs(snapshot.DeltaX) < 40 {
@@ -2788,6 +2787,8 @@ func Carousel(theme tokens.Theme, label string, state CarouselState, items []Car
 				onChange(previousKey)
 			}
 		})
+		controls := ui.Align(ui.Row(previous, ui.Flex(ui.AccessibleName(ui.Role(ui.Text(pagePosition), "status"), pagePosition), 1), next), ui.AlignCenter)
+		page := ui.OnKeyDown(ui.Gap(ui.Column(slide, controls), theme.Spacing.ContentGap), onKey)
 		page = ui.Hidden(page, !isCurrent)
 		pages = append(pages, ui.Key(page, current.Key))
 	}
@@ -3010,15 +3011,24 @@ func CommandPalette(theme tokens.Theme, title string, query string, placeholder 
 			rowContent = ui.Row(ui.Flex(copy, 1), ui.FontSize(ui.Foreground(ui.Text(current.Shortcut), theme.Colors.TextMuted), theme.Typography.CaptionSize))
 		}
 		rowContent = ui.Align(rowContent, ui.AlignCenter)
-		row := headless.Pressable(current.Label, current.Disabled, rowContent, func() {
+		activate := func() {
+			onSelectedChange(itemIndex)
 			onActivate(current.Key)
+		}
+		row := headless.Pressable(current.Label, current.Disabled, rowContent, activate)
+		row = ui.OnKeyDown(row, func(event ui.Event) {
+			if event.Key == "Escape" {
+				onDismiss()
+			} else if !current.Disabled && !event.Repeat &&
+				(event.Key == "Enter" || event.Key == " " || event.Key == "Space") {
+				activate()
+			}
 		})
 		row = ui.Role(row, "option")
 		row = ui.Selected(row, itemIndex == selected)
 		row = ui.AccessibleDescription(row, current.Detail)
-		row = ui.OnFocus(row, func(event ui.Event) {
-			onSelectedChange(itemIndex)
-		})
+		// Selection and activation share one turn. A focus render between
+		// pointer down and click would replace the click's handler generation.
 		background := theme.Colors.SurfaceRaised
 		foreground := theme.Colors.Text
 		if itemIndex == selected {
@@ -3046,11 +3056,8 @@ func CommandPalette(theme tokens.Theme, title string, query string, placeholder 
 		3)
 	overlay := ui.PointerEvents(ui.Stack(backdrop, placement), ui.PointerEventsNone)
 	overlay = ui.AccessibleName(ui.Role(overlay, "dialog"), title)
-	overlay = ui.OnKeyDownCapture(overlay, func(event ui.Event) {
-		if event.Key == "Escape" {
-			onDismiss()
-		}
-	})
+	// Each focusable child owns Escape and activation. A second capture
+	// handler would render before the child's queued key handler executes.
 	return ui.Portal(ui.Modal(overlay, true), ui.OverlayModal)
 }
 
