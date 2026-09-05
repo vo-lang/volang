@@ -61,6 +61,58 @@ fn function_entry_uses_stable_frame_index_and_direct_lanes() {
 }
 
 #[test]
+fn both_jit_tiers_execute_copies_into_dynamically_indexed_frame_arrays() {
+    for (opcode, width) in [(Opcode::Copy, 1), (Opcode::CopyN, 4), (Opcode::CopyN, 256)] {
+        let index = width * 2;
+        let output = index + 1;
+        let length = output + 1;
+        let mut function = make_func_with_sig(
+            vec![
+                Instruction::new(opcode, width, 0, width),
+                Instruction::new(Opcode::LoadInt, index, width - 1, 0),
+                Instruction::new(Opcode::LoadInt, length, width, 0),
+                Instruction::new(Opcode::IndexCheck, index, length, 0),
+                Instruction::new(Opcode::SlotGet, output, width, index),
+                Instruction::new(Opcode::Return, output, 1, 0),
+            ],
+            1,
+            width,
+            length + 1,
+            1,
+        );
+        function.instruction_metadata[4] = InstructionMetadata::SlotLayout {
+            array_len: width,
+            elem_layout: vec![SlotType::Value],
+        };
+        let mut module = VoModule::new("jit-frame-array-copy".into());
+        module.functions.push(function);
+        let loaded =
+            Arc::new(vo_common_core::verifier::verify_loaded_module(module.clone()).unwrap());
+        let externs = ResolvedExternTable::empty();
+        let mut jit = JitCompiler::new().unwrap();
+        jit.bind_loaded_module_scope(loaded).unwrap();
+        for tier in [
+            vo_runtime::jit_api::JitTier::Baseline,
+            vo_runtime::jit_api::JitTier::Optimizing,
+        ] {
+            jit.compile_loaded_tier(0, default_compile_env(&externs), tier)
+                .unwrap();
+            let entry = unsafe { jit.get_func_ptr_for_tier(0, tier).unwrap() };
+            let mut frame = vec![0; usize::from(length + 1)];
+            frame[usize::from(width - 1)] = 73;
+            let mut ret = [0];
+            let mut parts = JitContextParts::new();
+            let mut ctx = parts.context(&module, &mut frame);
+            assert_eq!(
+                unsafe { crate::invoke_test_jit(entry, &mut ctx, &mut frame, &mut ret) },
+                JitResult::Ok,
+            );
+            assert_eq!(ret[0], 73, "{tier:?} {opcode:?} width {width}");
+        }
+    }
+}
+
+#[test]
 fn tiered_entries_freeze_training_profiles_after_tier_up() {
     let mut module = VoModule::new("jit-tier-profile".into());
     module.functions.push(make_func(

@@ -2824,6 +2824,47 @@ mod tests {
     }
 
     #[test]
+    fn semantic_dce_preserves_copies_observed_through_inline_array_memory() {
+        for (opcode, width) in [(Opcode::Copy, 1), (Opcode::CopyN, 4), (Opcode::CopyN, 256)] {
+            let index = width * 2;
+            let output = index + 1;
+            let dead = output + 1;
+            let length = dead + 1;
+            let mut function = function_with_sig(
+                vec![
+                    Instruction::new(opcode, width, 0, width),
+                    Instruction::new(Opcode::LoadInt, dead, 123, 0),
+                    Instruction::new(Opcode::LoadInt, index, width - 1, 0),
+                    Instruction::new(Opcode::LoadInt, length, width, 0),
+                    Instruction::new(Opcode::IndexCheck, index, length, 0),
+                    Instruction::new(Opcode::SlotGet, output, width, index),
+                    Instruction::new(Opcode::Return, output, 1, 0),
+                ],
+                1,
+                width,
+                length + 1,
+                1,
+            );
+            function.instruction_metadata[5] = InstructionMetadata::SlotLayout {
+                array_len: width,
+                elem_layout: vec![SlotType::Value],
+            };
+            let mut module = Module::new("inline-array-copy-liveness".into());
+            module.functions.push(function);
+            let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
+            let plan = OptimizedFunction::analyze(&ir);
+            assert!(
+                !plan.eliminates(0),
+                "{opcode:?} width {width} must reach frame memory"
+            );
+            assert!(
+                plan.eliminates(1),
+                "an unrelated pure write should still disappear"
+            );
+        }
+    }
+
+    #[test]
     fn sccp_prunes_never_taken_branch_and_dead_arm() {
         let mut module = Module::new("optimizer-sccp-never".into());
         module.functions.push(function_with_sig(
