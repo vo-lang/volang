@@ -1557,6 +1557,15 @@ owner = "runtime-gc"
 expect = "pass"
 
 [[case]]
+id = "bugs.2026-09-05-pointer-field-gvn-control-flow"
+kind = "file"
+path = "cases/bugs/2026_09_05_pointer_field_gvn_control_flow.vo"
+matrix = "default"
+tags = ["jit", "regression", "control-flow", "smoke"]
+owner = "jit"
+expect = "pass"
+
+[[case]]
 id = "bugs.any-return-type-loss"
 kind = "file"
 path = "cases/bugs/any_return_type_loss.vo"

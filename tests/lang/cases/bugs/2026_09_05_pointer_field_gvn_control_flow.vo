@@ -1,0 +1,39 @@
+package main
+
+type keyParser struct {
+	data string
+	pos int
+}
+
+func keyByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '-'
+}
+
+func (p *keyParser) key() string {
+	start := p.pos
+	for p.pos < len(p.data) && keyByte(p.data[p.pos]) {
+		p.pos++
+	}
+	return p.data[start:p.pos]
+}
+
+func conditionalPosition(p *keyParser, alias *keyParser, change bool) int {
+	before := p.pos
+	if change {
+		alias.pos = before + 2
+	}
+	return p.pos
+}
+
+func main() {
+	p := &keyParser{data: "key_42-Z = 1"}
+	for i := 0; i < 20000; i++ {
+		p.pos = 0
+		assert(p.key() == "key_42-Z")
+		assert(p.pos == 8)
+		assert(conditionalPosition(p, p, false) == 8)
+		assert(conditionalPosition(p, p, true) == 10)
+	}
+	println("[VO:OK] pointer fields across loops and conditional aliases")
+}

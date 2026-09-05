@@ -1139,6 +1139,13 @@ fn global_gvn(
                 let mut inserted_checks = Vec::new();
                 let mut inserted_non_nil = Vec::new();
                 let mut field_undo = Vec::new();
+                // A dominating load is not a memory version: another incoming
+                // path (including a loop backedge) may have stored through an
+                // alias. Reuse fields only along a single-predecessor chain.
+                // The undo log keeps this barrier local to the dominator subtree.
+                if incoming[block.index()].len() > 1 {
+                    clear_field_values(&mut field_values, &mut field_undo);
+                }
                 for (offset, replacement) in replacements[start..end].iter_mut().enumerate() {
                     let pc = start + offset;
                     let instruction = *ir
@@ -3226,6 +3233,64 @@ mod tests {
         let plan = OptimizedFunction::analyze(&ir);
 
         assert_eq!(plan.replacement_value(2), ir.output_value(0, 1));
+    }
+
+    #[test]
+    fn field_memory_gvn_reloads_after_a_conditional_store() {
+        let module = pointer_field_function(
+            "optimizer-field-conditional-store",
+            vec![
+                Instruction::new(Opcode::PtrGet, 2, 0, 0),
+                branch(Opcode::JumpIfNot, 1, 3),
+                Instruction::new(Opcode::LoadInt, 3, 9, 0),
+                Instruction::new(Opcode::PtrSet, 0, 0, 3),
+                Instruction::new(Opcode::PtrGet, 4, 0, 0),
+                Instruction::new(Opcode::Return, 4, 1, 0),
+            ],
+            vec![
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ],
+            2,
+        );
+        let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
+        let plan = OptimizedFunction::analyze(&ir);
+
+        assert_eq!(plan.replacement_value(4), None);
+    }
+
+    #[test]
+    fn field_memory_gvn_reloads_a_loop_carried_pointer_field() {
+        let module = pointer_field_function(
+            "optimizer-field-loop-store",
+            vec![
+                Instruction::new(Opcode::PtrGet, 2, 0, 0),
+                Instruction::new(Opcode::LoadInt, 3, 1, 0),
+                Instruction::new(Opcode::PtrGet, 4, 0, 0),
+                Instruction::new(Opcode::LtI, 5, 4, 1),
+                branch(Opcode::JumpIfNot, 5, 4),
+                Instruction::new(Opcode::AddI, 4, 4, 3),
+                Instruction::new(Opcode::PtrSet, 0, 0, 4),
+                branch(Opcode::Jump, 0, -5),
+                Instruction::new(Opcode::Return, 4, 1, 0),
+            ],
+            vec![
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ],
+            2,
+        );
+        let ir = crate::ir::FunctionIr::build(&module.functions[0], &module).unwrap();
+        let plan = OptimizedFunction::analyze(&ir);
+
+        assert_eq!(plan.replacement_value(2), None);
     }
 
     fn canonical_slice_loop(initial_index: i16) -> Module {
