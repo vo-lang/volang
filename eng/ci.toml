@@ -359,6 +359,9 @@ artifacts = ["target/ci/artifacts/site"]
 
 [[task]]
 id = "nightly-language-native"
+commands = ["nightly-language-native-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "language_release_native"
 runner = "ubuntu-24.04"
@@ -373,6 +376,9 @@ results = ["target/ci/results/nightly-language-native.json"]
 
 [[task]]
 id = "nightly-language-wasm"
+commands = ["nightly-language-wasm-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "language_release_wasm"
 runner = "ubuntu-24.04"
@@ -387,6 +393,9 @@ results = ["target/ci/results/nightly-language-wasm.json"]
 
 [[task]]
 id = "nightly-stress-gc"
+commands = ["nightly-stress-gc-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "stress"
 runner = "ubuntu-24.04"
@@ -401,6 +410,9 @@ results = ["target/ci/results/nightly-stress-gc.json"]
 
 [[task]]
 id = "nightly-stress-jit-osr"
+commands = ["nightly-stress-jit-osr-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "stress"
 runner = "ubuntu-24.04"
@@ -415,6 +427,9 @@ results = ["target/ci/results/nightly-stress-jit-osr.json"]
 
 [[task]]
 id = "nightly-stress-gc-osr"
+commands = ["nightly-stress-gc-osr-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "stress"
 runner = "ubuntu-24.04"
@@ -429,6 +444,9 @@ results = ["target/ci/results/nightly-stress-gc-osr.json"]
 
 [[task]]
 id = "nightly-stress-scheduler"
+commands = ["nightly-stress-scheduler-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "stress"
 runner = "ubuntu-24.04"
@@ -443,6 +461,9 @@ results = ["target/ci/results/nightly-stress-scheduler.json"]
 
 [[task]]
 id = "nightly-platform-macos"
+commands = ["nightly-platform-macos-run", "nightly-workspace-tests"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "platform"
 runner = "macos-15"
@@ -457,6 +478,9 @@ results = ["target/ci/results/nightly-platform-macos.json"]
 
 [[task]]
 id = "nightly-platform-windows"
+commands = ["nightly-platform-windows-run", "nightly-workspace-tests"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "platform"
 runner = "windows-2025"
@@ -471,6 +495,9 @@ results = ["target/ci/results/nightly-platform-windows.json"]
 
 [[task]]
 id = "nightly-fuzz-app-protocol"
+commands = ["nightly-fuzz-app-protocol-prepare", "nightly-fuzz-app-protocol-metadata", "nightly-fuzz-app-protocol-build", "nightly-fuzz-app-protocol-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "bounded_fuzz"
 runner = "ubuntu-24.04"
@@ -484,6 +511,9 @@ evidence_kind = "fuzz-test"
 
 [[task]]
 id = "nightly-fuzz-ui-artifact"
+commands = ["nightly-fuzz-ui-artifact-prepare", "nightly-fuzz-ui-artifact-metadata", "nightly-fuzz-ui-artifact-build", "nightly-fuzz-ui-artifact-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "bounded_fuzz"
 runner = "ubuntu-24.04"
@@ -572,3 +602,122 @@ id = "dependency-audit"
 argv = ["node", "eng/run-dependency-audit.mjs"]
 timeout_seconds = 1500
 failure_kind = "dependency-policy"
+
+[[command]]
+id = "nightly-language-native-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,jit,osr,gc-vm,gc-jit,gc-osr,nostd,compile", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-language-native.json"
+
+[[command]]
+id = "nightly-language-wasm-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-language-wasm.json"
+
+[[command]]
+id = "nightly-stress-gc-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "gc-vm,gc-jit", "--tags", "gc", "--repeat", "20", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-gc.json"
+
+[[command]]
+id = "nightly-stress-jit-osr-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "jit,osr", "--tags", "jit", "--repeat", "5", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-jit-osr.json"
+
+[[command]]
+id = "nightly-stress-gc-osr-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,gc-vm,gc-osr", "--tags", "jit,osr,contract", "--repeat", "5", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-gc-osr.json"
+
+[[command]]
+id = "nightly-stress-scheduler-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,jit", "--tags", "scheduler", "--repeat", "10", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-scheduler.json"
+
+[[command]]
+id = "nightly-platform-macos-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,gc-vm,gc-osr", "--release", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-platform-macos.json"
+
+[[command]]
+id = "nightly-platform-windows-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,gc-vm,gc-osr", "--release", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-platform-windows.json"
+
+[[command]]
+id = "nightly-workspace-tests"
+argv = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--no-fail-fast", "--timings"]
+timeout_seconds = 3000
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-prepare"
+argv = ["mkdir", "-p", "target/ci/fuzz/nightly-fuzz-app-protocol/corpus", "target/ci/fuzz/nightly-fuzz-app-protocol/artifacts"]
+timeout_seconds = 30
+failure_kind = "infrastructure"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-metadata"
+argv = ["cargo", "+nightly-2026-08-20", "metadata", "--locked", "--format-version", "1"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+cwd = "fuzz/app-protocol"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-build"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "build", "--fuzz-dir", ".", "decoders"]
+timeout_seconds = 1800
+failure_kind = "product"
+cwd = "fuzz/app-protocol"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-run"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "run", "--fuzz-dir", ".", "decoders", "../../target/ci/fuzz/nightly-fuzz-app-protocol/corpus", "corpus/decoders", "--", "-artifact_prefix=../../target/ci/fuzz/nightly-fuzz-app-protocol/artifacts/", "-runs=100000", "-max_len=4096", "-timeout=10", "-seed=424242"]
+timeout_seconds = 600
+failure_kind = "product"
+cwd = "fuzz/app-protocol"
+report = "libfuzzer"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-prepare"
+argv = ["mkdir", "-p", "target/ci/fuzz/nightly-fuzz-ui-artifact/corpus", "target/ci/fuzz/nightly-fuzz-ui-artifact/artifacts"]
+timeout_seconds = 30
+failure_kind = "infrastructure"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-metadata"
+argv = ["cargo", "+nightly-2026-08-20", "metadata", "--locked", "--format-version", "1"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+cwd = "fuzz/ui-artifact"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-build"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "build", "--fuzz-dir", ".", "ui_artifact_decoders"]
+timeout_seconds = 1800
+failure_kind = "product"
+cwd = "fuzz/ui-artifact"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-run"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "run", "--fuzz-dir", ".", "ui_artifact_decoders", "../../target/ci/fuzz/nightly-fuzz-ui-artifact/corpus", "corpus/ui_artifact_decoders", "--", "-artifact_prefix=../../target/ci/fuzz/nightly-fuzz-ui-artifact/artifacts/", "-runs=100000", "-max_len=65536", "-timeout=10", "-seed=424242"]
+timeout_seconds = 600
+failure_kind = "product"
+cwd = "fuzz/ui-artifact"
+report = "libfuzzer"

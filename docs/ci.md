@@ -45,10 +45,18 @@ after execution. Task and command deadlines terminate the complete process
 group or Windows Job Object. Cancellation uses the same cleanup path. Commands
 run once; no automatic retry or shell interpolation is involved.
 
+All Nightly language, stress, platform, fuzz and audit lanes use `ci run`.
+Their executable arguments and budgets live in `eng/ci.toml`; Actions installs
+the environment and selects a static task. Language JSON is published from the
+child's exact stdout only after schema validation, and its digest must match
+the captured stdout. Fuzz commands require both completion records to match
+the declared positive input budget. Failed attempts retain logs and Cargo timings.
+
 `started.json` explicitly marks an incomplete attempt. The executor atomically
 writes the typed `result.json` and its digest in `completion.json`, then publishes
-certifiable evidence as its final commit point. Certification errors are also
-written to `failure.json` and cause a nonzero exit. Local dirty executions can
+certifiable evidence as its final commit point. Certification errors update
+the typed result and completion digest, write `failure.json`, and cause a
+nonzero exit. Local dirty executions can
 produce diagnostic receipts, but cannot produce certifiable evidence. Bundles
 reject mixed GitHub run attempts and missing command or log records.
 

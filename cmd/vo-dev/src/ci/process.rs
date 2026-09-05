@@ -192,9 +192,16 @@ pub(crate) fn run_command(
         std::thread::sleep(Duration::from_millis(20));
     }
     result.duration_millis = u64::try_from(start.elapsed().as_millis())?;
-    if result.passed() && spec.report == "cargo-test" {
-        let log = fs::read(&stdout)?;
-        match cargo_test_counts(&String::from_utf8_lossy(&log)) {
+    if result.passed() && !spec.report.is_empty() {
+        let counts = match spec.report.as_str() {
+            "cargo-test" => cargo_test_counts(&String::from_utf8_lossy(&fs::read(&stdout)?)),
+            "libfuzzer" => libfuzzer_counts(
+                &String::from_utf8_lossy(&fs::read(&stderr)?),
+                fuzz_run_budget(&spec.argv)?,
+            ),
+            _ => bail!("unknown command report contract"),
+        };
+        match counts {
             Ok(counts) => result.test_counts = Some(counts),
             Err(error) => {
                 result.status = CommandStatus::Failed;
@@ -204,6 +211,51 @@ pub(crate) fn run_command(
         }
     }
     Ok(result)
+}
+
+pub(crate) fn fuzz_run_budget(argv: &[String]) -> Result<u64> {
+    let budgets = argv
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("-runs="))
+        .collect::<Vec<_>>();
+    match budgets.as_slice() {
+        [value] => value
+            .parse::<u64>()
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| anyhow!("fuzz command requires a positive bounded run count")),
+        _ => bail!("fuzz command requires exactly one -runs budget"),
+    }
+}
+
+fn libfuzzer_counts(log: &str, expected: u64) -> Result<TestCounts> {
+    let completed = log
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("Done ")?
+                .split_once(" runs in ")?
+                .0
+                .parse::<u64>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    let done = log
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.strip_prefix('#')?.split_whitespace();
+            let count = fields.next()?.parse::<u64>().ok()?;
+            (fields.next()? == "DONE").then_some(count)
+        })
+        .collect::<Vec<_>>();
+    if expected == 0 || completed != [expected] || done != [expected] {
+        bail!("fuzzer did not complete its declared {expected} inputs: done={done:?}, summaries={completed:?}");
+    }
+    Ok(TestCounts {
+        passed: expected,
+        failed: 0,
+        ignored: 0,
+        binaries: 1,
+    })
 }
 
 pub(crate) fn cargo_test_counts(log: &str) -> Result<TestCounts> {
@@ -283,6 +335,7 @@ mod tests {
                 timeout_seconds: 40,
                 failure_kind: "product".into(),
                 report: String::new(),
+                stdout_result: String::new(),
             }
         }
         fn run(&self, spec: &CiCommand, cancel: &AtomicBool, timeout: Duration) -> CommandResult {
@@ -357,6 +410,23 @@ mod tests {
             }
             _ => panic!("unknown process fixture"),
         }
+    }
+
+    #[test]
+    fn fuzz_report_requires_the_complete_unique_declared_budget() {
+        let log = "#100000\tDONE cov: 308\nDone 100000 runs in 0 second(s)\n";
+        assert_eq!(libfuzzer_counts(log, 100000).unwrap().passed, 100000);
+        for invalid in [
+            "",
+            "#100000 DONE\n",
+            "Done 100000 runs in 0 second(s)\n",
+            "#2 DONE\nDone 2 runs in 0 second(s)\n",
+        ] {
+            assert!(libfuzzer_counts(invalid, 100000).is_err());
+        }
+        assert!(libfuzzer_counts(&format!("{log}{log}"), 100000).is_err());
+        assert!(fuzz_run_budget(&["-runs=-1".into()]).is_err());
+        assert!(fuzz_run_budget(&["-runs=1".into(), "-runs=2".into()]).is_err());
     }
 
     #[test]

@@ -79,27 +79,21 @@ jobs:
       - name: Build repository tooling
         run: cargo build --locked -p vo-dev
 
-      - name: Run complete native release matrix
-        run: |
-          mkdir -p target/ci/results
-          ./target/debug/vo-dev test run \
-            --suite lang \
-            --targets vm,jit,osr,gc-vm,gc-jit,gc-osr,nostd,compile \
-            --release \
-            --format json > target/ci/results/nightly-language-native.json
-
-      - name: Record Nightly evidence
+      - name: Execute declared Nightly task
         run: >-
-          ./target/debug/vo-dev ci record
+          ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
-          --task nightly-language-native
-          --output target/ci/evidence/nightly-language-native.evidence.json
+          --task "nightly-language-native"
 
       - name: Upload Nightly evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-language-native-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 
@@ -149,27 +143,21 @@ jobs:
       - name: Build repository tooling
         run: cargo build --locked -p vo-dev
 
-      - name: Run complete WebAssembly release matrix
-        run: |
-          mkdir -p target/ci/results
-          ./target/debug/vo-dev test run \
-            --suite lang \
-            --targets wasm,wasm-aot \
-            --release \
-            --format json > target/ci/results/nightly-language-wasm.json
-
-      - name: Record Nightly evidence
+      - name: Execute declared Nightly task
         run: >-
-          ./target/debug/vo-dev ci record
+          ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
-          --task nightly-language-wasm
-          --output target/ci/evidence/nightly-language-wasm.evidence.json
+          --task "nightly-language-wasm"
 
       - name: Upload Nightly evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-language-wasm-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 
@@ -184,24 +172,12 @@ jobs:
         include:
           - name: gc
             task: nightly-stress-gc
-            targets: gc-vm,gc-jit
-            tags: gc
-            repeat: 20
           - name: jit-osr
             task: nightly-stress-jit-osr
-            targets: jit,osr
-            tags: jit
-            repeat: 5
           - name: gc-osr
             task: nightly-stress-gc-osr
-            targets: vm,gc-vm,gc-osr
-            tags: jit,osr,contract
-            repeat: 5
           - name: scheduler
             task: nightly-stress-scheduler
-            targets: vm,jit
-            tags: scheduler
-            repeat: 10
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -224,29 +200,21 @@ jobs:
       - name: Build repository tooling
         run: cargo build --locked -p vo-dev
 
-      - name: Run stress selection
-        run: |
-          mkdir -p target/ci/results
-          ./target/debug/vo-dev test run \
-            --suite lang \
-            --targets "${{ matrix.targets }}" \
-            --tags "${{ matrix.tags }}" \
-            --repeat "${{ matrix.repeat }}" \
-            --release \
-            --format json > "target/ci/results/${{ matrix.task }}.json"
-
-      - name: Record Nightly evidence
+      - name: Execute declared Nightly task
         run: >-
-          ./target/debug/vo-dev ci record
+          ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
-          --output "target/ci/evidence/${{ matrix.task }}.evidence.json"
 
       - name: Upload Nightly evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 
@@ -285,31 +253,21 @@ jobs:
       - name: Build repository tooling
         run: cargo build --locked -p vo-dev
 
-      - name: Run native language smoke matrix
-        run: |
-          mkdir -p target/ci/results
-          ./target/debug/vo-dev test run \
-            --suite lang \
-            --tags smoke \
-            --targets native,gc-vm,gc-osr \
-            --release \
-            --format json > "target/ci/results/${{ matrix.task }}.json"
-
-      - name: Run workspace tests
-        run: cargo test --workspace --all-targets --locked --no-fail-fast
-
-      - name: Record Nightly evidence
+      - name: Execute declared Nightly task
         run: >-
-          ./target/debug/vo-dev ci record
+          ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
-          --output "target/ci/evidence/${{ matrix.task }}.evidence.json"
 
       - name: Upload Nightly evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 
@@ -327,12 +285,8 @@ jobs:
         include:
           - target: ui_artifact_decoders
             task: nightly-fuzz-ui-artifact
-            fuzz_dir: fuzz/ui-artifact
-            max_len: 65536
           - target: decoders
             task: nightly-fuzz-app-protocol
-            fuzz_dir: fuzz/app-protocol
-            max_len: 4096
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -375,37 +329,21 @@ jobs:
       - name: Build repository tooling
         run: cargo build --locked -p vo-dev
 
-      - name: Build coverage-instrumented fuzz target
-        working-directory: ${{ matrix.fuzz_dir }}
-        run: |
-          cargo +"$RUST_NIGHTLY" metadata --locked --format-version 1 > "$RUNNER_TEMP/${{ matrix.target }}-cargo-metadata.json"
-          cargo +"$RUST_NIGHTLY" fuzz build --fuzz-dir . "${{ matrix.target }}"
-
-      - name: Fuzz authenticated and untrusted protocol boundary
-        working-directory: ${{ matrix.fuzz_dir }}
-        run: |
-          fuzz_output="$GITHUB_WORKSPACE/target/ci/fuzz/${{ matrix.task }}"
-          mkdir -p "$fuzz_output/corpus" "$fuzz_output/artifacts"
-          cargo +"$RUST_NIGHTLY" fuzz run --fuzz-dir . "${{ matrix.target }}" \
-            "$fuzz_output/corpus" "corpus/${{ matrix.target }}" -- \
-            -artifact_prefix="$fuzz_output/artifacts/" \
-            -runs=100000 \
-            -max_len=${{ matrix.max_len }} \
-            -timeout=10 \
-            -seed=424242
-
-      - name: Record Nightly evidence
+      - name: Execute declared Nightly task
         run: >-
-          ./target/debug/vo-dev ci record
+          ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
-          --output "target/ci/evidence/${{ matrix.task }}.evidence.json"
 
       - name: Upload Nightly evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 
@@ -466,10 +404,14 @@ jobs:
         run: ./target/debug/vo-dev ci run --plan target/ci/plan-input/plan.json --task nightly-audits
 
       - name: Upload Nightly evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-audits-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 

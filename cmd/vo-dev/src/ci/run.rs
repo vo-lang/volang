@@ -146,6 +146,10 @@ fn run_task_inner(
                     failure.as_deref().unwrap_or("unsuccessful result")
                 );
             }
+            if !spec.stdout_result.is_empty() {
+                let stdout = &receipt.commands.last().unwrap().stdout;
+                publish_stdout_result(root, &attempt, stdout, &spec.stdout_result)?;
+            }
         }
         if source_identity(root)? != receipt.source || input_digests(root, task)? != receipt.inputs
         {
@@ -200,6 +204,7 @@ fn run_task_inner(
     receipt.certifiable = publish
         && receipt.passed
         && !receipt.source.tracked_dirty
+        && !matches!(plan.selection, super::plan::SelectionBasis::Explicit { .. })
         && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
     write_json(&attempt.join("result.json"), &receipt)?;
     let result_digest = digest_path(root, &format!("{}/result.json", receipt.attempt))?;
@@ -220,9 +225,17 @@ fn run_task_inner(
             receipt.certifiable = false;
             receipt.failure_kind = Some("infrastructure".into());
             receipt.error = Some(format!("execution could not be certified: {error:#}"));
+            if evidence_path.exists() {
+                fs::remove_file(&evidence_path)?;
+            }
         }
     }
     if receipt.error.is_some() {
+        // Certification itself can fail after command execution succeeds.
+        // The published typed result and completion must describe that failure.
+        write_json(&attempt.join("result.json"), &receipt)?;
+        let result_digest = digest_path(root, &format!("{}/result.json", receipt.attempt))?;
+        write_json(&attempt.join("completion.json"), &result_digest)?;
         write_json(&attempt.join("failure.json"), &receipt)?;
     }
     if publish {
@@ -279,6 +292,21 @@ fn archive_existing(root: &Path, attempt: &Path, path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    Ok(())
+}
+
+fn publish_stdout_result(root: &Path, attempt: &Path, stdout: &str, result: &str) -> Result<()> {
+    // Validate the child's exact bytes before publishing. A successful process
+    // with malformed, empty or unsuccessful JSON never creates a domain result.
+    validate_result(root, stdout)?;
+    let destination = root.join(result);
+    fs::create_dir_all(destination.parent().unwrap())?;
+    if fs::symlink_metadata(&destination).is_ok() {
+        bail!("CI command unexpectedly wrote its stdout result destination: {result}");
+    }
+    let staged = attempt.join("stdout-result.pending");
+    fs::copy(root.join(stdout), &staged)?;
+    fs::rename(staged, destination)?;
     Ok(())
 }
 
@@ -374,9 +402,43 @@ pub(super) fn validate_receipt(
         {
             bail!("execution command {id} has no successful Rust tests");
         }
+        if spec.report == "libfuzzer" {
+            let expected = super::process::fuzz_run_budget(&spec.argv)?;
+            if !result.test_counts.as_ref().is_some_and(|counts| {
+                counts.passed == expected
+                    && counts.failed == 0
+                    && counts.ignored == 0
+                    && counts.binaries == 1
+            }) {
+                bail!("execution command {id} has no completed fuzz budget");
+            }
+        }
     }
     if receipt.diagnostics.len() != receipt.commands.len() * 2 {
         bail!("incomplete execution diagnostics");
+    }
+    for (result, id) in receipt.commands.iter().zip(&task.commands) {
+        let spec = manifest
+            .commands
+            .iter()
+            .find(|command| &command.id == id)
+            .unwrap();
+        if spec.stdout_result.is_empty() {
+            continue;
+        }
+        let output = receipt
+            .results
+            .iter()
+            .find(|digest| digest.path == spec.stdout_result)
+            .ok_or_else(|| anyhow!("execution command {id} has no declared stdout result"))?;
+        let stdout = receipt
+            .diagnostics
+            .iter()
+            .find(|digest| digest.path == result.stdout)
+            .ok_or_else(|| anyhow!("execution command {id} has no stdout diagnostic"))?;
+        if output.sha256 != stdout.sha256 || output.size != stdout.size || output.kind != "file" {
+            bail!("execution command {id} stdout does not match its domain result");
+        }
     }
     for (diagnostic, expected) in receipt.diagnostics.iter().zip(
         receipt
@@ -526,6 +588,7 @@ mod tests {
                     timeout_seconds: 40,
                     failure_kind: "product".into(),
                     report: report.into(),
+                    stdout_result: String::new(),
                 }],
             };
             fs::write(
@@ -615,6 +678,32 @@ mod tests {
         let (plan, _) =
             read_plan(&repository.0, &repository.0.join("target/ci/plan.json")).unwrap();
         assert!(validate_receipt(&repository.0, &plan, &plan.tasks[0], &receipt).is_err());
+    }
+
+    #[test]
+    fn stdout_domain_publication_rejects_empty_malformed_failed_and_substituted_outputs() {
+        let repository = Repository::new("", false, "output");
+        let attempt = repository.0.join("target/ci/stdout-fixture");
+        fs::create_dir_all(&attempt).unwrap();
+        let stdout = "target/ci/stdout-fixture/child.log";
+        let result = "target/ci/results/child.json";
+        for invalid in [
+            "",
+            "truncated {",
+            r#"{"passed":true}"#,
+            r#"{"schema":"volang.browser-result.v1","passed":false,"report":{"passed":false,"complete":false}}"#,
+        ] {
+            fs::write(repository.0.join(stdout), invalid).unwrap();
+            assert!(publish_stdout_result(&repository.0, &attempt, stdout, result).is_err());
+            assert!(!repository.0.join(result).exists());
+        }
+        let bytes = br#"{"schema":"volang.browser-result.v1","passed":true,"report":{"passed":true,"complete":true,"checks":["executed"]}}"#;
+        fs::write(repository.0.join(stdout), bytes).unwrap();
+        publish_stdout_result(&repository.0, &attempt, stdout, result).unwrap();
+        assert_eq!(fs::read(repository.0.join(result)).unwrap(), bytes);
+        fs::write(repository.0.join(result), "substituted").unwrap();
+        assert!(publish_stdout_result(&repository.0, &attempt, stdout, result).is_err());
+        assert_eq!(fs::read(repository.0.join(result)).unwrap(), b"substituted");
     }
 
     #[test]

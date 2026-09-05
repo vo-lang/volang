@@ -46,6 +46,8 @@ pub(crate) struct CiCommand {
     pub(crate) failure_kind: String,
     #[serde(default)]
     pub(crate) report: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) stdout_result: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -170,9 +172,21 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
         if !matches!(
             command.failure_kind.as_str(),
             "product" | "infrastructure" | "portability" | "dependency-policy"
-        ) || !matches!(command.report.as_str(), "" | "cargo-test")
+        ) || !matches!(command.report.as_str(), "" | "cargo-test" | "libfuzzer")
         {
             bail!("invalid CI command result contract {}", command.id);
+        }
+        if command.report == "libfuzzer" {
+            super::process::fuzz_run_budget(&command.argv)?;
+        }
+        if !command.stdout_result.is_empty() {
+            validate_output_path(&command.id, &command.stdout_result)?;
+            if !command.report.is_empty() {
+                bail!(
+                    "CI command {} cannot use both stdout JSON and a test harness report",
+                    command.id
+                );
+            }
         }
         let cwd = Path::new(&command.cwd);
         if cwd.is_absolute()
@@ -238,9 +252,24 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
         if !task.commands.is_empty() {
             validate_nonempty_patterns(&task.id, &task.inputs)?;
             validate_token("CI task resource group", &task.resource_group)?;
+            let mut stdout_results = BTreeSet::new();
             for id in &task.commands {
                 if !command_ids.contains(id.as_str()) {
                     bail!("CI task {} references unknown command {id}", task.id);
+                }
+                let command = manifest
+                    .commands
+                    .iter()
+                    .find(|command| &command.id == id)
+                    .unwrap();
+                if !command.stdout_result.is_empty()
+                    && (!task.results.contains(&command.stdout_result)
+                        || !stdout_results.insert(&command.stdout_result))
+                {
+                    bail!(
+                        "CI task {} must declare each command stdout result exactly once",
+                        task.id
+                    );
                 }
             }
         }
@@ -486,6 +515,7 @@ mod tests {
                 timeout_seconds: 60,
                 failure_kind: "product".into(),
                 report: "cargo-test".into(),
+                stdout_result: String::new(),
             }],
         };
         validate_manifest(&manifest).unwrap();
