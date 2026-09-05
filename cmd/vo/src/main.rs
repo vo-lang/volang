@@ -734,6 +734,10 @@ fn msvc_aot_link_arguments(
             "kernel32.lib",
             "legacy_stdio_definitions.lib",
             "ntdll.lib",
+            // Core stdlib directory discovery uses SHGetKnownFolderPath and
+            // CoTaskMemFree even when the program has no UI host.
+            "ole32.lib",
+            "shell32.lib",
             "userenv.lib",
             "ws2_32.lib",
         ]
@@ -747,11 +751,9 @@ fn msvc_aot_link_arguments(
                 "dwmapi.lib",
                 "gdi32.lib",
                 "imm32.lib",
-                "ole32.lib",
                 "oleaut32.lib",
                 "opengl32.lib",
                 "propsys.lib",
-                "shell32.lib",
                 "user32.lib",
                 "windowscodecs.lib",
             ]
@@ -3337,6 +3339,9 @@ mod tests {
         );
         assert!(!core_arguments.contains(&OsString::from("d3dcompiler.lib")));
         assert!(!core_arguments.contains(&OsString::from("user32.lib")));
+        for library in ["ole32.lib", "shell32.lib"] {
+            assert!(core_arguments.contains(&OsString::from(library)));
+        }
     }
 
     #[test]
