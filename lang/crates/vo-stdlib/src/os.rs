@@ -387,7 +387,10 @@ fn open_file_for_times(path: &std::path::Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
-        options.access_mode(FILE_WRITE_ATTRIBUTES);
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     }
     #[cfg(not(windows))]
     options.read(true);
@@ -524,7 +527,11 @@ fn open_file_with_mode(path: &std::path::Path, flag: i32, perm: u32) -> std::io:
     #[cfg(windows)]
     {
         const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+        // CreateFile requires this flag to open existing directories. Keep
+        // the requested access and creation disposition for ordinary files.
+        let mut native_flags = FILE_FLAG_BACKUP_SEMANTICS;
         if flag & O_CREATE as i32 != 0 && perm & 0o222 == 0 {
             // CreateFile applies creation attributes only when it creates the
             // path, matching Go's Windows OpenFile behavior without changing
@@ -532,8 +539,9 @@ fn open_file_with_mode(path: &std::path::Path, flag: i32, perm: u32) -> std::io:
             options.attributes(FILE_ATTRIBUTE_READONLY);
         }
         if flag & O_SYNC as i32 != 0 {
-            options.custom_flags(FILE_FLAG_WRITE_THROUGH);
+            native_flags |= FILE_FLAG_WRITE_THROUGH;
         }
+        options.custom_flags(native_flags);
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -3008,7 +3016,7 @@ mod tests {
             3
         );
         assert_eq!(
-            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(0, 1)),
+            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(0, 100)),
             -1
         );
         assert_eq!(
@@ -3016,7 +3024,7 @@ mod tests {
             -1
         );
         assert_eq!(
-            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(1, 1)),
+            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(1, 100)),
             -2
         );
         for seconds in [-2, -1, 0, 1, 2] {
@@ -3044,6 +3052,22 @@ mod tests {
         assert_eq!(checked_chown_id(-1, "uid").unwrap(), u32::MAX);
         assert!(checked_chown_id(-2, "uid").is_err());
         assert!(next_file_handle(i32::MAX).is_err());
+    }
+
+    #[test]
+    fn directory_handles_support_readonly_open_and_modified_times() {
+        let root = TempDir::new("directory-open");
+        let file = open_file_with_mode(root.path(), O_RDONLY as i32, 0).unwrap();
+        assert!(file.metadata().unwrap().is_dir());
+        drop(file);
+        for flag in [O_WRONLY as i32, O_RDWR as i32] {
+            assert!(open_file_with_mode(root.path(), flag, 0).is_err());
+        }
+        let file = open_file_for_times(root.path()).unwrap();
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_modified(time).unwrap();
+        drop(file);
+        assert_eq!(fs::metadata(root.path()).unwrap().modified().unwrap(), time);
     }
 
     #[test]

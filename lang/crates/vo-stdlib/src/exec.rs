@@ -375,7 +375,17 @@ fn decode_environment_for_platform(
 ) -> std::io::Result<Vec<(OsString, OsString)>> {
     let mut result = Vec::with_capacity(entries.len());
     for entry in entries {
+        if entry.contains(&0) {
+            return Err(crate::host_bytes::invalid_input(
+                "environment entry must not contain NUL",
+            ));
+        }
         let Some(separator) = environment_separator(&entry, windows) else {
+            if entry.first() == Some(&b'=') {
+                return Err(crate::host_bytes::invalid_input(
+                    "environment variable name must not be empty",
+                ));
+            }
             // Go permits entries without '=' in the environment vector.
             // `std::process::Command` has no representation for them, so keep
             // the expressible entries and omit these opaque records.
@@ -384,11 +394,6 @@ fn decode_environment_for_platform(
         if separator == 0 {
             return Err(crate::host_bytes::invalid_input(
                 "environment variable name must not be empty",
-            ));
-        }
-        if entry.contains(&0) {
-            return Err(crate::host_bytes::invalid_input(
-                "environment entry must not contain NUL",
             ));
         }
         let key = crate::host_bytes::os_string_from_bytes(
@@ -927,9 +932,13 @@ mod tests {
             b"=empty-key".to_vec(),
             b"KEY=bad\0value".to_vec(),
             b"bad\0key=value".to_vec(),
+            b"opaque\0record".to_vec(),
         ] {
-            let error = decode_environment(vec![entry]).unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            for windows in [false, true] {
+                let error = super::decode_environment_for_platform(vec![entry.clone()], windows)
+                    .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            }
         }
     }
 

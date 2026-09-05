@@ -273,14 +273,16 @@ mod tests {
 
     #[test]
     fn unix_nanoseconds_preserve_pre_epoch_sign_without_panicking() {
+        // Windows SystemTime has 100 ns resolution; both signs must survive
+        // conversion using an instant representable on every supported host.
         assert_eq!(system_time_unix_nano(UNIX_EPOCH), 0);
         assert_eq!(
-            system_time_unix_nano(UNIX_EPOCH + Duration::from_nanos(1)),
-            1
+            system_time_unix_nano(UNIX_EPOCH + Duration::from_nanos(100)),
+            100
         );
         assert_eq!(
-            system_time_unix_nano(UNIX_EPOCH - Duration::from_nanos(1)),
-            -1
+            system_time_unix_nano(UNIX_EPOCH - Duration::from_nanos(100)),
+            -100
         );
     }
 
