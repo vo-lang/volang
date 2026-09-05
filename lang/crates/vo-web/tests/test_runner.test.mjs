@@ -6,6 +6,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+import { hostPlatform } from '../test_runner_host.mjs';
+
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 for (const runner of ['test_runner.mjs', 'aot_test_runner.mjs']) {
@@ -16,9 +18,9 @@ for (const runner of ['test_runner.mjs', 'aot_test_runner.mjs']) {
       const jobs = Array.from({ length: 2_000 }, (_, index) => ({
         id: `absent-${index}::wasm`, case_id: `absent-${index}`, kind: 'file',
         path: `target/ci/absent-${index}.vo`, target: 'wasm', backend: 'vo-web',
-        timeout_sec: 1,
+        timeout_sec: 1, requires_host: [], resource_group: null,
       }));
-      await writeFile(plan, JSON.stringify({ schema: 'volang.test-plan.v1', suite: 'lang', jobs }));
+      await writeFile(plan, JSON.stringify({ schema: 'volang.test-plan.v2', suite: 'lang', host_platform: hostPlatform, jobs }));
       const child = spawnSync(process.execPath, [join(project, runner), '--plan', plan, '--format', 'json'], {
         encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 30_000,
       });
@@ -103,10 +105,10 @@ test('Wasm VM synchronous infinite loop times out and the next real case still e
     await writeFile(join(temporary, 'next.vo'), 'package main\nfunc main() { println("after-timeout") }\n');
     const jobs = ['spin', 'next'].map(name => ({
       id: name, case_id: name, kind: 'file', path: join(temporary, name + '.vo'),
-      target: 'wasm', backend: 'vo-web', timeout_sec: name === 'spin' ? 1 : 5,
+      target: 'wasm', backend: 'vo-web', requires_host: [], resource_group: null, timeout_sec: name === 'spin' ? 1 : 5,
     }));
     const plan = join(temporary, 'plan.json');
-    await writeFile(plan, JSON.stringify({ schema: 'volang.test-plan.v1', suite: 'lang', jobs }));
+    await writeFile(plan, JSON.stringify({ schema: 'volang.test-plan.v2', suite: 'lang', host_platform: hostPlatform, jobs }));
     const child = spawnSync(process.execPath, [join(project, 'test_runner.mjs'), '--plan', plan, '--format', 'json', '--jobs', '1'], {
       encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: 15_000,
     });
@@ -119,4 +121,37 @@ test('Wasm VM synchronous infinite loop times out and the next real case still e
     assert.equal(report.jobs[1].stdout, 'after-timeout\n');
     assert.equal(report.jobs[1].status, 'passed');
   } finally { await rm(temporary, { recursive: true, force: true }); }
+});
+
+test('declared resources serialize collisions without occupying unrelated workers', async () => {
+  const { mapBounded } = await import('../test_runner_pool.mjs');
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const order = [];
+  const jobs = [{ resource_group: 'shared' }, { resource_group: 'shared' }, { resource_group: null }];
+  const result = await mapBounded(jobs, 2, async (_, index) => {
+    order.push(index);
+    if (index === 0) await blocked;
+    if (index === 2) release();
+    return index;
+  });
+  assert.deepEqual(order, [0, 2, 1]);
+  assert.deepEqual(result, [0, 1, 2]);
+});
+
+test('host contracts reject missing identity, unknown capabilities and forged probe environment', async () => {
+  const { validateHostPlan, jobHost } = await import('../test_runner_host.mjs');
+  const job = { id: 'fixture', requires_host: [], resource_group: null, tags: ['symlink'] };
+  const plan = { host_platform: hostPlatform, jobs: [job] };
+  validateHostPlan(plan);
+  assert.throws(() => validateHostPlan({ ...plan, host_platform: 'wrong' }));
+  for (const requires_host of [undefined, ['unknown'], ['symlink', 'symlink']]) {
+    assert.throws(() => validateHostPlan({ ...plan, jobs: [{ ...job, requires_host }] }));
+  }
+  assert.throws(() => validateHostPlan({ ...plan, jobs: [{ ...job, env: { VO_TEST_HOST_SYMLINK: 'supported' } }] }));
+  assert.throws(() => validateHostPlan({ ...plan, jobs: [{ ...job, env: { Vo_Test_Host_Symlink: 'supported' } }] }));
+  const unavailable = { symlink: { status: 'unavailable', detail: 'fixture permission denied' } };
+  assert.equal(jobHost(job, unavailable).failure_kind, null);
+  assert.equal(jobHost({ ...job, requires_host: ['symlink'] }, unavailable).failure_kind, 'portability');
+  assert.equal(jobHost(job, {}).failure_kind, 'infrastructure');
 });

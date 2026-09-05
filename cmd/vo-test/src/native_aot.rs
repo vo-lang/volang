@@ -262,6 +262,7 @@ mod tests {
         let mut job: TestJob = serde_json::from_value(json!({
             "id":"case::native-aot","case_id":"case","kind":"file","path":"case.vo",
             "target":"native-aot","backend":"native-aot","timeout_sec":1,"expect":{"kind":"pass"},
+            "requires_host":[],"resource_group":null,
         }))
         .unwrap();
         let valid = json!({

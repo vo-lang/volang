@@ -152,6 +152,18 @@ fn record_inner(
         .iter()
         .map(|path| {
             validate_result(root, path)?;
+            let result: serde_json::Value = serde_json::from_slice(&fs::read(root.join(path))?)?;
+            if result["schema"] == "volang.test-result.v2" {
+                let expected = match runner.os.as_str() {
+                    "Linux" | "linux" => "linux",
+                    "macOS" | "macos" => "macos",
+                    "Windows" | "windows" => "windows",
+                    _ => "invalid",
+                };
+                if result["host_platform"] != expected {
+                    bail!("language result host differs from the certified task runner");
+                }
+            }
             digest_path(root, path)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -629,7 +641,10 @@ pub(super) fn validate_result(root: &Path, relative: &str) -> Result<()> {
         .as_object()
         .ok_or_else(|| anyhow!("CI result must be a JSON object: {}", path.display()))?;
     match object.get("schema").and_then(serde_json::Value::as_str) {
-        Some("volang.test-result.v1") => {
+        Some("volang.test-result.v2") => {
+            crate::test_manifest::validate_host_platform(
+                value["host_platform"].as_str().unwrap_or_default(),
+            )?;
             let jobs = value["jobs"]
                 .as_array()
                 .ok_or_else(|| anyhow!("test result has no jobs: {relative}"))?;
@@ -643,6 +658,7 @@ pub(super) fn validate_result(root: &Path, relative: &str) -> Result<()> {
                 bail!("test result counters do not prove complete success: {relative}");
             }
             for job in jobs {
+                crate::test_runner::validate_host_job_result(job)?;
                 let id = job["id"]
                     .as_str()
                     .ok_or_else(|| anyhow!("test result lacks job identity: {relative}"))?;
@@ -1071,7 +1087,7 @@ mod tests {
         for invalid in [
             serde_json::json!({"passed": true}),
             serde_json::json!({"result": "success"}),
-            serde_json::json!({"schema": "volang.test-result.v1", "suite": "lang", "passed": 1, "failed": 0, "skipped": 0, "jobs": []}),
+            serde_json::json!({"schema": "volang.test-result.v2", "suite": "lang", "passed": 1, "failed": 0, "skipped": 0, "jobs": []}),
             serde_json::json!({"schema": "volang.browser-result.v1", "passed": true, "report": {"passed": true, "complete": true}}),
         ] {
             fs::write(

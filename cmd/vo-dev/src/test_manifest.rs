@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ManifestFile {
     pub(crate) version: u32,
     pub(crate) suite: String,
@@ -15,12 +16,18 @@ pub(crate) struct ManifestFile {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ManifestCase {
     pub(crate) id: String,
     pub(crate) kind: String,
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) targets: Vec<String>,
+    #[serde(default = "all_host_platforms")]
+    pub(crate) platforms: Vec<String>,
+    #[serde(default)]
+    pub(crate) requires_host: Vec<String>,
+    pub(crate) resource_group: Option<String>,
     pub(crate) matrix: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
@@ -59,6 +66,9 @@ struct TestCatalogCase {
     kind: String,
     path: String,
     targets: Vec<String>,
+    platforms: Vec<String>,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
     matrix: Option<String>,
     tags: Vec<String>,
     owner: Option<String>,
@@ -79,6 +89,9 @@ struct TestStats {
     skip_entries: usize,
     cases_by_kind: BTreeMap<String, usize>,
     cases_by_matrix: BTreeMap<String, usize>,
+    cases_by_platform: BTreeMap<String, usize>,
+    cases_by_host_capability: BTreeMap<String, usize>,
+    cases_by_resource_group: BTreeMap<String, usize>,
     jobs_by_target: BTreeMap<String, usize>,
     skips_by_target: BTreeMap<String, usize>,
     cases_by_tag: BTreeMap<String, usize>,
@@ -114,11 +127,71 @@ struct TestExplain {
     reasons: Vec<String>,
 }
 
+pub(crate) fn all_host_platforms() -> Vec<String> {
+    ["linux", "macos", "windows"].map(str::to_string).to_vec()
+}
+
+pub(crate) fn validate_host_platform(platform: &str) -> Result<()> {
+    if !matches!(platform, "linux" | "macos" | "windows") {
+        bail!("unsupported test host platform {platform}");
+    }
+    Ok(())
+}
+
+fn validate_host_contract(case: &ManifestCase) -> Result<()> {
+    let platforms = case.platforms.iter().collect::<BTreeSet<_>>();
+    if platforms.is_empty() || platforms.len() != case.platforms.len() {
+        bail!("case {} requires nonempty unique host platforms", case.id);
+    }
+    for platform in &case.platforms {
+        validate_host_platform(platform)?;
+    }
+    let capabilities = case.requires_host.iter().collect::<BTreeSet<_>>();
+    if capabilities.len() != case.requires_host.len()
+        || capabilities
+            .iter()
+            .any(|value| !matches!(value.as_str(), "loopback" | "symlink"))
+    {
+        bail!(
+            "case {} has unknown or duplicate host requirements",
+            case.id
+        );
+    }
+    if case.resource_group.as_ref().is_some_and(|group| {
+        group.is_empty()
+            || group.len() > 64
+            || !group
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }) {
+        bail!("case {} has invalid resource group", case.id);
+    }
+    if (platforms.len() != all_host_platforms().len()
+        || !capabilities.is_empty()
+        || case.resource_group.is_some())
+        && (case.owner.as_deref().is_none_or(str::is_empty) || !has_manifest_reason(case))
+    {
+        bail!(
+            "case {} host restrictions require owner and reason",
+            case.id
+        );
+    }
+    if case.id == "os-symlink-host-contract" && !case.requires_host.is_empty() {
+        bail!("symlink host contract must execute with unavailable capability too");
+    }
+    Ok(())
+}
+
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
     let path = root.join("tests/lang/manifest.toml");
     let text =
         fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))
+    let manifest: ManifestFile =
+        toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))?;
+    for case in &manifest.cases {
+        validate_host_contract(case)?;
+    }
+    Ok(manifest)
 }
 
 pub(crate) fn manifest_case_path(
@@ -294,7 +367,11 @@ fn validate_case_path_target_ownership(
                 .intersection(&effective_targets)
                 .cloned()
                 .collect::<Vec<_>>();
-            if !overlap.is_empty() {
+            let shared_platform = existing
+                .platforms
+                .iter()
+                .any(|platform| case.platforms.contains(platform));
+            if !overlap.is_empty() && shared_platform {
                 bail!(
                     "test cases {} ({}) and {} ({}) register the same normalized path {} with overlapping target(s): {}",
                     existing.id,
@@ -307,7 +384,7 @@ fn validate_case_path_target_ownership(
             }
             if !has_manifest_reason(existing) || !has_manifest_reason(case) {
                 bail!(
-                    "test cases {} and {} reuse normalized path {} with disjoint targets; both cases must declare an audited reason",
+                    "test cases {} and {} reuse normalized path {} with disjoint targets or host platforms; both cases must declare an audited reason",
                     existing.id,
                     case.id,
                     normalized_path
@@ -684,6 +761,9 @@ fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
     let mut skip_count = 0usize;
     let mut by_kind = BTreeMap::new();
     let mut by_matrix = BTreeMap::new();
+    let mut by_platform = BTreeMap::new();
+    let mut by_host = BTreeMap::new();
+    let mut by_resource = BTreeMap::new();
     let mut jobs_by_target = BTreeMap::new();
     let mut skips_by_target = BTreeMap::new();
     let mut by_tag = BTreeMap::new();
@@ -691,6 +771,15 @@ fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
 
     for case in &manifest.cases {
         case_count += 1;
+        for platform in &case.platforms {
+            increment(&mut by_platform, platform);
+        }
+        for host in &case.requires_host {
+            increment(&mut by_host, host);
+        }
+        if let Some(group) = &case.resource_group {
+            increment(&mut by_resource, group);
+        }
         increment(&mut by_kind, &case.kind);
         increment(
             &mut by_matrix,
@@ -744,6 +833,9 @@ fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
         skip_entries: skip_count,
         cases_by_kind: by_kind,
         cases_by_matrix: by_matrix,
+        cases_by_platform: by_platform,
+        cases_by_host_capability: by_host,
+        cases_by_resource_group: by_resource,
         jobs_by_target,
         skips_by_target,
         cases_by_tag: by_tag,
@@ -759,6 +851,9 @@ fn print_test_stats_text(stats: &TestStats) {
     println!("  skip entries: {}", stats.skip_entries);
     print_count_map("cases by kind", &stats.cases_by_kind);
     print_count_map("cases by matrix", &stats.cases_by_matrix);
+    print_count_map("cases by host platform", &stats.cases_by_platform);
+    print_count_map("cases by host capability", &stats.cases_by_host_capability);
+    print_count_map("cases by resource group", &stats.cases_by_resource_group);
     print_count_map("jobs by target", &stats.jobs_by_target);
     print_count_map("skips by target", &stats.skips_by_target);
     print_count_map("cases by tag", &stats.cases_by_tag);
@@ -786,6 +881,9 @@ pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Resu
             kind: case.kind.clone(),
             path: manifest_case_path(root, &manifest, case)?,
             targets: resolved_case_targets(case, &test_config)?,
+            platforms: case.platforms.clone(),
+            requires_host: case.requires_host.clone(),
+            resource_group: case.resource_group.clone(),
             matrix: case.matrix.clone(),
             tags: case.tags.clone(),
             owner: case.owner.clone(),
@@ -952,6 +1050,9 @@ pub(crate) fn explain_test_case(
             kind: case.kind.clone(),
             path: manifest_case_path(root, &manifest, case)?,
             targets: selected_targets.clone(),
+            platforms: case.platforms.clone(),
+            requires_host: case.requires_host.clone(),
+            resource_group: case.resource_group.clone(),
             matrix: case.matrix.clone(),
             tags: case.tags.clone(),
             owner: case.owner.clone(),
@@ -977,6 +1078,19 @@ pub(crate) fn explain_test_case(
         println!(
             "  owner: {}",
             explanation.case.owner.as_deref().unwrap_or("(missing)")
+        );
+        println!("  platforms: {}", explanation.case.platforms.join(","));
+        println!(
+            "  host requirements: {}",
+            explanation.case.requires_host.join(",")
+        );
+        println!(
+            "  resource group: {}",
+            explanation
+                .case
+                .resource_group
+                .as_deref()
+                .unwrap_or("(none)")
         );
         println!("  tags: {}", explanation.case.tags.join(","));
         println!("  targets: {}", explanation.selected_targets.join(","));
@@ -1682,6 +1796,9 @@ mod tests {
         reason: Option<&str>,
     ) -> ManifestCase {
         ManifestCase {
+            platforms: all_host_platforms(),
+            requires_host: Vec::new(),
+            resource_group: None,
             id: id.to_string(),
             kind: "file".to_string(),
             path: path.to_string(),
@@ -1832,6 +1949,9 @@ mod tests {
 
     fn expected_failure_case(matrix: &str) -> ManifestCase {
         ManifestCase {
+            platforms: all_host_platforms(),
+            requires_host: Vec::new(),
+            resource_group: None,
             id: format!("{matrix}-failure"),
             kind: "file".to_string(),
             path: "cases/typechecker/failure.vo".to_string(),
@@ -1929,6 +2049,9 @@ mod tests {
             skip_entries: 0,
             cases_by_kind: BTreeMap::new(),
             cases_by_matrix: BTreeMap::new(),
+            cases_by_platform: BTreeMap::new(),
+            cases_by_host_capability: BTreeMap::new(),
+            cases_by_resource_group: BTreeMap::new(),
             jobs_by_target: BTreeMap::new(),
             skips_by_target: BTreeMap::new(),
             cases_by_tag: BTreeMap::new(),
@@ -1954,6 +2077,9 @@ mod tests {
             ("jit_loop_entries_min".to_string(), toml::Value::Integer(1)),
         ]);
         ManifestCase {
+            platforms: all_host_platforms(),
+            requires_host: Vec::new(),
+            resource_group: None,
             id: "runtime.loop-entry-contract".to_string(),
             kind: "file".to_string(),
             path: "cases/runtime/loop_entry_contract.vo".to_string(),

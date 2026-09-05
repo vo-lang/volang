@@ -151,7 +151,15 @@ fn run_task_inner(
             summary.duration_millis = u64::try_from(clock.elapsed().as_millis())?;
             super::summary::store(root, &summary)?;
             eprintln!("CI {task_id}: {id} (logs: {})", receipt.attempt);
-            let result = run_command(root, spec, &attempt, &common_env, cancelled, remaining)?;
+            let mut result = run_command(root, spec, &attempt, &common_env, cancelled, remaining)?;
+            if matches!(result.status, super::process::CommandStatus::Failed)
+                && !spec.stdout_result.is_empty()
+            {
+                if let Some((kind, detail)) = language_failure(root, &result.stdout) {
+                    result.failure_kind = Some(kind);
+                    result.error = Some(detail);
+                }
+            }
             let passed = result.passed();
             if !passed {
                 receipt.failure_kind = result.failure_kind.clone();
@@ -328,6 +336,47 @@ fn archive_existing(root: &Path, attempt: &Path, path: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     Ok(())
+}
+
+// Domain classifications improve diagnostics only; command exit status and the
+// strict success/certification path retain authority.
+fn language_failure(root: &Path, relative: &str) -> Option<(String, String)> {
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 * 1024 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    if value["schema"] != "volang.test-result.v2"
+        || value["suite"] != "lang"
+        || value["host_platform"] != std::env::consts::OS
+        || value["skipped"] != 0
+    {
+        return None;
+    }
+    let jobs = value["jobs"].as_array()?;
+    let passed = jobs.iter().filter(|job| job["status"] == "passed").count();
+    let failed = jobs.iter().filter(|job| job["status"] == "failed").count();
+    if failed == 0
+        || passed + failed != jobs.len()
+        || value["passed"].as_u64()? != passed as u64
+        || value["failed"].as_u64()? != failed as u64
+    {
+        return None;
+    }
+    for job in jobs {
+        crate::test_runner::validate_host_job_result(job).ok()?;
+    }
+    let job = jobs.iter().find(|job| job["status"] == "failed")?;
+    let kind = job["failure_kind"].as_str()?.to_string();
+    let detail = format!(
+        "language job {} (owner {}, path {}): {}",
+        job["id"].as_str()?,
+        job["owner"].as_str().unwrap_or("unassigned"),
+        job["path"].as_str()?,
+        job["error"].as_str()?
+    );
+    Some((kind, detail.chars().take(4096).collect()))
 }
 
 fn publish_stdout_result(root: &Path, attempt: &Path, stdout: &str, result: &str) -> Result<()> {
@@ -869,5 +918,35 @@ mod tests {
                 "variant {variant}"
             );
         }
+    }
+
+    #[test]
+    fn language_failure_classification_survives_task_diagnostics() {
+        let repository = Repository::new("", false, "output");
+        let output = serde_json::json!({
+            "schema": "volang.test-result.v2", "suite": "lang", "host_platform": std::env::consts::OS,
+            "passed": 0, "failed": 1, "skipped": 0,
+            "jobs": [{"id": "socket::vm", "path": "tests/socket.vo", "owner": "stdlib",
+                "status": "failed", "error": "loopback denied", "failure_kind": "portability",
+                "requires_host": ["loopback"],
+                "host_capabilities": {"loopback": {"status": "unavailable", "detail": "fixture denied"}}}]
+        });
+        fs::write(
+            repository.0.join("result.json"),
+            serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let (kind, detail) = language_failure(&repository.0, "result.json").unwrap();
+        assert_eq!(kind, "portability");
+        assert!(detail.contains("socket::vm"));
+        assert!(detail.contains("stdlib"));
+        let mut forged = output;
+        forged["failed"] = 0.into();
+        fs::write(
+            repository.0.join("result.json"),
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+        assert!(language_failure(&repository.0, "result.json").is_none());
     }
 }

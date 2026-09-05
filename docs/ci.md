@@ -378,3 +378,18 @@ checks refresh/reopen persistence. Failures retain Playwright traces, screenshot
 and domain results. Pages configuration, private build markers, TypeScript declarations
 and source maps are outside the public asset comparison. The complete artifact
 including those files remains bound by the promotion certificate.
+
+### Language host contracts
+
+Language plan/result v2 binds the physical host OS separately from its execution
+backend. The manifest declares supported `platforms`, `requires_host` and an
+optional `resource_group`; defaults preserve unrestricted platform selection.
+Planning reports platform exclusions before sharding. Actual runners reject
+foreign-host plans, probe required host capabilities independently, and return
+failed jobs when a prerequisite is unavailable. Capability observations and
+failure categories survive JSON aggregation and task diagnostics. Certification
+checks that the domain host matches the producing task runner.
+
+Resource groups reserve case groups within each plan without occupying workers
+waiting for busy resources. Native AOT retains its independent two-linker bound;
+Wasm VM and AOT retain bounded worker pools. No automatic test retries are added.

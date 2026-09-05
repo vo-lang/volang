@@ -8,9 +8,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{self, Command};
 
+mod host;
 mod native_aot;
+mod resources;
 mod subprocess;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -138,6 +139,7 @@ fn parse_jobs(raw: &str) -> Result<usize, Box<dyn std::error::Error>> {
 struct TestPlan {
     schema: String,
     suite: String,
+    host_platform: String,
     jobs: Vec<TestJob>,
 }
 
@@ -157,6 +159,8 @@ struct TestJob {
     owner: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
     timeout_sec: u64,
     expect: Expect,
 }
@@ -186,6 +190,10 @@ struct PlanResult {
     tags: Vec<String>,
     owner: Option<String>,
     passed: bool,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
+    host_capabilities: BTreeMap<String, host::Probe>,
+    failure_kind: Option<String>,
     elapsed_ms: u128,
     stdout: String,
     stderr: String,
@@ -199,6 +207,7 @@ struct PlanResult {
 struct JsonRunOutput {
     schema: &'static str,
     suite: String,
+    host_platform: String,
     passed: usize,
     failed: usize,
     skipped: usize,
@@ -218,6 +227,10 @@ struct JsonJobResult {
     owner: Option<String>,
     expect: Expect,
     status: String,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
+    host_capabilities: BTreeMap<String, host::Probe>,
+    failure_kind: Option<String>,
     elapsed_ms: u128,
     stdout: String,
     stderr: String,
@@ -231,8 +244,19 @@ struct JsonJobResult {
 fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let plan: TestPlan = serde_json::from_str(&text)?;
-    if plan.schema != "volang.test-plan.v1" {
+    if plan.schema != "volang.test-plan.v2" {
         return Err(format!("unsupported plan schema: {}", plan.schema).into());
+    }
+    if plan.host_platform != std::env::consts::OS {
+        return Err(format!(
+            "test host {} differs from current {}",
+            plan.host_platform,
+            std::env::consts::OS
+        )
+        .into());
+    }
+    for job in &plan.jobs {
+        host::validate_job(job)?;
     }
     if plan.jobs.is_empty() {
         return Err("test plan contains no jobs".into());
@@ -253,8 +277,9 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
 
     if opts.format == "json" {
         let output = JsonRunOutput {
-            schema: "volang.test-result.v1",
+            schema: "volang.test-result.v2",
             suite: plan.suite,
+            host_platform: plan.host_platform,
             passed,
             failed,
             skipped: 0,
@@ -276,6 +301,10 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                     } else {
                         "failed".to_string()
                     },
+                    requires_host: result.requires_host.clone(),
+                    resource_group: result.resource_group.clone(),
+                    host_capabilities: result.host_capabilities.clone(),
+                    failure_kind: result.failure_kind.clone(),
                     elapsed_ms: result.elapsed_ms,
                     stdout: result.stdout.clone(),
                     stderr: result.stderr.clone(),
@@ -392,6 +421,7 @@ fn validate_differential_results(results: &mut [PlanResult]) {
     for (index, detail) in failures {
         let result = &mut results[index];
         result.passed = false;
+        result.failure_kind.get_or_insert_with(|| "product".into());
         if result.error.trim().is_empty() {
             result.error = detail;
         } else {
@@ -522,10 +552,16 @@ fn run_jobs_parallel(
     if jobs.iter().any(|job| job.backend == "native-aot") {
         native_aot::prepare(&run_dir)?;
     }
+    let probes = Arc::new(host::probe_all(&jobs));
     let jobs = Arc::new(jobs);
     let groups = Arc::new(case_job_groups(&jobs));
     let total = jobs.len();
-    let next = Arc::new(AtomicUsize::new(0));
+    let resources = Arc::new(resources::Resources::new(
+        groups
+            .iter()
+            .map(|group| jobs[group[0]].resource_group.clone())
+            .collect(),
+    ));
     let (tx, rx) = mpsc::channel();
     let link_slots = Arc::new(LinkSlots {
         active: Mutex::new(0),
@@ -536,38 +572,51 @@ fn run_jobs_parallel(
     for _ in 0..worker_count {
         let jobs = Arc::clone(&jobs);
         let groups = Arc::clone(&groups);
-        let next = Arc::clone(&next);
+        let resources = Arc::clone(&resources);
+        let probes = Arc::clone(&probes);
         let tx = tx.clone();
         let run_dir = run_dir.clone();
         let link_slots = Arc::clone(&link_slots);
         std::thread::spawn(move || loop {
-            let group_index = next.fetch_add(1, Ordering::SeqCst);
-            let Some(group) = groups.get(group_index) else {
+            let Some(permit) = resources.next() else {
                 break;
             };
+            let group = &groups[permit.index];
             for &index in group {
                 let job = &jobs[index];
                 let _link_permit = (job.backend == "native-aot").then(|| link_slots.acquire());
-                let result = run_job_subprocess(job, &run_dir).unwrap_or_else(|err| PlanResult {
-                    id: job.id.clone(),
-                    case_id: job.case_id.clone(),
-                    kind: job.kind.clone(),
-                    path: job.path.clone(),
-                    target: job.target.clone(),
-                    backend: job.backend.clone(),
-                    env: job.env.clone(),
-                    matrix: job.matrix.clone(),
-                    tags: job.tags.clone(),
-                    owner: job.owner.clone(),
-                    passed: false,
-                    elapsed_ms: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    error: err.to_string(),
-                    expect: job.expect.clone(),
-                    baseline: None,
-                    artifacts: Vec::new(),
-                });
+                let result =
+                    run_job_subprocess(job, &run_dir, &probes).unwrap_or_else(|err| PlanResult {
+                        id: job.id.clone(),
+                        case_id: job.case_id.clone(),
+                        kind: job.kind.clone(),
+                        path: job.path.clone(),
+                        target: job.target.clone(),
+                        backend: job.backend.clone(),
+                        env: job.env.clone(),
+                        matrix: job.matrix.clone(),
+                        tags: job.tags.clone(),
+                        owner: job.owner.clone(),
+                        passed: false,
+                        requires_host: job.requires_host.clone(),
+                        resource_group: job.resource_group.clone(),
+                        host_capabilities: host::observed(job)
+                            .into_iter()
+                            .filter_map(|name| {
+                                probes
+                                    .get(name)
+                                    .map(|probe| (name.to_string(), probe.clone()))
+                            })
+                            .collect(),
+                        failure_kind: Some("infrastructure".into()),
+                        elapsed_ms: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        error: err.to_string(),
+                        expect: job.expect.clone(),
+                        baseline: None,
+                        artifacts: Vec::new(),
+                    });
                 if tx.send((index, result)).is_err() {
                     return;
                 }
@@ -618,6 +667,17 @@ fn run_jobs_parallel(
                     tags: job.tags.clone(),
                     owner: job.owner.clone(),
                     passed: false,
+                    requires_host: job.requires_host.clone(),
+                    resource_group: job.resource_group.clone(),
+                    host_capabilities: host::observed(job)
+                        .into_iter()
+                        .filter_map(|name| {
+                            probes
+                                .get(name)
+                                .map(|probe| (name.to_string(), probe.clone()))
+                        })
+                        .collect(),
+                    failure_kind: Some("infrastructure".into()),
                     elapsed_ms: 0,
                     stdout: String::new(),
                     stderr: String::new(),
@@ -641,9 +701,10 @@ fn case_job_groups(jobs: &[TestJob]) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (index, job) in jobs.iter().enumerate() {
         let continues_current = groups.last().is_some_and(|group| {
-            group
-                .first()
-                .is_some_and(|first| jobs[*first].case_id == job.case_id)
+            group.first().is_some_and(|first| {
+                jobs[*first].case_id == job.case_id
+                    && jobs[*first].resource_group == job.resource_group
+            })
         });
         if continues_current {
             groups.last_mut().expect("group exists").push(index);
@@ -657,8 +718,43 @@ fn case_job_groups(jobs: &[TestJob]) -> Vec<Vec<usize>> {
 fn run_job_subprocess(
     job: &TestJob,
     run_dir: &std::path::Path,
+    probes: &BTreeMap<String, host::Probe>,
 ) -> Result<PlanResult, Box<dyn std::error::Error>> {
     use sha2::{Digest, Sha256};
+    let host_capabilities = host::observed(job)
+        .into_iter()
+        .filter_map(|name| {
+            probes
+                .get(name)
+                .map(|probe| (name.to_string(), probe.clone()))
+        })
+        .collect();
+    if let Some((kind, detail)) = host::failure(job, probes) {
+        return Ok(PlanResult {
+            id: job.id.clone(),
+            case_id: job.case_id.clone(),
+            kind: job.kind.clone(),
+            path: job.path.clone(),
+            target: job.target.clone(),
+            backend: job.backend.clone(),
+            env: job.env.clone(),
+            matrix: job.matrix.clone(),
+            tags: job.tags.clone(),
+            owner: job.owner.clone(),
+            requires_host: job.requires_host.clone(),
+            resource_group: job.resource_group.clone(),
+            host_capabilities,
+            failure_kind: Some(kind.into()),
+            passed: false,
+            elapsed_ms: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: detail,
+            expect: job.expect.clone(),
+            baseline: None,
+            artifacts: Vec::new(),
+        });
+    }
     let dir = run_dir.join(format!("{:x}", Sha256::digest(job.id.as_bytes())));
     fs::create_dir(&dir)?;
     let path = dir.join("job.json");
@@ -668,6 +764,17 @@ fn run_job_subprocess(
         .arg("run-plan-job")
         .arg(&path)
         .env("VO_TEST_ARTIFACT_DIR", &dir);
+    command.env_remove("VO_TEST_HOST_SYMLINK");
+    if host::observed(job).contains("symlink") {
+        command.env(
+            "VO_TEST_HOST_SYMLINK",
+            if probes["symlink"].status == host::Status::Supported {
+                "supported"
+            } else {
+                "unavailable"
+            },
+        );
+    }
     let output = subprocess::run(
         command,
         &dir,
@@ -684,6 +791,13 @@ fn run_job_subprocess(
             None
         };
     let passed = output.status.success() && output.error.is_none() && receipt_error.is_none();
+    let failure_kind = if passed {
+        None
+    } else if output.error.is_some() || receipt_error.is_some() {
+        Some("infrastructure".into())
+    } else {
+        Some("product".into())
+    };
     let error = output.error.or(receipt_error).unwrap_or_else(|| {
         if output.status.success() {
             String::new()
@@ -711,6 +825,10 @@ fn run_job_subprocess(
         tags: job.tags.clone(),
         owner: job.owner.clone(),
         passed,
+        requires_host: job.requires_host.clone(),
+        resource_group: job.resource_group.clone(),
+        host_capabilities,
+        failure_kind,
         elapsed_ms: output.elapsed_ms,
         stdout: output.stdout,
         stderr: output.stderr,
@@ -724,55 +842,13 @@ fn run_job_subprocess(
 fn run_plan_job(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let job: TestJob = serde_json::from_str(&text)?;
-    if job.tags.iter().any(|tag| tag == "symlink") {
-        let capability = probe_symlink_capability()?;
-        if env::var("VO_TEST_REQUIRE_SYMLINK").as_deref() == Ok("1") && capability != "supported" {
-            return Err("required host capability symlink is unavailable".into());
-        }
-        env::set_var("VO_TEST_HOST_SYMLINK", capability);
-    }
+    host::validate_job(&job)?;
     let result = run_job(&job);
     // `main` terminates workers with `process::exit`, which skips stdio
     // destructor flushing. Each worker is piped by the plan coordinator, so
     // even short successful output must be flushed explicitly.
     std::io::stdout().flush()?;
     result.map_err(|err| err.into())
-}
-
-fn probe_symlink_capability() -> Result<&'static str, Box<dyn std::error::Error>> {
-    let root = env::temp_dir().join(format!(
-        "vo-host-capability-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    fs::create_dir(&root)?;
-    let result = (|| {
-        fs::write(root.join("target"), b"probe")?;
-        #[cfg(unix)]
-        let result = std::os::unix::fs::symlink("target", root.join("link"));
-        #[cfg(windows)]
-        let result = std::os::windows::fs::symlink_file("target", root.join("link"));
-        #[cfg(not(any(unix, windows)))]
-        let result: std::io::Result<()> = Err(std::io::ErrorKind::Unsupported.into());
-        match result {
-            Ok(()) => Ok("supported"),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
-                ) || cfg!(windows) && matches!(error.raw_os_error(), Some(1314 | 50)) =>
-            {
-                Ok("unavailable")
-            }
-            Err(error) => Err(error),
-        }
-    })();
-    let cleanup = fs::remove_dir_all(&root);
-    let capability = result?;
-    cleanup?;
-    Ok(capability)
 }
 
 fn run_job(job: &TestJob) -> Result<(), String> {
@@ -1033,6 +1109,10 @@ mod tests {
             tags: Vec::new(),
             owner: None,
             passed,
+            requires_host: Vec::new(),
+            resource_group: None,
+            host_capabilities: BTreeMap::new(),
+            failure_kind: (!passed).then(|| "product".into()),
             elapsed_ms: 1,
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -1049,7 +1129,7 @@ mod tests {
         }
     }
 
-    fn test_job(target: &str, backend: &str, env: &[(&str, &str)]) -> TestJob {
+    pub(crate) fn test_job(target: &str, backend: &str, env: &[(&str, &str)]) -> TestJob {
         TestJob {
             id: format!("case::{target}"),
             case_id: "case".to_string(),
@@ -1064,6 +1144,8 @@ mod tests {
                 .iter()
                 .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
                 .collect(),
+            requires_host: Vec::new(),
+            resource_group: None,
             timeout_sec: 1,
             expect: Expect {
                 kind: "pass".to_string(),
@@ -1273,6 +1355,10 @@ mod tests {
         let mut repeated_first = test_job("osr", "jit", &[]);
         repeated_first.case_id = "first".to_string();
 
+        let mut different_resource = first_jit.clone();
+        different_resource.resource_group = Some("shared-socket".into());
+        let separate = case_job_groups(&[first_vm.clone(), different_resource]);
+        assert_eq!(separate, vec![vec![0], vec![1]]);
         let groups = case_job_groups(&[first_vm, first_jit, second_vm, repeated_first]);
 
         assert_eq!(groups, vec![vec![0, 1], vec![2], vec![3]]);
@@ -1372,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn json_result_job_includes_v1_schema_fields() {
+    fn json_result_job_includes_v2_host_contract_fields() {
         let result = result("case", "candidate", "jit", false, "", "boom");
         let job = JsonJobResult {
             id: result.id.clone(),
@@ -1386,6 +1472,10 @@ mod tests {
             owner: result.owner.clone(),
             expect: result.expect.clone(),
             status: "failed".to_string(),
+            requires_host: result.requires_host.clone(),
+            resource_group: result.resource_group.clone(),
+            host_capabilities: result.host_capabilities.clone(),
+            failure_kind: result.failure_kind.clone(),
             elapsed_ms: result.elapsed_ms,
             stdout: result.stdout.clone(),
             stderr: result.stderr.clone(),

@@ -50,6 +50,7 @@ expect = "pass"
 
 [[case]]
 id = "2026-01-31-blocking-file-ops"
+resource_group = "blocking-file-fixture"
 kind = "file"
 path = "cases/runtime/core/2026_01_31_blocking_file_ops.vo"
 matrix = "default"
@@ -1302,6 +1303,7 @@ expect = "pass"
 
 [[case]]
 id = "bugs.2026-01-31-jit-http-server-client-osr"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/bugs/2026_01_31_jit_http_server_client.vo"
 matrix = "osr-contract"
@@ -5132,6 +5134,7 @@ expect = { fail = ["continue label Switch must refer to an enclosing for stateme
 
 [[case]]
 id = "lang.test.http-client-test"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/lang/test/http_client_test.vo"
 matrix = "default"
@@ -5154,6 +5157,7 @@ expect = "pass"
 
 [[case]]
 id = "lang.test.http-server-test"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/lang/test/http_server_test.vo"
 matrix = "default"
@@ -5859,6 +5863,8 @@ expect = "pass"
 
 [[case]]
 id = "net.net-conn"
+resource_group = "net-conn-unix-socket"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/net/net_conn.vo"
 matrix = "default"
@@ -10499,6 +10505,7 @@ expect = "pass"
 
 [[case]]
 id = "stdlib.http-native-cancel"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/stdlib/http_native_cancel.vo"
 matrix = "default"
@@ -10511,6 +10518,7 @@ expect = "pass"
 
 [[case]]
 id = "stdlib.http-fileserver-semantics"
+requires_host = ["symlink"]
 kind = "file"
 path = "cases/stdlib/http_fileserver_semantics.vo"
 matrix = "default"

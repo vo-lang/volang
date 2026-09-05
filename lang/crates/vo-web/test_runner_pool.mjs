@@ -16,12 +16,27 @@ export function parseWorkers(value) {
 
 export async function mapBounded(jobs, workers, run) {
   parseWorkers(workers);
-  let next = 0;
+  const pending = jobs.map((_, index) => index);
+  const active = new Set();
+  const changed = new Set();
   const results = new Array(jobs.length);
   await Promise.all(Array.from({ length: Math.min(workers, jobs.length) }, async () => {
-    while (next < jobs.length) {
-      const index = next++;
-      results[index] = await run(jobs[index], index);
+    while (pending.length) {
+      const position = pending.findIndex(index => !jobs[index]?.resource_group
+        || !active.has(jobs[index].resource_group));
+      if (position < 0) {
+        await new Promise(resolve => changed.add(resolve));
+        continue;
+      }
+      const [index] = pending.splice(position, 1);
+      const group = jobs[index]?.resource_group;
+      if (group) active.add(group);
+      try { results[index] = await run(jobs[index], index); }
+      finally {
+        if (group) active.delete(group);
+        for (const resolve of changed) resolve();
+        changed.clear();
+      }
     }
   }));
   return results;

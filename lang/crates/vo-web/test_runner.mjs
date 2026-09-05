@@ -5,6 +5,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+import { hostPlatform, probeHost, jobHost } from './test_runner_host.mjs';
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { defaultWorkers, executeWorker, mapBounded, parseWorkers } from "./test_runner_pool.mjs";
 
@@ -111,6 +112,9 @@ function jsonJob(job, status, elapsedMs, stdout, stderr, error) {
     owner: job.owner ?? null,
     expect: job.expect ?? { kind: "pass" },
     status,
+    requires_host: job.requires_host,
+    resource_group: job.resource_group,
+    failure_kind: status === 'failed' ? 'product' : null,
     elapsed_ms: elapsedMs,
     stdout: stdout ?? "",
     stderr: stderr ?? "",
@@ -254,7 +258,7 @@ function loadPlan(args) {
     process.exit(2);
   }
   const plan = JSON.parse(readFileSync(planPath, "utf-8"));
-  if (plan.schema !== "volang.test-plan.v1") {
+  if (plan.schema !== "volang.test-plan.v2") {
     console.error(`Unsupported test plan schema: ${plan.schema}`);
     process.exit(2);
   }
@@ -271,13 +275,16 @@ async function main() {
   if (format === "text") {
     console.log(`Running ${plan.suite ?? "selected"} WASM tests...\n`);
   }
+  const probes = await probeHost(plan);
   const wasmPath = join(__dirname, "pkg", "vo_web_bg.wasm");
   const module = await WebAssembly.compile(readFileSync(wasmPath));
   const jobs = await mapBounded(plan.jobs, workers, async job => {
     const started = Date.now();
     let result;
+    const host = jobHost(job, probes);
+    if (host.error) return { ...jsonJob(job, 'failed', 0, '', '', host.error), ...host };
     // Reject unsupported or missing inputs before allocating a Wasm instance.
-    if (job.kind !== 'file' || !existsSync(resolveTestPath(job.path))) return runPlanJob(job, format);
+    if (job.kind !== 'file' || !existsSync(resolveTestPath(job.path))) return { ...await runPlanJob(job, format), host_capabilities: host.host_capabilities, failure_kind: 'infrastructure' };
     try {
       const output = await executeWorker(new URL(import.meta.url), { job, module }, jobTimeoutSeconds(job) * 1000);
       result = output.value;
@@ -291,7 +298,9 @@ async function main() {
     } catch (error) {
       result = jsonJob(job, 'failed', Date.now() - started,
         error.workerStdout || '', error.workerStderr || '', error.message || String(error));
+      result.failure_kind = 'infrastructure';
     }
+    result.host_capabilities = host.host_capabilities;
     if (format === 'text') {
       console.log(`  ${result.status === 'passed' ? GREEN + '✓' : RED + '✗'}${NC} ${job.id} [wasm] ${result.error}`.trimEnd());
     }
@@ -304,8 +313,9 @@ async function main() {
     console.log(
       JSON.stringify(
         {
-          schema: "volang.test-result.v1",
+          schema: "volang.test-result.v2",
           suite: plan.suite ?? "lang",
+          host_platform: hostPlatform,
           passed,
           failed,
           skipped: 0,
