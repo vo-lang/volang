@@ -43,6 +43,7 @@
     "build:js": "tsc",
     "test:vfs": "npm run build:js && node --test tests/vfs.test.mjs",
     "test:ui": "npm run build:js && node --test tests/ui_protocol.test.mjs",
+    "test:runner": "node --test tests/test_runner.test.mjs",
     "test:ui-browser": "node ../../../eng/run-browser-smoke.mjs --project . --global __volangUiBrowserSmoke --output ../../../target/ci/results/ui/volang-ui-browser-conformance.json",
     "test:ui-component-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ui-nested-component-aot --component-state-smoke --output ../../../target/ci/results/ui/volang-ui-aot-component-browser.json",
     "test:uikit-gallery-browser": "node ../../../eng/run-browser-smoke.mjs --static-root ../../../target/ui-component-gallery-aot --uikit-gallery-smoke --timeout-ms 120000 --output ../../../target/ci/results/ui/volang-uikit-gallery-browser.json",

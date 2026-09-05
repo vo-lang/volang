@@ -358,9 +358,14 @@ fn main() {
     let interaction_p95 = percentile(&mut interaction_samples, 95);
     let interaction_p99 = percentile(&mut interaction_samples, 99);
 
+    let passed = direct_allocations == 0
+        && frame_p95 <= FRAME_P95_BUDGET
+        && interaction_p95 <= INTERACTION_P95_BUDGET
+        && component_p95 <= COMPONENT_P95_BUDGET;
+
     println!(
         concat!(
-            "{{\"schema\":\"volang.ui.performance.v1\",\"passed\":true,\"target\":\"{}-{}\",\"profile\":\"{}\",",
+            "{{\"schema\":\"volang.ui.performance.v1\",\"passed\":{},\"target\":\"{}-{}\",\"profile\":\"{}\",",
             "\"direct_scalar_allocations\":{},",
             "\"frame_p50_ns\":{},\"frame_p95_ns\":{},\"frame_p99_ns\":{},",
             "\"interaction_p50_ns\":{},\"interaction_p95_ns\":{},\"interaction_p99_ns\":{},",
@@ -368,6 +373,7 @@ fn main() {
             "\"frame_samples\":{},\"interaction_samples\":{},",
             "\"component_samples\":{},\"component_rows\":{}}}"
         ),
+        passed,
         std::env::consts::OS,
         std::env::consts::ARCH,
         if cfg!(debug_assertions) {

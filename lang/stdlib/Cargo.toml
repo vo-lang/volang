@@ -21,3 +21,8 @@ path = "src/lib.rs"
 
 [dependencies]
 rust-embed = { version = "8", features = ["include-exclude"] }
+
+# WebAssembly has no host source tree, including in the development profile.
+# Native debug consumers retain live source edits.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rust-embed = { version = "8", features = ["debug-embed"] }

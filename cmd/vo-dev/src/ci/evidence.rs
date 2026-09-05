@@ -604,6 +604,35 @@ fn validate_result(root: &Path, relative: &str) -> Result<()> {
                 bail!("browser result does not prove completed scenario assertions: {relative}");
             }
         }
+        Some("volang.ui.performance.v1") => {
+            if value["passed"] != true
+                || value["profile"] != "release"
+                || value["target"].as_str().is_none_or(str::is_empty)
+                || value["direct_scalar_allocations"] != 0
+                || [
+                    "frame_samples",
+                    "interaction_samples",
+                    "component_samples",
+                    "component_rows",
+                ]
+                .iter()
+                .any(|field| value[field].as_u64().is_none_or(|count| count == 0))
+            {
+                bail!("UI performance result lacks successful release measurements: {relative}");
+            }
+            for metric in ["frame", "interaction", "component"] {
+                let values = [50, 95, 99]
+                    .map(|percentile| value[format!("{metric}_p{percentile}_ns")].as_u64());
+                let [Some(p50), Some(p95), Some(p99)] = values else {
+                    bail!("UI performance result lacks {metric} percentiles: {relative}");
+                };
+                if p50 > p95 || p95 > p99 {
+                    bail!(
+                        "UI performance result has inconsistent {metric} percentiles: {relative}"
+                    );
+                }
+            }
+        }
         _ => bail!("unsupported CI domain result schema: {relative}"),
     }
     Ok(())
@@ -923,6 +952,47 @@ mod tests {
         )
         .unwrap();
         validate_result(&root, "result.json").unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn performance_evidence_requires_actual_ordered_release_measurements() {
+        let root = temporary_test_dir("performance");
+        fs::create_dir_all(&root).unwrap();
+        let mut valid = serde_json::json!({
+            "schema": "volang.ui.performance.v1", "passed": true,
+            "target": "linux-x86_64", "profile": "release", "direct_scalar_allocations": 0,
+            "frame_samples": 600, "interaction_samples": 300, "component_samples": 300,
+            "component_rows": 256,
+        });
+        for metric in ["frame", "interaction", "component"] {
+            for percentile in [50, 95, 99] {
+                valid[format!("{metric}_p{percentile}_ns")] = serde_json::json!(percentile);
+            }
+        }
+        fs::write(
+            root.join("result.json"),
+            serde_json::to_vec(&valid).unwrap(),
+        )
+        .unwrap();
+        validate_result(&root, "result.json").unwrap();
+        for (field, value) in [
+            ("passed", serde_json::json!(false)),
+            ("profile", serde_json::json!("debug")),
+            ("frame_samples", serde_json::json!(0)),
+            ("frame_p95_ns", serde_json::json!(100)),
+            ("interaction_p99_ns", serde_json::Value::Null),
+            ("direct_scalar_allocations", serde_json::json!(1)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            fs::write(
+                root.join("result.json"),
+                serde_json::to_vec(&invalid).unwrap(),
+            )
+            .unwrap();
+            assert!(validate_result(&root, "result.json").is_err(), "{field}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

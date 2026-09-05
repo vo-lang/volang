@@ -382,7 +382,11 @@ jobs:
       - name: Fuzz authenticated and untrusted protocol boundary
         working-directory: ${{ matrix.fuzz_dir }}
         run: |
-          cargo +"$RUST_NIGHTLY" fuzz run --fuzz-dir . "${{ matrix.target }}" -- \
+          fuzz_output="$GITHUB_WORKSPACE/target/ci/fuzz/${{ matrix.task }}"
+          mkdir -p "$fuzz_output/corpus" "$fuzz_output/artifacts"
+          cargo +"$RUST_NIGHTLY" fuzz run --fuzz-dir . "${{ matrix.target }}" \
+            "$fuzz_output/corpus" "corpus/${{ matrix.target }}" -- \
+            -artifact_prefix="$fuzz_output/artifacts/" \
             -runs=100000 \
             -max_len=${{ matrix.max_len }} \
             -timeout=10 \
@@ -408,7 +412,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-${{ matrix.target }}-${{ github.sha }}
-          path: ${{ matrix.fuzz_dir }}/artifacts
+          path: target/ci/fuzz/${{ matrix.task }}
           if-no-files-found: ignore
           retention-days: 14
 

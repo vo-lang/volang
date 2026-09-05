@@ -186,10 +186,10 @@ async function main() {
   } else {
     console.log(`\n${passed} passed, ${failed} failed`);
   }
-  if (failed !== 0) process.exit(1);
+  if (failed !== 0) process.exitCode = 1;
 }
 
 main().catch((error) => {
   console.error(error?.stack ?? error);
-  process.exit(2);
+  process.exitCode = 2;
 });

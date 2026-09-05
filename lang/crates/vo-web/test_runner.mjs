@@ -322,7 +322,9 @@ async function main() {
   }
 
   if (failed > 0) {
-    process.exit(1);
+    // Let Node drain the full result to a pipe before terminating. Large failed
+    // matrices otherwise lose the JSON tail when process.exit closes stdout.
+    process.exitCode = 1;
   }
 }
 

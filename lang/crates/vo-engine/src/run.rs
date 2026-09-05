@@ -2303,7 +2303,20 @@ func main() {
         let compiled = workspace.compile();
         let mut final_values = Vec::new();
         for mode in [RunMode::Vm, RunMode::Jit] {
-            let mut vm = build_native_gui_vm_for_mode(compiled.clone(), mode).unwrap();
+            ensure_toolchain_host_installed();
+            let mut vm = match mode {
+                RunMode::Vm => Vm::new(),
+                RunMode::Jit => Vm::try_with_jit_config(vo_vm::JitConfig {
+                    call_threshold: 1,
+                    loop_threshold: 1,
+                    ..vo_vm::JitConfig::default()
+                })
+                .expect("JIT should initialize"),
+            };
+            register_ui_externs(&mut vm, &compiled.module).unwrap();
+            let extensions = load_extensions(&compiled.extensions).unwrap();
+            vm.load_verified_with_extensions(compiled.module.clone(), extensions)
+                .unwrap();
             let clock = vo_runtime::io::ManualClock::new(1_700_000_000_000_000_000);
             vm.set_manual_clock(clock.clone()).unwrap();
             let window = vo_app_protocol::GenerationalHandle {

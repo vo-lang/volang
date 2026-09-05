@@ -547,6 +547,7 @@ jobs:
         run: |
           npm run test:vfs
           npm run test:ui
+          npm run test:runner
           npm run test:ui-browser
           npm run test:ui-component-browser
           VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
@@ -557,6 +558,7 @@ jobs:
         run: |
           npm run test:vfs
           npm run test:ui
+          npm run test:runner
           npm run test:ui-browser
           npm run test:ui-component-browser
           npm run test:uikit-gallery-browser

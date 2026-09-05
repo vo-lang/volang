@@ -46,13 +46,15 @@ runs:
         key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
     - name: Install sccache
-      if: inputs.compiler-cache == 'true'
+      # sccache 0.17 exceeds Windows' command-line limit for web-sys check-cfg.
+      # Cargo's direct rustc invocation uses a response file for this crate.
+      if: inputs.compiler-cache == 'true' && runner.os != 'Windows'
       uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       with:
         version: v0.17.0
 
     - name: Enable compiler cache
-      if: inputs.compiler-cache == 'true'
+      if: inputs.compiler-cache == 'true' && runner.os != 'Windows'
       shell: bash
       run: |
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
