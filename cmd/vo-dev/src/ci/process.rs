@@ -100,6 +100,12 @@ pub(crate) fn run_command(
         bail!("CI command cwd resolves outside repository");
     }
     let mut command = Command::new(&spec.argv[0]);
+    // Rust on Windows searches System32 before an inherited PATH, but gives
+    // an explicit child PATH precedence. Honor the runner's selected tools.
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
     command
         .args(&spec.argv[1..])
         .current_dir(&cwd)
@@ -446,6 +452,28 @@ mod tests {
         assert!(result.passed());
         let output = fs::read_to_string(fixture.0.join(result.stdout)).unwrap();
         assert!(output.contains(&fixture.0.join("vo.work").to_string_lossy().to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn declared_bash_uses_native_git_instead_of_the_wsl_entry_point() {
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec("output");
+        spec.argv = vec![
+            "bash".into(),
+            "-euo".into(),
+            "pipefail".into(),
+            "-c".into(),
+            "case \"$(/usr/bin/uname -s)\" in MINGW*|MSYS*) printf 'native-git-bash\\n' ;; *) exit 19 ;; esac".into(),
+        ];
+        let result = fixture.run(&spec, &AtomicBool::new(false), Duration::from_secs(40));
+        assert!(result.passed(), "{result:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.0.join(result.stdout))
+                .unwrap()
+                .trim(),
+            "native-git-bash"
+        );
     }
 
     #[test]

@@ -18,6 +18,23 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Select native Git Bash on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $git = (Get-Command git.exe -ErrorAction Stop).Source
+        $gitRoot = Split-Path (Split-Path $git -Parent) -Parent
+        $bashDirectory = Join-Path $gitRoot 'bin'
+        $bash = Join-Path $bashDirectory 'bash.exe'
+        if (!(Test-Path -LiteralPath $bash -PathType Leaf)) {
+          throw "Git Bash is unavailable beside the selected Git installation"
+        }
+        & $bash --version
+        if ($LASTEXITCODE -ne 0) { throw "Git Bash preflight failed" }
+        # The Rust executor resolves declared bash commands through PATH.
+        # Put Git Bash before Windows' WSL compatibility entry point.
+        $bashDirectory >> $env:GITHUB_PATH
+
     - name: Install pinned Rust
       shell: bash
       env:
