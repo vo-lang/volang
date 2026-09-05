@@ -7,9 +7,12 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use tempfile::TempDir;
 use vo_module::ext_manifest::DeclaredArtifactId;
+#[cfg(unix)]
 use vo_module::schema::lockfile::{LockFile, LockOrigin, LockedModule};
+#[cfg(unix)]
 use vo_module::schema::manifest::ReleaseManifest;
 use vo_module::schema::modfile::ModFile;
+#[cfg(unix)]
 use vo_module::schema::{SourceFileMode, TreeManifest};
 
 use crate::{stage_release, verify_repo, ArtifactInput, ReleaseError, StageReleaseOptions};
@@ -41,6 +44,7 @@ fn write_module_metadata(root: &Path, metadata: String) {
     git_add(root, Path::new("vo.mod"));
 }
 
+#[cfg(unix)]
 fn write_registry_lock(root: &Path, modules: &[(&str, &str, char)]) {
     let mod_file = ModFile::parse(&fs::read_to_string(root.join("vo.mod")).unwrap()).unwrap();
     let lock = LockFile {
@@ -169,6 +173,7 @@ fn standalone_wasm_manifest(name: &str, wasm: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 fn bindgen_wasm_manifest(name: &str, wasm: &str, js_glue: &str) -> String {
     format!(
         "[extension]\nname = \"{}\"\n\n[extension.wasm]\nkind = \"bindgen\"\nwasm = \"{}\"\njs = \"{}\"\n",
@@ -198,12 +203,14 @@ fn bindgen_manifest(name: &str, native_targets: &[&str], wasm: &str, js_glue: &s
     rendered
 }
 
+#[cfg(unix)]
 fn source_archive_entries(path: &Path) -> Vec<String> {
     let mut entries = source_archive_entries_in_order(path);
     entries.sort();
     entries
 }
 
+#[cfg(unix)]
 fn source_archive_entries_in_order(path: &Path) -> Vec<String> {
     let file = fs::File::open(path).unwrap();
     let decoder = GzDecoder::new(file);
@@ -230,10 +237,12 @@ fn source_archive_file(path: &Path, suffix: &str) -> Vec<u8> {
     panic!("source archive is missing {suffix}");
 }
 
+#[cfg(unix)]
 fn source_tree_manifest(path: &Path) -> TreeManifest {
     TreeManifest::parse(&source_archive_file(path, "/vo.tree.json")).unwrap()
 }
 
+#[cfg(unix)]
 fn source_archive_mode(path: &Path, suffix: &str) -> u32 {
     let file = fs::File::open(path).unwrap();
     let decoder = GzDecoder::new(file);
@@ -525,6 +534,8 @@ release = "sha256:11111111111111111111111111111111111111111111111111111111111111
     assert!(matches!(err, ReleaseError::Module(ref msg) if msg.contains("intent")));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_writes_manifest_and_artifacts() {
     let temp = TempDir::new().unwrap();
@@ -625,6 +636,8 @@ fn stage_release_writes_manifest_and_artifacts() {
         .any(|a| a.id.kind == "extension-wasm" && a.id.target == "wasm32-unknown-unknown"));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_fixed_source_names_support_max_length_legal_versions() {
     let temp = TempDir::new().unwrap();
@@ -713,6 +726,8 @@ fn release_diagnostic_summaries_are_deterministic_and_bounded() {
     assert!(artifacts.ends_with("(and 12 more)"), "{artifacts}");
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_succeeds_for_pure_source_module_without_ext_manifest() {
     let temp = TempDir::new().unwrap();
@@ -725,6 +740,8 @@ fn stage_release_succeeds_for_pure_source_module_without_ext_manifest() {
     assert!(manifest.artifacts.is_empty());
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
     let temp = TempDir::new().unwrap();
@@ -785,6 +802,8 @@ fn stage_release_succeeds_when_all_declared_artifacts_are_present() {
     assert!(package.files.iter().any(|file| file.path == "vo.mod"));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_isolates_same_logical_name_across_artifact_identities() {
     let temp = TempDir::new().unwrap();
@@ -1145,6 +1164,8 @@ fn stage_release_rejects_bindgen_wasm_missing_js_glue_artifact() {
     ));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_canonicalizes_manifest_order_from_unsorted_inputs() {
     let temp = TempDir::new().unwrap();
@@ -1224,6 +1245,8 @@ fn stage_release_canonicalizes_manifest_order_from_unsorted_inputs() {
     assert!(package.files.iter().all(|file| file.path != "vo.lock"));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_includes_all_tracked_files_from_dist_dirs() {
     let temp = TempDir::new().unwrap();
@@ -1268,6 +1291,8 @@ fn stage_release_includes_all_tracked_files_from_dist_dirs() {
         .any(|entry| entry.ends_with("/js/dist/studio_host_bridge.js")));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_includes_tracked_directories_recursively() {
     let temp = TempDir::new().unwrap();
@@ -1361,6 +1386,8 @@ fn tracked_source_directory_is_loaded_from_the_commit_tree() {
     );
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn parent_release_excludes_complete_nested_module_subtrees() {
     let temp = TempDir::new().unwrap();
@@ -1529,6 +1556,8 @@ fn release_rejects_nested_module_manifest_portable_aliases() {
     assert!(!options.out_dir.exists());
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn nested_protocol_looking_names_are_ordinary_tracked_source_data() {
     let temp = TempDir::new().unwrap();
@@ -1759,6 +1788,8 @@ fn stage_release_rejects_an_existing_empty_output_directory_without_mutating_it(
     assert_eq!(fs::read_dir(out_dir).unwrap().count(), 0);
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn atomic_release_publish_never_replaces_an_existing_destination() {
     let temp = TempDir::new().unwrap();
@@ -2202,6 +2233,8 @@ fn parent_sync_failure_reports_published_but_unconfirmed_output() {
     }));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn source_archive_uses_portable_utf8_byte_order() {
     let temp = TempDir::new().unwrap();
@@ -2254,6 +2287,8 @@ fn stage_release_rejects_a_symbolic_link_output_directory() {
     assert_eq!(fs::read_dir(target).unwrap().count(), 0);
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_excludes_untracked_files_from_source_package() {
     let temp = TempDir::new().unwrap();
@@ -2279,6 +2314,8 @@ fn stage_release_excludes_untracked_files_from_source_package() {
         .all(|entry| !entry.ends_with("/untracked.txt")));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_roundtrips_text_and_binary_in_the_package_closure() {
     let temp = TempDir::new().unwrap();
@@ -2332,6 +2369,8 @@ fn stage_release_roundtrips_text_and_binary_in_the_package_closure() {
     );
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_includes_tracked_directories_regardless_of_output_like_names() {
     let temp = TempDir::new().unwrap();
@@ -2365,6 +2404,8 @@ fn stage_release_includes_tracked_directories_regardless_of_output_like_names() 
         .any(|entry| entry.contains("/.dist-v0.1.0/old.tar.gz")));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_includes_tracked_names_without_extension_filters() {
     let temp = TempDir::new().unwrap();
@@ -2389,6 +2430,8 @@ fn stage_release_includes_tracked_names_without_extension_filters() {
     assert!(entries.iter().any(|entry| entry.ends_with("/lib.ſo")));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_excludes_vo_work_from_source_package() {
     let temp = TempDir::new().unwrap();
@@ -2423,6 +2466,8 @@ fn stage_release_excludes_vo_work_from_source_package() {
     assert!(entries.iter().all(|entry| !entry.ends_with("/vo.work")));
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_preserves_cargo_patch_bytes_and_manifest_digest() {
     let temp = TempDir::new().unwrap();
@@ -2539,7 +2584,14 @@ fn stage_release_enforces_the_compiler_text_limit_for_vo_sources() {
     )
     .unwrap();
     git_add(accepted.path(), Path::new("main.vo"));
-    assert!(stage_release(accepted.path(), &stage_options(&accepted, Vec::new()),).is_ok());
+    let accepted_result = stage_release(accepted.path(), &stage_options(&accepted, Vec::new()));
+    #[cfg(unix)]
+    assert!(accepted_result.is_ok());
+    #[cfg(not(unix))]
+    assert!(matches!(
+        accepted_result,
+        Err(ReleaseError::AtomicPublishUnsupported { .. })
+    ));
 
     let rejected = TempDir::new().unwrap();
     write_basic_repo(rejected.path());
@@ -2588,6 +2640,8 @@ fn stage_release_enforces_the_compiler_text_limit_for_vo_sources() {
     assert!(!options.out_dir.exists());
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_includes_tracked_binary_source_data() {
     let temp = TempDir::new().unwrap();
@@ -2696,6 +2750,8 @@ fn stage_release_rejects_executable_root_mod_file() {
     );
 }
 
+// Requires the anchored, durable module-publication backend.
+#[cfg(unix)]
 #[test]
 fn stage_release_roundtrips_nested_module_from_commit_subtree() {
     let temp = TempDir::new().unwrap();
@@ -2837,4 +2893,32 @@ fn source_package_is_immutable_after_commit_snapshot_capture() {
         source_archive_file(&archive_path, "/main.vo"),
         b"fn main() {}\n"
     );
+}
+
+#[cfg(not(unix))]
+#[test]
+fn module_publication_requires_a_supported_durable_host_and_creates_nothing() {
+    let temp = TempDir::new().unwrap();
+    write_basic_repo(temp.path());
+    let options = stage_options(&temp, Vec::new());
+    let before = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let error = stage_release(temp.path(), &options).unwrap_err();
+    assert!(
+        matches!(error, ReleaseError::AtomicPublishUnsupported { ref path, .. }
+        if path == &temp.path().canonicalize().unwrap().join(".dist")),
+        "{error}"
+    );
+    assert!(!options.out_dir.exists());
+    let after = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(before, after);
+    assert!(matches!(
+        crate::publish::PendingOutputDir::create(&options.out_dir),
+        Err(ReleaseError::AtomicPublishUnsupported { .. })
+    ));
 }

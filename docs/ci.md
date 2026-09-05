@@ -83,6 +83,16 @@ Animation contracts use an explicitly installed per-VM manual clock shared by
 stdlib time reads and timer completions. They test intermediate values,
 cancellation, completion and actual JIT execution without sleeping.
 
+Module publication (`vo-release`) requires anchored, durable directory
+publication, currently implemented on Linux and macOS. Its publication journeys
+declare `cfg(unix)`; Windows runs the portable source and artifact validation
+tests and an explicit unsupported-host test that requires
+`AtomicPublishUnsupported` and no filesystem output. Validation precedes the
+host publication boundary. Windows distribution archives, CLI execution,
+Native AOT and desktop UI remain part of their separate release/platform lanes.
+This capability restriction does not exclude the `vo-release` crate from
+Windows workspace tests.
+
 ## Workflows
 
 ### CI

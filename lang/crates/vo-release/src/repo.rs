@@ -112,6 +112,12 @@ impl StagedRelease {
     }
 }
 
+struct PlannedArtifact<'a> {
+    id: ArtifactId,
+    input: &'a ArtifactInput,
+    asset_name: String,
+}
+
 struct PreparedArtifact {
     staged: StagedArtifact,
     manifest_artifact: ManifestArtifact,
@@ -716,14 +722,13 @@ pub fn stage_release(
     let version = mod_file.version.clone();
     let version_string = version.to_string();
     let source_name = SOURCE_ARCHIVE_ASSET_NAME.to_string();
-    let mut pending = PendingOutputDir::create(&out_dir)?;
-    let prepared_artifacts = prepare_artifacts(
+    // Validate portable content before asking the host to publish it. A host
+    // without durable publication still reports invalid source/artifact inputs.
+    let artifact_plan = plan_artifacts(
         &options.artifacts,
-        &out_dir,
         &["vo.release.json", SOURCE_ARCHIVE_ASSET_NAME],
-        &mut pending,
     )?;
-    validate_artifact_contract(&repo_root, &mod_file, &prepared_artifacts)?;
+    validate_artifact_contract(&repo_root, &mod_file, &artifact_plan)?;
     let source_files = collect_release_source_files(&repo_root, &mod_file, &commit_tree)?;
     let source_snapshot = capture_release_source_snapshot(&repo_root, &source_files, &commit_tree)?;
     validate_release_source_snapshot(&repo_root, &source_snapshot)?;
@@ -736,6 +741,9 @@ pub fn stage_release(
         .map_err(|error| ReleaseError::ManifestSerialize(error.to_string()))?;
     let tree_digest_typed = ModDigest::from_sha256(&tree_bytes);
     let tree_digest = tree_digest_typed.to_string();
+
+    let mut pending = PendingOutputDir::create(&out_dir)?;
+    let prepared_artifacts = prepare_artifacts(artifact_plan, &out_dir, &mut pending)?;
 
     let (source_size, source_digest) = pending.write_new_file_streaming(
         SOURCE_ARCHIVE_ASSET_NAME,
@@ -2480,12 +2488,10 @@ fn read_commit_blobs(
     Ok(blobs)
 }
 
-fn prepare_artifacts(
-    inputs: &[ArtifactInput],
-    out_dir: &Path,
+fn plan_artifacts<'a>(
+    inputs: &'a [ArtifactInput],
     reserved_output_names: &[&str],
-    pending: &mut PendingOutputDir,
-) -> ReleaseResult<Vec<PreparedArtifact>> {
+) -> ReleaseResult<Vec<PlannedArtifact<'a>>> {
     if inputs.len() > vo_module::MAX_MODULE_ARTIFACTS {
         return Err(ReleaseError::ManifestSerialize(format!(
             "release declares {} artifacts, exceeding the {}-artifact limit",
@@ -2531,15 +2537,31 @@ fn prepare_artifacts(
                 id.kind, id.target, id.name
             )));
         }
-        plans.push((id, input, asset_name));
+        plans.push(PlannedArtifact {
+            id,
+            input,
+            asset_name,
+        });
     }
-    plans.sort_by(|left, right| left.0.cmp(&right.0));
+    plans.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(plans)
+}
 
+fn prepare_artifacts(
+    plans: Vec<PlannedArtifact<'_>>,
+    out_dir: &Path,
+    pending: &mut PendingOutputDir,
+) -> ReleaseResult<Vec<PreparedArtifact>> {
     let mut prepared = Vec::new();
     prepared.try_reserve(plans.len()).map_err(|_| {
         ReleaseError::ManifestSerialize("failed to reserve staged artifacts".into())
     })?;
-    for (id, input, asset_name) in plans {
+    for PlannedArtifact {
+        id,
+        input,
+        asset_name,
+    } in plans
+    {
         let (size, digest) = pending.copy_new_file(
             &asset_name,
             &input.path,
@@ -2573,7 +2595,7 @@ fn prepare_artifacts(
 fn validate_artifact_contract(
     repo_root: &Path,
     mod_file: &ModFile,
-    prepared: &[PreparedArtifact],
+    planned: &[PlannedArtifact<'_>],
 ) -> ReleaseResult<()> {
     let manifest_path = repo_root.join("vo.mod");
     let declared = mod_file
@@ -2583,12 +2605,12 @@ fn validate_artifact_contract(
         .unwrap_or_default();
 
     let declared = declared.into_iter().collect::<BTreeSet<_>>();
-    let staged = prepared
+    let staged = planned
         .iter()
         .map(|artifact| vo_module::ext_manifest::DeclaredArtifactId {
-            kind: artifact.staged.kind.clone(),
-            target: artifact.staged.target.clone(),
-            name: artifact.staged.name.clone(),
+            kind: artifact.id.kind.clone(),
+            target: artifact.id.target.clone(),
+            name: artifact.id.name.clone(),
         })
         .collect::<BTreeSet<_>>();
 
