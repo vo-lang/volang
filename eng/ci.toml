@@ -440,3 +440,4 @@ capabilities = ["advisory", "dependency"]
 timeout_minutes = 30
 budget_minutes = 15
 evidence_kind = "security-audit"
+results = ["target/ci/results/dependencies.json"]

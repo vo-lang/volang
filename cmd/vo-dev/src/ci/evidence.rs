@@ -604,6 +604,48 @@ fn validate_result(root: &Path, relative: &str) -> Result<()> {
                 bail!("browser result does not prove completed scenario assertions: {relative}");
             }
         }
+        Some("volang.dependency-result.v1") => {
+            let policy: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join("eng/dependency-policy.json"))?)?;
+            let required = ["rust_lockfiles", "npm_workspaces"]
+                .into_iter()
+                .flat_map(|key| policy[key].as_array().into_iter().flatten())
+                .map(|entry| entry.as_str().unwrap_or_default())
+                .collect::<BTreeSet<_>>();
+            let audited = value["audited"]
+                .as_array()
+                .ok_or_else(|| anyhow!("dependency result lacks audited inputs: {relative}"))?;
+            let executions = value["executions"]
+                .as_array()
+                .ok_or_else(|| anyhow!("dependency result lacks executions: {relative}"))?;
+            let actual = audited
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<BTreeSet<_>>();
+            let executed = executions
+                .iter()
+                .filter_map(|entry| entry["input"].as_str())
+                .collect::<BTreeSet<_>>();
+            if value["passed"] != true
+                || value["complete"] != true
+                || value["failures"]
+                    .as_array()
+                    .is_none_or(|failures| !failures.is_empty())
+                || required.is_empty()
+                || required.contains("")
+                || actual != required
+                || audited.len() != required.len()
+                || executed != required
+                || executions.len() != required.len()
+                || executions.iter().any(|entry| {
+                    entry["code"] != 0
+                        || !entry["signal"].is_null()
+                        || entry["duration_ms"].as_u64().is_none()
+                })
+            {
+                bail!("dependency result does not prove complete successful audit coverage: {relative}");
+            }
+        }
         Some("volang.ui.performance.v1") => {
             if value["passed"] != true
                 || value["profile"] != "release"
@@ -952,6 +994,55 @@ mod tests {
         )
         .unwrap();
         validate_result(&root, "result.json").unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_evidence_rejects_missing_and_failed_audits() {
+        let root = temporary_test_dir("dependencies");
+        fs::create_dir_all(root.join("eng")).unwrap();
+        fs::write(
+            root.join("eng/dependency-policy.json"),
+            br#"{"rust_lockfiles":["Cargo.lock"],"npm_workspaces":["web"]}"#,
+        )
+        .unwrap();
+        let valid = serde_json::json!({
+            "schema": "volang.dependency-result.v1", "passed": true, "complete": true,
+            "audited": ["Cargo.lock", "web"], "failures": [],
+            "executions": [
+                {"input": "Cargo.lock", "code": 0, "signal": null, "duration_ms": 1},
+                {"input": "web", "code": 0, "signal": null, "duration_ms": 1}
+            ]
+        });
+        fs::write(
+            root.join("result.json"),
+            serde_json::to_vec(&valid).unwrap(),
+        )
+        .unwrap();
+        validate_result(&root, "result.json").unwrap();
+        for (field, value) in [
+            ("audited", serde_json::json!(["Cargo.lock"])),
+            ("executions", serde_json::json!([])),
+            ("failures", serde_json::json!(["unreviewed advisory"])),
+            ("complete", serde_json::json!(false)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            fs::write(
+                root.join("result.json"),
+                serde_json::to_vec(&invalid).unwrap(),
+            )
+            .unwrap();
+            assert!(validate_result(&root, "result.json").is_err(), "{field}");
+        }
+        let mut invalid = valid;
+        invalid["executions"][0]["code"] = serde_json::json!(7);
+        fs::write(
+            root.join("result.json"),
+            serde_json::to_vec(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_result(&root, "result.json").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

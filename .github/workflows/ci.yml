@@ -182,6 +182,7 @@ jobs:
           ./target/debug/vo-dev ui-certify --check
           ./target/debug/vo-dev test lint --suite lang --strict
           ./target/debug/vo-dev test fmt --suite lang
+          node --test eng/check-dependency-policy.test.mjs
 
       - name: Check GitHub Actions workflows
         env:

@@ -180,9 +180,18 @@ failures for all eight scenarios. See `eng/browser/README.md` for local setup.
 Dependency audits are:
 
 ```sh
-cargo audit --file Cargo.lock
-npm --prefix lang/crates/vo-web audit --audit-level high
+node eng/run-dependency-audit.mjs
 ```
+
+`eng/dependency-policy.json` declares the root and two maintained fuzz lockfiles,
+plus the Web and browser-tool npm workspaces. Every Rust report records an
+unfiltered advisory database revision. High/critical npm findings and Rust
+vulnerabilities fail the lane. Informational Rust findings require an exact
+package/version/advisory/lockfile review with an owner, dependency chain and
+expiry of at most 90 days. Expired or new findings fail. The current 13 warning
+reviews include the transitive GTK3/glib migration; the glib unsoundness remains
+a tracked risk and has a 30-day review window. Raw reports, process exits and
+timings accompany `target/ci/results/dependencies.json`, including on failure.
 
 If the local Cargo output tree has accumulated years of profiles and target
 triples, metadata scans can dominate command startup. `vo-dev clean rust`
