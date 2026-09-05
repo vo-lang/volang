@@ -1,7 +1,7 @@
 //! Browser VFS adapter for compiler and module-system filesystem contracts.
 
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use vo_common::vfs::{
     sort_fs_paths, FileSystem, FileSystemEntryKind, MAX_DIRECTORY_ENTRIES, MAX_TEXT_FILE_BYTES,
@@ -33,7 +33,8 @@ impl WasmVfs {
         let root_parts = self.root_parts.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid browser VFS root")
         })?;
-        let absolute = path.is_absolute();
+        let path = browser_path_text(path)?;
+        let absolute = path.starts_with('/');
         if absolute && !root_parts.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -47,10 +48,10 @@ impl WasmVfs {
             root_parts.clone()
         };
         let floor = parts.len();
-        for component in path.components() {
+        for component in path.split('/') {
             match component {
-                Component::CurDir | Component::RootDir => {}
-                Component::ParentDir => {
+                "" | "." => {}
+                ".." => {
                     if parts.len() == floor {
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
@@ -59,19 +60,7 @@ impl WasmVfs {
                     }
                     parts.pop();
                 }
-                Component::Normal(part) => {
-                    let part = part.to_str().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "browser VFS paths must be valid UTF-8",
-                        )
-                    })?;
-                    if part.is_empty() || part.contains('\0') {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "browser VFS path contains invalid data",
-                        ));
-                    }
+                part => {
                     parts.push(part.to_string());
                     if parts.len() > MAX_VFS_PATH_DEPTH {
                         return Err(io::Error::new(
@@ -79,12 +68,6 @@ impl WasmVfs {
                             "browser VFS path is too deep",
                         ));
                     }
-                }
-                Component::Prefix(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "browser VFS does not accept platform path prefixes",
-                    ));
                 }
             }
         }
@@ -97,7 +80,8 @@ impl WasmVfs {
     }
 
     fn full_install_path(&self, path: &Path) -> io::Result<String> {
-        vo_module::schema::portable_relative_path_from_path(path).map_err(|error| {
+        let text = browser_path_text(path)?;
+        vo_module::schema::validate_portable_relative_path(text).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -110,25 +94,40 @@ impl WasmVfs {
     }
 }
 
+// Browser paths use a slash protocol even when native tooling runs on Windows.
+// Host Path::components/is_absolute would reinterpret backslashes and / roots.
+fn browser_path_text(path: &Path) -> io::Result<&str> {
+    let text = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "browser VFS paths must be valid UTF-8",
+        )
+    })?;
+    if text.contains(['\\', '\0'])
+        || (text.as_bytes().get(1) == Some(&b':') && !text.starts_with('/'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "browser VFS does not accept host path separators or prefixes",
+        ));
+    }
+    Ok(text)
+}
+
 fn scoped_root_parts(root: &Path) -> Option<Vec<String>> {
     let mut parts = Vec::new();
-    for component in root.components() {
+    for component in browser_path_text(root).ok()?.split('/') {
         match component {
-            Component::CurDir | Component::RootDir => {}
-            Component::ParentDir => {
+            "" | "." => {}
+            ".." => {
                 parts.pop()?;
             }
-            Component::Normal(part) => {
-                let part = part.to_str()?;
-                if part.is_empty() || part.contains('\0') {
-                    return None;
-                }
+            part => {
                 parts.push(part.to_string());
                 if parts.len() > MAX_VFS_PATH_DEPTH {
                     return None;
                 }
             }
-            Component::Prefix(_) => return None,
         }
     }
     Some(parts)
@@ -347,6 +346,36 @@ mod tests {
         assert!(WasmVfs::new("../invalid")
             .full_path(Path::new("file"))
             .is_err());
+    }
+
+    #[test]
+    fn virtual_paths_have_the_same_lexical_contract_on_every_host() {
+        let vfs = WasmVfs::new("/workspace");
+        assert_eq!(
+            vfs.full_path(Path::new("a/../b/./c")).unwrap(),
+            "/workspace/b/c"
+        );
+        for path in [
+            r"a\b",
+            "C:/host",
+            r"C:\host",
+            r"\\server\share",
+            "bad\0path",
+        ] {
+            assert_eq!(
+                vfs.full_path(Path::new(path)).unwrap_err().kind(),
+                ErrorKind::InvalidInput
+            );
+            assert!(WasmVfs::new(path).full_path(Path::new("file")).is_err());
+        }
+        let global = WasmVfs::new("");
+        assert_eq!(
+            global.full_path(Path::new("/C:/project/main.vo")).unwrap(),
+            "/C:/project/main.vo"
+        );
+        assert!(global.full_path(Path::new("/../escape")).is_err());
+        let too_deep = vec!["a"; 257].join("/");
+        assert!(global.full_path(Path::new(&too_deep)).is_err());
     }
 
     #[test]

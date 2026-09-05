@@ -33,7 +33,11 @@ fn temp_dir(name: &str) -> PathBuf {
             .as_nanos(),
     ));
     fs::create_dir_all(&dir).unwrap();
-    dir
+    let canonical = dir.canonicalize().unwrap();
+    // Use the host spelling produced by the native/VFS bridge. Windows TEMP
+    // can contain an 8.3 alias, while canonicalize adds a verbatim prefix.
+    browser_snapshot_fs_path_from_vfs(&browser_snapshot_vfs_path_from_fs(&canonical).unwrap())
+        .unwrap()
 }
 
 fn write_wasm_candidate(dir: &Path, package: &str, feature: &str) {
@@ -217,7 +221,7 @@ fn browser_artifact_plan_from_fs_plans_local_bindgen_island() {
     .unwrap();
 
     let runtime = browser_runtime_plan_from_manifest(
-        &root.to_string_lossy(),
+        &browser_snapshot_vfs_path_from_fs(&root).unwrap(),
         &module_path("github.com/vo-lang/voplay"),
         &parse_manifest(
             r#"
@@ -433,34 +437,32 @@ renderer = "js/dist/demo-renderer.js"
         &mod_content,
         &files,
     );
-    let expected_renderer_path = module_dir
-        .join("js")
-        .join("dist")
-        .join("demo-renderer.js")
-        .to_string_lossy()
-        .to_string();
-    let expected_wasm_path = module_dir
-        .join(
+    let expected_renderer_path = browser_snapshot_vfs_path_from_fs(
+        &module_dir.join("js").join("dist").join("demo-renderer.js"),
+    )
+    .unwrap();
+    let expected_wasm_path = browser_snapshot_vfs_path_from_fs(
+        &module_dir.join(
             vo_module::artifact::artifact_relative_path(&ArtifactId {
                 kind: "extension-wasm".to_string(),
                 target: BROWSER_WASM_TARGET.to_string(),
                 name: "demo_bg.wasm".to_string(),
             })
             .unwrap(),
-        )
-        .to_string_lossy()
-        .to_string();
-    let expected_js_glue_path = module_dir
-        .join(
+        ),
+    )
+    .unwrap();
+    let expected_js_glue_path = browser_snapshot_vfs_path_from_fs(
+        &module_dir.join(
             vo_module::artifact::artifact_relative_path(&ArtifactId {
                 kind: "extension-js-glue".to_string(),
                 target: BROWSER_WASM_TARGET.to_string(),
                 name: "demo.js".to_string(),
             })
             .unwrap(),
-        )
-        .to_string_lossy()
-        .to_string();
+        ),
+    )
+    .unwrap();
 
     let plan = published_browser_runtime_plan_from_fs(&[locked], &cache_root).unwrap();
 
@@ -470,7 +472,7 @@ renderer = "js/dist/demo-renderer.js"
     assert_eq!(plan.graph.frameworks[0].module_key, "github.com/acme/demo");
     assert_eq!(
         plan.graph.frameworks[0].module_root,
-        module_dir.to_string_lossy().to_string()
+        browser_snapshot_vfs_path_from_fs(&module_dir).unwrap()
     );
     assert_eq!(plan.wasm_bindings[0].module_key, "github.com/acme/demo");
     assert_eq!(
@@ -755,7 +757,7 @@ renderer = "js/dist/demo-renderer.js"
     .unwrap();
 
     let runtime = browser_runtime_plan_from_manifest(
-        &root.to_string_lossy(),
+        &browser_snapshot_vfs_path_from_fs(&root).unwrap(),
         &module_path("github.com/vo-lang/demo"),
         &parse_manifest(
             r#"
@@ -847,7 +849,7 @@ fn capture_snapshot_files_projects_virtual_wasm_paths() {
     fs::write(wasm_dir.join("voplay_island_bg.wasm"), [0_u8, 97, 115, 109]).unwrap();
 
     let runtime = browser_runtime_plan_from_manifest(
-        &root.to_string_lossy(),
+        &browser_snapshot_vfs_path_from_fs(&root).unwrap(),
         &module_path("github.com/vo-lang/voplay"),
         &parse_manifest(
             r#"
@@ -880,13 +882,9 @@ renderer = "js/dist/voplay-renderer.js"
     let files = capture_snapshot_files(&snapshot, &runtime, Some(&root), &entry_path).unwrap();
     let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
 
-    assert!(paths.contains(&entry_path.to_string_lossy().to_string()));
-    assert!(paths.contains(
-        &js_dir
-            .join("voplay-renderer.js")
-            .to_string_lossy()
-            .to_string()
-    ));
+    assert!(paths.contains(&browser_snapshot_vfs_path_from_fs(&entry_path).unwrap()));
+    assert!(paths
+        .contains(&browser_snapshot_vfs_path_from_fs(&js_dir.join("voplay-renderer.js")).unwrap()));
     assert!(paths.contains(&"wasm/voplay_island.js".to_string()));
     assert!(paths.contains(&"wasm/voplay_island_bg.wasm".to_string()));
 
@@ -904,7 +902,7 @@ fn capture_snapshot_files_handles_single_component_assets() {
     fs::write(&wasm_path, [0_u8, 97, 115, 109]).unwrap();
 
     let runtime = browser_runtime_plan_from_manifest(
-        &root.to_string_lossy(),
+        &browser_snapshot_vfs_path_from_fs(&root).unwrap(),
         &module_path("github.com/vo-lang/demo"),
         &parse_manifest(
             r#"
@@ -955,8 +953,8 @@ renderer = "renderer.js"
 
     let files = capture_snapshot_files(&snapshot, &runtime, None, &entry_path).unwrap();
     let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
-    assert!(paths.contains(&entry_path.to_string_lossy().to_string()));
-    assert!(paths.contains(&renderer_path.to_string_lossy().to_string()));
+    assert!(paths.contains(&browser_snapshot_vfs_path_from_fs(&entry_path).unwrap()));
+    assert!(paths.contains(&browser_snapshot_vfs_path_from_fs(&renderer_path).unwrap()));
     assert!(paths.contains(&"wasm/demo.wasm".to_string()));
 
     fs::remove_dir_all(&root).unwrap();
@@ -1086,10 +1084,12 @@ fn project_snapshot_excludes_host_metadata_dependencies_and_build_outputs() {
     )
     .unwrap();
     let paths = files.into_iter().map(|file| file.path).collect::<Vec<_>>();
-    assert!(paths.contains(&entry_path.to_string_lossy().into_owned()));
-    assert!(paths.contains(&assets.join("visible.bin").to_string_lossy().into_owned()));
+    assert!(paths.contains(&browser_snapshot_vfs_path_from_fs(&entry_path).unwrap()));
+    assert!(
+        paths.contains(&browser_snapshot_vfs_path_from_fs(&assets.join("visible.bin")).unwrap())
+    );
     for directory in PROJECT_SNAPSHOT_EXCLUDED_DIRECTORIES {
-        let excluded = root.join(directory).to_string_lossy().into_owned();
+        let excluded = browser_snapshot_vfs_path_from_fs(&root.join(directory)).unwrap();
         assert!(paths.iter().all(|path| !path.starts_with(&excluded)));
     }
 
