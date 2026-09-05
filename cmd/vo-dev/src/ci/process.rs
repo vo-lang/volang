@@ -215,7 +215,8 @@ pub(crate) fn run_command(
     if result.passed() && !spec.report.is_empty() {
         let counts = match spec.report.as_str() {
             "cargo-test" => cargo_test_counts(&String::from_utf8_lossy(&fs::read(&stdout)?)),
-            "native-window" => super::native_window::validate(
+            "native-window" => super::native_window::validate_streams(
+                &String::from_utf8_lossy(&fs::read(&stdout)?),
                 &String::from_utf8_lossy(&fs::read(&stderr)?),
                 &spec.env,
             ),

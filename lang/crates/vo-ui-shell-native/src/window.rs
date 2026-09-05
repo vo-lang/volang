@@ -928,6 +928,14 @@ impl DesktopState {
     }
 
     fn draw(&mut self) -> Result<bool, NativeDesktopError> {
+        // Winit may deliver a queued redraw after another callback requested
+        // exit. Stop before preparing or presenting any additional frame.
+        if presentation_limit_reached(
+            self.config.exit_after_presented_frames,
+            self.presented_frames,
+        ) {
+            return Ok(true);
+        }
         automation_log("preparing certified native frame");
         if !self.visible || self.physical_size.width == 0 || self.physical_size.height == 0 {
             return Ok(false);

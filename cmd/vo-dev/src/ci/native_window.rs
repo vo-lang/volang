@@ -43,15 +43,33 @@ pub(super) fn expected_count(env: &BTreeMap<String, String>) -> Result<u64> {
     Ok(messages.len() as u64 + assertions.saturating_sub(1))
 }
 
-pub(super) fn validate(log: &str, env: &BTreeMap<String, String>) -> Result<TestCounts> {
-    let (expected, _) = script(env)?;
-    let observed = log
-        .lines()
+fn messages(log: &str) -> Vec<&str> {
+    log.lines()
         .filter_map(|line| line.strip_prefix(PREFIX))
         .filter(|line| {
             line.starts_with("completed semantic click ") || matches!(*line, ASSERTED | PRESENTED)
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+pub(super) fn validate_streams(
+    stdout: &str,
+    stderr: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<TestCounts> {
+    let output = messages(stdout);
+    let errors = messages(stderr);
+    // Display launchers may forward application stderr to stdout. Require the
+    // entire ordered script in one stream; cross-stream order is unknowable.
+    if !output.is_empty() && !errors.is_empty() {
+        bail!("native window certification records span both output streams");
+    }
+    validate(if output.is_empty() { stderr } else { stdout }, env)
+}
+
+fn validate(log: &str, env: &BTreeMap<String, String>) -> Result<TestCounts> {
+    let (expected, _) = script(env)?;
+    let observed = messages(log);
     if observed != expected {
         bail!("native window did not complete its exact semantic script before presenting: expected {expected:?}, observed {observed:?}");
     }
@@ -87,6 +105,10 @@ mod tests {
                 .collect::<String>()
         };
         assert_eq!(validate(&log(&lines), &env).unwrap().passed, 5);
+        assert_eq!(validate_streams(&log(&lines), "", &env).unwrap().passed, 5);
+        assert_eq!(validate_streams("", &log(&lines), &env).unwrap().passed, 5);
+        assert!(validate_streams(&log(&lines[..2]), &log(&lines[2..]), &env).is_err());
+        assert!(validate_streams(&log(&lines), &log(&lines), &env).is_err());
         for invalid in [
             vec![],
             vec![PRESENTED],
