@@ -1253,23 +1253,23 @@ failure_kind = "product"
 [[command]]
 id = "ui-native-package-linux"
 argv = ["bash", "-euo", "pipefail", "-c", '''
-cargo build --locked --timings -p vo-studio-aot-runtime-native --release
-cargo build --locked --timings -p vo-ui-aot-runtime-native --release
+cargo build --locked --timings --release --no-default-features \
+  -p vo -p vo-studio-aot-runtime-native -p vo-ui-aot-runtime-native
 studio_runtime=target/release/libvo_studio_aot_runtime_native.a
 ui_runtime=target/release/libvo_ui_aot_runtime_native.a
-VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/debug/vo ui package apps/studio \
+VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/release/vo ui package apps/studio \
   -o target/ci/artifacts/native/studio \
   --runtime="$studio_runtime"
-./target/debug/vo ui package ui/showcases/component-gallery \
+./target/release/vo ui package ui/showcases/component-gallery \
   -o target/ci/artifacts/native/gallery \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/data-application \
+./target/release/vo ui package ui/showcases/data-application \
   -o target/ci/artifacts/native/data \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/media-application \
+./target/release/vo ui package ui/showcases/media-application \
   -o target/ci/artifacts/native/media \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/studio-workbench \
+./target/release/vo ui package ui/showcases/studio-workbench \
   -o target/ci/artifacts/native/workbench \
   --runtime="$ui_runtime"
 ''']
@@ -1381,23 +1381,23 @@ failure_kind = "product"
 [[command]]
 id = "ui-native-package-macos"
 argv = ["bash", "-euo", "pipefail", "-c", '''
-cargo build --locked --timings -p vo-studio-aot-runtime-native --release
-cargo build --locked --timings -p vo-ui-aot-runtime-native --release
+cargo build --locked --timings --release --no-default-features \
+  -p vo -p vo-studio-aot-runtime-native -p vo-ui-aot-runtime-native
 studio_runtime=target/release/libvo_studio_aot_runtime_native.a
 ui_runtime=target/release/libvo_ui_aot_runtime_native.a
-VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/debug/vo ui package apps/studio \
+VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/release/vo ui package apps/studio \
   -o target/ci/artifacts/native/studio \
   --runtime="$studio_runtime"
-./target/debug/vo ui package ui/showcases/component-gallery \
+./target/release/vo ui package ui/showcases/component-gallery \
   -o target/ci/artifacts/native/gallery \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/data-application \
+./target/release/vo ui package ui/showcases/data-application \
   -o target/ci/artifacts/native/data \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/media-application \
+./target/release/vo ui package ui/showcases/media-application \
   -o target/ci/artifacts/native/media \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/studio-workbench \
+./target/release/vo ui package ui/showcases/studio-workbench \
   -o target/ci/artifacts/native/workbench \
   --runtime="$ui_runtime"
 ''']
@@ -1509,23 +1509,23 @@ failure_kind = "product"
 [[command]]
 id = "ui-native-package-windows"
 argv = ["bash", "-euo", "pipefail", "-c", '''
-cargo rustc --locked --timings -p vo-studio-aot-runtime-native --release -- --print native-static-libs
-cargo rustc --locked --timings -p vo-ui-aot-runtime-native --release -- --print native-static-libs
+cargo build --locked --timings --release --no-default-features \
+  -p vo -p vo-studio-aot-runtime-native -p vo-ui-aot-runtime-native
 studio_runtime=target/release/vo_studio_aot_runtime_native.lib
 ui_runtime=target/release/vo_ui_aot_runtime_native.lib
-VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/debug/vo ui package apps/studio \
+VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/release/vo ui package apps/studio \
   -o target/ci/artifacts/native/studio \
   --runtime="$studio_runtime"
-./target/debug/vo ui package ui/showcases/component-gallery \
+./target/release/vo ui package ui/showcases/component-gallery \
   -o target/ci/artifacts/native/gallery \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/data-application \
+./target/release/vo ui package ui/showcases/data-application \
   -o target/ci/artifacts/native/data \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/media-application \
+./target/release/vo ui package ui/showcases/media-application \
   -o target/ci/artifacts/native/media \
   --runtime="$ui_runtime"
-./target/debug/vo ui package ui/showcases/studio-workbench \
+./target/release/vo ui package ui/showcases/studio-workbench \
   -o target/ci/artifacts/native/workbench \
   --runtime="$ui_runtime"
 ''']

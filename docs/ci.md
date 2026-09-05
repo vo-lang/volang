@@ -160,11 +160,27 @@ failure state. Runtime compilation is measured separately through Cargo timings.
 Compare matching source, target, runtime and build settings before changing
 compiler profiles, sharing outputs or increasing package concurrency.
 
+Full native UI tasks build the optimized packaging compiler and both static
+runtimes in one declared Cargo invocation, then package Studio and the four
+showcases with explicit runtime paths. The existing debug VM/JIT window probes
+remain separate commands. This shared invocation is a distinct configuration:
+[Cargo can unify dependency features](https://doc.rust-lang.org/cargo/reference/features.html#feature-unification)
+and change archive bytes, so reuse must
+include the complete package/feature selection and the sealed artifact digests.
+The five native user journeys validate the resulting packages on each platform.
+
+Manual CI and Nightly runs accept `cold_cache=true` to disable compiler caching
+in every lane, including planning and certification. Task commands and deadlines
+remain identical. Dependency and browser-tool downloads may still be cached;
+Cargo compilation outputs are built afresh. Use this mode for the cold compiler
+cache acceptance run instead of deleting shared caches.
+
 Native filesystem ordering always runs. The symlink regression independently
 probes the host using Rust before invoking Vo. Supported hosts exercise relative
 file and directory links, absolute targets, dangling links and ReadDir/Lstat
-metadata. Unavailable hosts must return an error and leave no entry. Set
-`VO_TEST_REQUIRE_SYMLINK=1` in environments that require this capability.
+metadata. Unavailable hosts must return an error and leave no entry. Cases
+that require this capability declare `requires_host = ["symlink"]`; an unavailable
+required capability produces a typed portability failure before execution.
 
 Windows Nightly compiles the complete standard library before preparing AOT
 tools, so conditional compilation errors fail early. Pipe regressions require
