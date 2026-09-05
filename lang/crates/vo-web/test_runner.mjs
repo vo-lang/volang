@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // WASM test runner for vo test cases
-// Usage: node test_runner.mjs --plan <plan.json> [--format text|json]
+// Usage: node test_runner.mjs --plan <plan.json> [--format text|json] [--jobs 1..8]
 
 import { readFileSync, existsSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+import { isMainThread, parentPort, workerData } from "node:worker_threads";
+import { defaultWorkers, executeWorker, mapBounded, parseWorkers } from "./test_runner_pool.mjs";
 
 import { repositorySourcePath } from "./test_runner_paths.mjs";
 
@@ -68,23 +70,6 @@ function jobTimeoutSeconds(job) {
   return Math.trunc(parsed);
 }
 
-async function withJobTimeout(job, run) {
-  const seconds = jobTimeoutSeconds(job);
-  let timeout;
-  try {
-    return await Promise.race([
-      Promise.resolve().then(run),
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => {
-          reject(new Error(`timed out after ${seconds}s`));
-        }, seconds * 1000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 async function withJobEnv(job, run) {
   const env =
     job.env && typeof job.env === "object" && !Array.isArray(job.env) ? job.env : {};
@@ -110,9 +95,7 @@ async function withJobEnv(job, run) {
 }
 
 async function compileAndRunJob(job, source, relPath) {
-  return withJobEnv(job, () =>
-    withJobTimeout(job, () => voWeb.compileAndRun(source, relPath)),
-  );
+  return withJobEnv(job, () => voWeb.compileAndRun(source, relPath));
 }
 
 function jsonJob(job, status, elapsedMs, stdout, stderr, error) {
@@ -240,6 +223,7 @@ async function runPlanJob(job, format) {
 function loadPlan(args) {
   let planPath;
   let format = "text";
+  let workers = defaultWorkers;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--plan") {
@@ -252,6 +236,10 @@ function loadPlan(args) {
       format = args[i] ?? "";
     } else if (arg.startsWith("--format=")) {
       format = arg.slice("--format=".length);
+    } else if (arg === "--jobs") {
+      workers = parseWorkers(args[++i]);
+    } else if (arg.startsWith("--jobs=")) {
+      workers = parseWorkers(arg.slice(7));
     } else {
       console.error(`unknown argument: ${arg}`);
       process.exit(2);
@@ -270,18 +258,12 @@ function loadPlan(args) {
     console.error(`Unsupported test plan schema: ${plan.schema}`);
     process.exit(2);
   }
-  return { plan, format };
+  return { plan, format, workers };
 }
 
 async function main() {
-  // Initialize WASM (required for --target web)
-  // Node.js fetch doesn't support file:// URLs, so we read the WASM file manually
-  const wasmPath = join(__dirname, "pkg", "vo_web_bg.wasm");
-  const wasmBytes = readFileSync(wasmPath);
-  await init({ module_or_path: wasmBytes });
-
   const args = process.argv.slice(2);
-  const { plan, format } = loadPlan(args);
+  const { plan, format, workers } = loadPlan(args);
   if (!Array.isArray(plan.jobs) || plan.jobs.length === 0) {
     console.error("WASM test plan contains no jobs");
     process.exit(2);
@@ -289,10 +271,32 @@ async function main() {
   if (format === "text") {
     console.log(`Running ${plan.suite ?? "selected"} WASM tests...\n`);
   }
-  const jobs = [];
-  for (const job of plan.jobs) {
-    jobs.push(await runPlanJob(job, format));
-  }
+  const wasmPath = join(__dirname, "pkg", "vo_web_bg.wasm");
+  const module = await WebAssembly.compile(readFileSync(wasmPath));
+  const jobs = await mapBounded(plan.jobs, workers, async job => {
+    const started = Date.now();
+    let result;
+    // Reject unsupported or missing inputs before allocating a Wasm instance.
+    if (job.kind !== 'file' || !existsSync(resolveTestPath(job.path))) return runPlanJob(job, format);
+    try {
+      const output = await executeWorker(new URL(import.meta.url), { job, module }, jobTimeoutSeconds(job) * 1000);
+      result = output.value;
+      if (result?.id !== job.id || result?.case_id !== job.case_id || result?.kind !== job.kind
+          || result?.path !== job.path || result?.backend !== job.backend || result?.target !== job.target
+          || !['passed', 'failed'].includes(result?.status)
+          || !['stdout', 'stderr', 'error'].every(key => typeof result[key] === 'string')) {
+        throw new Error('worker result identity or status differs from its job');
+      }
+      if (output.stdout || output.stderr) result.stderr += output.stdout + output.stderr;
+    } catch (error) {
+      result = jsonJob(job, 'failed', Date.now() - started,
+        error.workerStdout || '', error.workerStderr || '', error.message || String(error));
+    }
+    if (format === 'text') {
+      console.log(`  ${result.status === 'passed' ? GREEN + '✓' : RED + '✗'}${NC} ${job.id} [wasm] ${result.error}`.trimEnd());
+    }
+    return result;
+  });
   const passed = jobs.filter((job) => job.status === "passed").length;
   const failed = jobs.filter((job) => job.status === "failed").length;
 
@@ -328,4 +332,9 @@ async function main() {
   }
 }
 
-main();
+if (isMainThread) {
+  main().catch(error => { console.error(error); process.exitCode = 1; });
+} else {
+  await init({ module_or_path: workerData.module });
+  parentPort.postMessage(await runPlanJob(workerData.job, 'json'));
+}

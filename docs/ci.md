@@ -101,6 +101,15 @@ Animation contracts use an explicitly installed per-VM manual clock shared by
 stdlib time reads and timer completions. They test intermediate values,
 cancellation, completion and actual JIT execution without sleeping.
 
+Wasm VM language cases run in a bounded Node worker pool. The parent compiles
+one WebAssembly module and each case creates a fresh instance, VM, VFS and
+environment. The default is at most four workers; the direct runner accepts
+`--jobs 1..8`. A case deadline terminates its worker, including synchronous Wasm
+loops, before that slot admits another case. Worker crashes, missing or duplicate
+results, and excessive diagnostic output fail the case. Reports retain plan
+order regardless of completion order. Supervisor contracts exercise actual
+worker and Wasm termination as part of the Web test suite.
+
 Module publication (`vo-release`) requires anchored, durable directory
 publication, currently implemented on Linux and macOS. Its publication journeys
 declare `cfg(unix)`; Windows runs the portable source and artifact validation
