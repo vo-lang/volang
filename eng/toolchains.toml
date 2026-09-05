@@ -49,3 +49,10 @@ path = "lang/crates/vo-web"
 lockfile = "lang/crates/vo-web/package-lock.json"
 audit = "current"
 audit_level = "high"
+
+[[node_workspace]]
+name = "browser-contracts"
+path = "eng/browser"
+lockfile = "eng/browser/package-lock.json"
+audit = "current"
+audit_level = "high"

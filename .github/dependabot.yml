@@ -26,3 +26,12 @@ updates:
       time: "03:30"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3
+
+  - package-ecosystem: npm
+    directory: /eng/browser
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:20"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3

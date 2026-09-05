@@ -60,3 +60,5 @@ lang/crates/vo-web/dist/
 .tmp/
 
 __pycache__/
+
+eng/browser/node_modules/
