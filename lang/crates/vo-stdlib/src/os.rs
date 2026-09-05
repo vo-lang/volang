@@ -529,9 +529,13 @@ fn open_file_with_mode(path: &std::path::Path, flag: i32, perm: u32) -> std::io:
         const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
-        // CreateFile requires this flag to open existing directories. Keep
-        // the requested access and creation disposition for ordinary files.
-        let mut native_flags = FILE_FLAG_BACKUP_SEMANTICS;
+        // Read-only directory handles need BACKUP_SEMANTICS. Writable opens
+        // must still fail for directories, as on Unix and in Go's OpenFile.
+        let mut native_flags = if flag & 0x3 == O_RDONLY as i32 {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
         if flag & O_CREATE as i32 != 0 && perm & 0o222 == 0 {
             // CreateFile applies creation attributes only when it creates the
             // path, matching Go's Windows OpenFile behavior without changing
