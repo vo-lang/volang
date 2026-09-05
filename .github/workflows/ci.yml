@@ -189,6 +189,8 @@ jobs:
         env:
           ACTIONLINT_VERSION: 1.7.12
           ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          SHELLCHECK_VERSION: 0.11.0
+          SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
         run: |
           archive="$RUNNER_TEMP/actionlint.tar.gz"
           install_dir="$RUNNER_TEMP/actionlint"
@@ -199,6 +201,13 @@ jobs:
           mkdir -p "$install_dir"
           tar -xzf "$archive" -C "$install_dir" actionlint
           echo "$install_dir" >> "$GITHUB_PATH"
+          shellcheck_archive="$RUNNER_TEMP/shellcheck.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz" \
+            --output "$shellcheck_archive"
+          printf '%s  %s\n' "$SHELLCHECK_SHA256" "$shellcheck_archive" | sha256sum --check --status
+          tar -xzf "$shellcheck_archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}" >> "$GITHUB_PATH"
 
       - name: Run repository contracts
         run: ./target/debug/vo-dev ci run --plan target/ci/plan-input/plan.json --task contracts

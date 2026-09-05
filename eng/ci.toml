@@ -605,7 +605,7 @@ failure_kind = "dependency-policy"
 
 [[command]]
 id = "workflow-lint"
-argv = ["actionlint", "-ignore", "unexpected key \"queue\""]
+argv = ["bash", "-euo", "pipefail", "-c", "command -v shellcheck >/dev/null || { echo 'workflow checks require ShellCheck; see eng/toolchains.toml' >&2; exit 1; }; actionlint -ignore 'unexpected key \"queue\"'"]
 timeout_seconds = 120
 failure_kind = "infrastructure"
 

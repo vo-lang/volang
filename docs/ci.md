@@ -12,7 +12,11 @@ Workflow YAML provisions and schedules lanes. Repository contracts, Rust quality
 language, Web, native UI and dependency checks execute ordered command definitions
 from `eng/ci.toml` through `vo-dev ci run`. `vo-dev ci lint` validates the task graph,
 dependencies, owners, platforms, budgets, runners, and safe evidence paths.
-Actionlint validates the workflow syntax and expressions.
+Actionlint validates workflow syntax and expressions with ShellCheck for embedded
+scripts. GitHub CI downloads both declared versions with verified archive hashes.
+Local workflow validation also requires ShellCheck on `PATH`; the task fails
+explicitly when it is missing, so a syntax-only check cannot stand in for the
+complete workflow check. Versions are listed in `eng/toolchains.toml`.
 
 ## Trust model
 
