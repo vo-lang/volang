@@ -1868,7 +1868,7 @@ mod cache_lease_tests {
 
     #[test]
     fn cached_native_spec_holds_read_lease_until_last_clone_drops() {
-        let root = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "vo-engine-cache-lease-{}-{:?}",
             std::process::id(),
             std::thread::current().id(),
