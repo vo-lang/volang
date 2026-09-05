@@ -739,7 +739,7 @@ report = "libfuzzer"
 
 [[task]]
 id = "nightly-browser"
-commands = ["browser-tooling", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "nightly-studio-build", "nightly-gallery-build", "nightly-studio-journey", "nightly-gallery-journey", "nightly-studio-lifecycle"]
+commands = ["browser-harness-tests", "browser-tooling", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "nightly-studio-build", "nightly-gallery-build", "nightly-studio-journey", "nightly-gallery-journey", "nightly-studio-lifecycle"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "exhaustive"
@@ -754,6 +754,12 @@ budget_minutes = 35
 evidence_kind = "web-test"
 results = ["target/ci/results/nightly-studio-journey.json", "target/ci/results/nightly-gallery-journey.json", "target/ci/results/nightly-studio-lifecycle.json"]
 artifacts = ["target/ci/artifacts/nightly-studio", "target/ci/artifacts/nightly-gallery"]
+
+[[command]]
+id = "browser-harness-tests"
+argv = ["node", "--test", "eng/browser/editor-timing.test.mjs"]
+timeout_seconds = 120
+failure_kind = "infrastructure"
 
 [[command]]
 id = "browser-tooling"

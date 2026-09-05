@@ -1,4 +1,5 @@
 import { pollEvaluation, waitForAotInteractive } from '../page-contract.mjs';
+import { beginEditorOpenTiming, editorOpenDuration, disposeEditorOpenTiming } from '../editor-timing.mjs';
 
 export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRoot) {
   const languageExampleOpenBudgetMilliseconds = 5_000;
@@ -460,19 +461,26 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
     timeoutMilliseconds,
   );
   const languageExampleStarted = Date.now();
-  await activateButton("Open Select example in Studio");
-  checkpoints.languageExample = await pollEvaluation(contract,
-    `({
-      source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
-      lock: document.querySelector('[role="treeitem"][aria-label="Open vo.lock"]') !== null,
-      work: document.querySelector('[role="treeitem"][aria-label="Open vo.work"]') !== null,
-      diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? '',
-    })`,
-    (value) => value?.source.includes('select {') && value?.lock === false
-      && value?.work === false && value?.diagnostic === '',
-    timeoutMilliseconds,
-  );
-  checkpoints.languageExampleOpenMs = Date.now() - languageExampleStarted;
+  const languageTiming = await beginEditorOpenTiming(contract.page, 'Open Select example in Studio', 'select {');
+  try {
+    await activateButton("Open Select example in Studio");
+    checkpoints.languageExample = await pollEvaluation(contract,
+      `({
+        source: document.querySelector('[data-testid="volang-code-editor"]')?.value ?? '',
+        lock: document.querySelector('[role="treeitem"][aria-label="Open vo.lock"]') !== null,
+        work: document.querySelector('[role="treeitem"][aria-label="Open vo.work"]') !== null,
+        diagnostic: document.getElementById('volang-diagnostic')?.textContent ?? '',
+      })`,
+      (value) => value?.source.includes('select {') && value?.lock === false
+        && value?.work === false && value?.diagnostic === '',
+      timeoutMilliseconds,
+    );
+    await contract.settleInput();
+    checkpoints.languageExampleOpenMs = await editorOpenDuration(languageTiming);
+    checkpoints.languageExampleDriverMs = Date.now() - languageExampleStarted;
+  } finally {
+    await disposeEditorOpenTiming(languageTiming);
+  }
   if (checkpoints.languageExampleOpenMs > languageExampleOpenBudgetMilliseconds) {
     throw new Error(
       `Studio language example took ${checkpoints.languageExampleOpenMs}ms to open; `

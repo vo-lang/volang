@@ -334,6 +334,9 @@ jobs:
             --no-cache \
             -o target/hello-aot.wasm
 
+      - name: Verify browser test harness
+        run: node --test eng/browser/editor-timing.test.mjs
+
       - name: Build Core Wasm AOT host
         working-directory: lang/crates/vo-web
         run: |

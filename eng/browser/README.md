@@ -20,6 +20,16 @@ Install with `npm ci` in this directory, then
 CI uses `.github/actions/setup-browser` to install the same lockfile and browser
 revision, including Linux libraries. No system Chrome discovery is used.
 
+Studio's language-example budget measures from the trusted click to the first
+ready editor frame using the browser's monotonic clock. The report also keeps
+the driver's elapsed time, including trace and transport overhead. Both measures
+are retained; the product budget remains five seconds. The timing regression
+checks delayed readiness, missing clicks, and driver delay after completion:
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH="$PWD/target/playwright-browsers" node --test eng/browser/editor-timing.test.mjs
+```
+
 From the repository root, after building the gallery:
 
 ```sh
