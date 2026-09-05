@@ -56,7 +56,8 @@ jobs:
     name: language-release-native
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 105
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -119,7 +120,8 @@ jobs:
     name: language-release-wasm
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 105
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -200,7 +202,8 @@ jobs:
     name: stress-${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:
@@ -274,7 +277,8 @@ jobs:
     name: platform-${{ matrix.os }}
     needs: plan
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -351,7 +355,8 @@ jobs:
     name: bounded-fuzz (${{ matrix.target }})
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 60
     env:
       CARGO_FUZZ_VERSION: "0.13.2"
       RUST_NIGHTLY: "nightly-2026-08-20"
@@ -453,7 +458,8 @@ jobs:
     name: audits
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -541,7 +547,8 @@ jobs:
     name: browser
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

@@ -146,7 +146,8 @@ jobs:
     name: quality-rust
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -232,7 +233,8 @@ jobs:
     name: language-native (${{ matrix.shard }})
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -301,7 +303,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.wasm_task != ''
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -410,7 +413,8 @@ jobs:
     name: ui-platform (${{ matrix.os }})
     needs: plan
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
