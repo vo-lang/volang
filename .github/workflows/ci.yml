@@ -258,17 +258,25 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
 
-      - name: Upload language evidence and diagnostics
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-diagnostics-${{ matrix.task }}-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/ci/test-runs
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   wasm_web:

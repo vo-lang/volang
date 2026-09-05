@@ -85,17 +85,25 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "nightly-language-native"
 
-      - name: Upload Nightly evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-language-native-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-language-native-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/ci/test-runs
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   language_release_wasm:
@@ -150,16 +158,24 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "nightly-language-wasm"
 
-      - name: Upload Nightly evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-language-wasm-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-language-wasm-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   stress:
@@ -207,16 +223,24 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
 
-      - name: Upload Nightly evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-${{ matrix.task }}-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   platform:
@@ -260,17 +284,25 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
 
-      - name: Upload Nightly evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-${{ matrix.task }}-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/ci/test-runs
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   bounded_fuzz:
@@ -337,16 +369,24 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
 
-      - name: Upload Nightly evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-${{ matrix.task }}-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Preserve fuzzing failures
@@ -405,16 +445,24 @@ jobs:
       - name: Audit every maintained dependency input
         run: ./target/debug/vo-dev ci run --plan target/ci/plan-input/plan.json --task nightly-audits
 
-      - name: Upload Nightly evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-audits-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-audits-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload dependency audit diagnostics
@@ -484,16 +532,24 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task nightly-browser
 
-      - name: Upload Nightly browser evidence
+      - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-evidence-browser-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-browser-${{ github.sha }}
           path: |
-            target/ci/evidence/*.evidence.json
             target/ci/executions
             target/cargo-timings
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload browser traces and results
