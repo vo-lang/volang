@@ -116,6 +116,7 @@ tasks = [
   "nightly-fuzz-app-protocol",
   "nightly-fuzz-ui-artifact",
   "nightly-audits",
+  "nightly-browser",
 ]
 
 [[task]]
@@ -721,3 +722,86 @@ timeout_seconds = 600
 failure_kind = "product"
 cwd = "fuzz/ui-artifact"
 report = "libfuzzer"
+
+[[task]]
+id = "nightly-browser"
+commands = ["browser-tooling", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "nightly-studio-build", "nightly-gallery-build", "nightly-studio-journey", "nightly-gallery-journey", "nightly-studio-lifecycle"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "browser"
+runner = "ubuntu-24.04"
+owners = ["ui", "studio", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["browser", "studio", "offline", "recovery", "resource-cleanup"]
+timeout_minutes = 60
+budget_minutes = 35
+evidence_kind = "web-test"
+results = ["target/ci/results/nightly-studio-journey.json", "target/ci/results/nightly-gallery-journey.json", "target/ci/results/nightly-studio-lifecycle.json"]
+artifacts = ["target/ci/artifacts/nightly-studio", "target/ci/artifacts/nightly-gallery"]
+
+[[command]]
+id = "browser-tooling"
+argv = ["cargo", "build", "--locked", "-p", "vo", "--no-default-features", "--timings"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "browser-node-dependencies"
+argv = ["npm", "ci"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "browser-aot-support"
+argv = ["npm", "run", "build:aot-support"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "browser-wasm-compiler"
+argv = ["npm", "run", "build:wasm:release"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "browser-javascript"
+argv = ["npm", "run", "build:js"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "nightly-studio-build"
+argv = ["target/debug/vo", "ui", "build", "apps/studio", "-o", "target/ci/artifacts/nightly-studio", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+repo_env = {"VOWORK" = "vo.work"}
+
+[[command]]
+id = "nightly-gallery-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/component-gallery", "-o", "target/ci/artifacts/nightly-gallery", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-studio-journey"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-aot-smoke", "--timeout-ms", "120000", "--output", "target/ci/results/nightly-studio-journey.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-gallery-journey"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-gallery", "--uikit-gallery-smoke", "--timeout-ms", "120000", "--output", "target/ci/results/nightly-gallery-journey.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-studio-lifecycle"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-lifecycle-smoke", "--timeout-ms", "30000", "--output", "target/ci/results/nightly-studio-lifecycle.json"]
+timeout_seconds = 900
+failure_kind = "product"

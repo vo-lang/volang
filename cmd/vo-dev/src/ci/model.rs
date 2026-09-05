@@ -42,6 +42,8 @@ pub(crate) struct CiCommand {
     pub(crate) cwd: String,
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) repo_env: BTreeMap<String, String>,
     pub(crate) timeout_seconds: u64,
     pub(crate) failure_kind: String,
     #[serde(default)]
@@ -201,7 +203,7 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
                 command.id
             );
         }
-        for (key, value) in &command.env {
+        for (key, value) in command.env.iter().chain(&command.repo_env) {
             if key.is_empty()
                 || key.contains(['=', '\0'])
                 || value.contains('\0')
@@ -211,6 +213,20 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
             {
                 bail!(
                     "CI command {} has invalid or reserved environment key {key}",
+                    command.id
+                );
+            }
+        }
+        for (key, value) in &command.repo_env {
+            if command.env.contains_key(key)
+                || value.is_empty()
+                || value.contains(['\\', ':'])
+                || Path::new(value)
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                bail!(
+                    "CI command {} repository environment path must stay inside the repository",
                     command.id
                 );
             }
@@ -512,6 +528,7 @@ mod tests {
                 argv: vec!["cargo".into(), "test".into()],
                 cwd: String::new(),
                 env: BTreeMap::new(),
+                repo_env: BTreeMap::new(),
                 timeout_seconds: 60,
                 failure_kind: "product".into(),
                 report: "cargo-test".into(),

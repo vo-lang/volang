@@ -427,6 +427,84 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  browser:
+    name: browser
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          wasm: "true"
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            lang/crates/vo-web/package-lock.json
+            eng/browser/package-lock.json
+
+      - name: Setup browser contracts
+        uses: ./.github/actions/setup-browser
+
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Execute declared browser journeys
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task nightly-browser
+
+      - name: Upload Nightly browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-evidence-browser-${{ github.sha }}
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/cargo-timings
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload browser traces and results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-browser-diagnostics-${{ github.sha }}
+          path: |
+            target/ci/browser
+            target/ci/results
+          if-no-files-found: ignore
+          retention-days: 14
+
   required:
     name: nightly-required
     if: ${{ always() }}
@@ -438,6 +516,7 @@ jobs:
       - platform
       - bounded_fuzz
       - audits
+      - browser
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -450,8 +529,9 @@ jobs:
           PLATFORM: ${{ needs.platform.result }}
           BOUNDED_FUZZ: ${{ needs.bounded_fuzz.result }}
           AUDITS: ${{ needs.audits.result }}
+          BROWSER: ${{ needs.browser.result }}
         run: |
-          for result in "$PLAN" "$LANGUAGE_NATIVE" "$LANGUAGE_WASM" "$STRESS" "$PLATFORM" "$BOUNDED_FUZZ" "$AUDITS"; do
+          for result in "$PLAN" "$LANGUAGE_NATIVE" "$LANGUAGE_WASM" "$STRESS" "$PLATFORM" "$BOUNDED_FUZZ" "$AUDITS" "$BROWSER"; do
             if [ "$result" != "success" ]; then
               echo "Nightly job ended with: $result"
               exit 1

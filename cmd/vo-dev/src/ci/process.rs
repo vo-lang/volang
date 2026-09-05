@@ -96,6 +96,9 @@ pub(crate) fn run_command(
         .stdin(Stdio::null())
         .stdout(File::create(&stdout)?)
         .stderr(File::create(&stderr)?);
+    for (key, relative) in &spec.repo_env {
+        command.env(key, root.canonicalize()?.join(relative));
+    }
     let mut command = CommandWrap::from(command);
     #[cfg(unix)]
     command.wrap(ProcessGroup::leader());
@@ -333,6 +336,7 @@ mod tests {
                     ),
                 ]),
                 timeout_seconds: 40,
+                repo_env: BTreeMap::new(),
                 failure_kind: "product".into(),
                 report: String::new(),
                 stdout_result: String::new(),
@@ -366,6 +370,7 @@ mod tests {
                     .unwrap();
             }
             "nonzero" => std::process::exit(7),
+            "repo-env" => println!("{}", env_path_for_fixture()),
             "sleep" => std::thread::sleep(Duration::from_secs(60)),
             "descendant" => {
                 let lock = File::options()
@@ -410,6 +415,22 @@ mod tests {
             }
             _ => panic!("unknown process fixture"),
         }
+    }
+
+    fn env_path_for_fixture() -> String {
+        std::env::var("VO_CI_FIXTURE_REPO_PATH").unwrap()
+    }
+
+    #[test]
+    fn declared_repository_environment_uses_an_absolute_candidate_path() {
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec("repo-env");
+        spec.repo_env
+            .insert("VO_CI_FIXTURE_REPO_PATH".into(), "vo.work".into());
+        let result = fixture.run(&spec, &AtomicBool::new(false), Duration::from_secs(40));
+        assert!(result.passed());
+        let output = fs::read_to_string(fixture.0.join(result.stdout)).unwrap();
+        assert!(output.contains(&fixture.0.join("vo.work").to_string_lossy().to_string()));
     }
 
     #[test]

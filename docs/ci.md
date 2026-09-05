@@ -223,7 +223,8 @@ npm --prefix lang/crates/vo-web run test:ui-browser
 Browser scenarios use the exact Playwright version and Chromium revision in
 `eng/browser/package-lock.json`. The compatibility entry point preserves all
 eight original product scenarios and adds Studio startup and account-free
-canary regressions, with their assertion mapping in
+canary regressions plus a Nightly offline/recovery/resource-cleanup journey,
+with their assertion mapping in
 `eng/browser/coverage.json`. Each attempt retains failure traces, screenshots,
 console/network diagnostics, and HTML/JSON reports under `target/ci/browser`.
 Retries are disabled; `eng/browser/check-diagnostics.mjs` verifies controlled

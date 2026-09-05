@@ -586,6 +586,7 @@ mod tests {
                         ),
                     ]),
                     timeout_seconds: 40,
+                    repo_env: BTreeMap::new(),
                     failure_kind: "product".into(),
                     report: report.into(),
                     stdout_result: String::new(),
