@@ -2004,6 +2004,7 @@ fn capture_native_extension_input_state(
         package,
         workspace_discovery,
     )?;
+    let mut drift = Vec::new();
     for _ in 0..NATIVE_EXTENSION_BUILD_ATTEMPTS {
         let current = capture_native_extension_input_state_once(
             module_dir,
@@ -2018,9 +2019,19 @@ fn capture_native_extension_input_state(
         {
             return Ok(current);
         }
+        drift.push(format!(
+            "content={}, namespace={}, metadata={}",
+            current.fingerprint != previous.fingerprint,
+            current.generation != previous.generation,
+            current.cargo.metadata_digest != previous.cargo.metadata_digest,
+        ));
         previous = current;
     }
-    Err(native_extension_inputs_kept_changing_error(module_dir))
+    let mut error = native_extension_inputs_kept_changing_error(module_dir);
+    error
+        .detail
+        .push_str(&format!(" (capture drift: {})", drift.join("; ")));
+    Err(error)
 }
 
 fn capture_native_extension_input_state_once(
