@@ -93,6 +93,7 @@ jobs:
           path: |
             target/ci/evidence/*.evidence.json
             target/ci/executions
+            target/ci/test-runs
             target/cargo-timings
           if-no-files-found: error
           retention-days: 14
@@ -267,6 +268,7 @@ jobs:
           path: |
             target/ci/evidence/*.evidence.json
             target/ci/executions
+            target/ci/test-runs
             target/cargo-timings
           if-no-files-found: error
           retention-days: 14

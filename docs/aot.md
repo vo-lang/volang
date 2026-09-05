@@ -60,6 +60,11 @@ at runtime. `--kind=object` preserves this dependency for downstream linking.
 An embedding that needs dynamic compilation can build `vo-aot-runtime` with
 `--features toolchain-host` and select that archive through `--runtime=PATH`.
 The CLI links the system libraries needed by this host on macOS and Windows.
+`vo-dev test run --targets vm,native-aot-host --tags compiler-host` checks the
+three dynamic compilation cases against the opt-in runtime and compares them
+with VM execution. The core and compiler-host runtime variants run separately;
+combining them in one test invocation is rejected to preserve their contracts.
+Nightly runs both contracts on Linux, macOS, and Windows.
 This opt-in archive includes the compiler and installs its host before entry.
 Custom runtimes can implement the same C ABI initializer `int(void)`: install
 a `ToolchainHost`, return zero on success, and return a nonzero process exit

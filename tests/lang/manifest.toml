@@ -1348,11 +1348,12 @@ id = "bugs.2026-04-30-ptrnew-large-struct-slots"
 kind = "file"
 path = "cases/bugs/2026_04_30_ptrnew_large_struct_slots.vo"
 matrix = "default"
-tags = ["codegen", "regression", "struct", "smoke"]
+tags = ["compiler-host", "codegen", "regression", "struct", "smoke"]
 owner = "codegen"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
+reason = "embedded and browser hosts lack compiler externs; the core Native AOT runtime must reject a missing compiler host at link time"
 expect = "pass"
+expect_by_target = { native-aot = { fail = ["vo_aot_initialize_toolchain_host_v1"] } }
 
 [[case]]
 id = "bugs.2026-05-10-large-struct-return-slots"
@@ -11152,22 +11153,24 @@ id = "toolchain-compile-file-error"
 kind = "file"
 path = "cases/runtime/core/toolchain_compile_file_error.vo"
 matrix = "default"
-tags = ["runtime"]
+tags = ["compiler-host", "runtime"]
 owner = "runtime"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
+reason = "embedded and browser hosts lack compiler externs; the core Native AOT runtime must reject a missing compiler host at link time"
 expect = "pass"
+expect_by_target = { native-aot = { fail = ["vo_aot_initialize_toolchain_host_v1"] } }
 
 [[case]]
 id = "toolchain-handle-lifetime"
 kind = "file"
 path = "cases/runtime/core/toolchain_handle_lifetime.vo"
 matrix = "default"
-tags = ["runtime", "toolchain", "handle", "regression"]
+tags = ["compiler-host", "runtime", "toolchain", "handle", "regression"]
 owner = "runtime"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
+reason = "embedded and browser hosts lack compiler externs; the core Native AOT runtime must reject a missing compiler host at link time"
 expect = "pass"
+expect_by_target = { native-aot = { fail = ["vo_aot_initialize_toolchain_host_v1"] } }
 
 [[case]]
 id = "type-alias-method-chain"

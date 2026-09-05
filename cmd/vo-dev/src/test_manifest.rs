@@ -34,6 +34,8 @@ pub(crate) struct ManifestCase {
     #[serde(default)]
     pub(crate) blank: bool,
     pub(crate) expect: Option<toml::Value>,
+    #[serde(default)]
+    pub(crate) expect_by_target: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +66,7 @@ struct TestCatalogCase {
     timeout: BTreeMap<String, u64>,
     reason: Option<String>,
     expect: CaseExpect,
+    expect_by_target: BTreeMap<String, CaseExpect>,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,7 +151,25 @@ pub(crate) fn manifest_case_path(
 }
 
 pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
-    let Some(value) = &case.expect else {
+    parse_expect_value(case, case.expect.as_ref())
+}
+
+pub(crate) fn parse_target_expect(case: &ManifestCase, target: &str) -> Result<CaseExpect> {
+    parse_expect_value(
+        case,
+        case.expect_by_target.get(target).or(case.expect.as_ref()),
+    )
+}
+
+fn target_expectations(case: &ManifestCase) -> Result<BTreeMap<String, CaseExpect>> {
+    case.expect_by_target
+        .keys()
+        .map(|target| Ok((target.clone(), parse_target_expect(case, target)?)))
+        .collect()
+}
+
+fn parse_expect_value(case: &ManifestCase, value: Option<&toml::Value>) -> Result<CaseExpect> {
+    let Some(value) = value else {
         return Ok(CaseExpect {
             kind: "pass".to_string(),
             patterns: Vec::new(),
@@ -303,10 +324,62 @@ fn validate_case_path_target_ownership(
 }
 
 fn target_supports_expected_compile_failure(test_config: &TestConfig, target_name: &str) -> bool {
-    test_config
-        .targets
-        .get(target_name)
-        .is_some_and(|target| matches!(target.kind.as_str(), "compile" | "wasm"))
+    test_config.targets.get(target_name).is_some_and(|target| {
+        matches!(target.kind.as_str(), "compile" | "wasm") || target.backend == "native-aot"
+    })
+}
+
+pub(crate) fn validate_target_expectations(case: &ManifestCase, config: &TestConfig) -> Result<()> {
+    if case.expect_by_target.is_empty() {
+        return Ok(());
+    }
+    if parse_case_expect(case)?.kind != "pass"
+        || !has_manifest_reason(case)
+        || case
+            .owner
+            .as_deref()
+            .is_none_or(|owner| owner.trim().is_empty())
+    {
+        bail!(
+            "case {} target build rejections require a passing base, owner and reason",
+            case.id
+        );
+    }
+    let resolved = resolved_case_targets(case, config)?;
+    let resolved = resolved.iter().map(String::as_str).collect::<HashSet<_>>();
+    for name in case.expect_by_target.keys() {
+        let target = config
+            .targets
+            .get(name)
+            .ok_or_else(|| anyhow!("case {} rejects unknown target {name}", case.id))?;
+        if !target_applies_to_resolved_case(name, target, &resolved)
+            || has_target_name(&case.skip, name)
+            || (target.inherit_compatible_skips
+                && target
+                    .compatible_with
+                    .as_deref()
+                    .is_some_and(|compatible| has_target_name(&case.skip, compatible)))
+            || !target_supports_expected_compile_failure(config, name)
+        {
+            bail!(
+                "case {} build rejection target {name} is unavailable or cannot check compilation",
+                case.id
+            );
+        }
+        let expect = parse_target_expect(case, name)?;
+        if expect.kind != "fail"
+            || expect.patterns.is_empty()
+            || expect.patterns.iter().any(|pattern| {
+                pattern.trim().is_empty() || pattern.contains("TODO_EXPECTED_DIAGNOSTIC")
+            })
+        {
+            bail!(
+                "case {} target {name} requires explicit build rejection diagnostics",
+                case.id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn case_uses_only_compile_failure_targets(
@@ -412,6 +485,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
         if !ids.insert(case.id.clone()) {
             bail!("duplicate test case id: {}", case.id);
         }
+        validate_target_expectations(case, &test_config)?;
         validate_manifest_case_shape(case)?;
         validate_manifest_case_metadata(case, &test_config, strict)?;
         if case.kind != "file" && case.kind != "project" && case.kind != "zip" {
@@ -719,6 +793,7 @@ pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Resu
             timeout: case.timeout.clone(),
             reason: case.reason.clone(),
             expect: parse_case_expect(case)?,
+            expect_by_target: target_expectations(case)?,
         });
     }
 
@@ -856,6 +931,13 @@ pub(crate) fn explain_test_case(
     if !case.timeout.is_empty() {
         reasons.push(format!("target timeouts {:?}", case.timeout));
     }
+    for (target, expectation) in target_expectations(case)? {
+        reasons.push(format!(
+            "target {target} must reject the build with {:?} because {}",
+            expectation.patterns,
+            case.reason.as_deref().unwrap_or_default()
+        ));
+    }
     if expect.kind == "fail" {
         reasons.push(format!(
             "expected compile failure because {}",
@@ -876,6 +958,7 @@ pub(crate) fn explain_test_case(
             skip: case.skip.clone(),
             timeout: case.timeout.clone(),
             reason: case.reason.clone(),
+            expect_by_target: target_expectations(case)?,
             expect,
         },
         selected_targets,
@@ -1498,6 +1581,7 @@ mod tests {
                     name: name.to_string(),
                     kind: kind.to_string(),
                     backend: name.to_string(),
+                    native_aot_runtime_features: Vec::new(),
                     compatible_with: None,
                     inherit_compatible_skips: true,
                     env: BTreeMap::new(),
@@ -1552,6 +1636,7 @@ mod tests {
                     name: name.to_string(),
                     kind: "native".to_string(),
                     backend: backend.to_string(),
+                    native_aot_runtime_features: Vec::new(),
                     compatible_with: None,
                     inherit_compatible_skips: true,
                     env,
@@ -1609,6 +1694,7 @@ mod tests {
             reason: reason.map(str::to_string),
             zip_root: None,
             blank: false,
+            expect_by_target: BTreeMap::new(),
             expect: Some(toml::Value::String("pass".to_string())),
         }
     }
@@ -1645,6 +1731,54 @@ mod tests {
             normalize_manifest_case_path("cases\\dyn\\typed_array.vo"),
             "cases/dyn/typed_array.vo"
         );
+    }
+
+    #[test]
+    fn target_build_rejections_preserve_the_passing_host_contract() {
+        let mut config = compile_failure_test_config();
+        let mut aot = config.targets["vm"].clone();
+        aot.name = "native-aot".into();
+        aot.backend = "native-aot".into();
+        aot.compatible_with = Some("vm".into());
+        config.targets.insert(aot.name.clone(), aot);
+        let mut case = path_case(
+            "host",
+            "cases/host.vo",
+            "native",
+            &[],
+            Some("compiler host required"),
+        );
+        case.expect_by_target.insert(
+            "native-aot".into(),
+            toml::Value::Table(toml::map::Map::from_iter([(
+                "fail".into(),
+                toml::Value::String("missing_host_v1".into()),
+            )])),
+        );
+        validate_target_expectations(&case, &config).unwrap();
+        assert_eq!(parse_target_expect(&case, "vm").unwrap().kind, "pass");
+        assert_eq!(
+            parse_target_expect(&case, "native-aot").unwrap().patterns,
+            ["missing_host_v1"]
+        );
+        for mutate in [
+            |case: &mut ManifestCase| case.owner = None,
+            |case: &mut ManifestCase| case.reason = None,
+            |case: &mut ManifestCase| case.skip.push("native-aot".into()),
+            |case: &mut ManifestCase| case.skip.push("vm".into()),
+            |case: &mut ManifestCase| {
+                case.expect_by_target
+                    .insert("unknown".into(), toml::Value::String("pass".into()));
+            },
+            |case: &mut ManifestCase| {
+                case.expect_by_target
+                    .insert("native-aot".into(), toml::Value::String("pass".into()));
+            },
+        ] {
+            let mut invalid = case.clone();
+            mutate(&mut invalid);
+            assert!(validate_target_expectations(&invalid, &config).is_err());
+        }
     }
 
     #[test]
@@ -1710,6 +1844,7 @@ mod tests {
             reason: Some("target-specific diagnostic".to_string()),
             zip_root: None,
             blank: false,
+            expect_by_target: BTreeMap::new(),
             expect: Some(toml::Value::Table(toml::map::Map::from_iter([(
                 "fail".to_string(),
                 toml::Value::Array(vec![toml::Value::String("diagnostic".to_string())]),
@@ -1745,6 +1880,7 @@ mod tests {
             name: "wasm-aot".to_string(),
             kind: "wasm".to_string(),
             backend: "wasm-aot".to_string(),
+            native_aot_runtime_features: Vec::new(),
             compatible_with: Some("wasm".to_string()),
             inherit_compatible_skips: false,
             env: BTreeMap::new(),
@@ -1830,6 +1966,7 @@ mod tests {
             reason: None,
             zip_root: None,
             blank: false,
+            expect_by_target: BTreeMap::new(),
             expect: Some(toml::Value::Table(expect)),
         }
     }

@@ -252,51 +252,22 @@ jobs:
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
 
-      - name: Exercise Native AOT delivery
-        if: matrix.shard == 'smoke' || matrix.shard == '1/2'
-        shell: bash
-        run: |
-          cargo build --locked -p vo -p vo-aot-runtime -p vo-ui-aot-runtime-native --no-default-features
-          ./target/debug/vo build examples/basics/hello.vo \
-            --runtime=target/debug/libvo_aot_runtime.a \
-            --no-cache \
-            -o target/hello-aot
-          test "$(./target/hello-aot)" = "Hello, hello!"
-
-      - name: Run pull request language targets
-        if: matrix.shard == 'smoke'
-        shell: bash
-        run: |
-          mkdir -p target/ci/results
-          ./target/debug/vo-dev test run \
-            --suite lang \
-            --tags smoke \
-            --targets native,gc-vm,gc-osr,compile \
-            --format json > "target/ci/results/${{ matrix.task }}.json"
-
-      - name: Run native language shard
-        if: matrix.shard != 'smoke'
-        shell: bash
-        run: |
-          mkdir -p target/ci/results
-          ./target/debug/vo-dev test run \
-            --suite lang \
-            --targets native,gc,gc-osr,embed,compile \
-            --shard '${{ matrix.shard }}' \
-            --format json > "target/ci/results/${{ matrix.task }}.json"
-
-      - name: Record language evidence
+      - name: Execute declared language task
         run: >-
-          ./target/debug/vo-dev ci record
+          ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
-          --output "target/ci/evidence/${{ matrix.task }}.evidence.json"
 
-      - name: Upload language evidence
+      - name: Upload language evidence and diagnostics
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-evidence-${{ matrix.task }}-${{ github.sha }}
-          path: target/ci/evidence/*.evidence.json
+          path: |
+            target/ci/evidence/*.evidence.json
+            target/ci/executions
+            target/ci/test-runs
+            target/cargo-timings
           if-no-files-found: error
           retention-days: 14
 

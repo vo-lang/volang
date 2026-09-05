@@ -6,9 +6,12 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Command};
+
+mod native_aot;
+mod subprocess;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_WORKERS: usize = 8;
@@ -189,6 +192,7 @@ struct PlanResult {
     error: String,
     expect: Expect,
     baseline: Option<String>,
+    artifacts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -283,7 +287,7 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                         Some(result.error.clone())
                     },
                     baseline: result.baseline.clone(),
-                    artifacts: Vec::new(),
+                    artifacts: result.artifacts.clone(),
                 })
                 .collect(),
         };
@@ -341,7 +345,9 @@ fn validate_differential_results(results: &mut [PlanResult]) {
     let mut failures = Vec::new();
     for case_results in by_case.values() {
         for &target_index in case_results.values() {
-            if results[target_index].backend != "jit" {
+            if !matches!(results[target_index].backend.as_str(), "jit" | "native-aot")
+                || results[target_index].expect.kind == "fail"
+            {
                 continue;
             }
             let baseline_index = case_results
@@ -419,6 +425,13 @@ fn differential_mismatch(baseline: &PlanResult, candidate: &PlanResult) -> Optio
             summarize_text(&candidate.stdout)
         ));
     }
+    if candidate.backend == "native-aot" && baseline.stderr != candidate.stderr {
+        parts.push(format!(
+            "stderr expected {:?}, got {:?}",
+            summarize_text(&baseline.stderr),
+            summarize_text(&candidate.stderr)
+        ));
+    }
     let baseline_error = baseline.error.trim();
     let candidate_error = candidate.error.trim();
     if baseline_error != candidate_error {
@@ -454,16 +467,70 @@ fn summarize_text(text: &str) -> String {
     }
 }
 
+// Linking debug runtimes has a much larger working set than interpreting a
+// case. Keep its concurrency bounded independently of the language worker count.
+struct LinkSlots {
+    active: Mutex<usize>,
+    available: Condvar,
+}
+
+struct LinkPermit<'a>(&'a LinkSlots);
+
+impl LinkSlots {
+    fn acquire(&self) -> LinkPermit<'_> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *active >= 2 {
+            active = self
+                .available
+                .wait(active)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        *active += 1;
+        LinkPermit(self)
+    }
+}
+
+impl Drop for LinkPermit<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) -= 1;
+        self.0.available.notify_one();
+    }
+}
+
 fn run_jobs_parallel(
     jobs: Vec<TestJob>,
     workers: usize,
     show_progress: bool,
 ) -> Result<Vec<PlanResult>, Box<dyn std::error::Error>> {
+    let run_dir = env::current_dir()?
+        .join("target/ci/test-runs")
+        .join(format!(
+            "{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
+        ));
+    fs::create_dir_all(&run_dir)?;
+    if jobs.iter().any(|job| job.backend == "native-aot") {
+        native_aot::prepare(&run_dir)?;
+    }
     let jobs = Arc::new(jobs);
     let groups = Arc::new(case_job_groups(&jobs));
     let total = jobs.len();
     let next = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel();
+    let link_slots = Arc::new(LinkSlots {
+        active: Mutex::new(0),
+        available: Condvar::new(),
+    });
     let worker_count = workers.min(groups.len().max(1));
 
     for _ in 0..worker_count {
@@ -471,6 +538,8 @@ fn run_jobs_parallel(
         let groups = Arc::clone(&groups);
         let next = Arc::clone(&next);
         let tx = tx.clone();
+        let run_dir = run_dir.clone();
+        let link_slots = Arc::clone(&link_slots);
         std::thread::spawn(move || loop {
             let group_index = next.fetch_add(1, Ordering::SeqCst);
             let Some(group) = groups.get(group_index) else {
@@ -478,7 +547,8 @@ fn run_jobs_parallel(
             };
             for &index in group {
                 let job = &jobs[index];
-                let result = run_job_subprocess(job).unwrap_or_else(|err| PlanResult {
+                let _link_permit = (job.backend == "native-aot").then(|| link_slots.acquire());
+                let result = run_job_subprocess(job, &run_dir).unwrap_or_else(|err| PlanResult {
                     id: job.id.clone(),
                     case_id: job.case_id.clone(),
                     kind: job.kind.clone(),
@@ -496,6 +566,7 @@ fn run_jobs_parallel(
                     error: err.to_string(),
                     expect: job.expect.clone(),
                     baseline: None,
+                    artifacts: Vec::new(),
                 });
                 if tx.send((index, result)).is_err() {
                     return;
@@ -553,6 +624,7 @@ fn run_jobs_parallel(
                     error: "worker exited without reporting a result".to_string(),
                     expect: job.expect.clone(),
                     baseline: None,
+                    artifacts: Vec::new(),
                 }
             })
         })
@@ -582,59 +654,50 @@ fn case_job_groups(jobs: &[TestJob]) -> Vec<Vec<usize>> {
     groups
 }
 
-fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let path = env::temp_dir().join(format!(
-        "volang-test-job-{}-{}.json",
-        process::id(),
-        stable_id(&job.id)
-    ));
+fn run_job_subprocess(
+    job: &TestJob,
+    run_dir: &std::path::Path,
+) -> Result<PlanResult, Box<dyn std::error::Error>> {
+    use sha2::{Digest, Sha256};
+    let dir = run_dir.join(format!("{:x}", Sha256::digest(job.id.as_bytes())));
+    fs::create_dir(&dir)?;
+    let path = dir.join("job.json");
     fs::write(&path, serde_json::to_vec(job)?)?;
-    let child = Command::new(env::current_exe()?)
+    let mut command = Command::new(env::current_exe()?);
+    command
         .arg("run-plan-job")
         .arg(&path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(err) => {
-            let _ = fs::remove_file(path);
-            return Err(err.into());
+        .env("VO_TEST_ARTIFACT_DIR", &dir);
+    let output = subprocess::run(
+        command,
+        &dir,
+        "run",
+        Duration::from_secs(job.timeout_sec.max(1)),
+        true,
+    )?;
+    let receipt_error =
+        if job.backend == "native-aot" && output.status.success() && output.error.is_none() {
+            native_aot::validate_receipt(&dir, job)
+                .err()
+                .map(|error| error.to_string())
+        } else {
+            None
+        };
+    let passed = output.status.success() && output.error.is_none() && receipt_error.is_none();
+    let error = output.error.or(receipt_error).unwrap_or_else(|| {
+        if output.status.success() {
+            String::new()
+        } else if output.stderr.trim().is_empty() {
+            format!("worker exited with {}", output.status)
+        } else {
+            output.stderr.trim().to_string()
         }
-    };
-    let timeout = Duration::from_secs(job.timeout_sec.max(1));
-    let timed_out;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                timed_out = false;
-                break;
-            }
-            Ok(None) => {}
-            Err(err) => {
-                let _ = fs::remove_file(path);
-                return Err(err.into());
-            }
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            timed_out = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let output = child.wait_with_output();
-    let _ = fs::remove_file(path);
-    let output = output?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let error = if timed_out {
-        format!("timed out after {}s", job.timeout_sec)
-    } else if output.status.success() {
-        String::new()
+    });
+    let artifacts = if job.backend == "native-aot" || !passed {
+        vec![dir.to_string_lossy().into_owned()]
     } else {
-        stderr.trim().to_string()
+        fs::remove_dir_all(&dir)?;
+        Vec::new()
     };
     Ok(PlanResult {
         id: job.id.clone(),
@@ -647,21 +710,15 @@ fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::E
         matrix: job.matrix.clone(),
         tags: job.tags.clone(),
         owner: job.owner.clone(),
-        passed: output.status.success() && !timed_out,
-        elapsed_ms: start.elapsed().as_millis(),
-        stdout,
-        stderr,
+        passed,
+        elapsed_ms: output.elapsed_ms,
+        stdout: output.stdout,
+        stderr: output.stderr,
         error,
         expect: job.expect.clone(),
         baseline: None,
+        artifacts,
     })
-}
-
-fn stable_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect()
 }
 
 fn run_plan_job(path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -751,14 +808,14 @@ fn restore_job_env(saved_env: Vec<(String, Option<String>)>) {
 
 fn job_env_restore_keys(job: &TestJob) -> Vec<String> {
     let mut keys: Vec<String> = job.env.keys().cloned().collect();
-    if job.backend == "jit" {
+    if matches!(job.backend.as_str(), "jit" | "native-aot") {
         keys.extend(
             RUNNER_OWNED_JIT_ENV_KEYS
                 .iter()
                 .map(|key| (*key).to_string()),
         );
     }
-    if matches!(job.backend.as_str(), "vm" | "jit") {
+    if matches!(job.backend.as_str(), "vm" | "jit" | "native-aot") {
         keys.extend(
             RUNNER_OWNED_GC_ENV_KEYS
                 .iter()
@@ -771,6 +828,9 @@ fn job_env_restore_keys(job: &TestJob) -> Vec<String> {
 }
 
 fn run_job_inner(job: &TestJob) -> Result<(), String> {
+    if job.backend == "native-aot" {
+        return native_aot::run(job).map_err(|error| error.to_string());
+    }
     let compiled = match vo_engine::compile(&job.path) {
         Ok(compiled) => compiled,
         Err(err) => {
@@ -985,6 +1045,7 @@ mod tests {
                 jit_loop_entries_min: None,
             },
             baseline: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -1280,6 +1341,34 @@ mod tests {
         assert!(!results[1].passed);
         assert_eq!(results[1].baseline.as_deref(), Some("reference"));
         assert_eq!(results[1].error, "runtime error: JIT panic");
+    }
+
+    #[test]
+    fn native_aot_requires_vm_observable_equivalence() {
+        let mut results = vec![
+            result("case", "vm", "vm", true, "expected\n", ""),
+            result("case", "native-aot", "native-aot", true, "expected\n", ""),
+        ];
+        validate_differential_results(&mut results);
+        assert!(results[1].passed);
+        assert_eq!(results[1].baseline.as_deref(), Some("vm"));
+        results[1].stderr = "unexpected diagnostic".into();
+        validate_differential_results(&mut results);
+        assert!(!results[1].passed);
+        assert!(results[1].error.contains("stderr expected"));
+    }
+
+    #[test]
+    fn an_expected_build_rejection_does_not_claim_vm_execution_equivalence() {
+        let mut results = vec![
+            result("case", "vm", "vm", true, "executed\n", ""),
+            result("case", "native-aot", "native-aot", true, "", ""),
+        ];
+        results[1].expect.kind = "fail".into();
+        results[1].expect.patterns = vec!["missing host".into()];
+        validate_differential_results(&mut results);
+        assert!(results[1].passed);
+        assert!(results[1].baseline.is_none());
     }
 
     #[test]

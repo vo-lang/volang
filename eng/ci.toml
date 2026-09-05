@@ -165,6 +165,10 @@ evidence_kind = "rust-quality"
 
 [[task]]
 id = "language-native-smoke"
+commands = ["language-native-smoke-run"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/test-runs"]
 tier = "feedback"
 workflow_job = "language_native"
 runner = "ubuntu-24.04"
@@ -191,6 +195,10 @@ results = ["target/ci/results/language-native-smoke.json"]
 
 [[task]]
 id = "language-native-1"
+commands = ["language-native-1-run", "language-native-aot-smoke-run"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/test-runs"]
 tier = "certification"
 workflow_job = "language_native"
 runner = "ubuntu-24.04"
@@ -202,10 +210,13 @@ capabilities = ["vm", "jit", "gc", "native-aot", "compile", "embed"]
 timeout_minutes = 35
 budget_minutes = 22
 evidence_kind = "language-test"
-results = ["target/ci/results/language-native-1.json"]
+results = ["target/ci/results/language-native-1.json", "target/ci/results/language-native-aot-smoke.json"]
 
 [[task]]
 id = "language-native-2"
+commands = ["language-native-2-run"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "certification"
 workflow_job = "language_native"
 runner = "ubuntu-24.04"
@@ -213,7 +224,7 @@ depends_on = ["contracts"]
 owners = ["language"]
 impact = ["*"]
 platforms = ["linux"]
-capabilities = ["vm", "jit", "gc", "native-aot", "compile", "embed"]
+capabilities = ["vm", "jit", "gc", "compile", "embed"]
 timeout_minutes = 35
 budget_minutes = 22
 evidence_kind = "language-test"
@@ -360,7 +371,8 @@ artifacts = ["target/ci/artifacts/site"]
 
 [[task]]
 id = "nightly-language-native"
-commands = ["nightly-language-native-run"]
+artifacts = ["target/ci/test-runs"]
+commands = ["nightly-language-native-run", "nightly-native-aot-host-run"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "exhaustive"
@@ -369,11 +381,11 @@ runner = "ubuntu-24.04"
 owners = ["language"]
 impact = ["*"]
 platforms = ["linux"]
-capabilities = ["release", "language", "native"]
+capabilities = ["native-aot", "compiler-host", "release", "language", "native"]
 timeout_minutes = 90
 budget_minutes = 45
 evidence_kind = "nightly-test"
-results = ["target/ci/results/nightly-language-native.json"]
+results = ["target/ci/results/nightly-language-native.json", "target/ci/results/nightly-native-aot-host.json"]
 
 [[task]]
 id = "nightly-language-wasm"
@@ -462,8 +474,9 @@ results = ["target/ci/results/nightly-stress-scheduler.json"]
 
 [[task]]
 id = "nightly-platform-macos"
-commands = ["nightly-platform-macos-run", "nightly-workspace-tests"]
+commands = ["nightly-platform-macos-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
+artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "platform"
@@ -471,16 +484,17 @@ runner = "macos-15"
 owners = ["language", "ui"]
 impact = ["*"]
 platforms = ["macos"]
-capabilities = ["release", "platform"]
+capabilities = ["native-aot", "compiler-host", "release", "platform"]
 timeout_minutes = 60
 budget_minutes = 40
 evidence_kind = "nightly-platform"
-results = ["target/ci/results/nightly-platform-macos.json"]
+results = ["target/ci/results/nightly-platform-macos.json", "target/ci/results/nightly-native-aot-host.json"]
 
 [[task]]
 id = "nightly-platform-windows"
-commands = ["nightly-platform-windows-run", "nightly-workspace-tests"]
+commands = ["nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
+artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
 tier = "exhaustive"
 workflow_job = "platform"
@@ -488,11 +502,11 @@ runner = "windows-2025"
 owners = ["language", "ui"]
 impact = ["*"]
 platforms = ["windows"]
-capabilities = ["release", "platform"]
+capabilities = ["native-aot", "compiler-host", "release", "platform"]
 timeout_minutes = 60
 budget_minutes = 40
 evidence_kind = "nightly-platform"
-results = ["target/ci/results/nightly-platform-windows.json"]
+results = ["target/ci/results/nightly-platform-windows.json", "target/ci/results/nightly-native-aot-host.json"]
 
 [[task]]
 id = "nightly-fuzz-app-protocol"
@@ -606,7 +620,7 @@ failure_kind = "dependency-policy"
 
 [[command]]
 id = "nightly-language-native-run"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,jit,osr,gc-vm,gc-jit,gc-osr,nostd,compile", "--release", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,jit,osr,native-aot,gc-vm,gc-jit,gc-osr,nostd,compile", "--release", "--format", "json"]
 timeout_seconds = 5100
 failure_kind = "product"
 stdout_result = "target/ci/results/nightly-language-native.json"
@@ -648,14 +662,14 @@ stdout_result = "target/ci/results/nightly-stress-scheduler.json"
 
 [[command]]
 id = "nightly-platform-macos-run"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,gc-vm,gc-osr", "--release", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,native-aot,gc-vm,gc-osr", "--release", "--format", "json"]
 timeout_seconds = 900
 failure_kind = "product"
 stdout_result = "target/ci/results/nightly-platform-macos.json"
 
 [[command]]
 id = "nightly-platform-windows-run"
-argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,gc-vm,gc-osr", "--release", "--format", "json"]
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,native-aot,gc-vm,gc-osr", "--release", "--format", "json"]
 timeout_seconds = 900
 failure_kind = "product"
 stdout_result = "target/ci/results/nightly-platform-windows.json"
@@ -805,3 +819,38 @@ id = "nightly-studio-lifecycle"
 argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-lifecycle-smoke", "--timeout-ms", "30000", "--output", "target/ci/results/nightly-studio-lifecycle.json"]
 timeout_seconds = 900
 failure_kind = "product"
+
+[[command]]
+id = "language-native-smoke-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,native-aot,gc-vm,gc-osr,compile", "--tags", "smoke", "--format", "json"]
+timeout_seconds = 1100
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-smoke.json"
+
+[[command]]
+id = "language-native-1-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,gc,gc-osr,embed,compile", "--shard", "1/2", "--format", "json"]
+timeout_seconds = 1800
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-1.json"
+
+[[command]]
+id = "language-native-2-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,gc,gc-osr,embed,compile", "--shard", "2/2", "--format", "json"]
+timeout_seconds = 1800
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-2.json"
+
+[[command]]
+id = "language-native-aot-smoke-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,native-aot", "--tags", "smoke", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-aot-smoke.json"
+
+[[command]]
+id = "nightly-native-aot-host-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,native-aot-host", "--tags", "compiler-host", "--release", "--jobs", "2", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-native-aot-host.json"

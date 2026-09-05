@@ -56,6 +56,25 @@ env = { VOWORK = "off" }
 default_timeout_sec = 20
 
 [[target]]
+name = "native-aot"
+kind = "native"
+backend = "native-aot"
+compatible_with = "vm"
+inherit_compatible_skips = true
+env = { VOWORK = "off" }
+default_timeout_sec = 60
+
+[[target]]
+name = "native-aot-host"
+kind = "native"
+backend = "native-aot"
+native_aot_runtime_features = ["toolchain-host"]
+compatible_with = "vm"
+inherit_compatible_skips = true
+env = { VOWORK = "off" }
+default_timeout_sec = 60
+
+[[target]]
 name = "jit"
 kind = "native"
 backend = "jit"

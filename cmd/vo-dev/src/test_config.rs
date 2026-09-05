@@ -39,6 +39,8 @@ pub(crate) struct TestTarget {
     pub(crate) kind: String,
     pub(crate) backend: String,
     #[serde(default)]
+    pub(crate) native_aot_runtime_features: Vec<String>,
+    #[serde(default)]
     pub(crate) compatible_with: Option<String>,
     #[serde(default = "default_true")]
     pub(crate) inherit_compatible_skips: bool,
@@ -93,6 +95,16 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
         if target.backend.trim().is_empty() {
             bail!(
                 "eng/tests.toml target {} backend cannot be empty",
+                target.name
+            );
+        }
+        if !target.native_aot_runtime_features.is_empty()
+            && (target.kind != "native"
+                || target.backend != "native-aot"
+                || target.native_aot_runtime_features != ["toolchain-host"])
+        {
+            bail!(
+                "eng/tests.toml target {} may enable only toolchain-host on the native-aot backend",
                 target.name
             );
         }

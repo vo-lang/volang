@@ -1,7 +1,7 @@
 use crate::test_config::{load_test_config, resolve_target_specs, TestTarget};
 use crate::test_manifest::{
-    has_target_name, load_manifest, manifest_case_path, parse_case_expect, resolved_case_targets,
-    CaseExpect, ManifestCase, ManifestFile,
+    has_target_name, load_manifest, manifest_case_path, parse_case_expect, parse_target_expect,
+    resolved_case_targets, validate_target_expectations, CaseExpect, ManifestCase, ManifestFile,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
@@ -338,6 +338,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
     let mut jobs = Vec::new();
     let mut matched_cases = 0usize;
     for case in &manifest.cases {
+        validate_target_expectations(case, &test_config)?;
         if !opts.paths.is_empty() && !case_matches_path_filters(root, &manifest, case, &opts.paths)?
         {
             continue;
@@ -350,9 +351,9 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
         if expect.kind == "fail" {
             let case_targets = resolved_case_targets(case, &test_config)?;
             if requested.iter().any(|name| {
-                targets
-                    .get(name)
-                    .is_some_and(target_runs_native_compile_fail)
+                targets.get(name).is_some_and(|target| {
+                    target_runs_native_compile_fail(target) && target.backend != "native-aot"
+                })
             }) {
                 let target = targets
                     .get("compile")
@@ -373,7 +374,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 let target = targets
                     .get(target_name)
                     .ok_or_else(|| anyhow!("unknown test target: {target_name}"))?;
-                if target.kind != "wasm" {
+                if target.kind != "wasm" && target.backend != "native-aot" {
                     continue;
                 }
                 if !compile_fail_enabled_for_target(&case_targets, target) {
@@ -401,6 +402,25 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 .get(target_name)
                 .ok_or_else(|| anyhow!("unknown test target: {target_name}"))?;
             if target_is_skipped(&case.skip, target) {
+                continue;
+            }
+            let expect = parse_target_expect(case, target_name)?;
+            if expect.kind == "fail" {
+                let mut reasons =
+                    selection_reasons_for_case(case, opts, &case_targets, target_name);
+                reasons.push(format!(
+                    "target build rejection: {}",
+                    case.reason.as_deref().unwrap_or_default()
+                ));
+                jobs.push(compile_fail_job(
+                    root,
+                    &manifest,
+                    case,
+                    target,
+                    &expect,
+                    &format!("{target_name}-compile"),
+                    &reasons,
+                )?);
                 continue;
             }
             jobs.push(TestJob {
@@ -982,6 +1002,61 @@ mod tests {
     }
 
     #[test]
+    fn native_aot_plans_real_execution_and_independent_build_rejections() {
+        let root = workspace_root();
+        let opts = TestArgs::parse(
+            &root,
+            vec![
+                "--targets".into(),
+                "native-aot".into(),
+                "--tags".into(),
+                "smoke".into(),
+            ],
+        )
+        .unwrap();
+        let plan = build_plan(&root, &opts).unwrap();
+        assert!(!plan.jobs.is_empty());
+        assert!(plan
+            .jobs
+            .iter()
+            .all(|job| job.backend == "native-aot" && job.target == "native-aot"));
+        assert!(plan.jobs.iter().any(|job| job.expect["kind"] == "pass"));
+        assert!(plan
+            .jobs
+            .iter()
+            .any(|job| job.expect["kind"] == "fail" && job.id.ends_with("::native-aot-compile")));
+        let compiler_host = plan
+            .jobs
+            .iter()
+            .find(|job| job.case_id == "bugs.2026-04-30-ptrnew-large-struct-slots")
+            .unwrap();
+        assert_eq!(
+            compiler_host.expect["patterns"],
+            json!(["vo_aot_initialize_toolchain_host_v1"])
+        );
+        assert!(compiler_host
+            .selection_reasons
+            .iter()
+            .any(|reason| reason.starts_with("target build rejection:")));
+        let host_opts = TestArgs::parse(
+            &root,
+            vec![
+                "--targets".into(),
+                "native-aot-host".into(),
+                "--tags".into(),
+                "compiler-host".into(),
+            ],
+        )
+        .unwrap();
+        let host_plan = build_plan(&root, &host_opts).unwrap();
+        assert_eq!(host_plan.jobs.len(), 3);
+        assert!(host_plan
+            .jobs
+            .iter()
+            .all(|job| job.expect["kind"] == "pass"));
+    }
+
+    #[test]
     fn native_compile_failure_selection_uses_target_kind() {
         let root = workspace_root();
         let config = load_test_config(&root).expect("load test target config");
@@ -1003,6 +1078,7 @@ mod tests {
             name: "wasm-aot".to_string(),
             kind: "wasm".to_string(),
             backend: "core-wasm-aot".to_string(),
+            native_aot_runtime_features: Vec::new(),
             compatible_with: Some("wasm".to_string()),
             inherit_compatible_skips: true,
             env: BTreeMap::new(),

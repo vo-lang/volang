@@ -17,3 +17,5 @@ path = "src/main.rs"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 vo-engine = { path = "../../lang/crates/vo-engine" }
+process-wrap = { version = "10.0.0", default-features = false, features = ["std", "process-group", "job-object", "creation-flags"] }
+sha2 = "0.10"

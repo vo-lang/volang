@@ -111,6 +111,7 @@ fn run_native_tests_text(root: &Path, opts: &TestArgs, run_plan_targets: &[Strin
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
     let mut command = vo_test_command(root, opts.release);
+    prepare_native_aot_command(root, opts.release, &plan, &mut command)?;
     command.arg("run-plan");
     command.arg(&plan_path);
     if let Some(jobs) = opts.jobs {
@@ -172,6 +173,7 @@ fn run_native_tests_json(
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
     let mut command = vo_test_command(root, opts.release);
+    prepare_native_aot_command(root, opts.release, &plan, &mut command)?;
     command.arg("run-plan");
     command.arg(&plan_path);
     if let Some(jobs) = opts.jobs {
@@ -506,13 +508,129 @@ fn check_localhost_loopback() -> Result<()> {
     Ok(())
 }
 
+fn prepare_native_aot_command(
+    root: &Path,
+    release: bool,
+    plan: &TestPlan,
+    runner: &mut Command,
+) -> Result<()> {
+    if !plan.jobs.iter().any(|job| job.backend == "native-aot") {
+        return Ok(());
+    }
+    let features = native_aot_runtime_features(root, plan)?;
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(root)
+        .args([
+            "build",
+            "--locked",
+            "--timings",
+            "--message-format=json",
+            "--no-default-features",
+            "-p",
+            "vo",
+            "-p",
+            "vo-aot-runtime",
+            "-p",
+            "vo-test",
+        ])
+        .stderr(std::process::Stdio::inherit());
+    if release {
+        command.arg("--release");
+    }
+    if !features.is_empty() {
+        command.arg("--features").arg(
+            features
+                .iter()
+                .map(|feature| format!("vo-aot-runtime/{feature}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    let output = command
+        .output()
+        .context("could not build shared Native AOT tools")?;
+    if !output.status.success() {
+        bail!("shared Native AOT tools build failed");
+    }
+    let mut compiler = None;
+    let mut runtime = None;
+    let mut test_runner = None;
+    for line in output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let artifact: serde_json::Value = serde_json::from_slice(line)?;
+        if artifact["reason"] != "compiler-artifact" {
+            continue;
+        }
+        match artifact["target"]["name"].as_str() {
+            Some("vo") => compiler = artifact["executable"].as_str().map(PathBuf::from),
+            Some("vo-test") => test_runner = artifact["executable"].as_str().map(PathBuf::from),
+            Some("vo_aot_runtime") => {
+                runtime = artifact["filenames"]
+                    .as_array()
+                    .and_then(|files| {
+                        files
+                            .iter()
+                            .filter_map(|file| file.as_str())
+                            .find(|file| file.ends_with(".a") || file.ends_with(".lib"))
+                    })
+                    .map(PathBuf::from);
+            }
+            _ => {}
+        }
+    }
+    // The compiler, runtime and runner share one Cargo feature resolution.
+    // Use the actual artifact instead of a timestamp-based sibling guess or
+    // another cargo run that would re-resolve the engine's JIT features.
+    *runner = Command::new(
+        test_runner
+            .context("Cargo did not report the native test runner")?
+            .canonicalize()?,
+    );
+    runner
+        .env(
+            "VO_TEST_NATIVE_AOT_COMPILER",
+            compiler
+                .context("Cargo did not report the Native AOT compiler")?
+                .canonicalize()?,
+        )
+        .env(
+            "VO_TEST_NATIVE_AOT_RUNTIME",
+            runtime
+                .context("Cargo did not report the Native AOT runtime")?
+                .canonicalize()?,
+        );
+    Ok(())
+}
+
+fn native_aot_runtime_features(root: &Path, plan: &TestPlan) -> Result<Vec<String>> {
+    let config = load_test_config(root)?;
+    let variants: BTreeSet<_> = plan
+        .jobs
+        .iter()
+        .filter(|job| job.backend == "native-aot")
+        .map(|job| {
+            config.targets[&job.target]
+                .native_aot_runtime_features
+                .clone()
+        })
+        .collect();
+    if variants.len() > 1 {
+        bail!("Native AOT runtime variants require separate test runs to preserve capability contracts");
+    }
+    Ok(variants.into_iter().next().unwrap_or_default())
+}
+
 fn vo_test_command(root: &Path, release: bool) -> Command {
     if let Some(path) = sibling_tool(root, "vo-test", release) {
         return Command::new(path);
     }
 
     let mut command = Command::new("cargo");
-    command.args(["run", "-q"]);
+    command.args(["run", "--locked", "-q"]);
     if release {
         command.arg("--release");
     }
@@ -618,7 +736,7 @@ fn command_description(args: &[String]) -> String {
 
 fn build_vo_embed(root: &Path, release: bool) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.args(["build", "-p", "vo-embed"]);
+    command.args(["build", "--locked", "-p", "vo-embed"]);
     if release {
         command.arg("--release");
     }
@@ -632,6 +750,36 @@ fn build_vo_embed(root: &Path, release: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_aot_core_and_compiler_host_cannot_share_a_runtime() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (targets, expected) in [
+            ("vm,native-aot", Some(Vec::<String>::new())),
+            ("vm,native-aot-host", Some(vec!["toolchain-host".into()])),
+            ("native-aot,native-aot-host", None),
+        ] {
+            let opts = TestArgs::parse(
+                &root,
+                vec![
+                    "--targets".into(),
+                    targets.into(),
+                    "--tags".into(),
+                    "compiler-host".into(),
+                ],
+            )
+            .unwrap();
+            let plan = build_plan(&root, &opts).unwrap();
+            let result = native_aot_runtime_features(&root, &plan);
+            match expected {
+                Some(features) => assert_eq!(result.unwrap(), features),
+                None => assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("separate test runs")),
+            }
+        }
+    }
 
     #[test]
     fn wasm_profiles_precede_forwarded_cargo_options() {

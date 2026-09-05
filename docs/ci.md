@@ -91,6 +91,29 @@ individual outcomes must agree with the selected plan. Unexpected, missing,
 duplicate, skipped or unidentifiable jobs cannot certify success. Nonzero exits
 cannot be hidden by a successful JSON payload.
 
+The explicit `native-aot` language target builds the compiler and core runtime
+once per profile, then compiles, links and executes each selected program in
+an isolated case directory. At most two AOT cases may link concurrently. Each
+case retains phase logs and a receipt with runner, compiler, runtime and executable
+digests. Successful executables are removed after execution to bound disk use;
+build or execution failures retain any executable produced for diagnosis.
+Differential failures retain the logs and executable digest. The case deadline includes
+both build and execution, and process-group cleanup also terminates descendants.
+Successful program output is compared with the matching VM case when present.
+
+Compile-negative cases exercise the actual AOT build command independently.
+For host-specific build rejection, a passing language case may declare
+`expect_by_target = { native-aot = { fail = ["diagnostic"] } }`, with an owner
+and reason. The planner retains its VM contract and requires the selected AOT
+build to fail with every declared diagnostic and no executable. Such a result
+proves rejection, and carries no execution-equivalence claim. The default AOT
+runtime's compiler-host rejection is covered through this contract.
+The `native-aot-host` target explicitly builds the runtime's `toolchain-host`
+feature. Nightly pairs it with VM execution for the `compiler-host` cases on
+Linux, macOS and Windows. Mixing core and compiler-host AOT targets in one
+invocation fails before building, so the core rejection cannot accidentally
+use a runtime with the extra capability.
+
 Native filesystem ordering always runs. The symlink regression independently
 probes the host using Rust before invoking Vo. Supported hosts exercise relative
 file and directory links, absolute targets, dangling links and ReadDir/Lstat
