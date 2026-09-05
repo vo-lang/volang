@@ -104,6 +104,24 @@ fn run_task_inner(
         artifacts: Vec::new(),
     };
     write_json(&attempt.join("started.json"), &receipt)?;
+    let mut summary = super::summary::TaskSummary {
+        schema: "volang.ci.task-summary.v1".into(),
+        source: receipt.source.clone(),
+        plan_sha256: receipt.plan_sha256.clone(),
+        task_definition_sha256: receipt.task_definition_sha256.clone(),
+        task_id: task_id.into(),
+        run_id: std::env::var("GITHUB_RUN_ID").unwrap_or_default(),
+        run_attempt: std::env::var("GITHUB_RUN_ATTEMPT").unwrap_or_default(),
+        attempt: receipt.attempt.clone(),
+        started_at_unix_millis: started,
+        updated_at_unix_millis: started,
+        duration_millis: 0,
+        state: super::summary::SummaryState::Running,
+        command: None,
+        failure_kind: None,
+        error: None,
+    };
+    super::summary::store(root, &summary)?;
     let clock = Instant::now();
     let evidence_path = root.join(format!("target/ci/evidence/{task_id}.evidence.json"));
     // Keep the lock alive through result capture, certification and completion.
@@ -128,6 +146,10 @@ fn run_task_inner(
             let spec = commands[id.as_str()];
             let remaining = Duration::from_secs(u64::from(task.timeout_minutes) * 60)
                 .saturating_sub(clock.elapsed());
+            summary.command = Some(id.clone());
+            summary.updated_at_unix_millis = unix_millis(SystemTime::now())?;
+            summary.duration_millis = u64::try_from(clock.elapsed().as_millis())?;
+            super::summary::store(root, &summary)?;
             eprintln!("CI {task_id}: {id} (logs: {})", receipt.attempt);
             let result = run_command(root, spec, &attempt, &common_env, cancelled, remaining)?;
             let passed = result.passed();
@@ -238,6 +260,19 @@ fn run_task_inner(
         write_json(&attempt.join("completion.json"), &result_digest)?;
         write_json(&attempt.join("failure.json"), &receipt)?;
     }
+    summary.state = if receipt.passed {
+        super::summary::SummaryState::Passed
+    } else {
+        super::summary::SummaryState::Failed
+    };
+    summary.updated_at_unix_millis = receipt.finished_at_unix_millis;
+    summary.duration_millis = receipt.duration_millis;
+    summary.failure_kind = receipt.failure_kind.clone();
+    summary.error = receipt
+        .error
+        .as_ref()
+        .map(|error| error.chars().take(4096).collect());
+    super::summary::store(root, &summary)?;
     if publish {
         append_summary(task, &receipt)?;
     }

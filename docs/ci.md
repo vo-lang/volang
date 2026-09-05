@@ -70,6 +70,15 @@ summaries show per-command test counts and durations; Cargo HTML timings are
 uploaded with executor diagnostics. Workspace tests continue across failing
 test programs so one run reports all failures while preserving a failing exit.
 
+Each attempt atomically refreshes a bounded display-only task summary at start,
+command boundaries and completion. The required job collects these small files
+before rejecting failed lanes. `vo-dev ci summarize --plan <path> --summaries <dir>`
+shows the first recorded failure, owner, declared command, reproduction and log
+location, plus all task states. Missing, stale, oversized or mismatched summaries
+are visibly invalid; interrupted attempts remain incomplete. Summary identity
+binds source, plan, task and GitHub run attempt. Summaries have no certification
+authority and their rendering cannot turn failed jobs into successful checks.
+
 Certification artifacts (`ci-evidence-*` and `nightly-evidence-*`) contain only
 the compact evidence files. Execution logs, per-case Native AOT receipts and
 Cargo timings travel in separate diagnostic artifacts, including failed attempts.

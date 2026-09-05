@@ -210,6 +210,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-summary-quality-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload quality evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -256,6 +265,15 @@ jobs:
           ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-summary-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload task evidence
         if: always()
@@ -336,6 +354,15 @@ jobs:
           ./target/debug/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "$WASM_TASK"
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-summary-wasm-web-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload task evidence
         if: always()
@@ -421,6 +448,15 @@ jobs:
           --plan target/ci/plan-input/plan.json
           --task "$UI_TASK"
 
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-summary-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload native UI evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -454,21 +490,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Reject failed or cancelled jobs
-        env:
-          PLAN: ${{ needs.plan.result }}
-          QUALITY_RUST: ${{ needs.quality_rust.result }}
-          LANGUAGE_NATIVE: ${{ needs.language_native.result }}
-          UI_PLATFORM: ${{ needs.ui_platform.result }}
-          WASM_WEB: ${{ needs.wasm_web.result }}
-        run: |
-          for result in "$PLAN" "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB"; do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              echo "CI job ended with: $result"
-              exit 1
-            fi
-          done
-
       - name: Checkout certified source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -484,15 +505,45 @@ jobs:
           name: ci-plan-${{ github.sha }}
           path: target/ci/plan-input
 
+      - name: Build certification verifier
+        run: cargo build --locked -p vo-dev
+
+      - name: Download compact task summaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: ci-summary-*-${{ github.sha }}
+          path: target/ci/collected-summaries
+          merge-multiple: true
+
+      - name: Summarize every planned task
+        run: >-
+          ./target/debug/vo-dev ci summarize
+          --plan target/ci/plan-input/plan.json
+          --summaries target/ci/collected-summaries
+
+      - name: Reject failed or cancelled jobs
+        if: always()
+        env:
+          PLAN: ${{ needs.plan.result }}
+          QUALITY_RUST: ${{ needs.quality_rust.result }}
+          LANGUAGE_NATIVE: ${{ needs.language_native.result }}
+          UI_PLATFORM: ${{ needs.ui_platform.result }}
+          WASM_WEB: ${{ needs.wasm_web.result }}
+        run: |
+          for result in "$PLAN" "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "CI job ended with: $result"
+              exit 1
+            fi
+          done
+
       - name: Download all task evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: ci-evidence-*-${{ github.sha }}
           path: target/ci/collected-evidence
           merge-multiple: true
-
-      - name: Build certification verifier
-        run: cargo build --locked -p vo-dev
 
       - name: Certify the complete planned task set
         run: |

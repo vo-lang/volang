@@ -5,6 +5,7 @@ mod native_window;
 mod plan;
 mod process;
 mod run;
+mod summary;
 mod web_result;
 
 use anyhow::{anyhow, bail, Result};
@@ -54,6 +55,10 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
             args.remove(0);
             cmd_run(root, args)
         }
+        "summarize" => {
+            args.remove(0);
+            cmd_summarize(root, args)
+        }
         "certify" => {
             args.remove(0);
             cmd_certify(root, args)
@@ -64,6 +69,29 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
         }
         _ => bail!(usage()),
     }
+}
+
+fn cmd_summarize(root: &Path, args: Vec<String>) -> Result<()> {
+    let mut plan = None;
+    let mut summaries = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--plan" => plan = Some(next_value(&args, &mut index, "--plan")?),
+            "--summaries" => summaries = Some(next_value(&args, &mut index, "--summaries")?),
+            value => bail!("unknown ci summarize argument {value}"),
+        }
+        index += 1;
+    }
+    let plan = resolve_repo_input(
+        root,
+        &plan.ok_or_else(|| anyhow!("ci summarize requires --plan"))?,
+    )?;
+    let summaries = resolve_repo_input(
+        root,
+        &summaries.ok_or_else(|| anyhow!("ci summarize requires --summaries"))?,
+    )?;
+    summary::render(root, &plan, &summaries)
 }
 
 fn cmd_run(root: &Path, args: Vec<String>) -> Result<()> {
@@ -292,5 +320,5 @@ fn resolve_repo_path(root: &Path, value: &str, output: bool) -> Result<PathBuf> 
 }
 
 fn usage() -> &'static str {
-    "usage:\n  vo-dev ci lint\n  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]\n  vo-dev ci explain --base <rev> --head <rev>\n  vo-dev ci run --plan <path> --task <id>\n  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json\n  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json\n  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]"
+    "usage:\n  vo-dev ci lint\n  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]\n  vo-dev ci explain --base <rev> --head <rev>\n  vo-dev ci run --plan <path> --task <id>\n  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json\n  vo-dev ci summarize --plan <path> --summaries <dir>\n  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json\n  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]"
 }
