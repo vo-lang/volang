@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct JsonRunOutput {
@@ -303,16 +303,7 @@ fn run_wasm_tests_json(
     if plan.jobs.is_empty() {
         bail!("no WASM tests selected");
     }
-    let mut build = wasm_build_command(wasm_target, opts.release)?;
-    let output = build.current_dir(root).output()?;
-    if !output.status.success() {
-        bail!(
-            "test command failed: {}\nstdout:\n{}\nstderr:\n{}",
-            command_description(&wasm_target.build_command),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    run_json_preparation(root, wasm_build_command(wasm_target, opts.release)?)?;
     run_wasm_prepare_commands(root, wasm_target)?;
     let plan_path =
         std::env::temp_dir().join(format!("volang-wasm-test-plan-{}.json", std::process::id()));
@@ -341,16 +332,31 @@ fn run_wasm_tests_json(
 
 fn run_wasm_prepare_commands(root: &Path, target: &crate::test_config::TestTarget) -> Result<()> {
     for args in &target.prepare_commands {
-        let mut command = command_from_args(args, "WASM prepare command")?;
-        let output = command.current_dir(root).output()?;
-        if !output.status.success() {
-            bail!(
-                "test command failed: {}\nstdout:\n{}\nstderr:\n{}",
-                command_description(args),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        run_json_preparation(root, command_from_args(args, "WASM prepare command")?)?;
+    }
+    Ok(())
+}
+
+fn run_json_preparation(root: &Path, mut command: Command) -> Result<()> {
+    let description = format!("{command:?}");
+    eprintln!("Wasm preparation started: {description}");
+    let started = Instant::now();
+    // Preserve stdout for the final domain result. Stream compiler diagnostics
+    // to stderr so a deadline retains progress even before the build completes.
+    let output = command
+        .current_dir(root)
+        .stderr(Stdio::inherit())
+        .output()?;
+    if !output.stdout.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    eprintln!(
+        "Wasm preparation finished: {} after {:.3}s: {description}",
+        output.status,
+        started.elapsed().as_secs_f64()
+    );
+    if !output.status.success() {
+        bail!("Wasm preparation failed: {description} ({})", output.status);
     }
     Ok(())
 }
