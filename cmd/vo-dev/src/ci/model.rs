@@ -174,9 +174,14 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
         if !matches!(
             command.failure_kind.as_str(),
             "product" | "infrastructure" | "portability" | "dependency-policy"
-        ) || !matches!(command.report.as_str(), "" | "cargo-test" | "libfuzzer")
-        {
+        ) || !matches!(
+            command.report.as_str(),
+            "" | "cargo-test" | "libfuzzer" | "native-window"
+        ) {
             bail!("invalid CI command result contract {}", command.id);
+        }
+        if command.report == "native-window" {
+            super::native_window::expected_count(&command.env)?;
         }
         if command.report == "libfuzzer" {
             super::process::fuzz_run_budget(&command.argv)?;

@@ -8,8 +8,9 @@ tested bytes. The machine-readable sources of truth are:
 - `eng/release.toml` for release targets and archive policy;
 - `eng/toolchains.toml` and `rust-toolchain.toml` for pinned tools.
 
-Workflow YAML provisions and schedules lanes while task execution migrates into `vo-dev ci run`. Repository contracts, Rust quality, language, Web and dependency checks
-execute ordered command definitions from `eng/ci.toml`. `vo-dev ci lint` validates the task graph,
+Workflow YAML provisions and schedules lanes. Repository contracts, Rust quality,
+language, Web, native UI and dependency checks execute ordered command definitions
+from `eng/ci.toml` through `vo-dev ci run`. `vo-dev ci lint` validates the task graph,
 dependencies, owners, platforms, budgets, runners, and safe evidence paths.
 Actionlint validates the workflow syntax and expressions.
 
@@ -20,11 +21,11 @@ Each CI run follows the same chain:
 1. `vo-dev ci plan` selects an immutable task set and records the source commit,
    Git tree, profile, changed paths, and complete task definitions. Impact plans
    also bind resolved base/head/merge-base object IDs and a component graph digest.
-2. A migrated job calls `vo-dev ci run --plan <path> --task <id>`. Its receipt
+2. Each job calls `vo-dev ci run --plan <path> --task <id>`. Its receipt
    binds the task, source, CI plan, toolchain files, test manifests, runner,
    GitHub run/job identity, timing, result files, and promotable artifacts. Domain results must identify a complete test or browser
-   scenario; arbitrary success flags are rejected. Unmigrated jobs temporarily
-   use `ci record`; migrated tasks reject that entry point.
+   scenario; arbitrary success flags are rejected. Every declared task requires
+   execution, and rejects the legacy `ci record` entry point.
 3. The stable `required` job rejects incomplete lanes and calls
    `vo-dev ci certify`. Certification requires one valid receipt for every
    planned task, with no missing, duplicate, or extra receipt.
@@ -82,6 +83,13 @@ Image and precache budget results bind their measured artifacts, complete asset
 lists and consistent limits. `wasm-web-full` seals `target/ci/artifacts/site` in
 the same execution receipt. Site promotion verifies that producing task's artifact
 digest; no additional task infers success from the presence of a directory.
+
+Native UI tasks retain eight real window scenarios on each full platform and
+two Linux smoke scenarios, alongside Rust contracts and VM/JIT differentials.
+Each window must emit its exact ordered semantic clicks, successful final text
+assertions and presentation boundary. Exit zero alone cannot satisfy that
+contract. Packaged applications are sealed under `target/ci/artifacts/native`;
+their receipts and timing logs share the same task attempt.
 
 ## Explain and diagnose
 

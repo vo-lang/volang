@@ -402,6 +402,17 @@ pub(super) fn validate_receipt(
         {
             bail!("execution command {id} has no successful Rust tests");
         }
+        if spec.report == "native-window" {
+            let expected = super::native_window::expected_count(&spec.env)?;
+            if !result.test_counts.as_ref().is_some_and(|counts| {
+                counts.passed == expected
+                    && counts.failed == 0
+                    && counts.ignored == 0
+                    && counts.binaries == 1
+            }) {
+                bail!("execution command {id} has no complete native user journey");
+            }
+        }
         if spec.report == "libfuzzer" {
             let expected = super::process::fuzz_run_budget(&spec.argv)?;
             if !result.test_counts.as_ref().is_some_and(|counts| {
