@@ -16,7 +16,7 @@ use std::os::unix::fs::{symlink, DirBuilderExt, FileTypeExt, OpenOptionsExt, Per
 #[cfg(all(feature = "std", unix))]
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 #[cfg(all(feature = "std", windows))]
-use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::fs::{symlink_dir, symlink_file, FileExt, OpenOptionsExt};
 #[cfg(all(feature = "std", windows))]
 use std::os::windows::io::AsHandle;
 #[cfg(feature = "std")]
@@ -2124,7 +2124,40 @@ fn os_symlink(call: &mut ExternCallContext) -> ExternResult {
             Err(e) => write_io_error(call, slots::RET_0, e),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let result =
+            path_arg(call, slots::ARG_OLDNAME, "symbolic link target").and_then(|oldname| {
+                path_arg(call, slots::ARG_NEWNAME, "symbolic link path").and_then(|newname| {
+                    let target = if oldname.is_absolute() {
+                        oldname.clone()
+                    } else {
+                        newname
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .join(&oldname)
+                    };
+                    match fs::metadata(target) {
+                        Ok(metadata) if metadata.is_dir() => symlink_dir(oldname, newname),
+                        Ok(_) => symlink_file(oldname, newname),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            let target = oldname.as_os_str().to_string_lossy();
+                            if target.ends_with('/') || target.ends_with('\\') {
+                                symlink_dir(oldname, newname)
+                            } else {
+                                symlink_file(oldname, newname)
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+            });
+        match result {
+            Ok(_) => write_nil_error(call, slots::RET_0),
+            Err(e) => write_io_error(call, slots::RET_0, e),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         write_error_to(call, slots::RET_0, "symlink not supported");
     }

@@ -667,12 +667,55 @@ fn stable_id(value: &str) -> String {
 fn run_plan_job(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let job: TestJob = serde_json::from_str(&text)?;
+    if job.tags.iter().any(|tag| tag == "symlink") {
+        let capability = probe_symlink_capability()?;
+        if env::var("VO_TEST_REQUIRE_SYMLINK").as_deref() == Ok("1") && capability != "supported" {
+            return Err("required host capability symlink is unavailable".into());
+        }
+        env::set_var("VO_TEST_HOST_SYMLINK", capability);
+    }
     let result = run_job(&job);
     // `main` terminates workers with `process::exit`, which skips stdio
     // destructor flushing. Each worker is piped by the plan coordinator, so
     // even short successful output must be flushed explicitly.
     std::io::stdout().flush()?;
     result.map_err(|err| err.into())
+}
+
+fn probe_symlink_capability() -> Result<&'static str, Box<dyn std::error::Error>> {
+    let root = env::temp_dir().join(format!(
+        "vo-host-capability-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    fs::create_dir(&root)?;
+    let result = (|| {
+        fs::write(root.join("target"), b"probe")?;
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink("target", root.join("link"));
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_file("target", root.join("link"));
+        #[cfg(not(any(unix, windows)))]
+        let result: std::io::Result<()> = Err(std::io::ErrorKind::Unsupported.into());
+        match result {
+            Ok(()) => Ok("supported"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+                ) || cfg!(windows) && matches!(error.raw_os_error(), Some(1314 | 50)) =>
+            {
+                Ok("unavailable")
+            }
+            Err(error) => Err(error),
+        }
+    })();
+    let cleanup = fs::remove_dir_all(&root);
+    let capability = result?;
+    cleanup?;
+    Ok(capability)
 }
 
 fn run_job(job: &TestJob) -> Result<(), String> {

@@ -5965,7 +5965,7 @@ matrix = "default"
 tags = ["stdlib", "filesystem", "regression", "smoke"]
 owner = "stdlib"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "symbolic-link creation and inspection require a native host"
+reason = "directory metadata requires a native filesystem"
 expect = "pass"
 
 [[case]]
@@ -11784,4 +11784,14 @@ tags = ["module", "archive"]
 owner = "module"
 reason = "project in src/ subdirectory"
 zip_root = "src/"
+expect = "pass"
+
+[[case]]
+id = "os-symlink-host-contract"
+kind = "file"
+path = "cases/stdlib/os_symlink_host_contract.vo"
+matrix = "native"
+tags = ["stdlib", "filesystem", "symlink", "regression", "smoke"]
+owner = "stdlib"
+reason = "runner probes native symlink capability independently; unavailable hosts must return an error without creating an entry"
 expect = "pass"
