@@ -4789,7 +4789,9 @@ mod tests {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
     fn temporary_project(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        // Windows TEMP may use an 8.3 alias. Module caches deliberately require
+        // canonical spelling; test paths must satisfy that production contract.
+        std::env::temp_dir().canonicalize().unwrap().join(format!(
             "vo-ui-{name}-{}-{}",
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)

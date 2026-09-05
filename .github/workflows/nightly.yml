@@ -377,7 +377,9 @@ jobs:
 
       - name: Build coverage-instrumented fuzz target
         working-directory: ${{ matrix.fuzz_dir }}
-        run: cargo +"$RUST_NIGHTLY" fuzz build --fuzz-dir . "${{ matrix.target }}"
+        run: |
+          cargo +"$RUST_NIGHTLY" metadata --locked --format-version 1 > "$RUNNER_TEMP/${{ matrix.target }}-cargo-metadata.json"
+          cargo +"$RUST_NIGHTLY" fuzz build --fuzz-dir . "${{ matrix.target }}"
 
       - name: Fuzz authenticated and untrusted protocol boundary
         working-directory: ${{ matrix.fuzz_dir }}

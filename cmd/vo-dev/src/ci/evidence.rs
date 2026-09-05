@@ -94,7 +94,14 @@ pub(crate) fn record(root: &Path, options: RecordOptions<'_>) -> Result<()> {
         bail!("CI evidence source does not match the immutable plan source");
     }
     if source.tracked_dirty {
-        bail!("CI evidence cannot certify a tracked dirty worktree");
+        let status = std::process::Command::new("git")
+            .args(["status", "--short", "--untracked-files=all"])
+            .current_dir(root)
+            .output()?;
+        bail!(
+            "CI evidence cannot certify a dirty source worktree:\n{}",
+            String::from_utf8_lossy(&status.stdout)
+        );
     }
 
     let workflow = workflow_identity()?;
