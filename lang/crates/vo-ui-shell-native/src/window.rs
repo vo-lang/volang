@@ -48,7 +48,7 @@ const UI_SURFACE_HANDLE: SurfaceHandle = GenerationalHandle {
 };
 const DEVICE_GENERATION: u64 = 1;
 const MAX_AUTOMATION_STEPS: usize = 1_024;
-const MAX_AUTOMATION_SETTLE_TURNS: usize = 600;
+const AUTOMATION_STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeDesktopAutomation {
@@ -337,7 +337,7 @@ struct DesktopState {
     reload: Option<NativeDesktopReloadPoll>,
     reload_diagnostic: Option<String>,
     automation_cursor: usize,
-    automation_settle_turns: usize,
+    automation_wait_started: Option<Instant>,
     automation_validated: bool,
     #[cfg(target_os = "windows")]
     attached_menu_revision: u64,
@@ -487,7 +487,7 @@ impl DesktopState {
             reload,
             reload_diagnostic: None,
             automation_cursor: 0,
-            automation_settle_turns: 0,
+            automation_wait_started: None,
             automation_validated,
             #[cfg(target_os = "windows")]
             attached_menu_revision: 0,
@@ -679,7 +679,7 @@ impl DesktopState {
             || report.session.woken_timers > 0
             || report.session.completed_system_requests > 0;
         self.attach_latest_menu()?;
-        self.advance_automation()?;
+        self.advance_automation(now)?;
         if self.visible && self.dirty {
             if !self.automation_validated {
                 let next_frame = now + self.config.frame_interval;
@@ -709,7 +709,7 @@ impl DesktopState {
         Ok(())
     }
 
-    fn advance_automation(&mut self) -> Result<(), NativeDesktopError> {
+    fn advance_automation(&mut self, now: Instant) -> Result<(), NativeDesktopError> {
         if self.automation_validated {
             return Ok(());
         }
@@ -734,12 +734,10 @@ impl DesktopState {
                             .get(&vo_ui_core::PropertyId::ACCESSIBLE_NAME)
                             == Some(&vo_ui_core::Value::Text(name.clone()))
                 })
-                .map(|node| node.id)
-                .ok_or_else(|| {
-                    NativeDesktopError::Runtime(format!(
-                        "automation click target {name:?} is missing"
-                    ))
-                })?;
+                .map(|node| node.id);
+            let Some(node) = node else {
+                return self.wait_for_automation(now, format!("click target {name:?} is missing"));
+            };
             let invoked = self
                 .runtime
                 .session_mut()
@@ -748,12 +746,11 @@ impl DesktopState {
                 .route_semantic_invoke(node)
                 .map_err(|error| NativeDesktopError::Runtime(error.to_string()))?;
             if !invoked {
-                return Err(NativeDesktopError::Runtime(format!(
-                    "automation click target {name:?} is not invokable"
-                )));
+                return self
+                    .wait_for_automation(now, format!("click target {name:?} is not invokable"));
             }
             self.automation_cursor += 1;
-            self.automation_settle_turns = 0;
+            self.automation_wait_started = None;
             automation_log(&format!("completed semantic click {name:?}"));
             self.dirty = true;
             return Ok(());
@@ -773,43 +770,61 @@ impl DesktopState {
             })
             .cloned();
         if let Some(expected) = missing {
-            self.automation_settle_turns = self.automation_settle_turns.saturating_add(1);
-            if self.automation_settle_turns > MAX_AUTOMATION_SETTLE_TURNS {
-                let visible = self
-                    .runtime
-                    .session()
-                    .renderer()
-                    .host()
-                    .tree()
-                    .nodes()
-                    .filter(|node| !node.text.is_empty())
-                    .take(96)
-                    .map(|node| node.text.clone())
-                    .collect::<Vec<_>>();
-                return Err(NativeDesktopError::Runtime(format!(
-                    "automation expected text {expected:?} is missing after {MAX_AUTOMATION_SETTLE_TURNS} settle turns; visible text: {visible:?}"
-                )));
-            }
-            let logical = self.physical_size.to_logical::<f64>(self.scale_factor);
-            let mut measurer = vo_ui_layout::ApproximateTextMeasurer;
-            self.runtime
-                .session_mut()
-                .renderer_mut()
-                .host_mut()
-                .compute_and_set_layout(
-                    Size::new(logical.width, logical.height),
-                    self.config.layout,
-                    &mut measurer,
-                )
-                .map_err(|error| NativeDesktopError::Runtime(error.to_string()))?;
-            // Effects and other structured workers publish through a later
-            // host-event turn. Layout observation also needs a post-update
-            // layout pass before its feedback event can enter that turn.
-            self.dirty = true;
-            return Ok(());
+            return self.wait_for_automation(now, format!("expected text {expected:?} is missing"));
         }
         self.automation_validated = true;
         automation_log("semantic interaction script and final assertions passed");
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn wait_for_automation(
+        &mut self,
+        now: Instant,
+        pending: String,
+    ) -> Result<(), NativeDesktopError> {
+        let started = *self.automation_wait_started.get_or_insert(now);
+        if now.saturating_duration_since(started) >= AUTOMATION_STEP_TIMEOUT {
+            let tree = self.runtime.session().renderer().host().tree();
+            let visible = tree
+                .nodes()
+                .filter(|node| !node.text.is_empty())
+                .take(96)
+                .map(|node| node.text.clone())
+                .collect::<Vec<_>>();
+            let actions = tree
+                .nodes()
+                .filter(|node| {
+                    node.listeners.contains_key(&vo_ui_core::EventType::CLICK)
+                        || node.listeners.contains_key(&vo_ui_core::EventType::CHANGE)
+                })
+                .filter_map(|node| {
+                    node.properties
+                        .get(&vo_ui_core::PropertyId::ACCESSIBLE_NAME)
+                        .cloned()
+                })
+                .take(96)
+                .collect::<Vec<_>>();
+            return Err(NativeDesktopError::Runtime(format!(
+                "automation {pending} after {} seconds; visible text: {visible:?}; available actions: {actions:?}",
+                AUTOMATION_STEP_TIMEOUT.as_secs(),
+            )));
+        }
+        let logical = self.physical_size.to_logical::<f64>(self.scale_factor);
+        let mut measurer = vo_ui_layout::ApproximateTextMeasurer;
+        self.runtime
+            .session_mut()
+            .renderer_mut()
+            .host_mut()
+            .compute_and_set_layout(
+                Size::new(logical.width, logical.height),
+                self.config.layout,
+                &mut measurer,
+            )
+            .map_err(|error| NativeDesktopError::Runtime(error.to_string()))?;
+        // Bootstrap, structured workers and layout observations publish on
+        // later pump turns. Wait for the exact semantic precondition while
+        // those turns progress; elapsed time only bounds a missing condition.
         self.dirty = true;
         Ok(())
     }
