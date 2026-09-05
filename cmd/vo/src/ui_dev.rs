@@ -198,7 +198,7 @@ try {
   if (loadedImage.error) throw loadedImage.error;
   const image = loadedImage.image;
   mark('volang-aot-image-ready');
-  measure('volang-aot-image-fetch', 'volang-aot-host-ready', 'volang-aot-image-ready');
+  measure('volang-aot-image-fetch', 'volang-aot-bootstrap-start', 'volang-aot-image-ready');
   let interactiveMarked = false;
   const { externs } = connectAotUiToDom(root, {
     systemHost,
@@ -5500,6 +5500,9 @@ compiler = true
         assert!(script.contains("createStudioHost"));
         assert!(script.contains("new UiBrowserSystemHost"));
         assert!(script.contains("WebAssembly.compileStreaming(response.clone())"));
+        assert!(script.contains(
+            "measure('volang-aot-image-fetch', 'volang-aot-bootstrap-start', 'volang-aot-image-ready')"
+        ));
         assert!(!script.contains("/*__VOLANG_APPLICATION_HOST__*/"));
         let development = development_index_html(&config);
         assert!(development.contains("<html lang=\"zh-CN\" dir=\"ltr\">"));

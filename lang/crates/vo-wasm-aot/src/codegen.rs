@@ -133,7 +133,6 @@ const LOW_LOCAL: u32 = 7;
 const HIGH_LOCAL: u32 = 8;
 const FRAME_LIMIT_LOCAL: u32 = 9;
 const PACKED_LOCAL: u32 = 10;
-const STACK_CHUNK_LOCAL: u32 = 11;
 pub(crate) const SLOT_LOCAL_BASE: u32 = 12;
 const DIRECT_OWNER_FRAME_LOCAL: u32 = 1;
 const DIRECT_BUDGET_LOCAL: u32 = 2;
@@ -155,7 +154,9 @@ const CLONE_BEGIN_FUNCTION_INDEX: u32 = 16;
 const DEEP_CLONE_FUNCTION_INDEX: u32 = 17;
 const FIND_ALLOCATION_FUNCTION_INDEX: u32 = 18;
 const INDEX_PANIC_MESSAGE_FUNCTION_INDEX: u32 = 19;
-pub(crate) const FIRST_VO_FUNCTION_INDEX: u32 = 20;
+pub(crate) const MATERIALIZED_FRAME_ALLOC_FUNCTION_INDEX: u32 = 20;
+pub(crate) const MATERIALIZED_FRAME_FREE_FUNCTION_INDEX: u32 = 21;
+pub(crate) const FIRST_VO_FUNCTION_INDEX: u32 = 22;
 const DIRECT_FUNCTION_TYPE_INDEX: u32 = 8;
 const FRAME_ALLOC_UNINITIALIZED: i32 = 0;
 const FRAME_ALLOC_ZEROED: i32 = 1;
@@ -1873,6 +1874,8 @@ pub(crate) fn compile_core_module(
     functions.function(4);
     functions.function(1);
     functions.function(6);
+    functions.function(1);
+    functions.function(1);
     for function_id in &reachable {
         functions.function(if materialized.contains(function_id) {
             1
@@ -2139,6 +2142,8 @@ pub(crate) fn compile_core_module(
         static_data.index_panic_prefix_ref,
         static_data.index_panic_middle_ref,
     ));
+    code.function(&compile_materialized_stack_frame_alloc(runtime_globals));
+    code.function(&compile_materialized_stack_frame_free(runtime_globals));
     for function_id in &reachable {
         let function = &vo_module.functions[*function_id as usize];
         let body = if let Some(slow_function) = retry_slow_functions.get(function_id) {
@@ -2340,6 +2345,8 @@ pub(crate) fn compile_core_module(
         "volang.deep_clone",
         "volang.find_allocation",
         "volang.index_panic_message",
+        "volang.materialized_frame_alloc",
+        "volang.materialized_frame_free",
     ]
     .into_iter()
     .enumerate()
@@ -19865,27 +19872,48 @@ fn emit_materialized_call_arguments(
 /// while retaining constant-time LIFO allocation for ordinary and recursive
 /// calls. Opening a new chunk is uncommon and continues to use the traced frame
 /// allocator so the GC can discover the whole active frame chain.
-fn emit_materialized_stack_frame_alloc(
-    body: &mut Function,
-    frame_bytes: u32,
-    globals: RuntimeGlobals,
-) -> Result<(), WasmAotError> {
-    let base_chunk_bytes =
-        SHADOW_STACK_BASE_CHUNK_BYTES.max(frame_bytes.checked_add(FRAME_STATE_BYTES).ok_or_else(
-            || WasmAotError::InvalidModule("call-frame chunk size overflows".into()),
-        )?);
-    let overflow_chunk_bytes =
-        SHADOW_STACK_CHUNK_BYTES.max(frame_bytes.checked_add(FRAME_STATE_BYTES).ok_or_else(
-            || WasmAotError::InvalidModule("call-frame chunk size overflows".into()),
-        )?);
+fn compile_materialized_stack_frame_alloc(globals: RuntimeGlobals) -> Function {
+    const FRAME_BYTES: u32 = 0;
+    const REQUIRED_CHUNK_BYTES: u32 = 1;
+    const BASE_CHUNK_BYTES: u32 = 2;
+    const OVERFLOW_CHUNK_BYTES: u32 = 3;
+    const PREVIOUS_CHUNK: u32 = 4;
+    const PREVIOUS_TOP: u32 = 5;
+    const PREVIOUS_LIMIT: u32 = 6;
+    const CURRENT_CHUNK: u32 = 7;
+    const FRAME_HEADER: u32 = 8;
+    const FRAME_TOP: u32 = 9;
+    const CHUNK_LIMIT: u32 = 10;
 
-    // CAPACITY/LOW/HIGH retain the allocator state to restore. STACK_CHUNK is
-    // the chunk containing the new frame, SEQUENCE its raw address, ALLOC its
-    // end, and FRAME_LIMIT the containing chunk limit.
+    let mut body = Function::new([(10, ValType::I32)]);
+    body.instruction(&W::LocalGet(FRAME_BYTES))
+        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
+        .instruction(&W::I32Add)
+        .instruction(&W::LocalTee(REQUIRED_CHUNK_BYTES))
+        .instruction(&W::LocalGet(FRAME_BYTES))
+        .instruction(&W::I32LtU)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Return)
+        .instruction(&W::End);
+    for (minimum, destination) in [
+        (SHADOW_STACK_BASE_CHUNK_BYTES, BASE_CHUNK_BYTES),
+        (SHADOW_STACK_CHUNK_BYTES, OVERFLOW_CHUNK_BYTES),
+    ] {
+        body.instruction(&W::LocalGet(REQUIRED_CHUNK_BYTES))
+            .instruction(&W::I32Const(minimum as i32))
+            .instruction(&W::I32GtU)
+            .instruction(&W::If(BlockType::Result(ValType::I32)))
+            .instruction(&W::LocalGet(REQUIRED_CHUNK_BYTES))
+            .instruction(&W::Else)
+            .instruction(&W::I32Const(minimum as i32))
+            .instruction(&W::End)
+            .instruction(&W::LocalSet(destination));
+    }
     for (local, offset) in [
-        (CAPACITY_LOCAL, FIBER_SHADOW_CHUNK_OFFSET),
-        (LOW_LOCAL, FIBER_SHADOW_TOP_OFFSET),
-        (HIGH_LOCAL, FIBER_SHADOW_LIMIT_OFFSET),
+        (PREVIOUS_CHUNK, FIBER_SHADOW_CHUNK_OFFSET),
+        (PREVIOUS_TOP, FIBER_SHADOW_TOP_OFFSET),
+        (PREVIOUS_LIMIT, FIBER_SHADOW_LIMIT_OFFSET),
     ] {
         body.instruction(&W::GlobalGet(globals.current_fiber))
             .instruction(&W::I32Load(MemArg {
@@ -19895,75 +19923,78 @@ fn emit_materialized_stack_frame_alloc(
             }))
             .instruction(&W::LocalSet(local));
     }
-    body.instruction(&W::LocalGet(CAPACITY_LOCAL))
-        .instruction(&W::LocalSet(STACK_CHUNK_LOCAL))
-        .instruction(&W::LocalGet(LOW_LOCAL))
-        .instruction(&W::LocalSet(SEQUENCE_LOCAL))
-        .instruction(&W::LocalGet(HIGH_LOCAL))
-        .instruction(&W::LocalSet(FRAME_LIMIT_LOCAL))
-        .instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
+    body.instruction(&W::LocalGet(PREVIOUS_CHUNK))
+        .instruction(&W::LocalSet(CURRENT_CHUNK))
+        .instruction(&W::LocalGet(PREVIOUS_TOP))
+        .instruction(&W::LocalSet(FRAME_HEADER))
+        .instruction(&W::LocalGet(PREVIOUS_LIMIT))
+        .instruction(&W::LocalSet(CHUNK_LIMIT))
+        .instruction(&W::LocalGet(CURRENT_CHUNK))
         .instruction(&W::I32Eqz)
         .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(base_chunk_bytes as i32))
+        .instruction(&W::LocalGet(BASE_CHUNK_BYTES))
         .instruction(&W::I32Const(FRAME_ALLOC_UNINITIALIZED))
         .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
-        .instruction(&W::LocalTee(STACK_CHUNK_LOCAL))
+        .instruction(&W::LocalTee(CURRENT_CHUNK))
         .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty));
-    return_status(body, STATUS_OUT_OF_MEMORY);
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(CURRENT_CHUNK))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(SEQUENCE_LOCAL))
-        .instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
-        .instruction(&W::I32Const(base_chunk_bytes as i32))
+        .instruction(&W::LocalSet(FRAME_HEADER))
+        .instruction(&W::LocalGet(CURRENT_CHUNK))
+        .instruction(&W::LocalGet(BASE_CHUNK_BYTES))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(FRAME_LIMIT_LOCAL))
+        .instruction(&W::LocalSet(CHUNK_LIMIT))
         .instruction(&W::End)
-        .instruction(&W::LocalGet(SEQUENCE_LOCAL))
-        .instruction(&W::I32Const(frame_bytes as i32))
+        .instruction(&W::LocalGet(FRAME_HEADER))
+        .instruction(&W::LocalGet(FRAME_BYTES))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalTee(ALLOC_LOCAL))
-        .instruction(&W::LocalGet(SEQUENCE_LOCAL))
+        .instruction(&W::LocalTee(FRAME_TOP))
+        .instruction(&W::LocalGet(FRAME_HEADER))
         .instruction(&W::I32LtU)
-        .instruction(&W::LocalGet(ALLOC_LOCAL))
-        .instruction(&W::LocalGet(FRAME_LIMIT_LOCAL))
+        .instruction(&W::LocalGet(FRAME_TOP))
+        .instruction(&W::LocalGet(CHUNK_LIMIT))
         .instruction(&W::I32GtU)
         .instruction(&W::I32Or)
         .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::I32Const(overflow_chunk_bytes as i32))
+        .instruction(&W::LocalGet(OVERFLOW_CHUNK_BYTES))
         .instruction(&W::I32Const(FRAME_ALLOC_UNINITIALIZED))
         .instruction(&W::Call(FRAME_ALLOC_FUNCTION_INDEX))
-        .instruction(&W::LocalTee(STACK_CHUNK_LOCAL))
+        .instruction(&W::LocalTee(CURRENT_CHUNK))
         .instruction(&W::I32Eqz)
-        .instruction(&W::If(BlockType::Empty));
-    return_status(body, STATUS_OUT_OF_MEMORY);
-    body.instruction(&W::End)
-        .instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(CURRENT_CHUNK))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(SEQUENCE_LOCAL))
-        .instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
-        .instruction(&W::I32Const(overflow_chunk_bytes as i32))
+        .instruction(&W::LocalSet(FRAME_HEADER))
+        .instruction(&W::LocalGet(CURRENT_CHUNK))
+        .instruction(&W::LocalGet(OVERFLOW_CHUNK_BYTES))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(FRAME_LIMIT_LOCAL))
-        .instruction(&W::LocalGet(SEQUENCE_LOCAL))
-        .instruction(&W::I32Const(frame_bytes as i32))
+        .instruction(&W::LocalSet(CHUNK_LIMIT))
+        .instruction(&W::LocalGet(FRAME_HEADER))
+        .instruction(&W::LocalGet(FRAME_BYTES))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(ALLOC_LOCAL))
+        .instruction(&W::LocalSet(FRAME_TOP))
         .instruction(&W::End)
-        .instruction(&W::LocalGet(SEQUENCE_LOCAL))
+        .instruction(&W::LocalGet(FRAME_HEADER))
         .instruction(&W::I32Const(0))
-        .instruction(&W::I32Const(frame_bytes as i32))
+        .instruction(&W::LocalGet(FRAME_BYTES))
         .instruction(&W::MemoryFill(0));
     for (offset, local) in [
-        (FRAME_PREVIOUS_STACK_CHUNK_OFFSET, CAPACITY_LOCAL),
-        (FRAME_PREVIOUS_STACK_TOP_OFFSET, LOW_LOCAL),
-        (FRAME_PREVIOUS_STACK_LIMIT_OFFSET, HIGH_LOCAL),
-        (FRAME_STACK_CHUNK_OFFSET, STACK_CHUNK_LOCAL),
+        (FRAME_PREVIOUS_STACK_CHUNK_OFFSET, PREVIOUS_CHUNK),
+        (FRAME_PREVIOUS_STACK_TOP_OFFSET, PREVIOUS_TOP),
+        (FRAME_PREVIOUS_STACK_LIMIT_OFFSET, PREVIOUS_LIMIT),
+        (FRAME_STACK_CHUNK_OFFSET, CURRENT_CHUNK),
+        (FRAME_LIMIT_OFFSET, FRAME_TOP),
     ] {
-        body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
+        body.instruction(&W::LocalGet(FRAME_HEADER))
             .instruction(&W::LocalGet(local))
             .instruction(&W::I32Store(MemArg {
                 offset,
@@ -19971,18 +20002,10 @@ fn emit_materialized_stack_frame_alloc(
                 memory_index: 0,
             }));
     }
-    // Frame bounds stay exact even when several frames share one chunk.
-    body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
-        .instruction(&W::LocalGet(ALLOC_LOCAL))
-        .instruction(&W::I32Store(MemArg {
-            offset: FRAME_LIMIT_OFFSET,
-            align: 2,
-            memory_index: 0,
-        }));
     for (offset, local) in [
-        (FIBER_SHADOW_CHUNK_OFFSET, STACK_CHUNK_LOCAL),
-        (FIBER_SHADOW_TOP_OFFSET, ALLOC_LOCAL),
-        (FIBER_SHADOW_LIMIT_OFFSET, FRAME_LIMIT_LOCAL),
+        (FIBER_SHADOW_CHUNK_OFFSET, CURRENT_CHUNK),
+        (FIBER_SHADOW_TOP_OFFSET, FRAME_TOP),
+        (FIBER_SHADOW_LIMIT_OFFSET, CHUNK_LIMIT),
     ] {
         body.instruction(&W::GlobalGet(globals.current_fiber))
             .instruction(&W::LocalGet(local))
@@ -19992,54 +20015,99 @@ fn emit_materialized_stack_frame_alloc(
                 memory_index: 0,
             }));
     }
-    body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
+    body.instruction(&W::LocalGet(FRAME_HEADER))
         .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
         .instruction(&W::I32Add)
-        .instruction(&W::LocalSet(ALLOC_LOCAL));
+        .instruction(&W::End);
+    body
+}
+
+fn compile_materialized_stack_frame_free(globals: RuntimeGlobals) -> Function {
+    const FRAME: u32 = 0;
+    const FRAME_HEADER: u32 = 1;
+    const PREVIOUS_CHUNK: u32 = 2;
+    const PREVIOUS_TOP: u32 = 3;
+    const PREVIOUS_LIMIT: u32 = 4;
+    const CURRENT_CHUNK: u32 = 5;
+
+    let mut body = Function::new([(5, ValType::I32)]);
+    body.instruction(&W::LocalGet(FRAME))
+        .instruction(&W::I32Eqz)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::I32Const(0))
+        .instruction(&W::Return)
+        .instruction(&W::End)
+        .instruction(&W::LocalGet(FRAME))
+        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
+        .instruction(&W::I32Sub)
+        .instruction(&W::LocalSet(FRAME_HEADER));
+    for (local, offset) in [
+        (PREVIOUS_CHUNK, FRAME_PREVIOUS_STACK_CHUNK_OFFSET),
+        (PREVIOUS_TOP, FRAME_PREVIOUS_STACK_TOP_OFFSET),
+        (PREVIOUS_LIMIT, FRAME_PREVIOUS_STACK_LIMIT_OFFSET),
+        (CURRENT_CHUNK, FRAME_STACK_CHUNK_OFFSET),
+    ] {
+        body.instruction(&W::LocalGet(FRAME_HEADER))
+            .instruction(&W::I32Load(MemArg {
+                offset,
+                align: 2,
+                memory_index: 0,
+            }))
+            .instruction(&W::LocalSet(local));
+    }
+    for (offset, local) in [
+        (FIBER_SHADOW_CHUNK_OFFSET, PREVIOUS_CHUNK),
+        (FIBER_SHADOW_TOP_OFFSET, PREVIOUS_TOP),
+        (FIBER_SHADOW_LIMIT_OFFSET, PREVIOUS_LIMIT),
+    ] {
+        body.instruction(&W::GlobalGet(globals.current_fiber))
+            .instruction(&W::LocalGet(local))
+            .instruction(&W::I32Store(MemArg {
+                offset,
+                align: 2,
+                memory_index: 0,
+            }));
+    }
+    body.instruction(&W::LocalGet(CURRENT_CHUNK))
+        .instruction(&W::LocalGet(PREVIOUS_CHUNK))
+        .instruction(&W::I32Ne)
+        .instruction(&W::If(BlockType::Empty))
+        .instruction(&W::LocalGet(CURRENT_CHUNK))
+        .instruction(&W::Call(FRAME_FREE_FUNCTION_INDEX))
+        .instruction(&W::Drop)
+        .instruction(&W::End)
+        .instruction(&W::I32Const(0))
+        .instruction(&W::End);
+    body
+}
+
+fn emit_materialized_stack_frame_alloc(
+    body: &mut Function,
+    frame_bytes: u32,
+    _globals: RuntimeGlobals,
+) -> Result<(), WasmAotError> {
+    frame_bytes
+        .checked_add(FRAME_STATE_BYTES)
+        .ok_or_else(|| WasmAotError::InvalidModule("call-frame chunk size overflows".into()))?;
+    body.instruction(&W::I32Const(frame_bytes as i32))
+        .instruction(&W::Call(MATERIALIZED_FRAME_ALLOC_FUNCTION_INDEX))
+        .instruction(&W::LocalTee(ALLOC_LOCAL))
+        .instruction(&W::I32Eqz)
+        .instruction(&W::If(BlockType::Empty));
+    return_status(body, STATUS_OUT_OF_MEMORY);
+    body.instruction(&W::End)
+        .instruction(&W::LocalGet(ALLOC_LOCAL))
+        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
+        .instruction(&W::I32Sub)
+        .instruction(&W::LocalSet(SEQUENCE_LOCAL));
     Ok(())
 }
 
 /// Pop a child created by `emit_materialized_stack_frame_alloc`.
-fn emit_materialized_stack_frame_free(body: &mut Function, globals: RuntimeGlobals) {
+fn emit_materialized_stack_frame_free(body: &mut Function, _globals: RuntimeGlobals) {
     body.instruction(&W::LocalGet(ALLOC_LOCAL))
-        .instruction(&W::I32Const(FRAME_STATE_BYTES as i32))
-        .instruction(&W::I32Sub)
-        .instruction(&W::LocalSet(SEQUENCE_LOCAL));
-    for (local, offset) in [
-        (CAPACITY_LOCAL, FRAME_PREVIOUS_STACK_CHUNK_OFFSET),
-        (LOW_LOCAL, FRAME_PREVIOUS_STACK_TOP_OFFSET),
-        (HIGH_LOCAL, FRAME_PREVIOUS_STACK_LIMIT_OFFSET),
-        (STACK_CHUNK_LOCAL, FRAME_STACK_CHUNK_OFFSET),
-    ] {
-        body.instruction(&W::LocalGet(SEQUENCE_LOCAL))
-            .instruction(&W::I32Load(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }))
-            .instruction(&W::LocalSet(local));
-    }
-    for (offset, local) in [
-        (FIBER_SHADOW_CHUNK_OFFSET, CAPACITY_LOCAL),
-        (FIBER_SHADOW_TOP_OFFSET, LOW_LOCAL),
-        (FIBER_SHADOW_LIMIT_OFFSET, HIGH_LOCAL),
-    ] {
-        body.instruction(&W::GlobalGet(globals.current_fiber))
-            .instruction(&W::LocalGet(local))
-            .instruction(&W::I32Store(MemArg {
-                offset,
-                align: 2,
-                memory_index: 0,
-            }));
-    }
-    body.instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
-        .instruction(&W::LocalGet(CAPACITY_LOCAL))
-        .instruction(&W::I32Ne)
-        .instruction(&W::If(BlockType::Empty))
-        .instruction(&W::LocalGet(STACK_CHUNK_LOCAL))
-        .instruction(&W::Call(FRAME_FREE_FUNCTION_INDEX))
-        .instruction(&W::Drop)
-        .instruction(&W::End);
+        .instruction(&W::Call(MATERIALIZED_FRAME_FREE_FUNCTION_INDEX))
+        .instruction(&W::Drop);
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -360,7 +360,7 @@ fn main() {
 
     println!(
         concat!(
-            "{{\"schema\":1,\"target\":\"{}-{}\",\"profile\":\"{}\",",
+            "{{\"schema\":\"volang.ui.performance.v1\",\"passed\":true,\"target\":\"{}-{}\",\"profile\":\"{}\",",
             "\"direct_scalar_allocations\":{},",
             "\"frame_p50_ns\":{},\"frame_p95_ns\":{},\"frame_p99_ns\":{},",
             "\"interaction_p50_ns\":{},\"interaction_p95_ns\":{},\"interaction_p99_ns\":{},",
