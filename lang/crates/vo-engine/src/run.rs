@@ -2302,7 +2302,10 @@ func main() {
         );
         let compiled = workspace.compile();
         let mut final_values = Vec::new();
-        for mode in [RunMode::Vm, RunMode::Jit] {
+        for (mode, step_millis) in [RunMode::Vm, RunMode::Jit]
+            .into_iter()
+            .flat_map(|mode| [7_u64, 20, 37].into_iter().map(move |step| (mode, step)))
+        {
             ensure_toolchain_host_installed();
             let mut vm = match mode {
                 RunMode::Vm => Vm::new(),
@@ -2383,16 +2386,18 @@ func main() {
                 started + std::time::Duration::from_millis(120),
             );
             let mut animation_frames = 0;
-            for tick in 1..=12 {
-                clock.advance(std::time::Duration::from_millis(20)).unwrap();
+            for tick in 1..=240_u64.div_ceil(step_millis) {
+                clock
+                    .advance(std::time::Duration::from_millis(step_millis))
+                    .unwrap();
                 let report = session
-                    .pump(started + std::time::Duration::from_millis(120 + tick * 20))
+                    .pump(started + std::time::Duration::from_millis(120 + tick * step_millis))
                     .unwrap();
                 animation_frames += report.applied_frames;
             }
             assert!(
                 animation_frames >= 2,
-                "motion worker should publish multiple coalesced frames; got {animation_frames}"
+                "motion worker should publish multiple coalesced frames at {step_millis}ms steps; got {animation_frames}"
             );
             let value = session
                 .renderer()
@@ -2417,7 +2422,7 @@ func main() {
             }
             final_values.push(value);
         }
-        assert_eq!(final_values[0], final_values[1]);
+        assert!(final_values.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]
