@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -17,11 +17,23 @@ struct ProcessTree {
     reaped: bool,
 }
 
+impl ProcessTree {
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        // JobObject::try_wait may have drained the completion port already.
+        // Termination still owns the whole job; reap the root without waiting
+        // for another notification that Windows need not send.
+        #[cfg(windows)]
+        return self.child.inner_mut().wait();
+        #[cfg(not(windows))]
+        self.child.wait()
+    }
+}
+
 impl Drop for ProcessTree {
     fn drop(&mut self) {
         if !self.reaped {
             let _ = self.child.start_kill();
-            let _ = self.child.wait();
+            let _ = self.wait();
         }
     }
 }
@@ -170,7 +182,6 @@ pub(crate) fn run_command(
                 .start_kill()
                 .context("could not terminate CI command process tree")?;
             let status = tree
-                .child
                 .wait()
                 .context("could not reap CI command process tree")?;
             tree.reaped = true;

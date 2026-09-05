@@ -21,10 +21,22 @@ struct Child {
     inner: Box<dyn ChildWrapper>,
 }
 
+impl Child {
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        // JobObject::try_wait consumes completion-port notifications. Waiting
+        // on that port again can block after the process has already exited.
+        // start_kill still terminates the entire job; reap its root directly.
+        #[cfg(windows)]
+        return self.inner.inner_mut().wait();
+        #[cfg(not(windows))]
+        self.inner.wait()
+    }
+}
+
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.inner.start_kill();
-        let _ = self.inner.wait();
+        let _ = self.wait();
     }
 }
 
@@ -57,7 +69,7 @@ pub(crate) fn run(
             || fs::metadata(&stderr)?.len() > MAX_LOG_BYTES;
         if over_limit || started.elapsed() >= timeout {
             child.inner.start_kill()?;
-            let status = child.inner.wait()?;
+            let status = child.wait()?;
             break (
                 status,
                 Some(if over_limit {
@@ -80,6 +92,60 @@ pub(crate) fn run(
         error,
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn drained_completion_port_fixture() {
+        if std::env::var_os("VO_TEST_DRAINED_JOB_FIXTURE").is_none() {
+            return;
+        }
+        let mut command = CommandWrap::with_new("cmd", |command| {
+            command.args(["/d", "/c", "exit 0"]);
+        });
+        command.wrap(JobObject);
+        let mut child = Child {
+            inner: command.spawn().unwrap(),
+        };
+        assert!(child.inner.inner_mut().wait().unwrap().success());
+        // Empty every queued notification before cleanup. This deterministically
+        // exercises the state seen after repeated polling of a finished job.
+        for _ in 0..32 {
+            assert!(child.inner.try_wait().unwrap().unwrap().success());
+        }
+        drop(child);
+    }
+
+    #[test]
+    fn cleanup_after_completed_job_polling_is_bounded() {
+        // A raw parent watchdog makes a cleanup regression fail in finite time,
+        // even when the wrapped child's destructor itself is stuck.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "subprocess::windows_tests::drained_completion_port_fixture",
+                "--nocapture",
+            ])
+            .env("VO_TEST_DRAINED_JOB_FIXTURE", "1")
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "cleanup fixture failed: {status}");
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("completed Windows job cleanup waited for a consumed notification");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 fn read_log(path: &Path) -> io::Result<String> {

@@ -474,7 +474,7 @@ results = ["target/ci/results/nightly-stress-scheduler.json"]
 
 [[task]]
 id = "nightly-platform-macos"
-commands = ["nightly-native-aot-tools", "nightly-platform-macos-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+commands = ["nightly-process-contracts", "nightly-native-aot-tools", "nightly-platform-macos-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
 artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
@@ -492,7 +492,7 @@ results = ["target/ci/results/nightly-platform-macos.json", "target/ci/results/n
 
 [[task]]
 id = "nightly-platform-windows"
-commands = ["nightly-native-aot-tools", "nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+commands = ["nightly-process-contracts", "nightly-native-aot-tools", "nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
 artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
@@ -679,6 +679,13 @@ id = "nightly-workspace-tests"
 argv = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--no-fail-fast", "--timings"]
 timeout_seconds = 3000
 failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "nightly-process-contracts"
+argv = ["cargo", "test", "--locked", "-p", "vo-dev", "process"]
+timeout_seconds = 180
+failure_kind = "infrastructure"
 report = "cargo-test"
 
 [[command]]
