@@ -6,10 +6,14 @@ structured result; `page-contract.mjs` owns Playwright input and waiting;
 `scenarios/` owns product assertions. `coverage.json` maps all eight former CDP
 scenarios and every original checkpoint to their replacements, with added
 regressions listed separately. The additional Studio canary covers a fresh local
-project through starter, edit, VM run, preview interaction, save, reload and reopen.
+project through starter, edit, VM run, preview interaction, save, reload, reopen and refresh the reopened workspace.
 The startup regression delays the first project activation through the test
 host-service wrapper, checks the loading state, then releases activation and
 requires the first starter click to open its editor.
+The Nightly lifecycle journey repeats three independent run/cancel cycles,
+requires each dedicated run worker to close, recovers from a compiler error,
+then reloads, edits, previews and saves while offline before recovering online.
+It uses the real service worker and checks persisted source after reconnecting.
 
 Install with `npm ci` in this directory, then
 `PLAYWRIGHT_BROWSERS_PATH=../../target/playwright-browsers npm run install:chromium`.

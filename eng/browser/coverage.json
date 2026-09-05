@@ -251,7 +251,8 @@
         "saved",
         "previewInteraction",
         "reload",
-        "reopen"
+        "reopen",
+        "reopenReload"
       ],
       "purpose": "isolated account-free deployed and final-artifact journey"
     },
@@ -267,6 +268,22 @@
         "firstClickOpened"
       ],
       "purpose": "controlled pending project activation preserves first-click behavior"
+    },
+    {
+      "id": "studio-lifecycle",
+      "flag": "studioLifecycleSmoke",
+      "source_function": "runStudioLifecycleSmoke",
+      "contract": "eng/browser/scenarios/studio-lifecycle.mjs",
+      "checkpoints": [
+        "canary",
+        "cycles",
+        "workerCleanup",
+        "diagnosticRecovery",
+        "offlineWarmup",
+        "offlineReloadEditPreviewSave",
+        "onlineRecovery"
+      ],
+      "purpose": "Nightly repeated run/cancel resource cleanup, diagnostic recovery, and persisted offline/online user flow"
     }
   ]
 }

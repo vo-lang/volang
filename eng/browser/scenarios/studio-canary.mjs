@@ -63,9 +63,14 @@ export async function runStudioCanarySmoke(contract, timeoutMilliseconds) {
   await button('Home').click();
   await button(`Open project ${projectName}`).click();
   await expect(editor).toHaveValue(edited);
+  await expect(page).toHaveURL(/\/workspace(?:[?#].*)?$/);
   await button('Open Preview').click();
   await expect(preview.getByRole('button', { name: 'Count: 41', exact: true })).toBeVisible();
   checkpoints.reopen = true;
+  await contract.reload();
+  await waitForAotInteractive(contract, timeoutMilliseconds);
+  await expect(editor).toHaveValue(edited);
+  checkpoints.reopenReload = true;
   await expect(page.locator('#volang-diagnostic')).toHaveText('');
 
   return { complete: true, passed: true, checkpoints };

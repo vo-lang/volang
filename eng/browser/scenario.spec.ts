@@ -11,6 +11,7 @@ import { runMediaApplicationSmoke } from './scenarios/media-application.mjs';
 import { runStudioWorkbenchSmoke } from './scenarios/studio-workbench.mjs';
 import { runStudioAotSmoke } from './scenarios/studio.mjs';
 import { prepareStudioBootstrap, runStudioBootstrapSmoke } from './scenarios/studio-bootstrap.mjs';
+import { runStudioLifecycleSmoke } from './scenarios/studio-lifecycle.mjs';
 import { runStudioCanarySmoke } from './scenarios/studio-canary.mjs';
 
 const request = process.env.VO_BROWSER_REQUEST
@@ -37,6 +38,7 @@ const scenarios = {
   studioAotSmoke: runStudioAotSmoke,
   studioCanarySmoke: runStudioCanarySmoke,
   studioBootstrapSmoke: runStudioBootstrapSmoke,
+  studioLifecycleSmoke: runStudioLifecycleSmoke,
 };
 
 test(request.scenario, async ({ page, context, browser, applicationURL }, testInfo) => {

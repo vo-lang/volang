@@ -811,6 +811,7 @@ func (state *State) requestProjectLoad(project domain.Project) {
 		state.activity = ActivityExplorer
 		state.status = project.Name
 		state.mu.Unlock()
+		ui.Navigate("/workspace")
 		ui.Invalidate()
 		return
 	}
