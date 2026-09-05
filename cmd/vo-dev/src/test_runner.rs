@@ -2,6 +2,7 @@ use crate::test_config::load_test_config;
 use crate::test_plan::{build_plan, effective_test_targets, TestArgs, TestPlan};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -185,7 +186,7 @@ fn run_native_tests_json(
         .output()
         .context("could not run vo-test run-plan")?;
     let _ = fs::remove_file(&plan_path);
-    parse_json_run_output(&output.stdout, &output.stderr, "vo-test run-plan")
+    checked_json_run_output(&output, &plan, "vo-test run-plan")
 }
 
 fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Result<()> {
@@ -224,10 +225,7 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
     if plan.jobs.is_empty() {
         bail!("no WASM tests selected");
     }
-    let mut build = command_from_args(&wasm_target.build_command, "WASM build command")?;
-    if opts.release {
-        build.args(&wasm_target.release_build_args);
-    }
+    let mut build = wasm_build_command(wasm_target, opts.release)?;
     let status = build.current_dir(root).status()?;
     if !status.success() {
         bail!(
@@ -303,10 +301,7 @@ fn run_wasm_tests_json(
     if plan.jobs.is_empty() {
         bail!("no WASM tests selected");
     }
-    let mut build = command_from_args(&wasm_target.build_command, "WASM build command")?;
-    if opts.release {
-        build.args(&wasm_target.release_build_args);
-    }
+    let mut build = wasm_build_command(wasm_target, opts.release)?;
     let output = build.current_dir(root).output()?;
     if !output.status.success() {
         bail!(
@@ -335,9 +330,9 @@ fn run_wasm_tests_json(
     let output = command.output();
     let _ = fs::remove_file(&plan_path);
     let output = output?;
-    parse_json_run_output(
-        &output.stdout,
-        &output.stderr,
+    checked_json_run_output(
+        &output,
+        &plan,
         &command_description(&wasm_target.runner_command),
     )
 }
@@ -380,26 +375,84 @@ fn aggregate_json_outputs(outputs: Vec<JsonRunOutput>) -> Result<JsonRunOutput> 
     Ok(aggregate)
 }
 
+fn checked_json_run_output(
+    output: &std::process::Output,
+    plan: &TestPlan,
+    command: &str,
+) -> Result<JsonRunOutput> {
+    let result = parse_json_run_output(&output.stdout, &output.stderr, command)?;
+    validate_json_run_output(&result, plan)?;
+    if output.status.success() != (result.failed == 0) {
+        bail!(
+            "{command} exit status {} contradicts its result ({} failed)\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            result.failed,
+            summarize_process_output(&output.stdout),
+            summarize_process_output(&output.stderr)
+        );
+    }
+    Ok(result)
+}
+
+fn validate_json_run_output(result: &JsonRunOutput, plan: &TestPlan) -> Result<()> {
+    if result.schema != "volang.test-result.v1" || result.suite != plan.suite {
+        bail!("test result schema or suite differs from the selected plan");
+    }
+    let expected = plan
+        .jobs
+        .iter()
+        .map(|job| (job.id.as_str(), job))
+        .collect::<BTreeMap<_, _>>();
+    if expected.is_empty()
+        || expected.len() != plan.jobs.len()
+        || result.jobs.len() != expected.len()
+    {
+        bail!("test result job count differs from the nonempty selected plan");
+    }
+    let mut seen = BTreeSet::new();
+    let (mut passed, mut failed) = (0, 0);
+    for job in &result.jobs {
+        let id = job["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("test result lacks job id"))?;
+        let planned = expected
+            .get(id)
+            .ok_or_else(|| anyhow!("unexpected test result job {id}"))?;
+        if !seen.insert(id) {
+            bail!("duplicate test result job {id}");
+        }
+        for (field, value) in [
+            ("case_id", &planned.case_id),
+            ("target", &planned.target),
+            ("backend", &planned.backend),
+            ("kind", &planned.kind),
+            ("path", &planned.path),
+        ] {
+            if job[field].as_str() != Some(value.as_str()) {
+                bail!("test result {id} differs from plan field {field}");
+            }
+        }
+        match job["status"].as_str() {
+            Some("passed") => passed += 1,
+            Some("failed") => failed += 1,
+            _ => bail!("test result {id} was not executed; skips must be resolved by the planner"),
+        }
+    }
+    if (result.passed, result.failed, result.skipped) != (passed, failed, 0) {
+        bail!("test result counters contradict individual job outcomes");
+    }
+    Ok(())
+}
+
 fn parse_json_run_output(stdout: &[u8], stderr: &[u8], command: &str) -> Result<JsonRunOutput> {
-    let text = String::from_utf8_lossy(stdout);
-    let start = match text.find('{') {
-        Some(start) => start,
-        None => bail!(
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        bail!(
             "{command} did not emit JSON result on stdout\nstdout:\n{}\nstderr:\n{}",
             summarize_process_output(stdout),
             summarize_process_output(stderr)
-        ),
-    };
-    let end = match text.rfind('}') {
-        Some(end) => end,
-        None => bail!(
-            "{command} emitted truncated JSON result\nstdout:\n{}\nstderr:\n{}",
-            summarize_process_output(stdout),
-            summarize_process_output(stderr)
-        ),
-    };
-    let json = &text[start..=end];
-    serde_json::from_str(json).with_context(|| {
+        );
+    }
+    serde_json::from_slice(stdout).with_context(|| {
         format!(
             "could not parse {command} JSON result\nstdout:\n{}\nstderr:\n{}",
             summarize_process_output(stdout),
@@ -540,6 +593,25 @@ fn command_from_args(args: &[String], description: &str) -> Result<Command> {
     Ok(command)
 }
 
+fn wasm_build_command(target: &crate::test_config::TestTarget, release: bool) -> Result<Command> {
+    let args = &target.build_command;
+    if args.len() < 2 {
+        bail!("WASM build command requires a program and subcommand");
+    }
+    let profile_args = if release {
+        &target.release_build_args
+    } else {
+        &target.debug_build_args
+    };
+    let mut command = Command::new(&args[0]);
+    command.arg(&args[1]);
+    // Build-tool options must precede trailing Cargo arguments (wasm-pack).
+    // Comparing tokens cannot distinguish options consumed at different levels.
+    command.args(profile_args);
+    command.args(&args[2..]);
+    Ok(command)
+}
+
 fn command_description(args: &[String]) -> String {
     args.join(" ")
 }
@@ -562,6 +634,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wasm_profiles_precede_forwarded_cargo_options() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let config = load_test_config(&root).unwrap();
+        for (release, flag) in [(false, "--dev"), (true, "--release")] {
+            let command = wasm_build_command(&config.targets["wasm"], release).unwrap();
+            let args = command
+                .get_args()
+                .map(|s| s.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(args[1], flag);
+            assert_eq!(args.iter().filter(|s| **s == flag).count(), 1);
+            assert!(args.iter().position(|s| *s == "--").unwrap() > 1);
+        }
+    }
+
+    #[test]
+    fn result_must_cover_exactly_the_plan_and_match_exit_status() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let opts = TestArgs::parse(
+            &root,
+            vec![
+                "--targets".into(),
+                "vm".into(),
+                "--path".into(),
+                "tests/lang/cases/runtime/array_len_cap_runtime.vo".into(),
+            ],
+        )
+        .unwrap();
+        let plan = build_plan(&root, &opts).unwrap();
+        let mut payload = serde_json::json!({
+            "schema": "volang.test-result.v1", "suite": plan.suite,
+            "passed": plan.jobs.len(), "failed": 0, "skipped": 0,
+            "jobs": plan.jobs.iter().map(|job| {
+                let mut value = serde_json::to_value(job).unwrap();
+                value["status"] = "passed".into();
+                value
+            }).collect::<Vec<_>>()
+        });
+        let decode =
+            |v: &serde_json::Value| serde_json::from_value::<JsonRunOutput>(v.clone()).unwrap();
+        validate_json_run_output(&decode(&payload), &plan).unwrap();
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(7 << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(7)
+        };
+        let output = std::process::Output {
+            status,
+            stdout: serde_json::to_vec(&payload).unwrap(),
+            stderr: b"injected failure".to_vec(),
+        };
+        assert!(checked_json_run_output(&output, &plan, "fixture")
+            .unwrap_err()
+            .to_string()
+            .contains("exit status"));
+        for (field, bad) in [
+            ("schema", serde_json::json!("wrong")),
+            ("passed", serde_json::json!(42)),
+            ("jobs", serde_json::json!([])),
+        ] {
+            let mut invalid = payload.clone();
+            invalid[field] = bad;
+            assert!(validate_json_run_output(&decode(&invalid), &plan).is_err());
+        }
+        for (field, bad) in [("target", "jit"), ("id", "extra"), ("status", "skipped")] {
+            let mut invalid = payload.clone();
+            invalid["jobs"][0][field] = bad.into();
+            assert!(validate_json_run_output(&decode(&invalid), &plan).is_err());
+        }
+        payload["jobs"][0]["status"] = "failed".into();
+        payload["passed"] = 0.into();
+        payload["failed"] = 1.into();
+        validate_json_run_output(&decode(&payload), &plan).unwrap();
+    }
+
+    #[test]
     fn parse_json_run_output_reports_stderr_when_json_is_missing() {
         let err = parse_json_run_output(
             b"",
@@ -577,17 +730,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_json_run_output_allows_wrapped_json_payload() {
-        let output = parse_json_run_output(
-            br#"prefix {"schema":"volang.test-result.v1","suite":"lang","passed":1,"failed":0,"skipped":0,"jobs":[]} suffix"#,
-            b"",
-            "vo-test run-plan",
-        )
-        .unwrap();
-
-        assert_eq!(output.schema, "volang.test-result.v1");
-        assert_eq!(output.passed, 1);
-        assert_eq!(output.failed, 0);
+    fn parse_json_run_output_rejects_wrapped_or_truncated_payloads() {
+        for invalid in [
+            &br#"prefix {"schema":"volang.test-result.v1","suite":"lang","passed":1,"failed":0,"skipped":0,"jobs":[]} suffix"#[..],
+            &br#"{"schema":"volang.test-result.v1","suite":"lang","passed":1"#[..],
+        ] {
+            assert!(parse_json_run_output(invalid, b"diagnostic", "runner").is_err());
+        }
     }
 
     #[test]

@@ -1,0 +1,60 @@
+name: Setup Volang toolchain
+description: Install the pinned Rust toolchain and configure shared compiler caching.
+
+inputs:
+  components:
+    description: Comma-separated rustup components.
+    required: false
+    default: ""
+  wasm:
+    description: Install wasm32-unknown-unknown.
+    required: false
+    default: "false"
+  compiler-cache:
+    description: Enable the GitHub Actions sccache backend.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Rust
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+        INSTALL_WASM: ${{ inputs.wasm }}
+      run: |
+        args=(toolchain install 1.94.0 --profile minimal)
+        if [ -n "$COMPONENTS" ]; then
+          IFS=',' read -ra components <<< "$COMPONENTS"
+          for component in "${components[@]}"; do
+            args+=(--component "$component")
+          done
+        fi
+        rustup "${args[@]}"
+        if [ "$INSTALL_WASM" = "true" ]; then
+          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
+        fi
+        rustup default 1.94.0
+
+    - name: Cache Cargo downloads
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+    - name: Install sccache
+      if: inputs.compiler-cache == 'true'
+      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      with:
+        version: v0.17.0
+
+    - name: Enable compiler cache
+      if: inputs.compiler-cache == 'true'
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=5G" >> "$GITHUB_ENV"

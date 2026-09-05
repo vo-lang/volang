@@ -108,7 +108,7 @@ struct BoundedRead {
 
 pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: vo-dev release matrix|metadata|version|sdk-plan|homebrew-repository|homebrew-metadata|build|package|verify|notes|publish|update-homebrew ...");
+        bail!("usage: vo-dev release matrix|metadata|version|sdk-plan|homebrew-repository|homebrew-metadata|build-web-runtime|build|package|verify|notes|publish|update-homebrew ...");
     }
     match args.remove(0).as_str() {
         "matrix" => cmd_matrix(root, args),
@@ -121,6 +121,10 @@ pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
         }
         "homebrew-repository" => cmd_homebrew_repository(root, args),
         "homebrew-metadata" => cmd_homebrew_metadata(root, args),
+        "build-web-runtime" => {
+            ensure_no_args("release build-web-runtime", &args)?;
+            build_ui_web_runtime(root)
+        }
         "build" => cmd_build(root, args),
         "package" => cmd_package(root, args),
         "verify" => cmd_verify(root, args),
@@ -303,7 +307,7 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
         &mut runtime_command,
         &format!("cargo build AOT runtime {}", target.target),
     )?;
-    build_ui_web_runtime(root)?;
+    require_ui_web_runtime(root)?;
     record_release_build(root, &release, &target.target, &identity)
 }
 
@@ -334,6 +338,26 @@ fn build_ui_web_runtime(root: &Path) -> Result<()> {
     let mut build = Command::new("npm");
     build.args(["run", "build"]).current_dir(&directory);
     run_status(&mut build, "npm run build for the UI Web runtime")
+}
+
+fn require_ui_web_runtime(root: &Path) -> Result<()> {
+    let directory = root.join("lang/crates/vo-web");
+    for relative in [
+        "dist/index.js",
+        "pkg/vo_web_bg.wasm",
+        "aot-support/vo_aot_support_wasm_bg.wasm",
+    ] {
+        let path = directory.join(relative);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("release Web runtime is missing: {}", path.display()))?;
+        if !metadata.file_type().is_file() || metadata.len() == 0 {
+            bail!(
+                "release Web runtime has invalid file {}; run `vo-dev release build-web-runtime` first",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn cmd_package(root: &Path, args: Vec<String>) -> Result<()> {
@@ -387,7 +411,7 @@ fn cmd_verify(root: &Path, args: Vec<String>) -> Result<()> {
         true,
     )?;
     let files = release_artifact_files(&release, &artifacts)?;
-    validate_release_artifacts(&artifacts, &release, &identity)?;
+    validate_release_artifacts(root, &artifacts, &release, &identity)?;
     let snapshot = snapshot_release_assets(&files)?;
     verify_local_release_asset_snapshot(&snapshot)?;
     println!(
@@ -509,9 +533,9 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
     let notes_text =
         read_regular_text_with_limit(&notes, "release notes file", MAX_RELEASE_NOTES_SIZE)?;
     let files = release_artifact_files(&release, &artifacts)?;
-    validate_release_artifacts(&artifacts, &release, &identity)?;
+    validate_release_artifacts(root, &artifacts, &release, &identity)?;
     let expected_assets = snapshot_release_assets(&files)?;
-    validate_release_artifacts(&artifacts, &release, &identity)?;
+    validate_release_artifacts(root, &artifacts, &release, &identity)?;
     verify_local_release_asset_snapshot(&expected_assets)?;
     let prerelease = !semver::Version::parse(&identity.version)?.pre.is_empty();
     let release_name = format!("Vo {tag}");
@@ -757,7 +781,7 @@ fn cmd_update_homebrew(root: &Path, args: Vec<String>) -> Result<()> {
         );
     }
     release_artifact_files(&release, &artifacts)?;
-    validate_release_artifacts(&artifacts, &release, &identity)?;
+    validate_release_artifacts(root, &artifacts, &release, &identity)?;
     let formula_path = safe_descendant_path(
         &repo,
         Path::new(&release.homebrew.formula_path),

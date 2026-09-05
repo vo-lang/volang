@@ -50,6 +50,8 @@ pub(crate) struct TestTarget {
     #[serde(default)]
     pub(crate) release_build_args: Vec<String>,
     #[serde(default)]
+    pub(crate) debug_build_args: Vec<String>,
+    #[serde(default)]
     pub(crate) runner_command: Vec<String>,
     #[serde(default)]
     pub(crate) prepare_commands: Vec<Vec<String>>,
@@ -114,6 +116,7 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
             "release_build_args",
             &target.release_build_args,
         )?;
+        validate_optional_command(&target.name, "debug_build_args", &target.debug_build_args)?;
         validate_optional_command(&target.name, "runner_command", &target.runner_command)?;
         for (index, command) in target.prepare_commands.iter().enumerate() {
             validate_optional_command(
@@ -167,7 +170,7 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
                         target.name
                     );
                 }
-                if !target.release_build_args.is_empty() {
+                if !target.release_build_args.is_empty() || !target.debug_build_args.is_empty() {
                     bail!(
                         "eng/tests.toml non-wasm target {} cannot declare release_build_args",
                         target.name

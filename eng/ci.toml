@@ -1,0 +1,442 @@
+version = 1
+
+# Profiles describe certification depth. Pull requests use impact selection;
+# merge queues and immutable branch candidates exercise the complete matrix.
+
+[[profile]]
+name = "pull-request"
+tier = "feedback"
+changed_only = true
+tasks = [
+  "contracts",
+  "rust-quality",
+  "language-native-smoke",
+  "wasm-web-smoke",
+  "ui-platform-linux-smoke",
+]
+
+[[profile]]
+name = "merge"
+tier = "certification"
+tasks = [
+  "contracts",
+  "rust-quality",
+  "language-native-1",
+  "language-native-2",
+  "wasm-web-full",
+  "ui-platform-linux-full",
+  "ui-platform-macos-full",
+  "ui-platform-windows-full",
+]
+
+[[profile]]
+name = "main"
+tier = "promotion"
+tasks = [
+  "contracts",
+  "rust-quality",
+  "language-native-1",
+  "language-native-2",
+  "wasm-web-full",
+  "ui-platform-linux-full",
+  "ui-platform-macos-full",
+  "ui-platform-windows-full",
+  "site-candidate",
+]
+
+[[profile]]
+name = "nightly"
+tier = "exhaustive"
+tasks = [
+  "nightly-language-native",
+  "nightly-language-wasm",
+  "nightly-stress-gc",
+  "nightly-stress-jit-osr",
+  "nightly-stress-gc-osr",
+  "nightly-stress-scheduler",
+  "nightly-platform-macos",
+  "nightly-platform-windows",
+  "nightly-fuzz-app-protocol",
+  "nightly-fuzz-ui-artifact",
+  "nightly-audits",
+]
+
+[[task]]
+id = "contracts"
+tier = "feedback"
+workflow_job = "quality_rust"
+runner = "ubuntu-24.04"
+always = true
+owners = ["engineering"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["contracts", "generated", "workflows"]
+timeout_minutes = 15
+budget_minutes = 8
+evidence_kind = "contract"
+
+[[task]]
+id = "rust-quality"
+tier = "feedback"
+workflow_job = "quality_rust"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["engineering", "language", "ui"]
+impact = [
+  "Cargo.*",
+  "rust-toolchain.toml",
+  "cmd/*",
+  "lang/crates/*",
+  "ui/crates/*",
+  "apps/studio/host-native/*",
+  "fuzz/*",
+  ".github/*",
+  "eng/*",
+]
+platforms = ["linux"]
+capabilities = ["rust", "clippy", "unit"]
+timeout_minutes = 30
+budget_minutes = 15
+evidence_kind = "rust-quality"
+
+[[task]]
+id = "language-native-smoke"
+tier = "feedback"
+workflow_job = "language_native"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language"]
+impact = [
+  "Cargo.*",
+  "rust-toolchain.toml",
+  "cmd/vo/*",
+  "cmd/vo-test/*",
+  "cmd/vo-dev/*",
+  "lang/*",
+  "tests/lang/*",
+  "examples/*",
+  "benchmarks/*",
+  "eng/tests.toml",
+]
+platforms = ["linux"]
+capabilities = ["vm", "jit", "gc", "native-aot", "compile"]
+timeout_minutes = 20
+budget_minutes = 10
+evidence_kind = "language-test"
+results = ["target/ci/results/language-native-smoke.json"]
+
+[[task]]
+id = "language-native-1"
+tier = "certification"
+workflow_job = "language_native"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["vm", "jit", "gc", "native-aot", "compile", "embed"]
+timeout_minutes = 35
+budget_minutes = 22
+evidence_kind = "language-test"
+results = ["target/ci/results/language-native-1.json"]
+
+[[task]]
+id = "language-native-2"
+tier = "certification"
+workflow_job = "language_native"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["vm", "jit", "gc", "native-aot", "compile", "embed"]
+timeout_minutes = 35
+budget_minutes = 22
+evidence_kind = "language-test"
+results = ["target/ci/results/language-native-2.json"]
+
+[[task]]
+id = "wasm-web-smoke"
+tier = "feedback"
+workflow_job = "wasm_web"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language", "ui", "web"]
+impact = [
+  "Cargo.*",
+  "cmd/vo/*",
+  "cmd/vo-dev/*",
+  "lang/crates/vo-web/*",
+  "lang/crates/vo-*/*",
+  "tests/lang/*",
+  "ui/*",
+  "apps/studio/*",
+  "eng/run-browser-smoke.mjs",
+  "eng/report-ui-web-*",
+]
+platforms = ["web"]
+capabilities = ["wasm-vm", "wasm-aot", "browser", "ui"]
+timeout_minutes = 25
+budget_minutes = 15
+evidence_kind = "web-test"
+results = [
+  "target/ci/results/wasm-web-smoke.json",
+  "target/ci/results/ui/volang-ui-browser-conformance.json",
+  "target/ci/results/ui/volang-ui-aot-component-browser.json",
+]
+
+[[task]]
+id = "wasm-web-full"
+tier = "certification"
+workflow_job = "wasm_web"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language", "ui", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["wasm-vm", "wasm-aot", "browser", "ui", "no-std"]
+timeout_minutes = 45
+budget_minutes = 30
+evidence_kind = "web-test"
+results = [
+  "target/ci/results/wasm-web-full.json",
+  "target/ci/results/ui/volang-ui-browser-conformance.json",
+  "target/ci/results/ui/volang-ui-aot-component-browser.json",
+  "target/ci/results/ui/volang-uikit-gallery-browser.json",
+  "target/ci/results/ui/volang-data-application-browser.json",
+  "target/ci/results/ui/volang-content-site-browser.json",
+  "target/ci/results/ui/volang-media-application-browser.json",
+  "target/ci/results/ui/volang-studio-workbench-browser.json",
+  "target/ci/results/ui/volang-studio-aot-browser.json",
+]
+
+[[task]]
+id = "ui-platform-linux-smoke"
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = [
+  "Cargo.*",
+  "cmd/vo/*",
+  "lang/crates/vo-engine/*",
+  "lang/crates/vo-ui-*",
+  "ui/*",
+  "apps/studio/*",
+  "eng/run-*-contracts.sh",
+]
+platforms = ["linux"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+timeout_minutes = 30
+budget_minutes = 18
+evidence_kind = "platform-test"
+
+[[task]]
+id = "ui-platform-linux-full"
+tier = "certification"
+workflow_job = "ui_platform"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 60
+budget_minutes = 35
+evidence_kind = "platform-test"
+results = ["target/ci/results/ui-performance.json"]
+
+[[task]]
+id = "ui-platform-macos-full"
+tier = "certification"
+workflow_job = "ui_platform"
+runner = "macos-15"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = ["*"]
+platforms = ["macos"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 60
+budget_minutes = 35
+evidence_kind = "platform-test"
+
+[[task]]
+id = "ui-platform-windows-full"
+tier = "certification"
+workflow_job = "ui_platform"
+runner = "windows-2025"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = ["*"]
+platforms = ["windows"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 60
+budget_minutes = 40
+evidence_kind = "platform-test"
+
+[[task]]
+id = "site-candidate"
+tier = "promotion"
+workflow_job = "wasm_web"
+runner = "ubuntu-24.04"
+depends_on = ["wasm-web-full"]
+owners = ["ui", "studio", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["studio", "pages", "offline"]
+timeout_minutes = 10
+budget_minutes = 5
+evidence_kind = "promotable-artifact"
+artifacts = ["target/ci/artifacts/site"]
+
+[[task]]
+id = "nightly-language-native"
+tier = "exhaustive"
+workflow_job = "language_release_native"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["release", "language", "native"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "nightly-test"
+results = ["target/ci/results/nightly-language-native.json"]
+
+[[task]]
+id = "nightly-language-wasm"
+tier = "exhaustive"
+workflow_job = "language_release_wasm"
+runner = "ubuntu-24.04"
+owners = ["language", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["release", "wasm-vm", "wasm-aot"]
+timeout_minutes = 90
+budget_minutes = 50
+evidence_kind = "nightly-test"
+results = ["target/ci/results/nightly-language-wasm.json"]
+
+[[task]]
+id = "nightly-stress-gc"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "gc"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-gc.json"]
+
+[[task]]
+id = "nightly-stress-jit-osr"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "jit", "osr"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-jit-osr.json"]
+
+[[task]]
+id = "nightly-stress-gc-osr"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "gc", "osr"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-gc-osr.json"]
+
+[[task]]
+id = "nightly-stress-scheduler"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "scheduler"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-scheduler.json"]
+
+[[task]]
+id = "nightly-platform-macos"
+tier = "exhaustive"
+workflow_job = "platform"
+runner = "macos-15"
+owners = ["language", "ui"]
+impact = ["*"]
+platforms = ["macos"]
+capabilities = ["release", "platform"]
+timeout_minutes = 60
+budget_minutes = 40
+evidence_kind = "nightly-platform"
+results = ["target/ci/results/nightly-platform-macos.json"]
+
+[[task]]
+id = "nightly-platform-windows"
+tier = "exhaustive"
+workflow_job = "platform"
+runner = "windows-2025"
+owners = ["language", "ui"]
+impact = ["*"]
+platforms = ["windows"]
+capabilities = ["release", "platform"]
+timeout_minutes = 60
+budget_minutes = 40
+evidence_kind = "nightly-platform"
+results = ["target/ci/results/nightly-platform-windows.json"]
+
+[[task]]
+id = "nightly-fuzz-app-protocol"
+tier = "exhaustive"
+workflow_job = "bounded_fuzz"
+runner = "ubuntu-24.04"
+owners = ["runtime"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["fuzz", "app-protocol"]
+timeout_minutes = 45
+budget_minutes = 30
+evidence_kind = "fuzz-test"
+
+[[task]]
+id = "nightly-fuzz-ui-artifact"
+tier = "exhaustive"
+workflow_job = "bounded_fuzz"
+runner = "ubuntu-24.04"
+owners = ["ui"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["fuzz", "ui-artifact"]
+timeout_minutes = 45
+budget_minutes = 30
+evidence_kind = "fuzz-test"
+
+[[task]]
+id = "nightly-audits"
+tier = "exhaustive"
+workflow_job = "audits"
+runner = "ubuntu-24.04"
+owners = ["security"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["advisory", "dependency"]
+timeout_minutes = 30
+budget_minutes = 15
+evidence_kind = "security-audit"

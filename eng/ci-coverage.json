@@ -1,0 +1,377 @@
+{
+  "schema": "volang.ci.coverage-migration.v1",
+  "baseline": "aae49c4a8d89c0aef8ce138eb5d4c891250d7174",
+  "cases": [
+    {
+      "legacy_id": "TEST-BOUNDARY-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo run -p vo-dev --locked -- lint repo-boundaries"
+      ],
+      "historical_commands": [
+        "cargo run -p vo-dev --locked -- lint repo-boundaries",
+        "cargo run -p vo-dev --locked -- lint traceability",
+        "cargo check -p voplay-extension --manifest-path ../voplay/rust/Cargo.toml --locked --no-default-features --features profile-core",
+        "cargo check -p vogui-extension --manifest-path ../vogui/rust/Cargo.toml --locked --no-default-features --features profile-headless"
+      ]
+    },
+    {
+      "legacy_id": "TEST-CI-001",
+      "destination": "contracts: generation/lint; release: complete target archive verification; removed consumer commands reference retired generator contracts.",
+      "retained_local_commands": [
+        "cargo run -p vo-dev --locked -- generate app-protocol --check",
+        "cargo run -p vo-dev --locked -- generate studio-docs --check",
+        "cargo run -p vo-dev --locked -- lint all"
+      ],
+      "historical_commands": [
+        "cargo run -p vo-dev --locked -- generate app-protocol --check",
+        "cargo run -p vo-dev --locked -- generate studio-docs --check",
+        "cargo run -p vo-dev --locked -- generate vogui-protocol --check",
+        "cargo run -p vo-dev --locked -- generate voplay-protocol --check",
+        "sh eng/run-rewrite-consumer-smoke-report.sh ci-consumer-smoke",
+        "cargo run -p vo-dev --locked -- lint all",
+        "sh eng/run-rewrite-release-matrix-report.sh ci-release-matrix.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-DELIVERY-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo run -p vo-dev --locked -- lint docs"
+      ],
+      "historical_commands": [
+        "cargo run -p vo-dev --locked -- lint traceability",
+        "cargo run -p vo-dev --locked -- lint docs",
+        "sh eng/run-rewrite-release-matrix-report.sh delivery-release-matrix.json",
+        "cargo check --manifest-path ../vogui/rust/Cargo.toml --workspace --all-targets --locked",
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml --workspace --all-targets --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-RT-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo test -p vo-app-runtime --locked",
+        "cargo test -p vo-runtime host_services --locked",
+        "cargo test -p vo-vm runtime_boundary --locked"
+      ],
+      "historical_commands": [
+        "cargo test -p vo-app-runtime --locked",
+        "cargo test -p vo-runtime host_services --locked",
+        "cargo test -p vo-vm runtime_boundary --locked",
+        "cargo test --target-dir target/rewrite-validation/cargo/rt-vo-web -p vo-web --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-PROTO-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo test -p vo-app-protocol --locked",
+        "cargo run -p vo-dev --locked -- generate app-protocol --check"
+      ],
+      "historical_commands": [
+        "cargo test -p vo-app-protocol --locked",
+        "cargo run -p vo-dev --locked -- generate app-protocol --check",
+        "sh eng/run-rewrite-protocol-fuzz-report.sh app"
+      ]
+    },
+    {
+      "legacy_id": "TEST-PROTO-002",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-codegen --locked",
+        "cargo run -p vo-dev --locked -- generate voplay-protocol --check",
+        "sh eng/run-rewrite-protocol-fuzz-report.sh framework"
+      ]
+    },
+    {
+      "legacy_id": "TEST-PROTO-003",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo test -p vo-engine compile::tests --locked"
+      ],
+      "historical_commands": [
+        "cargo test -p vo-engine compile::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-codegen --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-codegen --locked",
+        "sh eng/run-rewrite-consumer-smoke-report.sh proto3-consumer-smoke"
+      ]
+    },
+    {
+      "legacy_id": "TEST-PROFILE-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo test -p vo-module profile --locked"
+      ],
+      "historical_commands": [
+        "cargo test -p vo-module profile --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime profile::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-PROFILE-002",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-core",
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-2d",
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-3d",
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-editor",
+        "cargo check --manifest-path ../vogui/rust/Cargo.toml -p vogui-extension --locked --no-default-features --features profile-headless",
+        "cargo check --manifest-path ../vogui/rust/Cargo.toml -p vogui-extension --target wasm32-unknown-unknown --locked --no-default-features --features profile-web-minimal",
+        "cargo check --manifest-path ../vogui/rust/Cargo.toml -p vogui-extension --locked --no-default-features --features profile-native-webview-minimal",
+        "sh eng/run-rewrite-profile-artifact-audit-report.sh voplay",
+        "sh eng/run-rewrite-profile-artifact-audit-report.sh vogui"
+      ]
+    },
+    {
+      "legacy_id": "TEST-ENGINE-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime game_engine::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime runtime::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-ASSET-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime asset::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime buffer_lease::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-ASSET-002",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-assets --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-import-gltf --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-RENDER-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime outbox::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_control::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_graph::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_readback::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime headless_renderer::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-RENDER-002",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-2d --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-3d --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-core --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-INPUT-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration. Browser input and macOS lifecycle probes require explicit ecosystem integration; they remain in this repository.",
+      "retained_local_commands": [
+        "cargo test -p vo-app-runtime platform_input::tests --locked",
+        "sh eng/run-macos-window-lifecycle-smoke.sh input-macos-window-lifecycle-smoke.json"
+      ],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime input::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime haptics::tests --locked",
+        "cargo test -p vo-app-runtime platform_input::tests --locked",
+        "node eng/run-browser-smoke.mjs --project eng/browser-input-smoke --bundle-entry eng/browser-input-smoke/src/browser_smoke.ts --global __voplayBrowserInputSmoke --output target/rewrite-validation/browser-input-smoke.json",
+        "sh eng/run-macos-window-lifecycle-smoke.sh input-macos-window-lifecycle-smoke.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-RECOVERY-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "cargo test -p vo-app-runtime kernel::tests::injected_surface_fault_is_atomic_and_next_attempt_recovers --locked",
+        "cargo test -p vo-app-runtime kernel::tests::one_thousand_full_owner_graph_create_close_cycles_leave_zero_resources --locked"
+      ],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime platform_recovery::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime runtime::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime reload::tests --locked",
+        "cargo test -p vo-app-runtime kernel::tests::injected_surface_fault_is_atomic_and_next_attempt_recovers --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tests::injected_renderer_fault_is_atomic_and_next_attempt_recovers --locked",
+        "cargo test -p vo-app-runtime kernel::tests::one_thousand_full_owner_graph_create_close_cycles_leave_zero_resources --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime runtime::tests::one_thousand_runtime_create_close_cycles_release_surfaces_scopes_and_device_bindings --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tests::one_thousand_ui_owner_graph_attach_detach_cycles_leave_zero_resources --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-RECOVERY-002",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-render-core --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-assets --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-audio --locked",
+        "sh eng/run-voplay-vogui-macos-gpu-smoke.sh recovery-macos-gpu-smoke.json",
+        "sh eng/run-voplay-cpal-smoke.sh recovery-cpal-smoke.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-MULTIVIEW-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime suspended_remote_domain_does_not_block_peer_domain_frame_completion --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime two_engines_keep_world_and_revision_isolated --locked",
+        "node eng/run-browser-smoke.mjs --project ../voplay/web --global __voplayBrowserSmoke --button audio-gesture --output target/rewrite-validation/voplay-browser-multiview-smoke.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-RENDEREXT-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_feature::tests --locked",
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --locked --no-default-features --features profile-3d",
+        "cargo check --manifest-path ../voplay/rust/Cargo.toml -p voplay-extension --target wasm32-unknown-unknown --locked --no-default-features --features profile-3d"
+      ]
+    },
+    {
+      "legacy_id": "TEST-SCENEPERF-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime render_world::tests --locked",
+        "sh eng/run-rewrite-stable-benchmark.sh voplay"
+      ]
+    },
+    {
+      "legacy_id": "TEST-WORLD-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime world::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime query::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime hierarchy::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime scene::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime world_partition::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-COMPOSE-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime engine_command --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-PLATFORM-001",
+      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "retained_local_commands": [
+        "sh eng/run-macos-window-lifecycle-smoke.sh platform-macos-window-lifecycle-smoke.json"
+      ],
+      "historical_commands": [
+        "node eng/run-browser-smoke.mjs --project ../voplay/web --global __voplayBrowserSmoke --button audio-gesture --output target/rewrite-validation/voplay-browser-platform-smoke.json",
+        "sh eng/run-macos-window-lifecycle-smoke.sh platform-macos-window-lifecycle-smoke.json",
+        "sh eng/run-voplay-cpal-smoke.sh platform-cpal-smoke.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-AUDIO-001",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio_mixer::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio_streaming::tests --locked",
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-runtime audio_device_adapter::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-AUDIO-002",
+      "destination": "External Voplay ownership; excluded from core certification. Provision and verify eng/project.toml pin before ecosystem checks.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../voplay/rust/Cargo.toml -p voplay-audio --locked",
+        "sh eng/run-voplay-cpal-smoke.sh audio-cpal-smoke.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-APP-001",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tests:: --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime multi_root_reconcile_prepares_every_tree_before_any_apply --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime commit_views_combines_tree_apply_patch_budget_and_commit_revision --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime async_runtime::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-INCR-001",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime tree::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime control_runtime::tests --locked",
+        "sh eng/run-rewrite-stable-benchmark.sh vogui"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-EVENT-001",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime input::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime command::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime router::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime inspection::tests --locked",
+        "node eng/run-browser-smoke.mjs --project ../vogui/js --global __voguiBrowserSmoke --output target/rewrite-validation/vogui-browser-event-smoke.json",
+        "sh eng/run-voplay-vogui-macos-gpu-smoke.sh gui-event-macos-gpu-smoke.json"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-RESOURCE-001",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime resource::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-native-renderer --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-WIDGET-001",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime widget_provider::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime reload::tests --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-RENDER-001",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-runtime profile::tests --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-layout --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-text --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-headless-renderer --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-native-renderer --locked",
+        "cargo test --manifest-path ../vogui/rust/Cargo.toml -p vogui-native-accessibility --locked"
+      ]
+    },
+    {
+      "legacy_id": "TEST-GUI-RENDER-002",
+      "destination": "Legacy Vogui implementation retired; renderer-neutral UI workspace Rust contracts, native platform matrix and eight browser scenarios cover the active UI product.",
+      "retained_local_commands": [],
+      "historical_commands": [
+        "node eng/run-browser-smoke.mjs --project ../vogui/js --global __voguiBrowserSmoke --output target/rewrite-validation/vogui-browser-renderer-smoke.json"
+      ]
+    }
+  ]
+}

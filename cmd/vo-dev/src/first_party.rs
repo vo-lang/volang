@@ -319,19 +319,19 @@ mod tests {
     #[test]
     fn checked_repo_requires_the_clean_expected_commit() {
         let root = temp_root("checked");
-        let repo = root.join("siblings/vogui");
+        let repo = root.join("siblings/voplay");
         let expected = init_repo(&repo);
         let entry = ProjectRepo {
-            name: "vogui".to_string(),
-            repository: Some("vo-lang/vogui".to_string()),
-            local_hint: Some("siblings/vogui".to_string()),
+            name: "voplay".to_string(),
+            repository: Some("vo-lang/voplay".to_string()),
+            local_hint: Some("siblings/voplay".to_string()),
             expected_commit: Some(expected),
             workspace: Vec::new(),
         };
 
-        checked_repo_path_from_entry(&root, "vogui", &entry).expect("clean pin");
+        checked_repo_path_from_entry(&root, "voplay", &entry).expect("clean pin");
         fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty");
-        assert!(checked_repo_path_from_entry(&root, "vogui", &entry).is_err());
+        assert!(checked_repo_path_from_entry(&root, "voplay", &entry).is_err());
         fs::remove_dir_all(root).ok();
     }
 }

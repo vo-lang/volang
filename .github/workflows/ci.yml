@@ -10,9 +10,13 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,33 +24,156 @@ env:
   VOWORK: "off"
 
 jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    outputs:
+      profile: ${{ steps.plan.outputs.profile }}
+      rust_quality: ${{ steps.plan.outputs.rust_quality }}
+      language_matrix: ${{ steps.plan.outputs.language_matrix }}
+      wasm_task: ${{ steps.plan.outputs.wasm_task }}
+      ui_matrix: ${{ steps.plan.outputs.ui_matrix }}
+      site_candidate: ${{ steps.plan.outputs.site_candidate }}
+    steps:
+      - name: Checkout complete candidate history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          compiler-cache: "true"
+
+      - name: Build CI planner
+        run: cargo build --locked -p vo-dev
+
+      - name: Build immutable CI plan
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              profile=pull-request
+              ./target/debug/vo-dev ci plan \
+                --profile "$profile" \
+                --base "$BASE_SHA" \
+                --head "$HEAD_SHA" \
+                --output target/ci/plan.json >/dev/null
+              ;;
+            merge_group)
+              profile=merge
+              ./target/debug/vo-dev ci plan \
+                --profile "$profile" \
+                --output target/ci/plan.json >/dev/null
+              ;;
+            push)
+              profile=main
+              ./target/debug/vo-dev ci plan \
+                --profile "$profile" \
+                --output target/ci/plan.json >/dev/null
+              ;;
+            workflow_dispatch)
+              if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+                profile=main
+              else
+                profile=merge
+              fi
+              ./target/debug/vo-dev ci plan \
+                --profile "$profile" \
+                --output target/ci/plan.json >/dev/null
+              ;;
+            *)
+              echo "unsupported CI event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          has_task() {
+            jq --exit-status --arg task "$1" \
+              'any(.tasks[]; .id == $task)' target/ci/plan.json >/dev/null
+          }
+          language_matrix="$(jq -c '
+            [.tasks[]
+              | select(.workflow_job == "language_native")
+              | {
+                  task: .id,
+                  shard: (
+                    if .id == "language-native-smoke" then "smoke"
+                    elif .id == "language-native-1" then "1/2"
+                    elif .id == "language-native-2" then "2/2"
+                    else error("unknown language task")
+                    end
+                  )
+                }
+            ]' target/ci/plan.json)"
+          ui_matrix="$(jq -c '
+            [.tasks[]
+              | select(.workflow_job == "ui_platform")
+              | {
+                  task: .id,
+                  os: .runner,
+                  full: (.id | endswith("-full"))
+                }
+            ]' target/ci/plan.json)"
+          wasm_task="$(jq -r '
+            [.tasks[] | select(.workflow_job == "wasm_web") | .id]
+            | map(select(. != "site-candidate"))
+            | .[0] // ""
+          ' target/ci/plan.json)"
+          {
+            echo "profile=$profile"
+            echo "language_matrix=$language_matrix"
+            echo "ui_matrix=$ui_matrix"
+            echo "wasm_task=$wasm_task"
+            if has_task rust-quality; then echo "rust_quality=true"; else echo "rust_quality=false"; fi
+            if has_task site-candidate; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable CI plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
   quality_rust:
     name: quality-rust
+    needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          components: rustfmt,clippy
+
+      - name: Download immutable CI plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan-input
 
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
 
       - name: Check Rust formatting
+        if: needs.plan.outputs.rust_quality == 'true'
         run: cargo fmt --all -- --check
 
       - name: Check repository contracts
@@ -73,9 +200,11 @@ jobs:
           "$install_dir/actionlint" -color -ignore 'unexpected key "queue"'
 
       - name: Run Clippy
+        if: needs.plan.outputs.rust_quality == 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Rust tests
+        if: needs.plan.outputs.rust_quality == 'true'
         run: cargo test --workspace --all-targets --locked
 
       - name: Require a clean generated state
@@ -86,32 +215,59 @@ jobs:
             exit 1
           fi
 
+      - name: Record quality evidence
+        shell: bash
+        env:
+          RUN_RUST_QUALITY: ${{ needs.plan.outputs.rust_quality }}
+        run: |
+          mkdir -p target/ci/evidence
+          ./target/debug/vo-dev ci record \
+            --plan target/ci/plan-input/plan.json \
+            --task contracts \
+            --output target/ci/evidence/contracts.evidence.json
+          if [ "$RUN_RUST_QUALITY" = "true" ]; then
+            ./target/debug/vo-dev ci record \
+              --plan target/ci/plan-input/plan.json \
+              --task rust-quality \
+              --output target/ci/evidence/rust-quality.evidence.json
+          fi
+
+      - name: Upload quality evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-evidence-quality-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
   language_native:
+    if: needs.plan.outputs.language_matrix != '[]'
     name: language-native (${{ matrix.shard }})
+    needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event_name == 'pull_request' && '["smoke"]' || '["1/2", "2/2"]') }}
+        include: ${{ fromJSON(needs.plan.outputs.language_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+
+      - name: Download immutable CI plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan-input
 
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
@@ -129,35 +285,67 @@ jobs:
 
       - name: Run pull request language targets
         if: matrix.shard == 'smoke'
-        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets native,gc-vm,gc-osr,compile
+        shell: bash
+        run: |
+          mkdir -p target/ci/results
+          ./target/debug/vo-dev test run \
+            --suite lang \
+            --tags smoke \
+            --targets native,gc-vm,gc-osr,compile \
+            --format json > "target/ci/results/${{ matrix.task }}.json"
 
       - name: Run native language shard
         if: matrix.shard != 'smoke'
-        run: ./target/debug/vo-dev test run --suite lang --targets native,gc,gc-osr,embed,compile --shard '${{ matrix.shard }}'
+        shell: bash
+        run: |
+          mkdir -p target/ci/results
+          ./target/debug/vo-dev test run \
+            --suite lang \
+            --targets native,gc,gc-osr,embed,compile \
+            --shard '${{ matrix.shard }}' \
+            --format json > "target/ci/results/${{ matrix.task }}.json"
+
+      - name: Record language evidence
+        run: >-
+          ./target/debug/vo-dev ci record
+          --plan target/ci/plan-input/plan.json
+          --task "${{ matrix.task }}"
+          --output "target/ci/evidence/${{ matrix.task }}.evidence.json"
+
+      - name: Upload language evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 14
 
   wasm_web:
     name: wasm-web
+    needs: plan
+    if: needs.plan.outputs.wasm_task != ''
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust and WebAssembly target
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          wasm: "true"
+
+      - name: Download immutable CI plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan-input
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -197,7 +385,17 @@ jobs:
           npm run build:wasm:release
           npm run build:js
 
-      - name: Build production Core Wasm AOT component application
+      - name: Build pull request Core Wasm AOT component fixture
+        if: needs.plan.outputs.wasm_task == 'wasm-web-smoke'
+        env:
+          VOWORK: "off"
+        run: |
+          ./target/debug/vo ui build ui/tests/nested-component-list \
+            -o target/ui-nested-component-aot \
+            --runtime-dir=lang/crates/vo-web
+
+      - name: Build production Core Wasm AOT component applications
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         env:
           VOWORK: "off"
         run: |
@@ -220,31 +418,34 @@ jobs:
             -o target/studio-workbench-aot \
             --runtime-dir=lang/crates/vo-web
           VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui build apps/studio \
-            -o target/studio-aot \
+            -o target/ci/artifacts/site \
             --runtime-dir=lang/crates/vo-web
 
       - name: Enforce Core Wasm AOT image budgets
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         run: |
-          mkdir -p target/ui-certification/web-size
-          node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/component-gallery.json
-          node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/data-application.json
-          node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/content-site.json
-          node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ui-certification/web-size/media-application.json
-          node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ui-certification/web-size/studio-workbench.json
-          node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/studio-aot/app.wasm --brotli-limit 983040 --gzip-limit 2700000 --output target/ui-certification/web-size/studio.json
-          node eng/report-ui-web-precache-size.mjs --label studio --root target/studio-aot --gzip-limit 3670016 --output target/ui-certification/web-size/studio-precache.json
+          mkdir -p target/ci/results/ui-size
+          node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/component-gallery.json
+          node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/data-application.json
+          node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/content-site.json
+          node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/media-application.json
+          node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ci/results/ui-size/studio-workbench.json
+          node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/ci/artifacts/site/app.wasm --raw-limit 34000000 --brotli-limit 972800 --gzip-limit 2500000 --output target/ci/results/ui-size/studio.json
+          node eng/report-ui-web-precache-size.mjs --label studio --root target/ci/artifacts/site --gzip-limit 3670016 --output target/ci/results/ui-size/studio-precache.json
 
       - name: Publish Core Wasm AOT image reports
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-web-image-size
-          path: target/ui-certification/web-size/*.json
+          path: target/ci/results/ui-size/*.json
           if-no-files-found: error
 
       - name: Build VM and JIT UI test tooling
         run: cargo build --locked -p vo --no-default-features --features jit
 
       - name: Run official UIKit VM and JIT interaction matrix
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         run: |
           ./eng/run-uikit-gallery-contracts.sh
           ./eng/run-data-application-contracts.sh
@@ -253,6 +454,7 @@ jobs:
           ./eng/run-studio-workbench-contracts.sh
 
       - name: Run Core Wasm AOT semantic gate
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         shell: bash
         run: |
           set -euo pipefail
@@ -296,14 +498,26 @@ jobs:
           done
 
       - name: Run WebAssembly language target
+        shell: bash
+        env:
+          WASM_TASK: ${{ needs.plan.outputs.wasm_task }}
         run: |
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            ./target/debug/vo-dev test run --suite lang --tags smoke --targets wasm,wasm-aot
+          mkdir -p target/ci/results
+          if [ "$WASM_TASK" = "wasm-web-smoke" ]; then
+            ./target/debug/vo-dev test run \
+              --suite lang \
+              --tags smoke \
+              --targets wasm,wasm-aot \
+              --format json > "target/ci/results/${WASM_TASK}.json"
           else
-            ./target/debug/vo-dev test run --suite lang --targets wasm,wasm-aot
+            ./target/debug/vo-dev test run \
+              --suite lang \
+              --targets wasm,wasm-aot \
+              --format json > "target/ci/results/${WASM_TASK}.json"
           fi
 
       - name: Check no-std target closure
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         run: |
           stdlib_closure="$(cargo tree --locked -p vo-stdlib --target wasm32-unknown-unknown \
             --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
@@ -327,7 +541,18 @@ jobs:
             -p vo-ui-core -p vo-ui-protocol -p vo-ui-reactive -p vo-ui-plan \
             -p vo-ui-system -p vo-ui-web --no-default-features
 
-      - name: Test vo-web JavaScript
+      - name: Test pull request Web runtime
+        if: needs.plan.outputs.wasm_task == 'wasm-web-smoke'
+        working-directory: lang/crates/vo-web
+        run: |
+          npm run test:vfs
+          npm run test:ui
+          npm run test:ui-browser
+          npm run test:ui-component-browser
+          VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
+
+      - name: Test complete Web runtime and product set
+        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
         working-directory: lang/crates/vo-web
         run: |
           npm run test:vfs
@@ -340,36 +565,75 @@ jobs:
           npm run test:media-application-browser
           npm run test:studio-workbench-browser
           npm run test:studio-aot-browser
-          "$GITHUB_WORKSPACE/target/debug/vo-dev" ui-certify --evidence
           VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
 
+      - name: Record Web and site evidence
+        shell: bash
+        env:
+          WASM_TASK: ${{ needs.plan.outputs.wasm_task }}
+          SITE_CANDIDATE: ${{ needs.plan.outputs.site_candidate }}
+        run: |
+          ./target/debug/vo-dev ci record \
+            --plan target/ci/plan-input/plan.json \
+            --task "$WASM_TASK" \
+            --output "target/ci/evidence/${WASM_TASK}.evidence.json"
+          if [ "$SITE_CANDIDATE" = "true" ]; then
+            ./target/debug/vo-dev ci record \
+              --plan target/ci/plan-input/plan.json \
+              --task site-candidate \
+              --output target/ci/evidence/site-candidate.evidence.json
+          fi
+
+      - name: Upload Web evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-evidence-wasm-web-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload promotable Studio site
+        if: needs.plan.outputs.site_candidate == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-candidate-${{ github.sha }}
+          path: target/ci/artifacts/site
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7
+
   ui_platform:
+    if: needs.plan.outputs.ui_matrix != '[]'
     name: ui-platform (${{ matrix.os }})
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        include: ${{ fromJSON(needs.plan.outputs.ui_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
+      - name: Start evidence clock
         shell: bash
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup default 1.94.0
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+
+      - name: Download immutable CI plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-ui-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Build evidence tooling
+        run: cargo build --locked -p vo-dev
 
       - name: Install Linux window smoke dependencies
         if: runner.os == 'Linux'
@@ -392,24 +656,25 @@ jobs:
         run: cargo test --locked -p vo-engine official_ui_native_vm_jit
 
       - name: Enforce UI performance budgets
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         run: |
-          mkdir -p target/ui-certification
-          cargo run --locked --profile release-native -p vo-ui-benchmark > target/ui-certification/performance.json
-          cat target/ui-certification/performance.json
+          mkdir -p target/ci/results
+          cargo run --locked --profile release-native -p vo-ui-benchmark > target/ci/results/ui-performance.json
+          cat target/ci/results/ui-performance.json
 
       - name: Publish UI performance dashboard data
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ui-performance-${{ runner.os }}-${{ runner.arch }}
-          path: target/ui-certification/performance.json
+          path: target/ci/results/ui-performance.json
           if-no-files-found: error
 
       - name: Build production UI CLI
         run: cargo build --locked -p vo
 
       - name: Build production Studio desktop host
+        if: matrix.full
         run: cargo build --locked -p vo-studio-native
 
       - name: Link a production Native AOT UI application
@@ -429,6 +694,7 @@ jobs:
             -o "$output"
 
       - name: Package production Native AOT applications
+        if: matrix.full
         shell: bash
         env:
           # Match the published native SDK runtime. The workspace's plain
@@ -506,7 +772,7 @@ jobs:
         run: ./target/debug/vo.exe ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame
 
       - name: Present one real Linux Studio JIT window
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         shell: bash
         env:
           WGPU_BACKEND: vulkan
@@ -519,7 +785,7 @@ jobs:
           VOLANG_STUDIO_WORKSPACE="$studio_workspace" xvfb-run --auto-servernum ./target/debug/vo-studio-native
 
       - name: Present one real macOS Studio JIT window
-        if: runner.os == 'macOS'
+        if: matrix.full && runner.os == 'macOS'
         shell: bash
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
@@ -531,20 +797,22 @@ jobs:
           VOLANG_STUDIO_WORKSPACE="$studio_workspace" ./target/debug/vo-studio-native
 
       - name: Present one real Windows Studio JIT window
-        if: runner.os == 'Windows'
+        if: matrix.full && runner.os == 'Windows'
         shell: pwsh
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
           VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
           VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $studioWorkspace = Join-Path $env:RUNNER_TEMP "volang-studio-window"
           New-Item -ItemType Directory -Force -Path $studioWorkspace | Out-Null
           $env:VOLANG_STUDIO_WORKSPACE = $studioWorkspace
           ./target/debug/vo-studio-native.exe
 
       - name: Present one real Linux Studio Native AOT window
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         shell: bash
         env:
           WGPU_BACKEND: vulkan
@@ -559,7 +827,7 @@ jobs:
           VOLANG_STUDIO_WORKSPACE="$studio_workspace" xvfb-run --auto-servernum "$studio_executable"
 
       - name: Present one real macOS Studio Native AOT window
-        if: runner.os == 'macOS'
+        if: matrix.full && runner.os == 'macOS'
         shell: bash
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
@@ -573,13 +841,15 @@ jobs:
           VOLANG_STUDIO_WORKSPACE="$studio_workspace" "$studio_executable"
 
       - name: Present one real Windows Studio Native AOT window
-        if: runner.os == 'Windows'
+        if: matrix.full && runner.os == 'Windows'
         shell: pwsh
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
           VO_UI_AUTOMATION_CLICKS: "Open UIKit starter"
           VO_UI_AUTOMATION_EXPECT_TEXT: "EXAMPLE-COUNTER|main.vo"
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $studioWorkspace = Join-Path $env:RUNNER_TEMP "volang-studio-aot-window"
           New-Item -ItemType Directory -Force -Path $studioWorkspace | Out-Null
           $studioExecutable = Get-ChildItem target/studio-native-aot -Recurse -Filter volang-studio.exe | Select-Object -First 1
@@ -588,7 +858,7 @@ jobs:
           & $studioExecutable.FullName
 
       - name: Present one real Linux UIKit Gallery Native AOT window
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         shell: bash
         env:
           WGPU_BACKEND: vulkan
@@ -601,7 +871,7 @@ jobs:
           xvfb-run --auto-servernum "$gallery_executable"
 
       - name: Present one real macOS UIKit Gallery Native AOT window
-        if: runner.os == 'macOS'
+        if: matrix.full && runner.os == 'macOS'
         shell: bash
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
@@ -613,13 +883,15 @@ jobs:
           "$gallery_executable"
 
       - name: Present one real Windows UIKit Gallery Native AOT window
-        if: runner.os == 'Windows'
+        if: matrix.full && runner.os == 'Windows'
         shell: pwsh
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
           VO_UI_AUTOMATION_CLICKS: "Primary|Open drawer|Close|Show toast"
           VO_UI_AUTOMATION_EXPECT_TEXT: "Primary activated|Release ready"
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $galleryExecutable = Get-ChildItem target/uikit-gallery-native-aot -Recurse -Filter volang-app.exe | Select-Object -First 1
           if ($null -eq $galleryExecutable) { throw "UIKit Gallery Native AOT executable is missing" }
           $galleryProcess = Start-Process -FilePath $galleryExecutable.FullName -NoNewWindow -PassThru -Wait
@@ -629,7 +901,7 @@ jobs:
           }
 
       - name: Present one real Linux Data Application Native AOT window
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         shell: bash
         env:
           WGPU_BACKEND: vulkan
@@ -642,7 +914,7 @@ jobs:
           xvfb-run --auto-servernum "$data_executable"
 
       - name: Present one real macOS Data Application Native AOT window
-        if: runner.os == 'macOS'
+        if: matrix.full && runner.os == 'macOS'
         shell: bash
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
@@ -654,19 +926,21 @@ jobs:
           "$data_executable"
 
       - name: Present one real Windows Data Application Native AOT window
-        if: runner.os == 'Windows'
+        if: matrix.full && runner.os == 'Windows'
         shell: pwsh
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
           VO_UI_AUTOMATION_CLICKS: "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard"
           VO_UI_AUTOMATION_EXPECT_TEXT: "Archived member-0|Operations dashboard"
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $dataExecutable = Get-ChildItem target/data-application-native-aot -Recurse -Filter volang-data.exe | Select-Object -First 1
           if ($null -eq $dataExecutable) { throw "Data Application Native AOT executable is missing" }
           & $dataExecutable.FullName
 
       - name: Present one real Linux Media Application Native AOT window
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         shell: bash
         env:
           WGPU_BACKEND: vulkan
@@ -679,7 +953,7 @@ jobs:
           xvfb-run --auto-servernum "$media_executable"
 
       - name: Present one real macOS Media Application Native AOT window
-        if: runner.os == 'macOS'
+        if: matrix.full && runner.os == 'macOS'
         shell: bash
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
@@ -691,19 +965,21 @@ jobs:
           "$media_executable"
 
       - name: Present one real Windows Media Application Native AOT window
-        if: runner.os == 'Windows'
+        if: matrix.full && runner.os == 'Windows'
         shell: pwsh
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
           VO_UI_AUTOMATION_CLICKS: "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session"
           VO_UI_AUTOMATION_EXPECT_TEXT: "Camera session recovered; permission is ready to request"
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $mediaExecutable = Get-ChildItem target/media-application-native-aot -Recurse -Filter volang-media.exe | Select-Object -First 1
           if ($null -eq $mediaExecutable) { throw "Media Application Native AOT executable is missing" }
           & $mediaExecutable.FullName
 
       - name: Present one real Linux Studio Workbench Native AOT window
-        if: runner.os == 'Linux'
+        if: matrix.full && runner.os == 'Linux'
         shell: bash
         env:
           WGPU_BACKEND: vulkan
@@ -716,7 +992,7 @@ jobs:
           xvfb-run --auto-servernum "$workbench_executable"
 
       - name: Present one real macOS Studio Workbench Native AOT window
-        if: runner.os == 'macOS'
+        if: matrix.full && runner.os == 'macOS'
         shell: bash
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
@@ -728,39 +1004,101 @@ jobs:
           "$workbench_executable"
 
       - name: Present one real Windows Studio Workbench Native AOT window
-        if: runner.os == 'Windows'
+        if: matrix.full && runner.os == 'Windows'
         shell: pwsh
         env:
           VO_UI_AUTOMATION_EXIT_AFTER_FRAMES: "1"
           VO_UI_AUTOMATION_CLICKS: "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation"
           VO_UI_AUTOMATION_EXPECT_TEXT: "Build once, run everywhere|Structured concurrency"
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $workbenchExecutable = Get-ChildItem target/studio-workbench-native-aot -Recurse -Filter volang-studio.exe | Select-Object -First 1
           if ($null -eq $workbenchExecutable) { throw "Studio Workbench Native AOT executable is missing" }
           & $workbenchExecutable.FullName
+
+      - name: Record native UI platform evidence
+        shell: bash
+        run: >-
+          ./target/debug/vo-dev ci record
+          --plan target/ci/plan-input/plan.json
+          --task "${{ matrix.task }}"
+          --output "target/ci/evidence/${{ matrix.task }}.evidence.json"
+
+      - name: Upload native UI platform evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 14
 
   required:
     name: required
     if: ${{ always() }}
     needs:
+      - plan
       - quality_rust
       - language_native
       - ui_platform
       - wasm_web
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 15
     steps:
-      - name: Require every CI job
+      - name: Reject failed or cancelled jobs
         env:
+          PLAN: ${{ needs.plan.result }}
           QUALITY_RUST: ${{ needs.quality_rust.result }}
           LANGUAGE_NATIVE: ${{ needs.language_native.result }}
           UI_PLATFORM: ${{ needs.ui_platform.result }}
           WASM_WEB: ${{ needs.wasm_web.result }}
         run: |
-          for result in "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB"; do
-            if [ "$result" != "success" ]; then
-              echo "required CI job ended with: $result"
+          for result in "$PLAN" "$QUALITY_RUST" "$LANGUAGE_NATIVE" "$UI_PLATFORM" "$WASM_WEB"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "CI job ended with: $result"
               exit 1
             fi
           done
-          echo "all required CI jobs passed"
+
+      - name: Checkout certified source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup certification toolchain
+        uses: ./.github/actions/setup-volang
+
+      - name: Download immutable CI plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Download all task evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ci-evidence-*-${{ github.sha }}
+          path: target/ci/collected-evidence
+          merge-multiple: true
+
+      - name: Build certification verifier
+        run: cargo build --locked -p vo-dev
+
+      - name: Certify the complete planned task set
+        run: |
+          ./target/debug/vo-dev ci certify \
+            --plan target/ci/plan-input/plan.json \
+            --evidence-dir target/ci/collected-evidence \
+            --output target/ci/certification.json
+
+      - name: Require complete UI evidence for merge and promotion
+        if: needs.plan.outputs.profile != 'pull-request'
+        run: ./target/debug/vo-dev ui-certify --evidence target/ci/certification.json
+
+      - name: Upload certification bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-certification-${{ github.sha }}
+          path: target/ci/certification.json
+          if-no-files-found: error
+          retention-days: 30

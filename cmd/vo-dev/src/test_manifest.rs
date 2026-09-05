@@ -1504,6 +1504,7 @@ mod tests {
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
+                    debug_build_args: Vec::new(),
                     runner_command: Vec::new(),
                     prepare_commands: Vec::new(),
                 },
@@ -1557,6 +1558,7 @@ mod tests {
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
+                    debug_build_args: Vec::new(),
                     runner_command: Vec::new(),
                     prepare_commands: Vec::new(),
                 },
@@ -1749,6 +1751,7 @@ mod tests {
             default_timeout_sec: 20,
             build_command: Vec::new(),
             release_build_args: Vec::new(),
+            debug_build_args: Vec::new(),
             runner_command: Vec::new(),
             prepare_commands: Vec::new(),
         };

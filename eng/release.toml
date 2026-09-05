@@ -55,3 +55,7 @@ os = "ubuntu-22.04"
 [[target]]
 target = "aarch64-unknown-linux-gnu"
 os = "ubuntu-22.04-arm"
+
+[[target]]
+target = "x86_64-pc-windows-msvc"
+os = "windows-2025"

@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tar::{Builder, Header};
 
-const BUILD_RECEIPT_SCHEMA: u32 = 5;
-const PROVENANCE_SCHEMA: u32 = 5;
+const BUILD_RECEIPT_SCHEMA: u32 = 6;
+const PROVENANCE_SCHEMA: u32 = 6;
 const MAX_RELEASE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 const MAX_RELEASE_ARCHIVE_SIZE: u64 = MAX_RELEASE_BINARY_SIZE * 4 + 8 * 1024 * 1024;
 const MAX_RELEASE_EVIDENCE_SIZE: u64 = 1024 * 1024;
@@ -55,9 +55,14 @@ struct ReleaseProvenance {
 struct UiProductEvidence {
     schema: String,
     status: String,
-    source_sha256: String,
+    declaration_sha256: String,
     gate_count: u32,
     showcase_count: u32,
+    ci_schema: String,
+    ci_status: String,
+    ci_profile: String,
+    ci_commit: String,
+    ci_bundle_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,7 +145,7 @@ pub(crate) fn record_release_build(
     let ui_runtime_path = release_binary_path(root, target, ui_runtime_name);
     let ui_aot_runtime = binary_record(&ui_runtime_path, ui_runtime_name)?;
     let ui_web_runtime = ui_web_runtime_records(root)?;
-    let ui_product = ui_product_evidence(root)?;
+    let ui_product = ui_product_evidence(root, identity)?;
     validate_embedded_build_identity(&binary_path, identity)?;
     let receipt = ReleaseBuildReceipt {
         schema: BUILD_RECEIPT_SCHEMA,
@@ -201,7 +206,7 @@ pub(crate) fn package_release_binary(
     if receipt.ui_web_runtime != ui_web_runtime {
         bail!("UI Web runtime changed after its verified build receipt was written");
     }
-    let ui_product = ui_product_evidence(root)?;
+    let ui_product = ui_product_evidence(root, identity)?;
     if receipt.ui_product != ui_product {
         bail!("UI product certification changed after its verified build receipt was written");
     }
@@ -260,22 +265,24 @@ pub(crate) fn package_release_binary(
         &format!("{}  {tarball_name}\n", provenance.archive.sha256),
     )?;
     read_checked_sha256(root, &tarball_name)?;
-    validate_release_artifact(root, release, target, identity)?;
+    validate_release_artifact(root, root, release, target, identity)?;
     Ok(tarball_name)
 }
 
 pub(crate) fn validate_release_artifacts(
+    root: &Path,
     dir: &Path,
     release: &ReleaseFile,
     identity: &ReleaseIdentity,
 ) -> Result<()> {
     for target in &release.targets {
-        validate_release_artifact(dir, release, &target.target, identity)?;
+        validate_release_artifact(root, dir, release, &target.target, identity)?;
     }
     Ok(())
 }
 
 fn validate_release_artifact(
+    root: &Path,
     dir: &Path,
     release: &ReleaseFile,
     target: &str,
@@ -361,7 +368,11 @@ fn validate_release_artifact(
     }
     validate_binary_record(&provenance.ui_aot_runtime)?;
     validate_ui_web_runtime_records(&provenance.ui_web_runtime)?;
-    validate_ui_product_evidence(&provenance.ui_product)?;
+    let expected_ui_product = ui_product_evidence(root, identity)?;
+    validate_ui_product_evidence(&provenance.ui_product, &identity.commit)?;
+    if provenance.ui_product != expected_ui_product {
+        bail!("release provenance CI certification differs from the verified bundle");
+    }
     verify_deterministic_tarball(
         &tarball_path,
         &provenance.binary,
@@ -372,17 +383,60 @@ fn validate_release_artifact(
     )
 }
 
-fn ui_product_evidence(root: &Path) -> Result<UiProductEvidence> {
+fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProductEvidence> {
     #[cfg(test)]
     if !root.join("ui/certification.toml").exists() {
         return Ok(UiProductEvidence {
-            schema: "volang.ui.product-evidence.v1".to_string(),
-            status: "foundation-certified".to_string(),
-            source_sha256: "0".repeat(64),
+            schema: "volang.ui.product-evidence.v2".to_string(),
+            status: "product-certified".to_string(),
+            declaration_sha256: "0".repeat(64),
             gate_count: 12,
             showcase_count: 5,
+            ci_schema: "volang.ci.certification.v1".to_string(),
+            ci_status: "certified".to_string(),
+            ci_profile: "main".to_string(),
+            ci_commit: identity.commit.clone(),
+            ci_bundle_sha256: "0".repeat(64),
         });
     }
+    let (declaration_sha256, gate_count, showcase_count) = ui_declaration_evidence(root)?;
+    let configured = std::env::var("VO_CI_CERTIFICATION_PATH")
+        .unwrap_or_else(|_| "target/ci/release-input/certification.json".to_string());
+    let relative = Path::new(&configured);
+    if configured.is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        bail!("VO_CI_CERTIFICATION_PATH must be repository-relative");
+    }
+    let certification = crate::ci::verify_release_bundle(root, &root.join(relative))?;
+    if certification.commit != identity.commit {
+        bail!("UI certification commit differs from the release identity");
+    }
+    let evidence = UiProductEvidence {
+        schema: "volang.ui.product-evidence.v2".to_string(),
+        status: "product-certified".to_string(),
+        declaration_sha256,
+        gate_count,
+        showcase_count,
+        ci_schema: "volang.ci.certification.v1".to_string(),
+        ci_status: certification.status,
+        ci_profile: certification.profile,
+        ci_commit: certification.commit,
+        ci_bundle_sha256: certification.sha256,
+    };
+    validate_ui_product_evidence(&evidence, &identity.commit)?;
+    Ok(evidence)
+}
+
+fn ui_declaration_evidence(root: &Path) -> Result<(String, u32, u32)> {
     const SOURCES: [&str; 17] = [
         "ui/certification.toml",
         "ui/product-certification.toml",
@@ -402,9 +456,12 @@ fn ui_product_evidence(root: &Path) -> Result<UiProductEvidence> {
         "ui/docs/release-notes-1.0.md",
         "ui/docs/release-policy.md",
     ];
-    let status = crate::ui_certification::certification_status(root)?.to_string();
+    let status = crate::ui_certification::certification_status(root)?;
+    if status != "declaration-valid" {
+        bail!("UI declaration validation did not succeed");
+    }
     let mut hasher = Sha256::new();
-    hasher.update(b"volang-ui-product-evidence-v1\0");
+    hasher.update(b"volang-ui-declaration-evidence-v1\0");
     for relative in SOURCES {
         let path = root.join(relative);
         let metadata = fs::symlink_metadata(&path)
@@ -422,34 +479,31 @@ fn ui_product_evidence(root: &Path) -> Result<UiProductEvidence> {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    let evidence = UiProductEvidence {
-        schema: "volang.ui.product-evidence.v1".to_string(),
-        status,
-        source_sha256: format!("{:x}", hasher.finalize()),
-        gate_count: 12,
-        showcase_count: 5,
-    };
-    validate_ui_product_evidence(&evidence)?;
-    Ok(evidence)
+    Ok((format!("{:x}", hasher.finalize()), 12, 5))
 }
 
-fn validate_ui_product_evidence(evidence: &UiProductEvidence) -> Result<()> {
-    if evidence.schema != "volang.ui.product-evidence.v1"
-        || !matches!(
-            evidence.status.as_str(),
-            "foundation-certified" | "product-certified"
-        )
-        || evidence.source_sha256.len() != 64
-        || !evidence
-            .source_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+fn validate_ui_product_evidence(evidence: &UiProductEvidence, commit: &str) -> Result<()> {
+    if evidence.schema != "volang.ui.product-evidence.v2"
+        || evidence.status != "product-certified"
+        || !valid_sha256(&evidence.declaration_sha256)
         || evidence.gate_count != 12
         || evidence.showcase_count != 5
+        || evidence.ci_schema != "volang.ci.certification.v1"
+        || evidence.ci_status != "certified"
+        || evidence.ci_profile != "main"
+        || evidence.ci_commit != commit
+        || !valid_sha256(&evidence.ci_bundle_sha256)
     {
         bail!("release provenance contains invalid UI product evidence");
     }
     Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn create_deterministic_tarball(
@@ -1352,14 +1406,13 @@ mod tests {
     }
 
     #[test]
-    fn repository_ui_product_evidence_is_bounded_and_certified() {
+    fn repository_ui_declaration_evidence_is_bounded_and_valid() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let evidence = ui_product_evidence(&root).unwrap();
-        validate_ui_product_evidence(&evidence).unwrap();
-        assert_eq!(evidence.status, "product-certified");
-        assert_ne!(evidence.source_sha256, "0".repeat(64));
-        assert_eq!(evidence.gate_count, 12);
-        assert_eq!(evidence.showcase_count, 5);
+        let (digest, gate_count, showcase_count) = ui_declaration_evidence(&root).unwrap();
+        assert!(valid_sha256(&digest));
+        assert_ne!(digest, "0".repeat(64));
+        assert_eq!(gate_count, 12);
+        assert_eq!(showcase_count, 5);
     }
 
     #[test]

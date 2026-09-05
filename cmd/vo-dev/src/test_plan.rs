@@ -6,25 +6,24 @@ use crate::test_manifest::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct TestPlan {
     schema: &'static str,
-    suite: String,
+    pub(crate) suite: String,
     pub(crate) jobs: Vec<TestJob>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TestJob {
     pub(crate) id: String,
-    case_id: String,
+    pub(crate) case_id: String,
     pub(crate) kind: String,
     pub(crate) path: String,
     pub(crate) target: String,
-    backend: String,
+    pub(crate) backend: String,
     matrix: Option<String>,
     tags: Vec<String>,
     owner: Option<String>,
@@ -294,16 +293,27 @@ fn parse_shard(value: &str) -> Result<TestShard> {
     Ok(TestShard { index, total })
 }
 
-fn case_belongs_to_shard(case_id: &str, shard: TestShard) -> bool {
-    let digest = Sha256::digest(case_id.as_bytes());
-    let prefix = u64::from_be_bytes(
-        digest[..8]
-            .try_into()
-            .expect("SHA-256 always has an eight-byte prefix"),
-    );
-    let total = u64::try_from(shard.total).expect("test shard count must fit in u64");
-    let bucket = usize::try_from(prefix % total).expect("test shard bucket must fit in usize") + 1;
-    bucket == shard.index
+fn cases_for_weighted_shard(jobs: &[TestJob], shard: TestShard) -> BTreeSet<String> {
+    let mut weights = BTreeMap::<String, u64>::new();
+    for job in jobs {
+        *weights.entry(job.case_id.clone()).or_default() += job.timeout_sec;
+    }
+    let mut cases = weights.into_iter().collect::<Vec<_>>();
+    cases.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut shard_weights = vec![0u64; shard.total];
+    let mut assignments = vec![BTreeSet::new(); shard.total];
+    for (case_id, weight) in cases {
+        let target = shard_weights
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, weight)| (**weight, *index))
+            .map(|(index, _)| index)
+            .expect("a test shard always has at least one bucket");
+        shard_weights[target] = shard_weights[target].saturating_add(weight);
+        assignments[target].insert(case_id);
+    }
+    assignments.swap_remove(shard.index - 1)
 }
 
 pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
@@ -327,7 +337,6 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
 
     let mut jobs = Vec::new();
     let mut matched_cases = 0usize;
-    let mut sharded_cases = 0usize;
     for case in &manifest.cases {
         if !opts.paths.is_empty() && !case_matches_path_filters(root, &manifest, case, &opts.paths)?
         {
@@ -337,13 +346,6 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
             continue;
         }
         matched_cases += 1;
-        if opts
-            .shard
-            .is_some_and(|shard| !case_belongs_to_shard(&case.id, shard))
-        {
-            continue;
-        }
-        sharded_cases += 1;
         let expect = parse_case_expect(case)?;
         if expect.kind == "fail" {
             let case_targets = resolved_case_targets(case, &test_config)?;
@@ -425,6 +427,23 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                     target_name,
                 ),
             });
+        }
+    }
+
+    let mut sharded_cases = jobs
+        .iter()
+        .map(|job| job.case_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if let Some(shard) = opts.shard {
+        let selected = cases_for_weighted_shard(&jobs, shard);
+        sharded_cases = selected.len();
+        jobs.retain(|job| selected.contains(&job.case_id));
+        for job in &mut jobs {
+            job.selection_reasons.push(format!(
+                "weighted shard {}/{} selected by aggregate timeout budget",
+                shard.index, shard.total
+            ));
         }
     }
 
@@ -990,6 +1009,7 @@ mod tests {
             default_timeout_sec: 60,
             build_command: Vec::new(),
             release_build_args: Vec::new(),
+            debug_build_args: Vec::new(),
             runner_command: Vec::new(),
             prepare_commands: Vec::new(),
         };
@@ -1016,18 +1036,7 @@ mod tests {
         let root = workspace_root();
         let manifest = load_manifest(&root).expect("load test manifest");
         let total = manifest.cases.len() + 1;
-        let index = (1..=total)
-            .find(|index| {
-                let shard = TestShard {
-                    index: *index,
-                    total,
-                };
-                manifest
-                    .cases
-                    .iter()
-                    .all(|case| !case_belongs_to_shard(&case.id, shard))
-            })
-            .expect("more shards than cases must leave an empty shard");
+        let index = total;
         let opts = TestArgs::parse(
             &root,
             vec!["--shard".to_string(), format!("{index}/{total}")],
@@ -1048,5 +1057,34 @@ mod tests {
     #[test]
     fn shards_compose_with_metadata_filters() {
         assert_two_shards_partition(&["--tags", "smoke"]);
+    }
+
+    #[test]
+    fn weighted_shards_place_the_heaviest_cases_first() {
+        fn job(case_id: &str, timeout_sec: u64) -> TestJob {
+            TestJob {
+                id: format!("{case_id}::vm"),
+                case_id: case_id.to_string(),
+                kind: "file".to_string(),
+                path: format!("{case_id}.vo"),
+                target: "vm".to_string(),
+                backend: "vm".to_string(),
+                matrix: None,
+                tags: Vec::new(),
+                owner: None,
+                env: BTreeMap::new(),
+                timeout_sec,
+                expect: json!({ "kind": "pass" }),
+                selection_reasons: Vec::new(),
+            }
+        }
+        let jobs = vec![job("heavy", 100), job("medium", 60), job("small", 40)];
+        let first = cases_for_weighted_shard(&jobs, TestShard { index: 1, total: 2 });
+        let second = cases_for_weighted_shard(&jobs, TestShard { index: 2, total: 2 });
+        assert_eq!(first, BTreeSet::from(["heavy".to_string()]));
+        assert_eq!(
+            second,
+            BTreeSet::from(["medium".to_string(), "small".to_string()])
+        );
     }
 }

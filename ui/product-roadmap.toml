@@ -156,7 +156,7 @@ status = "complete"
 starts_in = "E3"
 acceptance = ["Every official component, state, theme, locale, density, input mode, and accessibility mode runs as Web AOT and packaged Native AOT."]
 commands = ["cargo test --locked -p vo-engine --features jit official_uikit_", "./eng/run-uikit-gallery-contracts.sh", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser"]
-evidence = ["ui/showcases/component-gallery/main.vo", "ui/kit/catalog.toml", "ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/uikit.paint.txt", "ui/testdata/goldens/uikit.web.txt", "generated:target/rewrite-validation/volang-uikit-gallery-browser.json"]
+evidence = ["ui/showcases/component-gallery/main.vo", "ui/kit/catalog.toml", "ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/uikit.paint.txt", "ui/testdata/goldens/uikit.web.txt", "generated:target/ci/results/ui/volang-uikit-gallery-browser.json"]
 
 [[showcase]]
 id = "content-site"
@@ -165,7 +165,7 @@ status = "complete"
 starts_in = "E5"
 acceptance = ["SSG, SSR, streaming, metadata, search, forms, assets, offline policy, activation, and WCAG 2.2 AA ship useful HTML before Wasm."]
 commands = ["cargo test --locked -p vo-engine --features jit official_content_site_renders_distinct_useful_routes_and_web_aot", "./eng/run-content-site-contracts.sh", "npm --prefix lang/crates/vo-web run test:content-site-browser"]
-evidence = ["ui/showcases/content-site/main.vo", "ui/showcases/content-site/ui.web.toml", "ui/web/server/server.vo", "eng/run-content-site-contracts.sh", "generated:target/rewrite-validation/volang-content-site-browser.json", "ui/docs/web-desktop-products.md"]
+evidence = ["ui/showcases/content-site/main.vo", "ui/showcases/content-site/ui.web.toml", "ui/web/server/server.vo", "eng/run-content-site-contracts.sh", "generated:target/ci/results/ui/volang-content-site-browser.json", "ui/docs/web-desktop-products.md"]
 
 [[showcase]]
 id = "data-application"
@@ -174,7 +174,7 @@ status = "complete"
 starts_in = "E4"
 acceptance = ["Tables, trees, virtual grids, filtering, sorting, pagination, charts, forms, commands, optimistic data, responsive Web, and desktop workspaces share one domain model."]
 commands = ["cargo test --locked -p vo-engine --features jit official_data_application_compiles_and_bounds_vm_jit_materialization", "./eng/run-data-application-contracts.sh", "npm --prefix lang/crates/vo-web run test:data-application-browser", "cargo run --locked --profile release-native -p vo-ui-benchmark"]
-evidence = ["ui/showcases/data-application/main.vo", "ui/tests/application-platform/main.vo", "ui/resource/resource.vo", "ui/kit/data/data.vo", "eng/run-data-application-contracts.sh", "generated:target/rewrite-validation/volang-data-application-browser.json", ".github/workflows/ci.yml#ui_platform"]
+evidence = ["ui/showcases/data-application/main.vo", "ui/tests/application-platform/main.vo", "ui/resource/resource.vo", "ui/kit/data/data.vo", "eng/run-data-application-contracts.sh", "generated:target/ci/results/ui/volang-data-application-browser.json", ".github/workflows/ci.yml#ui_platform"]
 
 [[showcase]]
 id = "media-application"
@@ -183,7 +183,7 @@ status = "complete"
 starts_in = "E6"
 acceptance = ["Images, SVG, canvas, animation, audio, video, capture, permissions, recovery, and capability results cover Web, macOS, Windows, and Linux."]
 commands = ["cargo test --locked -p vo-engine --features jit official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-engine --features jit official_advanced_packs_are_vm_jit_and_aot_equivalent", "./eng/run-media-application-contracts.sh", "npm --prefix lang/crates/vo-web run test:media-application-browser"]
-evidence = ["ui/showcases/media-application/main.vo", "ui/media/media.vo", "lang/crates/vo-web/js/ui_dom.ts", "eng/run-media-application-contracts.sh", "generated:target/rewrite-validation/volang-media-application-browser.json", ".github/workflows/ci.yml#ui_platform", "ui/docs/advanced-capability-packs.md"]
+evidence = ["ui/showcases/media-application/main.vo", "ui/media/media.vo", "lang/crates/vo-web/js/ui_dom.ts", "eng/run-media-application-contracts.sh", "generated:target/ci/results/ui/volang-media-application-browser.json", ".github/workflows/ci.yml#ui_platform", "ui/docs/advanced-capability-packs.md"]
 
 [[showcase]]
 id = "studio-workbench"
@@ -192,7 +192,7 @@ status = "complete"
 starts_in = "E6"
 acceptance = ["Project management, file tree, official editor, console, docs, commands, windows, and embedded previews use public APIs across VM/JIT development and Wasm/Native AOT release."]
 commands = ["cargo test --locked -p vo-engine --features jit official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-engine --features jit official_multi_window_editor_preserves_shared_document_and_native_aot", "./eng/run-studio-workbench-contracts.sh", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "cargo test --locked -p vo pure_volang_studio_starter_opens_edits_saves_and_runs", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
-evidence = ["ui/showcases/studio-workbench/main.vo", "ui/showcases/studio-workbench/ui.web.toml", "ui/showcases/studio-workbench/ui.desktop.toml", "ui/templates/studio/main.vo", "ui/editor/editor.vo", "ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "apps/studio/app/app.vo", "apps/studio/examples/examples.vo", "apps/studio/product-parity.toml", "eng/run-studio-workbench-contracts.sh", "generated:target/rewrite-validation/volang-studio-workbench-browser.json", ".github/workflows/ci.yml#ui_platform"]
+evidence = ["ui/showcases/studio-workbench/main.vo", "ui/showcases/studio-workbench/ui.web.toml", "ui/showcases/studio-workbench/ui.desktop.toml", "ui/templates/studio/main.vo", "ui/editor/editor.vo", "ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "apps/studio/app/app.vo", "apps/studio/examples/examples.vo", "apps/studio/product-parity.toml", "eng/run-studio-workbench-contracts.sh", "generated:target/ci/results/ui/volang-studio-workbench-browser.json", ".github/workflows/ci.yml#ui_platform"]
 
 [[gate]]
 id = "public-api-usability"

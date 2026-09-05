@@ -34,7 +34,8 @@ to the same or an earlier delivery increment.
 `certification.toml` owns the certified foundation gates.
 `product-certification.toml` binds all product gates and showcases to one
 candidate identity and immutable release evidence. `vo-dev ui-certify --check`
-validates the complete contract.
+validates the complete authored contract; `vo-dev ui-certify --evidence`
+verifies the CI-bound product evidence.
 
 ## Maturity
 
@@ -110,10 +111,10 @@ authoring kits, documentation, and real-platform evidence. E7 is complete.
 ### E8 — Volang UI 1.0
 
 Every required capability is stable, every showcase is complete, every product
-gate has an executable contract, and the source product status is
-`product-certified`. E8 is complete. Publication still requires the tagged
-candidate, protected-main CI, and immutable release receipts defined by the
-release policy.
+gate has an executable contract, and the authored declaration reaches E8.
+E8 is complete. The runtime status becomes `product-certified` only for a
+candidate carrying the protected CI evidence and immutable release receipts
+defined by the release policy.
 
 ## E0 contract probes
 

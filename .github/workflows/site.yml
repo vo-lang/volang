@@ -5,6 +5,11 @@ on:
     workflows: [CI]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful main CI run id whose certified site will be promoted.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -19,99 +24,118 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build Volang Studio
+  promote:
+    name: Promote certified Studio
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_sha == github.sha) ||
+       github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 15
     permissions:
+      actions: read
       contents: read
     steps:
+      - name: Resolve certified candidate
+        id: candidate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANUAL_RUN_ID: ${{ inputs.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            run_id="$WORKFLOW_RUN_ID"
+          else
+            run_id="$MANUAL_RUN_ID"
+          fi
+          run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+          commit="$(jq -er '
+            if .name == "CI" and
+               .path == ".github/workflows/ci.yml" and
+               .event == "push" and
+               .head_branch == "main" and
+               .status == "completed" and
+               .conclusion == "success"
+            then .head_sha
+            else error("run is not a successful main push from .github/workflows/ci.yml")
+            end
+          ' <<<"$run")"
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$commit" != "$WORKFLOW_HEAD_SHA" ]; then
+            echo "workflow_run payload and API commit disagree" >&2
+            exit 1
+          fi
+          {
+            echo "run_id=$run_id"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout certified source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ steps.candidate.outputs.commit }}
           persist-credentials: false
 
-      - name: Install Rust and WebAssembly target
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
-          rustup default 1.94.0
+      - name: Setup verification toolchain
+        uses: ./.github/actions/setup-volang
 
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Download certified Studio site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: lang/crates/vo-web/package-lock.json
+          name: site-candidate-${{ steps.candidate.outputs.commit }}
+          path: target/ci/artifacts/site
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Download CI certification
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: site-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          name: ci-certification-${{ steps.candidate.outputs.commit }}
+          path: target/ci/certification-input
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Cache wasm-pack
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+      - name: Build certification verifier
+        run: cargo build --locked -p vo-dev
 
-      - name: Install wasm-pack
+      - name: Verify exact candidate identity and bytes
         run: |
-          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
-            cargo install wasm-pack --locked --version 0.14.0 --force
-          fi
+          ./target/debug/vo-dev ci verify \
+            --bundle target/ci/certification-input/certification.json \
+            --profile main \
+            --artifact-task site-candidate \
+            --artifact target/ci/artifacts/site
+          test -s target/ci/artifacts/site/app.wasm
+          test -s target/ci/artifacts/site/runtime/pkg/vo_web_bg.wasm
+          test "$(cat target/ci/artifacts/site/CNAME)" = "volang.dev"
 
-      - name: Build release Web runtime
-        working-directory: lang/crates/vo-web
+      - name: Recheck deployment budgets
         run: |
-          npm ci
-          npm run build:release
-
-      - name: Build Volang Studio AOT site
-        run: |
-          cargo build --locked -p vo --no-default-features
-          VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui build apps/studio \
-            -o target/volang-dev \
-            --runtime-dir=lang/crates/vo-web
-          test -s target/volang-dev/app.wasm
-          test -s target/volang-dev/runtime/pkg/vo_web_bg.wasm
-          test "$(cat target/volang-dev/CNAME)" = "volang.dev"
-
-      - name: Enforce Studio image budget
-        run: >-
-          node eng/report-ui-web-artifact-size.mjs
-          --label studio
-          --artifact target/volang-dev/app.wasm
-          --brotli-limit 983040
-          --gzip-limit 2700000
-
-      - name: Enforce Studio install budget
-        run: >-
-          node eng/report-ui-web-precache-size.mjs
-          --label studio
-          --root target/volang-dev
-          --gzip-limit 3670016
+          node eng/report-ui-web-artifact-size.mjs \
+            --label studio \
+            --artifact target/ci/artifacts/site/app.wasm \
+            --raw-limit 34000000 \
+            --brotli-limit 972800 \
+            --gzip-limit 2500000
+          node eng/report-ui-web-precache-size.mjs \
+            --label studio \
+            --root target/ci/artifacts/site \
+            --gzip-limit 3670016
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: target/volang-dev
+          path: target/ci/artifacts/site
           retention-days: 1
 
   deploy:
     name: Deploy volang.dev
-    needs: build
+    needs: promote
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -121,7 +145,33 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy certified Pages artifact
         id: deploy
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+
+  smoke:
+    name: Verify deployed site
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Probe public shell and runtime
+        env:
+          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+        run: |
+          base="${PAGE_URL%/}"
+          curl --fail --silent --show-error --location \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            "$base/" --output index.html
+          grep -q 'src="/app.js"' index.html
+          curl --fail --silent --show-error --location \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            "$base/app.js" --output app.js
+          grep -q '/app.wasm' app.js
+          curl --fail --silent --show-error --location \
+            --compressed --retry 12 --retry-all-errors --retry-delay 5 \
+            "$base/app.wasm" --output app.wasm
+          test -s app.wasm

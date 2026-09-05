@@ -50,6 +50,7 @@ try {
       throw new Error("browser smoke returned no structured report");
     }
     const result = {
+      schema: "volang.browser-result.v1",
       passed: report.passed === true,
       project: basename(projectRoot),
       report,

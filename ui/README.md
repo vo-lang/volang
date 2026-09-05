@@ -7,7 +7,7 @@ projects carry no npm dependency graph or JavaScript component runtime.
 
 ## Current status
 
-The Volang UI source tree satisfies the 1.0 product certification contract.
+The Volang UI source tree declares a complete 1.0 product contract.
 All E0-E8 delivery increments, 57 required capabilities, five showcases, and
 twelve product gates are complete. Publication still requires the tagged
 candidate and protected-main CI identity defined by
@@ -34,8 +34,10 @@ Run the governance check with:
 cargo run -q -p vo-dev --locked -- ui-certify --check
 ```
 
-The output reports `product-certified`, the stable capability count, and the
-completed E8 delivery state.
+The output reports `declaration-valid`, the stable capability count, and the
+completed E8 delivery state. CI reports `product-certified` only after
+`vo-dev ui-certify --evidence target/ci/certification.json` verifies the full
+Web and three-platform evidence set for the same immutable source commit.
 
 ## Product certification
 

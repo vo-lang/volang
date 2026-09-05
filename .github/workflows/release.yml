@@ -31,6 +31,7 @@ jobs:
       commit: ${{ steps.release.outputs.commit }}
       build_date: ${{ steps.release.outputs.build_date }}
       source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
+      ci_run_id: ${{ steps.trust.outputs.ci_run_id }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -39,7 +40,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Setup release toolchain
+        uses: ./.github/actions/setup-volang
+
       - name: Trust release commit
+        id: trust
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,17 +75,20 @@ jobs:
             exit 1
           }
 
-          gh api --hostname github.com --method GET \
+          ci_run_id="$(gh api --hostname github.com --method GET \
             "repos/vo-lang/volang/actions/workflows/ci.yml/runs" \
             -f branch=main \
             -f event=push \
             -f head_sha="$tag_commit" \
             -f status=success \
             -f per_page=1 \
-            | jq --exit-status '.total_count > 0' >/dev/null || {
+            --jq '.workflow_runs[0].id // empty')"
+          if [ -z "$ci_run_id" ]; then
               echo "tagged commit has no successful main CI run" >&2
               exit 1
-            }
+          fi
+          echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
 
           environment="$(gh api --hostname github.com --method GET \
             "repos/vo-lang/volang/environments/release")"
@@ -111,6 +119,15 @@ jobs:
       - name: Build release tool
         run: cargo build --locked -p vo-dev
 
+      - name: Download certified main evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-certification-${{ steps.trust.outputs.commit }}
+          path: target/ci/release-input
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.trust.outputs.ci_run_id }}
+          github-token: ${{ github.token }}
+
       - name: Verify identity and plan targets
         id: release
         shell: bash
@@ -119,6 +136,11 @@ jobs:
         run: |
           ./target/debug/vo-dev lint release
           ./target/debug/vo-dev ui-certify --check
+          ./target/debug/vo-dev ci verify \
+            --bundle target/ci/release-input/certification.json \
+            --profile main
+          ./target/debug/vo-dev ui-certify \
+            --evidence target/ci/release-input/certification.json
 
           unset GITHUB_REF_NAME GITHUB_SHA
           matrix="$(./target/debug/vo-dev release matrix)"
@@ -140,23 +162,32 @@ jobs:
             printf 'source_date_epoch=%s\n' "$source_date_epoch"
           } >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Build ${{ matrix.target }}
+      - name: Upload release certification input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-certification-${{ steps.release.outputs.commit }}
+          path: target/ci/release-input/certification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  web_runtime:
+    name: Build shared Web runtime
     needs: preflight
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
       - name: Checkout tagged source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.preflight.outputs.commit }}
-          fetch-depth: 0
           persist-credentials: false
+
+      - name: Setup Rust and WebAssembly
+        uses: ./.github/actions/setup-volang
+        with:
+          wasm: "true"
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -172,11 +203,60 @@ jobs:
           key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
 
       - name: Install wasm-pack
-        shell: bash
         run: |
           if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
             cargo install wasm-pack --locked --version 0.14.0 --force
           fi
+
+      - name: Build release tooling and Web runtime
+        run: |
+          cargo build --locked -p vo-dev
+          ./target/debug/vo-dev release build-web-runtime
+
+      - name: Upload platform-neutral Web runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-web-runtime-${{ needs.preflight.outputs.commit }}
+          path: |
+            lang/crates/vo-web/dist
+            lang/crates/vo-web/pkg
+            lang/crates/vo-web/aot-support
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [preflight, web_runtime]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup release toolchain
+        uses: ./.github/actions/setup-volang
+
+      - name: Download shared Web runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-web-runtime-${{ needs.preflight.outputs.commit }}
+          path: lang/crates/vo-web
+
+      - name: Download release certification input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-certification-${{ needs.preflight.outputs.commit }}
+          path: target/ci/release-input
 
       - name: Build release tool
         run: cargo build --locked -p vo-dev
@@ -188,25 +268,42 @@ jobs:
           VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
           VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
           SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+          VO_CI_CERTIFICATION_PATH: target/ci/release-input/certification.json
         run: |
           unset GITHUB_REF_NAME GITHUB_SHA
           ./target/debug/vo-dev release build "${{ matrix.target }}"
-          binary="./target/${{ matrix.target }}/release/vo"
+          case "${{ matrix.target }}" in
+            *windows*)
+              binary="./target/${{ matrix.target }}/release/vo.exe"
+              runtime="./target/${{ matrix.target }}/release/vo_aot_runtime.lib"
+              hello="./target/${{ matrix.target }}/release/hello-aot-smoke.exe"
+              ;;
+            *)
+              binary="./target/${{ matrix.target }}/release/vo"
+              runtime="./target/${{ matrix.target }}/release/libvo_aot_runtime.a"
+              hello="./target/${{ matrix.target }}/release/hello-aot-smoke"
+              ;;
+          esac
           "$binary" --version
           "$binary" run tests/lang/cases/runtime/array_len_cap_runtime.vo --mode=jit
-          runtime="./target/${{ matrix.target }}/release/libvo_aot_runtime.a"
           "$binary" build examples/basics/hello.vo \
             --runtime="$runtime" \
             --no-cache \
-            -o "./target/${{ matrix.target }}/release/hello-aot-smoke"
-          test "$("./target/${{ matrix.target }}/release/hello-aot-smoke")" = "Hello, hello!"
+            -o "$hello"
+          test "$("$hello")" = "Hello, hello!"
           ./target/debug/vo-dev release package "${{ matrix.target }}"
           unpack="./target/${{ matrix.target }}/release/package-smoke"
           mkdir -p "$unpack"
           tar -xzf "${{ matrix.artifact_name }}" -C "$unpack"
           case "${{ matrix.target }}" in
-            *windows*) packaged_vo="$unpack/vo.exe" ;;
-            *) packaged_vo="$unpack/vo" ;;
+            *windows*)
+              packaged_vo="$unpack/vo.exe"
+              packaged_ui_runtime="$unpack/vo_ui_aot_runtime_native.lib"
+              ;;
+            *)
+              packaged_vo="$unpack/vo"
+              packaged_ui_runtime="$unpack/libvo_ui_aot_runtime_native.a"
+              ;;
           esac
           "$packaged_vo" ui build ui/examples/settings \
             -o "./target/${{ matrix.target }}/release/ui-web-smoke"
@@ -219,10 +316,13 @@ jobs:
           test -f "$starter/vo.lock"
           "$packaged_vo" ui test "$starter" --mode=vm
           "$packaged_vo" build ui/examples/settings \
-            --runtime="$unpack/libvo_ui_aot_runtime_native.a" \
+            --runtime="$packaged_ui_runtime" \
             --no-cache \
             -o "./target/${{ matrix.target }}/release/ui-native-aot-smoke"
-          test -x "./target/${{ matrix.target }}/release/ui-native-aot-smoke"
+          case "${{ matrix.target }}" in
+            *windows*) test -f "./target/${{ matrix.target }}/release/ui-native-aot-smoke.exe" ;;
+            *) test -x "./target/${{ matrix.target }}/release/ui-native-aot-smoke" ;;
+          esac
 
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -238,7 +338,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [preflight, build]
+    needs: [preflight, web_runtime, build]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     permissions:
@@ -256,14 +356,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Setup release toolchain
+        uses: ./.github/actions/setup-volang
+
       - name: Build release tool
         run: cargo build --locked -p vo-dev
 
       - name: Download packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          pattern: vo-*
           path: artifacts
           merge-multiple: true
+
+      - name: Download release certification input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-certification-${{ needs.preflight.outputs.commit }}
+          path: target/ci/release-input
 
       - name: Verify release packages
         shell: bash
@@ -272,8 +382,14 @@ jobs:
           VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
           VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
           SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
+          VO_CI_CERTIFICATION_PATH: target/ci/release-input/certification.json
         run: |
           unset GITHUB_REF_NAME GITHUB_SHA
+          ./target/debug/vo-dev ci verify \
+            --bundle target/ci/release-input/certification.json \
+            --profile main
+          ./target/debug/vo-dev ui-certify \
+            --evidence target/ci/release-input/certification.json
           ./target/debug/vo-dev release verify \
             --tag "$VO_RELEASE_TAG" \
             --artifacts artifacts

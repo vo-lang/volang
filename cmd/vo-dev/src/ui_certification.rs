@@ -114,7 +114,7 @@ const PRODUCT_DOCUMENTS: [&str; 8] = [
     "ui/docs/release-notes-1.0.md",
 ];
 const GENERATED_EVIDENCE_PREFIX: &str = "generated:";
-const GENERATED_EVIDENCE_ROOT: &str = "target/rewrite-validation/";
+const GENERATED_EVIDENCE_ROOT: &str = "target/ci/results/ui/";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -468,20 +468,19 @@ struct CertificationSummary<'a> {
 }
 
 pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
-    let (json, require_generated_evidence) = match args.as_slice() {
-        [] => (false, false),
-        [arg] if arg == "--check" => (false, false),
-        [arg] if arg == "--json" => (true, false),
-        [arg] if arg == "--evidence" => (false, true),
-        _ => bail!("usage: vo-dev ui-certify --check|--json|--evidence"),
+    let (json, evidence_bundle) = match args.as_slice() {
+        [] => (false, None),
+        [arg] if arg == "--check" => (false, None),
+        [arg] if arg == "--json" => (true, None),
+        [flag, bundle] if flag == "--evidence" => (false, Some(bundle.as_str())),
+        _ => bail!("usage: vo-dev ui-certify --check|--json|--evidence <ci-bundle>"),
     };
     let (certification, roadmap, product_roadmap, capabilities, delivery, studio) =
         load_and_validate(root)?;
-    let verified_evidence = if require_generated_evidence {
-        validate_generated_evidence_artifacts(root)?
-    } else {
-        0
-    };
+    if let Some(bundle) = evidence_bundle {
+        let path = checked_repo_path(root, bundle, "CI certification bundle")?;
+        crate::ci::verify_ui_bundle(root, &path)?;
+    }
     let uikit = load_uikit_catalog(root, &product_roadmap)?;
     let stable_capability_count = capabilities
         .capability
@@ -508,12 +507,10 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
         uikit_component_count: uikit.component.len(),
         uikit_parity_gap_count: uikit.parity_gap.len(),
         studio_capability_count: studio.capability.len(),
-        status: if product_roadmap.status == "complete"
-            && uikit.market_baseline.status == "complete"
-        {
+        status: if evidence_bundle.is_some() {
             "product-certified"
         } else {
-            "foundation-certified"
+            "declaration-valid"
         },
     };
     if json {
@@ -541,8 +538,8 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
             summary.uikit_parity_gap_count,
             summary.studio_capability_count,
         );
-        if require_generated_evidence {
-            println!("verified {verified_evidence} generated evidence reports");
+        if evidence_bundle.is_some() {
+            println!("verified complete CI-bound UI evidence");
         }
     }
     Ok(())
@@ -550,14 +547,8 @@ pub(crate) fn cmd_ui_certify(root: &Path, args: Vec<String>) -> Result<()> {
 
 pub(crate) fn certification_status(root: &Path) -> Result<&'static str> {
     let (_, _, product_roadmap, _, _, _) = load_and_validate(root)?;
-    let uikit = load_uikit_catalog(root, &product_roadmap)?;
-    Ok(
-        if product_roadmap.status == "complete" && uikit.market_baseline.status == "complete" {
-            "product-certified"
-        } else {
-            "foundation-certified"
-        },
-    )
+    let _ = load_uikit_catalog(root, &product_roadmap)?;
+    Ok("declaration-valid")
 }
 
 fn load_uikit_catalog(root: &Path, roadmap: &ProductRoadmapFile) -> Result<UIKitCatalogFile> {
@@ -996,86 +987,6 @@ fn load_and_validate_studio_parity(root: &Path) -> Result<StudioParityFile> {
     Ok(matrix)
 }
 
-fn collect_generated_evidence(value: &toml::Value, references: &mut BTreeSet<String>) {
-    match value {
-        toml::Value::String(value) if value.starts_with(GENERATED_EVIDENCE_PREFIX) => {
-            references.insert(value.clone());
-        }
-        toml::Value::Array(values) => {
-            for value in values {
-                collect_generated_evidence(value, references);
-            }
-        }
-        toml::Value::Table(values) => {
-            for value in values.values() {
-                collect_generated_evidence(value, references);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn validate_generated_evidence_artifacts(root: &Path) -> Result<usize> {
-    let mut references = BTreeSet::new();
-    for relative in [
-        "ui/certification.toml",
-        "ui/roadmap.toml",
-        "ui/product-roadmap.toml",
-        "ui/capabilities.toml",
-        "ui/delivery.toml",
-        "ui/kit/catalog.toml",
-        "ui/quality-matrix.toml",
-        "apps/studio/product-parity.toml",
-    ] {
-        let path = root.join(relative);
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        let value: toml::Value =
-            toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))?;
-        collect_generated_evidence(&value, &mut references);
-    }
-    if references.is_empty() {
-        bail!("UI certification declares no generated evidence reports");
-    }
-    for reference in &references {
-        validate_evidence_reference(root, reference, "generated evidence gate")?;
-        let relative = reference
-            .strip_prefix(GENERATED_EVIDENCE_PREFIX)
-            .expect("generated reference was collected by prefix");
-        let path = checked_repo_path(root, relative, "generated evidence report")?;
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("generated evidence is missing: {}", path.display()))?;
-        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 * 1024 {
-            bail!(
-                "generated evidence has invalid size or type: {}",
-                path.display()
-            );
-        }
-        let bytes = fs::read(&path)
-            .with_context(|| format!("could not read generated evidence {}", path.display()))?;
-        let report: serde_json::Value = serde_json::from_slice(&bytes)
-            .with_context(|| format!("could not parse generated evidence {}", path.display()))?;
-        let object = report
-            .as_object()
-            .with_context(|| format!("generated evidence must be an object: {}", path.display()))?;
-        if let Some(passed) = object.get("passed") {
-            if passed.as_bool() != Some(true) {
-                bail!("generated evidence did not pass: {}", path.display());
-            }
-        } else if object
-            .get("schema")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(str::is_empty)
-        {
-            bail!(
-                "generated evidence needs passed=true or a schema: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(references.len())
-}
-
 fn validate_certification(root: &Path, certification: &CertificationFile) -> Result<()> {
     if certification.schema_version != 1 {
         bail!("ui certification schema_version must be 1");
@@ -1342,7 +1253,7 @@ fn validate_product_certification(root: &Path, roadmap: &ProductRoadmapFile) -> 
         || contract.target_version != roadmap.target_version
         || contract.status != "enforced"
         || contract.candidate_identity != "tagged-commit-with-successful-protected-main-ci"
-        || contract.evidence_schema != "volang.ui.product-evidence.v1"
+        || contract.evidence_schema != "volang.ui.product-evidence.v2"
         || contract.quality_matrix != "ui/quality-matrix.toml"
         || contract.release_workflow != ".github/workflows/release.yml"
     {
@@ -2068,7 +1979,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         assert!(validate_evidence_reference(
             &root,
-            "generated:target/rewrite-validation/browser-report.json",
+            "generated:target/ci/results/ui/browser-report.json",
             "test gate",
         )
         .is_ok());
@@ -2080,7 +1991,7 @@ mod tests {
         .is_err());
         assert!(validate_evidence_reference(
             &root,
-            "generated:target/rewrite-validation/browser-report.txt",
+            "generated:target/ci/results/ui/browser-report.txt",
             "test gate",
         )
         .is_err());

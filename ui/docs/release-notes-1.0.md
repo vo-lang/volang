@@ -5,8 +5,8 @@ VM/JIT development and Wasm/Native AOT release.
 
 The GA contract completes E0-E8, 57 stable required capabilities, 63 governed
 UIKit components with no open baseline gap, five showcases, and twelve product
-gates. Release provenance binds the governance digest and
-`product-certified` status to the tagged candidate commit.
+gates. Release provenance binds the governance digest and CI evidence required
+to grant `product-certified` status to one candidate commit.
 
 Highlights include separately compiled keyed components, structured state and
 goroutines, an official accessible UIKit, navigation/forms/commands/resources,

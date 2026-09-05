@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod artifact_lint;
 mod artifact_repo_lint;
+mod ci;
 mod command_lint;
 mod config;
 mod dev_bench;
@@ -24,8 +25,6 @@ mod release_homebrew;
 mod release_identity;
 mod release_sdk;
 mod release_system;
-mod rewrite_traceability;
-mod rewrite_validation;
 mod test_config;
 mod test_format;
 mod test_manifest;
@@ -57,7 +56,7 @@ fn real_main() -> Result<()> {
         "node-audit" => node_audit::cmd_node_audit(&root, args),
         "tool" => tool_system::cmd_tool(&root, args),
         "release" => release_system::cmd_release(&root, args),
-        "rewrite" => rewrite_validation::cmd_rewrite(&root, args),
+        "ci" => ci::cmd_ci(&root, args),
         "test" => test_system::cmd_test(&root, args),
         "dpy" => dpy_compat::cmd_dpy(&root, args),
         "bench" => dev_bench::cmd_bench(&root, args),
@@ -77,20 +76,24 @@ fn real_main() -> Result<()> {
 fn print_usage() {
     println!(
         r#"usage:
-  vo-dev lint artifacts|repo-boundaries|layout|docs|skill|examples|benchmarks|release|traceability|all
-  vo-dev generate app-protocol|voplay-protocol|studio-docs --check|--write
+  vo-dev lint artifacts|repo-boundaries|layout|docs|skill|examples|benchmarks|release|ci|all
+  vo-dev generate app-protocol|studio-docs --check|--write
   vo-dev node-audit current|list
   vo-dev tool check [--json]
   vo-dev tool bootstrap [--apply] [--json]
   vo-dev tool version <tool>
   vo-dev release matrix
-  vo-dev rewrite validate --case <TEST-ID> [--format text|json] [--output <path>]
-  vo-dev rewrite certify [--reports <dir>] [--format toml|json] [--output <path>] [--traceability-output <path>]
+  vo-dev ci lint
+  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]
+  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json
+  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json
+  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]
   vo-dev release metadata [--tag <tag>] [--commit <commit>]
   vo-dev release version [--tag <tag>]
   vo-dev release sdk-plan [--check|--json]
   vo-dev release homebrew-repository
   vo-dev release homebrew-metadata
+  vo-dev release build-web-runtime
   vo-dev release build <target>
   vo-dev release package <target>
   vo-dev release verify --tag <tag> --artifacts <dir>

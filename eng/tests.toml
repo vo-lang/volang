@@ -103,7 +103,8 @@ kind = "wasm"
 backend = "vo-web"
 env = { VOWORK = "off" }
 default_timeout_sec = 60
-build_command = ["wasm-pack", "build", "lang/crates/vo-web", "--target", "web", "--features", "compiler", "--locked"]
+build_command = ["wasm-pack", "build", "lang/crates/vo-web", "--target", "web", "--", "--features", "compiler", "--locked"]
+debug_build_args = ["--dev"]
 release_build_args = ["--release"]
 runner_command = ["node", "lang/crates/vo-web/test_runner.mjs"]
 

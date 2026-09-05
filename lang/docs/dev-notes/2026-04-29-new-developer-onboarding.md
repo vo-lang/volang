@@ -20,9 +20,12 @@ Volang is both a language implementation and a browser/native development enviro
 - The language pipeline lives under `lang/`: parser, analysis, codegen, VM, runtime, JIT, stdlib, module system, release tooling, and web runtime.
 - The CLI lives under `cmd/vo`.
 - The test runner lives under `cmd/vo-test`.
-- Studio lives under `apps/studio/`: Svelte web app, Rust/WASM compiler bridge, and Tauri native wrapper.
+- Studio lives under `apps/studio/`: pure-Volang UI source, its native Rust host,
+  and the shared Core Wasm AOT browser runtime.
 - Engineering automation lives in `cmd/vo-dev` and `eng/`. CI workflows call the same `vo-dev` task graph used locally.
-- First-party libraries such as `vogui`, `voplay`, `vopack`, and `vostore` are sibling repos and are validated by Volang release checks.
+- Related first-party projects such as `voplay`, `vopack`, and `vostore` are
+  separate repositories pinned by `eng/project.toml` for explicit integration
+  work.
 
 The repo prefers current canonical formats and rules. If old metadata, docs, or package formats are found, update them to the latest shape instead of adding long-lived compatibility paths unless a migration design explicitly requires it.
 
@@ -230,7 +233,8 @@ Vo modules use:
 - `vo.lock`: resolved dependency/artifact lock.
 - `vo.work`: local workspace overrides for development.
 
-The root `vo.work` points to sibling first-party modules such as `vogui`, `voplay`, and `vopack`. That is convenient for local development, but release/quickplay verification should be clear about whether it is using workspace overrides or locked artifacts.
+The root `vo.work` binds the in-repository `ui` and `apps/studio` modules.
+External first-party projects use their own lock and workspace policy.
 
 Useful commands:
 
@@ -378,8 +382,8 @@ eng/ci.toml
 Typical verification:
 
 ```sh
-./d.py ci task release-verify-vogui
-./d.py ci release-verify
+cargo run -q -p vo-dev --locked -- first-party release-verify voplay
+cargo run -q -p vo-dev --locked -- lint all
 ```
 
 ### Change First-Party Game/UI Libraries
@@ -387,7 +391,6 @@ Typical verification:
 The common sibling repos are:
 
 ```text
-../vogui
 ../voplay
 ../vopack
 ../vostore

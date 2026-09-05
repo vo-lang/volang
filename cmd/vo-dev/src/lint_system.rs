@@ -19,7 +19,7 @@ const ALL_LINT_TARGETS: &[&str] = &[
     "examples",
     "benchmarks",
     "release",
-    "traceability",
+    "ci",
 ];
 
 pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
@@ -47,7 +47,7 @@ fn run_lint_target(root: &Path, target: &str) -> Result<()> {
         "examples" => lint_examples(root)?,
         "benchmarks" => lint_benchmarks(root)?,
         "release" => release_system::lint_release(root)?,
-        "traceability" => crate::rewrite_traceability::lint(root)?,
+        "ci" => crate::ci::cmd_ci(root, vec!["lint".to_string()])?,
         other => bail!("unknown lint target: {other}"),
     }
     Ok(())
@@ -262,8 +262,11 @@ fn lint_layout(root: &Path) -> Result<()> {
         "LICENSE",
         "README.md",
         "d.py",
-        "rewrite-traceability.toml",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "GOVERNANCE.md",
         "rust-toolchain.toml",
+        "SECURITY.md",
         "vo.work",
     ]);
     for entry in fs::read_dir(root)? {
