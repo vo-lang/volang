@@ -279,6 +279,27 @@ bundle digest and commit. Publication re-verifies all archives and the bundle,
 creates GitHub build-provenance attestations, then crosses the protected
 `release` environment.
 
+Manual dispatch rehearses the same five targets using a successful full CI run
+for the exact selected branch commit. `release candidate metadata|matrix|build|package|verify`
+uses an explicit candidate identity, no release tag, a `vo-candidate-` archive
+prefix, and `target/ci/release-candidate/<commit>` output. Candidate evidence must
+use the full `merge` profile; production continues to require the tagged `main`
+identity. Build receipts and archive provenance use schema 7 and bind that purpose
+and the declared CLI build arguments, optimization level and LTO configuration.
+Candidate mode exposes no publication or Homebrew operation. The workflow's
+production publish job runs only for `repository_dispatch`.
+
+Every target tests VM/JIT and a linked Native AOT executable, unpacks its archive,
+builds a Web UI application, creates and tests a starter project, then links and
+opens a real native UI window using the packaged runtime. The window probe has a
+120-second process-tree deadline and requires the exact presentation record;
+it saves a typed result with executable digest, source, exit status, timing and
+logs. Linux uses Xvfb and Mesa. Build failures preserve Cargo timings and receipts.
+After all five targets pass, candidate verification checks the complete archive
+set, provenance and digests, creates GitHub Artifact Attestations, and verifies
+their source commit, ref and signing workflow. This rehearsal produces candidate
+artifacts and verification records; it grants no production publication authority.
+
 ## Local verification
 
 Use Rust 1.94.0, Node 24, and wasm-pack 0.14.0. Run from the repository root:

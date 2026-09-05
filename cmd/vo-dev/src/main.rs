@@ -96,6 +96,8 @@ fn print_usage() {
   vo-dev release homebrew-repository
   vo-dev release homebrew-metadata
   vo-dev release build-web-runtime
+  vo-dev release candidate metadata|matrix|build|package|verify ...
+  vo-dev release probe-native-ui <target>
   vo-dev release build <target>
   vo-dev release package <target>
   vo-dev release verify --tag <tag> --artifacts <dir>

@@ -1,6 +1,6 @@
-use crate::config::{load_project, load_release};
+use crate::config::{load_project, load_release, ReleaseFile};
 use crate::release_archive::{
-    clear_release_build_outputs, package_release_binary, record_release_build,
+    artifact_directory, clear_release_build_outputs, package_release_binary, record_release_build,
     validate_release_artifacts, write_text_atomic,
 };
 use crate::release_config::{
@@ -13,7 +13,8 @@ use crate::release_homebrew::{
     validate_release_version_progression, HomebrewVersionProgression,
 };
 use crate::release_identity::{
-    resolve_release_identity, validated_release_version, SourceCleanliness,
+    resolve_candidate_identity, resolve_release_identity, validated_release_version,
+    ReleaseIdentity, SourceCleanliness,
 };
 use crate::release_sdk::{cmd_sdk_plan, validate_sdk_publish_boundary};
 use anyhow::{anyhow, bail, Context, Result};
@@ -108,9 +109,20 @@ struct BoundedRead {
 
 pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() {
-        bail!("usage: vo-dev release matrix|metadata|version|sdk-plan|homebrew-repository|homebrew-metadata|build-web-runtime|build|package|verify|notes|publish|update-homebrew ...");
+        bail!("usage: vo-dev release candidate|matrix|metadata|version|sdk-plan|homebrew-repository|homebrew-metadata|build-web-runtime|build|package|verify|notes|publish|update-homebrew ...");
     }
     match args.remove(0).as_str() {
+        "candidate" => cmd_candidate(root, args),
+        "probe-native-ui" => {
+            if args.len() != 1 {
+                bail!("usage: vo-dev release probe-native-ui TARGET");
+            }
+            let release = load_release(root)?;
+            lint_release_file(&release)?;
+            let target = release_target(&release, &args[0])?;
+            let commit = crate::release_identity::checkout_commit(root)?;
+            crate::ci::probe_native_ui(root, &target.target, commit)
+        }
         "matrix" => cmd_matrix(root, args),
         "metadata" => cmd_metadata(root, args),
         "version" => cmd_version(root, args),
@@ -133,6 +145,73 @@ pub(crate) fn cmd_release(root: &Path, mut args: Vec<String>) -> Result<()> {
         "update-homebrew" => cmd_update_homebrew(root, args),
         other => bail!("unknown release command: {other}"),
     }
+}
+
+// Candidate mode builds the declared release packages without creating a tag,
+// granting production authority, or exposing publication commands.
+fn cmd_candidate(root: &Path, mut args: Vec<String>) -> Result<()> {
+    if args.is_empty() {
+        bail!("usage: vo-dev release candidate metadata|matrix|build|package|verify ...");
+    }
+    let operation = args.remove(0);
+    if !matches!(
+        operation.as_str(),
+        "metadata" | "matrix" | "build" | "package" | "verify"
+    ) {
+        bail!("unsupported candidate operation {operation}; candidates cannot be published");
+    }
+    let identity = resolve_candidate_identity(root)?;
+    let mut release = load_release(root)?;
+    lint_release_file(&release)?;
+    release.package.artifact_prefix.push_str("-candidate");
+    let directory = artifact_directory(root, &identity);
+    match operation.as_str() {
+        "metadata" => {
+            ensure_no_args("release candidate metadata", &args)?;
+            let mut metadata = serde_json::to_value(&identity)?;
+            metadata["artifact_directory"] = directory
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/")
+                .into();
+            println!("{}", serde_json::to_string_pretty(&metadata)?);
+        }
+        "matrix" => {
+            ensure_no_args("release candidate matrix", &args)?;
+            print_matrix(&release)?;
+        }
+        "build" | "package" => {
+            if args.len() != 1 {
+                bail!("candidate {operation} requires one declared target");
+            }
+            let target = release_target(&release, &args[0])?;
+            if operation == "build" {
+                build_with_identity(root, &release, &target.target, &identity)?;
+            } else {
+                let archive = package_release_binary(root, &release, &target.target, &identity)?;
+                println!("{}", directory.join(archive).display());
+            }
+        }
+        "verify" => {
+            let directory = match args.as_slice() {
+                [] => directory,
+                [flag, path] if flag == "--artifacts" => {
+                    safe_repo_path(root, Path::new(path), "candidate artifact directory", true)?
+                }
+                _ => bail!("usage: vo-dev release candidate verify [--artifacts DIR]"),
+            };
+            let files = release_artifact_files(&release, &directory)?;
+            validate_release_artifacts(root, &directory, &release, &identity)?;
+            verify_local_release_asset_snapshot(&snapshot_release_assets(&files)?)?;
+            println!(
+                "verified {} candidate assets at {}",
+                files.len(),
+                identity.commit
+            );
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
 
 pub(crate) fn lint_release(root: &Path) -> Result<()> {
@@ -182,6 +261,10 @@ fn cmd_matrix(root: &Path, args: Vec<String>) -> Result<()> {
     ensure_no_args("release matrix", &args)?;
     let release = load_release(root)?;
     lint_release_file(&release)?;
+    print_matrix(&release)
+}
+
+fn print_matrix(release: &ReleaseFile) -> Result<()> {
     let matrix = ReleaseMatrix {
         include: release
             .targets
@@ -189,7 +272,7 @@ fn cmd_matrix(root: &Path, args: Vec<String>) -> Result<()> {
             .map(|target| ReleaseMatrixRow {
                 target: target.target.clone(),
                 os: target.os.clone(),
-                artifact_name: artifact_name(&release, &target.target),
+                artifact_name: artifact_name(release, &target.target),
             })
             .collect(),
     };
@@ -252,7 +335,17 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
     lint_release_file(&release)?;
     let target = release_target(&release, &args[0])?;
     let identity = resolve_release_identity(root, None, None, SourceCleanliness::AllFiles)?;
-    clear_release_build_outputs(root, &release, &target.target)?;
+    build_with_identity(root, &release, &target.target, &identity)
+}
+
+fn build_with_identity(
+    root: &Path,
+    release: &ReleaseFile,
+    target: &str,
+    identity: &ReleaseIdentity,
+) -> Result<()> {
+    let target = release_target(release, target)?;
+    clear_release_build_outputs(root, release, &target.target)?;
 
     run_status(
         Command::new("rustup")
@@ -265,6 +358,7 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
     command
         .arg("build")
         .args(&release.package.build_args)
+        .arg("--timings")
         .args(["--target", &target.target])
         .env(
             "CARGO_PROFILE_RELEASE_OPT_LEVEL",
@@ -285,6 +379,7 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
             "build",
             "--release",
             "--locked",
+            "--timings",
             "-p",
             "vo-aot-runtime",
             "-p",
@@ -308,7 +403,7 @@ fn cmd_build(root: &Path, args: Vec<String>) -> Result<()> {
         &format!("cargo build AOT runtime {}", target.target),
     )?;
     require_ui_web_runtime(root)?;
-    record_release_build(root, &release, &target.target, &identity)
+    record_release_build(root, release, &target.target, identity)
 }
 
 fn build_ui_web_runtime(root: &Path) -> Result<()> {
@@ -336,8 +431,8 @@ fn build_ui_web_runtime(root: &Path) -> Result<()> {
     run_status(&mut install, "npm ci for the UI Web runtime")?;
 
     let mut build = Command::new("npm");
-    build.args(["run", "build"]).current_dir(&directory);
-    run_status(&mut build, "npm run build for the UI Web runtime")
+    build.args(["run", "build:release"]).current_dir(&directory);
+    run_status(&mut build, "npm run build:release for the UI Web runtime")
 }
 
 fn require_ui_web_runtime(root: &Path) -> Result<()> {
@@ -518,6 +613,7 @@ fn cmd_publish(root: &Path, args: Vec<String>) -> Result<()> {
     let repository = release_repository(root)?;
     let identity =
         resolve_release_identity(root, Some(&tag), None, SourceCleanliness::TrackedFiles)?;
+    identity.require_publishable()?;
     let artifacts = safe_repo_path(
         root,
         &artifacts.unwrap_or_else(|| PathBuf::from("artifacts")),
@@ -761,6 +857,7 @@ fn cmd_update_homebrew(root: &Path, args: Vec<String>) -> Result<()> {
     let release = load_release(root)?;
     lint_release_file(&release)?;
     let identity = resolve_release_identity(root, None, None, SourceCleanliness::TrackedFiles)?;
+    identity.require_publishable()?;
     let repo = safe_repo_path(
         root,
         &repo.ok_or_else(|| anyhow!("update-homebrew requires --repo <path>"))?,

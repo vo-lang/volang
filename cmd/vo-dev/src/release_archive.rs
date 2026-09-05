@@ -2,7 +2,7 @@ use crate::config::ReleaseFile;
 use crate::release_config::{
     artifact_name, provenance_name, read_checked_sha256, release_binary_name, sha256_file,
 };
-use crate::release_identity::ReleaseIdentity;
+use crate::release_identity::{ReleaseIdentity, ReleasePurpose};
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::bufread::GzDecoder;
 use flate2::{Compression, GzBuilder};
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tar::{Builder, Header};
 
-const BUILD_RECEIPT_SCHEMA: u32 = 6;
-const PROVENANCE_SCHEMA: u32 = 6;
+const BUILD_RECEIPT_SCHEMA: u32 = 7;
+const PROVENANCE_SCHEMA: u32 = 7;
 const MAX_RELEASE_BINARY_SIZE: u64 = 512 * 1024 * 1024;
 const MAX_RELEASE_ARCHIVE_SIZE: u64 = MAX_RELEASE_BINARY_SIZE * 4 + 8 * 1024 * 1024;
 const MAX_RELEASE_EVIDENCE_SIZE: u64 = 1024 * 1024;
@@ -29,6 +29,7 @@ struct ReleaseBuildReceipt {
     schema: u32,
     identity: ReleaseIdentity,
     target: String,
+    configuration: BuildConfiguration,
     binary: BinaryRecord,
     aot_runtime: BinaryRecord,
     ui_aot_runtime: BinaryRecord,
@@ -42,12 +43,31 @@ struct ReleaseProvenance {
     schema: u32,
     identity: ReleaseIdentity,
     target: String,
+    configuration: BuildConfiguration,
     archive: ArchiveRecord,
     binary: BinaryRecord,
     aot_runtime: BinaryRecord,
     ui_aot_runtime: BinaryRecord,
     ui_web_runtime: Vec<BinaryRecord>,
     ui_product: UiProductEvidence,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BuildConfiguration {
+    cli_arguments: Vec<String>,
+    release_opt_level: String,
+    release_lto: String,
+}
+
+impl BuildConfiguration {
+    fn declared(release: &ReleaseFile) -> Self {
+        Self {
+            cli_arguments: release.package.build_args.clone(),
+            release_opt_level: release.package.release_opt_level.clone(),
+            release_lto: release.package.release_lto.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -92,6 +112,15 @@ struct UiWebRuntimeInput<'a> {
 struct ArchiveBinaryInput<'a> {
     path: &'a Path,
     name: &'a str,
+}
+
+pub(crate) fn artifact_directory(root: &Path, identity: &ReleaseIdentity) -> PathBuf {
+    match identity.purpose {
+        ReleasePurpose::Release => root.to_path_buf(),
+        ReleasePurpose::Candidate => root
+            .join("target/ci/release-candidate")
+            .join(&identity.commit),
+    }
 }
 
 pub(crate) fn clear_release_build_outputs(
@@ -151,6 +180,7 @@ pub(crate) fn record_release_build(
         schema: BUILD_RECEIPT_SCHEMA,
         identity: identity.clone(),
         target: target.to_string(),
+        configuration: BuildConfiguration::declared(release),
         binary,
         aot_runtime,
         ui_aot_runtime,
@@ -176,6 +206,9 @@ pub(crate) fn package_release_binary(
     }
     if &receipt.identity != identity {
         bail!("release build receipt identity differs from the tagged checkout");
+    }
+    if receipt.configuration != BuildConfiguration::declared(release) {
+        bail!("release build configuration differs from the verified build receipt");
     }
     if receipt.target != target {
         bail!(
@@ -212,7 +245,9 @@ pub(crate) fn package_release_binary(
     }
 
     let tarball_name = artifact_name(release, target);
-    let tarball_path = root.join(&tarball_name);
+    let output_dir = artifact_directory(root, identity);
+    fs::create_dir_all(&output_dir)?;
+    let tarball_path = output_dir.join(&tarball_name);
     create_deterministic_tarball(
         &tarball_path,
         ArchiveBinaryInput {
@@ -252,6 +287,7 @@ pub(crate) fn package_release_binary(
         schema: PROVENANCE_SCHEMA,
         identity: identity.clone(),
         target: target.to_string(),
+        configuration: BuildConfiguration::declared(release),
         archive,
         binary,
         aot_runtime,
@@ -259,13 +295,16 @@ pub(crate) fn package_release_binary(
         ui_web_runtime,
         ui_product,
     };
-    write_json_atomic(&root.join(provenance_name(release, target)), &provenance)?;
+    write_json_atomic(
+        &output_dir.join(provenance_name(release, target)),
+        &provenance,
+    )?;
     write_text_atomic(
-        &root.join(format!("{tarball_name}.sha256")),
+        &output_dir.join(format!("{tarball_name}.sha256")),
         &format!("{}  {tarball_name}\n", provenance.archive.sha256),
     )?;
-    read_checked_sha256(root, &tarball_name)?;
-    validate_release_artifact(root, root, release, target, identity)?;
+    read_checked_sha256(&output_dir, &tarball_name)?;
+    validate_release_artifact(root, &output_dir, release, target, identity)?;
     Ok(tarball_name)
 }
 
@@ -301,6 +340,9 @@ fn validate_release_artifact(
             "release provenance identity mismatch for {}",
             provenance_path.display()
         );
+    }
+    if provenance.configuration != BuildConfiguration::declared(release) {
+        bail!("release provenance build configuration differs from eng/release.toml");
     }
     if provenance.target != target {
         bail!(
@@ -369,7 +411,7 @@ fn validate_release_artifact(
     validate_binary_record(&provenance.ui_aot_runtime)?;
     validate_ui_web_runtime_records(&provenance.ui_web_runtime)?;
     let expected_ui_product = ui_product_evidence(root, identity)?;
-    validate_ui_product_evidence(&provenance.ui_product, &identity.commit)?;
+    validate_ui_product_evidence(&provenance.ui_product, identity)?;
     if provenance.ui_product != expected_ui_product {
         bail!("release provenance CI certification differs from the verified bundle");
     }
@@ -394,7 +436,7 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
             showcase_count: 5,
             ci_schema: "volang.ci.certification.v1".to_string(),
             ci_status: "certified".to_string(),
-            ci_profile: "main".to_string(),
+            ci_profile: identity.purpose.certification_profile().to_string(),
             ci_commit: identity.commit.clone(),
             ci_bundle_sha256: "0".repeat(64),
         });
@@ -416,7 +458,12 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
     {
         bail!("VO_CI_CERTIFICATION_PATH must be repository-relative");
     }
-    let certification = crate::ci::verify_release_bundle(root, &root.join(relative))?;
+    let certification = match identity.purpose {
+        ReleasePurpose::Release => crate::ci::verify_release_bundle(root, &root.join(relative))?,
+        ReleasePurpose::Candidate => {
+            crate::ci::verify_candidate_bundle(root, &root.join(relative))?
+        }
+    };
     if certification.commit != identity.commit {
         bail!("UI certification commit differs from the release identity");
     }
@@ -432,7 +479,7 @@ fn ui_product_evidence(root: &Path, identity: &ReleaseIdentity) -> Result<UiProd
         ci_commit: certification.commit,
         ci_bundle_sha256: certification.sha256,
     };
-    validate_ui_product_evidence(&evidence, &identity.commit)?;
+    validate_ui_product_evidence(&evidence, identity)?;
     Ok(evidence)
 }
 
@@ -482,7 +529,10 @@ fn ui_declaration_evidence(root: &Path) -> Result<(String, u32, u32)> {
     Ok((format!("{:x}", hasher.finalize()), 12, 5))
 }
 
-fn validate_ui_product_evidence(evidence: &UiProductEvidence, commit: &str) -> Result<()> {
+fn validate_ui_product_evidence(
+    evidence: &UiProductEvidence,
+    identity: &ReleaseIdentity,
+) -> Result<()> {
     if evidence.schema != "volang.ui.product-evidence.v2"
         || evidence.status != "product-certified"
         || !valid_sha256(&evidence.declaration_sha256)
@@ -490,8 +540,8 @@ fn validate_ui_product_evidence(evidence: &UiProductEvidence, commit: &str) -> R
         || evidence.showcase_count != 5
         || evidence.ci_schema != "volang.ci.certification.v1"
         || evidence.ci_status != "certified"
-        || evidence.ci_profile != "main"
-        || evidence.ci_commit != commit
+        || evidence.ci_profile != identity.purpose.certification_profile()
+        || evidence.ci_commit != identity.commit
         || !valid_sha256(&evidence.ci_bundle_sha256)
     {
         bail!("release provenance contains invalid UI product evidence");
@@ -1368,7 +1418,9 @@ mod tests {
         let binary_dir = root.join("target").join(target).join("release");
         fs::create_dir_all(&binary_dir).unwrap();
         let identity = ReleaseIdentity {
-            tag: "v0.1.1".to_string(),
+            purpose: ReleasePurpose::Release,
+            tag: Some("v0.1.1".to_string()),
+            candidate_id: None,
             version: "0.1.1".to_string(),
             commit: "a".repeat(40),
             build_date: "2026-01-02T03:04:05+00:00".to_string(),
@@ -1402,6 +1454,64 @@ mod tests {
         assert_eq!(first, fs::read(root.join(&tarball)).unwrap());
         assert!(root.join(format!("{tarball}.sha256")).is_file());
         assert!(root.join(format!("{tarball}.provenance.json")).is_file());
+
+        let mut candidate = identity.clone();
+        candidate.purpose = ReleasePurpose::Candidate;
+        candidate.tag = None;
+        candidate.candidate_id = Some(format!("ci-{}", identity.commit));
+        let mut candidate_release = sample_release(target);
+        candidate_release
+            .package
+            .artifact_prefix
+            .push_str("-candidate");
+        // The production receipt cannot be reused by changing only CLI mode.
+        assert!(package_release_binary(&root, &candidate_release, target, &candidate).is_err());
+        record_release_build(&root, &candidate_release, target, &candidate).unwrap();
+        let archive =
+            package_release_binary(&root, &candidate_release, target, &candidate).unwrap();
+        let directory = artifact_directory(&root, &candidate);
+        assert!(!root.join(&archive).exists());
+        validate_release_artifact(&root, &directory, &candidate_release, target, &candidate)
+            .unwrap();
+        assert!(validate_release_artifact(
+            &root,
+            &directory,
+            &candidate_release,
+            target,
+            &identity
+        )
+        .is_err());
+        let mut wrong_commit = candidate.clone();
+        wrong_commit.commit = "b".repeat(40);
+        assert!(validate_release_artifact(
+            &root,
+            &directory,
+            &candidate_release,
+            target,
+            &wrong_commit
+        )
+        .is_err());
+        let mut wrong_config = sample_release(target);
+        wrong_config.package.artifact_prefix.push_str("-candidate");
+        wrong_config.package.release_opt_level = "1".into();
+        assert!(package_release_binary(&root, &wrong_config, target, &candidate).is_err());
+        assert!(
+            validate_release_artifact(&root, &directory, &wrong_config, target, &candidate)
+                .is_err()
+        );
+        let original_archive = fs::read(directory.join(&archive)).unwrap();
+        fs::write(directory.join(&archive), b"mutated archive").unwrap();
+        assert!(validate_release_artifact(
+            &root,
+            &directory,
+            &candidate_release,
+            target,
+            &candidate
+        )
+        .is_err());
+        fs::write(directory.join(&archive), original_archive).unwrap();
+        let evidence = ui_product_evidence(&root, &candidate).unwrap();
+        assert!(validate_ui_product_evidence(&evidence, &identity).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

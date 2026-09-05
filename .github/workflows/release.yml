@@ -3,6 +3,12 @@ name: Release
 on:
   repository_dispatch:
     types: [release]
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful full CI run for this exact candidate commit
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ env:
   VOWORK: "off"
 
 concurrency:
-  group: release
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.ref || 'production' }}
   queue: max
   cancel-in-progress: false
 
@@ -31,12 +37,14 @@ jobs:
       commit: ${{ steps.release.outputs.commit }}
       build_date: ${{ steps.release.outputs.build_date }}
       source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
-      ci_run_id: ${{ steps.trust.outputs.ci_run_id }}
+      ci_run_id: ${{ steps.trust.outputs.ci_run_id || steps.candidate_trust.outputs.ci_run_id }}
+      purpose: ${{ steps.release.outputs.purpose }}
+      artifact_directory: ${{ steps.release.outputs.artifact_directory }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.client_payload.tag }}
+          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -44,6 +52,7 @@ jobs:
         uses: ./.github/actions/setup-volang
 
       - name: Trust release commit
+        if: github.event_name == 'repository_dispatch'
         id: trust
         shell: bash
         env:
@@ -116,16 +125,42 @@ jobs:
             exit 1
           }
 
+      - name: Bind candidate to successful full CI
+        if: github.event_name == 'workflow_dispatch'
+        id: candidate_trust
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          test "$GITHUB_REPOSITORY" = vo-lang/volang
+          [[ "$GITHUB_REF" == refs/heads/* ]]
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]{0,15}$ ]]
+          head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          test "$head_commit" = "$GITHUB_SHA"
+          gh api "repos/vo-lang/volang/actions/runs/$CI_RUN_ID" \
+            | jq --exit-status --arg sha "$head_commit" --arg branch "$GITHUB_REF_NAME" '
+                .repository.full_name == "vo-lang/volang" and
+                .head_repository.full_name == "vo-lang/volang" and
+                .path == ".github/workflows/ci.yml" and
+                .head_sha == $sha and .head_branch == $branch and
+                .event == "workflow_dispatch" and .run_attempt == 1 and
+                .status == "completed" and .conclusion == "success"
+              ' >/dev/null
+          echo "commit=$head_commit" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+
       - name: Build release tool
         run: cargo build --locked -p vo-dev
 
-      - name: Download certified main evidence
+      - name: Download certified source evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ci-certification-${{ steps.trust.outputs.commit }}
+          name: ci-certification-${{ steps.trust.outputs.commit || steps.candidate_trust.outputs.commit }}
           path: target/ci/release-input
           repository: ${{ github.repository }}
-          run-id: ${{ steps.trust.outputs.ci_run_id }}
+          run-id: ${{ steps.trust.outputs.ci_run_id || steps.candidate_trust.outputs.ci_run_id }}
           github-token: ${{ github.token }}
 
       - name: Verify identity and plan targets
@@ -136,30 +171,35 @@ jobs:
         run: |
           ./target/debug/vo-dev lint release
           ./target/debug/vo-dev ui-certify --check
+          release_args=(release)
+          profile=main
+          purpose=release
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            release_args+=(candidate)
+            profile=merge
+            purpose=candidate
+          fi
           ./target/debug/vo-dev ci verify \
-            --bundle target/ci/release-input/certification.json \
-            --profile main
+            --bundle target/ci/release-input/certification.json --profile "$profile"
           ./target/debug/vo-dev ui-certify \
             --evidence target/ci/release-input/certification.json
-
-          unset GITHUB_REF_NAME GITHUB_SHA
-          matrix="$(./target/debug/vo-dev release matrix)"
-          metadata="$(./target/debug/vo-dev release metadata \
-            --tag "$RELEASE_TAG" \
-            --commit "$(git rev-parse --verify 'HEAD^{commit}')")"
-
-          matrix="$(jq -ce . <<<"$matrix")"
-          tag="$(jq -er .tag <<<"$metadata")"
-          commit="$(jq -er .commit <<<"$metadata")"
-          build_date="$(jq -er .build_date <<<"$metadata")"
-          source_date_epoch="$(jq -er .source_date_epoch <<<"$metadata")"
-
+          if [ "$purpose" = release ]; then
+            unset GITHUB_REF_NAME GITHUB_SHA
+            metadata="$(./target/debug/vo-dev release metadata --tag "$RELEASE_TAG" \
+              --commit "$(git rev-parse --verify 'HEAD^{commit}')")"
+          else
+            unset VO_RELEASE_TAG
+            metadata="$(./target/debug/vo-dev release candidate metadata)"
+          fi
+          matrix="$(./target/debug/vo-dev "${release_args[@]}" matrix | jq -ce .)"
           {
             printf 'matrix=%s\n' "$matrix"
-            printf 'tag=%s\n' "$tag"
-            printf 'commit=%s\n' "$commit"
-            printf 'build_date=%s\n' "$build_date"
-            printf 'source_date_epoch=%s\n' "$source_date_epoch"
+            printf 'purpose=%s\n' "$purpose"
+            printf 'tag=%s\n' "$(jq -r '.tag // ""' <<<"$metadata")"
+            printf 'artifact_directory=%s\n' "$(jq -r '.artifact_directory // "."' <<<"$metadata")"
+            printf 'commit=%s\n' "$(jq -er .commit <<<"$metadata")"
+            printf 'build_date=%s\n' "$(jq -er .build_date <<<"$metadata")"
+            printf 'source_date_epoch=%s\n' "$(jq -er .source_date_epoch <<<"$metadata")"
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload release certification input
@@ -178,7 +218,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout tagged source
+      - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.preflight.outputs.commit }}
@@ -236,7 +276,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
-      - name: Checkout tagged source
+      - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.preflight.outputs.commit }}
@@ -245,6 +285,12 @@ jobs:
 
       - name: Setup release toolchain
         uses: ./.github/actions/setup-volang
+
+      - name: Install Linux window smoke dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libxkbcommon-x11-0 mesa-vulkan-drivers xvfb
 
       - name: Download shared Web runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -264,14 +310,21 @@ jobs:
       - name: Build and package CLI
         shell: bash
         env:
+          RELEASE_PURPOSE: ${{ needs.preflight.outputs.purpose }}
           VO_RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
           VO_BUILD_COMMIT: ${{ needs.preflight.outputs.commit }}
           VO_BUILD_DATE: ${{ needs.preflight.outputs.build_date }}
           SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.source_date_epoch }}
           VO_CI_CERTIFICATION_PATH: target/ci/release-input/certification.json
         run: |
-          unset GITHUB_REF_NAME GITHUB_SHA
-          ./target/debug/vo-dev release build "${{ matrix.target }}"
+          release_args=(release)
+          if [ "$RELEASE_PURPOSE" = candidate ]; then
+            unset VO_RELEASE_TAG
+            release_args+=(candidate)
+          else
+            unset GITHUB_REF_NAME GITHUB_SHA
+          fi
+          ./target/debug/vo-dev "${release_args[@]}" build "${{ matrix.target }}"
           case "${{ matrix.target }}" in
             *windows*)
               binary="./target/${{ matrix.target }}/release/vo.exe"
@@ -285,16 +338,17 @@ jobs:
               ;;
           esac
           "$binary" --version
+          "$binary" run tests/lang/cases/runtime/array_len_cap_runtime.vo --mode=vm
           "$binary" run tests/lang/cases/runtime/array_len_cap_runtime.vo --mode=jit
           "$binary" build examples/basics/hello.vo \
             --runtime="$runtime" \
             --no-cache \
             -o "$hello"
           test "$("$hello")" = "Hello, hello!"
-          ./target/debug/vo-dev release package "${{ matrix.target }}"
+          ./target/debug/vo-dev "${release_args[@]}" package "${{ matrix.target }}"
           unpack="./target/${{ matrix.target }}/release/package-smoke"
           mkdir -p "$unpack"
-          tar -xzf "${{ matrix.artifact_name }}" -C "$unpack"
+          tar -xzf "${{ needs.preflight.outputs.artifact_directory }}/${{ matrix.artifact_name }}" -C "$unpack"
           case "${{ matrix.target }}" in
             *windows*)
               packaged_vo="$unpack/vo.exe"
@@ -319,24 +373,34 @@ jobs:
             --runtime="$packaged_ui_runtime" \
             --no-cache \
             -o "./target/${{ matrix.target }}/release/ui-native-aot-smoke"
-          case "${{ matrix.target }}" in
-            *windows*) test -f "./target/${{ matrix.target }}/release/ui-native-aot-smoke.exe" ;;
-            *) test -x "./target/${{ matrix.target }}/release/ui-native-aot-smoke" ;;
-          esac
+          ./target/debug/vo-dev release probe-native-ui "${{ matrix.target }}"
 
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: vo-${{ matrix.target }}
+          name: ${{ needs.preflight.outputs.purpose }}-package-${{ matrix.target }}
           path: |
-            ${{ matrix.artifact_name }}
-            ${{ matrix.artifact_name }}.sha256
-            ${{ matrix.artifact_name }}.provenance.json
+            ${{ needs.preflight.outputs.artifact_directory }}/${{ matrix.artifact_name }}
+            ${{ needs.preflight.outputs.artifact_directory }}/${{ matrix.artifact_name }}.sha256
+            ${{ needs.preflight.outputs.artifact_directory }}/${{ matrix.artifact_name }}.provenance.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
+      - name: Preserve release build and probe diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-diagnostics-${{ matrix.target }}
+          path: |
+            target/cargo-timings
+            target/ci/release-probes
+            target/${{ matrix.target }}/release/vo.release-build.json
+          if-no-files-found: warn
+          retention-days: 30
+
   publish:
+    if: github.event_name == 'repository_dispatch'
     name: Publish GitHub Release
     needs: [preflight, web_runtime, build]
     runs-on: ubuntu-22.04
@@ -349,7 +413,7 @@ jobs:
     environment:
       name: release
     steps:
-      - name: Checkout tagged source
+      - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.preflight.outputs.commit }}
@@ -365,7 +429,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: vo-*
+          pattern: release-package-*
           path: artifacts
           merge-multiple: true
 
@@ -502,3 +566,75 @@ jobs:
           GH_HOST: github.com
           RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
         run: gh release verify "$RELEASE_TAG" --repo github.com/vo-lang/volang
+
+  candidate_verify:
+    name: Verify candidate archives and attestations
+    if: github.event_name == 'workflow_dispatch'
+    needs: [preflight, web_runtime, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup release toolchain
+        uses: ./.github/actions/setup-volang
+      - name: Build release tool
+        run: cargo build --locked -p vo-dev
+      - name: Download candidate packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: candidate-package-*
+          path: target/ci/candidate-download
+          merge-multiple: true
+      - name: Download release certification input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-certification-${{ needs.preflight.outputs.commit }}
+          path: target/ci/release-input
+      - name: Verify complete candidate asset set
+        env:
+          VO_CI_CERTIFICATION_PATH: target/ci/release-input/certification.json
+        run: |
+          ./target/debug/vo-dev ci verify --bundle "$VO_CI_CERTIFICATION_PATH" --profile merge
+          ./target/debug/vo-dev ui-certify --evidence "$VO_CI_CERTIFICATION_PATH"
+          ./target/debug/vo-dev release candidate verify --artifacts target/ci/candidate-download
+      - name: Attest candidate archives
+        id: attestation
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: target/ci/candidate-download/vo-candidate-*.tar.gz
+      - name: Verify signed source and workflow identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_BUNDLE: ${{ steps.attestation.outputs.bundle-path }}
+        run: |
+          mkdir -p target/ci/candidate-verification
+          cp "$ATTESTATION_BUNDLE" target/ci/candidate-verification/attestation.jsonl
+          for archive in target/ci/candidate-download/vo-candidate-*.tar.gz; do
+            gh attestation verify "$archive" \
+              --bundle "$ATTESTATION_BUNDLE" --repo vo-lang/volang \
+              --signer-workflow vo-lang/volang/.github/workflows/release.yml \
+              --signer-digest "$GITHUB_SHA" --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners --format json \
+              > "target/ci/candidate-verification/$(basename "$archive").attestation.json"
+          done
+          printf 'Candidate `%s`: all five archives, native probes, source-bound certification and signed attestations passed.\n' \
+            "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve candidate verification
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-verification-${{ github.sha }}
+          path: target/ci/candidate-verification
+          if-no-files-found: warn
+          retention-days: 30

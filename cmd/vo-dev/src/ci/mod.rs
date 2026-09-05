@@ -4,6 +4,7 @@ mod model;
 mod native_window;
 mod plan;
 mod process;
+mod release_probe;
 mod run;
 mod summary;
 mod web_result;
@@ -12,6 +13,8 @@ use anyhow::{anyhow, bail, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+pub(crate) use release_probe::probe_native_ui;
 
 pub(crate) struct VerifiedCertification {
     pub(crate) profile: String,
@@ -274,7 +277,15 @@ pub(crate) fn verify_ui_bundle(root: &Path, path: &Path) -> Result<()> {
 }
 
 pub(crate) fn verify_release_bundle(root: &Path, path: &Path) -> Result<VerifiedCertification> {
-    let bundle = evidence::read_and_verify_bundle(root, path, Some("main"))?;
+    verify_build_bundle(root, path, "main")
+}
+
+pub(crate) fn verify_candidate_bundle(root: &Path, path: &Path) -> Result<VerifiedCertification> {
+    verify_build_bundle(root, path, "merge")
+}
+
+fn verify_build_bundle(root: &Path, path: &Path, profile: &str) -> Result<VerifiedCertification> {
+    let bundle = evidence::read_and_verify_bundle(root, path, Some(profile))?;
     evidence::require_ui_evidence(&bundle)?;
     let bytes = fs::read(path)?;
     Ok(VerifiedCertification {
