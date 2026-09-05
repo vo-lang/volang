@@ -296,7 +296,7 @@ jobs:
             --format json > "target/ci/results/${{ matrix.task }}.json"
 
       - name: Run workspace tests
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
 
       - name: Record Nightly evidence
         run: >-
