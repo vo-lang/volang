@@ -461,6 +461,7 @@ mod tests {
             fs::create_dir_all(root.join("eng")).unwrap();
             let root = root.canonicalize().unwrap();
             let manifest = CiManifest {
+                components: Vec::new(),
                 version: 1,
                 profiles: vec![CiProfile {
                     name: "test".into(),

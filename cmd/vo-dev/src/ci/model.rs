@@ -17,6 +17,20 @@ pub(crate) struct CiManifest {
     pub(crate) tasks: Vec<CiTask>,
     #[serde(default, rename = "command")]
     pub(crate) commands: Vec<CiCommand>,
+    #[serde(default, rename = "component")]
+    pub(crate) components: Vec<CiComponent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CiComponent {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) paths: Vec<String>,
+    #[serde(default)]
+    pub(crate) depends_on: Vec<String>,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -133,6 +147,7 @@ pub(crate) fn task_map(manifest: &CiManifest) -> BTreeMap<&str, &CiTask> {
 }
 
 fn validate_manifest(manifest: &CiManifest) -> Result<()> {
+    super::graph::validate_components(&manifest.components)?;
     if manifest.version != 1 {
         bail!("eng/ci.toml version must be 1");
     }
@@ -416,6 +431,7 @@ mod tests {
     #[test]
     fn dependency_cycles_are_rejected() {
         let manifest = CiManifest {
+            components: Vec::new(),
             version: 1,
             profiles: vec![CiProfile {
                 name: "pull-request".to_string(),
@@ -453,6 +469,7 @@ mod tests {
         task.inputs = vec!["*".into()];
         task.resource_group = "cargo".into();
         let manifest = CiManifest {
+            components: Vec::new(),
             version: 1,
             profiles: vec![CiProfile {
                 name: "test".into(),

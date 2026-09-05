@@ -1,3 +1,4 @@
+use super::graph::{Impact, ImpactGraph};
 use super::model::{
     load_manifest, manifest_digest, task_map, validate_source_identity, CiManifest, CiTask,
     SourceIdentity,
@@ -9,7 +10,22 @@ use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
 
-pub(crate) const PLAN_SCHEMA: &str = "volang.ci.plan.v1";
+pub(crate) const PLAN_SCHEMA: &str = "volang.ci.plan.v2";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum SelectionBasis {
+    Complete,
+    Explicit {
+        graph_sha256: String,
+    },
+    Git {
+        base: String,
+        head: String,
+        merge_base: String,
+        graph_sha256: String,
+    },
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +35,7 @@ pub(crate) struct CiPlan {
     pub(crate) tier: String,
     pub(crate) manifest_sha256: String,
     pub(crate) source: SourceIdentity,
+    pub(crate) selection: SelectionBasis,
     pub(crate) changed_files: Vec<String>,
     pub(crate) decisions: BTreeMap<String, Vec<String>>,
     pub(crate) tasks: Vec<CiTask>,
@@ -39,9 +56,26 @@ pub(crate) fn build_plan(
         .find(|profile| profile.name == profile_name)
         .ok_or_else(|| anyhow!("unknown CI profile {profile_name}"))?;
 
+    if !profile.changed_only
+        && (base.is_some() || head.is_some() || !explicit_changed_files.is_empty())
+    {
+        bail!("complete CI profiles do not accept impact-only inputs");
+    }
+    let source = source_identity(root)?;
+    let mut comparison = None;
     let mut changed_files = if explicit_changed_files.is_empty() {
         match (base, head) {
-            (Some(base), Some(head)) => git_changed_files(root, base, head)?,
+            (Some(base), Some(head)) => {
+                let base = resolve_revision(root, base)?;
+                let head = resolve_revision(root, head)?;
+                if head != source.commit {
+                    bail!("CI impact head must equal the checked-out candidate commit");
+                }
+                let merge_base = git_stdout(root, &["merge-base", &base, &head])?;
+                let paths = git_changed_files(root, &base, &head)?;
+                comparison = Some((base, head, merge_base));
+                paths
+            },
             (None, None) if !profile.changed_only => Vec::new(),
             (None, None) => bail!(
                 "CI profile {profile_name} selects by impact and requires --base/--head or --changed-file"
@@ -60,7 +94,29 @@ pub(crate) fn build_plan(
     changed_files.sort();
     changed_files.dedup();
 
-    let selected = selected_task_ids(&manifest, profile_name, &changed_files)?;
+    let mut graph = if profile.changed_only {
+        ImpactGraph::load(root, None)?
+    } else {
+        ImpactGraph::default()
+    };
+    let selection = if let Some((base, head, merge_base)) = comparison {
+        graph.merge(ImpactGraph::load(root, Some(&base))?);
+        graph.merge(ImpactGraph::load(root, Some(&head))?);
+        SelectionBasis::Git {
+            base,
+            head,
+            merge_base,
+            graph_sha256: graph.digest()?,
+        }
+    } else if profile.changed_only {
+        SelectionBasis::Explicit {
+            graph_sha256: graph.digest()?,
+        }
+    } else {
+        SelectionBasis::Complete
+    };
+    let impact = graph.impact(&changed_files);
+    let selected = selected_task_ids(&manifest, profile_name, &impact)?;
     let tasks = manifest
         .tasks
         .iter()
@@ -83,8 +139,9 @@ pub(crate) fn build_plan(
         profile: profile.name.clone(),
         tier: profile.tier.clone(),
         manifest_sha256: manifest_digest(root)?,
-        source: source_identity(root)?,
-        decisions: selection_decisions(&manifest, profile_name, &changed_files)?,
+        source,
+        selection,
+        decisions: selection_decisions(&manifest, profile_name, &impact)?,
         changed_files,
         tasks,
         workflow_jobs,
@@ -144,8 +201,50 @@ pub(crate) fn validate_plan(root: &Path, plan: &CiPlan) -> Result<()> {
     if !profile.changed_only && !plan.changed_files.is_empty() {
         bail!("complete CI profiles cannot carry impact-only changed paths");
     }
-    let expected = selected_task_ids(&manifest, &plan.profile, &plan.changed_files)?;
-    if plan.decisions != selection_decisions(&manifest, &plan.profile, &plan.changed_files)? {
+    let mut graph = if profile.changed_only {
+        ImpactGraph::load(root, None)?
+    } else {
+        ImpactGraph::default()
+    };
+    match &plan.selection {
+        SelectionBasis::Complete if !profile.changed_only => {}
+        SelectionBasis::Explicit { graph_sha256 } if profile.changed_only => {
+            if graph.digest()? != *graph_sha256 {
+                bail!("CI plan component graph differs from the candidate");
+            }
+        }
+        SelectionBasis::Git {
+            base,
+            head,
+            merge_base,
+            graph_sha256,
+        } if profile.changed_only => {
+            if resolve_revision(root, base)? != *base
+                || resolve_revision(root, head)? != *head
+                || *head != plan.source.commit
+                || git_stdout(root, &["merge-base", base, head])? != *merge_base
+            {
+                bail!(
+                    "CI plan comparison does not identify the checked-out candidate and its base"
+                );
+            }
+            let mut expected_paths = git_changed_files(root, base, head)?;
+            expected_paths.sort();
+            expected_paths.dedup();
+            if expected_paths != plan.changed_files {
+                bail!("CI plan changed files differ from its Git comparison");
+            }
+            graph.merge(ImpactGraph::load(root, Some(base))?);
+            graph.merge(ImpactGraph::load(root, Some(head))?);
+            if graph.digest()? != *graph_sha256 {
+                bail!("CI plan base/head component graph differs from Git");
+            }
+        }
+        _ => bail!("CI plan selection mode differs from its profile"),
+    }
+    let impact = graph.impact(&plan.changed_files);
+    let expected = selected_task_ids(&manifest, &plan.profile, &impact)?;
+    if plan.decisions != selection_decisions(&manifest, &plan.profile, &impact)? {
         bail!("CI plan explanations differ from task selection rules");
     }
     let actual_ids = plan
@@ -191,59 +290,61 @@ pub(crate) fn canonical_plan_bytes(plan: &CiPlan) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn direct_reasons(task: &CiTask, impact: &Impact) -> Vec<String> {
+    let mut reasons = impact
+        .full
+        .iter()
+        .map(|reason| format!("run: {reason}"))
+        .collect::<Vec<_>>();
+    for capability in &task.capabilities {
+        if let Some(chains) = impact.capabilities.get(capability) {
+            reasons.extend(chains.iter().map(|chain| format!("run: {chain}")));
+        }
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
 fn selection_decisions(
     manifest: &CiManifest,
     profile_name: &str,
-    paths: &[String],
+    impact: &Impact,
 ) -> Result<BTreeMap<String, Vec<String>>> {
     let profile = manifest
         .profiles
         .iter()
         .find(|p| p.name == profile_name)
         .ok_or_else(|| anyhow!("unknown CI profile {profile_name}"))?;
-    let selected = selected_task_ids(manifest, profile_name, paths)?;
+    let selected = selected_task_ids(manifest, profile_name, impact)?;
     let mut decisions = BTreeMap::new();
     for task in &manifest.tasks {
-        let mut reasons = Vec::new();
-        if !profile.tasks.contains(&task.id) {
-            reasons.push(format!("skip: task is outside profile {profile_name}"));
+        let mut reasons = if !profile.tasks.contains(&task.id) {
+            vec![format!("skip: task is outside profile {profile_name}")]
         } else if !profile.changed_only {
-            reasons.push(format!("run: complete profile {profile_name}"));
+            vec![format!("run: complete profile {profile_name}")]
         } else if task.always {
-            reasons.push("run: mandatory repository contracts".into());
+            vec!["run: mandatory repository contracts".into()]
         } else {
-            for path in paths {
-                if !documentation_only_path(path) {
-                    reasons.push(format!(
-                        "run: conservative coverage for executable or unknown input {path}"
-                    ));
-                } else {
-                    for pattern in &task.impact {
-                        if glob_matches(pattern, path) {
-                            reasons.push(format!("run: {path} matches {pattern}"));
-                        }
-                    }
-                }
-            }
-            if reasons.is_empty() {
-                if selected.contains(task.id.as_str()) {
-                    reasons.extend(
-                        manifest
-                            .tasks
-                            .iter()
-                            .filter(|dependent| {
-                                selected.contains(dependent.id.as_str())
-                                    && dependent.depends_on.contains(&task.id)
-                            })
-                            .map(|dependent| {
-                                format!("run: required dependency of {}", dependent.id)
-                            }),
-                    );
-                } else {
-                    reasons.push(
-                        "skip: no changed input or selected dependent requires this task".into(),
-                    );
-                }
+            direct_reasons(task, impact)
+        };
+        if reasons.is_empty() {
+            if selected.contains(task.id.as_str()) {
+                reasons.extend(
+                    manifest
+                        .tasks
+                        .iter()
+                        .filter(|dependent| {
+                            selected.contains(dependent.id.as_str())
+                                && dependent.depends_on.contains(&task.id)
+                        })
+                        .map(|dependent| format!("run: required dependency of {}", dependent.id)),
+                );
+            } else {
+                reasons.push(
+                    "skip: no changed component or selected dependent requires this capability"
+                        .into(),
+                );
             }
         }
         decisions.insert(task.id.clone(), reasons);
@@ -254,7 +355,7 @@ fn selection_decisions(
 fn selected_task_ids<'a>(
     manifest: &'a CiManifest,
     profile_name: &str,
-    changed_files: &[String],
+    impact: &Impact,
 ) -> Result<BTreeSet<&'a str>> {
     let profile = manifest
         .profiles
@@ -270,21 +371,10 @@ fn selected_task_ids<'a>(
     let mut selected = BTreeSet::new();
     for id in &profile.tasks {
         let task = tasks[id.as_str()];
-        if !profile.changed_only
-            || task.always
-            || changed_files
-                .iter()
-                .any(|path| !documentation_only_path(path))
-            || changed_files.iter().any(|path| {
-                task.impact
-                    .iter()
-                    .any(|pattern| glob_matches(pattern, path))
-            })
-        {
+        if !profile.changed_only || task.always || !direct_reasons(task, impact).is_empty() {
             selected.insert(id.as_str());
         }
     }
-
     let mut pending = selected.iter().copied().collect::<Vec<_>>();
     while let Some(id) = pending.pop() {
         for dependency in &tasks[id].depends_on {
@@ -302,16 +392,6 @@ fn selected_task_ids<'a>(
         }
     }
     Ok(selected)
-}
-
-// Until the component graph is verified, only inert prose may narrow coverage.
-// Generated Studio documentation is executable product input.
-fn documentation_only_path(path: &str) -> bool {
-    (path.starts_with("docs/") && path.ends_with(".md"))
-        || matches!(
-            path,
-            "README.md" | "CHANGELOG.md" | "CONTRIBUTING.md" | "GOVERNANCE.md" | "SECURITY.md"
-        )
 }
 
 pub(super) fn glob_matches(pattern: &str, path: &str) -> bool {
@@ -369,6 +449,14 @@ fn git_changed_files(root: &Path, base: &str, head: &str) -> Result<Vec<String>>
         .collect()
 }
 
+fn resolve_revision(root: &Path, value: &str) -> Result<String> {
+    validate_git_revision(value)?;
+    git_stdout(
+        root,
+        &["rev-parse", "--verify", &format!("{value}^{{commit}}")],
+    )
+}
+
 fn validate_git_revision(value: &str) -> Result<()> {
     if value.is_empty()
         || value.starts_with('-')
@@ -412,7 +500,7 @@ pub(crate) fn source_identity(root: &Path) -> Result<SourceIdentity> {
     Ok(source)
 }
 
-fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
@@ -458,6 +546,7 @@ mod tests {
     fn shared_and_unknown_inputs_select_every_eligible_task() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest = load_manifest(&root).unwrap();
+        let graph = ImpactGraph::load(&root, None).unwrap();
         let profile = manifest
             .profiles
             .iter()
@@ -468,10 +557,10 @@ mod tests {
             "eng/tests.toml",
             "lang/crates/vo-runtime/src/gc.rs",
             "unknown/input",
-            "apps/studio/documentation/catalog.vo",
+            "lang/protocol/app-runtime/generated/schema.rs",
         ] {
             assert_eq!(
-                selected_task_ids(&manifest, "pull-request", &[path.into()])
+                selected_task_ids(&manifest, "pull-request", &graph.impact(&[path.into()]))
                     .unwrap()
                     .len(),
                 profile.tasks.len(),
@@ -479,9 +568,52 @@ mod tests {
             );
         }
         assert_eq!(
-            selected_task_ids(&manifest, "pull-request", &["README.md".into()]).unwrap(),
+            selected_task_ids(
+                &manifest,
+                "pull-request",
+                &graph.impact(&["README.md".into()])
+            )
+            .unwrap(),
             BTreeSet::from(["contracts"])
         );
+    }
+
+    #[test]
+    fn known_product_and_test_inputs_select_their_actual_capabilities() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = load_manifest(&root).unwrap();
+        let graph = ImpactGraph::load(&root, None).unwrap();
+        assert!(graph.fallback.is_empty(), "{:?}", graph.fallback);
+        let language = graph.impact(&["tests/lang/arrays.vo".into()]);
+        assert_eq!(
+            selected_task_ids(&manifest, "pull-request", &language).unwrap(),
+            BTreeSet::from(["contracts", "language-native-smoke", "wasm-web-smoke"])
+        );
+        for path in [
+            "apps/studio/main.vo",
+            "apps/studio/documentation/catalog.vo",
+            "lang/crates/vo-web/js/vfs.ts",
+        ] {
+            let impact = graph.impact(&[path.into()]);
+            let selected = selected_task_ids(&manifest, "pull-request", &impact).unwrap();
+            assert_eq!(
+                selected,
+                BTreeSet::from([
+                    "contracts",
+                    "rust-quality",
+                    "wasm-web-smoke",
+                    "ui-platform-linux-smoke",
+                    "ui-platform-macos-full",
+                    "ui-platform-windows-full"
+                ]),
+                "{path}"
+            );
+            let decisions = selection_decisions(&manifest, "pull-request", &impact).unwrap();
+            assert!(decisions["wasm-web-smoke"]
+                .iter()
+                .any(|reason| reason.contains(path) && reason.contains("capability browser")));
+            assert!(decisions["language-native-smoke"][0].starts_with("skip:"));
+        }
     }
 
     #[test]
@@ -505,6 +637,15 @@ mod tests {
                 .success())
         };
         git(&["init", "-q"]);
+        fs::create_dir(root.join("eng")).unwrap();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut manifest = load_manifest(&repository).unwrap();
+        manifest.components.clear();
+        fs::write(
+            root.join("eng/ci.toml"),
+            toml::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
         fs::write(root.join("deleted.rs"), "deleted").unwrap();
         fs::write(root.join("old name.rs"), "renamed").unwrap();
         git(&["add", "."]);
@@ -531,6 +672,28 @@ mod tests {
         ]);
         let paths = git_changed_files(&root, "HEAD~1", "HEAD").unwrap();
         assert_eq!(paths, vec!["deleted.rs", "new name.rs", "old name.rs"]);
+        let plan = build_plan(&root, "pull-request", Some("HEAD~1"), Some("HEAD"), &[]).unwrap();
+        validate_plan(&root, &plan).unwrap();
+        let SelectionBasis::Git {
+            base,
+            head,
+            merge_base,
+            ..
+        } = &plan.selection
+        else {
+            panic!("expected Git comparison");
+        };
+        assert_eq!(base, merge_base);
+        assert_eq!(head, &plan.source.commit);
+        let mut tampered = plan.clone();
+        tampered.changed_files.pop();
+        assert!(validate_plan(&root, &tampered).is_err());
+        tampered = plan.clone();
+        if let SelectionBasis::Git { merge_base, .. } = &mut tampered.selection {
+            *merge_base = head.clone();
+        }
+        assert!(validate_plan(&root, &tampered).is_err());
+        assert!(build_plan(&root, "pull-request", Some("HEAD"), Some("HEAD~1"), &[]).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

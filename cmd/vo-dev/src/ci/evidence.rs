@@ -102,6 +102,9 @@ fn record_inner(
     execution: Option<super::run::ExecutionReceipt>,
 ) -> Result<()> {
     let (plan, plan_bytes) = read_plan(root, options.plan_path)?;
+    if matches!(plan.selection, super::plan::SelectionBasis::Explicit { .. }) {
+        bail!("explicit changed-file plans are local diagnostics and cannot certify a candidate");
+    }
     let task = plan
         .tasks
         .iter()
@@ -347,6 +350,12 @@ fn validate_bundle(
         );
     }
     validate_plan(root, &bundle.plan)?;
+    if matches!(
+        bundle.plan.selection,
+        super::plan::SelectionBasis::Explicit { .. }
+    ) {
+        bail!("certification cannot use a manually supplied changed-file list");
+    }
     if bundle.profile != bundle.plan.profile
         || bundle.source != bundle.plan.source
         || bundle.ci_manifest_sha256 != bundle.plan.manifest_sha256

@@ -18,7 +18,8 @@ Actionlint validates the workflow syntax and expressions.
 Each CI run follows the same chain:
 
 1. `vo-dev ci plan` selects an immutable task set and records the source commit,
-   Git tree, profile, changed paths, and complete task definitions.
+   Git tree, profile, changed paths, and complete task definitions. Impact plans
+   also bind resolved base/head/merge-base object IDs and a component graph digest.
 2. A migrated job calls `vo-dev ci run --plan <path> --task <id>`. Its receipt
    binds the task, source, CI plan, toolchain files, test manifests, runner,
    GitHub run/job identity, timing, result files, and promotable artifacts. Domain results must identify a complete test or browser
@@ -62,7 +63,16 @@ test programs so one run reports all failures while preserving a failing exit.
 
 `vo-dev ci explain --base <commit> --head <commit>` explains each task's inclusion
 or exclusion. Deleted paths and both sides of a rename participate in selection.
-Unknown inputs fail open toward broader testing. The historical 32-case coverage
+The checked-out candidate must match `--head`. The planner joins component
+contracts from both revisions and the candidate, walks reverse dependencies,
+and maps affected capabilities to profile tasks. Rust edges come from workspace
+Cargo manifests, including build, dev, optional and platform dependencies. Vo,
+browser product inputs use the small component declarations in `eng/ci.toml`.
+Generated source dependencies come from `eng/artifacts.toml`, including Studio's
+embedded documentation. Explanations include each input, component chain and capability.
+Shared controls, unknown inputs and missing historical graphs select the full
+eligible profile. Manually supplied `--changed-file` plans remain local diagnostics
+and cannot certify a candidate. The historical 32-case coverage
 migration is recorded in `eng/ci-coverage.json`; external Voplay commands require
 an explicitly provisioned, clean `eng/project.toml` pin. Retired Vogui commands
 refer to a historical implementation, and active UI coverage belongs to the
@@ -100,12 +110,12 @@ Windows workspace tests.
 `.github/workflows/ci.yml` runs for pull requests, merge groups, `main` pushes,
 and manual dispatches.
 
-Pull requests currently use conservative impact selection. Executable and unknown inputs select every eligible lane; only inert prose can narrow coverage:
+Pull requests use conservative component impact selection:
 
 - repository contracts always run;
 - Rust, language, Web, and UI smoke lanes run only when their owned inputs are
   affected;
-- UI pull requests use one Linux smoke lane;
+- UI product changes include Linux smoke and the macOS/Windows platform lanes;
 - weighted case sharding keeps every backend variant of a language case
   together while balancing declared timeout cost.
 

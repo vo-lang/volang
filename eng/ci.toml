@@ -1,5 +1,60 @@
 version = 1
 
+# Non-Cargo inputs and product dependencies. Rust package edges are read from
+# workspace manifests, including optional and target-specific dependencies.
+[[component]]
+id = "language-library"
+paths = ["lang/stdlib/*"]
+capabilities = ["rust", "vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm", "wasm-aot"]
+
+[[component]]
+id = "language-tests"
+paths = ["tests/lang/*", "examples/*", "benchmarks/*"]
+depends_on = ["language-library", "cargo:cmd/vo", "cargo:cmd/vo-test", "cargo:cmd/vo-embed"]
+capabilities = ["vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm", "wasm-aot"]
+
+[[component]]
+id = "ui-library"
+paths = ["ui/*", "tests/ui/*"]
+depends_on = ["language-library", "cargo:ui"]
+capabilities = ["rust", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+
+[[component]]
+id = "native-ui-products"
+paths = []
+depends_on = ["ui-library", "cargo:cmd/vo", "cargo:apps/studio/host-native", "cargo:apps/studio/aot-runtime-native"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+
+[[component]]
+id = "web-runtime"
+paths = ["lang/crates/vo-web/js/*", "lang/crates/vo-web/tests/*", "lang/crates/vo-web/*.mjs", "lang/crates/vo-web/*.json", "lang/crates/vo-web/*.html"]
+depends_on = ["cargo:lang/crates/vo-web", "cargo:lang/crates/vo-aot-support-wasm", "ui-library"]
+capabilities = ["browser", "wasm-vm", "wasm-aot"]
+
+[[component]]
+id = "studio"
+paths = ["apps/studio/*"]
+depends_on = ["ui-library", "web-runtime", "native-ui-products"]
+capabilities = ["rust", "browser", "studio", "pages", "offline", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+
+[[component]]
+id = "app-protocol"
+paths = ["lang/protocol/*", "fuzz/app-protocol/*"]
+depends_on = ["cargo:lang/crates/vo-app-protocol"]
+capabilities = ["rust", "vm", "jit", "wasm-vm", "wasm-aot", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "app-protocol"]
+
+[[component]]
+id = "ui-artifact-fuzz"
+paths = ["fuzz/ui-artifact/*"]
+depends_on = ["cargo:ui/crates/vo-ui-artifact"]
+capabilities = ["rust", "browser", "headless", "ui-artifact"]
+
+[[component]]
+id = "ecosystem"
+paths = ["fuzz/voplay-protocol/*"]
+depends_on = ["app-protocol"]
+capabilities = ["rust", "vm", "jit", "browser", "app-protocol"]
+
 # Profiles describe certification depth. Pull requests use impact selection;
 # merge queues and immutable branch candidates exercise the complete matrix.
 
@@ -13,6 +68,8 @@ tasks = [
   "language-native-smoke",
   "wasm-web-smoke",
   "ui-platform-linux-smoke",
+  "ui-platform-macos-full",
+  "ui-platform-windows-full",
 ]
 
 [[profile]]
