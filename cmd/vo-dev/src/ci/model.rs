@@ -15,6 +15,23 @@ pub(crate) struct CiManifest {
     pub(crate) profiles: Vec<CiProfile>,
     #[serde(rename = "task")]
     pub(crate) tasks: Vec<CiTask>,
+    #[serde(default, rename = "command")]
+    pub(crate) commands: Vec<CiCommand>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CiCommand {
+    pub(crate) id: String,
+    pub(crate) argv: Vec<String>,
+    #[serde(default)]
+    pub(crate) cwd: String,
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) failure_kind: String,
+    #[serde(default)]
+    pub(crate) report: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -49,6 +66,12 @@ pub(crate) struct CiTask {
     pub(crate) results: Vec<String>,
     #[serde(default)]
     pub(crate) artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) resource_group: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -117,6 +140,54 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
         bail!("eng/ci.toml must declare profiles and tasks");
     }
 
+    let mut command_ids = BTreeSet::new();
+    for command in &manifest.commands {
+        validate_token("CI command id", &command.id)?;
+        if !command_ids.insert(command.id.as_str())
+            || command.argv.is_empty()
+            || command.argv[0].is_empty()
+            || command.argv.iter().any(|arg| arg.contains('\0'))
+            || command.timeout_seconds == 0
+            || command.timeout_seconds > 6 * 3600
+        {
+            bail!("invalid or duplicate CI command {}", command.id);
+        }
+        if !matches!(
+            command.failure_kind.as_str(),
+            "product" | "infrastructure" | "portability" | "dependency-policy"
+        ) || !matches!(command.report.as_str(), "" | "cargo-test")
+        {
+            bail!("invalid CI command result contract {}", command.id);
+        }
+        let cwd = Path::new(&command.cwd);
+        if cwd.is_absolute()
+            || command.cwd.contains(':')
+            || cwd
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+            || command.cwd.contains('\\')
+        {
+            bail!(
+                "CI command {} cwd must stay within the repository",
+                command.id
+            );
+        }
+        for (key, value) in &command.env {
+            if key.is_empty()
+                || key.contains(['=', '\0'])
+                || value.contains('\0')
+                || matches!(key.as_str(), "HOME" | "CODEX_HOME")
+                || key.starts_with("GITHUB_")
+                || key.starts_with("RUNNER_")
+            {
+                bail!(
+                    "CI command {} has invalid or reserved environment key {key}",
+                    command.id
+                );
+            }
+        }
+    }
+
     let mut task_ids = BTreeSet::new();
     for task in &manifest.tasks {
         validate_token("CI task id", &task.id)?;
@@ -148,6 +219,16 @@ fn validate_manifest(manifest: &CiManifest) -> Result<()> {
         reject_duplicates(&task.id, "dependencies", &task.depends_on)?;
         reject_duplicates(&task.id, "results", &task.results)?;
         reject_duplicates(&task.id, "artifacts", &task.artifacts)?;
+        reject_duplicates(&task.id, "commands", &task.commands)?;
+        if !task.commands.is_empty() {
+            validate_nonempty_patterns(&task.id, &task.inputs)?;
+            validate_token("CI task resource group", &task.resource_group)?;
+            for id in &task.commands {
+                if !command_ids.contains(id.as_str()) {
+                    bail!("CI task {} references unknown command {id}", task.id);
+                }
+            }
+        }
     }
 
     let tasks = task_map(manifest);
@@ -268,7 +349,17 @@ fn validate_output_path(owner: &str, value: &str) -> Result<()> {
     let path = Path::new(value);
     if value.is_empty()
         || path.is_absolute()
+        || value.contains(['\\', ':'])
         || !value.starts_with("target/ci/")
+        || value.trim_end_matches('/') == "target/ci"
+        || [
+            "target/ci/executions",
+            "target/ci/evidence",
+            "target/ci/locks",
+            "target/ci/plan-input",
+        ]
+        .iter()
+        .any(|reserved| value == *reserved || value.starts_with(&format!("{reserved}/")))
         || path.components().any(|part| {
             matches!(
                 part,
@@ -316,6 +407,9 @@ mod tests {
             evidence_kind: "contract".to_string(),
             results: Vec::new(),
             artifacts: Vec::new(),
+            commands: Vec::new(),
+            inputs: Vec::new(),
+            resource_group: String::new(),
         }
     }
 
@@ -330,6 +424,7 @@ mod tests {
                 tasks: vec!["one".to_string()],
             }],
             tasks: vec![task("one", &["two"]), task("two", &["one"])],
+            commands: Vec::new(),
         };
         assert!(validate_manifest(&manifest).is_err());
     }
@@ -337,8 +432,65 @@ mod tests {
     #[test]
     fn evidence_outputs_stay_under_ci_target() {
         assert!(validate_output_path("task", "target/ci/results/out.json").is_ok());
-        for invalid in ["target/out.json", "target/ci/../secret", "/target/ci/out"] {
+        for invalid in [
+            "target/out.json",
+            "target/ci/../secret",
+            "/target/ci/out",
+            "target/ci/",
+            "target/ci/evidence/proof.json",
+            "target/ci/executions",
+            "target/ci/out:stream",
+            "target/ci/sub\\..\\out",
+        ] {
             assert!(validate_output_path("task", invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn executable_tasks_require_bounded_commands_and_declared_inputs() {
+        let mut task = task("one", &[]);
+        task.commands = vec!["check".into()];
+        task.inputs = vec!["*".into()];
+        task.resource_group = "cargo".into();
+        let manifest = CiManifest {
+            version: 1,
+            profiles: vec![CiProfile {
+                name: "test".into(),
+                tier: "feedback".into(),
+                changed_only: false,
+                tasks: vec!["one".into()],
+            }],
+            tasks: vec![task],
+            commands: vec![CiCommand {
+                id: "check".into(),
+                argv: vec!["cargo".into(), "test".into()],
+                cwd: String::new(),
+                env: BTreeMap::new(),
+                timeout_seconds: 60,
+                failure_kind: "product".into(),
+                report: "cargo-test".into(),
+            }],
+        };
+        validate_manifest(&manifest).unwrap();
+        for variant in 0..9 {
+            let mut invalid = manifest.clone();
+            match variant {
+                0 => invalid.commands[0].argv.clear(),
+                1 => invalid.commands[0].timeout_seconds = 0,
+                2 => invalid.commands[0].cwd = "../outside".into(),
+                3 => invalid.commands[0].cwd = "C:outside".into(),
+                4 => {
+                    invalid.commands[0]
+                        .env
+                        .insert("GITHUB_REPOSITORY".into(), "other/repo".into());
+                }
+                5 => invalid.tasks[0].inputs.clear(),
+                6 => invalid.tasks[0].resource_group.clear(),
+                7 => invalid.tasks[0].commands = vec!["unknown".into()],
+                8 => invalid.commands[0].report = "arbitrary-success-file".into(),
+                _ => unreachable!(),
+            }
+            assert!(validate_manifest(&invalid).is_err(), "variant {variant}");
         }
     }
 

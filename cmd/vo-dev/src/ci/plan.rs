@@ -314,7 +314,7 @@ fn documentation_only_path(path: &str) -> bool {
         )
 }
 
-fn glob_matches(pattern: &str, path: &str) -> bool {
+pub(super) fn glob_matches(pattern: &str, path: &str) -> bool {
     let pattern = pattern.as_bytes();
     let path = path.as_bytes();
     let mut current = vec![false; path.len() + 1];

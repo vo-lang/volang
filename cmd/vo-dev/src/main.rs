@@ -85,6 +85,8 @@ fn print_usage() {
   vo-dev release matrix
   vo-dev ci lint
   vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]
+  vo-dev ci explain --base <rev> --head <rev>
+  vo-dev ci run --plan <path> --task <id>
   vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json
   vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json
   vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]

@@ -39,6 +39,8 @@ pub(crate) struct CiEvidence {
     artifacts: Vec<FileDigest>,
     passed: bool,
     certifiable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution: Option<super::run::ExecutionReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,12 +85,34 @@ pub(crate) struct RecordOptions<'a> {
 }
 
 pub(crate) fn record(root: &Path, options: RecordOptions<'_>) -> Result<()> {
+    record_inner(root, options, None)
+}
+
+pub(super) fn record_execution(
+    root: &Path,
+    options: RecordOptions<'_>,
+    execution: super::run::ExecutionReceipt,
+) -> Result<()> {
+    record_inner(root, options, Some(execution))
+}
+
+fn record_inner(
+    root: &Path,
+    options: RecordOptions<'_>,
+    execution: Option<super::run::ExecutionReceipt>,
+) -> Result<()> {
     let (plan, plan_bytes) = read_plan(root, options.plan_path)?;
     let task = plan
         .tasks
         .iter()
         .find(|task| task.id == options.task_id)
         .ok_or_else(|| anyhow!("task {} is absent from the CI plan", options.task_id))?;
+    if !task.commands.is_empty() && execution.is_none() {
+        bail!(
+            "task {} requires ci run; arbitrary ci record is disabled",
+            task.id
+        );
+    }
     let source = source_identity(root)?;
     if source.commit != plan.source.commit || source.tree != plan.source.tree {
         bail!("CI evidence source does not match the immutable plan source");
@@ -135,11 +159,16 @@ pub(crate) fn record(root: &Path, options: RecordOptions<'_>) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     let finished_at_unix_millis = unix_millis(SystemTime::now())?;
-    let started_at_unix_millis = env::var("VO_CI_STARTED_AT")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .and_then(|seconds| seconds.checked_mul(1000))
-        .unwrap_or(finished_at_unix_millis);
+    let started_at_unix_millis = execution
+        .as_ref()
+        .map(|receipt| receipt.started_at_unix_millis)
+        .unwrap_or_else(|| {
+            env::var("VO_CI_STARTED_AT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .and_then(|seconds| seconds.checked_mul(1000))
+                .unwrap_or(finished_at_unix_millis)
+        });
     if started_at_unix_millis > finished_at_unix_millis {
         bail!("VO_CI_STARTED_AT is later than the evidence finish time");
     }
@@ -168,6 +197,7 @@ pub(crate) fn record(root: &Path, options: RecordOptions<'_>) -> Result<()> {
         artifacts,
         passed: true,
         certifiable: true,
+        execution,
     };
     validate_evidence(root, &plan, &plan_bytes, task, &evidence)?;
     write_json(options.output, &evidence)
@@ -198,6 +228,12 @@ pub(crate) fn certify(
             .find(|task| task.id == evidence.task_id)
             .ok_or_else(|| anyhow!("evidence references unplanned task {}", evidence.task_id))?;
         validate_evidence(root, &plan, &plan_bytes, task, &evidence)?;
+        if env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+            && (evidence.workflow.run_id != required_env("GITHUB_RUN_ID")?
+                || evidence.workflow.run_attempt != required_env("GITHUB_RUN_ATTEMPT")?)
+        {
+            bail!("certification cannot reuse evidence from a different workflow run or attempt");
+        }
         if by_task.insert(evidence.task_id.clone(), evidence).is_some() {
             bail!("duplicate CI evidence for task {}", task.id);
         }
@@ -322,7 +358,10 @@ fn validate_bundle(
         bail!("CI certification plan digest is invalid");
     }
     let current = source_identity(root)?;
-    if current.commit != bundle.source.commit || current.tree != bundle.source.tree {
+    if current.commit != bundle.source.commit
+        || current.tree != bundle.source.tree
+        || current.tracked_dirty
+    {
         bail!("CI certification bundle belongs to different source");
     }
     let mut actual = BTreeSet::new();
@@ -351,6 +390,7 @@ fn validate_bundle(
         }
         let identity = (
             evidence.workflow.run_id.as_str(),
+            evidence.workflow.run_attempt.as_str(),
             evidence.workflow.repository.as_str(),
             evidence.workflow.event.as_str(),
         );
@@ -385,6 +425,19 @@ fn validate_evidence(
     task: &CiTask,
     evidence: &CiEvidence,
 ) -> Result<()> {
+    match (&evidence.execution, task.commands.is_empty()) {
+        (Some(receipt), false) => {
+            super::run::validate_receipt(root, plan, task, receipt)?;
+            if receipt.results != evidence.results || receipt.artifacts != evidence.artifacts {
+                bail!(
+                    "execution and certification output digests differ for {}",
+                    task.id
+                );
+            }
+        }
+        (None, true) => {}
+        _ => bail!("CI task {} execution contract mismatch", task.id),
+    }
     if evidence.schema != EVIDENCE_SCHEMA
         || !evidence.passed
         || !evidence.certifiable
@@ -550,7 +603,7 @@ fn required_env(name: &str) -> Result<String> {
     Ok(value)
 }
 
-fn validate_result(root: &Path, relative: &str) -> Result<()> {
+pub(super) fn validate_result(root: &Path, relative: &str) -> Result<()> {
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path)
         .with_context(|| format!("required CI result is missing: {}", path.display()))?;
@@ -687,7 +740,7 @@ fn validate_result(root: &Path, relative: &str) -> Result<()> {
     Ok(())
 }
 
-fn digest_path(root: &Path, relative: &str) -> Result<FileDigest> {
+pub(super) fn digest_path(root: &Path, relative: &str) -> Result<FileDigest> {
     digest_absolute_path(root, &root.join(relative), relative)
 }
 
@@ -852,7 +905,7 @@ fn hash_regular_file(
     Ok((total, hasher.finalize()))
 }
 
-fn validate_file_digest(digest: &FileDigest) -> Result<()> {
+pub(super) fn validate_file_digest(digest: &FileDigest) -> Result<()> {
     if !matches!(digest.kind.as_str(), "file" | "directory")
         || digest.path.is_empty()
         || digest.sha256.len() != 64
@@ -933,7 +986,7 @@ fn evidence_files(directory: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn unix_millis(time: SystemTime) -> Result<u64> {
+pub(super) fn unix_millis(time: SystemTime) -> Result<u64> {
     let millis = time
         .duration_since(UNIX_EPOCH)
         .context("system time predates Unix epoch")?
@@ -941,7 +994,7 @@ fn unix_millis(time: SystemTime) -> Result<u64> {
     u64::try_from(millis).context("system timestamp overflow")
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(super) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
     let parent = path

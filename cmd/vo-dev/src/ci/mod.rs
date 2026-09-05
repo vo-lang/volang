@@ -1,6 +1,8 @@
 mod evidence;
 mod model;
 mod plan;
+mod process;
+mod run;
 
 use anyhow::{anyhow, bail, Result};
 use sha2::{Digest, Sha256};
@@ -45,6 +47,10 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
             args.remove(0);
             cmd_record(root, args)
         }
+        "run" => {
+            args.remove(0);
+            cmd_run(root, args)
+        }
         "certify" => {
             args.remove(0);
             cmd_certify(root, args)
@@ -55,6 +61,29 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
         }
         _ => bail!(usage()),
     }
+}
+
+fn cmd_run(root: &Path, args: Vec<String>) -> Result<()> {
+    let mut plan_path = None;
+    let mut task = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--plan" => plan_path = Some(next_value(&args, &mut index, "--plan")?),
+            "--task" => task = Some(next_value(&args, &mut index, "--task")?),
+            value => bail!("unknown ci run argument {value}"),
+        }
+        index += 1;
+    }
+    let path = resolve_repo_input(
+        root,
+        &plan_path.ok_or_else(|| anyhow!("ci run requires --plan"))?,
+    )?;
+    let task = task.ok_or_else(|| anyhow!("ci run requires --task"))?;
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = cancelled.clone();
+    ctrlc::set_handler(move || signal.store(true, std::sync::atomic::Ordering::Relaxed))?;
+    run::run_task(root, &path, &task, &cancelled)
 }
 
 fn cmd_plan(root: &Path, args: Vec<String>, explain: bool) -> Result<()> {
@@ -260,5 +289,5 @@ fn resolve_repo_path(root: &Path, value: &str, output: bool) -> Result<PathBuf> 
 }
 
 fn usage() -> &'static str {
-    "usage:\n  vo-dev ci lint\n  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]\n  vo-dev ci explain --base <rev> --head <rev>\n  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json\n  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json\n  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]"
+    "usage:\n  vo-dev ci lint\n  vo-dev ci plan --profile <name> [--base <rev> --head <rev> | --changed-file <path>...] [--output target/ci/plan.json]\n  vo-dev ci explain --base <rev> --head <rev>\n  vo-dev ci run --plan <path> --task <id>\n  vo-dev ci record --plan <path> --task <id> --output target/ci/evidence/<id>.evidence.json\n  vo-dev ci certify --plan <path> --evidence-dir <dir> --output target/ci/certification.json\n  vo-dev ci verify --bundle <path> [--profile <name>] [--artifact-task <id> --artifact <path>]"
 }

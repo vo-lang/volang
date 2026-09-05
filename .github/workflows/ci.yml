@@ -177,19 +177,7 @@ jobs:
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
 
-      - name: Check Rust formatting
-        if: needs.plan.outputs.rust_quality == 'true'
-        run: cargo fmt --all -- --check
-
-      - name: Check repository contracts
-        run: |
-          ./target/debug/vo-dev lint all
-          ./target/debug/vo-dev ui-certify --check
-          ./target/debug/vo-dev test lint --suite lang --strict
-          ./target/debug/vo-dev test fmt --suite lang
-          node --test eng/check-dependency-policy.test.mjs
-
-      - name: Check GitHub Actions workflows
+      - name: Install workflow validator
         env:
           ACTIONLINT_VERSION: 1.7.12
           ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -202,41 +190,25 @@ jobs:
           printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum --check --status
           mkdir -p "$install_dir"
           tar -xzf "$archive" -C "$install_dir" actionlint
-          # actionlint 1.7.12 predates GitHub's bounded concurrency queue key.
-          "$install_dir/actionlint" -color -ignore 'unexpected key "queue"'
+          echo "$install_dir" >> "$GITHUB_PATH"
 
-      - name: Run Clippy
+      - name: Run repository contracts
+        run: ./target/debug/vo-dev ci run --plan target/ci/plan-input/plan.json --task contracts
+
+      - name: Run Rust quality checks
         if: needs.plan.outputs.rust_quality == 'true'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: ./target/debug/vo-dev ci run --plan target/ci/plan-input/plan.json --task rust-quality
 
-      - name: Run Rust tests
-        if: needs.plan.outputs.rust_quality == 'true'
-        run: cargo test --workspace --all-targets --locked
-
-      - name: Require a clean generated state
-        run: |
-          status="$(git status --porcelain=v1 --untracked-files=all)"
-          if [ -n "$status" ]; then
-            printf '%s\n' "$status"
-            exit 1
-          fi
-
-      - name: Record quality evidence
-        shell: bash
-        env:
-          RUN_RUST_QUALITY: ${{ needs.plan.outputs.rust_quality }}
-        run: |
-          mkdir -p target/ci/evidence
-          ./target/debug/vo-dev ci record \
-            --plan target/ci/plan-input/plan.json \
-            --task contracts \
-            --output target/ci/evidence/contracts.evidence.json
-          if [ "$RUN_RUST_QUALITY" = "true" ]; then
-            ./target/debug/vo-dev ci record \
-              --plan target/ci/plan-input/plan.json \
-              --task rust-quality \
-              --output target/ci/evidence/rust-quality.evidence.json
-          fi
+      - name: Preserve task execution diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-executions-quality-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/cargo-timings
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload quality evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

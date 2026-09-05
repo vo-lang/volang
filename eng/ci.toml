@@ -63,6 +63,9 @@ tasks = [
 
 [[task]]
 id = "contracts"
+commands = ["contract-lint", "ui-catalog", "language-manifest", "language-format", "dependency-policy-unit", "workflow-lint"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "feedback"
 workflow_job = "quality_rust"
 runner = "ubuntu-24.04"
@@ -77,6 +80,9 @@ evidence_kind = "contract"
 
 [[task]]
 id = "rust-quality"
+commands = ["rust-format", "rust-clippy", "rust-tests"]
+inputs = ["*"]
+resource_group = "cargo"
 tier = "feedback"
 workflow_job = "quality_rust"
 runner = "ubuntu-24.04"
@@ -430,6 +436,9 @@ evidence_kind = "fuzz-test"
 
 [[task]]
 id = "nightly-audits"
+commands = ["dependency-audit"]
+inputs = ["*"]
+resource_group = "dependency-audit"
 tier = "exhaustive"
 workflow_job = "audits"
 runner = "ubuntu-24.04"
@@ -441,3 +450,64 @@ timeout_minutes = 30
 budget_minutes = 15
 evidence_kind = "security-audit"
 results = ["target/ci/results/dependencies.json"]
+
+[[command]]
+id = "contract-lint"
+argv = ["target/debug/vo-dev", "lint", "all"]
+timeout_seconds = 600
+failure_kind = "infrastructure"
+
+[[command]]
+id = "ui-catalog"
+argv = ["target/debug/vo-dev", "ui-certify", "--check"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "language-manifest"
+argv = ["target/debug/vo-dev", "test", "lint", "--suite", "lang", "--strict"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "language-format"
+argv = ["target/debug/vo-dev", "test", "fmt", "--suite", "lang"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "dependency-policy-unit"
+argv = ["node", "--test", "eng/check-dependency-policy.test.mjs"]
+timeout_seconds = 120
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "workflow-lint"
+argv = ["actionlint", "-ignore", "unexpected key \"queue\""]
+timeout_seconds = 120
+failure_kind = "infrastructure"
+
+[[command]]
+id = "rust-format"
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "rust-clippy"
+argv = ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--timings", "--", "-D", "warnings"]
+timeout_seconds = 1500
+failure_kind = "product"
+
+[[command]]
+id = "rust-tests"
+argv = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--no-fail-fast", "--timings"]
+timeout_seconds = 1500
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "dependency-audit"
+argv = ["node", "eng/run-dependency-audit.mjs"]
+timeout_seconds = 1500
+failure_kind = "dependency-policy"

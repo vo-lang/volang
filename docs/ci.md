@@ -8,7 +8,8 @@ tested bytes. The machine-readable sources of truth are:
 - `eng/release.toml` for release targets and archive policy;
 - `eng/toolchains.toml` and `rust-toolchain.toml` for pinned tools.
 
-Workflow YAML currently executes the lanes while task execution migrates into `vo-dev ci run`. `vo-dev ci lint` validates the task graph,
+Workflow YAML provisions and schedules lanes while task execution migrates into `vo-dev ci run`. Repository contracts, Rust quality checks and dependency audits
+execute ordered command definitions from `eng/ci.toml`. `vo-dev ci lint` validates the task graph,
 dependencies, owners, platforms, budgets, runners, and safe evidence paths.
 Actionlint validates the workflow syntax and expressions.
 
@@ -18,10 +19,11 @@ Each CI run follows the same chain:
 
 1. `vo-dev ci plan` selects an immutable task set and records the source commit,
    Git tree, profile, changed paths, and complete task definitions.
-2. A job executes its assigned task and calls `vo-dev ci record`. The receipt
+2. A migrated job calls `vo-dev ci run --plan <path> --task <id>`. Its receipt
    binds the task, source, CI plan, toolchain files, test manifests, runner,
    GitHub run/job identity, timing, result files, and promotable artifacts. Domain results must identify a complete test or browser
-   scenario; arbitrary success flags are rejected.
+   scenario; arbitrary success flags are rejected. Unmigrated jobs temporarily
+   use `ci record`; migrated tasks reject that entry point.
 3. The stable `required` job rejects incomplete lanes and calls
    `vo-dev ci certify`. Certification requires one valid receipt for every
    planned task, with no missing, duplicate, or extra receipt.
@@ -34,6 +36,27 @@ receipts only inside GitHub Actions from a clean tracked worktree. Site and
 release promotion accept bundles downloaded from the exact successful main CI
 run, so a local or unrelated-workflow `passed: true` file has no deployment
 authority.
+
+Each executor attempt writes to a fresh `target/ci/executions/<task>/<attempt>`
+directory. It archives earlier outputs, locks the task's local resource group,
+captures command stdout/stderr, and compares declared source inputs before and
+after execution. Task and command deadlines terminate the complete process
+group or Windows Job Object. Cancellation uses the same cleanup path. Commands
+run once; no automatic retry or shell interpolation is involved.
+
+`started.json` explicitly marks an incomplete attempt. The executor atomically
+writes the typed `result.json` and its digest in `completion.json`, then publishes
+certifiable evidence as its final commit point. Certification errors are also
+written to `failure.json` and cause a nonzero exit. Local dirty executions can
+produce diagnostic receipts, but cannot produce certifiable evidence. Bundles
+reject mixed GitHub run attempts and missing command or log records.
+
+Rust test commands require a nonempty successful test set, independently of the
+process exit code. Failure records identify the command, owner through the task
+definition, classification, reproduction command and diagnostic paths. Job
+summaries show per-command test counts and durations; Cargo HTML timings are
+uploaded with executor diagnostics. Workspace tests continue across failing
+test programs so one run reports all failures while preserving a failing exit.
 
 ## Explain and diagnose
 
