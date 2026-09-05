@@ -2620,20 +2620,24 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Pipe ====================
 
-#[cfg(all(feature = "std", unix))]
+#[cfg(all(feature = "std", any(unix, windows)))]
 #[vostd_fn("os", "nativePipe", std)]
 fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
+    #[cfg(unix)]
+    let pipe = nix::unistd::pipe()
+        .map(|(reader, writer)| (File::from(reader), File::from(writer)))
+        .map_err(std::io::Error::from);
+    #[cfg(windows)]
+    let pipe = std::io::pipe().map(|(reader, writer)| {
+        use std::os::windows::io::OwnedHandle;
+        (
+            File::from(OwnedHandle::from(reader)),
+            File::from(OwnedHandle::from(writer)),
+        )
+    });
 
-    match nix::unistd::pipe() {
-        Ok((read_fd, write_fd)) => {
-            let rfd_raw = read_fd.into_raw_fd();
-            let wfd_raw = write_fd.into_raw_fd();
-
-            // Wrap raw fds into File and register in our handle system
-            let r_file = unsafe { File::from_raw_fd(rfd_raw) };
-            let w_file = unsafe { File::from_raw_fd(wfd_raw) };
-
+    match pipe {
+        Ok((r_file, w_file)) => {
             let rfd = match register_file(call.io_mut(), r_file, false) {
                 Ok(fd) => fd,
                 Err(error) => {
@@ -2666,7 +2670,7 @@ fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(all(feature = "std", not(unix)))]
+#[cfg(all(feature = "std", not(any(unix, windows))))]
 #[vostd_fn("os", "nativePipe", std)]
 fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(slots::RET_0, -1);
