@@ -50,6 +50,22 @@ custom UI runtime can be selected with `VO_UI_AOT_RUNTIME_LIB` or
 `--runtime=PATH`; `VO_AOT_RUNTIME_LIB` continues to select the core runtime and
 acts as the explicit fallback for UI builds.
 
+Programs importing the `toolchain` package require a compiler host. Their
+generated native entry calls the versioned runtime symbol
+`vo_aot_initialize_toolchain_host_v1` before starting the program. The default
+core runtime omits that capability, so linking such a program fails with the
+missing symbol instead of producing an executable whose compiler calls fail
+at runtime. `--kind=object` preserves this dependency for downstream linking.
+
+An embedding that needs dynamic compilation can build `vo-aot-runtime` with
+`--features toolchain-host` and select that archive through `--runtime=PATH`.
+The CLI links the system libraries needed by this host on macOS and Windows.
+This opt-in archive includes the compiler and installs its host before entry.
+Custom runtimes can implement the same C ABI initializer `int(void)`: install
+a `ToolchainHost`, return zero on success, and return a nonzero process exit
+code on failure. Initialization failure prevents the Vo program from running.
+The ordinary release archive retains the smaller runtime without this feature.
+
 Emit a relocatable cross-target object:
 
 ```sh

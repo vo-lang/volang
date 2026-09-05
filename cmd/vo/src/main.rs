@@ -769,6 +769,8 @@ fn link_native_aot(
     runtime: Option<PathBuf>,
     extension_archives: &[PathBuf],
     ui: bool,
+    // Additional system libraries differ on macOS and Windows.
+    _compiler_host: bool,
 ) -> Result<(), String> {
     let host = TargetSpec::host().map_err(|error| error.to_string())?;
     if target != &host {
@@ -805,7 +807,7 @@ fn link_native_aot(
         &runtime,
         &linked_file.0,
         extension_archives,
-        ui,
+        ui || _compiler_host,
     ));
     #[cfg(not(windows))]
     command
@@ -842,7 +844,7 @@ fn link_native_aot(
             command.arg("-framework").arg(framework);
         }
         command.args(["-liconv", "-lresolv"]);
-        if ui {
+        if ui || _compiler_host {
             for framework in [
                 "ApplicationServices",
                 "CoreGraphics",
@@ -1133,6 +1135,7 @@ fn cmd_build(args: &[OsString]) -> i32 {
                 runtime,
                 &extension_archives,
                 ui_application,
+                vo_engine::native_aot_requires_toolchain_host(output.module.module()),
             ),
             BuildKind::Wasm | BuildKind::Bytecode => unreachable!(),
         };

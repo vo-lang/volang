@@ -6,6 +6,17 @@ use std::ffi::c_char;
 #[cfg(not(test))]
 use vo_vm::vm::SchedulingOutcome;
 
+/// Optional compiler-host capability required by AOT images importing toolchain.
+/// Called by the generated main before loading or executing the program.
+#[cfg(all(not(test), feature = "toolchain-host"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn vo_aot_initialize_toolchain_host_v1() -> i32 {
+    match std::panic::catch_unwind(vo_engine::ensure_toolchain_host_installed) {
+        Ok(()) => 0,
+        Err(_) => 101,
+    }
+}
+
 #[cfg(not(test))]
 unsafe fn run_embedded(argc: i32, argv: *const *const c_char) -> Result<i32, String> {
     let mut vm =

@@ -3,6 +3,14 @@
 use crate::{verify_compile_output_for_target, CompileError, CompileOutput};
 use vo_target::{HostSurface, TargetSpec};
 
+/// Compiler-host capability shared by native lowering and platform linking.
+pub fn native_aot_requires_toolchain_host(module: &vo_runtime::bytecode::Module) -> bool {
+    module.externs.iter().any(|external| {
+        matches!(vo_common_core::extern_key::classify_extern_name(&external.name),
+            Ok(vo_common_core::extern_key::ExternNameClass::Canonical(key)) if key.package() == "toolchain")
+    })
+}
+
 /// Resolve the same native extern contract used by the VM, then lower every
 /// verified function into a relocatable object for the requested target.
 pub fn compile_native_aot_object(
@@ -43,6 +51,7 @@ pub fn compile_native_aot_object(
 
     let mut options = vo_jit::NativeAotOptions::new(target.triple());
     options.debug_ir = debug_ir;
+    options.requires_toolchain_host = native_aot_requires_toolchain_host(output.module.module());
     vo_jit::compile_native_object(output.module.clone(), &externs, &options)
         .map_err(|error| CompileError::Codegen(format!("native AOT lowering failed: {error}")))
 }

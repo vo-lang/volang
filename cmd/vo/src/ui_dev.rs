@@ -2155,6 +2155,7 @@ fn cmd_package(args: &[OsString]) -> i32 {
             runtime,
             &[],
             true,
+            vo_engine::native_aot_requires_toolchain_host(compiled.module.module()),
         )
         .and_then(|()| finalize_desktop_package(&project, &layout, &config, &target));
         if let Err(error) = package_result {

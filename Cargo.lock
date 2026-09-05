@@ -4649,6 +4649,7 @@ name = "vo-aot-runtime"
 version = "0.1.4"
 dependencies = [
  "vo-aot-runtime-core",
+ "vo-engine",
  "vo-vm",
 ]
 

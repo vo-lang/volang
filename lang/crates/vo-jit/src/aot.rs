@@ -31,12 +31,15 @@ pub const NATIVE_AOT_METADATA_LEN_SYMBOL: &str = "vo_aot_metadata_len";
 pub const NATIVE_AOT_FUNCTION_TABLE_SYMBOL: &str = "vo_aot_function_table";
 pub const NATIVE_AOT_FUNCTION_COUNT_SYMBOL: &str = "vo_aot_function_count";
 pub const NATIVE_AOT_START_SYMBOL: &str = "vo_aot_start";
+pub const NATIVE_AOT_TOOLCHAIN_INIT_SYMBOL: &str = "vo_aot_initialize_toolchain_host_v1";
 
 /// Immutable options that participate in the native AOT build identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeAotOptions {
     pub target_triple: String,
     pub debug_ir: bool,
+    /// Require the linked runtime to initialize a compiler host before entry.
+    pub requires_toolchain_host: bool,
 }
 
 impl NativeAotOptions {
@@ -44,6 +47,7 @@ impl NativeAotOptions {
         Self {
             target_triple: target_triple.into(),
             debug_ir: false,
+            requires_toolchain_host: false,
         }
     }
 }
@@ -241,7 +245,7 @@ fn define_function_table(
     )
 }
 
-fn define_main(module: &mut ObjectModule) -> Result<(), JitError> {
+fn define_main(module: &mut ObjectModule, requires_toolchain_host: bool) -> Result<(), JitError> {
     let pointer_type = module.target_config().pointer_type();
     let call_conv = module.target_config().default_call_conv;
     let mut signature = cranelift_codegen::ir::Signature::new(call_conv);
@@ -255,6 +259,18 @@ fn define_main(module: &mut ObjectModule) -> Result<(), JitError> {
     context.func.signature = signature;
     context.func.name = UserFuncName::user(1, 0);
     let start_ref = module.declare_func_in_func(start, &mut context.func);
+    let initialize_host = if requires_toolchain_host {
+        let mut signature = cranelift_codegen::ir::Signature::new(call_conv);
+        signature.returns.push(AbiParam::new(types::I32));
+        let function = module.declare_function(
+            NATIVE_AOT_TOOLCHAIN_INIT_SYMBOL,
+            Linkage::Import,
+            &signature,
+        )?;
+        Some(module.declare_func_in_func(function, &mut context.func))
+    } else {
+        None
+    };
     let mut frontend = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
     let entry = builder.create_block();
@@ -262,6 +278,18 @@ fn define_main(module: &mut ObjectModule) -> Result<(), JitError> {
     builder.switch_to_block(entry);
     builder.seal_block(entry);
     let params = builder.block_params(entry).to_vec();
+    if let Some(initialize_host) = initialize_host {
+        let call = builder.ins().call(initialize_host, &[]);
+        let status = builder.inst_results(call)[0];
+        let failure = builder.create_block();
+        let ready = builder.create_block();
+        builder.ins().brif(status, failure, &[], ready, &[]);
+        builder.switch_to_block(failure);
+        builder.seal_block(failure);
+        builder.ins().return_(&[status]);
+        builder.switch_to_block(ready);
+        builder.seal_block(ready);
+    }
     let call = builder.ins().call(start_ref, &params);
     let result = builder.inst_results(call)[0];
     builder.ins().return_(&[result]);
@@ -433,7 +461,7 @@ pub fn compile_native_object(
         metadata_bytes,
     )?;
     define_function_table(&mut object_module, &function_ids)?;
-    define_main(&mut object_module)?;
+    define_main(&mut object_module, options.requires_toolchain_host)?;
 
     let bytes = object_module
         .finish()
@@ -553,6 +581,37 @@ mod tests {
                 .map(|artifact| artifact.payload.as_slice()),
             Some([0x56, 0x55, 0x42, 0x31].as_slice())
         );
+    }
+
+    #[test]
+    fn compiler_host_requirements_are_live_link_dependencies_on_every_native_format() {
+        for triple in [
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "x86_64-pc-windows-msvc",
+        ] {
+            let mut options = NativeAotOptions::new(triple);
+            for required in [false, true] {
+                options.requires_toolchain_host = required;
+                let artifact =
+                    compile_native_object(test_module(), &ResolvedExternTable::empty(), &options)
+                        .unwrap();
+                let object = object::File::parse(artifact.bytes.as_slice()).unwrap();
+                let symbol = object.symbols().find(|symbol| {
+                    symbol.name().ok().is_some_and(|name| {
+                        name.trim_start_matches('_') == NATIVE_AOT_TOOLCHAIN_INIT_SYMBOL
+                    })
+                });
+                assert_eq!(symbol.is_some(), required, "{triple}");
+                if let Some(symbol) = symbol {
+                    assert!(symbol.is_undefined());
+                    assert!(object.sections().any(|section| section
+                        .relocations()
+                        .any(|(_, relocation)| relocation.target()
+                            == object::RelocationTarget::Symbol(symbol.index()))));
+                }
+            }
+        }
     }
 
     #[test]
