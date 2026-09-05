@@ -10,6 +10,8 @@ import { runContentSiteSmoke } from './scenarios/content-site.mjs';
 import { runMediaApplicationSmoke } from './scenarios/media-application.mjs';
 import { runStudioWorkbenchSmoke } from './scenarios/studio-workbench.mjs';
 import { runStudioAotSmoke } from './scenarios/studio.mjs';
+import { prepareStudioBootstrap, runStudioBootstrapSmoke } from './scenarios/studio-bootstrap.mjs';
+import { runStudioCanarySmoke } from './scenarios/studio-canary.mjs';
 
 const request = process.env.VO_BROWSER_REQUEST
   ? JSON.parse(await readFile(process.env.VO_BROWSER_REQUEST, 'utf8')) : null;
@@ -33,6 +35,8 @@ const scenarios = {
   mediaApplicationSmoke: runMediaApplicationSmoke,
   studioWorkbenchSmoke: runStudioWorkbenchSmoke,
   studioAotSmoke: runStudioAotSmoke,
+  studioCanarySmoke: runStudioCanarySmoke,
+  studioBootstrapSmoke: runStudioBootstrapSmoke,
 };
 
 test(request.scenario, async ({ page, context, browser, applicationURL }, testInfo) => {
@@ -44,6 +48,7 @@ test(request.scenario, async ({ page, context, browser, applicationURL }, testIn
   const contract = new PageContract(page);
   let result: any;
   try {
+    if (request.studioBootstrapSmoke) await prepareStudioBootstrap(page);
     await page.goto(applicationURL, { waitUntil: 'load' });
     if (request.staticRoot !== null || request.baseURL) {
       const guard = await page.locator('#volang-root').evaluate(root => ({

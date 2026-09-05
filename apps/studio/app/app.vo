@@ -292,6 +292,7 @@ type State struct {
 	projects []domain.Project
 	current domain.Project
 	hasProject bool
+	initializing bool
 	projectGeneration uint64
 	projectLoadGeneration uint64
 	projectLoadCancel context.CancelFunc
@@ -395,8 +396,9 @@ type State struct {
 func New(services protocol.Services) *State {
 	services.Validate()
 	state := &State{
-		services: services, buffers: make(map[string]*editor.Model), dirty: make(map[string]bool),
-		savedText: make(map[string]string), saveQueue: make(chan saveBatch, MaxSaveQueue),
+		services: services, initializing: true, buffers: make(map[string]*editor.Model),
+		dirty: make(map[string]bool), savedText: make(map[string]string),
+		saveQueue: make(chan saveBatch, MaxSaveQueue),
 		diagnosticsByPath: make(map[string][]domain.Diagnostic), docPageID: "introduction",
 		docExpanded: make(map[string]bool), collapsedDirectories: make(map[string]bool), status: "Ready",
 	}
@@ -453,6 +455,15 @@ func (state *State) ReportFailure(source string, err error) {
 }
 
 func (state *State) Bootstrap(ctx context.Context) error {
+	// Restoring the previous project includes the host's durable activation.
+	// Keep project actions unavailable until that operation releases its host
+	// mutation lease, including the first render after project files arrive.
+	defer func() {
+		state.mu.Lock()
+		state.initializing = false
+		state.mu.Unlock()
+		ui.Invalidate()
+	}()
 	location := ui.LocationPath()
 	routeActivity, hasWorkspaceRoute := workspaceActivityRoute(location)
 	host, err := state.services.Host.Info(ctx)
@@ -4881,6 +4892,19 @@ func (state *State) TopBar() ui.View {
 }
 
 func (state *State) View() ui.View {
+	state.mu.RLock()
+	initializing := state.initializing
+	state.mu.RUnlock()
+	if initializing {
+		message := design.EmptyState("Opening workspace", "Loading your projects and restoring the last workspace.", ui.Text("Please wait…"))
+		message = ui.TestID(ui.Role(message, "status"), "studio-initializing")
+		content := design.AppSurface(ui.Column(design.TopBar(design.BrandLockup()), ui.Flex(message, 1)))
+		content = ui.MinHeight(content, 320)
+		if height := ui.CurrentEnvironment().ViewportHeight; height > 0 {
+			content = ui.Height(content, height)
+		}
+		return content
+	}
 	if runnerRoute(ui.LocationPath()) {
 		return state.RunnerView()
 	}

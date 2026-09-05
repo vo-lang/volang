@@ -5,7 +5,11 @@ artifact. `scenario.spec.ts` owns fixture cleanup, browser diagnostics and the
 structured result; `page-contract.mjs` owns Playwright input and waiting;
 `scenarios/` owns product assertions. `coverage.json` maps all eight former CDP
 scenarios and every original checkpoint to their replacements, with added
-regressions listed separately.
+regressions listed separately. The additional Studio canary covers a fresh local
+project through starter, edit, VM run, preview interaction, save, reload and reopen.
+The startup regression delays the first project activation through the test
+host-service wrapper, checks the loading state, then releases activation and
+requires the first starter click to open its editor.
 
 Install with `npm ci` in this directory, then
 `PLAYWRIGHT_BROWSERS_PATH=../../target/playwright-browsers npm run install:chromium`.
@@ -28,9 +32,18 @@ browser startup failure cannot reuse a previous success.
 
 The `--studio-aot-smoke --base-url` option exercises a complete Studio test
 instance. It includes account and sharing contracts; deploy canaries must use a
-separate isolated, account-free journey.
+separate isolated, account-free journey:
 
-To check reporting, pass a JSON map from the eight `coverage.json` flags to built
+```sh
+node eng/run-browser-smoke.mjs --base-url https://example.com/studio/ \
+  --studio-canary-smoke --output target/ci/results/site-canary.json
+```
+
+The canary can also use `--static-root` to check the final candidate before
+promotion. Playwright supplies an empty browser context; all project changes
+stay in its local store.
+
+To check reporting, pass a JSON map from all `coverage.json` flags to built
 artifact directories (`ui-conformance` maps to `lang/crates/vo-web`):
 
 ```sh

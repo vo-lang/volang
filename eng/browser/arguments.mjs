@@ -12,6 +12,8 @@ export function parseArguments(arguments_) {
     mediaApplicationSmoke: false,
     studioWorkbenchSmoke: false,
     studioAotSmoke: false,
+    studioCanarySmoke: false,
+    studioBootstrapSmoke: false,
     button: null,
     timeout: 30_000,
     serveOnly: false,
@@ -53,6 +55,10 @@ export function parseArguments(arguments_) {
       parsed.studioWorkbenchSmoke = true;
     } else if (argument === "--studio-aot-smoke") {
       parsed.studioAotSmoke = true;
+    } else if (argument === "--studio-canary-smoke") {
+      parsed.studioCanarySmoke = true;
+    } else if (argument === "--studio-bootstrap-smoke") {
+      parsed.studioBootstrapSmoke = true;
     } else if (argument === "--button" && value !== undefined) {
       parsed.button = value;
       index += 1;
@@ -76,7 +82,7 @@ export function parseArguments(arguments_) {
     && (parsed.componentStateSmoke || parsed.uikitGallerySmoke
       || parsed.dataApplicationSmoke || parsed.contentSiteSmoke
       || parsed.mediaApplicationSmoke || parsed.studioWorkbenchSmoke
-      || parsed.studioAotSmoke);
+      || parsed.studioAotSmoke || parsed.studioCanarySmoke || parsed.studioBootstrapSmoke);
   const staticScenarios = [
     parsed.componentStateSmoke,
     parsed.uikitGallerySmoke,
@@ -85,14 +91,16 @@ export function parseArguments(arguments_) {
     parsed.mediaApplicationSmoke,
     parsed.studioWorkbenchSmoke,
     parsed.studioAotSmoke,
+    parsed.studioCanarySmoke,
+    parsed.studioBootstrapSmoke,
   ].filter(Boolean).length;
-  if (parsed.baseURL && !parsed.studioAotSmoke) throw new Error("deployed canary currently requires --studio-aot-smoke");
+  if (parsed.baseURL && !parsed.studioAotSmoke && !parsed.studioCanarySmoke) throw new Error("base URL requires a Studio journey");
   if (staticScenarios > 1) {
     throw new Error("choose exactly one static browser smoke scenario");
   }
   if (!compiledSmoke && !staticSmoke) {
     throw new Error(
-      "usage: run-browser-smoke.mjs (--project <dir> --global <window-key> | --static-root <dir> (--component-state-smoke | --uikit-gallery-smoke | --data-application-smoke | --content-site-smoke | --media-application-smoke | --studio-workbench-smoke | --studio-aot-smoke))",
+      "usage: run-browser-smoke.mjs (--project <dir> --global <window-key> | --static-root <dir> (--component-state-smoke | --uikit-gallery-smoke | --data-application-smoke | --content-site-smoke | --media-application-smoke | --studio-workbench-smoke | --studio-aot-smoke | --studio-canary-smoke | --studio-bootstrap-smoke))",
     );
   }
   if (!Number.isSafeInteger(parsed.timeout) || parsed.timeout < 1_000 || parsed.timeout > 120_000) {

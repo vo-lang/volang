@@ -238,6 +238,35 @@
         "documentationColdStart"
       ],
       "flag": "studioAotSmoke"
+    },
+    {
+      "id": "studio-canary",
+      "flag": "studioCanarySmoke",
+      "source_function": "runStudioCanarySmoke",
+      "contract": "eng/browser/scenarios/studio-canary.mjs",
+      "checkpoints": [
+        "starter",
+        "project",
+        "run",
+        "saved",
+        "previewInteraction",
+        "reload",
+        "reopen"
+      ],
+      "purpose": "isolated account-free deployed and final-artifact journey"
+    },
+    {
+      "id": "studio-bootstrap",
+      "flag": "studioBootstrapSmoke",
+      "source_function": "runStudioBootstrapSmoke",
+      "contract": "eng/browser/scenarios/studio-bootstrap.mjs",
+      "checkpoints": [
+        "activationHeld",
+        "actionsUnavailable",
+        "activationReleased",
+        "firstClickOpened"
+      ],
+      "purpose": "controlled pending project activation preserves first-click behavior"
     }
   ]
 }

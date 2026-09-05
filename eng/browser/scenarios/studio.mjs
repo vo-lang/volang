@@ -41,6 +41,7 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
       );
       return {
         startupMs: startup?.duration ?? -1,
+        workspaceReadyMs: performance.now(),
         hostMs: host?.duration ?? -1,
         imageFetchMs: image?.duration ?? -1,
         imageTransferBytes: resource?.transferSize ?? 0,
@@ -48,7 +49,8 @@ export async function runStudioAotSmoke(contract, timeoutMilliseconds, projectRo
         imageDecodedBytes: resource?.decodedBodySize ?? 0,
       };
     })()`,
-    (value) => Number.isFinite(value?.startupMs) && value.startupMs >= 0
+    (value) => Number.isFinite(value?.workspaceReadyMs) && value.workspaceReadyMs <= 5_000
+      && Number.isFinite(value?.startupMs) && value.startupMs >= 0
       && value.startupMs <= 5_000
       && Number.isFinite(value?.hostMs) && value.hostMs >= 0
       && Number.isFinite(value?.imageFetchMs) && value.imageFetchMs >= 0
