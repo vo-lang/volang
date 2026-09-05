@@ -1,16 +1,41 @@
 #[cfg(all(target_os = "macos", feature = "macos-gpu"))]
 fn main() {
-    use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
-    use vo_app_host_native::{MacOsGpuWindow, MacOsGpuWindowConfig, NativeInputKind};
+    use vo_app_host_native::{
+        MacOsGpuWindow, MacOsGpuWindowConfig, NativeInputEvent, NativeInputKind,
+    };
     use vo_app_protocol::{ViewHandle, WindowHandle};
 
-    fn settle(window: &MacOsGpuWindow) {
-        thread::sleep(Duration::from_millis(100));
-        window.pump_events(128);
+    fn wait_for(
+        window: &MacOsGpuWindow,
+        phase: &str,
+        completed: impl Fn(&MacOsGpuWindow, &[NativeInputEvent]) -> bool,
+    ) -> Vec<NativeInputEvent> {
+        let started = Instant::now();
+        let mut events = Vec::new();
+        loop {
+            window.pump_events(128);
+            events.extend(
+                window
+                    .drain_input(128)
+                    .expect("drain AppKit lifecycle events"),
+            );
+            assert!(
+                events.len() <= 1024,
+                "AppKit {phase} exceeded its event budget"
+            );
+            if completed(window, &events) {
+                return events;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "AppKit {phase} did not complete; metrics={:?}, events={events:?}",
+                window.metrics()
+            );
+        }
     }
 
     let mtm = MainThreadMarker::new().expect("run AppKit smoke on the main thread");
@@ -39,37 +64,52 @@ fn main() {
     .expect("create AppKit lifecycle smoke window");
 
     window.show();
-    settle(&window);
+    wait_for(&window, "show", |window, _| window.metrics().visible);
     let shown = window.metrics();
     assert!(shown.visible);
 
     let resized = window
         .resize_content(800.0, 450.0)
         .expect("resize AppKit content");
-    settle(&window);
+    let resize_input = wait_for(&window, "resize", |window, events| {
+        let metrics = window.metrics();
+        (metrics.width_points - 800.0).abs() < 0.5
+            && (metrics.height_points - 450.0).abs() < 0.5
+            && events
+                .iter()
+                .any(|event| matches!(event.kind, NativeInputKind::Resized { .. }))
+    });
     assert!((resized.width_points - 800.0).abs() < 0.5);
     assert!((resized.height_points - 450.0).abs() < 0.5);
 
     window.minimize();
-    settle(&window);
+    let hidden_input = wait_for(&window, "minimize", |window, events| {
+        window.is_minimized()
+            && events
+                .iter()
+                .any(|event| matches!(event.kind, NativeInputKind::VisibilityChanged(false)))
+    });
     assert!(window.is_minimized());
     window.restore();
-    settle(&window);
+    let visible_input = wait_for(&window, "restore", |window, events| {
+        !window.is_minimized()
+            && window.metrics().visible
+            && events
+                .iter()
+                .any(|event| matches!(event.kind, NativeInputKind::VisibilityChanged(true)))
+    });
     assert!(!window.is_minimized());
     assert!(window.metrics().visible);
 
-    let lifecycle_events = window
-        .drain_input(64)
-        .expect("drain AppKit lifecycle events");
-    let resize_events = lifecycle_events
+    let resize_events = resize_input
         .iter()
         .filter(|event| matches!(event.kind, NativeInputKind::Resized { .. }))
         .count();
-    let hidden_events = lifecycle_events
+    let hidden_events = hidden_input
         .iter()
         .filter(|event| matches!(event.kind, NativeInputKind::VisibilityChanged(false)))
         .count();
-    let visible_events = lifecycle_events
+    let visible_events = visible_input
         .iter()
         .filter(|event| matches!(event.kind, NativeInputKind::VisibilityChanged(true)))
         .count();
@@ -87,8 +127,13 @@ fn main() {
     );
 
     window.close();
+    assert!(
+        !window.metrics().visible,
+        "closed AppKit window remained visible"
+    );
+    window.close();
     println!(
-        "{{\"passed\":true,\"resize_events\":{resize_events},\"hidden_events\":{hidden_events},\"visible_events\":{visible_events},\"width_points\":{},\"height_points\":{}}}",
+        "{{\"schema\":\"volang.appkit-lifecycle-result.v1\",\"passed\":true,\"complete\":true,\"checks\":[\"show\",\"resize\",\"minimize\",\"restore\",\"close\"],\"resize_events\":{resize_events},\"hidden_events\":{hidden_events},\"visible_events\":{visible_events},\"width_points\":{},\"height_points\":{}}}",
         resized.width_points, resized.height_points
     );
 }

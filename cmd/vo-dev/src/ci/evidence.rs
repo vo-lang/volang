@@ -657,6 +657,28 @@ pub(super) fn validate_result(root: &Path, relative: &str) -> Result<()> {
                 }
             }
         }
+        Some("volang.appkit-lifecycle-result.v1") => {
+            if value["passed"] != true
+                || value["complete"] != true
+                || value["checks"]
+                    != serde_json::json!(["show", "resize", "minimize", "restore", "close"])
+                || ["resize_events", "hidden_events", "visible_events"]
+                    .iter()
+                    .any(|field| {
+                        value[field]
+                            .as_u64()
+                            .is_none_or(|count| !(1..=1024).contains(&count))
+                    })
+                || value["width_points"]
+                    .as_f64()
+                    .is_none_or(|width| (width - 800.0).abs() >= 0.5)
+                || value["height_points"]
+                    .as_f64()
+                    .is_none_or(|height| (height - 450.0).abs() >= 0.5)
+            {
+                bail!("AppKit result lacks complete observed window lifecycle: {relative}");
+            }
+        }
         Some("volang.browser-result.v1") => {
             let report = &value["report"];
             let has_checks = report["checks"]
@@ -1207,6 +1229,40 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("nesting exceeds"));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appkit_evidence_requires_every_lifecycle_event_and_final_geometry() {
+        let root = temporary_test_dir("appkit");
+        fs::create_dir_all(&root).unwrap();
+        let valid = serde_json::json!({"schema":"volang.appkit-lifecycle-result.v1",
+            "passed":true,"complete":true,"checks":["show","resize","minimize","restore","close"],
+            "resize_events":1,"hidden_events":1,"visible_events":1,"width_points":800,"height_points":450});
+        fs::write(
+            root.join("result.json"),
+            serde_json::to_vec(&valid).unwrap(),
+        )
+        .unwrap();
+        validate_result(&root, "result.json").unwrap();
+        for field in [
+            "complete",
+            "checks",
+            "resize_events",
+            "hidden_events",
+            "visible_events",
+            "width_points",
+            "height_points",
+        ] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            fs::write(
+                root.join("result.json"),
+                serde_json::to_vec(&invalid).unwrap(),
+            )
+            .unwrap();
+            assert!(validate_result(&root, "result.json").is_err(), "{field}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

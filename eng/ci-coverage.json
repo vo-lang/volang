@@ -176,7 +176,7 @@
     },
     {
       "legacy_id": "TEST-INPUT-001",
-      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration. Browser input and macOS lifecycle probes require explicit ecosystem integration; they remain in this repository.",
+      "destination": "Core Rust workspace tests retain platform input contracts. nightly-platform-macos runs nightly-appkit-lifecycle with observed show/resize/minimize/restore/close events. Browser gamepad/framework probes import the separately pinned Voplay repository and remain ecosystem integration.",
       "retained_local_commands": [
         "cargo test -p vo-app-runtime platform_input::tests --locked",
         "sh eng/run-macos-window-lifecycle-smoke.sh input-macos-window-lifecycle-smoke.json"
@@ -270,7 +270,7 @@
     },
     {
       "legacy_id": "TEST-PLATFORM-001",
-      "destination": "Core Rust workspace/contracts lanes retain local crate tests and generated checks. External commands belong to explicitly pinned ecosystem integration.",
+      "destination": "Core Rust workspace tests retain platform input contracts. nightly-platform-macos runs nightly-appkit-lifecycle with observed show/resize/minimize/restore/close events. Browser gamepad/framework probes import the separately pinned Voplay repository and remain ecosystem integration.",
       "retained_local_commands": [
         "sh eng/run-macos-window-lifecycle-smoke.sh platform-macos-window-lifecycle-smoke.json"
       ],

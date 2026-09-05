@@ -490,7 +490,7 @@ results = ["target/ci/results/nightly-stress-scheduler.json"]
 
 [[task]]
 id = "nightly-platform-macos"
-commands = ["nightly-process-contracts", "nightly-native-aot-tools", "nightly-platform-macos-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+commands = ["nightly-process-contracts", "nightly-native-aot-tools", "nightly-platform-macos-run", "nightly-appkit-lifecycle", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
 artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
@@ -504,7 +504,7 @@ capabilities = ["native-aot", "compiler-host", "release", "platform"]
 timeout_minutes = 60
 budget_minutes = 40
 evidence_kind = "nightly-platform"
-results = ["target/ci/results/nightly-platform-macos.json", "target/ci/results/nightly-native-aot-host.json"]
+results = ["target/ci/results/appkit-lifecycle.json", "target/ci/results/nightly-platform-macos.json", "target/ci/results/nightly-native-aot-host.json"]
 
 [[task]]
 id = "nightly-platform-windows"
@@ -1659,3 +1659,10 @@ timeout_seconds = 180
 failure_kind = "product"
 env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
 report = "native-window"
+
+[[command]]
+id = "nightly-appkit-lifecycle"
+argv = ["cargo", "run", "--locked", "-p", "vo-app-host-native", "--example", "macos_window_lifecycle_smoke", "--features", "macos-gpu"]
+timeout_seconds = 600
+failure_kind = "product"
+stdout_result = "target/ci/results/appkit-lifecycle.json"

@@ -43,7 +43,10 @@ Each executor attempt writes to a fresh `target/ci/executions/<task>/<attempt>`
 directory. It archives earlier outputs, locks the task's local resource group,
 captures command stdout/stderr, and compares declared source inputs before and
 after execution. Task and command deadlines terminate the complete process
-group or Windows Job Object. Cancellation uses the same cleanup path. Commands
+group or Windows Job Object. Workflow jobs reserve a further 15 minutes for
+provisioning and diagnostic uploads; the quality job includes both sequential
+task budgets. These outer allowances do not change test or task deadlines.
+Cancellation uses the same cleanup path. Commands
 run once using their declared argument vector and environment. Commands that
 explicitly select Bash use fail-fast scripts; the executor never implicitly
 expands an argument through a shell. Automatic retries remain disabled. Platform Nightly lanes
@@ -223,7 +226,9 @@ timing, so a size-compliant image cannot silently regress into a slow product.
 `.github/workflows/nightly.yml` runs release-mode native and Wasm/Wasm-AOT
 language matrices, GC/JIT/OSR/scheduler stress selections, macOS and Windows
 workspace tests, bounded protocol fuzzing, and Rust/npm audits. It emits and
-certifies the same task receipts as CI.
+certifies the same task receipts as CI. The macOS task also runs the repository
+AppKit lifecycle probe, observing show, resize, minimize, restore and close
+without fixed settling sleeps; it requires typed complete event evidence.
 
 Cross-repository Voplay fuzzing is excluded from the core Nightly contract. Its
 standalone harness remains under `fuzz/voplay-protocol` for a workspace where
@@ -239,8 +244,9 @@ certification and Studio candidate, verifies the commit and recursive artifact
 digest, rechecks deployment budgets, and uploads those exact bytes to Pages.
 It performs no compiler, runtime, or application rebuild.
 
-After deployment, a public smoke probe checks the shell and non-empty
-`app.wasm`. The Pages environment remains the sole deployment authority.
+After deployment, the pinned Playwright canary verifies public asset bytes against
+the certified directory and exercises project creation, editing, execution, saving
+and reopen persistence. The Pages environment remains the deployment authority.
 
 ### Release
 
