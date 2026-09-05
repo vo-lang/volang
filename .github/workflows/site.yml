@@ -21,11 +21,15 @@ env:
 
 concurrency:
   group: pages-${{ github.repository }}
-  cancel-in-progress: true
+  queue: max
+  cancel-in-progress: false
 
 jobs:
   promote:
     name: Promote certified Studio
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+      run_id: ${{ steps.candidate.outputs.run_id }}
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'push' &&
@@ -33,7 +37,7 @@ jobs:
        github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       actions: read
       contents: read
@@ -127,6 +131,41 @@ jobs:
             --root target/ci/artifacts/site \
             --gzip-limit 3670016
 
+      - name: Setup browser contracts
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: eng/browser/package-lock.json
+
+      - name: Install pinned browser
+        run: |
+          npm ci --ignore-scripts --prefix eng/browser
+          cd eng/browser
+          PLAYWRIGHT_BROWSERS_PATH="$GITHUB_WORKSPACE/target/playwright-browsers" npx playwright install --with-deps chromium
+
+      - name: Exercise the final certified site before deployment
+        run: |
+          node eng/run-browser-smoke.mjs \
+            --static-root target/ci/artifacts/site \
+            --studio-aot-smoke --timeout-ms 120000 \
+            --output target/ci/results/site-predeploy.json
+          ./target/debug/vo-dev ci verify \
+            --bundle target/ci/certification-input/certification.json \
+            --profile main --artifact-task wasm-web-full \
+            --artifact target/ci/artifacts/site
+
+      - name: Upload predeployment browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-predeploy-${{ steps.candidate.outputs.commit }}
+          path: |
+            target/ci/browser
+            target/ci/results/site-predeploy.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
@@ -148,30 +187,81 @@ jobs:
     outputs:
       page_url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      - name: Admit the current main candidate
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_COMMIT: ${{ needs.promote.outputs.commit }}
+        run: |
+          current="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current" = "$CANDIDATE_COMMIT" ]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Candidate was superseded on main; deployment skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Deploy certified Pages artifact
+        if: steps.current.outputs.eligible == 'true'
+
         id: deploy
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
 
   smoke:
     name: Verify deployed site
-    needs: deploy
+    needs: [promote, deploy]
+    if: needs.deploy.outputs.page_url != ''
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - name: Probe public shell and runtime
+      - name: Checkout certified browser contracts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.promote.outputs.commit }}
+          persist-credentials: false
+
+      - name: Download the same certified site bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: site-candidate-${{ needs.promote.outputs.commit }}
+          path: target/ci/artifacts/site
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.promote.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Setup browser contracts
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: eng/browser/package-lock.json
+
+      - name: Install pinned browser
+        run: |
+          npm ci --ignore-scripts --prefix eng/browser
+          cd eng/browser
+          PLAYWRIGHT_BROWSERS_PATH="$GITHUB_WORKSPACE/target/playwright-browsers" npx playwright install --with-deps chromium
+
+      - name: Verify deployed bytes and run the user journey
         env:
           PAGE_URL: ${{ needs.deploy.outputs.page_url }}
         run: |
-          base="${PAGE_URL%/}"
-          curl --fail --silent --show-error --location \
-            --retry 12 --retry-all-errors --retry-delay 5 \
-            "$base/" --output index.html
-          grep -q 'src="/app.js"' index.html
-          curl --fail --silent --show-error --location \
-            --retry 12 --retry-all-errors --retry-delay 5 \
-            "$base/app.js" --output app.js
-          grep -q '/app.wasm' app.js
-          curl --fail --silent --show-error --location \
-            --compressed --retry 12 --retry-all-errors --retry-delay 5 \
-            "$base/app.wasm" --output app.wasm
-          test -s app.wasm
+          node eng/run-browser-smoke.mjs \
+            --base-url "$PAGE_URL" \
+            --expected-artifact target/ci/artifacts/site \
+            --studio-canary-smoke --timeout-ms 120000 \
+            --output target/ci/results/site-canary.json
+
+      - name: Upload deployed journey diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-canary-${{ needs.promote.outputs.commit }}
+          path: |
+            target/ci/browser
+            target/ci/results/site-canary.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -356,3 +356,19 @@ Repository configuration must enforce these controls before release:
 These settings live on GitHub and need administrator application. Repository
 files provide CODEOWNERS, dependency-update policy, protected workflow logic,
 and the auditable target state.
+
+## Site promotion journeys
+
+Site promotion downloads the exact main CI site and certification, verifies its
+digest and budgets, runs the complete Studio journey against that final directory,
+and verifies the digest again before uploading Pages bytes. Deployment is serialized;
+a candidate superseded on main is skipped before the Pages action runs.
+
+After deployment, the pinned Chromium canary first checks all executable and user
+content assets (HTML, JavaScript, Wasm, JSON, images, CSS and fonts) against that
+same certified artifact, with bounded downloads and no retries. It then creates a
+fresh browser-local project, edits and runs code, saves, clicks the UI preview and
+checks refresh/reopen persistence. Failures retain Playwright traces, screenshots
+and domain results. Pages configuration, private build markers, TypeScript declarations
+and source maps are outside the public asset comparison. The complete artifact
+including those files remains bound by the promotion certificate.

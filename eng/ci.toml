@@ -786,7 +786,7 @@ artifacts = ["target/ci/artifacts/nightly-studio", "target/ci/artifacts/nightly-
 
 [[command]]
 id = "browser-harness-tests"
-argv = ["node", "--test", "eng/browser/editor-timing.test.mjs"]
+argv = ["node", "--test", "eng/browser/editor-timing.test.mjs", "eng/browser/deployed-artifact.test.mjs"]
 timeout_seconds = 120
 failure_kind = "infrastructure"
 

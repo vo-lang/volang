@@ -2,6 +2,7 @@ import { test as base, expect } from '@playwright/test';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { prepareApplication } from './server.mjs';
+import { deployedAssetRecords, verifyDeployedArtifact } from './deployed-artifact.mjs';
 import { PageContract, pollEvaluation, waitForAotInteractive } from './page-contract.mjs';
 import { runComponentStateSmoke } from './scenarios/component-state.mjs';
 import { runUikitGallerySmoke } from './scenarios/uikit-gallery.mjs';
@@ -50,6 +51,11 @@ test(request.scenario, async ({ page, context, browser, applicationURL }, testIn
   const contract = new PageContract(page);
   let result: any;
   try {
+    if (request.expectedArtifact) {
+      const assets = await deployedAssetRecords(request.expectedArtifact);
+      const verification = await verifyDeployedArtifact(applicationURL, assets);
+      await testInfo.attach('deployed-artifact', { body: JSON.stringify({ ...verification, assets }, null, 2), contentType: 'application/json' });
+    }
     if (request.studioBootstrapSmoke) await prepareStudioBootstrap(page);
     await page.goto(applicationURL, { waitUntil: 'load' });
     if (request.staticRoot !== null || request.baseURL) {

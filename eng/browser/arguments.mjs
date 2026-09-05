@@ -5,6 +5,7 @@ export function parseArguments(arguments_) {
     global: "",
     staticRoot: null,
     baseURL: null,
+    expectedArtifact: null,
     componentStateSmoke: false,
     uikitGallerySmoke: false,
     dataApplicationSmoke: false,
@@ -31,6 +32,9 @@ export function parseArguments(arguments_) {
       const url = new URL(value);
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('base URL must be an HTTP(S) origin without credentials');
       parsed.baseURL = url.href;
+      index += 1;
+    } else if (argument === "--expected-artifact" && value !== undefined) {
+      parsed.expectedArtifact = value;
       index += 1;
     } else if (argument === "--html" && value !== undefined) {
       parsed.html = value;
@@ -98,6 +102,7 @@ export function parseArguments(arguments_) {
     parsed.studioBootstrapSmoke,
     parsed.studioLifecycleSmoke,
   ].filter(Boolean).length;
+  if (parsed.expectedArtifact && !parsed.baseURL) throw new Error("expected artifact requires a deployed base URL");
   if (parsed.baseURL && !parsed.studioAotSmoke && !parsed.studioCanarySmoke) throw new Error("base URL requires a Studio journey");
   if (staticScenarios > 1) {
     throw new Error("choose exactly one static browser smoke scenario");
