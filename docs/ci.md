@@ -151,6 +151,11 @@ file and directory links, absolute targets, dangling links and ReadDir/Lstat
 metadata. Unavailable hosts must return an error and leave no entry. Set
 `VO_TEST_REQUIRE_SYMLINK=1` in environments that require this capability.
 
+Windows Nightly compiles the complete standard library before preparing AOT
+tools, so conditional compilation errors fail early. Pipe regressions require
+normal byte transfer and an explicit write error after the reader closes on
+Linux, macOS and Windows.
+
 Animation contracts use an explicitly installed per-VM manual clock shared by
 stdlib time reads and timer completions. They test intermediate values,
 cancellation, completion and actual JIT execution without sleeping.

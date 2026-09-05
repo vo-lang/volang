@@ -211,7 +211,7 @@ fn cleanup_file_handle(fd: i32, cleanup_token: IoResourceToken) {
     }
 }
 
-#[cfg(all(feature = "std", any(unix, test)))]
+#[cfg(all(feature = "std", any(unix, windows, test)))]
 fn discard_file(io: &mut IoRuntime, fd: i32) {
     if let Some(file) = remove_file(fd) {
         io.disarm_resource_cleanup(file.cleanup_token);

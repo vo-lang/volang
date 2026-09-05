@@ -508,7 +508,7 @@ results = ["target/ci/results/nightly-platform-macos.json", "target/ci/results/n
 
 [[task]]
 id = "nightly-platform-windows"
-commands = ["nightly-process-contracts", "nightly-native-aot-tools", "nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+commands = ["nightly-process-contracts", "nightly-stdlib-compile", "nightly-native-aot-tools", "nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
 artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
@@ -696,6 +696,12 @@ argv = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--no-fail-
 timeout_seconds = 3000
 failure_kind = "product"
 report = "cargo-test"
+
+[[command]]
+id = "nightly-stdlib-compile"
+argv = ["cargo", "check", "--locked", "-p", "vo-stdlib", "--features", "std", "--all-targets"]
+timeout_seconds = 900
+failure_kind = "product"
 
 [[command]]
 id = "nightly-process-contracts"
