@@ -400,6 +400,10 @@ jobs:
           ./target/debug/vo ui build ui/showcases/studio-workbench \
             -o target/studio-workbench-aot \
             --runtime-dir=lang/crates/vo-web
+
+      - name: Build Studio candidate for browser contracts
+        shell: bash
+        run: |
           VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui build apps/studio \
             -o target/ci/artifacts/site \
             --runtime-dir=lang/crates/vo-web
@@ -551,6 +555,11 @@ jobs:
           npm run test:studio-workbench-browser
           npm run test:studio-aot-browser
           VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
+
+      - name: Verify Studio startup and isolated user journey
+        run: |
+          node eng/run-browser-smoke.mjs --static-root target/ci/artifacts/site --studio-bootstrap-smoke --output target/ci/results/ui/volang-studio-bootstrap-browser.json
+          node eng/run-browser-smoke.mjs --static-root target/ci/artifacts/site --studio-canary-smoke --output target/ci/results/ui/volang-studio-canary-browser.json
 
       - name: Record Web and site evidence
         shell: bash

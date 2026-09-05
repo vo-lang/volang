@@ -186,6 +186,8 @@ timeout_minutes = 25
 budget_minutes = 15
 evidence_kind = "web-test"
 results = [
+  "target/ci/results/ui/volang-studio-bootstrap-browser.json",
+  "target/ci/results/ui/volang-studio-canary-browser.json",
   "target/ci/results/wasm-web-smoke.json",
   "target/ci/results/ui/volang-ui-browser-conformance.json",
   "target/ci/results/ui/volang-ui-aot-component-browser.json",
@@ -205,6 +207,8 @@ timeout_minutes = 45
 budget_minutes = 30
 evidence_kind = "web-test"
 results = [
+  "target/ci/results/ui/volang-studio-bootstrap-browser.json",
+  "target/ci/results/ui/volang-studio-canary-browser.json",
   "target/ci/results/wasm-web-full.json",
   "target/ci/results/ui/volang-ui-browser-conformance.json",
   "target/ci/results/ui/volang-ui-aot-component-browser.json",
