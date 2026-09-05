@@ -1060,13 +1060,13 @@ mod tests {
 
     #[test]
     fn captures_and_round_trips_a_lockless_declared_graph_without_lock_side_effects() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
         .unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
 
         let snapshot =
             ProjectSnapshot::capture(project.path(), cache.path(), &SnapshotOptions::declared())
@@ -1348,7 +1348,7 @@ mod tests {
 
     #[test]
     fn effective_snapshot_uses_exact_workspace_lock_nodes() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let root_path = std::fs::canonicalize(root.path()).unwrap();
         let app = root_path.join("app");
         let a = root_path.join("a");

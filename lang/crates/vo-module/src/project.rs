@@ -2985,7 +2985,8 @@ mod tests {
             .expect_err("a child vo.mod directory must block parent discovery");
         assert_eq!(error.stage, ProjectPlanStage::ModFile);
         assert_eq!(error.kind, ProjectPlanErrorKind::ValidationFailed);
-        assert_eq!(error.path.as_deref(), Some("repo/child/vo.mod"));
+        let invalid_manifest = Path::new("repo").join("child").join("vo.mod");
+        assert_eq!(error.path.as_deref(), invalid_manifest.to_str());
     }
 
     #[test]
@@ -3001,7 +3002,8 @@ mod tests {
             .expect_err("a child portable alias must block parent discovery");
         assert_eq!(error.stage, ProjectPlanStage::ModFile);
         assert_eq!(error.kind, ProjectPlanErrorKind::ValidationFailed);
-        assert_eq!(error.path.as_deref(), Some("repo/child/VO.MOD"));
+        let invalid_manifest = Path::new("repo").join("child").join("VO.MOD");
+        assert_eq!(error.path.as_deref(), invalid_manifest.to_str());
         assert!(error.detail.contains("portable alias"), "{error}");
 
         let fs = MemoryFs::new()
@@ -3019,7 +3021,7 @@ mod tests {
 
     #[test]
     fn public_project_root_discovery_surfaces_invalid_manifest_entries() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::write(
             temp.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/root\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -3191,7 +3193,7 @@ mod tests {
 
     #[test]
     fn project_context_classifies_oversized_source_as_validation_failure() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -3216,7 +3218,7 @@ mod tests {
 
     #[test]
     fn project_context_classifies_invalid_source_utf8_as_validation_failure() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -3238,7 +3240,7 @@ mod tests {
 
     #[test]
     fn project_context_keeps_workspace_syntax_errors_as_parse_failures() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -3393,7 +3395,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn workspace_generation_changes_when_a_member_directory_is_rebound_in_place() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let app = root.join("app");
         let member = root.join("lib");
@@ -3684,7 +3686,7 @@ mod tests {
     fn single_file_context_retries_when_source_changes_after_classification() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let source_path = root.join("main.vo");
         std::fs::write(&source_path, "package main\nfunc main() {}\n").unwrap();
@@ -3741,7 +3743,7 @@ mod tests {
     fn single_file_context_retries_when_an_ancestor_manifest_appears() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let source_path = root.join("main.vo");
         std::fs::write(&source_path, "package main\nfunc main() {}\n").unwrap();
@@ -3794,7 +3796,7 @@ mod tests {
     fn single_file_context_retries_when_the_project_manifest_disappears() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let source_path = root.join("main.vo");
         let mod_path = root.join("vo.mod");
@@ -3845,7 +3847,7 @@ mod tests {
     fn single_file_context_retries_when_the_nearest_project_root_relocates() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let nested = root.join("nested");
         std::fs::create_dir(&nested).unwrap();
@@ -3906,7 +3908,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn single_file_context_rejects_a_linked_source_leaf() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let target = root.join("target.vo");
         let source = root.join("main.vo");
@@ -4088,7 +4090,7 @@ mod tests {
 
     #[test]
     fn authored_project_files_are_replaced_atomically() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (mod_file, lock_file) = module_with_lock("github.com/acme/atomic");
 
         commit_project_files(temp.path(), &mod_file, Some(&lock_file)).unwrap();
@@ -4110,7 +4112,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::symlink;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let linked_root = temp.path().join("linked-root");
         std::fs::create_dir(&linked_root).unwrap();
         let target = temp.path().join("target.mod");
@@ -4156,7 +4158,7 @@ mod tests {
 
     #[test]
     fn authored_project_transaction_rejects_manifest_directory_before_changing_lock() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let old_lock = b"previous lock contents";
         std::fs::write(temp.path().join("vo.lock"), old_lock).unwrap();
         std::fs::create_dir(temp.path().join("vo.mod")).unwrap();
@@ -4174,7 +4176,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn stable_reader_completes_interrupted_project_transaction() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (old_mod, old_lock) = module_with_lock("github.com/acme/old");
         commit_project_files(temp.path(), &old_mod, Some(&old_lock)).unwrap();
 
@@ -4195,7 +4197,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn stable_reader_rejects_corrupt_project_transaction() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (mod_file, lock_file) = module_with_lock("github.com/acme/app");
         commit_project_files(temp.path(), &mod_file, Some(&lock_file)).unwrap();
         std::fs::write(
@@ -4212,7 +4214,7 @@ mod tests {
 
     #[test]
     fn project_pair_does_not_change_public_files_before_journal_is_durable() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (old_mod, old_lock) = module_with_lock("github.com/acme/old");
         commit_project_files(temp.path(), &old_mod, Some(&old_lock)).unwrap();
 
@@ -4234,7 +4236,7 @@ mod tests {
 
     #[test]
     fn create_new_reports_that_the_manifest_committed_when_parent_sync_fails() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let path = temp.path().join("vo.mod");
         let mod_file = ModFile::parse(
             "format = 1\nmodule = \"github.com/acme/new\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -4255,7 +4257,7 @@ mod tests {
 
     #[test]
     fn remove_reports_that_the_lock_was_removed_when_parent_sync_fails() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let path = temp.path().join("vo.lock");
         std::fs::write(&path, b"old lock").unwrap();
         fail_project_parent_sync_for_test(&path);
@@ -4272,7 +4274,7 @@ mod tests {
 
     #[test]
     fn project_pair_retains_redo_journal_after_committed_lock_sync_failure() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (mod_file, lock_file) = module_with_lock("github.com/acme/pair");
         fail_project_parent_sync_for_test(&temp.path().join("vo.lock"));
 
@@ -4299,7 +4301,7 @@ mod tests {
 
     #[test]
     fn project_pair_retains_redo_journal_after_committed_manifest_sync_failure() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (mod_file, lock_file) = module_with_lock("github.com/acme/pair-mod");
         fail_project_parent_sync_for_test(&temp.path().join("vo.mod"));
 
@@ -4329,7 +4331,7 @@ mod tests {
     fn initially_lock_free_reader_retries_after_a_writer_creates_the_lock() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let old_mod = ModFile::parse(
             "format = 1\nmodule = \"github.com/acme/old\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
@@ -4371,7 +4373,7 @@ mod tests {
             (".VO-PROJECT.LOCK", PROJECT_LOCK_FILE),
             (".VO-PROJECT.TRANSACTION", PROJECT_TRANSACTION_FILE),
         ] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::test_tempdir().unwrap();
             std::fs::write(temp.path().join(alias), b"alias").unwrap();
 
             let error = match lock_project_mutation(temp.path()) {
@@ -4392,7 +4394,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn held_project_lock_rejects_path_rebinding_before_publication() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let guard = lock_project_mutation(temp.path()).unwrap();
         let lock_path = temp.path().join(".vo-project.lock");
         std::fs::rename(&lock_path, temp.path().join("detached.lock")).unwrap();
@@ -4409,7 +4411,7 @@ mod tests {
 
     #[test]
     fn project_transaction_journal_publication_is_no_clobber() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let path = temp.path().join(PROJECT_TRANSACTION_FILE);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
         let mut writers = Vec::new();
@@ -4438,7 +4440,7 @@ mod tests {
     fn project_context_retries_an_unlocked_root_metadata_pair_change() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (old_mod, old_lock) = module_with_lock("github.com/acme/old-context");
         std::fs::write(temp.path().join("vo.mod"), old_mod.render().unwrap()).unwrap();
         std::fs::write(temp.path().join("vo.lock"), old_lock.render().unwrap()).unwrap();
@@ -4493,7 +4495,7 @@ mod tests {
     fn project_context_retries_an_unlocked_lock_only_change() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (mod_file, old_lock) = module_with_lock("github.com/acme/lock-drift");
         std::fs::write(temp.path().join("vo.mod"), mod_file.render().unwrap()).unwrap();
         std::fs::write(temp.path().join("vo.lock"), old_lock.render().unwrap()).unwrap();
@@ -4544,7 +4546,7 @@ mod tests {
     fn project_context_retries_when_auto_workspace_appears_before_return() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::write(
             root.join("vo.mod"),
@@ -4594,7 +4596,7 @@ mod tests {
     fn project_context_reader_waits_for_pair_commit_guard() {
         use std::sync::mpsc;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let (old_mod, old_lock) = module_with_lock("github.com/acme/old");
         commit_project_files(temp.path(), &old_mod, Some(&old_lock)).unwrap();
 

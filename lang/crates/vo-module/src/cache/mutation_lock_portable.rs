@@ -3295,7 +3295,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn post_create_portable_alias_failure_preserves_both_directories() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = AnchoredDirectory::open(root.path(), "test parent").unwrap();
         let requested = OsStr::new("Straße");
         let alias = root.path().join("STRASSE");
@@ -3316,7 +3316,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn post_create_path_replacement_fails_closed_and_preserves_both_directories() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = AnchoredDirectory::open(root.path(), "test parent").unwrap();
         let requested = OsStr::new("created");
         let requested_path = root.path().join(requested);
@@ -3339,7 +3339,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn post_create_failure_preserves_nonempty_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = AnchoredDirectory::open(root.path(), "test parent").unwrap();
         let requested = OsStr::new("created");
         let sentinel = root.path().join(requested).join("sentinel");
@@ -3378,7 +3378,7 @@ mod tests {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn unsupported_platform_rejects_before_creating_the_cache_root() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache/must-not-exist");
 
         let error = CacheMutationLock::shared(&root).unwrap_err();
@@ -3391,7 +3391,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn maximum_module_identity_uses_a_fixed_length_lock_name() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let prefix = "github.com/a/";
         let module = ModulePath::parse(&format!(
             "{prefix}{}",
@@ -3415,7 +3415,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn shared_lease_safely_creates_a_missing_cache_root() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("nested/cache/root");
 
         let _lease = crate::cache::acquire_read_lease(&root).unwrap();
@@ -3445,7 +3445,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn noncache_unowned_root_is_never_blindly_adopted() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let sentinel = root.path().join("project-source");
         std::fs::write(&sentinel, b"preserve").unwrap();
 
@@ -3470,7 +3470,7 @@ mod tests {
     #[test]
     fn current_layout_without_owner_marker_is_rejected_without_inspection() {
         for entry in ["github.com@acme@lib", ".cargo-target", ".tmp", "github.com"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::test_tempdir().unwrap();
             let path = root.path().join(entry);
             std::fs::create_dir(&path).unwrap();
             std::fs::write(path.join("preserve"), b"unchanged").unwrap();
@@ -3488,7 +3488,7 @@ mod tests {
             assert!(!root.path().join(STAGING_DIR).exists());
         }
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let sums = root.path().join("vo.sum");
         std::fs::write(&sums, b"unchanged").unwrap();
         let error = CacheMutationLock::shared(root.path()).unwrap_err();
@@ -3508,7 +3508,7 @@ mod tests {
     fn first_acquisition_creates_an_exact_nonlinked_owner_marker() {
         use std::os::unix::fs::MetadataExt;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let lease = CacheMutationLock::shared(root.path()).unwrap();
         let marker = root.path().join(CACHE_OWNER_MARKER);
 
@@ -3520,7 +3520,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn owner_marker_observer_retries_when_it_locks_before_the_creator() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let marker_published = race_owner_marker_observer_before_creator_lock_for_test(root.path());
         let (completed, completions) = mpsc::channel();
         let creator_root = root.path().to_path_buf();
@@ -3562,7 +3562,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn permanently_incomplete_owner_marker_has_a_bounded_explicit_error() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         std::fs::write(root.path().join(CACHE_OWNER_MARKER), b"").unwrap();
 
         let error = CacheMutationLock::shared(root.path()).unwrap_err();
@@ -3579,7 +3579,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn marker_creation_rolls_back_when_a_root_entry_appears_concurrently() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         race_owner_marker_publication_for_test(root.path());
 
         let error = CacheMutationLock::shared(root.path()).unwrap_err();
@@ -3599,7 +3599,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         for setup in ["content", "symlink", "hardlink"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::test_tempdir().unwrap();
             let marker = root.path().join(CACHE_OWNER_MARKER);
             let external = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(external.path(), CACHE_OWNER_MARKER_CONTENT).unwrap();
@@ -3620,7 +3620,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn exclusive_acquisition_requires_existing_cache_ownership() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
 
         let error = CacheMutationLock::exclusive(root.path()).unwrap_err();
 
@@ -3631,7 +3631,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn held_lease_rejects_marker_removal_or_replacement() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let lease = CacheMutationLock::shared(root.path()).unwrap();
         let marker = root.path().join(CACHE_OWNER_MARKER);
         std::fs::remove_file(&marker).unwrap();
@@ -3648,7 +3648,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn held_lease_rejects_staging_lock_removal_or_replacement() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let lease = CacheMutationLock::shared(root.path()).unwrap();
         let lock_path = staging_lock_path(root.path());
         std::fs::remove_file(&lock_path).unwrap();
@@ -3665,7 +3665,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn held_lease_and_transaction_reject_staging_directory_replacement() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let lease = CacheMutationLock::shared(root.path()).unwrap();
         let transaction = lease.begin_transaction("staging-replacement").unwrap();
         let moved_staging = root.path().join("moved-staging");
@@ -3705,8 +3705,8 @@ mod tests {
     fn shared_lease_rejects_a_symlinked_cache_root() {
         use std::os::unix::fs::symlink;
 
-        let parent = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         symlink(outside.path(), &root).unwrap();
 
@@ -3721,8 +3721,8 @@ mod tests {
     fn shared_lease_rejects_an_existing_root_beneath_a_symlink_parent() {
         use std::os::unix::fs::symlink;
 
-        let parent = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let outside_root = outside.path().join("cache");
         std::fs::create_dir(&outside_root).unwrap();
         let linked_parent = parent.path().join("linked-parent");
@@ -3739,7 +3739,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn shared_lease_rejects_a_portable_alias_in_the_existing_parent_chain() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let actual_parent = parent.path().join("CacheParent");
         std::fs::create_dir(&actual_parent).unwrap();
         let requested_root = parent.path().join("cacheparent/cache");
@@ -3766,7 +3766,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn identity_lock_rejects_hard_links_without_self_deadlocking() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let identity = "source:github.com/acme/lib@1.0.0";
         let digest = Digest::from_sha256(identity.as_bytes());
@@ -3784,7 +3784,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn atomic_publish_never_replaces_an_existing_destination() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let staging = root.path().join(STAGING_DIR);
         let source = staging.join("source");
@@ -3806,12 +3806,12 @@ mod tests {
     fn descriptor_relative_publish_rejects_a_symlinked_destination_parent() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let staging = root.path().join(STAGING_DIR);
         let source = staging.join("source");
         std::fs::write(&source, b"new").unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let sentinel = outside.path().join("sentinel");
         std::fs::write(&sentinel, b"outside").unwrap();
         symlink(outside.path(), root.path().join("destination-parent")).unwrap();
@@ -3831,7 +3831,7 @@ mod tests {
     fn descriptor_relative_publish_rejects_a_symlink_source() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let staging = root.path().join(STAGING_DIR);
         let outside = tempfile::NamedTempFile::new().unwrap();
@@ -3873,12 +3873,12 @@ mod tests {
     fn anchored_cleanup_does_not_follow_a_replaced_root_path() {
         use std::os::unix::fs::symlink;
 
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         let moved_root = parent.path().join("moved-cache");
         std::fs::create_dir_all(root.join("victim/nested")).unwrap();
         std::fs::write(root.join("victim/nested/cache-data"), b"cache").unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let sentinel = outside.path().join("sentinel");
         std::fs::write(&sentinel, b"outside").unwrap();
         let anchored = AnchoredDirectory::open(&root, "test cache root").unwrap();
@@ -3896,7 +3896,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn iterative_cleanup_rejects_excessive_directory_depth() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("one/two/three")).unwrap();
         let anchored = AnchoredDirectory::open(root.path(), "test cleanup root").unwrap();
 
@@ -3911,7 +3911,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn iterative_cleanup_applies_one_total_entry_budget() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         for name in ["one", "two", "three"] {
             std::fs::write(root.path().join(name), b"preserve").unwrap();
         }
@@ -3930,7 +3930,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_drop_cleans_the_anchored_root_after_path_replacement() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         let moved_root = parent.path().join("moved-cache");
         std::fs::create_dir(&root).unwrap();
@@ -3957,7 +3957,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_keeps_the_shared_lease_after_its_origin_guard_is_dropped() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let transaction = cache_lock.begin_transaction("retained-lease").unwrap();
         drop(cache_lock);
@@ -3978,7 +3978,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn identity_lock_keeps_the_shared_lease_after_its_origin_guard_is_dropped() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let identity_lock = cache_lock
             .identity_lock("source:github.com/acme/lib@1.0.0")
@@ -4001,7 +4001,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn lock_scaffolding_creation_uses_the_opened_root_inode() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         let moved_root = parent.path().join("moved-cache");
         std::fs::create_dir(&root).unwrap();
@@ -4024,7 +4024,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_publish_rejects_a_pre_rename_root_rebind_without_publishing() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         let moved_root = parent.path().join("moved-cache");
         std::fs::create_dir(&root).unwrap();
@@ -4069,7 +4069,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn held_guard_rejects_new_operations_after_root_rebind() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         let moved_root = parent.path().join("moved-cache");
         std::fs::create_dir(&root).unwrap();
@@ -4095,7 +4095,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_reports_a_post_rename_root_rebind_as_committed() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::test_tempdir().unwrap();
         let root = parent.path().join("cache");
         let moved_root = parent.path().join("moved-cache");
         let replacement_root = parent.path().join("replacement-cache");
@@ -4145,7 +4145,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_reports_a_post_rename_destination_parent_rebind_as_unconfirmed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let mut transaction = cache_lock
             .begin_transaction("post-rename-parent-rebind")
@@ -4190,7 +4190,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_reports_a_post_rename_staging_lock_replacement_as_unconfirmed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let mut transaction = cache_lock
             .begin_transaction("post-rename-lock-replacement")
@@ -4223,7 +4223,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn publication_reports_a_valid_source_replacement_as_committed_but_unconfirmed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let mut transaction = cache_lock.begin_transaction("source-rebind").unwrap();
         transaction
@@ -4258,7 +4258,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn descriptor_relative_parent_walk_rejects_portable_case_aliases() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         cache_lock.ensure_directory(Path::new("Parent")).unwrap();
 
@@ -4273,7 +4273,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn transaction_reads_require_exact_leaf_spelling() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let transaction = cache_lock.begin_transaction("read-case").unwrap();
         transaction
@@ -4290,7 +4290,7 @@ mod tests {
     fn concurrent_installers_can_create_the_same_real_parent_chain() {
         use std::sync::{Arc, Barrier};
 
-        let root = tempfile::tempdir().unwrap().keep();
+        let root = crate::test_tempdir().unwrap().keep();
         let barrier = Arc::new(Barrier::new(8));
         let threads = (0..8)
             .map(|_| {
@@ -4313,7 +4313,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn post_rename_sync_failure_keeps_the_published_tree_for_validation() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let cache_lock = CacheMutationLock::shared(root.path()).unwrap();
         let mut transaction = cache_lock.begin_transaction("sync-failure").unwrap();
         transaction

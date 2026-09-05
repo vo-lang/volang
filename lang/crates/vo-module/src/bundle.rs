@@ -292,13 +292,13 @@ mod tests {
         assert_eq!(first.manifest_raw, second.manifest_raw);
         assert_eq!(first.source_package, second.source_package);
 
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"local/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n\n[dependencies]\n\"example.com/acme/bundled\" = \"^0.1.4\"\n",
         )
         .unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
         crate::ops::mod_sync(project.path(), &first).unwrap();
         crate::ops::mod_fetch_with_options(
             project.path(),

@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn clean_cache_validates_entries_in_canonical_order() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         std::fs::create_dir(root.path().join("z-invalid")).unwrap();
         std::fs::create_dir(root.path().join("a-invalid")).unwrap();
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn clean_cache_removes_owned_staging_without_counting_a_module_version() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         let staging = root.path().join(crate::cache::layout::STAGING_DIR);
         std::fs::create_dir_all(staging.join("abandoned/nested")).unwrap();
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn clean_cache_never_adopts_or_mutates_an_unowned_root() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let victim = root.path().join("github.com@acme@lib/1.2.3/source.vo");
         std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
         std::fs::write(&victim, b"preserve").unwrap();
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn clean_cache_removes_the_reserved_ephemeral_namespace_and_keeps_ownership() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         let ephemeral = root.path().join("ephemeral/hash");
         std::fs::create_dir_all(&ephemeral).unwrap();
@@ -796,7 +796,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn clean_cache_removes_a_version_through_anchored_directories() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let module_dir = root.path().join(crate::cache::layout::cache_key(&module));
@@ -813,12 +813,12 @@ mod tests {
     fn clean_cache_unlinks_nested_symlinks_without_touching_their_targets() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         let staging = root.path().join(crate::cache::layout::STAGING_DIR);
         let abandoned = staging.join("abandoned");
         std::fs::create_dir_all(&abandoned).unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let sentinel = outside.path().join("sentinel");
         std::fs::write(&sentinel, b"outside").unwrap();
         symlink(outside.path(), abandoned.join("outside-link")).unwrap();
@@ -833,7 +833,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let install_lock = crate::cache::acquire_read_lease(root.path()).unwrap();
         let staging = root.path().join(crate::cache::layout::STAGING_DIR);
         let active_stage = staging.join("source-active");
@@ -861,7 +861,7 @@ mod tests {
     fn clean_cache_rejects_staging_lock_symlinks_and_case_aliases() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         let staging = root.path().join(crate::cache::layout::STAGING_DIR);
         std::fs::remove_file(staging.join(crate::cache::layout::STAGING_LOCK_FILE)).unwrap();
@@ -876,7 +876,7 @@ mod tests {
         assert!(error.to_string().contains("Symlink"), "{error}");
         assert_eq!(std::fs::read(outside.path()).unwrap(), b"");
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
         let staging = root.path().join(crate::cache::layout::STAGING_DIR);
         std::fs::remove_file(staging.join(crate::cache::layout::STAGING_LOCK_FILE)).unwrap();
@@ -891,9 +891,9 @@ mod tests {
     fn clean_cache_rejects_symlinked_cache_key_without_touching_target() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let outside_version = outside.path().join("1.2.3");
         std::fs::create_dir(&outside_version).unwrap();
@@ -916,9 +916,9 @@ mod tests {
     fn clean_cache_rejects_symlinked_version_without_touching_target() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let module = ModulePath::parse("github.com/acme/lib").unwrap();
         let module_dir = root.path().join(crate::cache::layout::cache_key(&module));
         std::fs::create_dir(&module_dir).unwrap();

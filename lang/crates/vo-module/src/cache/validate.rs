@@ -1550,8 +1550,8 @@ mod tests {
         let cache_key = crate::cache::layout::cache_key(&fixture.locked.path);
 
         for symlink_version in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
+            let root = crate::test_tempdir().unwrap();
+            let outside = crate::test_tempdir().unwrap();
             let sentinel = outside.path().join("sentinel");
             std::fs::write(&sentinel, b"preserve").unwrap();
             if symlink_version {

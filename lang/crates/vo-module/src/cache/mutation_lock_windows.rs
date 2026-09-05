@@ -3119,7 +3119,7 @@ mod tests {
 
     #[test]
     fn post_create_portable_alias_failure_removes_only_the_created_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("Straße");
         let alias = root.path().join("STRASSE");
@@ -3138,7 +3138,7 @@ mod tests {
 
     #[test]
     fn external_post_create_alias_failure_removes_only_the_created_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("Straße");
         let alias = root.path().join("STRASSE");
@@ -3161,7 +3161,7 @@ mod tests {
 
     #[test]
     fn post_create_path_replacement_is_preserved_when_rollback_loses_identity() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("created");
         let requested_path = root.path().join(requested);
@@ -3185,7 +3185,7 @@ mod tests {
 
     #[test]
     fn post_create_nonempty_directory_is_preserved_when_rollback_is_unsafe() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("created");
         let sentinel = root.path().join(requested).join("sentinel");
@@ -3206,7 +3206,7 @@ mod tests {
 
     #[test]
     fn cache_initialization_is_explicit_and_reopenable() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
 
         assert!(CacheMutationLock::shared_existing(&cache).is_err());
@@ -3226,7 +3226,7 @@ mod tests {
     fn concurrent_first_acquirers_observe_one_complete_owner_marker() {
         const WORKERS: usize = 8;
 
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let barrier = Arc::new(Barrier::new(WORKERS));
         let mut workers = Vec::new();
@@ -3250,7 +3250,7 @@ mod tests {
 
     #[test]
     fn exclusive_lease_waits_for_every_shared_lease() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let first = CacheMutationLock::shared(&cache).unwrap();
         let second = CacheMutationLock::shared_existing(&cache).unwrap();
@@ -3283,7 +3283,7 @@ mod tests {
 
     #[test]
     fn transaction_publication_is_atomic_and_no_replace() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let cache_lock = CacheMutationLock::shared(&cache).unwrap();
 
@@ -3322,7 +3322,7 @@ mod tests {
 
     #[test]
     fn portable_alias_cannot_publish_a_second_generation() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let cache_lock = CacheMutationLock::shared(&cache).unwrap();
 
