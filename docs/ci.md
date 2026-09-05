@@ -91,6 +91,18 @@ Cargo timings travel in separate diagnostic artifacts, including failed attempts
 The certification collector keeps its bounded scan and rejects incomplete
 coverage; adding thousands of diagnostic files cannot exhaust that scan.
 
+Nightly's browser and release Wasm language tasks share one static Web job and
+execute sequentially. Each retains its own immutable task receipt and deadline;
+the second task runs after a failure unless the job is cancelled. Both use the
+same Cargo output tree, release Wasm compiler configuration and locked Node
+dependencies. Build commands still check freshness through Cargo. The language
+task explicitly installs its locked JavaScript tools for isolated reproduction.
+The combined job reserves both task deadlines plus one provisioning allowance.
+This scheduling choice follows [Nightly measurements](https://github.com/vo-lang/volang/actions/runs/33995230524):
+the separate Web jobs took 816 and 714 seconds, below the 2712-second Windows
+critical path even when added sequentially. Whole Cargo output trees remain
+uncached across runs.
+
 Both Web profiles execute their ordered commands through `ci run`. The full
 profile retains all 31 semantic probes and tests the final Studio directory
 through the complete journey, startup, canary and offline lifecycle contracts.

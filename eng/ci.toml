@@ -405,11 +405,11 @@ results = ["target/ci/results/nightly-language-native.json", "target/ci/results/
 
 [[task]]
 id = "nightly-language-wasm"
-commands = ["nightly-language-wasm-run"]
+commands = ["browser-node-dependencies", "nightly-language-wasm-run"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "exhaustive"
-workflow_job = "language_release_wasm"
+workflow_job = "browser"
 runner = "ubuntu-24.04"
 owners = ["language", "web"]
 impact = ["*"]
