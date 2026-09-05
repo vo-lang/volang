@@ -9,8 +9,10 @@
 use std::borrow::Cow;
 use std::path::Path;
 
+#[cfg(any(not(debug_assertions), target_arch = "wasm32"))]
 use rust_embed::RustEmbed;
 
+#[cfg(any(not(debug_assertions), target_arch = "wasm32"))]
 #[derive(RustEmbed)]
 #[folder = "."]
 #[include = "stdlib.toml"]
@@ -26,12 +28,72 @@ struct EmbeddedAssets;
 ///
 /// Paths are relative to [`source_root`] and use `/` separators.
 pub fn iter() -> impl Iterator<Item = Cow<'static, str>> + 'static {
-    EmbeddedAssets::iter()
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+    {
+        live_asset_paths(source_root()).into_iter().map(Cow::Owned)
+    }
+    #[cfg(any(not(debug_assertions), target_arch = "wasm32"))]
+    {
+        EmbeddedAssets::iter()
+    }
 }
 
 /// Returns the bytes for a standard-library asset relative to [`source_root`].
 pub fn get(path: &str) -> Option<Cow<'static, [u8]>> {
-    EmbeddedAssets::get(path).map(|file| file.data)
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+    {
+        if !is_source_asset(path) {
+            return None;
+        }
+        std::fs::read(source_root().join(path)).ok().map(Cow::Owned)
+    }
+    #[cfg(any(not(debug_assertions), target_arch = "wasm32"))]
+    {
+        EmbeddedAssets::get(path).map(|file| file.data)
+    }
+}
+
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+fn is_source_asset(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|part| {
+            !matches!(
+                part,
+                "" | "." | ".." | ".git" | ".volang" | ".vo-cache" | "node_modules" | "target"
+            ) && !part.contains(['\\', ':'])
+        })
+        && (path == "stdlib.toml" || path.ends_with(".vo"))
+}
+
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+fn live_asset_paths(root: &Path) -> Vec<String> {
+    fn visit(root: &Path, directory: &Path, paths: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("asset below source root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if kind.is_dir() {
+                if is_source_asset(&format!("{relative}/probe.vo")) {
+                    visit(root, &path, paths);
+                }
+            } else if kind.is_file() && is_source_asset(&relative) {
+                paths.push(relative);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    visit(root, root, &mut paths);
+    paths.sort();
+    paths
 }
 
 /// Returns the materialized Cargo package root containing the source assets.
@@ -89,6 +151,40 @@ mod tests {
         let mut assets = BTreeMap::new();
         visit(source_root(), source_root(), &mut assets);
         assets
+    }
+
+    #[test]
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+    fn live_assets_observe_new_files_and_exclude_build_outputs() {
+        let root = std::env::temp_dir().join(format!(
+            "volang-live-stdlib-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("target/generated")).unwrap();
+        fs::create_dir_all(root.join("new-package")).unwrap();
+        fs::write(root.join("stdlib.toml"), "version = 1").unwrap();
+        fs::write(root.join("target/generated/hidden.vo"), "hidden").unwrap();
+        assert_eq!(live_asset_paths(&root), ["stdlib.toml"]);
+        fs::write(root.join("new-package/new.vo"), "package new").unwrap();
+        assert_eq!(
+            live_asset_paths(&root),
+            ["new-package/new.vo", "stdlib.toml"]
+        );
+        for path in [
+            "../stdlib.toml",
+            "/stdlib.toml",
+            "target/a.vo",
+            "a/../b.vo",
+            "C:/a.vo",
+            "a\\b.vo",
+        ] {
+            assert!(!is_source_asset(path), "{path}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
