@@ -114,6 +114,13 @@ Linux, macOS and Windows. Mixing core and compiler-host AOT targets in one
 invocation fails before building, so the core rejection cannot accidentally
 use a runtime with the extra capability.
 
+Set `VO_UI_PACKAGE_TIMINGS=1` when measuring `vo ui package`. Its stderr includes
+a `volang.ui-package-timings.v1` record for source compilation, native AOT
+lowering, linking and final packaging, plus compiler path, assertion mode, total duration and
+failure state. Runtime compilation is measured separately through Cargo timings.
+Compare matching source, target, runtime and build settings before changing
+compiler profiles, sharing outputs or increasing package concurrency.
+
 Native filesystem ordering always runs. The symlink regression independently
 probes the host using Rust before invoking Vo. Supported hosts exercise relative
 file and directory links, absolute targets, dangling links and ReadDir/Lstat
