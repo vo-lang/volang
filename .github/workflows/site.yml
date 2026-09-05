@@ -108,7 +108,7 @@ jobs:
           ./target/debug/vo-dev ci verify \
             --bundle target/ci/certification-input/certification.json \
             --profile main \
-            --artifact-task site-candidate \
+            --artifact-task wasm-web-full \
             --artifact target/ci/artifacts/site
           test -s target/ci/artifacts/site/app.wasm
           test -s target/ci/artifacts/site/runtime/pkg/vo_web_bg.wasm

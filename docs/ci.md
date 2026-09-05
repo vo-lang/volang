@@ -8,7 +8,7 @@ tested bytes. The machine-readable sources of truth are:
 - `eng/release.toml` for release targets and archive policy;
 - `eng/toolchains.toml` and `rust-toolchain.toml` for pinned tools.
 
-Workflow YAML provisions and schedules lanes while task execution migrates into `vo-dev ci run`. Repository contracts, Rust quality checks and dependency audits
+Workflow YAML provisions and schedules lanes while task execution migrates into `vo-dev ci run`. Repository contracts, Rust quality, language, Web and dependency checks
 execute ordered command definitions from `eng/ci.toml`. `vo-dev ci lint` validates the task graph,
 dependencies, owners, platforms, budgets, runners, and safe evidence paths.
 Actionlint validates the workflow syntax and expressions.
@@ -43,7 +43,9 @@ directory. It archives earlier outputs, locks the task's local resource group,
 captures command stdout/stderr, and compares declared source inputs before and
 after execution. Task and command deadlines terminate the complete process
 group or Windows Job Object. Cancellation uses the same cleanup path. Commands
-run once; no automatic retry or shell interpolation is involved.
+run once using their declared argument vector and environment. Commands that
+explicitly select Bash use fail-fast scripts; the executor never implicitly
+expands an argument through a shell. Automatic retries remain disabled.
 
 All Nightly language, stress, platform, fuzz and audit lanes use `ci run`.
 Their executable arguments and budgets live in `eng/ci.toml`; Actions installs
@@ -66,6 +68,20 @@ definition, classification, reproduction command and diagnostic paths. Job
 summaries show per-command test counts and durations; Cargo HTML timings are
 uploaded with executor diagnostics. Workspace tests continue across failing
 test programs so one run reports all failures while preserving a failing exit.
+
+Certification artifacts (`ci-evidence-*` and `nightly-evidence-*`) contain only
+the compact evidence files. Execution logs, per-case Native AOT receipts and
+Cargo timings travel in separate diagnostic artifacts, including failed attempts.
+The certification collector keeps its bounded scan and rejects incomplete
+coverage; adding thousands of diagnostic files cannot exhaust that scan.
+
+Both Web profiles execute their ordered commands through `ci run`. The full
+profile retains all 31 semantic probes and tests the final Studio directory
+through the complete journey, startup, canary and offline lifecycle contracts.
+Image and precache budget results bind their measured artifacts, complete asset
+lists and consistent limits. `wasm-web-full` seals `target/ci/artifacts/site` in
+the same execution receipt. Site promotion verifies that producing task's artifact
+digest; no additional task infers success from the presence of a directory.
 
 ## Explain and diagnose
 

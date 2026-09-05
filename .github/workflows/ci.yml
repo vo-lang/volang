@@ -123,7 +123,6 @@ jobs:
             ]' target/ci/plan.json)"
           wasm_task="$(jq -r '
             [.tasks[] | select(.workflow_job == "wasm_web") | .id]
-            | map(select(. != "site-candidate"))
             | .[0] // ""
           ' target/ci/plan.json)"
           {
@@ -132,7 +131,7 @@ jobs:
             echo "ui_matrix=$ui_matrix"
             echo "wasm_task=$wasm_task"
             if has_task rust-quality; then echo "rust_quality=true"; else echo "rust_quality=false"; fi
-            if has_task site-candidate; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
+            if has_task wasm-web-full; then echo "site_candidate=true"; else echo "site_candidate=false"; fi
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable CI plan
@@ -292,10 +291,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Start evidence clock
-        shell: bash
-        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Setup engineering toolchain
         uses: ./.github/actions/setup-volang
         with:
@@ -334,241 +329,33 @@ jobs:
       - name: Build repository tooling
         run: cargo build -p vo-dev --locked
 
-      - name: Build browser AOT fixture
-        run: |
-          cargo build --locked -p vo --no-default-features
-          ./target/debug/vo build examples/basics/hello.vo \
-            --kind=wasm \
-            --no-cache \
-            -o target/hello-aot.wasm
-
-      - name: Verify browser test harness
-        run: node --test eng/browser/editor-timing.test.mjs
-
-      - name: Build Core Wasm AOT host
-        working-directory: lang/crates/vo-web
-        run: |
-          npm ci
-          npm run build:aot-support
-          npm run build:wasm:release
-          npm run build:js
-
-      - name: Build pull request Core Wasm AOT component fixture
-        if: needs.plan.outputs.wasm_task == 'wasm-web-smoke'
-        env:
-          VOWORK: "off"
-        run: |
-          ./target/debug/vo ui build ui/tests/nested-component-list \
-            -o target/ui-nested-component-aot \
-            --runtime-dir=lang/crates/vo-web
-
-      - name: Build production Core Wasm AOT component applications
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        env:
-          VOWORK: "off"
-        run: |
-          ./target/debug/vo ui build ui/tests/nested-component-list \
-            -o target/ui-nested-component-aot \
-            --runtime-dir=lang/crates/vo-web
-          ./target/debug/vo ui build ui/showcases/component-gallery \
-            -o target/ui-component-gallery-aot \
-            --runtime-dir=lang/crates/vo-web
-          ./target/debug/vo ui build ui/showcases/data-application \
-            -o target/data-application-aot \
-            --runtime-dir=lang/crates/vo-web
-          ./target/debug/vo ui build ui/showcases/content-site \
-            -o target/content-site-aot \
-            --runtime-dir=lang/crates/vo-web
-          ./target/debug/vo ui build ui/showcases/media-application \
-            -o target/media-application-aot \
-            --runtime-dir=lang/crates/vo-web
-          ./target/debug/vo ui build ui/showcases/studio-workbench \
-            -o target/studio-workbench-aot \
-            --runtime-dir=lang/crates/vo-web
-
-      - name: Build Studio candidate for browser contracts
-        shell: bash
-        run: |
-          VOWORK="$GITHUB_WORKSPACE/vo.work" ./target/debug/vo ui build apps/studio \
-            -o target/ci/artifacts/site \
-            --runtime-dir=lang/crates/vo-web
-
-      - name: Enforce Core Wasm AOT image budgets
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        run: |
-          mkdir -p target/ci/results/ui-size
-          node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/component-gallery.json
-          node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/data-application.json
-          node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/content-site.json
-          node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/media-application.json
-          node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ci/results/ui-size/studio-workbench.json
-          node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/ci/artifacts/site/app.wasm --raw-limit 34000000 --brotli-limit 972800 --gzip-limit 2500000 --output target/ci/results/ui-size/studio.json
-          node eng/report-ui-web-precache-size.mjs --label studio --root target/ci/artifacts/site --gzip-limit 3670016 --output target/ci/results/ui-size/studio-precache.json
-
-      - name: Publish Core Wasm AOT image reports
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ui-web-image-size
-          path: target/ci/results/ui-size/*.json
-          if-no-files-found: error
-
-      - name: Build VM and JIT UI test tooling
-        run: cargo build --locked -p vo --no-default-features --features jit
-
-      - name: Run official UIKit VM and JIT interaction matrix
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        run: |
-          ./eng/run-uikit-gallery-contracts.sh
-          ./eng/run-data-application-contracts.sh
-          ./eng/run-content-site-contracts.sh
-          ./eng/run-media-application-contracts.sh
-          ./eng/run-studio-workbench-contracts.sh
-
-      - name: Run Core Wasm AOT semantic gate
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cases=(
-            tests/lang/cases/runtime/defer/defer_repanic_chain.vo
-            tests/lang/cases/runtime/defer/nested_unwind_state_stack.vo
-            tests/lang/cases/runtime/defer/bug_defer_recover_mixed_named_return.vo
-            tests/lang/cases/runtime/defer/closure_defer_interact.vo
-            tests/lang/cases/runtime/defer/bug_defer_closure_iface_arg.vo
-            tests/lang/cases/runtime/panic/nil_pointer_method_panic.vo
-            tests/lang/cases/runtime/panic/closure_panic_recover.vo
-            tests/lang/cases/jit/runtime_traps.vo
-            tests/lang/cases/runtime/numeric/integer_div_mod_edge.vo
-            tests/lang/cases/bugs/2026_05_28_jit_slice_addr_nil_panic.vo
-            tests/lang/cases/bugs/2026_05_28_jit_slice_addr_oob_panic.vo
-            tests/lang/cases/bugs/2026_05_28_jit_array_addr_oob_panic.vo
-            tests/lang/cases/runtime/interface/iface_to_iface_assign.vo
-            tests/lang/cases/runtime/map/array_as_map_key.vo
-            tests/lang/cases/runtime/slice/slice_append_semantics.vo
-            tests/lang/cases/runtime/slice/slice_func_elem_call.vo
-            tests/lang/cases/runtime/scheduler/select_multi_ready.vo
-            tests/lang/cases/runtime/scheduler/closure_goroutine_immediate.vo
-            tests/lang/cases/runtime/scheduler/direct_method_value_cross_island_multi_slot.vo
-            tests/lang/cases/runtime/scheduler/island_deep_graph_transfer.vo
-            tests/lang/cases/runtime/scheduler/island_transfer_source_isolation.vo
-            tests/lang/cases/gc/gc_deep_pointer_graph.vo
-            tests/lang/cases/gc/gc_spread_append_layout.vo
-            tests/lang/cases/gc/wasm_aot_shadow_root_stack.vo
-            tests/lang/cases/stdlib/fmt_scan.vo
-            tests/lang/cases/stdlib/filepath_basic.vo
-            tests/lang/cases/stdlib/log_semantics.vo
-            tests/lang/cases/stdlib/regexp.vo
-            tests/lang/cases/net/net_basic.vo
-            benchmarks/binary-trees/trees.vo
-            benchmarks/channel-block-wake/block_wake.vo
-          )
-          for source in "${cases[@]}"; do
-            image="target/aot-$(basename "${source%.vo}").wasm"
-            ./target/debug/vo build "$source" --kind=wasm --no-cache -o "$image"
-            node cmd/vo-dev/src/bench_wasm_aot_runner.mjs "$image"
-          done
-
-      - name: Run WebAssembly language target
-        shell: bash
+      - name: Execute declared Web task
         env:
           WASM_TASK: ${{ needs.plan.outputs.wasm_task }}
-        run: |
-          mkdir -p target/ci/results
-          if [ "$WASM_TASK" = "wasm-web-smoke" ]; then
-            ./target/debug/vo-dev test run \
-              --suite lang \
-              --tags smoke \
-              --targets wasm,wasm-aot \
-              --format json > "target/ci/results/${WASM_TASK}.json"
-          else
-            ./target/debug/vo-dev test run \
-              --suite lang \
-              --targets wasm,wasm-aot \
-              --format json > "target/ci/results/${WASM_TASK}.json"
-          fi
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task "$WASM_TASK"
 
-      - name: Check no-std target closure
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        run: |
-          stdlib_closure="$(cargo tree --locked -p vo-stdlib --target wasm32-unknown-unknown \
-            --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
-          vm_closure="$(cargo tree --locked -p vo-vm --target wasm32-unknown-unknown \
-            --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
-          ext_closure="$(cargo tree --locked -p vo-ext --target wasm32-unknown-unknown \
-            --no-default-features --features wasm --edges normal,no-proc-macro --format '{p}|{f}')"
-          closure="${stdlib_closure}
-          ${vm_closure}
-          ${ext_closure}"
-          printf '%s\n' "$closure"
-          if printf '%s\n' "$closure" | grep -Eq '\|([^,]*,)*std(,|$)|(libloading|rust-embed|termcolor|ureq|vo-analysis|vo-common|vo-module|vo-stdlib-source|vo-syntax|zip) v[0-9]'; then
-            echo "no-std target closure contains std or a host/compiler package" >&2
-            exit 1
-          fi
-          cargo check --locked -p vo-stdlib -p vo-vm --no-default-features
-          cargo check --locked -p vo-vm --target wasm32-unknown-unknown --no-default-features
-          cargo check --locked -p vo-ext --target wasm32-unknown-unknown \
-            --no-default-features --features wasm --tests
-          cargo check --locked --target wasm32-unknown-unknown \
-            -p vo-ui-core -p vo-ui-protocol -p vo-ui-reactive -p vo-ui-plan \
-            -p vo-ui-system -p vo-ui-web --no-default-features
-
-      - name: Test pull request Web runtime
-        if: needs.plan.outputs.wasm_task == 'wasm-web-smoke'
-        working-directory: lang/crates/vo-web
-        run: |
-          npm run test:vfs
-          npm run test:ui
-          npm run test:runner
-          npm run test:ui-browser
-          npm run test:ui-component-browser
-          VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
-
-      - name: Test complete Web runtime and product set
-        if: needs.plan.outputs.wasm_task == 'wasm-web-full'
-        working-directory: lang/crates/vo-web
-        run: |
-          npm run test:vfs
-          npm run test:ui
-          npm run test:runner
-          npm run test:ui-browser
-          npm run test:ui-component-browser
-          npm run test:uikit-gallery-browser
-          npm run test:data-application-browser
-          npm run test:content-site-browser
-          npm run test:media-application-browser
-          npm run test:studio-workbench-browser
-          npm run test:studio-aot-browser
-          VO_AOT_IMAGE="$GITHUB_WORKSPACE/target/hello-aot.wasm" npm run test:aot
-
-      - name: Verify Studio startup and isolated user journey
-        run: |
-          node eng/run-browser-smoke.mjs --static-root target/ci/artifacts/site --studio-bootstrap-smoke --output target/ci/results/ui/volang-studio-bootstrap-browser.json
-          node eng/run-browser-smoke.mjs --static-root target/ci/artifacts/site --studio-canary-smoke --output target/ci/results/ui/volang-studio-canary-browser.json
-
-      - name: Record Web and site evidence
-        shell: bash
-        env:
-          WASM_TASK: ${{ needs.plan.outputs.wasm_task }}
-          SITE_CANDIDATE: ${{ needs.plan.outputs.site_candidate }}
-        run: |
-          ./target/debug/vo-dev ci record \
-            --plan target/ci/plan-input/plan.json \
-            --task "$WASM_TASK" \
-            --output "target/ci/evidence/${WASM_TASK}.evidence.json"
-          if [ "$SITE_CANDIDATE" = "true" ]; then
-            ./target/debug/vo-dev ci record \
-              --plan target/ci/plan-input/plan.json \
-              --task site-candidate \
-              --output target/ci/evidence/site-candidate.evidence.json
-          fi
-
-      - name: Upload Web evidence
+      - name: Upload task evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-evidence-wasm-web-${{ github.sha }}
           path: target/ci/evidence/*.evidence.json
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-diagnostics-wasm-web-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/ci/results
+            target/cargo-timings
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload browser diagnostics

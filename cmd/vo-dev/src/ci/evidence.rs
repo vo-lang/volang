@@ -715,6 +715,9 @@ pub(super) fn validate_result(root: &Path, relative: &str) -> Result<()> {
                 bail!("dependency result does not prove complete successful audit coverage: {relative}");
             }
         }
+        Some("volang.ui.web-artifact-size.v1" | "volang.ui.web-precache-size.v1") => {
+            super::web_result::validate(root, &value)?;
+        }
         Some("volang.ui.performance.v1") => {
             if value["passed"] != true
                 || value["profile"] != "release"

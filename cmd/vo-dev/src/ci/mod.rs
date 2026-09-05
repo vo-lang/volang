@@ -4,6 +4,7 @@ mod model;
 mod plan;
 mod process;
 mod run;
+mod web_result;
 
 use anyhow::{anyhow, bail, Result};
 use sha2::{Digest, Sha256};
