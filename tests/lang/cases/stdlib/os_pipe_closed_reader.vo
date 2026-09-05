@@ -1,0 +1,15 @@
+package main
+
+import (
+	"os"
+)
+
+func main() {
+	r, w, err := os.Pipe()
+	assert(err == nil, "create pipe")
+	assert(r.Close() == nil, "close the only reader")
+	n, err := w.Write([]byte("payload"))
+	assert(n == 0 && err != nil, "closed reader returns a write error")
+	assert(w.Close() == nil, "writer remains closable after the error")
+	println("closed pipe write returned an error")
+}

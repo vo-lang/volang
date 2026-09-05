@@ -15,3 +15,6 @@ vo-common-core = { workspace = true, features = ["std"] }
 vo-jit = { path = "../vo-jit" }
 vo-target.workspace = true
 vo-vm = { path = "../vo-vm", features = ["jit"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

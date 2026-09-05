@@ -4657,6 +4657,7 @@ dependencies = [
 name = "vo-aot-runtime-core"
 version = "0.1.4"
 dependencies = [
+ "libc",
  "vo-common-core",
  "vo-jit",
  "vo-target",

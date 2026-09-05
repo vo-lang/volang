@@ -5946,6 +5946,17 @@ reason = "native filesystem permissions, flags, timestamps, and environment sema
 expect = "pass"
 
 [[case]]
+id = "os-pipe-closed-reader"
+kind = "file"
+path = "cases/stdlib/os_pipe_closed_reader.vo"
+matrix = "default"
+tags = ["stdlib", "smoke", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "operating-system pipes require a native host"
+expect = "pass"
+
+[[case]]
 id = "os-pipe-chtimes"
 kind = "file"
 path = "cases/stdlib/os_pipe_chtimes.vo"
