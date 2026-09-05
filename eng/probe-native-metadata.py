@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -19,6 +20,21 @@ def changed_paths(left, right, path=""):
         return [item for i, pair in enumerate(zip(left, right))
                 for item in changed_paths(*pair, f"{path}/{i}")]
     return [] if left == right else [path]
+
+
+def equivalent_cargo_paths(before, after, fields):
+    def at(document, pointer):
+        for key in pointer.strip("/").split("/"):
+            document = document[int(key)] if isinstance(document, list) else document[key]
+        return document
+
+    for pointer in fields:
+        if not re.fullmatch(r"/packages/\d+/(manifest_path|targets/\d+/src_path|dependencies/\d+/path)", pointer):
+            return False
+        # Verify live file identity rather than stripping a namespace prefix.
+        if not os.path.samefile(at(before, pointer), at(after, pointer)):
+            return False
+    return True
 
 
 def main():
@@ -62,8 +78,10 @@ def main():
             current = json.loads(child.stdout)
             changes = changed_paths(previous, current) if previous is not None else []
             raw_changed = previous_raw is not None and previous_raw != child.stdout
+            equivalent = previous is None or equivalent_cargo_paths(previous, current, changes)
             observations.append({"index": index, "sha256": hashlib.sha256(child.stdout).hexdigest(),
-                                 "raw_changed": raw_changed, "changed_fields": changes})
+                                 "raw_changed": raw_changed, "changed_fields": changes,
+                                 "equivalent_host_paths": equivalent})
             if raw_changed:
                 (output / f"{index}-before.json").write_bytes(previous_raw)
                 (output / f"{index}-after.json").write_bytes(child.stdout)
@@ -71,8 +89,9 @@ def main():
             previous_raw, previous = child.stdout, current
         (output / "result.json").write_text(json.dumps({"target": target, "observations": observations}, indent=2) + "\n")
         changed = sum(item["raw_changed"] for item in observations)
-        print(f"Observed {changed} metadata changes across 32 reads", flush=True)
-        return int(changed != 0)
+        unexpected = sum(not item["equivalent_host_paths"] for item in observations)
+        print(f"Observed {changed} metadata spelling changes and {unexpected} semantic changes across 32 reads", flush=True)
+        return int(unexpected != 0)
 
 
 if __name__ == "__main__":

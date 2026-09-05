@@ -1,3 +1,5 @@
+mod metadata;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -1257,8 +1259,10 @@ fn inspect_native_cargo_context(
         ));
     }
 
-    let mut metadata_hasher = StableHasher::new("vo-native-cargo-metadata-v1");
-    metadata_hasher.update_bytes("metadata", &output.stdout);
+    let canonical_metadata = metadata::canonical_bytes(&output.stdout)
+        .map_err(|error| native_build_input_read_error(&manifest_path, error))?;
+    let mut metadata_hasher = StableHasher::new("vo-native-cargo-metadata-v2");
+    metadata_hasher.update_bytes("metadata", &canonical_metadata);
     let metadata_digest = metadata_hasher.finish();
     Ok(NativeCargoContext {
         manifest_dir,
