@@ -8,7 +8,7 @@
 #![cfg(feature = "std")]
 
 use std::any::Any;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use std::fmt;
 use std::io;
 #[cfg(unix)]
@@ -16,7 +16,6 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 #[cfg(unix)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
 use std::sync::Arc;
 
 use crate::gc::GcRef;
@@ -299,10 +298,51 @@ impl IoLease {
     }
 }
 
+/// Explicit host-controlled time for deterministic embedded execution.
+/// Each VM installs its own clock before execution; ordinary VMs use OS time.
+#[derive(Clone, Debug)]
+pub struct ManualClock {
+    elapsed_ns: Arc<AtomicU64>,
+    unix_origin_ns: i64,
+}
+
+impl ManualClock {
+    pub fn new(unix_origin_ns: i64) -> Self {
+        Self {
+            elapsed_ns: Arc::new(AtomicU64::new(0)),
+            unix_origin_ns,
+        }
+    }
+
+    pub fn advance(&self, duration: std::time::Duration) -> io::Result<()> {
+        let delta = u64::try_from(duration.as_nanos())
+            .map_err(|_| io::Error::other("clock duration overflow"))?;
+        self.elapsed_ns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_add(delta)
+            })
+            .map_err(|_| io::Error::other("clock elapsed time overflow"))?;
+        Ok(())
+    }
+
+    pub fn monotonic_nanos(&self) -> i64 {
+        i64::try_from(self.elapsed_ns.load(Ordering::SeqCst))
+            .unwrap_or(i64::MAX)
+            .saturating_add(1)
+    }
+
+    pub fn unix_nanos(&self) -> i64 {
+        self.unix_origin_ns
+            .saturating_add(self.monotonic_nanos().saturating_sub(1))
+    }
+}
+
 /// Async I/O runtime.
 #[derive(Debug)]
 pub struct IoRuntime {
     driver: Option<IoDriver>,
+    manual_clock: Option<ManualClock>,
+    manual_timers: BTreeMap<(u64, IoToken), ()>,
     completions: HashMap<IoToken, Completion>,
     /// Completions returned synchronously by submission and cancellation paths
     /// outside `driver.poll()` still need one scheduler notification.
@@ -352,6 +392,8 @@ impl IoRuntime {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             driver: Some(IoDriver::new()?),
+            manual_clock: None,
+            manual_timers: BTreeMap::new(),
             completions: HashMap::new(),
             pending_notifications: Vec::new(),
             slice_staging: HashMap::new(),
@@ -363,6 +405,19 @@ impl IoRuntime {
         })
     }
 
+    pub fn set_manual_clock(&mut self, clock: ManualClock) -> io::Result<()> {
+        self.driver_mut()?;
+        if self.has_pending() || !self.completions.is_empty() {
+            return Err(io::Error::other("install clock before submitting I/O"));
+        }
+        self.manual_clock = Some(clock);
+        Ok(())
+    }
+
+    pub fn manual_clock(&self) -> Option<&ManualClock> {
+        self.manual_clock.as_ref()
+    }
+
     /// Permanently stop this runtime and release every VM-owned I/O resource.
     ///
     /// Guest termination is terminal for a VM, so no replacement driver is
@@ -372,6 +427,7 @@ impl IoRuntime {
     /// while provider attachments are still available.
     pub fn shutdown(&mut self) {
         drop(self.driver.take());
+        self.manual_timers.clear();
         self.resource_cleanups.clear();
         self.completions.clear();
         self.pending_notifications.clear();
@@ -660,7 +716,16 @@ impl IoRuntime {
     /// Fallible timer submission for production paths that must surface
     /// process-wide identity exhaustion as a language/runtime error.
     pub fn try_submit_timer(&mut self, duration_ns: i64) -> io::Result<IoToken> {
+        self.driver_mut()?;
         let token = self.try_alloc_token()?;
+        if let Some(clock) = &self.manual_clock {
+            let now = clock.elapsed_ns.load(Ordering::SeqCst);
+            let deadline = now
+                .checked_add(duration_ns.max(0) as u64)
+                .ok_or_else(|| io::Error::other("timer deadline overflow"))?;
+            self.manual_timers.insert((deadline, token), ());
+            return Ok(token);
+        }
         match self.driver_mut()?.submit_timer(token, duration_ns) {
             SubmitResult::Completed(completion) => {
                 self.store_completion_for_poll(completion);
@@ -881,6 +946,20 @@ impl IoRuntime {
     /// Poll for completed operations (non-blocking).
     /// Returns tokens of newly completed operations.
     pub fn poll(&mut self) -> Vec<IoToken> {
+        if let Some(clock) = &self.manual_clock {
+            let now = clock.elapsed_ns.load(Ordering::SeqCst);
+            while self
+                .manual_timers
+                .first_key_value()
+                .is_some_and(|((deadline, _), _)| *deadline <= now)
+            {
+                let ((_, token), ()) = self.manual_timers.pop_first().expect("due timer");
+                self.store_completion_for_poll(Completion {
+                    token,
+                    result: Ok(CompletionData::Timer),
+                });
+            }
+        }
         let mut completed_tokens = std::mem::take(&mut self.pending_notifications);
         let Some(driver) = self.driver.as_mut() else {
             return completed_tokens;
@@ -922,6 +1001,7 @@ impl IoRuntime {
     /// Check if there are any pending operations.
     pub fn has_pending(&self) -> bool {
         !self.pending_notifications.is_empty()
+            || !self.manual_timers.is_empty()
             || self.driver.as_ref().is_some_and(IoDriver::has_pending)
     }
 
@@ -1044,6 +1124,30 @@ mod tests {
         assert_eq!(allocate_io_token(&counter), Some(u64::MAX));
         assert_eq!(allocate_io_token(&counter), None);
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn manual_time_orders_timers_isolates_vms_and_cancels_on_shutdown() {
+        let mut runtime = IoRuntime::new().unwrap();
+        let clock = ManualClock::new(1_700_000_000_000_000_000);
+        runtime.set_manual_clock(clock.clone()).unwrap();
+        let later = runtime.try_submit_timer(20).unwrap();
+        let first = runtime.try_submit_timer(10).unwrap();
+        let same = runtime.try_submit_timer(10).unwrap();
+        assert!(runtime.poll().is_empty());
+        clock.advance(std::time::Duration::from_nanos(10)).unwrap();
+        assert_eq!(runtime.poll(), vec![first, same]);
+        assert!(runtime.poll().is_empty());
+        assert_eq!(clock.monotonic_nanos(), 11);
+        assert_eq!(clock.unix_nanos(), 1_700_000_000_000_000_010);
+        assert_eq!(ManualClock::new(0).monotonic_nanos(), 1);
+        assert!(runtime.set_manual_clock(ManualClock::new(0)).is_err());
+        runtime.shutdown();
+        clock.advance(std::time::Duration::from_nanos(100)).unwrap();
+        assert!(runtime.poll().is_empty());
+        assert!(!runtime.has_pending());
+        assert!(!runtime.has_completion(later));
+        assert!(runtime.try_submit_timer(1).is_err());
     }
 
     #[test]

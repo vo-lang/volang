@@ -33,12 +33,20 @@ fn system_time_unix_nano(time: SystemTime) -> i64 {
 }
 
 fn timesys_now_unix_nano(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_i64(0, now_unix_nano());
+    let now = call
+        .try_io_mut()
+        .and_then(|io| io.manual_clock())
+        .map_or_else(now_unix_nano, |clock| clock.unix_nanos());
+    call.ret_i64(0, now);
     ExternResult::Ok
 }
 
 fn timesys_now_mono_nano(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_i64(0, now_mono_nano());
+    let now = call
+        .try_io_mut()
+        .and_then(|io| io.manual_clock())
+        .map_or_else(now_mono_nano, |clock| clock.monotonic_nanos());
+    call.ret_i64(0, now);
     ExternResult::Ok
 }
 
