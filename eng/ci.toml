@@ -372,7 +372,7 @@ artifacts = ["target/ci/artifacts/site"]
 [[task]]
 id = "nightly-language-native"
 artifacts = ["target/ci/test-runs"]
-commands = ["nightly-language-native-run", "nightly-native-aot-host-run"]
+commands = ["nightly-native-aot-tools", "nightly-language-native-run", "nightly-native-aot-host-run"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "exhaustive"
@@ -474,7 +474,7 @@ results = ["target/ci/results/nightly-stress-scheduler.json"]
 
 [[task]]
 id = "nightly-platform-macos"
-commands = ["nightly-platform-macos-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+commands = ["nightly-native-aot-tools", "nightly-platform-macos-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
 artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
@@ -492,7 +492,7 @@ results = ["target/ci/results/nightly-platform-macos.json", "target/ci/results/n
 
 [[task]]
 id = "nightly-platform-windows"
-commands = ["nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+commands = ["nightly-native-aot-tools", "nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
 inputs = ["*"]
 artifacts = ["target/ci/test-runs"]
 resource_group = "cargo"
@@ -854,3 +854,9 @@ argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "v
 timeout_seconds = 900
 failure_kind = "product"
 stdout_result = "target/ci/results/nightly-native-aot-host.json"
+
+[[command]]
+id = "nightly-native-aot-tools"
+argv = ["cargo", "build", "--locked", "--timings", "--release", "--no-default-features", "-p", "vo", "-p", "vo-aot-runtime", "-p", "vo-test"]
+timeout_seconds = 1800
+failure_kind = "product"
