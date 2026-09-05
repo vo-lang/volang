@@ -302,12 +302,18 @@ jobs:
           name: nightly-plan-${{ github.sha }}
           path: target/ci/plan-input
 
-      - name: Build repository tooling
-        run: cargo build --locked -p vo-dev
+      - name: Build and preserve repository tooling
+        run: |
+          cargo build --locked -p vo-dev
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          mkdir -p target/ci/bin
+          cp "target/debug/vo-dev$suffix" "target/ci/bin/vo-dev$suffix"
+          cmp "target/debug/vo-dev$suffix" "target/ci/bin/vo-dev$suffix"
 
       - name: Execute declared Nightly task
         run: >-
-          ./target/debug/vo-dev ci run
+          ./target/ci/bin/vo-dev ci run
           --plan target/ci/plan-input/plan.json
           --task "${{ matrix.task }}"
 

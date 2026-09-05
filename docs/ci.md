@@ -46,7 +46,10 @@ after execution. Task and command deadlines terminate the complete process
 group or Windows Job Object. Cancellation uses the same cleanup path. Commands
 run once using their declared argument vector and environment. Commands that
 explicitly select Bash use fail-fast scripts; the executor never implicitly
-expands an argument through a shell. Automatic retries remain disabled.
+expands an argument through a shell. Automatic retries remain disabled. Platform Nightly lanes
+run a byte-checked copy of `vo-dev` from `target/ci/bin`, allowing workspace
+Cargo tests to replace `target/debug/vo-dev.exe` while the executor remains alive
+on Windows.
 
 All Nightly language, stress, platform, fuzz and audit lanes use `ci run`.
 Their executable arguments and budgets live in `eng/ci.toml`; Actions installs
