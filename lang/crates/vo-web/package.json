@@ -58,7 +58,7 @@
     "clean": "rm -rf dist pkg aot-support"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^7.0.2"
   },
   "keywords": [
     "vo",
