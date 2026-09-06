@@ -353,10 +353,12 @@ jobs:
             *windows*)
               packaged_vo="$unpack/vo.exe"
               packaged_ui_runtime="$unpack/vo_ui_aot_runtime_native.lib"
+              ui_native="./target/${{ matrix.target }}/release/ui-native-aot-smoke.exe"
               ;;
             *)
               packaged_vo="$unpack/vo"
               packaged_ui_runtime="$unpack/libvo_ui_aot_runtime_native.a"
+              ui_native="./target/${{ matrix.target }}/release/ui-native-aot-smoke"
               ;;
           esac
           "$packaged_vo" ui build ui/examples/settings \
@@ -372,7 +374,8 @@ jobs:
           "$packaged_vo" build ui/examples/settings \
             --runtime="$packaged_ui_runtime" \
             --no-cache \
-            -o "./target/${{ matrix.target }}/release/ui-native-aot-smoke"
+            -o "$ui_native"
+          test -f "$ui_native"
           ./target/debug/vo-dev release probe-native-ui "${{ matrix.target }}"
 
       - name: Upload package
