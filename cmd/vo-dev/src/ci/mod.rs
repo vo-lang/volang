@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) use release_probe::probe_native_ui;
+pub(crate) use release_probe::{probe_cli_identity, probe_native_ui};
 
 pub(crate) struct VerifiedCertification {
     pub(crate) profile: String,

@@ -163,10 +163,14 @@ pub(crate) fn record_release_build(
     release: &ReleaseFile,
     target: &str,
     identity: &ReleaseIdentity,
+    verified_binary_sha256: &str,
 ) -> Result<()> {
     let binary_name = release_binary_name(release, target);
     let binary_path = release_binary_path(root, target, &binary_name);
     let binary = binary_record(&binary_path, &binary_name)?;
+    if binary.sha256 != verified_binary_sha256 {
+        bail!("release binary changed after its verified identity probe");
+    }
     let runtime_name = release_aot_runtime_name(target);
     let runtime_path = release_binary_path(root, target, runtime_name);
     let aot_runtime = binary_record(&runtime_path, runtime_name)?;
@@ -175,7 +179,6 @@ pub(crate) fn record_release_build(
     let ui_aot_runtime = binary_record(&ui_runtime_path, ui_runtime_name)?;
     let ui_web_runtime = ui_web_runtime_records(root)?;
     let ui_product = ui_product_evidence(root, identity)?;
-    validate_embedded_build_identity(&binary_path, identity)?;
     let receipt = ReleaseBuildReceipt {
         schema: BUILD_RECEIPT_SCHEMA,
         identity: identity.clone(),
@@ -987,46 +990,6 @@ fn validate_release_binary_size(size: u64) -> Result<()> {
     Ok(())
 }
 
-fn validate_embedded_build_identity(path: &Path, identity: &ReleaseIdentity) -> Result<()> {
-    for (field, value) in [
-        ("commit", identity.commit.as_bytes()),
-        ("build date", identity.build_date.as_bytes()),
-    ] {
-        if !file_contains(path, value)? {
-            bail!(
-                "release binary {} does not embed the verified {field} value",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn file_contains(path: &Path, needle: &[u8]) -> Result<bool> {
-    if needle.is_empty() {
-        return Ok(true);
-    }
-    let mut reader = BufReader::new(
-        File::open(path).with_context(|| format!("could not read {}", path.display()))?,
-    );
-    let mut carry = Vec::new();
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
-        let read = reader
-            .read(&mut chunk)
-            .with_context(|| format!("could not inspect {}", path.display()))?;
-        if read == 0 {
-            return Ok(false);
-        }
-        carry.extend_from_slice(&chunk[..read]);
-        if carry.windows(needle.len()).any(|window| window == needle) {
-            return Ok(true);
-        }
-        let keep = needle.len().saturating_sub(1).min(carry.len());
-        carry.drain(..carry.len() - keep);
-    }
-}
-
 fn release_binary_path(root: &Path, target: &str, binary_name: &str) -> PathBuf {
     root.join("target")
         .join(target)
@@ -1447,7 +1410,9 @@ mod tests {
         write_ui_web_runtime_fixture(&root);
         let release = sample_release(target);
 
-        record_release_build(&root, &release, target, &identity).unwrap();
+        let verified_binary = sha256_file(&binary_dir.join("vo")).unwrap();
+        assert!(record_release_build(&root, &release, target, &identity, &"0".repeat(64)).is_err());
+        record_release_build(&root, &release, target, &identity, &verified_binary).unwrap();
         let tarball = package_release_binary(&root, &release, target, &identity).unwrap();
         let first = fs::read(root.join(&tarball)).unwrap();
         package_release_binary(&root, &release, target, &identity).unwrap();
@@ -1466,7 +1431,14 @@ mod tests {
             .push_str("-candidate");
         // The production receipt cannot be reused by changing only CLI mode.
         assert!(package_release_binary(&root, &candidate_release, target, &candidate).is_err());
-        record_release_build(&root, &candidate_release, target, &candidate).unwrap();
+        record_release_build(
+            &root,
+            &candidate_release,
+            target,
+            &candidate,
+            &verified_binary,
+        )
+        .unwrap();
         let archive =
             package_release_binary(&root, &candidate_release, target, &candidate).unwrap();
         let directory = artifact_directory(&root, &candidate);

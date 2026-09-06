@@ -4,8 +4,8 @@ use crate::release_archive::{
     validate_release_artifacts, write_text_atomic,
 };
 use crate::release_config::{
-    artifact_name, lint_release_file, read_checked_sha256, release_artifact_files, release_target,
-    sha256_file,
+    artifact_name, lint_release_file, read_checked_sha256, release_artifact_files,
+    release_binary_name, release_target, sha256_file,
 };
 use crate::release_homebrew::{
     homebrew_checkout_path, homebrew_version_progression, replace_formula_target_sha,
@@ -373,6 +373,13 @@ fn build_with_identity(
         .current_dir(root);
     run_status(&mut command, &format!("cargo build {}", target.target))?;
 
+    let binary = root
+        .join("target")
+        .join(&target.target)
+        .join("release")
+        .join(release_binary_name(release, &target.target));
+    let verified_binary = crate::ci::probe_cli_identity(root, &binary, &target.target, identity)?;
+
     let mut runtime_command = Command::new("cargo");
     runtime_command
         .args([
@@ -403,7 +410,7 @@ fn build_with_identity(
         &format!("cargo build AOT runtime {}", target.target),
     )?;
     require_ui_web_runtime(root)?;
-    record_release_build(root, release, &target.target, identity)
+    record_release_build(root, release, &target.target, identity, &verified_binary)
 }
 
 fn build_ui_web_runtime(root: &Path) -> Result<()> {

@@ -323,6 +323,12 @@ and the declared CLI build arguments, optimization level and LTO configuration.
 Candidate mode exposes no publication or Homebrew operation. The workflow's
 production publish job runs only for `repository_dispatch`.
 
+Each freshly built CLI must execute `--version` within 60 seconds and return the
+exact version, full source commit and commit date. A typed probe preserves its
+output and exit status. The executable digest must remain unchanged during the
+probe and through build receipt creation; archive provenance binds those same
+bytes. Identity validation does not depend on the compiler's string layout.
+
 Every target tests VM/JIT and a linked Native AOT executable, unpacks its archive,
 builds a Web UI application, creates and tests a starter project, then links and
 opens a real native UI window using the packaged runtime. The window probe has a
