@@ -290,7 +290,9 @@ and reopen persistence. The Pages environment remains the deployment authority.
 ### Release
 
 `.github/workflows/release.yml` accepts an existing `v*` tag through the
-default-branch `repository_dispatch` entry. Preflight verifies tag identity,
+default-branch `repository_dispatch` entry. The tag must equal the main commit
+that triggered the workflow, so GitHub's OIDC provenance and the checked-out
+release source identify the same commit. Preflight verifies tag identity,
 main reachability, protected release policy, and the exact successful main CI
 bundle. That bundle must contain full Web, Linux, macOS, and Windows UI
 evidence.
@@ -298,9 +300,11 @@ evidence.
 The browser VM/Core Wasm runtime is built once and shared by every target job.
 Target jobs build and smoke-test Linux x64/arm64, macOS x64/arm64, and Windows
 x64 archives. Each archive provenance record binds the product-certified CI
-bundle digest and commit. Publication re-verifies all archives and the bundle,
-creates GitHub build-provenance attestations, then crosses the protected
-`release` environment.
+bundle digest and commit. Inside the protected `release` job, publication
+re-verifies all archives and the bundle, creates GitHub build-provenance
+attestations, and verifies each archive's signed source commit, workflow commit,
+main ref and hosted runner identity before publishing. Signed bundles and
+verification results are retained even when a later publication step fails.
 
 Manual dispatch rehearses the same five targets using a successful full CI run
 for the exact selected branch commit. `release candidate metadata|matrix|build|package|verify`
