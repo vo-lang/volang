@@ -150,8 +150,11 @@ The explicit `native-aot` language target builds the compiler and core runtime
 once per profile, then compiles, links and executes each selected program in
 an isolated case directory. At most two AOT cases may link concurrently. Each
 case retains phase logs and a receipt with runner, compiler, runtime and executable
-digests. Successful executables are removed after execution to bound disk use;
-build or execution failures retain any executable produced for diagnosis.
+digests. After each worker and its process wrapper exit, the coordinator verifies
+the executable's retained bytes against the receipt and removes it to bound disk
+use. Verification or cleanup errors are infrastructure failures and preserve the
+file for diagnosis; cleanup has no retries. Build or execution failures also
+retain any executable produced.
 Differential failures retain the logs and executable digest. The case deadline includes
 both build and execution, and process-group cleanup also terminates descendants.
 Successful program output is compared with the matching VM case when present.

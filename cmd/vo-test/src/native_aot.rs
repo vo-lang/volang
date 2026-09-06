@@ -149,15 +149,30 @@ pub(crate) fn run(job: &TestJob) -> Result<()> {
     if !execution.stderr.is_empty() {
         eprint!("{}", execution.stderr);
     }
-    // The receipt preserves exact executable identity. Successful executables
-    // are removed to bound the disk footprint of a whole language suite.
-    fs::remove_file(binary)?;
+    // The coordinator owns cleanup after this worker and its process wrapper
+    // have exited, so no worker-owned process handles overlap file deletion.
+    Ok(())
+}
+
+pub(crate) fn finish_job(dir: &Path, job: &TestJob) -> Result<()> {
+    validate_receipt(dir, job)?;
+    if job.expect.kind != "fail" {
+        let binary = dir.join(if cfg!(windows) {
+            "program.exe"
+        } else {
+            "program"
+        });
+        fs::remove_file(&binary).map_err(|error| format!(
+            "Native AOT coordinator could not remove verified executable {} after worker exit: {error}",
+            binary.display()
+        ))?;
+    }
     Ok(())
 }
 
 pub(crate) fn validate_receipt(dir: &Path, job: &TestJob) -> Result<()> {
-    // The executable is removed on success; canonicalize its retained parent.
-    // This also keeps Windows extended-length path spellings consistent with input().
+    // The coordinator checks the retained executable before removing it. Keep
+    // Windows extended-length path spellings consistent with input().
     let expected_binary = dir.canonicalize()?.join(if cfg!(windows) {
         "program.exe"
     } else {
@@ -212,6 +227,7 @@ pub(crate) fn validate_receipt(dir: &Path, job: &TestJob) -> Result<()> {
             .is_none_or(|code| code == 0)
             || !receipt["execution"].is_null()
             || !receipt["binary"].is_null()
+            || expected_binary.try_exists()?
         {
             return Err("Native AOT rejection receipt contains an accepted program".into());
         }
@@ -227,6 +243,11 @@ pub(crate) fn validate_receipt(dir: &Path, job: &TestJob) -> Result<()> {
             .is_none_or(|bytes| bytes == 0)
     {
         return Err("Native AOT receipt does not prove a built and executed program".into());
+    }
+    if job.expect.kind != "fail"
+        && serde_json::to_value(input(&expected_binary)?)? != receipt["binary"]
+    {
+        return Err("Native AOT executable changed after execution; retained for diagnosis".into());
     }
     Ok(())
 }
@@ -265,12 +286,17 @@ mod tests {
             "requires_host":[],"resource_group":null,
         }))
         .unwrap();
+        let binary = dir.join(if cfg!(windows) {
+            "program.exe"
+        } else {
+            "program"
+        });
+        fs::write(&binary, b"verified executable fixture").unwrap();
         let valid = json!({
             "schema":"volang.native-aot-test.v1","job":job.id,"toolchain":toolchain,
             "build":{"exit_code":0,"elapsed_ms":1,"error":null},
             "execution":{"exit_code":0,"elapsed_ms":1,"error":null},
-            "binary":{"path":dir.join(if cfg!(windows) { "program.exe" } else { "program" }),
-                "sha256":"c".repeat(64),"bytes":30},
+            "binary":input(&binary).unwrap(),
         });
         let check = |receipt: &serde_json::Value, job: &TestJob| {
             fs::write(
@@ -288,6 +314,7 @@ mod tests {
             ("/execution/exit_code", json!(1)),
             ("/execution/error", json!("timeout")),
             ("/binary/sha256", json!("invalid")),
+            ("/binary/sha256", json!("c".repeat(64))),
             ("/binary/path", json!("another-program")),
             ("/binary/bytes", json!(0)),
         ] {
@@ -301,6 +328,34 @@ mod tests {
             .unwrap()
             .remove("error");
         assert!(check(&missing, &job).is_err());
+        check(&valid, &job).unwrap();
+        fs::write(&binary, b"modified executable fixture").unwrap();
+        let error = finish_job(&dir, &job).unwrap_err().to_string();
+        assert!(error.contains("executable changed"), "{error}");
+        assert!(binary.is_file(), "unverified executable must be retained");
+        fs::write(&binary, b"verified executable fixture").unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Model a worker-held handle that permits verification reads but
+            // denies deletion. Release ownership explicitly; never sleep/retry.
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1) // FILE_SHARE_READ, without FILE_SHARE_DELETE.
+                .open(&binary)
+                .unwrap();
+            let error = finish_job(&dir, &job).unwrap_err().to_string();
+            assert!(error.contains("coordinator could not remove"), "{error}");
+            assert!(binary.is_file());
+            drop(handle);
+        }
+        finish_job(&dir, &job).unwrap();
+        assert!(!binary.exists(), "verified executable must be cleaned up");
+        assert!(dir.join("native-aot.json").is_file());
+        assert!(
+            finish_job(&dir, &job).is_err(),
+            "missing executable cannot prove success"
+        );
         job.expect.kind = "fail".into();
         assert!(check(&valid, &job).is_err());
         let mut rejected = valid;
@@ -308,6 +363,11 @@ mod tests {
         rejected["execution"] = json!(null);
         rejected["binary"] = json!(null);
         check(&rejected, &job).unwrap();
+        finish_job(&dir, &job).unwrap();
+        fs::write(&binary, b"unexpected executable").unwrap();
+        assert!(finish_job(&dir, &job).is_err());
+        assert!(binary.is_file(), "unexpected executable must be retained");
+        fs::remove_file(binary).unwrap();
         rejected["build"]["exit_code"] = json!(null);
         assert!(check(&rejected, &job).is_err());
         fs::remove_dir_all(root).unwrap();

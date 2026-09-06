@@ -784,7 +784,7 @@ fn run_job_subprocess(
     )?;
     let receipt_error =
         if job.backend == "native-aot" && output.status.success() && output.error.is_none() {
-            native_aot::validate_receipt(&dir, job)
+            native_aot::finish_job(&dir, job)
                 .err()
                 .map(|error| error.to_string())
         } else {
