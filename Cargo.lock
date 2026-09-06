@@ -709,6 +709,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codespan-reporting"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
+dependencies = [
+ "serde",
+ "termcolor",
+ "unicode-width",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2541,7 +2552,7 @@ dependencies = [
  "bit-set",
  "bitflags 2.11.0",
  "cfg_aliases",
- "codespan-reporting",
+ "codespan-reporting 0.11.1",
  "hexf-parse",
  "indexmap",
  "log",
@@ -4719,7 +4730,7 @@ dependencies = [
 name = "vo-common"
 version = "0.1.4"
 dependencies = [
- "codespan-reporting",
+ "codespan-reporting 0.13.1",
  "sha2",
  "vo-common-core",
  "zip",
