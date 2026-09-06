@@ -107,6 +107,13 @@ the separate Web jobs took 816 and 714 seconds, below the 2712-second Windows
 critical path even when added sequentially. Whole Cargo output trees remain
 uncached across runs.
 
+Embedded standard-library assets use deterministic zero timestamps. Their source
+bytes still come from the canonical `lang/stdlib` tree; host checkout times and
+`SOURCE_DATE_EPOCH` do not enter the embedded metadata. This keeps separately
+built site and release Web runtimes comparable by byte digest, including when
+compiler caches reuse the embedding proc macro's output. Native debug source
+editing continues to read live files through the source API.
+
 Both Web profiles execute their ordered commands through `ci run`. The full
 profile retains all 31 semantic probes and tests the final Studio directory
 through the complete journey, startup, canary and offline lifecycle contracts.

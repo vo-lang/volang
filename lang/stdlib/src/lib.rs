@@ -9,10 +9,10 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-#[cfg(any(not(debug_assertions), target_arch = "wasm32"))]
+#[cfg(any(test, not(debug_assertions), target_arch = "wasm32"))]
 use rust_embed::RustEmbed;
 
-#[cfg(any(not(debug_assertions), target_arch = "wasm32"))]
+#[cfg(any(test, not(debug_assertions), target_arch = "wasm32"))]
 #[derive(RustEmbed)]
 #[folder = "."]
 #[include = "stdlib.toml"]
@@ -185,6 +185,19 @@ mod tests {
             assert!(!is_source_asset(path), "{path}");
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_metadata_ignores_host_timestamps() {
+        let disk = disk_assets();
+        let paths = EmbeddedAssets::iter().collect::<Vec<_>>();
+        assert_eq!(paths.len(), disk.len());
+        for path in paths {
+            let asset = EmbeddedAssets::get(path.as_ref()).expect("embedded stdlib asset");
+            assert_eq!(asset.data.as_ref(), disk[path.as_ref()], "{path}");
+            assert_eq!(asset.metadata.last_modified(), Some(0), "{path}");
+            assert_eq!(asset.metadata.created(), Some(0), "{path}");
+        }
     }
 
     #[test]
