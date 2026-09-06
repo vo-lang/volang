@@ -700,7 +700,11 @@ fn load_real_path_compile_context_with_options(
     if let WorkspaceDiscovery::Explicit(selected) = &options.workspace {
         if selected.is_absolute() {
             if let Ok(canonical) = selected.canonicalize() {
-                if canonical != *selected {
+                #[cfg(target_os = "macos")]
+                let exact_spelling = path_has_exact_host_spelling(selected).unwrap_or(false);
+                #[cfg(not(target_os = "macos"))]
+                let exact_spelling = true;
+                if canonical != *selected || !exact_spelling {
                     return Err(CompileError::ModuleSystem(
                         ModuleSystemError::new(
                             ModuleSystemStage::Workspace,
@@ -772,6 +776,45 @@ fn load_real_path_compile_context_with_options(
         workspace,
         module_cache_read_lease,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn path_has_exact_host_spelling(path: &Path) -> std::io::Result<bool> {
+    use std::path::Component;
+
+    let mut current = PathBuf::new();
+    let mut components = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => return Ok(false),
+            Component::Normal(expected) => {
+                components += 1;
+                if components > 256 {
+                    return Ok(false);
+                }
+                let mut exact = false;
+                let mut entries = 0usize;
+                for entry in fs::read_dir(&current)? {
+                    entries += 1;
+                    if entries > 65_536 {
+                        return Ok(false);
+                    }
+                    if entry?.file_name() == expected {
+                        exact = true;
+                        break;
+                    }
+                }
+                if !exact {
+                    return Ok(false);
+                }
+                current.push(expected);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn real_path_compile_context_for_single_file(
@@ -1825,7 +1868,7 @@ mod cache_lease_tests {
 
     #[test]
     fn cached_native_spec_holds_read_lease_until_last_clone_drops() {
-        let root = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "vo-engine-cache-lease-{}-{:?}",
             std::process::id(),
             std::thread::current().id(),

@@ -179,11 +179,9 @@ they do not claim universal workload speedups.
 - Component Model output remains gated on a canonical typed capability ABI for
   transferred Volang values.
 
-Repository-wide `vo-dev lint all` still stops at the separately documented
-Studio/Vogui governance gate: Studio intentionally has no `vogui-protocol` Git
-revision until the external Vogui rewrite has a legal commit identity. Filling
-that field with an invented revision would violate the repository contract and
-is outside the AOT delivery.
+Repository-wide certification is now governed by `eng/ci.toml`. The generated
+plan binds every required test receipt to the source commit, toolchain, test
+manifest and workflow identity before a candidate can be promoted.
 
 The evidence establishes complete Core Wasm execution for accepted programs,
 a production-oriented ABI and host, and an optimizer/root architecture whose

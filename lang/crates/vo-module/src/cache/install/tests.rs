@@ -800,7 +800,7 @@ fn archive_scan_enforces_aggregate_complete_path_key_bytes() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn cache_transactions_use_unique_bounded_names_and_exclusive_files() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     let cache_lock = crate::cache::mutation_lock::CacheMutationLock::shared(temp.path()).unwrap();
     let first = cache_lock.begin_transaction(&"a".repeat(255)).unwrap();
     let second = cache_lock.begin_transaction(&"a".repeat(255)).unwrap();
@@ -818,7 +818,7 @@ fn cache_transactions_use_unique_bounded_names_and_exclusive_files() {
 
 #[test]
 fn authenticated_cached_source_skips_network_fetch() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     let fixture = pure_fixture();
     write_cached_source(temp.path(), &fixture);
     let registry = TestRegistry::from_fixture(&fixture);
@@ -840,7 +840,7 @@ fn authenticated_cached_source_skips_network_fetch() {
 fn native_cache_installs_and_revalidates_authenticated_executable_mode() {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     initialize_cache_root(temp.path());
     let fixture = executable_fixture();
     let registry = TestRegistry::from_fixture(&fixture);
@@ -880,7 +880,7 @@ fn native_cache_installs_and_revalidates_authenticated_executable_mode() {
 
 #[test]
 fn tree_binding_failure_precedes_cache_mutation() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     initialize_cache_root(temp.path());
     let mut fixture = pure_fixture();
     let alternate_package = TreeManifest {
@@ -916,7 +916,7 @@ fn tree_binding_failure_precedes_cache_mutation() {
 
 #[test]
 fn invalid_existing_artifact_is_preserved() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     let (fixture, artifact, artifact_bytes) = native_fixture();
     let module_dir = write_cached_source(temp.path(), &fixture);
     let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id).unwrap();
@@ -946,7 +946,7 @@ fn invalid_existing_artifact_is_preserved() {
 
 #[test]
 fn invalid_existing_source_fails_before_registry_access() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     let fixture = pure_fixture();
     let module_dir = write_cached_source(temp.path(), &fixture);
     std::fs::write(module_dir.join("lib.vo"), b"tampered").unwrap();
@@ -974,7 +974,7 @@ fn invalid_existing_source_fails_before_registry_access() {
 #[test]
 fn cached_release_and_package_tampering_are_detected() {
     for target in ["vo.release.json", "vo.tree.json", "lib.vo"] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let fixture = pure_fixture();
         let module_dir = write_cached_source(temp.path(), &fixture);
         std::fs::write(module_dir.join(target), b"tampered").unwrap();
@@ -988,7 +988,7 @@ fn cached_release_and_package_tampering_are_detected() {
 
 #[test]
 fn locked_install_materializes_authenticated_protocol_objects() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     let fixture = pure_fixture();
     let registry = TestRegistry::from_fixture(&fixture);
     populate_locked_modules(
@@ -1021,7 +1021,7 @@ fn locked_install_materializes_authenticated_protocol_objects() {
 
 #[test]
 fn install_rejects_extension_artifact_contract_mismatch() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_tempdir().unwrap();
     let fixture = fixture_with(
         concat!(
             "format = 1\nmodule = \"github.com/acme/lib\"\nversion = \"1.2.3\"\n",
@@ -1048,7 +1048,7 @@ fn install_rejects_extension_artifact_contract_mismatch() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn committed_source_and_artifact_durability_failures_are_reported() {
-    let source_root = tempfile::tempdir().unwrap();
+    let source_root = crate::test_tempdir().unwrap();
     let fixture = pure_fixture();
     let registry = TestRegistry::from_fixture(&fixture);
     let destination =
@@ -1068,7 +1068,7 @@ fn committed_source_and_artifact_durability_failures_are_reported() {
         crate::cache::mutation_lock::CacheMutationLock::shared(source_root.path()).unwrap();
     validate_source_cache_entry_with_fs(&read_lock.file_system(), &fixture.locked).unwrap();
 
-    let artifact_root = tempfile::tempdir().unwrap();
+    let artifact_root = crate::test_tempdir().unwrap();
     let (fixture, artifact, artifact_bytes) = native_fixture();
     let module_dir = write_cached_source(artifact_root.path(), &fixture);
     let relative_artifact_path = crate::artifact::artifact_relative_path(&artifact.id).unwrap();
@@ -1107,9 +1107,9 @@ fn source_install_rejects_symlinked_cache_components_without_touching_targets() 
     use std::os::unix::fs::symlink;
 
     for symlink_version in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         initialize_cache_root(root.path());
-        let outside = tempfile::tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let sentinel = outside.path().join("keep.vo");
         std::fs::write(&sentinel, b"package keep\n").unwrap();
         let fixture = pure_fixture();

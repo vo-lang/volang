@@ -2,7 +2,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-artifact_dir="$repo_root/target/rewrite-validation"
+artifact_dir="$repo_root/target/ci/results/ecosystem"
 if [ "$#" -gt 1 ]; then
   echo "usage: $0 [artifact-name.json]" >&2
   exit 2

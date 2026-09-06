@@ -1,0 +1,16 @@
+name: Setup browser contracts
+description: Install the locked Playwright version and its matching Chromium build.
+runs:
+  using: composite
+  steps:
+    - name: Select browser installation directory
+      shell: bash
+      run: echo "PLAYWRIGHT_BROWSERS_PATH=$GITHUB_WORKSPACE/target/playwright-browsers" >> "$GITHUB_ENV"
+    - name: Install browser test dependencies
+      shell: bash
+      working-directory: eng/browser
+      run: npm ci
+    - name: Install pinned Chromium and system libraries
+      shell: bash
+      working-directory: eng/browser
+      run: npx --no-install playwright install --with-deps chromium

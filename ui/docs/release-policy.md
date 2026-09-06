@@ -9,7 +9,9 @@ the capabilities an application uses.
 
 `ui/roadmap.toml` is the frozen M0-M7 foundation record. A publishable
 1.0 release must pass `vo-dev ui-certify --check`, every declared product gate,
-and every required CI job from one tagged candidate commit.
+and every required CI job from one candidate commit. `--check` validates the
+authored declaration; `vo-dev ui-certify --evidence <bundle>` grants
+`product-certified` status after verifying the complete platform evidence.
 
 The Volang UI 1.0 product status is derived from:
 
@@ -90,10 +92,11 @@ unavailable.
 
 ## Publication authority
 
-The release workflow rebuilds all required targets, verifies VM/JIT startup,
-links Native AOT applications, builds Web AOT and server artifacts, creates a
-fresh starter, executes contract probes and showcases, checks receipts and
-provenance, and publishes only through an approved protected environment.
+The main workflow builds and tests all required targets once, binds their
+receipts to one commit, and exposes exact promotable candidates. The release
+workflow verifies that certification, builds distributable target archives,
+tests each packaged CLI and UI runtime, checks receipts and provenance, and
+publishes only through an approved protected environment.
 
 Release receipts bind the CLI, language runtime, UI runtime, official modules,
 browser adapter, native libraries, templates, and target artifacts by size and

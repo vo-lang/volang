@@ -37,8 +37,9 @@ evidence. Renderer-neutral hover, pressed, focus-ring, and 0–5 elevation
 properties keep those visual states equivalent across Web SSR/live DOM and
 desktop retained paint.
 `vo-dev ui-certify --check` requires exact baseline coverage and
-rejects incomplete conformant rows. A successful 1.0 certification reports
-`63 implemented, 0 governed gaps`.
+rejects incomplete conformant rows. A valid declaration reports
+`63 implemented, 0 governed gaps`; product certification additionally requires
+the CI evidence bundle.
 
 ## Controlled interaction model
 

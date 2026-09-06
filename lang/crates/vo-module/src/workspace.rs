@@ -2977,8 +2977,8 @@ mod tests {
     fn source_scan_rejects_linked_entries_without_following_them() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         std::fs::write(
             outside.path().join("outside.vo"),
             "package outside\nimport \"github.com/acme/hidden\"\n",
@@ -2995,7 +2995,7 @@ mod tests {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     #[test]
     fn source_scan_rejects_leaf_rebinding_during_the_source_read() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let target = root.path().join("main.vo");
         let replacement = root.path().join("replacement.vo");
         let parked_original = root.path().join("main.parked");
@@ -3138,7 +3138,7 @@ mod tests {
 
     #[test]
     fn automatic_workspace_discovery_does_not_absorb_scoped_realfs_root_from_parent_start() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::write(temp.path().join("vo.work"), "format = 1\nmembers = []\n").unwrap();
 
         let selected = discover_workfile_in_with(
@@ -3173,7 +3173,11 @@ mod tests {
             discover_workfile_in_with(&fs, Path::new("repo/child"), &WorkspaceDiscovery::Auto)
                 .expect_err("a child vo.work directory must block parent discovery");
         let detail = error.to_string();
-        assert!(detail.contains("repo/child/vo.work"), "{detail}");
+        let invalid_workfile = Path::new("repo").join("child").join("vo.work");
+        assert!(
+            detail.contains(&invalid_workfile.display().to_string()),
+            "{detail}"
+        );
         assert!(detail.contains("Directory"), "{detail}");
     }
 
@@ -3198,7 +3202,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn stable_regular_text_reader_rejects_a_linked_leaf() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::write(
             temp.path().join("real.vo.mod"),
             "format = 1\nmodule = \"local/test\"\nversion = \"0.1.0\"\n",
@@ -3231,7 +3235,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn stable_regular_text_reader_rejects_a_linked_parent() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir(temp.path().join("real")).unwrap();
         std::fs::write(
             temp.path().join("real/vo.mod"),
@@ -3296,7 +3300,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn stable_regular_bytes_reader_rejects_same_size_in_place_content_drift() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let target = temp.path().join("vo.mod");
         std::fs::write(&target, b"generation-a").unwrap();
         let hook_target = normalize_host_stable_regular_file_path(&target);
@@ -3327,7 +3331,7 @@ mod tests {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     #[test]
     fn stable_regular_bytes_reader_rejects_leaf_aba_while_descriptor_is_open() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let target = temp.path().join("vo.mod");
         let replacement = temp.path().join("replacement.vo.mod");
         let parked_original = temp.path().join("original.parked");
@@ -3378,7 +3382,7 @@ mod tests {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let fifo = temp.path().join("manifest.pipe");
         let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
         let result = unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
@@ -3405,7 +3409,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn explicit_vowork_rejects_a_linked_intermediate_directory_from_namespace_root() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("config/real")).unwrap();
         std::fs::write(
             temp.path().join("config/real/selected.vo.work"),
@@ -3434,7 +3438,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn explicit_vowork_rejects_a_linked_workfile_leaf() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("config")).unwrap();
         std::fs::write(
             temp.path().join("config/real.vo.work"),
@@ -3466,7 +3470,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn automatic_vowork_rejects_a_selected_file_below_a_linked_parent() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("real/project")).unwrap();
         std::fs::write(
             temp.path().join("real/vo.work"),
@@ -3495,7 +3499,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn workspace_rejects_parent_path_replacement_while_reading_workfile() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         for directory in ["config", "replacement"] {
             std::fs::create_dir(temp.path().join(directory)).unwrap();
             std::fs::write(
@@ -3521,7 +3525,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn workspace_rejects_workfile_parent_replacement_while_loading_members() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let workfile = "format = 1\nmembers = [\"member\"]\n";
         for (directory, module) in [
             ("config", "github.com/acme/original"),
@@ -3556,7 +3560,7 @@ mod tests {
     #[cfg(any(all(unix, not(target_arch = "wasm32")), windows))]
     #[test]
     fn workspace_member_rejects_equivalent_directory_rebinding_after_discovery() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("app")).unwrap();
         std::fs::write(
@@ -3716,7 +3720,7 @@ mod tests {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     #[test]
     fn workspace_member_discovery_rejects_vo_mod_leaf_rebinding() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let member = root.path().join("lib");
         std::fs::create_dir(&member).unwrap();
         std::fs::write(
@@ -3825,7 +3829,7 @@ mod tests {
 
     #[test]
     fn real_workspace_rejects_duplicate_module_identities_including_the_active_root() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("app")).unwrap();
         std::fs::create_dir_all(temp.path().join("app-copy")).unwrap();
         std::fs::write(
@@ -3855,7 +3859,7 @@ mod tests {
 
     #[test]
     fn host_alias_of_the_active_directory_is_filtered_by_physical_identity() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir(temp.path().join("target")).unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
@@ -3885,7 +3889,7 @@ mod tests {
 
     #[test]
     fn explicit_workspace_accepts_an_active_root_host_alias() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir(temp.path().join("target")).unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
@@ -4044,7 +4048,7 @@ mod tests {
 
     #[test]
     fn workspace_rejects_distinct_paths_with_the_same_host_directory_identity() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::create_dir(temp.path().join("target")).unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
@@ -4072,7 +4076,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn workspace_rejects_a_symbolic_link_in_the_middle_of_a_member_path() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("real/member")).unwrap();
         std::fs::write(
@@ -4109,7 +4113,7 @@ mod tests {
 
     #[test]
     fn workspace_member_rejects_parent_components_before_filesystem_access() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         std::fs::write(
             temp.path().join("vo.work"),
             "format = 1\nmembers = [\"../outside\"]\n",

@@ -156,9 +156,11 @@ vo ui build -o dist
 
 See the [UI overview](ui/README.md), [architecture](ui/docs/architecture.md),
 [platform capabilities](ui/docs/platform-capabilities.md), and [release
-policy](ui/docs/release-policy.md). Maintainers can validate the frozen
-foundation, active VUI 1.0 capability graph, E0-E8 delivery plan, contract
-probes, target matrix, and evidence paths with `vo-dev ui-certify --check`.
+policy](ui/docs/release-policy.md). Maintainers can validate the authored UI
+contract, capability graph, delivery plan, probes, target matrix, and evidence
+declarations with `vo-dev ui-certify --check`. A release earns
+`product-certified` only after `vo-dev ui-certify --evidence` verifies the
+complete Web, Linux, macOS, and Windows CI bundle for one source commit.
 
 ## Development
 

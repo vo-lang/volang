@@ -1574,8 +1574,12 @@ mod tests {
         };
 
         let error = StdSource::with_fs(fs).resolve("broken").unwrap_err();
-        assert!(error.contains("failed to read source file 'broken/source.vo'"));
-        assert!(error.contains("injected source read failure"));
+        let path = Path::new("broken").join("source.vo");
+        assert!(
+            error.contains(&format!("failed to read source file '{}'", path.display())),
+            "{error}"
+        );
+        assert!(error.contains("injected source read failure"), "{error}");
     }
 
     #[test]
@@ -1615,8 +1619,12 @@ mod tests {
         };
 
         let error = StdSource::with_fs(fs).resolve("broken").unwrap_err();
-        assert!(error.contains("failed to read module file 'broken/vo.mod'"));
-        assert!(error.contains("injected source read failure"));
+        let path = Path::new("broken").join("vo.mod");
+        assert!(
+            error.contains(&format!("failed to read module file '{}'", path.display())),
+            "{error}"
+        );
+        assert!(error.contains("injected source read failure"), "{error}");
     }
 
     #[test]

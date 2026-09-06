@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ManifestFile {
     pub(crate) version: u32,
     pub(crate) suite: String,
@@ -15,12 +16,18 @@ pub(crate) struct ManifestFile {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ManifestCase {
     pub(crate) id: String,
     pub(crate) kind: String,
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) targets: Vec<String>,
+    #[serde(default = "all_host_platforms")]
+    pub(crate) platforms: Vec<String>,
+    #[serde(default)]
+    pub(crate) requires_host: Vec<String>,
+    pub(crate) resource_group: Option<String>,
     pub(crate) matrix: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
@@ -34,6 +41,8 @@ pub(crate) struct ManifestCase {
     #[serde(default)]
     pub(crate) blank: bool,
     pub(crate) expect: Option<toml::Value>,
+    #[serde(default)]
+    pub(crate) expect_by_target: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +66,9 @@ struct TestCatalogCase {
     kind: String,
     path: String,
     targets: Vec<String>,
+    platforms: Vec<String>,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
     matrix: Option<String>,
     tags: Vec<String>,
     owner: Option<String>,
@@ -64,6 +76,7 @@ struct TestCatalogCase {
     timeout: BTreeMap<String, u64>,
     reason: Option<String>,
     expect: CaseExpect,
+    expect_by_target: BTreeMap<String, CaseExpect>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +89,9 @@ struct TestStats {
     skip_entries: usize,
     cases_by_kind: BTreeMap<String, usize>,
     cases_by_matrix: BTreeMap<String, usize>,
+    cases_by_platform: BTreeMap<String, usize>,
+    cases_by_host_capability: BTreeMap<String, usize>,
+    cases_by_resource_group: BTreeMap<String, usize>,
     jobs_by_target: BTreeMap<String, usize>,
     skips_by_target: BTreeMap<String, usize>,
     cases_by_tag: BTreeMap<String, usize>,
@@ -111,11 +127,71 @@ struct TestExplain {
     reasons: Vec<String>,
 }
 
+pub(crate) fn all_host_platforms() -> Vec<String> {
+    ["linux", "macos", "windows"].map(str::to_string).to_vec()
+}
+
+pub(crate) fn validate_host_platform(platform: &str) -> Result<()> {
+    if !matches!(platform, "linux" | "macos" | "windows") {
+        bail!("unsupported test host platform {platform}");
+    }
+    Ok(())
+}
+
+fn validate_host_contract(case: &ManifestCase) -> Result<()> {
+    let platforms = case.platforms.iter().collect::<BTreeSet<_>>();
+    if platforms.is_empty() || platforms.len() != case.platforms.len() {
+        bail!("case {} requires nonempty unique host platforms", case.id);
+    }
+    for platform in &case.platforms {
+        validate_host_platform(platform)?;
+    }
+    let capabilities = case.requires_host.iter().collect::<BTreeSet<_>>();
+    if capabilities.len() != case.requires_host.len()
+        || capabilities
+            .iter()
+            .any(|value| !matches!(value.as_str(), "loopback" | "symlink"))
+    {
+        bail!(
+            "case {} has unknown or duplicate host requirements",
+            case.id
+        );
+    }
+    if case.resource_group.as_ref().is_some_and(|group| {
+        group.is_empty()
+            || group.len() > 64
+            || !group
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }) {
+        bail!("case {} has invalid resource group", case.id);
+    }
+    if (platforms.len() != all_host_platforms().len()
+        || !capabilities.is_empty()
+        || case.resource_group.is_some())
+        && (case.owner.as_deref().is_none_or(str::is_empty) || !has_manifest_reason(case))
+    {
+        bail!(
+            "case {} host restrictions require owner and reason",
+            case.id
+        );
+    }
+    if case.id == "os-symlink-host-contract" && !case.requires_host.is_empty() {
+        bail!("symlink host contract must execute with unavailable capability too");
+    }
+    Ok(())
+}
+
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
     let path = root.join("tests/lang/manifest.toml");
     let text =
         fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))
+    let manifest: ManifestFile =
+        toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))?;
+    for case in &manifest.cases {
+        validate_host_contract(case)?;
+    }
+    Ok(manifest)
 }
 
 pub(crate) fn manifest_case_path(
@@ -148,7 +224,25 @@ pub(crate) fn manifest_case_path(
 }
 
 pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
-    let Some(value) = &case.expect else {
+    parse_expect_value(case, case.expect.as_ref())
+}
+
+pub(crate) fn parse_target_expect(case: &ManifestCase, target: &str) -> Result<CaseExpect> {
+    parse_expect_value(
+        case,
+        case.expect_by_target.get(target).or(case.expect.as_ref()),
+    )
+}
+
+fn target_expectations(case: &ManifestCase) -> Result<BTreeMap<String, CaseExpect>> {
+    case.expect_by_target
+        .keys()
+        .map(|target| Ok((target.clone(), parse_target_expect(case, target)?)))
+        .collect()
+}
+
+fn parse_expect_value(case: &ManifestCase, value: Option<&toml::Value>) -> Result<CaseExpect> {
+    let Some(value) = value else {
         return Ok(CaseExpect {
             kind: "pass".to_string(),
             patterns: Vec::new(),
@@ -273,7 +367,11 @@ fn validate_case_path_target_ownership(
                 .intersection(&effective_targets)
                 .cloned()
                 .collect::<Vec<_>>();
-            if !overlap.is_empty() {
+            let shared_platform = existing
+                .platforms
+                .iter()
+                .any(|platform| case.platforms.contains(platform));
+            if !overlap.is_empty() && shared_platform {
                 bail!(
                     "test cases {} ({}) and {} ({}) register the same normalized path {} with overlapping target(s): {}",
                     existing.id,
@@ -286,7 +384,7 @@ fn validate_case_path_target_ownership(
             }
             if !has_manifest_reason(existing) || !has_manifest_reason(case) {
                 bail!(
-                    "test cases {} and {} reuse normalized path {} with disjoint targets; both cases must declare an audited reason",
+                    "test cases {} and {} reuse normalized path {} with disjoint targets or host platforms; both cases must declare an audited reason",
                     existing.id,
                     case.id,
                     normalized_path
@@ -303,10 +401,62 @@ fn validate_case_path_target_ownership(
 }
 
 fn target_supports_expected_compile_failure(test_config: &TestConfig, target_name: &str) -> bool {
-    test_config
-        .targets
-        .get(target_name)
-        .is_some_and(|target| matches!(target.kind.as_str(), "compile" | "wasm"))
+    test_config.targets.get(target_name).is_some_and(|target| {
+        matches!(target.kind.as_str(), "compile" | "wasm") || target.backend == "native-aot"
+    })
+}
+
+pub(crate) fn validate_target_expectations(case: &ManifestCase, config: &TestConfig) -> Result<()> {
+    if case.expect_by_target.is_empty() {
+        return Ok(());
+    }
+    if parse_case_expect(case)?.kind != "pass"
+        || !has_manifest_reason(case)
+        || case
+            .owner
+            .as_deref()
+            .is_none_or(|owner| owner.trim().is_empty())
+    {
+        bail!(
+            "case {} target build rejections require a passing base, owner and reason",
+            case.id
+        );
+    }
+    let resolved = resolved_case_targets(case, config)?;
+    let resolved = resolved.iter().map(String::as_str).collect::<HashSet<_>>();
+    for name in case.expect_by_target.keys() {
+        let target = config
+            .targets
+            .get(name)
+            .ok_or_else(|| anyhow!("case {} rejects unknown target {name}", case.id))?;
+        if !target_applies_to_resolved_case(name, target, &resolved)
+            || has_target_name(&case.skip, name)
+            || (target.inherit_compatible_skips
+                && target
+                    .compatible_with
+                    .as_deref()
+                    .is_some_and(|compatible| has_target_name(&case.skip, compatible)))
+            || !target_supports_expected_compile_failure(config, name)
+        {
+            bail!(
+                "case {} build rejection target {name} is unavailable or cannot check compilation",
+                case.id
+            );
+        }
+        let expect = parse_target_expect(case, name)?;
+        if expect.kind != "fail"
+            || expect.patterns.is_empty()
+            || expect.patterns.iter().any(|pattern| {
+                pattern.trim().is_empty() || pattern.contains("TODO_EXPECTED_DIAGNOSTIC")
+            })
+        {
+            bail!(
+                "case {} target {name} requires explicit build rejection diagnostics",
+                case.id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn case_uses_only_compile_failure_targets(
@@ -412,6 +562,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
         if !ids.insert(case.id.clone()) {
             bail!("duplicate test case id: {}", case.id);
         }
+        validate_target_expectations(case, &test_config)?;
         validate_manifest_case_shape(case)?;
         validate_manifest_case_metadata(case, &test_config, strict)?;
         if case.kind != "file" && case.kind != "project" && case.kind != "zip" {
@@ -610,6 +761,9 @@ fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
     let mut skip_count = 0usize;
     let mut by_kind = BTreeMap::new();
     let mut by_matrix = BTreeMap::new();
+    let mut by_platform = BTreeMap::new();
+    let mut by_host = BTreeMap::new();
+    let mut by_resource = BTreeMap::new();
     let mut jobs_by_target = BTreeMap::new();
     let mut skips_by_target = BTreeMap::new();
     let mut by_tag = BTreeMap::new();
@@ -617,6 +771,15 @@ fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
 
     for case in &manifest.cases {
         case_count += 1;
+        for platform in &case.platforms {
+            increment(&mut by_platform, platform);
+        }
+        for host in &case.requires_host {
+            increment(&mut by_host, host);
+        }
+        if let Some(group) = &case.resource_group {
+            increment(&mut by_resource, group);
+        }
         increment(&mut by_kind, &case.kind);
         increment(
             &mut by_matrix,
@@ -670,6 +833,9 @@ fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
         skip_entries: skip_count,
         cases_by_kind: by_kind,
         cases_by_matrix: by_matrix,
+        cases_by_platform: by_platform,
+        cases_by_host_capability: by_host,
+        cases_by_resource_group: by_resource,
         jobs_by_target,
         skips_by_target,
         cases_by_tag: by_tag,
@@ -685,6 +851,9 @@ fn print_test_stats_text(stats: &TestStats) {
     println!("  skip entries: {}", stats.skip_entries);
     print_count_map("cases by kind", &stats.cases_by_kind);
     print_count_map("cases by matrix", &stats.cases_by_matrix);
+    print_count_map("cases by host platform", &stats.cases_by_platform);
+    print_count_map("cases by host capability", &stats.cases_by_host_capability);
+    print_count_map("cases by resource group", &stats.cases_by_resource_group);
     print_count_map("jobs by target", &stats.jobs_by_target);
     print_count_map("skips by target", &stats.skips_by_target);
     print_count_map("cases by tag", &stats.cases_by_tag);
@@ -712,6 +881,9 @@ pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Resu
             kind: case.kind.clone(),
             path: manifest_case_path(root, &manifest, case)?,
             targets: resolved_case_targets(case, &test_config)?,
+            platforms: case.platforms.clone(),
+            requires_host: case.requires_host.clone(),
+            resource_group: case.resource_group.clone(),
             matrix: case.matrix.clone(),
             tags: case.tags.clone(),
             owner: case.owner.clone(),
@@ -719,6 +891,7 @@ pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Resu
             timeout: case.timeout.clone(),
             reason: case.reason.clone(),
             expect: parse_case_expect(case)?,
+            expect_by_target: target_expectations(case)?,
         });
     }
 
@@ -856,6 +1029,13 @@ pub(crate) fn explain_test_case(
     if !case.timeout.is_empty() {
         reasons.push(format!("target timeouts {:?}", case.timeout));
     }
+    for (target, expectation) in target_expectations(case)? {
+        reasons.push(format!(
+            "target {target} must reject the build with {:?} because {}",
+            expectation.patterns,
+            case.reason.as_deref().unwrap_or_default()
+        ));
+    }
     if expect.kind == "fail" {
         reasons.push(format!(
             "expected compile failure because {}",
@@ -870,12 +1050,16 @@ pub(crate) fn explain_test_case(
             kind: case.kind.clone(),
             path: manifest_case_path(root, &manifest, case)?,
             targets: selected_targets.clone(),
+            platforms: case.platforms.clone(),
+            requires_host: case.requires_host.clone(),
+            resource_group: case.resource_group.clone(),
             matrix: case.matrix.clone(),
             tags: case.tags.clone(),
             owner: case.owner.clone(),
             skip: case.skip.clone(),
             timeout: case.timeout.clone(),
             reason: case.reason.clone(),
+            expect_by_target: target_expectations(case)?,
             expect,
         },
         selected_targets,
@@ -894,6 +1078,19 @@ pub(crate) fn explain_test_case(
         println!(
             "  owner: {}",
             explanation.case.owner.as_deref().unwrap_or("(missing)")
+        );
+        println!("  platforms: {}", explanation.case.platforms.join(","));
+        println!(
+            "  host requirements: {}",
+            explanation.case.requires_host.join(",")
+        );
+        println!(
+            "  resource group: {}",
+            explanation
+                .case
+                .resource_group
+                .as_deref()
+                .unwrap_or("(none)")
         );
         println!("  tags: {}", explanation.case.tags.join(","));
         println!("  targets: {}", explanation.selected_targets.join(","));
@@ -1498,12 +1695,14 @@ mod tests {
                     name: name.to_string(),
                     kind: kind.to_string(),
                     backend: name.to_string(),
+                    native_aot_runtime_features: Vec::new(),
                     compatible_with: None,
                     inherit_compatible_skips: true,
                     env: BTreeMap::new(),
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
+                    debug_build_args: Vec::new(),
                     runner_command: Vec::new(),
                     prepare_commands: Vec::new(),
                 },
@@ -1551,12 +1750,14 @@ mod tests {
                     name: name.to_string(),
                     kind: "native".to_string(),
                     backend: backend.to_string(),
+                    native_aot_runtime_features: Vec::new(),
                     compatible_with: None,
                     inherit_compatible_skips: true,
                     env,
                     default_timeout_sec: 20,
                     build_command: Vec::new(),
                     release_build_args: Vec::new(),
+                    debug_build_args: Vec::new(),
                     runner_command: Vec::new(),
                     prepare_commands: Vec::new(),
                 },
@@ -1595,6 +1796,9 @@ mod tests {
         reason: Option<&str>,
     ) -> ManifestCase {
         ManifestCase {
+            platforms: all_host_platforms(),
+            requires_host: Vec::new(),
+            resource_group: None,
             id: id.to_string(),
             kind: "file".to_string(),
             path: path.to_string(),
@@ -1607,6 +1811,7 @@ mod tests {
             reason: reason.map(str::to_string),
             zip_root: None,
             blank: false,
+            expect_by_target: BTreeMap::new(),
             expect: Some(toml::Value::String("pass".to_string())),
         }
     }
@@ -1643,6 +1848,54 @@ mod tests {
             normalize_manifest_case_path("cases\\dyn\\typed_array.vo"),
             "cases/dyn/typed_array.vo"
         );
+    }
+
+    #[test]
+    fn target_build_rejections_preserve_the_passing_host_contract() {
+        let mut config = compile_failure_test_config();
+        let mut aot = config.targets["vm"].clone();
+        aot.name = "native-aot".into();
+        aot.backend = "native-aot".into();
+        aot.compatible_with = Some("vm".into());
+        config.targets.insert(aot.name.clone(), aot);
+        let mut case = path_case(
+            "host",
+            "cases/host.vo",
+            "native",
+            &[],
+            Some("compiler host required"),
+        );
+        case.expect_by_target.insert(
+            "native-aot".into(),
+            toml::Value::Table(toml::map::Map::from_iter([(
+                "fail".into(),
+                toml::Value::String("missing_host_v1".into()),
+            )])),
+        );
+        validate_target_expectations(&case, &config).unwrap();
+        assert_eq!(parse_target_expect(&case, "vm").unwrap().kind, "pass");
+        assert_eq!(
+            parse_target_expect(&case, "native-aot").unwrap().patterns,
+            ["missing_host_v1"]
+        );
+        for mutate in [
+            |case: &mut ManifestCase| case.owner = None,
+            |case: &mut ManifestCase| case.reason = None,
+            |case: &mut ManifestCase| case.skip.push("native-aot".into()),
+            |case: &mut ManifestCase| case.skip.push("vm".into()),
+            |case: &mut ManifestCase| {
+                case.expect_by_target
+                    .insert("unknown".into(), toml::Value::String("pass".into()));
+            },
+            |case: &mut ManifestCase| {
+                case.expect_by_target
+                    .insert("native-aot".into(), toml::Value::String("pass".into()));
+            },
+        ] {
+            let mut invalid = case.clone();
+            mutate(&mut invalid);
+            assert!(validate_target_expectations(&invalid, &config).is_err());
+        }
     }
 
     #[test]
@@ -1696,6 +1949,9 @@ mod tests {
 
     fn expected_failure_case(matrix: &str) -> ManifestCase {
         ManifestCase {
+            platforms: all_host_platforms(),
+            requires_host: Vec::new(),
+            resource_group: None,
             id: format!("{matrix}-failure"),
             kind: "file".to_string(),
             path: "cases/typechecker/failure.vo".to_string(),
@@ -1708,6 +1964,7 @@ mod tests {
             reason: Some("target-specific diagnostic".to_string()),
             zip_root: None,
             blank: false,
+            expect_by_target: BTreeMap::new(),
             expect: Some(toml::Value::Table(toml::map::Map::from_iter([(
                 "fail".to_string(),
                 toml::Value::Array(vec![toml::Value::String("diagnostic".to_string())]),
@@ -1743,12 +2000,14 @@ mod tests {
             name: "wasm-aot".to_string(),
             kind: "wasm".to_string(),
             backend: "wasm-aot".to_string(),
+            native_aot_runtime_features: Vec::new(),
             compatible_with: Some("wasm".to_string()),
             inherit_compatible_skips: false,
             env: BTreeMap::new(),
             default_timeout_sec: 20,
             build_command: Vec::new(),
             release_build_args: Vec::new(),
+            debug_build_args: Vec::new(),
             runner_command: Vec::new(),
             prepare_commands: Vec::new(),
         };
@@ -1790,6 +2049,9 @@ mod tests {
             skip_entries: 0,
             cases_by_kind: BTreeMap::new(),
             cases_by_matrix: BTreeMap::new(),
+            cases_by_platform: BTreeMap::new(),
+            cases_by_host_capability: BTreeMap::new(),
+            cases_by_resource_group: BTreeMap::new(),
             jobs_by_target: BTreeMap::new(),
             skips_by_target: BTreeMap::new(),
             cases_by_tag: BTreeMap::new(),
@@ -1815,6 +2077,9 @@ mod tests {
             ("jit_loop_entries_min".to_string(), toml::Value::Integer(1)),
         ]);
         ManifestCase {
+            platforms: all_host_platforms(),
+            requires_host: Vec::new(),
+            resource_group: None,
             id: "runtime.loop-entry-contract".to_string(),
             kind: "file".to_string(),
             path: "cases/runtime/loop_entry_contract.vo".to_string(),
@@ -1827,6 +2092,7 @@ mod tests {
             reason: None,
             zip_root: None,
             blank: false,
+            expect_by_target: BTreeMap::new(),
             expect: Some(toml::Value::Table(expect)),
         }
     }

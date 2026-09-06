@@ -1612,6 +1612,31 @@ mod tests {
         wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
             .validate_all(&artifact.bytes)
             .unwrap();
+
+        let operators = wasmparser::Parser::new(0)
+            .parse_all(&artifact.bytes)
+            .filter_map(|payload| match payload.unwrap() {
+                wasmparser::Payload::CodeSectionEntry(body) => Some(
+                    body.get_operators_reader()
+                        .unwrap()
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(operators.iter().any(|operator| matches!(
+            operator,
+            wasmparser::Operator::Call { function_index }
+                if *function_index == codegen::MATERIALIZED_FRAME_ALLOC_FUNCTION_INDEX
+        )));
+        assert!(operators.iter().any(|operator| matches!(
+            operator,
+            wasmparser::Operator::Call { function_index }
+                if *function_index == codegen::MATERIALIZED_FRAME_FREE_FUNCTION_INDEX
+        )));
     }
 
     #[test]

@@ -35,16 +35,21 @@ const brotliBytes = brotliCompressSync(artifact, {
   params: { [constants.BROTLI_PARAM_QUALITY]: 11 },
 }).byteLength;
 const brotliLimit = byteLimit("brotli-limit");
+const rawLimit = options.has("raw-limit") ? byteLimit("raw-limit") : null;
 const gzipLimit = options.has("gzip-limit") ? byteLimit("gzip-limit") : null;
 const report = {
   schema: "volang.ui.web-artifact-size.v1",
   label: required("label"),
   artifact: artifactPath,
   raw_bytes: artifact.byteLength,
+  raw_limit_bytes: rawLimit,
+  raw_remaining_bytes: rawLimit === null ? null : rawLimit - artifact.byteLength,
   gzip_bytes: gzipBytes,
   gzip_limit_bytes: gzipLimit,
+  gzip_remaining_bytes: gzipLimit === null ? null : gzipLimit - gzipBytes,
   brotli_bytes: brotliBytes,
   brotli_limit_bytes: brotliLimit,
+  brotli_remaining_bytes: brotliLimit - brotliBytes,
   remaining_bytes: brotliLimit - brotliBytes,
   artifact_sha256: createHash("sha256").update(artifact).digest("hex"),
 };
@@ -54,6 +59,9 @@ if (output) writeFileSync(output, encoded);
 process.stdout.write(encoded);
 if (brotliBytes > brotliLimit) {
   throw new Error(`${report.label} Brotli image ${brotliBytes} exceeds ${brotliLimit}`);
+}
+if (rawLimit !== null && artifact.byteLength > rawLimit) {
+  throw new Error(`${report.label} raw image ${artifact.byteLength} exceeds ${rawLimit}`);
 }
 if (gzipLimit !== null && gzipBytes > gzipLimit) {
   throw new Error(`${report.label} gzip image ${gzipBytes} exceeds ${gzipLimit}`);

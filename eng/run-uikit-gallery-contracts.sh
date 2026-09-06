@@ -74,6 +74,17 @@ actions=(
   "--input=Command palette query=publish"
   "--key=Command palette query=Enter"
   "--wait-text=Command executed: release.publish"
+  "--wait-absent-text=Build verified WebAssembly and desktop AOT artifacts"
+  "--click=Open commands"
+  "--click=Run project"
+  "--wait-text=Command executed: run.start"
+  "--wait-absent-text=Create a typed Volang workspace"
+  "--click=Open commands"
+  "--key=Open file=Escape"
+  "--wait-absent-text=Create a typed Volang workspace"
+  "--click=Open commands"
+  "--key=Command palette query=Escape"
+  "--wait-absent-text=Create a typed Volang workspace"
 )
 
 "$vo_binary" ui test "$gallery" --mode=vm \

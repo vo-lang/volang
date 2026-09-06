@@ -13,6 +13,11 @@ publish = false
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+default = []
+toolchain-host = ["dep:vo-engine"]
+
 [dependencies]
 vo-aot-runtime-core = { path = "../vo-aot-runtime-core" }
 vo-vm = { path = "../vo-vm", features = ["jit"] }
+vo-engine = { path = "../vo-engine", optional = true }

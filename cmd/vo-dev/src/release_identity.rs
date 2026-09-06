@@ -9,17 +9,53 @@ use std::process::Command;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseIdentity {
-    pub(crate) tag: String,
+    pub(crate) purpose: ReleasePurpose,
+    pub(crate) tag: Option<String>,
+    pub(crate) candidate_id: Option<String>,
     pub(crate) version: String,
     pub(crate) commit: String,
     pub(crate) build_date: String,
     pub(crate) source_date_epoch: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReleasePurpose {
+    Release,
+    Candidate,
+}
+
+impl ReleasePurpose {
+    pub(crate) fn certification_profile(self) -> &'static str {
+        match self {
+            Self::Release => "main",
+            Self::Candidate => "merge",
+        }
+    }
+}
+
+impl ReleaseIdentity {
+    pub(crate) fn require_publishable(&self) -> Result<()> {
+        if self.purpose != ReleasePurpose::Release
+            || self.candidate_id.is_some()
+            || self.tag.as_deref() != Some(format!("v{}", self.version).as_str())
+        {
+            bail!("candidate identity cannot authorize publication");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SourceCleanliness {
     AllFiles,
     TrackedFiles,
+}
+
+pub(crate) fn checkout_commit(root: &Path) -> Result<String> {
+    let head = git_output(root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    validate_commit("current HEAD", &head)?;
+    Ok(head)
 }
 
 pub(crate) fn workspace_version(root: &Path) -> Result<String> {
@@ -70,8 +106,7 @@ pub(crate) fn resolve_release_identity(
     })?;
     let version = validated_release_version(root, &tag)?;
 
-    let head = git_output(root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    validate_commit("current HEAD", &head)?;
+    let head = checkout_commit(root)?;
     let tag_ref = format!("refs/tags/{tag}^{{commit}}");
     let tag_commit = git_output(root, &["rev-parse", "--verify", &tag_ref])?;
     validate_commit("release tag commit", &tag_commit)?;
@@ -98,7 +133,41 @@ pub(crate) fn resolve_release_identity(
 
     ensure_clean_checkout(root, cleanliness)?;
 
-    let date_and_epoch = git_output(root, &["show", "-s", "--format=%cI%n%ct", &head])?;
+    let (build_date, source_date_epoch) = commit_metadata(root, &head)?;
+    Ok(ReleaseIdentity {
+        purpose: ReleasePurpose::Release,
+        tag: Some(tag),
+        candidate_id: None,
+        version,
+        commit: head,
+        build_date,
+        source_date_epoch,
+    })
+}
+
+pub(crate) fn resolve_candidate_identity(root: &Path) -> Result<ReleaseIdentity> {
+    if env::var_os("VO_RELEASE_TAG").is_some() {
+        bail!("candidate build must not claim a release tag");
+    }
+    ensure_clean_checkout(root, SourceCleanliness::AllFiles)?;
+    let head = checkout_commit(root)?;
+    for name in ["VO_BUILD_COMMIT", "GITHUB_SHA"] {
+        validate_optional_env(name, &head)?;
+    }
+    let (build_date, source_date_epoch) = commit_metadata(root, &head)?;
+    Ok(ReleaseIdentity {
+        purpose: ReleasePurpose::Candidate,
+        tag: None,
+        candidate_id: Some(format!("ci-{head}")),
+        version: workspace_version(root)?,
+        commit: head,
+        build_date,
+        source_date_epoch,
+    })
+}
+
+fn commit_metadata(root: &Path, head: &str) -> Result<(String, u64)> {
+    let date_and_epoch = git_output(root, &["show", "-s", "--format=%cI%n%ct", head])?;
     let mut lines = date_and_epoch.lines();
     let build_date = lines
         .next()
@@ -122,13 +191,7 @@ pub(crate) fn resolve_release_identity(
     validate_optional_env("VO_BUILD_DATE", &build_date)?;
     validate_optional_env("SOURCE_DATE_EPOCH", epoch_text)?;
 
-    Ok(ReleaseIdentity {
-        tag,
-        version,
-        commit: head,
-        build_date,
-        source_date_epoch,
-    })
+    Ok((build_date, source_date_epoch))
 }
 
 fn consistent_value(
@@ -160,7 +223,7 @@ fn validate_optional_env(name: &str, expected: &str) -> Result<()> {
         return Ok(());
     };
     if actual != expected {
-        bail!("{name} must match tagged commit metadata: expected {expected}, got {actual}");
+        bail!("{name} must match commit metadata: expected {expected}, got {actual}");
     }
     Ok(())
 }
@@ -213,6 +276,28 @@ fn validate_canonical_semver(field: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidates_cannot_gain_publication_authority_by_claiming_a_tag() {
+        let mut identity = ReleaseIdentity {
+            purpose: ReleasePurpose::Candidate,
+            tag: None,
+            candidate_id: Some(format!("ci-{}", "a".repeat(40))),
+            version: "0.1.1".into(),
+            commit: "a".repeat(40),
+            build_date: "2026-01-02T03:04:05+00:00".into(),
+            source_date_epoch: 1_767_323_045,
+        };
+        assert!(identity.require_publishable().is_err());
+        identity.tag = Some("v0.1.1".into());
+        assert!(identity.require_publishable().is_err());
+        identity.purpose = ReleasePurpose::Release;
+        assert!(identity.require_publishable().is_err());
+        identity.candidate_id = None;
+        assert!(identity.require_publishable().is_ok());
+        identity.tag = Some("v0.1.2".into());
+        assert!(identity.require_publishable().is_err());
+    }
 
     #[test]
     fn canonical_semver_rejects_leading_zeroes() {

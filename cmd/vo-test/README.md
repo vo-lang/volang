@@ -39,7 +39,7 @@ Jobs whose backend is `jit` must enter JIT-compiled function or loop code at
 least once. A run that completes entirely through the interpreter is reported as
 a failed JIT job, even if the program output is otherwise correct.
 
-The plan schema is `volang.test-plan.v1`. A job contains:
+The plan schema is `volang.test-plan.v2`. A job contains:
 
 - `id`: stable job id.
 - `case_id`: manifest case id.
@@ -53,7 +53,7 @@ The plan schema is `volang.test-plan.v1`. A job contains:
   target-specific `timeout = { ... }` manifest override.
 - `expect`: pass/fail expectation and diagnostic patterns.
 
-`--format json` emits one `volang.test-result.v1` object with aggregate counts
+`--format json` emits one `volang.test-result.v2` object with aggregate counts
 and per-job status records, including any `matrix`, `tags`, and `owner`
 metadata carried by the plan.
 
@@ -63,3 +63,21 @@ Direct mode selection such as `vo-test both`, `vo-test vm`, or `vo-test jit`
 is intentionally unsupported. New test discovery, target expansion, skips,
 expected failures, and repository-wide orchestration belong in `vo-dev` and
 `tests/lang/manifest.toml`.
+
+Host selection uses the physical `host_platform` (`linux`, `macos`, or
+`windows`), independently of the VM/JIT/AOT backend. Execution rejects a plan
+for another host; `vo-dev test plan --host-platform windows` can inspect its
+selection on any supported machine. Manifest `platforms` defaults to all three
+hosts. Exclusions are reported before weighted sharding.
+
+Each job carries `requires_host` and a nullable `resource_group`. The runner
+independently probes declared `loopback` (TCP and UDP) and `symlink` requirements.
+Missing prerequisites produce failed jobs with capability observations and a
+`portability` or `infrastructure` classification. The symlink behavior contract
+observes both supported and unavailable hosts without requiring availability.
+Runner-owned probe environment cannot be overridden by the plan.
+
+Within one plan, jobs in a declared resource group exclude one another; waiting
+groups do not occupy workers that can execute independent cases. The existing
+two-linker limit remains separate. Results retain requirements, resource names,
+capability observations and typed failure classifications.

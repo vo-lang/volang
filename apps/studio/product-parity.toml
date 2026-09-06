@@ -5,21 +5,21 @@ baseline = "legacy-studio-product-surface"
 id = "home"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json"]
 acceptance = "The initial surface presents product orientation, starters, and local projects without entering the editor first."
 
 [[capability]]
 id = "starter-gallery"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/examples/examples.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
+evidence = ["apps/studio/examples/examples.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json"]
 acceptance = "At least the eleven legacy language topics plus maintained UIKit starters open as persistent editable projects."
 
 [[capability]]
 id = "starter-edit-run"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "One click opens main.vo; edits participate in analysis/save; VM or JIT run and UI preview use the same snapshot."
 
 [[capability]]
@@ -40,7 +40,7 @@ acceptance = "Projects can be imported/opened, persisted, listed, and reopened a
 id = "project-search"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json"]
 acceptance = "The project catalog can be filtered by name without changing the persisted recent-project order."
 
 [[capability]]
@@ -96,42 +96,42 @@ acceptance = "Remove local, forget catalog, delete cloud, and delete everywhere 
 id = "workbench"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Resizable workspace, explorer, multi-buffer editor, save/save-all, undo/redo, find, diagnostics, search, console, preview, and commands work from one state model."
 
 [[capability]]
 id = "responsive-workbench"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "Desktop and compact layouts keep project actions, explorer, editor, contextual output, documentation, preview, and source control usable without page-level horizontal overflow."
 
 [[capability]]
 id = "diagnostic-navigation"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json"]
 acceptance = "Compiler failures retain their reported file, line, and column; activating a problem opens the file, scrolls to the range, moves the selection, and returns focus to the editor on Web and desktop."
 
 [[capability]]
 id = "command-palette"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json"]
 acceptance = "The accessible filtered command palette covers navigation, editing, preview, sharing, and explicit VM/JIT execution with a full-viewport modal overlay."
 
 [[capability]]
 id = "independent-runner"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
+evidence = ["apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json", ".github/workflows/ci.yml#ui_platform"]
 acceptance = "A shareable chromeless runner owns loading, failure recovery, stop, and return-to-Studio flows on Web and desktop."
 
 [[capability]]
 id = "documentation-center"
 status = "implemented"
 targets = ["web", "desktop"]
-evidence = ["apps/studio/documentation/catalog.vo", "apps/studio/app/app.vo", "generated:target/rewrite-validation/volang-studio-aot-browser.json"]
+evidence = ["apps/studio/documentation/catalog.vo", "apps/studio/app/app.vo", "generated:target/ci/results/ui/volang-studio-aot-browser.json"]
 acceptance = "Searchable, routed, versioned documentation is generated from canonical language, specification, toolchain, and UI sources; its collapsible section tree, page outline, breadcrumb, and previous/next controls expose the maintained hierarchy; every page shows its source path and stale mirrors fail repository lint."
 
 [[capability]]

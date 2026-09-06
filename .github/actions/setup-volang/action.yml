@@ -1,0 +1,79 @@
+name: Setup Volang toolchain
+description: Install the pinned Rust toolchain and configure shared compiler caching.
+
+inputs:
+  components:
+    description: Comma-separated rustup components.
+    required: false
+    default: ""
+  wasm:
+    description: Install wasm32-unknown-unknown.
+    required: false
+    default: "false"
+  compiler-cache:
+    description: Enable the GitHub Actions sccache backend.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Select native Git Bash on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $git = (Get-Command git.exe -ErrorAction Stop).Source
+        $gitRoot = Split-Path (Split-Path $git -Parent) -Parent
+        $bashDirectory = Join-Path $gitRoot 'bin'
+        $bash = Join-Path $bashDirectory 'bash.exe'
+        if (!(Test-Path -LiteralPath $bash -PathType Leaf)) {
+          throw "Git Bash is unavailable beside the selected Git installation"
+        }
+        & $bash --version
+        if ($LASTEXITCODE -ne 0) { throw "Git Bash preflight failed" }
+        # The Rust executor resolves declared bash commands through PATH.
+        # Put Git Bash before Windows' WSL compatibility entry point.
+        $bashDirectory >> $env:GITHUB_PATH
+
+    - name: Install pinned Rust
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+        INSTALL_WASM: ${{ inputs.wasm }}
+      run: |
+        args=(toolchain install 1.94.0 --profile minimal)
+        if [ -n "$COMPONENTS" ]; then
+          IFS=',' read -ra components <<< "$COMPONENTS"
+          for component in "${components[@]}"; do
+            args+=(--component "$component")
+          done
+        fi
+        rustup "${args[@]}"
+        if [ "$INSTALL_WASM" = "true" ]; then
+          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
+        fi
+        rustup default 1.94.0
+
+    - name: Cache Cargo downloads
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+    - name: Install sccache
+      # sccache 0.17 exceeds Windows' command-line limit for web-sys check-cfg.
+      # Cargo's direct rustc invocation uses a response file for this crate.
+      if: inputs.compiler-cache == 'true' && runner.os != 'Windows'
+      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      with:
+        version: v0.17.0
+
+    - name: Enable compiler cache
+      if: inputs.compiler-cache == 'true' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=5G" >> "$GITHUB_ENV"

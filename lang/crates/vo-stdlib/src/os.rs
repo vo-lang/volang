@@ -16,7 +16,7 @@ use std::os::unix::fs::{symlink, DirBuilderExt, FileTypeExt, OpenOptionsExt, Per
 #[cfg(all(feature = "std", unix))]
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 #[cfg(all(feature = "std", windows))]
-use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::fs::{symlink_dir, symlink_file, FileExt, OpenOptionsExt};
 #[cfg(all(feature = "std", windows))]
 use std::os::windows::io::AsHandle;
 #[cfg(feature = "std")]
@@ -211,7 +211,7 @@ fn cleanup_file_handle(fd: i32, cleanup_token: IoResourceToken) {
     }
 }
 
-#[cfg(all(feature = "std", any(unix, test)))]
+#[cfg(all(feature = "std", any(unix, windows, test)))]
 fn discard_file(io: &mut IoRuntime, fd: i32) {
     if let Some(file) = remove_file(fd) {
         io.disarm_resource_cleanup(file.cleanup_token);
@@ -387,7 +387,10 @@ fn open_file_for_times(path: &std::path::Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
-        options.access_mode(FILE_WRITE_ATTRIBUTES);
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     }
     #[cfg(not(windows))]
     options.read(true);
@@ -524,7 +527,15 @@ fn open_file_with_mode(path: &std::path::Path, flag: i32, perm: u32) -> std::io:
     #[cfg(windows)]
     {
         const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+        // Read-only directory handles need BACKUP_SEMANTICS. Writable opens
+        // must still fail for directories, as on Unix and in Go's OpenFile.
+        let mut native_flags = if flag & 0x3 == O_RDONLY as i32 {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
         if flag & O_CREATE as i32 != 0 && perm & 0o222 == 0 {
             // CreateFile applies creation attributes only when it creates the
             // path, matching Go's Windows OpenFile behavior without changing
@@ -532,8 +543,9 @@ fn open_file_with_mode(path: &std::path::Path, flag: i32, perm: u32) -> std::io:
             options.attributes(FILE_ATTRIBUTE_READONLY);
         }
         if flag & O_SYNC as i32 != 0 {
-            options.custom_flags(FILE_FLAG_WRITE_THROUGH);
+            native_flags |= FILE_FLAG_WRITE_THROUGH;
         }
+        options.custom_flags(native_flags);
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -2124,7 +2136,40 @@ fn os_symlink(call: &mut ExternCallContext) -> ExternResult {
             Err(e) => write_io_error(call, slots::RET_0, e),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let result =
+            path_arg(call, slots::ARG_OLDNAME, "symbolic link target").and_then(|oldname| {
+                path_arg(call, slots::ARG_NEWNAME, "symbolic link path").and_then(|newname| {
+                    let target = if oldname.is_absolute() {
+                        oldname.clone()
+                    } else {
+                        newname
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .join(&oldname)
+                    };
+                    match fs::metadata(target) {
+                        Ok(metadata) if metadata.is_dir() => symlink_dir(oldname, newname),
+                        Ok(_) => symlink_file(oldname, newname),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            let target = oldname.as_os_str().to_string_lossy();
+                            if target.ends_with('/') || target.ends_with('\\') {
+                                symlink_dir(oldname, newname)
+                            } else {
+                                symlink_file(oldname, newname)
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+            });
+        match result {
+            Ok(_) => write_nil_error(call, slots::RET_0),
+            Err(e) => write_io_error(call, slots::RET_0, e),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         write_error_to(call, slots::RET_0, "symlink not supported");
     }
@@ -2575,20 +2620,24 @@ fn os_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
 
 // ==================== Pipe ====================
 
-#[cfg(all(feature = "std", unix))]
+#[cfg(all(feature = "std", any(unix, windows)))]
 #[vostd_fn("os", "nativePipe", std)]
 fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
+    #[cfg(unix)]
+    let pipe = nix::unistd::pipe()
+        .map(|(reader, writer)| (File::from(reader), File::from(writer)))
+        .map_err(std::io::Error::from);
+    #[cfg(windows)]
+    let pipe = std::io::pipe().map(|(reader, writer)| {
+        use std::os::windows::io::OwnedHandle;
+        (
+            File::from(OwnedHandle::from(reader)),
+            File::from(OwnedHandle::from(writer)),
+        )
+    });
 
-    match nix::unistd::pipe() {
-        Ok((read_fd, write_fd)) => {
-            let rfd_raw = read_fd.into_raw_fd();
-            let wfd_raw = write_fd.into_raw_fd();
-
-            // Wrap raw fds into File and register in our handle system
-            let r_file = unsafe { File::from_raw_fd(rfd_raw) };
-            let w_file = unsafe { File::from_raw_fd(wfd_raw) };
-
+    match pipe {
+        Ok((r_file, w_file)) => {
             let rfd = match register_file(call.io_mut(), r_file, false) {
                 Ok(fd) => fd,
                 Err(error) => {
@@ -2621,7 +2670,7 @@ fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-#[cfg(all(feature = "std", not(unix)))]
+#[cfg(all(feature = "std", not(any(unix, windows))))]
 #[vostd_fn("os", "nativePipe", std)]
 fn os_native_pipe(call: &mut ExternCallContext) -> ExternResult {
     call.ret_i64(slots::RET_0, -1);
@@ -2975,7 +3024,7 @@ mod tests {
             3
         );
         assert_eq!(
-            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(0, 1)),
+            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(0, 100)),
             -1
         );
         assert_eq!(
@@ -2983,7 +3032,7 @@ mod tests {
             -1
         );
         assert_eq!(
-            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(1, 1)),
+            system_time_to_unix_seconds(UNIX_EPOCH - Duration::new(1, 100)),
             -2
         );
         for seconds in [-2, -1, 0, 1, 2] {
@@ -3011,6 +3060,22 @@ mod tests {
         assert_eq!(checked_chown_id(-1, "uid").unwrap(), u32::MAX);
         assert!(checked_chown_id(-2, "uid").is_err());
         assert!(next_file_handle(i32::MAX).is_err());
+    }
+
+    #[test]
+    fn directory_handles_support_readonly_open_and_modified_times() {
+        let root = TempDir::new("directory-open");
+        let file = open_file_with_mode(root.path(), O_RDONLY as i32, 0).unwrap();
+        assert!(file.metadata().unwrap().is_dir());
+        drop(file);
+        for flag in [O_WRONLY as i32, O_RDWR as i32] {
+            assert!(open_file_with_mode(root.path(), flag, 0).is_err());
+        }
+        let file = open_file_for_times(root.path()).unwrap();
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_modified(time).unwrap();
+        drop(file);
+        assert_eq!(fs::metadata(root.path()).unwrap().modified().unwrap(), time);
     }
 
     #[test]

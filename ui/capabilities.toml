@@ -368,8 +368,8 @@ required_for_1_0 = true
 owners = ["vo-ui-core", "vo-ui-web", "vo-ui-host-native"]
 required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 depends_on = []
-acceptance = ["Reverse events reject stale identities and preserve typed keyboard, pointer, scroll, and composition data."]
-evidence = ["ui/crates/vo-ui-core/src/lib.rs", "lang/crates/vo-web/js/ui_protocol.ts"]
+acceptance = ["Reverse events reject stale identities and preserve typed keyboard, pointer, scroll, and composition data.", "An editable combobox with an application key handler owns Enter activation before host delivery; closing cannot activate the restored trigger, and ordinary typing remains native."]
+evidence = ["ui/crates/vo-ui-core/src/lib.rs", "lang/crates/vo-web/js/ui_protocol.ts", "lang/crates/vo-web/js/ui_dom.ts", "lang/crates/vo-web/tests/ui_protocol.test.mjs", "eng/run-uikit-gallery-contracts.sh"]
 
 [[capability]]
 id = "focus-overlay-command"

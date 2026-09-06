@@ -2290,7 +2290,9 @@ func App() ui.View {
 	status := "idle"
 	if value.IsRunning() { status = "running" }
 	return ui.Column(ui.Text(status), ui.Padding(ui.Button("Animate", func(event ui.Event) {
-		value.AnimateTo(80, motion.Tween{Duration: 100 * time.Millisecond, Curve: motion.Linear})
+		if value.IsRunning() { value.Stop() } else {
+			value.AnimateTo(80, motion.Tween{Duration: 100 * time.Millisecond, Curve: motion.Linear})
+		}
 	}), value.Current()))
 }
 func main() {
@@ -2300,8 +2302,26 @@ func main() {
         );
         let compiled = workspace.compile();
         let mut final_values = Vec::new();
-        for mode in [RunMode::Vm, RunMode::Jit] {
-            let vm = build_native_gui_vm_for_mode(compiled.clone(), mode).unwrap();
+        for (mode, step_millis) in [RunMode::Vm, RunMode::Jit]
+            .into_iter()
+            .flat_map(|mode| [7_u64, 20, 37].into_iter().map(move |step| (mode, step)))
+        {
+            ensure_toolchain_host_installed();
+            let mut vm = match mode {
+                RunMode::Vm => Vm::new(),
+                RunMode::Jit => Vm::try_with_jit_config(vo_vm::JitConfig {
+                    call_threshold: 1,
+                    loop_threshold: 1,
+                    ..vo_vm::JitConfig::default()
+                })
+                .expect("JIT should initialize"),
+            };
+            register_ui_externs(&mut vm, &compiled.module).unwrap();
+            let extensions = load_extensions(&compiled.extensions).unwrap();
+            vm.load_verified_with_extensions(compiled.module.clone(), extensions)
+                .unwrap();
+            let clock = vo_runtime::io::ManualClock::new(1_700_000_000_000_000_000);
+            vm.set_manual_clock(clock.clone()).unwrap();
             let window = vo_app_protocol::GenerationalHandle {
                 index: 1,
                 generation: 1,
@@ -2321,15 +2341,63 @@ func main() {
             .unwrap();
             let clicked = click_first_native_button(&mut session, window, view, started);
             assert_eq!(clicked.revision, 2);
+            let padding = |session: &crate::NativeUiVmSession| {
+                session
+                    .renderer()
+                    .host()
+                    .tree()
+                    .nodes()
+                    .find_map(|node| {
+                        node.properties
+                            .get(&vo_ui_core::PropertyId::PADDING)
+                            .cloned()
+                    })
+                    .expect("animated padding")
+            };
+            clock.advance(std::time::Duration::from_millis(20)).unwrap();
+            session
+                .pump(started + std::time::Duration::from_millis(20))
+                .unwrap();
+            let intermediate = padding(&session);
+            assert!(
+                matches!(intermediate, vo_ui_core::Value::Length(vo_ui_core::Length::Px(value)) if value > 0.0 && value < 80.0)
+            );
+            click_first_native_button(
+                &mut session,
+                window,
+                view,
+                started + std::time::Duration::from_millis(20),
+            );
+            clock
+                .advance(std::time::Duration::from_millis(100))
+                .unwrap();
+            session
+                .pump(started + std::time::Duration::from_millis(120))
+                .unwrap();
+            assert_eq!(
+                padding(&session),
+                intermediate,
+                "cancelled animation must retain its last value"
+            );
+            click_first_native_button(
+                &mut session,
+                window,
+                view,
+                started + std::time::Duration::from_millis(120),
+            );
             let mut animation_frames = 0;
-            for _ in 0..12 {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                let report = session.pump(std::time::Instant::now()).unwrap();
+            for tick in 1..=240_u64.div_ceil(step_millis) {
+                clock
+                    .advance(std::time::Duration::from_millis(step_millis))
+                    .unwrap();
+                let report = session
+                    .pump(started + std::time::Duration::from_millis(120 + tick * step_millis))
+                    .unwrap();
                 animation_frames += report.applied_frames;
             }
             assert!(
                 animation_frames >= 2,
-                "motion worker should publish multiple coalesced frames; got {animation_frames}"
+                "motion worker should publish multiple coalesced frames at {step_millis}ms steps; got {animation_frames}"
             );
             let value = session
                 .renderer()
@@ -2346,9 +2414,15 @@ func main() {
                 value,
                 vo_ui_core::Value::Length(vo_ui_core::Length::Px(80.0))
             );
+            if mode == RunMode::Jit {
+                assert!(
+                    session.vm().jit_execution_stats().function_entries > 0,
+                    "JIT must enter compiled code"
+                );
+            }
             final_values.push(value);
         }
-        assert_eq!(final_values[0], final_values[1]);
+        assert!(final_values.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]

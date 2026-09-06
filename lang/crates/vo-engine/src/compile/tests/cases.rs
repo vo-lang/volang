@@ -1636,6 +1636,7 @@ fn test_compile_prefers_workspace_source_extension_manifest_paths() {
     assert_native_extension_load_copy(&vogui.native_path, &local_vogui);
     assert_eq!(fs::read(&cargo_lock).unwrap(), cargo_lock_before);
 
+    drop(output);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -1715,6 +1716,7 @@ fn test_compile_single_file_entry_in_project_uses_ancestor_workfile_extension_ma
     assert_native_extension_load_copy(&vogui.native_path, &local_vogui);
     assert_eq!(fs::read(&cargo_lock).unwrap(), cargo_lock_before);
 
+    drop(output);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -2153,6 +2155,9 @@ fn test_compile_cache_revalidates_reached_prebuilt_bytes_outside_base_fingerprin
     assert_eq!(cached_output.extensions[0].native_path, second_native_path);
     assert_eq!(read_saved_cache_fingerprint(&root, None), second);
 
+    drop(first_output);
+    drop(second_output);
+    drop(cached_output);
     fs::remove_dir_all(&root).unwrap();
 }
 

@@ -81,6 +81,16 @@ pub unsafe fn load_embedded_vm<F>(
 where
     F: FnOnce(&mut Vm, &vo_common_core::bytecode::LoadedModule) -> Result<(), String>,
 {
+    // Generated C main does not enter Rust's startup code. Match the native
+    // CLI's pipe policy so a closed reader produces an I/O error instead of
+    // terminating the entire Vo process during os.File.Write or exec copying.
+    #[cfg(unix)]
+    if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(format!(
+            "failed to initialize AOT pipe handling: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     let module_bytes = unsafe {
         embedded_slice(
             &raw const vo_aot_module_bytes,

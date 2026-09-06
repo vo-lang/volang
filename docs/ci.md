@@ -1,140 +1,380 @@
-# Continuous Integration
+# Continuous integration and delivery
 
-Volang uses three GitHub Actions workflows. The workflow files are the
-executable source of truth; this document explains their stable responsibilities
-and the commands maintainers can reproduce locally.
+Volang uses one declared CI task model, source-bound evidence, and promotion of
+tested bytes. The machine-readable sources of truth are:
 
-All third-party actions are pinned to full commit SHAs. CI and Nightly have
-read-only repository permissions. Write permissions exist only in the deploy
-job for Pages and the protected publish job for releases.
+- `eng/ci.toml` for pull-request, merge, main, and Nightly task profiles;
+- `eng/tests.toml` and `tests/lang/manifest.toml` for language cases and costs;
+- `eng/release.toml` for release targets and archive policy;
+- `eng/toolchains.toml` and `rust-toolchain.toml` for pinned tools.
+
+Workflow YAML provisions and schedules lanes. Repository contracts, Rust quality,
+language, Web, native UI and dependency checks execute ordered command definitions
+from `eng/ci.toml` through `vo-dev ci run`. `vo-dev ci lint` validates the task graph,
+dependencies, owners, platforms, budgets, runners, and safe evidence paths.
+Actionlint validates workflow syntax and expressions with ShellCheck for embedded
+scripts. GitHub CI downloads both declared versions with verified archive hashes.
+Local workflow validation also requires ShellCheck on `PATH`; the task fails
+explicitly when it is missing, so a syntax-only check cannot stand in for the
+complete workflow check. Versions are listed in `eng/toolchains.toml`.
+
+## Trust model
+
+Each CI run follows the same chain:
+
+1. `vo-dev ci plan` selects an immutable task set and records the source commit,
+   Git tree, profile, changed paths, and complete task definitions. Impact plans
+   also bind resolved base/head/merge-base object IDs and a component graph digest.
+2. Each job calls `vo-dev ci run --plan <path> --task <id>`. Its receipt
+   binds the task, source, CI plan, toolchain files, test manifests, runner,
+   GitHub run/job identity, timing, result files, and promotable artifacts. Domain results must identify a complete test or browser
+   scenario; arbitrary success flags are rejected. Every declared task requires
+   execution, and rejects the legacy `ci record` entry point.
+3. The stable `required` job rejects incomplete lanes and calls
+   `vo-dev ci certify`. Certification requires one valid receipt for every
+   planned task, with no missing, duplicate, or extra receipt.
+4. Site and release workflows verify that bundle against their checkout. A
+   promotable artifact is hashed recursively and must match the exact bytes
+   recorded by its producing job.
+
+Local processes can build plans for inspection. The official workflows record
+receipts only inside GitHub Actions from a clean tracked worktree. Site and
+release promotion accept bundles downloaded from the exact successful main CI
+run, so a local or unrelated-workflow `passed: true` file has no deployment
+authority.
+
+Each executor attempt writes to a fresh `target/ci/executions/<task>/<attempt>`
+directory. It archives earlier outputs, locks the task's local resource group,
+captures command stdout/stderr, and compares declared source inputs before and
+after execution. Task and command deadlines terminate the complete process
+group or Windows Job Object. Workflow jobs reserve a further 15 minutes for
+provisioning and diagnostic uploads; the quality job includes both sequential
+task budgets. These outer allowances do not change test or task deadlines.
+Cancellation uses the same cleanup path. Commands
+run once using their declared argument vector and environment. Commands that
+explicitly select Bash use fail-fast scripts; the executor never implicitly
+expands an argument through a shell. Automatic retries remain disabled. Platform Nightly lanes
+run a byte-checked copy of `vo-dev` from `target/ci/bin`, allowing workspace
+Cargo tests to replace `target/debug/vo-dev.exe` while the executor remains alive
+on Windows.
+
+All Nightly language, stress, platform, fuzz and audit lanes use `ci run`.
+Their executable arguments and budgets live in `eng/ci.toml`; Actions installs
+the environment and selects a static task. Language JSON is published from the
+child's exact stdout only after schema validation, and its digest must match
+the captured stdout. Fuzz commands require both completion records to match
+the declared positive input budget. Failed attempts retain logs and Cargo timings.
+
+`started.json` explicitly marks an incomplete attempt. The executor atomically
+writes the typed `result.json` and its digest in `completion.json`, then publishes
+certifiable evidence as its final commit point. Certification errors update
+the typed result and completion digest, write `failure.json`, and cause a
+nonzero exit. Local dirty executions can
+produce diagnostic receipts, but cannot produce certifiable evidence. Bundles
+reject mixed GitHub run attempts and missing command or log records.
+
+Rust test commands require a nonempty successful test set, independently of the
+process exit code. Failure records identify the command, owner through the task
+definition, classification, reproduction command and diagnostic paths. Job
+summaries show per-command test counts and durations; Cargo HTML timings are
+uploaded with executor diagnostics. Workspace tests continue across failing
+test programs so one run reports all failures while preserving a failing exit.
+
+Each attempt atomically refreshes a bounded display-only task summary at start,
+command boundaries and completion. The required job collects these small files
+before rejecting failed lanes. `vo-dev ci summarize --plan <path> --summaries <dir>`
+shows the first recorded failure, owner, declared command, reproduction and log
+location, plus all task states. Missing, stale, oversized or mismatched summaries
+are visibly invalid; interrupted attempts remain incomplete. Summary identity
+binds source, plan, task and GitHub run attempt. Summaries have no certification
+authority and their rendering cannot turn failed jobs into successful checks.
+
+Certification artifacts (`ci-evidence-*` and `nightly-evidence-*`) contain only
+the compact evidence files. Execution logs, per-case Native AOT receipts and
+Cargo timings travel in separate diagnostic artifacts, including failed attempts.
+The certification collector keeps its bounded scan and rejects incomplete
+coverage; adding thousands of diagnostic files cannot exhaust that scan.
+
+Nightly's browser and release Wasm language tasks share one static Web job and
+execute sequentially. Each retains its own immutable task receipt and deadline;
+the second task runs after a failure unless the job is cancelled. Both use the
+same Cargo output tree, release Wasm compiler configuration and locked Node
+dependencies. Build commands still check freshness through Cargo. The language
+task explicitly installs its locked JavaScript tools for isolated reproduction.
+The combined job reserves both task deadlines plus one provisioning allowance.
+This scheduling choice follows [Nightly measurements](https://github.com/vo-lang/volang/actions/runs/33995230524):
+the separate Web jobs took 816 and 714 seconds, below the 2712-second Windows
+critical path even when added sequentially. Whole Cargo output trees remain
+uncached across runs.
+
+Embedded standard-library assets use deterministic zero timestamps. Their source
+bytes still come from the canonical `lang/stdlib` tree; host checkout times and
+`SOURCE_DATE_EPOCH` do not enter the embedded metadata. This keeps separately
+built site and release Web runtimes comparable by byte digest, including when
+compiler caches reuse the embedding proc macro's output. Native debug source
+editing continues to read live files through the source API.
+
+Both Web profiles execute their ordered commands through `ci run`. The full
+profile retains all 31 semantic probes and tests the final Studio directory
+through the complete journey, startup, canary and offline lifecycle contracts.
+Image and precache budget results bind their measured artifacts, complete asset
+lists and consistent limits. `wasm-web-full` seals `target/ci/artifacts/site` in
+the same execution receipt. Site promotion verifies that producing task's artifact
+digest; no additional task infers success from the presence of a directory.
+
+Native UI tasks retain eight real window scenarios on each full platform and
+two Linux smoke scenarios, alongside Rust contracts and VM/JIT differentials.
+Each window must emit its exact ordered semantic clicks, successful final text
+assertions and presentation boundary. Exit zero alone cannot satisfy that
+contract. Packaged applications are sealed under `target/ci/artifacts/native`;
+their receipts and timing logs share the same task attempt.
+
+## Explain and diagnose
+
+`vo-dev ci explain --base <commit> --head <commit>` explains each task's inclusion
+or exclusion. Deleted paths and both sides of a rename participate in selection.
+The checked-out candidate must match `--head`. The planner joins component
+contracts from both revisions and the candidate, walks reverse dependencies,
+and maps affected capabilities to profile tasks. Rust edges come from workspace
+Cargo manifests, including build, dev, optional and platform dependencies. Vo,
+browser product inputs use the small component declarations in `eng/ci.toml`.
+Generated source dependencies come from `eng/artifacts.toml`, including Studio's
+embedded documentation. Explanations include each input, component chain and capability.
+Shared controls, unknown inputs and missing historical graphs select the full
+eligible profile. Manually supplied `--changed-file` plans remain local diagnostics
+and cannot certify a candidate. The historical 32-case coverage
+migration is recorded in `eng/ci-coverage.json`; external Voplay commands require
+an explicitly provisioned, clean `eng/project.toml` pin. Retired Vogui commands
+refer to a historical implementation, and active UI coverage belongs to the
+renderer-neutral workspace and the platform/browser matrix.
+
+A language runner's exit status, result schema, case/backend identities and
+individual outcomes must agree with the selected plan. Unexpected, missing,
+duplicate, skipped or unidentifiable jobs cannot certify success. Nonzero exits
+cannot be hidden by a successful JSON payload.
+
+The explicit `native-aot` language target builds the compiler and core runtime
+once per profile, then compiles, links and executes each selected program in
+an isolated case directory. At most two AOT cases may link concurrently. Each
+case retains phase logs and a receipt with runner, compiler, runtime and executable
+digests. After each worker and its process wrapper exit, the coordinator verifies
+the executable's retained bytes against the receipt and removes it to bound disk
+use. Verification or cleanup errors are infrastructure failures and preserve the
+file for diagnosis; cleanup has no retries. Build or execution failures also
+retain any executable produced.
+The debug profile optimizes the SHA-256 helper with debug assertions and overflow
+checks enabled. Debug executable receipts can cover hundreds of megabytes, so
+verification must remain practical on CPUs without SHA instruction acceleration;
+the compiler, runtime and test runner retain their debug profiles.
+Differential failures retain the logs and executable digest. The case deadline includes
+both build and execution, and process-group cleanup also terminates descendants.
+Successful program output is compared with the matching VM case when present.
+
+Compile-negative cases exercise the actual AOT build command independently.
+For host-specific build rejection, a passing language case may declare
+`expect_by_target = { native-aot = { fail = ["diagnostic"] } }`, with an owner
+and reason. The planner retains its VM contract and requires the selected AOT
+build to fail with every declared diagnostic and no executable. Such a result
+proves rejection, and carries no execution-equivalence claim. The default AOT
+runtime's compiler-host rejection is covered through this contract.
+The `native-aot-host` target explicitly builds the runtime's `toolchain-host`
+feature. Nightly pairs it with VM execution for the `compiler-host` cases on
+Linux, macOS and Windows. Mixing core and compiler-host AOT targets in one
+invocation fails before building, so the core rejection cannot accidentally
+use a runtime with the extra capability.
+
+Set `VO_UI_PACKAGE_TIMINGS=1` when measuring `vo ui package`. Its stderr includes
+a `volang.ui-package-timings.v1` record for source compilation, native AOT
+lowering, linking and final packaging, plus compiler path, assertion mode, total duration and
+failure state. Runtime compilation is measured separately through Cargo timings.
+Compare matching source, target, runtime and build settings before changing
+compiler profiles, sharing outputs or increasing package concurrency.
+
+Full native UI tasks build the optimized packaging compiler and both static
+runtimes in one declared Cargo invocation, then package Studio and the four
+showcases with explicit runtime paths. The existing debug VM/JIT window probes
+remain separate commands. This shared invocation is a distinct configuration:
+[Cargo can unify dependency features](https://doc.rust-lang.org/cargo/reference/features.html#feature-unification)
+and change archive bytes, so reuse must
+include the complete package/feature selection and the sealed artifact digests.
+The five native user journeys validate the resulting packages on each platform.
+
+Manual CI and Nightly runs accept `cold_cache=true` to disable compiler caching
+in every lane, including planning and certification. Task commands and deadlines
+remain identical. Dependency and browser-tool downloads may still be cached;
+Cargo compilation outputs are built afresh. Use this mode for the cold compiler
+cache acceptance run instead of deleting shared caches.
+
+Native filesystem ordering always runs. The symlink regression independently
+probes the host using Rust before invoking Vo. Supported hosts exercise relative
+file and directory links, absolute targets, dangling links and ReadDir/Lstat
+metadata. Unavailable hosts must return an error and leave no entry. Cases
+that require this capability declare `requires_host = ["symlink"]`; an unavailable
+required capability produces a typed portability failure before execution.
+
+Windows Nightly compiles the complete standard library before preparing AOT
+tools, so conditional compilation errors fail early. Pipe regressions require
+normal byte transfer and an explicit write error after the reader closes on
+Linux, macOS and Windows.
+
+Animation contracts use an explicitly installed per-VM manual clock shared by
+stdlib time reads and timer completions. They test intermediate values,
+cancellation, completion and actual JIT execution without sleeping.
+
+Wasm VM language cases run in a bounded Node worker pool. The parent compiles
+one WebAssembly module and each case creates a fresh instance, VM, VFS and
+environment. The default is at most four workers; the direct runner accepts
+`--jobs 1..8`. A case deadline terminates its worker, including synchronous Wasm
+loops, before that slot admits another case. Worker crashes, missing or duplicate
+results, and excessive diagnostic output fail the case. Reports retain plan
+order regardless of completion order. Supervisor contracts exercise actual
+worker and Wasm termination as part of the Web test suite.
+
+Module publication (`vo-release`) requires anchored, durable directory
+publication, currently implemented on Linux and macOS. Its publication journeys
+declare `cfg(unix)`; Windows runs the portable source and artifact validation
+tests and an explicit unsupported-host test that requires
+`AtomicPublishUnsupported` and no filesystem output. Validation precedes the
+host publication boundary. Windows distribution archives, CLI execution,
+Native AOT and desktop UI remain part of their separate release/platform lanes.
+This capability restriction does not exclude the `vo-release` crate from
+Windows workspace tests.
 
 ## Workflows
 
-### [`ci.yml`](../.github/workflows/ci.yml)
+### CI
 
-Runs for pull requests, merge groups, pushes to `main`, and manual dispatches.
-There are no path filters or changed-file planners: every run uses the same
-small event-defined job graph.
+`.github/workflows/ci.yml` runs for pull requests, merge groups, `main` pushes,
+and manual dispatches.
 
-| Lane | Responsibility |
-| --- | --- |
-| `quality-rust` | Rust formatting, repository and language-manifest lint, Action workflow lint, Clippy, root-workspace tests, and a clean generated state |
-| `language-native` | Pull requests run one `smoke` selection on VM, JIT, and compile targets; merge groups, `main`, and manual runs split the complete native VM/JIT/OSR/GC/no_std/compile selection into two stable case shards |
-| `wasm-web` | WASM language cases and `vo-web` |
-| `ui-platform` | Ubuntu, macOS, and Windows native UI contracts plus one real WGPU window present on each target |
-| `required` | Fails unless every lane above succeeds; configure this stable job name as the required branch-protection check |
+Pull requests use conservative component impact selection:
 
-Pull-request and superseded merge-queue runs cancel older work for the same
-ref. Every `main` push uses its immutable SHA as the concurrency key, so no
-successful-CI candidate can be displaced by a later push.
+- repository contracts always run;
+- Rust, language, Web, and UI smoke lanes run only when their owned inputs are
+  affected;
+- UI product changes include Linux smoke and the macOS/Windows platform lanes;
+- weighted case sharding keeps every backend variant of a language case
+  together while balancing declared timeout cost.
 
-### [`nightly.yml`](../.github/workflows/nightly.yml)
+Merge groups and `main` run the complete language matrix, full Wasm/Web suite,
+and real Linux, macOS, and Windows UI/AOT matrix. A `main` run additionally
+produces the Studio Pages candidate. Superseded pull requests are cancelled;
+immutable branch candidates and Nightly runs retain their execution. Rust compilation uses the GitHub sccache backend; dependency caches
+contain downloads only and never serve as test evidence.
 
-Runs daily at 03:37 UTC and on manual dispatch. It adds work that is valuable
-but too expensive or platform-specific for every pull request:
+The Studio candidate has independent raw, gzip, Brotli, and total-precache size
+budgets. The raw AOT limit protects browser decode/compile cost; the compressed
+limits protect first-load transfer cost. Browser smoke also enforces startup
+timing, so a size-compliant image cannot silently regress into a slow product.
 
-- complete native and WASM language matrices in release mode;
-- repeated GC, JIT/OSR, and scheduler stress selections;
-- root-workspace tests on macOS and Windows;
-- Rust audits for maintained lockfiles and npm audits for `vo-web`.
+### Nightly
 
-Nightly never publishes or mutates repository contents. A nightly failure is a
-maintenance signal and does not replace the required pull-request check.
+`.github/workflows/nightly.yml` runs release-mode native and Wasm/Wasm-AOT
+language matrices, GC/JIT/OSR/scheduler stress selections, macOS and Windows
+workspace tests, bounded protocol fuzzing, and Rust/npm audits. It emits and
+certifies the same task receipts as CI. The macOS task also runs the repository
+AppKit lifecycle probe, observing show, resize, minimize, restore and close
+without fixed settling sleeps; it requires typed complete event evidence.
 
-### [`release.yml`](../.github/workflows/release.yml)
+Cross-repository Voplay fuzzing is excluded from the core Nightly contract. Its
+standalone harness remains under `fuzz/voplay-protocol` for a workspace where
+the exact `eng/project.toml` Voplay revision is present. A sibling repository
+cannot make the Volang core gate fail merely because it was absent from the
+checkout.
 
-Runs only for a `repository_dispatch` event of type `release`, carrying an
-existing `v*` tag, and places requests in one bounded serial queue. GitHub
-binds repository-dispatch workflows to the default branch, so a tag cannot
-supply publication logic. Its phases are intentionally separate:
+### Site
 
-1. `preflight` requires a successful `ci.yml` push run for the exact tagged
-   commit, binds the tag and checkout to that immutable SHA, verifies reachability
-   from `origin/main`, validates release policy, and derives the target matrix
-   and deterministic identity.
-2. `build` compiles and smoke-tests each target declared in
-   `eng/release.toml`, builds the browser VM and Core Wasm AOT runtime, and
-   records every bundled UI runtime file in the deterministic archive receipt
-   and provenance. It then extracts that archive and runs `vo ui build` through
-   the packaged sidecar, followed by a bundled-registry `vo ui new` and VM mount,
-   before uploading the archive, checksum, and provenance.
-3. `publish` downloads and verifies the complete artifact set, creates GitHub
-   build-provenance attestations, and publishes one GitHub Release.
+`.github/workflows/site.yml` starts only after a successful `main` CI run, or
+from an explicitly selected successful main run. It downloads that run's
+certification and Studio candidate, verifies the commit and recursive artifact
+digest, rechecks deployment budgets, and uploads those exact bytes to Pages.
+It performs no compiler, runtime, or application rebuild.
 
-SDK publication and Homebrew repository updates are separate operations and
-are not performed by this workflow.
+After deployment, the pinned Playwright canary verifies public asset bytes against
+the certified directory and exercises project creation, editing, execution, saving
+and reopen persistence. The Pages environment remains the deployment authority.
 
-## Local checks
+### Release
 
-Use Rust 1.94.0, Node 24, and wasm-pack 0.14.0, matching
-`rust-toolchain.toml` and `eng/toolchains.toml`. Run commands from the repository
-root unless a command names another manifest. Match the workflow's workspace
-boundary before running repository or language commands:
+`.github/workflows/release.yml` accepts an existing `v*` tag through the
+default-branch `repository_dispatch` entry. The tag must equal the main commit
+that triggered the workflow, so GitHub's OIDC provenance and the checked-out
+release source identify the same commit. Preflight verifies tag identity,
+main reachability, protected release policy, and the exact successful main CI
+bundle. That bundle must contain full Web, Linux, macOS, and Windows UI
+evidence.
+
+The browser VM/Core Wasm runtime is built once and shared by every target job.
+Target jobs build and smoke-test Linux x64/arm64, macOS x64/arm64, and Windows
+x64 archives. Each archive provenance record binds the product-certified CI
+bundle digest and commit. Inside the protected `release` job, publication
+re-verifies all archives and the bundle, creates GitHub build-provenance
+attestations, and verifies each archive's signed source commit, workflow commit,
+main ref and hosted runner identity before publishing. Signed bundles and
+verification results are retained even when a later publication step fails.
+
+Manual dispatch rehearses the same five targets using a successful full CI run
+for the exact selected branch commit. `release candidate metadata|matrix|build|package|verify`
+uses an explicit candidate identity, no release tag, a `vo-candidate-` archive
+prefix, and `target/ci/release-candidate/<commit>` output. Candidate evidence must
+use the full `merge` profile; production continues to require the tagged `main`
+identity. Build receipts and archive provenance use schema 7 and bind that purpose
+and the declared CLI build arguments, optimization level and LTO configuration.
+Candidate mode exposes no publication or Homebrew operation. The workflow's
+production publish job runs only for `repository_dispatch`.
+
+Each freshly built CLI must execute `--version` within 60 seconds and return the
+exact version, full source commit and commit date. A typed probe preserves its
+output and exit status. The executable digest must remain unchanged during the
+probe and through build receipt creation; archive provenance binds those same
+bytes. Identity validation does not depend on the compiler's string layout.
+
+Every target tests VM/JIT and a linked Native AOT executable, unpacks its archive,
+builds a Web UI application, creates and tests a starter project, then links and
+opens a real native UI window using the packaged runtime. The window probe has a
+120-second process-tree deadline and requires the exact presentation record;
+it saves a typed result with executable digest, source, exit status, timing and
+logs. Linux uses Xvfb and Mesa. Build failures preserve Cargo timings and receipts.
+After all five targets pass, candidate verification checks the complete archive
+set, provenance and digests, creates GitHub Artifact Attestations, and verifies
+their source commit, ref and signing workflow. This rehearsal produces candidate
+artifacts and verification records; it grants no production publication authority.
+
+## Local verification
+
+Use Rust 1.94.0, Node 24, and wasm-pack 0.14.0. Run from the repository root:
 
 ```sh
 export VOWORK=off
-```
-
-### Quality and root workspace
-
-```sh
 cargo fmt --all -- --check
 cargo run -q -p vo-dev --locked -- lint all
-cargo run -q -p vo-dev --locked -- test lint --suite lang --strict
-cargo run -q -p vo-dev --locked -- test fmt --suite lang
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo test --locked -p vo-dev
 ```
 
-CI also runs actionlint 1.7.12. Its schema predates GitHub's `concurrency.queue`
-key, so the local equivalent keeps one narrow compatibility exception:
+Inspect plans without creating trusted evidence:
 
 ```sh
-actionlint -ignore 'unexpected key "queue"'
+cargo run -q -p vo-dev --locked -- ci plan \
+  --profile pull-request \
+  --changed-file ui/ui.vo \
+  --output target/ci/plan.json
+cargo run -q -p vo-dev --locked -- ci plan \
+  --profile main \
+  --output target/ci/main-plan.json
 ```
 
-### Language targets
-
-Pull-request selection:
+Representative language commands are:
 
 ```sh
-cargo run -q -p vo-dev --locked -- test run --suite lang --tags smoke --targets both,compile
+cargo run -q -p vo-dev --locked -- test run \
+  --suite lang --tags smoke --targets native,gc-vm,gc-osr,compile
+cargo run -q -p vo-dev --locked -- test run \
+  --suite lang --targets native,gc,embed,compile --shard 1/2
+cargo run -q -p vo-dev --locked -- test run \
+  --suite lang --targets wasm,wasm-aot --release
 ```
 
-Complete native and WASM selections:
-
-```sh
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets native,gc,embed,compile --shard 1/2
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets native,gc,embed,compile --shard 2/2
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets wasm
-```
-
-Sharding hashes the case ID before target expansion. Every target variant of a
-case stays in one shard, preserving VM/JIT/OSR and GC differential checks while
-the two shards run concurrently.
-
-The WASM lane also checks the portable dependency closure and compiles each
-supported no-default-feature configuration:
-
-```sh
-cargo tree --locked -p vo-stdlib --target wasm32-unknown-unknown --no-default-features --edges normal,no-proc-macro --format '{p}|{f}'
-cargo tree --locked -p vo-vm --target wasm32-unknown-unknown --no-default-features --edges normal,no-proc-macro --format '{p}|{f}'
-cargo tree --locked -p vo-ext --target wasm32-unknown-unknown --no-default-features --features wasm --edges normal,no-proc-macro --format '{p}|{f}'
-cargo check --locked -p vo-stdlib -p vo-vm --no-default-features
-cargo check --locked -p vo-vm --target wasm32-unknown-unknown --no-default-features
-cargo check --locked -p vo-ext --target wasm32-unknown-unknown --no-default-features --features wasm --tests
-```
-
-Add `--release` to reproduce the nightly release-mode runs. The three nightly
-stress selections are:
-
-```sh
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets gc-vm,gc-jit --tags gc --repeat 20 --release
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets jit,osr --tags jit --repeat 5 --release
-cargo run -q -p vo-dev --locked -- test run --suite lang --targets vm,jit --tags scheduler --repeat 10 --release
-```
-
-### Web
+Web checks use the locked npm workspace:
 
 ```sh
 npm --prefix lang/crates/vo-web ci
@@ -143,47 +383,90 @@ npm --prefix lang/crates/vo-web run test:ui
 npm --prefix lang/crates/vo-web run test:ui-browser
 ```
 
-### Dependency audits
+Browser scenarios use the exact Playwright version and Chromium revision in
+`eng/browser/package-lock.json`. The compatibility entry point preserves all
+eight original product scenarios and adds Studio startup and account-free
+canary regressions plus a Nightly offline/recovery/resource-cleanup journey,
+with their assertion mapping in
+`eng/browser/coverage.json`. Each attempt retains failure traces, screenshots,
+console/network diagnostics, and HTML/JSON reports under `target/ci/browser`.
+Retries are disabled; `eng/browser/check-diagnostics.mjs` verifies controlled
+failures for every registered scenario. See `eng/browser/README.md` for local setup.
+
+Dependency audits are:
 
 ```sh
-cargo audit --file Cargo.lock
-npm --prefix lang/crates/vo-web audit --audit-level high
+node eng/run-dependency-audit.mjs
 ```
 
-## Release environment
+`eng/dependency-policy.json` declares the root and two maintained fuzz lockfiles,
+plus the Web and browser-tool npm workspaces. Every Rust report records an
+unfiltered advisory database revision. High/critical npm findings and Rust
+vulnerabilities fail the lane. Informational Rust findings require an exact
+package/version/advisory/lockfile review with an owner, dependency chain and
+expiry of at most 90 days. Expired or new findings fail. The current 13 warning
+reviews include the transitive GTK3/glib migration; the glib unsoundness remains
+a tracked risk and has a 30-day review window. Raw reports, process exits and
+timings accompany `target/ci/results/dependencies.json`, including on failure.
 
-Before publishing the first release:
+If the local Cargo output tree has accumulated years of profiles and target
+triples, metadata scans can dominate command startup. `vo-dev clean rust`
+removes that cache deliberately; a temporary `CARGO_TARGET_DIR` is useful for
+isolated diagnostics. For tests that launch nested Cargo builds, prefer Cargo's
+`--target-dir` option so the child fixtures retain their own isolated output
+directories. CI relies on clean runners plus sccache and never uploads the whole
+`target` tree.
 
-1. Create a GitHub environment named `release`.
-2. Add the desired required reviewers so publication has an explicit approval
-   boundary.
-3. Prevent self-review, disable administrator bypass, and restrict that
-   environment to `main`.
-4. Add an environment secret named `RELEASE_SETTINGS_TOKEN`, backed by a
-   fine-grained token scoped only to this repository with `Administration:
-   read`. The release job uses it solely to fail closed when immutable releases
-   cannot be confirmed before publication.
-5. Keep `required` green on the exact `main` commit that will receive the tag.
-6. Ensure the tag version agrees with the workspace version and that the tag
-   points to a commit reachable from `origin/main`.
-7. Enable immutable releases and protect `v*` tags from updates and deletion.
+## Required repository settings
 
-Safe local release preflight commands are:
+Repository configuration must enforce these controls before release:
 
-```sh
-cargo build --locked -p vo-dev
-./target/debug/vo-dev lint release
-./target/debug/vo-dev release matrix
-./target/debug/vo-dev release metadata --tag vX.Y.Z --commit <full-commit-sha>
-```
+1. Protect `main` and require pull requests, one approving review, resolved
+   conversations, linear history, and the `CI / required` check. Block force
+   pushes and deletion.
+2. Enable merge queue if maintainers use merge groups; require the same stable
+   check there.
+3. Enable private vulnerability reporting, dependency graph, Dependabot
+   alerts/security updates, secret scanning, and push protection.
+4. Enforce HTTPS for Pages and protect the `github-pages` environment.
+5. Protect `v*` tags, enable immutable releases, and configure a `release`
+   environment with independent reviewers, self-review disabled, administrator
+   bypass disabled, and an explicit `main` branch policy.
+6. Store `RELEASE_SETTINGS_TOKEN` only in the release environment. It requires
+   repository Administration read access and is used solely to fail closed on
+   immutable-release policy.
 
-Release build, package, verify, and publish commands require the clean tagged
-source identity used by the workflow. Do not invoke `release publish` for local
-validation. Push the approved tag, then request the trusted default-branch
-workflow with:
+These settings live on GitHub and need administrator application. Repository
+files provide CODEOWNERS, dependency-update policy, protected workflow logic,
+and the auditable target state.
 
-```sh
-gh api --method POST repos/vo-lang/volang/dispatches \
-  -f event_type=release \
-  -f 'client_payload[tag]=vX.Y.Z'
-```
+## Site promotion journeys
+
+Site promotion downloads the exact main CI site and certification, verifies its
+digest and budgets, runs the complete Studio journey against that final directory,
+and verifies the digest again before uploading Pages bytes. Deployment is serialized;
+a candidate superseded on main is skipped before the Pages action runs.
+
+After deployment, the pinned Chromium canary first checks all executable and user
+content assets (HTML, JavaScript, Wasm, JSON, images, CSS and fonts) against that
+same certified artifact, with bounded downloads and no retries. It then creates a
+fresh browser-local project, edits and runs code, saves, clicks the UI preview and
+checks refresh/reopen persistence. Failures retain Playwright traces, screenshots
+and domain results. Pages configuration, private build markers, TypeScript declarations
+and source maps are outside the public asset comparison. The complete artifact
+including those files remains bound by the promotion certificate.
+
+### Language host contracts
+
+Language plan/result v2 binds the physical host OS separately from its execution
+backend. The manifest declares supported `platforms`, `requires_host` and an
+optional `resource_group`; defaults preserve unrestricted platform selection.
+Planning reports platform exclusions before sharding. Actual runners reject
+foreign-host plans, probe required host capabilities independently, and return
+failed jobs when a prerequisite is unavailable. Capability observations and
+failure categories survive JSON aggregation and task diagnostics. Certification
+checks that the domain host matches the producing task runner.
+
+Resource groups reserve case groups within each plan without occupying workers
+waiting for busy resources. Native AOT retains its independent two-linker bound;
+Wasm VM and AOT retain bounded worker pools. No automatic test retries are added.

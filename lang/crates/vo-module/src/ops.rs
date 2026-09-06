@@ -1605,7 +1605,7 @@ mod tests {
 
     #[test]
     fn mod_init_refuses_to_overwrite_existing_manifest() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let path = temp.path().join("vo.mod");
         let original = "format = 1\nmodule = \"github.com/acme/existing\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         fs::write(&path, original).unwrap();
@@ -1621,7 +1621,7 @@ mod tests {
 
     #[test]
     fn mod_init_rejects_an_orphaned_lock_without_creating_a_manifest() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let lock_path = temp.path().join("vo.lock");
         let original = b"unrelated pre-existing lock bytes\n";
         fs::write(&lock_path, original).unwrap();
@@ -1638,7 +1638,7 @@ mod tests {
 
     #[test]
     fn selection_lock_tolerates_graph_drift_but_rejects_corruption() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_tempdir().unwrap();
         let empty_mod = ModFile::parse(
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
         )
@@ -1704,7 +1704,7 @@ mod tests {
             b"format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         let lock_bytes = b"malformed lock that must remain visible\n";
 
-        let add_project = tempfile::tempdir().unwrap();
+        let add_project = crate::test_tempdir().unwrap();
         fs::write(add_project.path().join("vo.mod"), mod_bytes).unwrap();
         fs::write(add_project.path().join("vo.lock"), lock_bytes).unwrap();
         let error = mod_add(
@@ -1724,7 +1724,7 @@ mod tests {
             lock_bytes
         );
 
-        let tidy_project = tempfile::tempdir().unwrap();
+        let tidy_project = crate::test_tempdir().unwrap();
         fs::write(tidy_project.path().join("vo.mod"), mod_bytes).unwrap();
         fs::write(tidy_project.path().join("vo.lock"), lock_bytes).unwrap();
         let error = mod_tidy(tidy_project.path(), &PanicRegistry).unwrap_err();
@@ -1738,7 +1738,7 @@ mod tests {
             lock_bytes
         );
 
-        let targeted_update_project = tempfile::tempdir().unwrap();
+        let targeted_update_project = crate::test_tempdir().unwrap();
         fs::write(targeted_update_project.path().join("vo.mod"), mod_bytes).unwrap();
         fs::write(targeted_update_project.path().join("vo.lock"), lock_bytes).unwrap();
         let error = mod_update(
@@ -1760,7 +1760,7 @@ mod tests {
 
     #[test]
     fn dependency_mutation_solves_and_writes_without_materializing_cache() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         std::fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -1783,7 +1783,7 @@ mod tests {
 
     #[test]
     fn mutation_commands_have_explicit_stable_update_boundaries() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         write_two_dependency_project(project.path());
         let initial = VersionedRegistry::new(&[
             ("github.com/acme/lib", &["1.0.0"]),
@@ -1864,7 +1864,7 @@ mod tests {
 
     #[test]
     fn targeted_update_requires_target_in_resolved_graph_without_writes() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         let mod_bytes = concat!(
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\n",
             "vo = \"0.1.0\"\n",
@@ -1915,7 +1915,7 @@ mod tests {
 
     #[test]
     fn sync_repairs_manifest_drift_without_upgrading_unchanged_nodes() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             concat!(
@@ -1961,7 +1961,7 @@ mod tests {
 
     #[test]
     fn tidy_preserves_versions_for_dependencies_that_remain_in_use() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         write_two_dependency_project(project.path());
         let initial = VersionedRegistry::new(&[
             ("github.com/acme/lib", &["1.0.0"]),
@@ -1998,7 +1998,7 @@ mod tests {
 
     #[test]
     fn tidy_stops_at_nested_module_boundaries_and_rejects_their_aliases() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -2036,7 +2036,7 @@ mod tests {
 
     #[test]
     fn tidy_revalidates_the_complete_source_generation_before_commit() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         let mod_bytes =
             b"format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n";
         fs::write(project.path().join("vo.mod"), mod_bytes).unwrap();
@@ -2078,8 +2078,8 @@ mod tests {
 
     #[test]
     fn empty_graph_lifecycle_uses_one_explicit_lockless_state() {
-        let project = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -2109,8 +2109,8 @@ mod tests {
 
     #[test]
     fn missing_lock_is_an_error_when_external_dependencies_exist() {
-        let project = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             concat!(
@@ -2130,8 +2130,8 @@ mod tests {
 
     #[test]
     fn any_lock_is_rejected_for_the_canonical_lockless_graph() {
-        let project = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -2151,8 +2151,8 @@ mod tests {
 
     #[test]
     fn why_handles_the_canonical_lockless_graph_semantically() {
-        let project = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
         let options = crate::snapshot::SnapshotOptions::declared();
         fs::write(
             project.path().join("vo.mod"),
@@ -2185,7 +2185,7 @@ mod tests {
 
     #[test]
     fn why_explains_the_exact_locked_workspace_graph() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let app = root.join("app");
         let library = root.join("lib");
@@ -2229,8 +2229,8 @@ mod tests {
 
     #[test]
     fn read_only_commands_do_not_create_a_project_lock() {
-        let project = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
+        let cache = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -2256,7 +2256,7 @@ mod tests {
 
     #[test]
     fn read_only_lifecycle_revalidation_rejects_graph_drift() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -2294,7 +2294,7 @@ mod tests {
 
     #[test]
     fn mod_verify_does_not_initialize_a_missing_module_cache() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             "format = 1\nmodule = \"github.com/acme/app\"\nversion = \"0.1.0\"\nvo = \"0.1.0\"\n",
@@ -2315,7 +2315,7 @@ mod tests {
 
     #[test]
     fn mod_tidy_validates_imports_even_when_an_existing_module_prefix_matches() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_tempdir().unwrap();
         fs::write(
             project.path().join("vo.mod"),
             concat!(

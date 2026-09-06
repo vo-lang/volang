@@ -30,6 +30,13 @@ pub mod workspace;
 
 use std::fmt;
 
+/// Test fixtures start from an exact host path. Windows TEMP may contain an
+/// 8.3 alias, which the cache's deliberate exact-spelling guard must reject.
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+}
+
 /// Canonical version of the Volang toolchain that owns this module protocol.
 pub const TOOLCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Minimum toolchain version written into newly initialized modules.

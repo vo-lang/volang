@@ -1,0 +1,57 @@
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func must(err error) {
+	if err != nil {
+		panic(err.Error())
+	}
+}
+
+func main() {
+	capability := os.Getenv("VO_TEST_HOST_SYMLINK")
+	assert(capability == "supported" || capability == "unavailable", "runner must probe symlink capability")
+	root, err := os.MkdirTemp("", "volang-symlink-*")
+	must(err)
+	defer os.RemoveAll(root)
+	must(os.WriteFile(root + "/file", []byte("value"), 0644))
+	must(os.Mkdir(root + "/directory", 0755))
+	targets := []string{"file", "directory", "missing", root + "/file"}
+	for index, target := range targets {
+		name := root + fmt.Sprintf("/link-%d", index)
+		err = os.Symlink(target, name)
+		if capability == "unavailable" {
+			assert(err != nil, "unsupported host must return an explicit symlink error")
+			_, inspectErr := os.Lstat(name)
+			assert(os.IsNotExist(inspectErr), "failed symlink must leave no filesystem entry")
+			continue
+		}
+		must(err)
+		info, statErr := os.Lstat(name)
+		must(statErr)
+		assert(info.Mode() & os.ModeSymlink != 0, "Lstat must identify the link")
+		if index == 1 {
+			resolved, resolveErr := os.Stat(name)
+			must(resolveErr)
+			assert(resolved.IsDir(), "relative directory symlink must resolve beside the link")
+		}
+		if index == 2 {
+			_, resolveErr := os.Stat(name)
+			assert(os.IsNotExist(resolveErr), "dangling link must remain a link")
+		}
+	}
+	entries, readErr := os.ReadDir(root)
+	must(readErr)
+	if capability == "supported" {
+		assert(len(entries) == 6)
+		for index := 2; index < 6; index++ {
+			assert(entries[index].Type() & os.ModeSymlink != 0, "ReadDir must preserve symlink type")
+		}
+	} else {
+		assert(len(entries) == 2)
+	}
+	fmt.Println("symlink host contract: ok")
+}

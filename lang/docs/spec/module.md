@@ -210,7 +210,7 @@ imports use portable mode.
 
 ```toml
 format = 1
-members = ["BlockKart", "vogui", "vopack", "voplay"]
+members = ["ui", "apps/studio"]
 ```
 
 Each member path is relative to the workfile directory and names a directory

@@ -1,3 +1,5 @@
+mod metadata;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -1257,8 +1259,10 @@ fn inspect_native_cargo_context(
         ));
     }
 
-    let mut metadata_hasher = StableHasher::new("vo-native-cargo-metadata-v1");
-    metadata_hasher.update_bytes("metadata", &output.stdout);
+    let canonical_metadata = metadata::canonical_bytes(&output.stdout)
+        .map_err(|error| native_build_input_read_error(&manifest_path, error))?;
+    let mut metadata_hasher = StableHasher::new("vo-native-cargo-metadata-v2");
+    metadata_hasher.update_bytes("metadata", &canonical_metadata);
     let metadata_digest = metadata_hasher.finish();
     Ok(NativeCargoContext {
         manifest_dir,
@@ -2004,6 +2008,7 @@ fn capture_native_extension_input_state(
         package,
         workspace_discovery,
     )?;
+    let mut drift = Vec::new();
     for _ in 0..NATIVE_EXTENSION_BUILD_ATTEMPTS {
         let current = capture_native_extension_input_state_once(
             module_dir,
@@ -2018,9 +2023,19 @@ fn capture_native_extension_input_state(
         {
             return Ok(current);
         }
+        drift.push(format!(
+            "content={}, namespace={}, metadata={}",
+            current.fingerprint != previous.fingerprint,
+            current.generation != previous.generation,
+            current.cargo.metadata_digest != previous.cargo.metadata_digest,
+        ));
         previous = current;
     }
-    Err(native_extension_inputs_kept_changing_error(module_dir))
+    let mut error = native_extension_inputs_kept_changing_error(module_dir);
+    error
+        .detail
+        .push_str(&format!(" (capture drift: {})", drift.join("; ")));
+    Err(error)
 }
 
 fn capture_native_extension_input_state_once(
@@ -4561,14 +4576,11 @@ fn atomic_write_native_file(path: &Path, bytes: &[u8]) -> Result<(), std::io::Er
     result
 }
 
-#[cfg(not(windows))]
 fn replace_native_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    // Rust's Windows rename also uses FileRenameInfoEx/POSIX semantics when
+    // MoveFileEx cannot replace a destination observed by an open reader.
+    // Keep the atomic replacement; removing the destination first exposes a gap.
     fs::rename(temp_path, path)
-}
-
-#[cfg(windows)]
-fn replace_native_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
-    move_native_file_windows(temp_path, path, true)
 }
 
 #[cfg(windows)]
@@ -5546,6 +5558,7 @@ mod tests {
         assert_eq!(specs[0].name, "demo");
         assert_eq!(specs[0].module_owner, "github.com/acme/demo");
 
+        drop(specs);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -6039,8 +6052,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(fs::read(load_copy.path).unwrap(), live_bytes);
+        assert_eq!(fs::read(&load_copy.path).unwrap(), live_bytes);
         assert_eq!(fs::read(native_path).unwrap(), live_bytes);
+        drop(load_copy);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -6351,6 +6365,7 @@ mod tests {
         assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
         assert!(!extension_dir.join("Cargo.lock").exists());
 
+        drop(load_copy);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -6986,7 +7001,11 @@ name = "vo-engine"
         let source_url = if cfg!(windows) {
             format!(
                 "file:///{}",
-                source_repo.to_string_lossy().replace('\\', "/")
+                source_repo
+                    .to_string_lossy()
+                    .strip_prefix(r"\\?\")
+                    .expect("canonical Windows fixture has a verbatim disk path")
+                    .replace('\\', "/")
             )
         } else {
             format!("file://{}", source_repo.display())
@@ -7461,6 +7480,24 @@ name = "vo-engine"
     }
 
     #[test]
+    fn native_file_replacement_preserves_open_reader_generation() {
+        let root = temp_dir("vo_native_atomic_open_reader");
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("marker");
+        fs::write(&destination, b"original").unwrap();
+        let mut original = fs::File::open(&destination).unwrap();
+        for generation in 0..16u32 {
+            atomic_write_native_file(&destination, &generation.to_le_bytes()).unwrap();
+            assert_eq!(fs::read(&destination).unwrap(), generation.to_le_bytes());
+        }
+        let mut original_bytes = Vec::new();
+        original.read_to_end(&mut original_bytes).unwrap();
+        assert_eq!(original_bytes, b"original");
+        drop(original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn atomic_native_file_replacement_never_exposes_a_missing_destination() {
         let root = temp_dir("vo_native_atomic_replace_visibility");
         fs::create_dir_all(&root).unwrap();
@@ -7879,6 +7916,8 @@ name = "vo-engine"
             &workspace_discovery,
         ));
 
+        drop(spec);
+        drop(restored_spec);
         fs::remove_dir_all(&root).unwrap();
     }
 

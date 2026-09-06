@@ -1979,6 +1979,14 @@ fn open_cache_owner_marker(
     root: &AnchoredDirectory,
     create: bool,
 ) -> Result<Arc<LockedFile>, Error> {
+    open_cache_owner_marker_with_post_missing(root, create, || Ok(()))
+}
+
+fn open_cache_owner_marker_with_post_missing(
+    root: &AnchoredDirectory,
+    create: bool,
+    mut post_missing: impl FnMut() -> Result<(), Error>,
+) -> Result<Arc<LockedFile>, Error> {
     let name = OsStr::new(CACHE_OWNER_MARKER);
     let mut observed_incomplete = false;
     for _ in 0..OWNER_MARKER_ACQUISITION_ATTEMPTS {
@@ -1990,7 +1998,16 @@ fn open_cache_owner_marker(
                         root.display_path.display(),
                     )));
                 }
-                if !root.entries()?.is_empty() {
+                post_missing()?;
+                let entries = root.entries()?;
+                if entries.iter().any(|entry| entry == name) {
+                    // A first acquirer published the exact marker after our
+                    // missing observation. Reopen it through the normal lease
+                    // and identity/content checks, including an in-flight writer.
+                    observed_incomplete = true;
+                    continue;
+                }
+                if !entries.is_empty() {
                     return Err(invalid_cache_state(format!(
                         "module cache root {} is non-empty but missing required owner marker {CACHE_OWNER_MARKER}; move or remove it and retry",
                         root.display_path.display(),
@@ -3119,7 +3136,7 @@ mod tests {
 
     #[test]
     fn post_create_portable_alias_failure_removes_only_the_created_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("Straße");
         let alias = root.path().join("STRASSE");
@@ -3138,7 +3155,7 @@ mod tests {
 
     #[test]
     fn external_post_create_alias_failure_removes_only_the_created_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("Straße");
         let alias = root.path().join("STRASSE");
@@ -3161,7 +3178,7 @@ mod tests {
 
     #[test]
     fn post_create_path_replacement_is_preserved_when_rollback_loses_identity() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("created");
         let requested_path = root.path().join(requested);
@@ -3185,7 +3202,7 @@ mod tests {
 
     #[test]
     fn post_create_nonempty_directory_is_preserved_when_rollback_is_unsafe() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let parent = open_absolute_directory(root.path(), false, true, "test parent").unwrap();
         let requested = OsStr::new("created");
         let sentinel = root.path().join(requested).join("sentinel");
@@ -3206,7 +3223,7 @@ mod tests {
 
     #[test]
     fn cache_initialization_is_explicit_and_reopenable() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
 
         assert!(CacheMutationLock::shared_existing(&cache).is_err());
@@ -3226,7 +3243,7 @@ mod tests {
     fn concurrent_first_acquirers_observe_one_complete_owner_marker() {
         const WORKERS: usize = 8;
 
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let barrier = Arc::new(Barrier::new(WORKERS));
         let mut workers = Vec::new();
@@ -3249,8 +3266,98 @@ mod tests {
     }
 
     #[test]
+    fn owner_marker_published_after_missing_observation_is_reopened() {
+        let temporary = crate::test_tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        let root = open_cache_root(&normalize_cache_root_path(&cache).unwrap(), true).unwrap();
+        let mut winner = None;
+        let mut missing_observations = 0;
+
+        let marker = open_cache_owner_marker_with_post_missing(&root, true, || {
+            missing_observations += 1;
+            assert_eq!(missing_observations, 1);
+            // Complete another real acquisition between the first missing
+            // observation and the directory enumeration, without timing races.
+            winner = Some(CacheMutationLock::shared(&cache)?);
+            Ok(())
+        })
+        .unwrap();
+
+        let winner = winner.unwrap();
+        winner.validate_cache_ownership().unwrap();
+        validate_cache_owner_marker_file(marker.file(), &root).unwrap();
+        let winner_information =
+            crate::windows_file::file_information(winner.owner_marker.as_ref().unwrap().file())
+                .unwrap();
+        let observer_information = crate::windows_file::file_information(marker.file()).unwrap();
+        assert_eq!(
+            FileIdentity::from_information(&observer_information),
+            FileIdentity::from_information(&winner_information),
+        );
+        CacheMutationLock::shared_existing(&cache)
+            .unwrap()
+            .validate_cache_ownership()
+            .unwrap();
+    }
+
+    #[test]
+    fn foreign_entry_after_missing_owner_marker_is_not_adopted() {
+        let temporary = crate::test_tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        let root = open_cache_root(&normalize_cache_root_path(&cache).unwrap(), true).unwrap();
+        let sentinel = cache.join("foreign-source");
+
+        let error = open_cache_owner_marker_with_post_missing(&root, true, || {
+            std::fs::write(&sentinel, b"preserve")?;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("non-empty but missing"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve");
+        assert!(!cache.join(CACHE_OWNER_MARKER).exists());
+        assert!(!cache.join(STAGING_DIR).exists());
+    }
+
+    #[test]
+    fn invalid_owner_marker_published_after_missing_observation_is_rejected() {
+        for invalid in ["content", "directory", "alias"] {
+            let temporary = crate::test_tempdir().unwrap();
+            let cache = temporary.path().join("cache");
+            let root = open_cache_root(&normalize_cache_root_path(&cache).unwrap(), true).unwrap();
+            let name = if invalid == "alias" {
+                CACHE_OWNER_MARKER.to_ascii_uppercase()
+            } else {
+                CACHE_OWNER_MARKER.to_string()
+            };
+            let marker = cache.join(name);
+
+            let error = open_cache_owner_marker_with_post_missing(&root, true, || {
+                if invalid == "directory" {
+                    std::fs::create_dir(&marker)?;
+                } else {
+                    std::fs::write(&marker, b"wrong-owner\n")?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+
+            assert!(matches!(error, Error::Io(_)), "{invalid}: {error}");
+            assert!(!cache.join(STAGING_DIR).exists(), "{invalid}");
+            if invalid == "directory" {
+                assert!(marker.is_dir());
+            } else {
+                assert_eq!(std::fs::read(marker).unwrap(), b"wrong-owner\n");
+            }
+        }
+    }
+
+    #[test]
     fn exclusive_lease_waits_for_every_shared_lease() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let first = CacheMutationLock::shared(&cache).unwrap();
         let second = CacheMutationLock::shared_existing(&cache).unwrap();
@@ -3283,7 +3390,7 @@ mod tests {
 
     #[test]
     fn transaction_publication_is_atomic_and_no_replace() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let cache_lock = CacheMutationLock::shared(&cache).unwrap();
 
@@ -3322,7 +3429,7 @@ mod tests {
 
     #[test]
     fn portable_alias_cannot_publish_a_second_generation() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let cache_lock = CacheMutationLock::shared(&cache).unwrap();
 

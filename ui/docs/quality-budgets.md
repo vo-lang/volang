@@ -16,7 +16,7 @@ low-end profile uses constrained CPU and memory runners.
 | Core Wasm AOT image, UIKit gallery (Brotli) | 600 KiB | 600 KiB | hard failure |
 | Core Wasm AOT image, official product (Brotli) | 600 KiB | 600 KiB | hard failure |
 | Core Wasm AOT image, Studio workbench (Brotli) | 640 KiB | 640 KiB | hard failure |
-| Core Wasm AOT image, full Studio (Brotli / gzip) | 960 KiB / 2,700,000 B | 960 KiB / 2,700,000 B | hard failure |
+| Core Wasm AOT image, full Studio (raw / Brotli / gzip) | 34,000,000 B / 950 KiB / 2,500,000 B | 34,000,000 B / 950 KiB / 2,500,000 B | hard failure |
 | Full Studio install precache (gzip transfer) | 3.5 MiB | 3.5 MiB | hard failure |
 | desktop warm startup p95 | 500 ms | 900 ms | E5 gate |
 | idle resident memory | 120 MiB | 160 MiB | E7 gate |
@@ -52,13 +52,15 @@ mounts fewer than 200 text mutations. Startup, artifact size, resident memory,
 jank, and power measurements enter the same report as their owning Web,
 desktop, and observability increments land.
 
-The full Studio budget records Brotli and gzip separately because production
-static hosts do not all negotiate the same encoding. Its install precache is a
-second, independent budget over every file listed by the generated service
-worker. The browser compiler runtime and packaged module workspace load and
-enter the runtime cache on first use; they do not consume the initial install
-budget. Documentation routes follow the same visit-then-cache policy, while the
-start and offline routes remain install-time assets.
+The full Studio budget records the raw image, Brotli, and gzip separately.
+The raw ceiling bounds browser decode and compile work; the compressed ceilings
+bound transfer cost across static hosts with different content negotiation. Its
+install precache is a second, independent budget over every file listed by the
+generated service worker. The browser compiler runtime and packaged module
+workspace load and enter the runtime cache on first use; they do not consume
+the initial install budget. Documentation routes follow the same
+visit-then-cache policy, while the start and offline routes remain install-time
+assets.
 
 Warm-up, sample counts, target triple, profile, CPU mode, screen scale, and
 renderer backend are part of every record. Results from debug builds are

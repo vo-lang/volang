@@ -95,6 +95,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "vo-ui-artifact",
+ "vo-ui-core",
  "vo-ui-plan",
 ]
 

@@ -2354,7 +2354,8 @@ mod tests {
         );
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("project root changed"), "{error}");
-        assert!(error.contains("outer/sub"), "{error}");
+        let nested = canonical_test_path(tree.0.join("outer/sub"));
+        assert!(error.contains(&nested.display().to_string()), "{error}");
     }
 
     #[test]
@@ -2385,7 +2386,11 @@ mod tests {
         tree.write("workspace/app/vo.work", "format = 1\nmembers = [\".\"]\n");
         let error = workspace.validate_current().unwrap_err();
         assert!(error.contains("workspace selection changed"), "{error}");
-        assert!(error.contains("workspace/app/vo.work"), "{error}");
+        let nested_workfile = canonical_test_path(tree.0.join("workspace/app/vo.work"));
+        assert!(
+            error.contains(&nested_workfile.display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]

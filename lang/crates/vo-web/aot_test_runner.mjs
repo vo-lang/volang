@@ -2,9 +2,11 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
+import { mapBounded } from './test_runner_pool.mjs';
 import { dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { hostPlatform, probeHost, jobHost } from './test_runner_host.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '../../..');
@@ -27,7 +29,7 @@ function loadArguments(args) {
   if (!planPath) throw new Error('usage: aot_test_runner.mjs --plan PLAN [--format text|json]');
   if (format !== 'text' && format !== 'json') throw new Error('--format must be text or json');
   const plan = JSON.parse(readFileSync(planPath, 'utf8'));
-  if (plan.schema !== 'volang.test-plan.v1' || !Array.isArray(plan.jobs)) {
+  if (plan.schema !== 'volang.test-plan.v2' || !Array.isArray(plan.jobs)) {
     throw new Error('unsupported Volang test plan');
   }
   return { plan, format };
@@ -61,6 +63,9 @@ function jsonJob(job, status, elapsedMs, result, error = '') {
     owner: job.owner ?? null,
     expect: job.expect ?? { kind: 'pass' },
     status,
+    requires_host: job.requires_host,
+    resource_group: job.resource_group,
+    failure_kind: status === 'failed' ? 'product' : null,
     elapsed_ms: elapsedMs,
     stdout: result?.stdout ?? '',
     stderr: result?.stderr ?? '',
@@ -113,13 +118,17 @@ function executeWorker(job) {
   });
 }
 
-async function runJob(job, format) {
+async function runJob(job, format, probes) {
+  const host = jobHost(job, probes);
+  if (host.error) return { ...jsonJob(job, 'failed', 0, null, host.error), ...host };
   const started = Date.now();
   const source = resolve(repositoryRoot, job.path);
   let result;
   let failure = '';
+  let failureKind = 'product';
   if (job.kind !== 'file') failure = `unsupported AOT case kind ${job.kind}`;
   else if (!existsSync(source)) failure = `file not found: ${job.path}`;
+  if (failure) failureKind = 'infrastructure';
   try {
     if (!failure) result = await executeWorker(job);
     const expectFailure = job.expect?.kind === 'fail';
@@ -137,6 +146,7 @@ async function runJob(job, format) {
     }
   } catch (error) {
     failure = error?.message ?? String(error);
+    failureKind = 'infrastructure';
   }
   const status = failure ? 'failed' : 'passed';
   if (format === 'text') {
@@ -144,40 +154,30 @@ async function runJob(job, format) {
     const detail = failure ? ` ${failure.split('\n')[0]}` : '';
     console.log(`  ${marker} ${job.path} [wasm-aot]${detail}`);
   }
-  return jsonJob(job, status, Date.now() - started, result, failure);
+  return { ...jsonJob(job, status, Date.now() - started, result, failure), host_capabilities: host.host_capabilities, failure_kind: failure ? failureKind : null };
 }
 
 async function main() {
   const { plan, format } = loadArguments(process.argv.slice(2));
   if (plan.jobs.length === 0) throw new Error('AOT test plan contains no jobs');
+  const probes = await probeHost(plan);
   const configuredJobs = Number(process.env.VO_TEST_JOBS ?? '');
   const concurrency = Number.isSafeInteger(configuredJobs) && configuredJobs > 0
-    ? Math.min(configuredJobs, 32)
+    ? Math.min(configuredJobs, 8)
     : Math.min(4, availableParallelism());
   if (format === 'text') {
     console.log(
       `Running ${plan.suite ?? 'selected'} Core Wasm AOT tests (${concurrency} workers)...\n`,
     );
   }
-  const jobs = new Array(plan.jobs.length);
-  let nextJob = 0;
-  const worker = async () => {
-    while (nextJob < plan.jobs.length) {
-      const index = nextJob;
-      nextJob += 1;
-      jobs[index] = await runJob(plan.jobs[index], format);
-    }
-  };
-  await Promise.all(Array.from(
-    { length: Math.min(concurrency, plan.jobs.length) },
-    () => worker(),
-  ));
+  const jobs = await mapBounded(plan.jobs, concurrency, job => runJob(job, format, probes));
   const passed = jobs.filter((job) => job.status === 'passed').length;
   const failed = jobs.length - passed;
   if (format === 'json') {
     console.log(JSON.stringify({
-      schema: 'volang.test-result.v1',
+      schema: 'volang.test-result.v2',
       suite: plan.suite ?? 'lang',
+      host_platform: hostPlatform,
       passed,
       failed,
       skipped: 0,
@@ -186,10 +186,10 @@ async function main() {
   } else {
     console.log(`\n${passed} passed, ${failed} failed`);
   }
-  if (failed !== 0) process.exit(1);
+  if (failed !== 0) process.exitCode = 1;
 }
 
 main().catch((error) => {
   console.error(error?.stack ?? error);
-  process.exit(2);
+  process.exitCode = 2;
 });

@@ -734,6 +734,10 @@ fn msvc_aot_link_arguments(
             "kernel32.lib",
             "legacy_stdio_definitions.lib",
             "ntdll.lib",
+            // Core stdlib directory discovery uses SHGetKnownFolderPath and
+            // CoTaskMemFree even when the program has no UI host.
+            "ole32.lib",
+            "shell32.lib",
             "userenv.lib",
             "ws2_32.lib",
         ]
@@ -747,11 +751,9 @@ fn msvc_aot_link_arguments(
                 "dwmapi.lib",
                 "gdi32.lib",
                 "imm32.lib",
-                "ole32.lib",
                 "oleaut32.lib",
                 "opengl32.lib",
                 "propsys.lib",
-                "shell32.lib",
                 "user32.lib",
                 "windowscodecs.lib",
             ]
@@ -769,6 +771,8 @@ fn link_native_aot(
     runtime: Option<PathBuf>,
     extension_archives: &[PathBuf],
     ui: bool,
+    // Additional system libraries differ on macOS and Windows.
+    _compiler_host: bool,
 ) -> Result<(), String> {
     let host = TargetSpec::host().map_err(|error| error.to_string())?;
     if target != &host {
@@ -805,7 +809,7 @@ fn link_native_aot(
         &runtime,
         &linked_file.0,
         extension_archives,
-        ui,
+        ui || _compiler_host,
     ));
     #[cfg(not(windows))]
     command
@@ -842,7 +846,7 @@ fn link_native_aot(
             command.arg("-framework").arg(framework);
         }
         command.args(["-liconv", "-lresolv"]);
-        if ui {
+        if ui || _compiler_host {
             for framework in [
                 "ApplicationServices",
                 "CoreGraphics",
@@ -1133,6 +1137,7 @@ fn cmd_build(args: &[OsString]) -> i32 {
                 runtime,
                 &extension_archives,
                 ui_application,
+                vo_engine::native_aot_requires_toolchain_host(output.module.module()),
             ),
             BuildKind::Wasm | BuildKind::Bytecode => unreachable!(),
         };
@@ -3334,6 +3339,9 @@ mod tests {
         );
         assert!(!core_arguments.contains(&OsString::from("d3dcompiler.lib")));
         assert!(!core_arguments.contains(&OsString::from("user32.lib")));
+        for library in ["ole32.lib", "shell32.lib"] {
+            assert!(core_arguments.contains(&OsString::from(library)));
+        }
     }
 
     #[test]

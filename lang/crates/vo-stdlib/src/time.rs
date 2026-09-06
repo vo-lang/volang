@@ -33,12 +33,20 @@ fn system_time_unix_nano(time: SystemTime) -> i64 {
 }
 
 fn timesys_now_unix_nano(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_i64(0, now_unix_nano());
+    let now = call
+        .try_io_mut()
+        .and_then(|io| io.manual_clock())
+        .map_or_else(now_unix_nano, |clock| clock.unix_nanos());
+    call.ret_i64(0, now);
     ExternResult::Ok
 }
 
 fn timesys_now_mono_nano(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_i64(0, now_mono_nano());
+    let now = call
+        .try_io_mut()
+        .and_then(|io| io.manual_clock())
+        .map_or_else(now_mono_nano, |clock| clock.monotonic_nanos());
+    call.ret_i64(0, now);
     ExternResult::Ok
 }
 
@@ -265,14 +273,16 @@ mod tests {
 
     #[test]
     fn unix_nanoseconds_preserve_pre_epoch_sign_without_panicking() {
+        // Windows SystemTime has 100 ns resolution; both signs must survive
+        // conversion using an instant representable on every supported host.
         assert_eq!(system_time_unix_nano(UNIX_EPOCH), 0);
         assert_eq!(
-            system_time_unix_nano(UNIX_EPOCH + Duration::from_nanos(1)),
-            1
+            system_time_unix_nano(UNIX_EPOCH + Duration::from_nanos(100)),
+            100
         );
         assert_eq!(
-            system_time_unix_nano(UNIX_EPOCH - Duration::from_nanos(1)),
-            -1
+            system_time_unix_nano(UNIX_EPOCH - Duration::from_nanos(100)),
+            -100
         );
     }
 

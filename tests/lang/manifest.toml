@@ -50,6 +50,7 @@ expect = "pass"
 
 [[case]]
 id = "2026-01-31-blocking-file-ops"
+resource_group = "blocking-file-fixture"
 kind = "file"
 path = "cases/runtime/core/2026_01_31_blocking_file_ops.vo"
 matrix = "default"
@@ -439,7 +440,7 @@ id = "2026-02-18-map-make-value-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_make_value_abi_slot_count_limit.vo"
 matrix = "default"
-tags = ["typechecker", "regression", "map", "vm-contract"]
+tags = ["smoke", "typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
 reason = "MapNew uses exact metadata widths for wide map values"
 expect = "pass"
@@ -1302,6 +1303,7 @@ expect = "pass"
 
 [[case]]
 id = "bugs.2026-01-31-jit-http-server-client-osr"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/bugs/2026_01_31_jit_http_server_client.vo"
 matrix = "osr-contract"
@@ -1348,11 +1350,12 @@ id = "bugs.2026-04-30-ptrnew-large-struct-slots"
 kind = "file"
 path = "cases/bugs/2026_04_30_ptrnew_large_struct_slots.vo"
 matrix = "default"
-tags = ["codegen", "regression", "struct", "smoke"]
+tags = ["compiler-host", "codegen", "regression", "struct", "smoke"]
 owner = "codegen"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
+reason = "embedded and browser hosts lack compiler externs; the core Native AOT runtime must reject a missing compiler host at link time"
 expect = "pass"
+expect_by_target = { native-aot = { fail = ["vo_aot_initialize_toolchain_host_v1"] } }
 
 [[case]]
 id = "bugs.2026-05-10-large-struct-return-slots"
@@ -1554,6 +1557,15 @@ path = "cases/bugs/2026_06_01_jit_strict_contract_boundaries.vo"
 matrix = "default-gc"
 tags = ["gc", "contract", "regression", "smoke"]
 owner = "runtime-gc"
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-09-05-pointer-field-gvn-control-flow"
+kind = "file"
+path = "cases/bugs/2026_09_05_pointer_field_gvn_control_flow.vo"
+matrix = "default"
+tags = ["jit", "regression", "control-flow", "smoke"]
+owner = "jit"
 expect = "pass"
 
 [[case]]
@@ -5122,6 +5134,7 @@ expect = { fail = ["continue label Switch must refer to an enclosing for stateme
 
 [[case]]
 id = "lang.test.http-client-test"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/lang/test/http_client_test.vo"
 matrix = "default"
@@ -5144,6 +5157,7 @@ expect = "pass"
 
 [[case]]
 id = "lang.test.http-server-test"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/lang/test/http_server_test.vo"
 matrix = "default"
@@ -5849,6 +5863,8 @@ expect = "pass"
 
 [[case]]
 id = "net.net-conn"
+resource_group = "net-conn-unix-socket"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/net/net_conn.vo"
 matrix = "default"
@@ -5936,6 +5952,17 @@ reason = "native filesystem permissions, flags, timestamps, and environment sema
 expect = "pass"
 
 [[case]]
+id = "os-pipe-closed-reader"
+kind = "file"
+path = "cases/stdlib/os_pipe_closed_reader.vo"
+matrix = "default"
+tags = ["stdlib", "smoke", "regression"]
+owner = "stdlib"
+skip = ["nostd", "wasm", "wasm-aot"]
+reason = "operating-system pipes require a native host"
+expect = "pass"
+
+[[case]]
 id = "os-pipe-chtimes"
 kind = "file"
 path = "cases/stdlib/os_pipe_chtimes.vo"
@@ -5965,7 +5992,7 @@ matrix = "default"
 tags = ["stdlib", "filesystem", "regression", "smoke"]
 owner = "stdlib"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "symbolic-link creation and inspection require a native host"
+reason = "directory metadata requires a native filesystem"
 expect = "pass"
 
 [[case]]
@@ -10478,6 +10505,7 @@ expect = "pass"
 
 [[case]]
 id = "stdlib.http-native-cancel"
+requires_host = ["loopback"]
 kind = "file"
 path = "cases/stdlib/http_native_cancel.vo"
 matrix = "default"
@@ -10490,6 +10518,7 @@ expect = "pass"
 
 [[case]]
 id = "stdlib.http-fileserver-semantics"
+requires_host = ["symlink"]
 kind = "file"
 path = "cases/stdlib/http_fileserver_semantics.vo"
 matrix = "default"
@@ -11143,22 +11172,24 @@ id = "toolchain-compile-file-error"
 kind = "file"
 path = "cases/runtime/core/toolchain_compile_file_error.vo"
 matrix = "default"
-tags = ["runtime"]
+tags = ["compiler-host", "runtime"]
 owner = "runtime"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
+reason = "embedded and browser hosts lack compiler externs; the core Native AOT runtime must reject a missing compiler host at link time"
 expect = "pass"
+expect_by_target = { native-aot = { fail = ["vo_aot_initialize_toolchain_host_v1"] } }
 
 [[case]]
 id = "toolchain-handle-lifetime"
 kind = "file"
 path = "cases/runtime/core/toolchain_handle_lifetime.vo"
 matrix = "default"
-tags = ["runtime", "toolchain", "handle", "regression"]
+tags = ["compiler-host", "runtime", "toolchain", "handle", "regression"]
 owner = "runtime"
 skip = ["nostd", "wasm", "wasm-aot"]
-reason = "toolchain compiler externs are intentionally unavailable in embedded and browser hosts"
+reason = "embedded and browser hosts lack compiler externs; the core Native AOT runtime must reject a missing compiler host at link time"
 expect = "pass"
+expect_by_target = { native-aot = { fail = ["vo_aot_initialize_toolchain_host_v1"] } }
 
 [[case]]
 id = "type-alias-method-chain"
@@ -11784,4 +11815,14 @@ tags = ["module", "archive"]
 owner = "module"
 reason = "project in src/ subdirectory"
 zip_root = "src/"
+expect = "pass"
+
+[[case]]
+id = "os-symlink-host-contract"
+kind = "file"
+path = "cases/stdlib/os_symlink_host_contract.vo"
+matrix = "native"
+tags = ["stdlib", "filesystem", "symlink", "regression", "smoke"]
+owner = "stdlib"
+reason = "runner probes native symlink capability independently; unavailable hosts must return an error without creating an entry"
 expect = "pass"

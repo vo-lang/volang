@@ -103,3 +103,9 @@ name = "vo-web.aot-support"
 class = "build-output"
 path = "lang/crates/vo-web/aot-support"
 tracked = false
+
+[[artifact]]
+name = "browser-contracts.node-modules"
+class = "cache"
+path = "eng/browser/node_modules"
+tracked = false

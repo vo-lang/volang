@@ -1801,7 +1801,7 @@ mod tests {
 
     #[test]
     fn real_fs_publish_noreplace_preserves_both_paths_on_collision() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let fs = RealFs::new(root.path());
         <RealFs as InstallSurface>::write_bytes(&fs, Path::new("source"), b"new").unwrap();
         <RealFs as InstallSurface>::write_bytes(&fs, Path::new("target"), b"old").unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_staged_sync_rejects_excessive_directory_depth() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let mut directory = root.path().to_path_buf();
         for _ in 0..=MAX_NATIVE_STAGED_TREE_DEPTH {
             directory.push("d");
@@ -1840,8 +1840,8 @@ mod tests {
     fn real_fs_mutations_reject_symlink_ancestors_and_only_unlink_leaf_symlinks() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
+        let outside = crate::test_tempdir().unwrap();
         let outside_tree = outside.path().join("tree");
         std::fs::create_dir(&outside_tree).unwrap();
         let outside_file = outside_tree.join("keep.vo");
@@ -1879,7 +1879,7 @@ mod tests {
 
     impl Default for RecordingSurface {
         fn default() -> Self {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::test_tempdir().unwrap();
             drop(crate::cache::acquire_read_lease(root.path()).unwrap());
             let fs = RealFs::new(root.path());
             Self {
@@ -2647,7 +2647,7 @@ mod tests {
     fn async_source_install_propagates_committed_durability_failure() {
         let source_files = browser_source_files();
         let (locked, manifest, tree_raw) = browser_manifest_fixture(&source_files);
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let surface = RealFs::new(root.path());
         let registry = FilesRegistry {
             source_files,
@@ -2681,7 +2681,7 @@ mod tests {
             artifact,
             artifact_bytes,
         } = native_artifact_browser_fixture();
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_tempdir().unwrap();
         let surface = RealFs::new(root.path());
         let registry = FilesRegistry {
             source_files,

@@ -48,9 +48,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:7f2d6244f69d9aa1aefc93e5c05c87786362bc1363585725945f282cab52d115",
+      "digest": "sha256:295f06034ffd8d2e1f14b45b846c03d102b7ded065acf9840325141554749750",
       "path": "catalog.vo",
-      "size": 292571
+      "size": 292566
     }
   ],
   "path": "apps/studio/documentation",
@@ -74,8 +74,8 @@
     "lang/docs/spec/channel.md": "sha256:2672a36f30d7f38576fccc78d04adb607891a643e8d14041d8e3c595809ed6b2",
     "lang/docs/spec/dynamic.md": "sha256:b772f19f8b6df75774bfdc2c7d4e713fbcf2091d6b4dd2b510af2892f92abe37",
     "lang/docs/spec/language.md": "sha256:be03e4d9b638adc4803717ed516c52126ebe3f37ac005bbd90a32908ab427a64",
-    "lang/docs/spec/module.md": "sha256:40ce96a464adeb3b59a8bb01c2b018deab48b7ab6779eda895411e2a048b06ec",
-    "lang/docs/spec/native-ffi.md": "sha256:0b16b9205870c207c70086376d2b6782a93fa332507e3a0044c1eb54a00a30ae",
+    "lang/docs/spec/module.md": "sha256:8ec5f17e9be3389e3e768c346329115a3dd7a25f5e38d65bdd616248ad1d5a88",
+    "lang/docs/spec/native-ffi.md": "sha256:94b32af33a28db13b0371b6ee87ec09002115f9d4d14b1de776bde66bc416ce3",
     "lang/docs/spec/runtime-memory.md": "sha256:507fe4b6cbed2ec579e467f47929b9e1078e7be7b571bc51bb91891c25ffca9b",
     "lang/docs/vo-for-gophers.md": "sha256:4c4357f24a55b188074be91688d9b2cc65bf22f7ef65daddb4f031aa40ff4061",
     "ui/docs/accessibility-localization.md": "sha256:1408efc55eb088b7d970caeee20e217b8a27980b259d0ec76333f908e7b237e8",

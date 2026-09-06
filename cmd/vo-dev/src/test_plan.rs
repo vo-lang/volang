@@ -1,30 +1,39 @@
 use crate::test_config::{load_test_config, resolve_target_specs, TestTarget};
 use crate::test_manifest::{
-    has_target_name, load_manifest, manifest_case_path, parse_case_expect, resolved_case_targets,
-    CaseExpect, ManifestCase, ManifestFile,
+    has_target_name, load_manifest, manifest_case_path, parse_case_expect, parse_target_expect,
+    resolved_case_targets, validate_target_expectations, CaseExpect, ManifestCase, ManifestFile,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct TestPlan {
     schema: &'static str,
-    suite: String,
+    pub(crate) suite: String,
+    pub(crate) host_platform: String,
     pub(crate) jobs: Vec<TestJob>,
+    pub(crate) excluded_platforms: Vec<PlatformExclusion>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PlatformExclusion {
+    case_id: String,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TestJob {
     pub(crate) id: String,
-    case_id: String,
+    pub(crate) case_id: String,
     pub(crate) kind: String,
     pub(crate) path: String,
     pub(crate) target: String,
-    backend: String,
+    pub(crate) backend: String,
+    pub(crate) requires_host: Vec<String>,
+    pub(crate) resource_group: Option<String>,
     matrix: Option<String>,
     tags: Vec<String>,
     owner: Option<String>,
@@ -43,6 +52,7 @@ pub(crate) struct TestShard {
 #[derive(Debug)]
 pub(crate) struct TestArgs {
     pub(crate) suite: String,
+    pub(crate) host_platform: String,
     pub(crate) targets: Vec<String>,
     pub(crate) targets_explicit: bool,
     pub(crate) matrices: Vec<String>,
@@ -62,6 +72,7 @@ impl TestArgs {
     pub(crate) fn parse(root: &Path, args: Vec<String>) -> Result<Self> {
         let test_config = load_test_config(root)?;
         let mut suite = "lang".to_string();
+        let mut host_platform = std::env::consts::OS.to_string();
         let mut target_specs: Option<Vec<String>> = None;
         let mut matrices = Vec::new();
         let mut tags = Vec::new();
@@ -77,6 +88,16 @@ impl TestArgs {
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--host-platform" => {
+                    i += 1;
+                    host_platform = args
+                        .get(i)
+                        .ok_or_else(|| anyhow!("--host-platform requires a value"))?
+                        .clone();
+                }
+                arg if arg.starts_with("--host-platform=") => {
+                    host_platform = arg["--host-platform=".len()..].to_string();
+                }
                 "--release" => {
                     release = true;
                 }
@@ -260,8 +281,10 @@ impl TestArgs {
                 bail!("unknown test matrix: {matrix}");
             }
         }
+        crate::test_manifest::validate_host_platform(&host_platform)?;
         Ok(Self {
             suite,
+            host_platform,
             targets,
             targets_explicit,
             matrices,
@@ -294,16 +317,27 @@ fn parse_shard(value: &str) -> Result<TestShard> {
     Ok(TestShard { index, total })
 }
 
-fn case_belongs_to_shard(case_id: &str, shard: TestShard) -> bool {
-    let digest = Sha256::digest(case_id.as_bytes());
-    let prefix = u64::from_be_bytes(
-        digest[..8]
-            .try_into()
-            .expect("SHA-256 always has an eight-byte prefix"),
-    );
-    let total = u64::try_from(shard.total).expect("test shard count must fit in u64");
-    let bucket = usize::try_from(prefix % total).expect("test shard bucket must fit in usize") + 1;
-    bucket == shard.index
+fn cases_for_weighted_shard(jobs: &[TestJob], shard: TestShard) -> BTreeSet<String> {
+    let mut weights = BTreeMap::<String, u64>::new();
+    for job in jobs {
+        *weights.entry(job.case_id.clone()).or_default() += job.timeout_sec;
+    }
+    let mut cases = weights.into_iter().collect::<Vec<_>>();
+    cases.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut shard_weights = vec![0u64; shard.total];
+    let mut assignments = vec![BTreeSet::new(); shard.total];
+    for (case_id, weight) in cases {
+        let target = shard_weights
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, weight)| (**weight, *index))
+            .map(|(index, _)| index)
+            .expect("a test shard always has at least one bucket");
+        shard_weights[target] = shard_weights[target].saturating_add(weight);
+        assignments[target].insert(case_id);
+    }
+    assignments.swap_remove(shard.index - 1)
 }
 
 pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
@@ -326,9 +360,10 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
     }
 
     let mut jobs = Vec::new();
+    let mut excluded_platforms = Vec::new();
     let mut matched_cases = 0usize;
-    let mut sharded_cases = 0usize;
     for case in &manifest.cases {
+        validate_target_expectations(case, &test_config)?;
         if !opts.paths.is_empty() && !case_matches_path_filters(root, &manifest, case, &opts.paths)?
         {
             continue;
@@ -337,20 +372,25 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
             continue;
         }
         matched_cases += 1;
-        if opts
-            .shard
-            .is_some_and(|shard| !case_belongs_to_shard(&case.id, shard))
-        {
+        if !case.platforms.contains(&opts.host_platform) {
+            excluded_platforms.push(PlatformExclusion {
+                case_id: case.id.clone(),
+                reason: format!(
+                    "host {} outside declared platforms {}: {}",
+                    opts.host_platform,
+                    case.platforms.join(","),
+                    case.reason.as_deref().unwrap_or_default()
+                ),
+            });
             continue;
         }
-        sharded_cases += 1;
         let expect = parse_case_expect(case)?;
         if expect.kind == "fail" {
             let case_targets = resolved_case_targets(case, &test_config)?;
             if requested.iter().any(|name| {
-                targets
-                    .get(name)
-                    .is_some_and(target_runs_native_compile_fail)
+                targets.get(name).is_some_and(|target| {
+                    target_runs_native_compile_fail(target) && target.backend != "native-aot"
+                })
             }) {
                 let target = targets
                     .get("compile")
@@ -371,7 +411,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 let target = targets
                     .get(target_name)
                     .ok_or_else(|| anyhow!("unknown test target: {target_name}"))?;
-                if target.kind != "wasm" {
+                if target.kind != "wasm" && target.backend != "native-aot" {
                     continue;
                 }
                 if !compile_fail_enabled_for_target(&case_targets, target) {
@@ -401,6 +441,25 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
             if target_is_skipped(&case.skip, target) {
                 continue;
             }
+            let expect = parse_target_expect(case, target_name)?;
+            if expect.kind == "fail" {
+                let mut reasons =
+                    selection_reasons_for_case(case, opts, &case_targets, target_name);
+                reasons.push(format!(
+                    "target build rejection: {}",
+                    case.reason.as_deref().unwrap_or_default()
+                ));
+                jobs.push(compile_fail_job(
+                    root,
+                    &manifest,
+                    case,
+                    target,
+                    &expect,
+                    &format!("{target_name}-compile"),
+                    &reasons,
+                )?);
+                continue;
+            }
             jobs.push(TestJob {
                 id: format!("{}::{}", case.id, target_name),
                 case_id: case.id.clone(),
@@ -408,6 +467,8 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 path: manifest_case_path(root, &manifest, case)?,
                 target: target.name.clone(),
                 backend: target.backend.clone(),
+                requires_host: case.requires_host.clone(),
+                resource_group: case.resource_group.clone(),
                 matrix: case.matrix.clone(),
                 tags: case.tags.clone(),
                 owner: case.owner.clone(),
@@ -425,6 +486,23 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                     target_name,
                 ),
             });
+        }
+    }
+
+    let mut sharded_cases = jobs
+        .iter()
+        .map(|job| job.case_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if let Some(shard) = opts.shard {
+        let selected = cases_for_weighted_shard(&jobs, shard);
+        sharded_cases = selected.len();
+        jobs.retain(|job| selected.contains(&job.case_id));
+        for job in &mut jobs {
+            job.selection_reasons.push(format!(
+                "weighted shard {}/{} selected by aggregate timeout budget",
+                shard.index, shard.total
+            ));
         }
     }
 
@@ -454,7 +532,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
             shard.total,
         );
     }
-    if has_case_filters && sharded_cases > 0 && jobs.is_empty() {
+    if has_case_filters && jobs.is_empty() {
         bail!(
             "matched {}, but no jobs were selected for targets {}",
             describe_case_filters(opts),
@@ -463,9 +541,11 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
     }
 
     Ok(TestPlan {
-        schema: "volang.test-plan.v1",
+        schema: "volang.test-plan.v2",
         suite: opts.suite.clone(),
+        host_platform: opts.host_platform.clone(),
         jobs,
+        excluded_platforms,
     })
 }
 
@@ -545,6 +625,8 @@ fn compile_fail_job(
         path: manifest_case_path(root, manifest, case)?,
         target: target.name.clone(),
         backend: target.backend.clone(),
+        requires_host: case.requires_host.clone(),
+        resource_group: case.resource_group.clone(),
         matrix: case.matrix.clone(),
         tags: case.tags.clone(),
         owner: case.owner.clone(),
@@ -620,7 +702,16 @@ fn selection_reasons_for_case(
     case_targets: &[String],
     target_name: &str,
 ) -> Vec<String> {
-    let mut reasons = Vec::new();
+    let mut reasons = vec![format!("host {} is supported", opts.host_platform)];
+    if !case.requires_host.is_empty() {
+        reasons.push(format!(
+            "requires host capabilities {}",
+            case.requires_host.join(",")
+        ));
+    }
+    if let Some(group) = &case.resource_group {
+        reasons.push(format!("resource group {group}"));
+    }
     if opts.paths.is_empty()
         && opts.matrices.is_empty()
         && opts.tags.is_empty()
@@ -896,8 +987,10 @@ mod tests {
     #[test]
     fn test_plan_job_json_includes_explain_reasons() {
         let plan = TestPlan {
-            schema: "volang.test-plan.v1",
+            schema: "volang.test-plan.v2",
             suite: "lang".to_string(),
+            host_platform: std::env::consts::OS.into(),
+            excluded_platforms: Vec::new(),
             jobs: vec![TestJob {
                 id: "case::vm".to_string(),
                 case_id: "case".to_string(),
@@ -905,6 +998,8 @@ mod tests {
                 path: "tests/lang/cases/runtime/case.vo".to_string(),
                 target: "vm".to_string(),
                 backend: "vm".to_string(),
+                requires_host: Vec::new(),
+                resource_group: None,
                 matrix: Some("default".to_string()),
                 tags: vec!["runtime".to_string()],
                 owner: Some("runtime".to_string()),
@@ -915,7 +1010,7 @@ mod tests {
             }],
         };
         let value = serde_json::to_value(plan).unwrap();
-        assert_eq!(value["schema"], "volang.test-plan.v1");
+        assert_eq!(value["schema"], "volang.test-plan.v2");
         assert_eq!(
             value["jobs"][0]["selection_reasons"][0],
             "target vm selected by matrix default"
@@ -963,6 +1058,61 @@ mod tests {
     }
 
     #[test]
+    fn native_aot_plans_real_execution_and_independent_build_rejections() {
+        let root = workspace_root();
+        let opts = TestArgs::parse(
+            &root,
+            vec![
+                "--targets".into(),
+                "native-aot".into(),
+                "--tags".into(),
+                "smoke".into(),
+            ],
+        )
+        .unwrap();
+        let plan = build_plan(&root, &opts).unwrap();
+        assert!(!plan.jobs.is_empty());
+        assert!(plan
+            .jobs
+            .iter()
+            .all(|job| job.backend == "native-aot" && job.target == "native-aot"));
+        assert!(plan.jobs.iter().any(|job| job.expect["kind"] == "pass"));
+        assert!(plan
+            .jobs
+            .iter()
+            .any(|job| job.expect["kind"] == "fail" && job.id.ends_with("::native-aot-compile")));
+        let compiler_host = plan
+            .jobs
+            .iter()
+            .find(|job| job.case_id == "bugs.2026-04-30-ptrnew-large-struct-slots")
+            .unwrap();
+        assert_eq!(
+            compiler_host.expect["patterns"],
+            json!(["vo_aot_initialize_toolchain_host_v1"])
+        );
+        assert!(compiler_host
+            .selection_reasons
+            .iter()
+            .any(|reason| reason.starts_with("target build rejection:")));
+        let host_opts = TestArgs::parse(
+            &root,
+            vec![
+                "--targets".into(),
+                "native-aot-host".into(),
+                "--tags".into(),
+                "compiler-host".into(),
+            ],
+        )
+        .unwrap();
+        let host_plan = build_plan(&root, &host_opts).unwrap();
+        assert_eq!(host_plan.jobs.len(), 3);
+        assert!(host_plan
+            .jobs
+            .iter()
+            .all(|job| job.expect["kind"] == "pass"));
+    }
+
+    #[test]
     fn native_compile_failure_selection_uses_target_kind() {
         let root = workspace_root();
         let config = load_test_config(&root).expect("load test target config");
@@ -984,12 +1134,14 @@ mod tests {
             name: "wasm-aot".to_string(),
             kind: "wasm".to_string(),
             backend: "core-wasm-aot".to_string(),
+            native_aot_runtime_features: Vec::new(),
             compatible_with: Some("wasm".to_string()),
             inherit_compatible_skips: true,
             env: BTreeMap::new(),
             default_timeout_sec: 60,
             build_command: Vec::new(),
             release_build_args: Vec::new(),
+            debug_build_args: Vec::new(),
             runner_command: Vec::new(),
             prepare_commands: Vec::new(),
         };
@@ -1016,18 +1168,7 @@ mod tests {
         let root = workspace_root();
         let manifest = load_manifest(&root).expect("load test manifest");
         let total = manifest.cases.len() + 1;
-        let index = (1..=total)
-            .find(|index| {
-                let shard = TestShard {
-                    index: *index,
-                    total,
-                };
-                manifest
-                    .cases
-                    .iter()
-                    .all(|case| !case_belongs_to_shard(&case.id, shard))
-            })
-            .expect("more shards than cases must leave an empty shard");
+        let index = total;
         let opts = TestArgs::parse(
             &root,
             vec!["--shard".to_string(), format!("{index}/{total}")],
@@ -1048,5 +1189,126 @@ mod tests {
     #[test]
     fn shards_compose_with_metadata_filters() {
         assert_two_shards_partition(&["--tags", "smoke"]);
+    }
+
+    #[test]
+    fn weighted_shards_place_the_heaviest_cases_first() {
+        fn job(case_id: &str, timeout_sec: u64) -> TestJob {
+            TestJob {
+                id: format!("{case_id}::vm"),
+                case_id: case_id.to_string(),
+                kind: "file".to_string(),
+                path: format!("{case_id}.vo"),
+                target: "vm".to_string(),
+                backend: "vm".to_string(),
+                requires_host: Vec::new(),
+                resource_group: None,
+                matrix: None,
+                tags: Vec::new(),
+                owner: None,
+                env: BTreeMap::new(),
+                timeout_sec,
+                expect: json!({ "kind": "pass" }),
+                selection_reasons: Vec::new(),
+            }
+        }
+        let jobs = vec![job("heavy", 100), job("medium", 60), job("small", 40)];
+        let first = cases_for_weighted_shard(&jobs, TestShard { index: 1, total: 2 });
+        let second = cases_for_weighted_shard(&jobs, TestShard { index: 2, total: 2 });
+        assert_eq!(first, BTreeSet::from(["heavy".to_string()]));
+        assert_eq!(
+            second,
+            BTreeSet::from(["medium".to_string(), "small".to_string()])
+        );
+    }
+
+    #[test]
+    fn host_platform_selection_precedes_weighted_sharding_and_reports_exclusions() {
+        let original = workspace_root();
+        let fixture = std::env::temp_dir().join(format!(
+            "vo-host-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(fixture.join("eng")).unwrap();
+        std::fs::create_dir_all(fixture.join("tests/lang")).unwrap();
+        for path in ["eng/tests.toml", "eng/toolchains.toml"] {
+            std::fs::copy(original.join(path), fixture.join(path)).unwrap();
+        }
+        let manifest = r#"
+version = 1
+suite = "lang"
+root = "tests/lang"
+[[case]]
+id = "linux-only"
+kind = "file"
+path = "cases/linux.vo"
+matrix = "native"
+platforms = ["linux"]
+owner = "test"
+reason = "fixture OS contract"
+expect = "pass"
+[[case]]
+id = "mac-only"
+kind = "file"
+path = "cases/mac.vo"
+matrix = "native"
+platforms = ["macos"]
+owner = "test"
+reason = "fixture OS contract"
+expect = "pass"
+[[case]]
+id = "portable"
+kind = "file"
+path = "cases/portable.vo"
+matrix = "native"
+owner = "test"
+expect = "pass"
+"#;
+        std::fs::write(fixture.join("tests/lang/manifest.toml"), manifest).unwrap();
+        let options = |platform: &str, shard: Option<&str>| {
+            let mut args = vec![
+                "--host-platform".into(),
+                platform.into(),
+                "--targets".into(),
+                "vm,jit".into(),
+            ];
+            if let Some(shard) = shard {
+                args.extend(["--shard".into(), shard.into()]);
+            }
+            TestArgs::parse(&fixture, args).unwrap()
+        };
+        for (platform, selected, excluded) in [
+            ("linux", "linux-only", "mac-only"),
+            ("macos", "mac-only", "linux-only"),
+        ] {
+            let plan = build_plan(&fixture, &options(platform, None)).unwrap();
+            assert_eq!(plan.host_platform, platform);
+            assert_eq!(plan.jobs.len(), 4);
+            assert!(plan
+                .jobs
+                .iter()
+                .all(|job| job.case_id == selected || job.case_id == "portable"));
+            assert_eq!(plan.excluded_platforms.len(), 1);
+            assert_eq!(plan.excluded_platforms[0].case_id, excluded);
+            let a = build_plan(&fixture, &options(platform, Some("1/2"))).unwrap();
+            let b = build_plan(&fixture, &options(platform, Some("2/2"))).unwrap();
+            assert_eq!(a.jobs.len(), 2);
+            assert_eq!(b.jobs.len(), 2);
+            assert_ne!(a.jobs[0].case_id, b.jobs[0].case_id);
+        }
+        assert!(TestArgs::parse(&fixture, vec!["--host-platform=typo".into()]).is_err());
+        for invalid in [
+            manifest.replace("platforms = [\"linux\"]", "platforms = []"),
+            manifest.replace("platforms = [\"linux\"]", "platfroms = [\"linux\"]"),
+            manifest.replace("platforms = [\"linux\"]", "requires_host = [\"invented\"]"),
+        ] {
+            std::fs::write(fixture.join("tests/lang/manifest.toml"), invalid).unwrap();
+            assert!(build_plan(&fixture, &options("linux", None)).is_err());
+        }
+        std::fs::remove_dir_all(fixture).unwrap();
     }
 }

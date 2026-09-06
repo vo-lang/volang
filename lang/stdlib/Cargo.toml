@@ -20,4 +20,7 @@ include = [
 path = "src/lib.rs"
 
 [dependencies]
-rust-embed = { version = "8", features = ["include-exclude"] }
+# Keep proc-macro features identical in host and cross-compiled consumers.
+# Native debug live editing is implemented by the source API below the embed.
+# Checkout times and cached embedding metadata must not change release bytes.
+rust-embed = { version = "8.7", features = ["include-exclude", "debug-embed", "deterministic-timestamps"] }

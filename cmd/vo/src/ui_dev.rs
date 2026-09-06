@@ -198,7 +198,7 @@ try {
   if (loadedImage.error) throw loadedImage.error;
   const image = loadedImage.image;
   mark('volang-aot-image-ready');
-  measure('volang-aot-image-fetch', 'volang-aot-host-ready', 'volang-aot-image-ready');
+  measure('volang-aot-image-fetch', 'volang-aot-bootstrap-start', 'volang-aot-image-ready');
   let interactiveMarked = false;
   const { externs } = connectAotUiToDom(root, {
     systemHost,
@@ -2076,6 +2076,28 @@ fn cmd_build(args: &[OsString]) -> i32 {
     }
 }
 
+#[derive(Serialize)]
+struct PackagePhaseTiming {
+    phase: &'static str,
+    elapsed_ms: u128,
+    success: bool,
+}
+
+fn package_phase<T>(
+    timings: &mut Vec<PackagePhaseTiming>,
+    phase: &'static str,
+    run: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let started = Instant::now();
+    let result = run();
+    timings.push(PackagePhaseTiming {
+        phase,
+        elapsed_ms: started.elapsed().as_millis(),
+        success: result.is_ok(),
+    });
+    result
+}
+
 fn cmd_package(args: &[OsString]) -> i32 {
     let mut project = PathBuf::from(".");
     let mut output = PathBuf::from("dist");
@@ -2114,6 +2136,8 @@ fn cmd_package(args: &[OsString]) -> i32 {
         }
         index += 1;
     }
+    let started = Instant::now();
+    let mut timings = Vec::new();
     let result = (|| {
         let target = match target {
             Some(value) => {
@@ -2138,31 +2162,53 @@ fn cmd_package(args: &[OsString]) -> i32 {
             }
         };
         let (config, format) = read_desktop_package_config(&project, &target)?;
-        let compiled = super::compile_cli_path(&project)?;
+        let compiled = package_phase(&mut timings, "source-compile", || {
+            super::compile_cli_path(&project)
+        })?;
         if !has_ui_mount(compiled.module.module()) {
             return Err("the project does not call github.com/vo-lang/ui.Mount".to_string());
         }
-        let object = vo_engine::compile_native_aot_object(&compiled, &target, false)
-            .map_err(|error| error.to_string())?;
+        let object = package_phase(&mut timings, "native-aot-lowering", || {
+            vo_engine::compile_native_aot_object(&compiled, &target, false)
+                .map_err(|error| error.to_string())
+        })?;
         fs::create_dir_all(&output).map_err(|error| {
             format!("cannot create package output {}: {error}", output.display())
         })?;
         let layout = prepare_desktop_package_layout(&output, &config, format)?;
-        let package_result = super::link_native_aot(
-            &object.bytes,
-            &layout.executable,
-            &target,
-            runtime,
-            &[],
-            true,
-        )
-        .and_then(|()| finalize_desktop_package(&project, &layout, &config, &target));
+        let package_result = package_phase(&mut timings, "link", || {
+            super::link_native_aot(
+                &object.bytes,
+                &layout.executable,
+                &target,
+                runtime,
+                &[],
+                true,
+                vo_engine::native_aot_requires_toolchain_host(compiled.module.module()),
+            )
+        })
+        .and_then(|()| {
+            package_phase(&mut timings, "package", || {
+                finalize_desktop_package(&project, &layout, &config, &target)
+            })
+        });
         if let Err(error) = package_result {
             let _ = fs::remove_dir_all(&layout.root);
             return Err(error);
         }
         Ok(layout.root)
     })();
+    if env::var_os("VO_UI_PACKAGE_TIMINGS").is_some() {
+        eprintln!(
+            "[VO:UI:PACKAGE:TIMINGS] {}",
+            serde_json::json!({
+                "schema": "volang.ui-package-timings.v1", "project": project,
+                "compiler": env::current_exe().ok(), "debug_assertions": cfg!(debug_assertions),
+                "elapsed_ms": started.elapsed().as_millis(), "phases": timings,
+                "success": result.is_ok(), "error": result.as_ref().err(),
+            })
+        );
+    }
     match result {
         Ok(path) => {
             println!("Packaged Volang desktop application at {}", path.display());
@@ -4789,7 +4835,9 @@ mod tests {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
     fn temporary_project(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        // Windows TEMP may use an 8.3 alias. Module caches deliberately require
+        // canonical spelling; test paths must satisfy that production contract.
+        std::env::temp_dir().canonicalize().unwrap().join(format!(
             "vo-ui-{name}-{}-{}",
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
@@ -5500,6 +5548,9 @@ compiler = true
         assert!(script.contains("createStudioHost"));
         assert!(script.contains("new UiBrowserSystemHost"));
         assert!(script.contains("WebAssembly.compileStreaming(response.clone())"));
+        assert!(script.contains(
+            "measure('volang-aot-image-fetch', 'volang-aot-bootstrap-start', 'volang-aot-image-ready')"
+        ));
         assert!(!script.contains("/*__VOLANG_APPLICATION_HOST__*/"));
         let development = development_index_html(&config);
         assert!(development.contains("<html lang=\"zh-CN\" dir=\"ltr\">"));

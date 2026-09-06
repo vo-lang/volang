@@ -374,15 +374,15 @@ the local build fields, remains part of source identity.
 
 ```toml
 format = 1
-module = "github.com/vo-lang/vogui"
+module = "example.com/acme/graphics"
 version = "0.1.0"
 vo = "0.1.0"
 
 [extension]
-name = "vogui"
+name = "graphics"
 
 [extension.native]
-library = "vo_vogui"
+library = "acme_graphics"
 targets = [
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
@@ -391,7 +391,7 @@ targets = [
 
 [extension.wasm]
 kind = "standalone"
-wasm = "vogui.wasm"
+wasm = "graphics.wasm"
 
 [extension.web]
 capabilities = ["render"]
@@ -404,10 +404,10 @@ host_bridge = "js/dist/studio_host_bridge.js"
 [build.native]
 kind = "cargo"
 manifest = "rust/Cargo.toml"
-package = "vo-vogui"
+package = "acme-graphics"
 
 [build.wasm]
-wasm = "web/pkg/vogui.wasm"
+wasm = "web/pkg/graphics.wasm"
 ```
 
 ### 4.4 `[extension]`

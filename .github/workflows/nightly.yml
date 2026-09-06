@@ -4,9 +4,19 @@ on:
   schedule:
     - cron: "37 3 * * *"
   workflow_dispatch:
+    inputs:
+      cold_cache:
+        description: Disable compiler caching for a complete cold build validation
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 concurrency:
   group: nightly-${{ github.repository }}
@@ -18,171 +28,267 @@ env:
   VOWORK: "off"
 
 jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Build CI planner
+        run: cargo build --locked -p vo-dev
+
+      - name: Build immutable Nightly plan
+        run: >-
+          ./target/debug/vo-dev ci plan
+          --profile nightly
+          --output target/ci/plan.json
+
+      - name: Upload immutable Nightly plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
   language_release_native:
     name: language-release-native
+    needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 105
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
 
       - name: Build repository tooling
-        run: cargo build -p vo-dev --locked
+        run: cargo build --locked -p vo-dev
 
-      - name: Run complete native release matrix
-        run: ./target/debug/vo-dev test run --suite lang --targets vm,jit,osr,gc-vm,gc-jit,gc-osr,nostd,compile --release
+      - name: Execute declared Nightly task
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task "nightly-language-native"
 
-  language_release_wasm:
-    name: language-release-wasm
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          persist-credentials: false
+          name: nightly-summary-language-native-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Install Rust and WebAssembly target
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup target add wasm32-unknown-unknown --toolchain 1.94.0
-          rustup default 1.94.0
-
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: nightly-evidence-language-native-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-language-native-${{ github.sha }}
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-
-      - name: Cache wasm-pack
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
-
-      - name: Install wasm-pack
-        run: |
-          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
-            cargo install wasm-pack --locked --version 0.14.0 --force
-          fi
-
-      - name: Build repository tooling
-        run: cargo build -p vo-dev --locked
-
-      - name: Run complete WebAssembly release matrix
-        run: ./target/debug/vo-dev test run --suite lang --targets wasm --release
+            target/ci/executions
+            target/ci/test-runs
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
 
   stress:
     name: stress-${{ matrix.name }}
+    needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: gc
-            targets: gc-vm,gc-jit
-            tags: gc
-            repeat: 20
+            task: nightly-stress-gc
           - name: jit-osr
-            targets: jit,osr
-            tags: jit
-            repeat: 5
+            task: nightly-stress-jit-osr
           - name: gc-osr
-            targets: vm,gc-vm,gc-osr
-            tags: jit,osr,contract
-            repeat: 5
+            task: nightly-stress-gc-osr
           - name: scheduler
-            targets: vm,jit
-            tags: scheduler
-            repeat: 10
+            task: nightly-stress-scheduler
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
 
       - name: Build repository tooling
-        run: cargo build -p vo-dev --locked
+        run: cargo build --locked -p vo-dev
 
-      - name: Run stress selection
-        run: ./target/debug/vo-dev test run --suite lang --targets "${{ matrix.targets }}" --tags "${{ matrix.tags }}" --repeat "${{ matrix.repeat }}" --release
+      - name: Execute declared Nightly task
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task "${{ matrix.task }}"
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-summary-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-${{ matrix.task }}-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
 
   platform:
     name: platform-${{ matrix.os }}
+    needs: plan
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2025]
+        include:
+          - os: macos-15
+            task: nightly-platform-macos
+          - os: windows-2025
+            task: nightly-platform-windows
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
         with:
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Build and preserve repository tooling
+        run: |
+          cargo build --locked -p vo-dev
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          mkdir -p target/ci/bin
+          cp "target/debug/vo-dev$suffix" "target/ci/bin/vo-dev$suffix"
+          cmp "target/debug/vo-dev$suffix" "target/ci/bin/vo-dev$suffix"
+
+      - name: Execute declared Nightly task
+        run: >-
+          ./target/ci/bin/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task "${{ matrix.task }}"
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-summary-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-${{ matrix.task }}-${{ github.sha }}
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-
-      - name: Build repository tooling
-        run: cargo build -p vo-dev --locked
-
-      - name: Run native language smoke matrix
-        run: ./target/debug/vo-dev test run --suite lang --tags smoke --targets native,gc-vm,gc-osr --release
-
-      - name: Run workspace tests
-        run: cargo test --workspace --all-targets --locked
+            target/ci/executions
+            target/ci/test-runs
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
 
   bounded_fuzz:
     name: bounded-fuzz (${{ matrix.target }})
+    needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 60
     env:
       CARGO_FUZZ_VERSION: "0.13.2"
       RUST_NIGHTLY: "nightly-2026-08-20"
@@ -191,32 +297,38 @@ jobs:
       matrix:
         include:
           - target: ui_artifact_decoders
-            fuzz_dir: fuzz/ui-artifact
-            max_len: 65536
+            task: nightly-fuzz-ui-artifact
           - target: decoders
-            fuzz_dir: fuzz/app-protocol
-            max_len: 4096
-          - target: voplay_decoders
-            fuzz_dir: fuzz/voplay-protocol
-            max_len: 4096
+            task: nightly-fuzz-app-protocol
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install fuzzing toolchain
-        run: |
-          rustup toolchain install "$RUST_NIGHTLY" --profile minimal
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads and cargo-fuzz
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Install fuzzing toolchain
+        run: rustup toolchain install "$RUST_NIGHTLY" --profile minimal
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Cache cargo-fuzz
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ runner.tool_cache }}/cargo-fuzz
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ hashFiles('fuzz/**/Cargo.lock') }}
+          path: ${{ runner.tool_cache }}/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_FUZZ_VERSION }}
 
       - name: Install cargo-fuzz
         run: |
@@ -229,51 +341,79 @@ jobs:
               --locked
           fi
 
-      - name: Build coverage-instrumented fuzz target
-        working-directory: ${{ matrix.fuzz_dir }}
-        run: |
-          cargo +"$RUST_NIGHTLY" fuzz build --fuzz-dir . "${{ matrix.target }}"
+      - name: Build repository tooling
+        run: cargo build --locked -p vo-dev
 
-      - name: Fuzz authenticated and untrusted protocol boundary
-        working-directory: ${{ matrix.fuzz_dir }}
-        run: |
-          cargo +"$RUST_NIGHTLY" fuzz run --fuzz-dir . "${{ matrix.target }}" -- \
-            -runs=100000 \
-            -max_len=${{ matrix.max_len }} \
-            -timeout=10 \
-            -seed=424242
+      - name: Execute declared Nightly task
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task "${{ matrix.task }}"
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-summary-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-evidence-${{ matrix.task }}-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-${{ matrix.task }}-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Preserve fuzzing failures
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-${{ matrix.target }}-${{ github.sha }}
-          path: ${{ matrix.fuzz_dir }}/artifacts
+          path: target/ci/fuzz/${{ matrix.task }}
           if-no-files-found: ignore
           retention-days: 14
 
   audits:
     name: audits
+    needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Allow provisioning and diagnostic uploads outside the declared task deadline.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.94.0 --profile minimal
-          rustup default 1.94.0
+      - name: Start evidence clock
+        shell: bash
+        run: echo "VO_CI_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -292,9 +432,240 @@ jobs:
             cargo install cargo-audit --locked --version 0.22.2 --force
           fi
 
-      - name: Audit Rust lockfiles
-        run: cargo audit --file Cargo.lock
+      - name: Build repository tooling
+        run: cargo build --locked -p vo-dev
 
-      - name: Audit vo-web dependencies
-        working-directory: lang/crates/vo-web
-        run: npm audit --audit-level high
+      - name: Audit every maintained dependency input
+        run: ./target/debug/vo-dev ci run --plan target/ci/plan-input/plan.json --task nightly-audits
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-summary-audits-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-evidence-audits-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-audits-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload dependency audit diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-audit-${{ github.sha }}
+          path: |
+            target/ci/dependency-audit
+            target/ci/executions
+            target/ci/results/dependencies.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  browser:
+    name: release-web-and-browser
+    needs: plan
+    runs-on: ubuntu-24.04
+    # Both sequential task deadlines plus one provisioning/upload allowance.
+    timeout-minutes: 165
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup engineering toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+          wasm: "true"
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            lang/crates/vo-web/package-lock.json
+            eng/browser/package-lock.json
+
+      - name: Setup browser contracts
+        uses: ./.github/actions/setup-browser
+
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-0.14.0
+
+      - name: Install wasm-pack
+        run: |
+          if [ "$(wasm-pack --version 2>/dev/null || true)" != "wasm-pack 0.14.0" ]; then
+            cargo install wasm-pack --locked --version 0.14.0 --force
+          fi
+
+      - name: Build repository tooling
+        run: cargo build -p vo-dev --locked
+
+      - name: Execute declared browser journeys
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task nightly-browser
+
+      - name: Execute declared release Wasm language task
+        if: ${{ !cancelled() }}
+        run: >-
+          ./target/debug/vo-dev ci run
+          --plan target/ci/plan-input/plan.json
+          --task nightly-language-wasm
+
+      - name: Upload compact task summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-summary-browser-${{ github.sha }}
+          path: target/ci/summaries
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-evidence-browser-${{ github.sha }}
+          path: target/ci/evidence/*.evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload task diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-diagnostics-browser-${{ github.sha }}
+          path: |
+            target/ci/executions
+            target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload browser traces and results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-browser-diagnostics-${{ github.sha }}
+          path: |
+            target/ci/browser
+            target/ci/results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  required:
+    name: nightly-required
+    if: ${{ always() }}
+    needs:
+      - plan
+      - language_release_native
+      - stress
+      - platform
+      - bounded_fuzz
+      - audits
+      - browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout certified source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup certification toolchain
+        uses: ./.github/actions/setup-volang
+        with:
+          compiler-cache: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_cache }}
+
+      - name: Download immutable Nightly plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-plan-${{ github.sha }}
+          path: target/ci/plan-input
+
+      - name: Build certification verifier
+        run: cargo build --locked -p vo-dev
+
+      - name: Download compact task summaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: nightly-summary-*-${{ github.sha }}
+          path: target/ci/collected-summaries
+          merge-multiple: true
+
+      - name: Summarize every planned task
+        run: >-
+          ./target/debug/vo-dev ci summarize
+          --plan target/ci/plan-input/plan.json
+          --summaries target/ci/collected-summaries
+
+      - name: Reject incomplete jobs
+        if: always()
+        env:
+          PLAN: ${{ needs.plan.result }}
+          LANGUAGE_NATIVE: ${{ needs.language_release_native.result }}
+          STRESS: ${{ needs.stress.result }}
+          PLATFORM: ${{ needs.platform.result }}
+          BOUNDED_FUZZ: ${{ needs.bounded_fuzz.result }}
+          AUDITS: ${{ needs.audits.result }}
+          BROWSER: ${{ needs.browser.result }}
+        run: |
+          for result in "$PLAN" "$LANGUAGE_NATIVE" "$STRESS" "$PLATFORM" "$BOUNDED_FUZZ" "$AUDITS" "$BROWSER"; do
+            if [ "$result" != "success" ]; then
+              echo "Nightly job ended with: $result"
+              exit 1
+            fi
+          done
+
+      - name: Download all Nightly evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: nightly-evidence-*-${{ github.sha }}
+          path: target/ci/collected-evidence
+          merge-multiple: true
+
+      - name: Certify the complete Nightly plan
+        run: >-
+          ./target/debug/vo-dev ci certify
+          --plan target/ci/plan-input/plan.json
+          --evidence-dir target/ci/collected-evidence
+          --output target/ci/nightly-certification.json
+
+      - name: Upload Nightly certification
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-certification-${{ github.sha }}
+          path: target/ci/nightly-certification.json
+          if-no-files-found: error
+          retention-days: 30

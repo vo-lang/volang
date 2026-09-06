@@ -1,0 +1,1668 @@
+version = 1
+
+# Non-Cargo inputs and product dependencies. Rust package edges are read from
+# workspace manifests, including optional and target-specific dependencies.
+[[component]]
+id = "language-library"
+paths = ["lang/stdlib/*"]
+capabilities = ["rust", "vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm", "wasm-aot"]
+
+[[component]]
+id = "language-tests"
+paths = ["tests/lang/*", "examples/*", "benchmarks/*"]
+depends_on = ["language-library", "cargo:cmd/vo", "cargo:cmd/vo-test", "cargo:cmd/vo-embed"]
+capabilities = ["vm", "jit", "gc", "compile", "embed", "native-aot", "wasm-vm", "wasm-aot"]
+
+[[component]]
+id = "ui-library"
+paths = ["ui/*", "tests/ui/*"]
+depends_on = ["language-library", "cargo:ui"]
+capabilities = ["rust", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+
+[[component]]
+id = "native-ui-products"
+paths = []
+depends_on = ["ui-library", "cargo:cmd/vo", "cargo:apps/studio/host-native", "cargo:apps/studio/aot-runtime-native"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+
+[[component]]
+id = "web-runtime"
+paths = ["lang/crates/vo-web/js/*", "lang/crates/vo-web/tests/*", "lang/crates/vo-web/*.mjs", "lang/crates/vo-web/*.json", "lang/crates/vo-web/*.html"]
+depends_on = ["cargo:lang/crates/vo-web", "cargo:lang/crates/vo-aot-support-wasm", "ui-library"]
+capabilities = ["browser", "wasm-vm", "wasm-aot"]
+
+[[component]]
+id = "studio"
+paths = ["apps/studio/*"]
+depends_on = ["ui-library", "web-runtime", "native-ui-products"]
+capabilities = ["rust", "browser", "studio", "pages", "offline", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+
+[[component]]
+id = "app-protocol"
+paths = ["lang/protocol/*", "fuzz/app-protocol/*"]
+depends_on = ["cargo:lang/crates/vo-app-protocol"]
+capabilities = ["rust", "vm", "jit", "wasm-vm", "wasm-aot", "browser", "headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "app-protocol"]
+
+[[component]]
+id = "ui-artifact-fuzz"
+paths = ["fuzz/ui-artifact/*"]
+depends_on = ["cargo:ui/crates/vo-ui-artifact"]
+capabilities = ["rust", "browser", "headless", "ui-artifact"]
+
+[[component]]
+id = "ecosystem"
+paths = ["fuzz/voplay-protocol/*"]
+depends_on = ["app-protocol"]
+capabilities = ["rust", "vm", "jit", "browser", "app-protocol"]
+
+# Profiles describe certification depth. Pull requests use impact selection;
+# merge queues and immutable branch candidates exercise the complete matrix.
+
+[[profile]]
+name = "pull-request"
+tier = "feedback"
+changed_only = true
+tasks = [
+  "contracts",
+  "rust-quality",
+  "language-native-smoke",
+  "wasm-web-smoke",
+  "ui-platform-linux-smoke",
+  "ui-platform-macos-full",
+  "ui-platform-windows-full",
+]
+
+[[profile]]
+name = "merge"
+tier = "certification"
+tasks = [
+  "contracts",
+  "rust-quality",
+  "language-native-1",
+  "language-native-2",
+  "wasm-web-full",
+  "ui-platform-linux-full",
+  "ui-platform-macos-full",
+  "ui-platform-windows-full",
+]
+
+[[profile]]
+name = "main"
+tier = "promotion"
+tasks = [
+  "contracts",
+  "rust-quality",
+  "language-native-1",
+  "language-native-2",
+  "wasm-web-full",
+  "ui-platform-linux-full",
+  "ui-platform-macos-full",
+  "ui-platform-windows-full",
+]
+
+[[profile]]
+name = "nightly"
+tier = "exhaustive"
+tasks = [
+  "nightly-language-native",
+  "nightly-language-wasm",
+  "nightly-stress-gc",
+  "nightly-stress-jit-osr",
+  "nightly-stress-gc-osr",
+  "nightly-stress-scheduler",
+  "nightly-platform-macos",
+  "nightly-platform-windows",
+  "nightly-fuzz-app-protocol",
+  "nightly-fuzz-ui-artifact",
+  "nightly-audits",
+  "nightly-browser",
+]
+
+[[task]]
+id = "contracts"
+commands = ["contract-lint", "ui-catalog", "language-manifest", "language-format", "dependency-policy-unit", "workflow-lint"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "feedback"
+workflow_job = "quality_rust"
+runner = "ubuntu-24.04"
+always = true
+owners = ["engineering"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["contracts", "generated", "workflows"]
+timeout_minutes = 15
+budget_minutes = 8
+evidence_kind = "contract"
+
+[[task]]
+id = "rust-quality"
+commands = ["rust-format", "rust-clippy", "rust-tests"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "feedback"
+workflow_job = "quality_rust"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["engineering", "language", "ui"]
+impact = [
+  "Cargo.*",
+  "rust-toolchain.toml",
+  "cmd/*",
+  "lang/crates/*",
+  "ui/crates/*",
+  "apps/studio/host-native/*",
+  "fuzz/*",
+  ".github/*",
+  "eng/*",
+]
+platforms = ["linux"]
+capabilities = ["rust", "clippy", "unit"]
+timeout_minutes = 30
+budget_minutes = 15
+evidence_kind = "rust-quality"
+
+[[task]]
+id = "language-native-smoke"
+commands = ["language-native-smoke-run"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/test-runs"]
+tier = "feedback"
+workflow_job = "language_native"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language"]
+impact = [
+  "Cargo.*",
+  "rust-toolchain.toml",
+  "cmd/vo/*",
+  "cmd/vo-test/*",
+  "cmd/vo-dev/*",
+  "lang/*",
+  "tests/lang/*",
+  "examples/*",
+  "benchmarks/*",
+  "eng/tests.toml",
+]
+platforms = ["linux"]
+capabilities = ["vm", "jit", "gc", "native-aot", "compile"]
+timeout_minutes = 20
+budget_minutes = 10
+evidence_kind = "language-test"
+results = ["target/ci/results/language-native-smoke.json"]
+
+[[task]]
+id = "language-native-1"
+commands = ["language-native-1-run", "language-native-aot-smoke-run"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/test-runs"]
+tier = "certification"
+workflow_job = "language_native"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["vm", "jit", "gc", "native-aot", "compile", "embed"]
+timeout_minutes = 35
+budget_minutes = 22
+evidence_kind = "language-test"
+results = ["target/ci/results/language-native-1.json", "target/ci/results/language-native-aot-smoke.json"]
+
+[[task]]
+id = "language-native-2"
+commands = ["language-native-2-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "certification"
+workflow_job = "language_native"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["vm", "jit", "gc", "compile", "embed"]
+timeout_minutes = 35
+budget_minutes = 22
+evidence_kind = "language-test"
+results = ["target/ci/results/language-native-2.json"]
+
+[[task]]
+id = "wasm-web-smoke"
+commands = ["browser-harness-tests", "browser-tooling", "web-hello-aot", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "web-component-build", "web-studio-build", "web-native-tooling", "web-language-smoke", "web-vfs", "web-ui", "web-runner", "web-ui-browser", "web-ui-component-browser", "web-runtime-aot", "web-studio-bootstrap", "web-studio-canary"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/site"]
+tier = "feedback"
+workflow_job = "wasm_web"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language", "ui", "web"]
+impact = [
+  "Cargo.*",
+  "cmd/vo/*",
+  "cmd/vo-dev/*",
+  "lang/crates/vo-web/*",
+  "lang/crates/vo-*/*",
+  "tests/lang/*",
+  "ui/*",
+  "apps/studio/*",
+  "eng/run-browser-smoke.mjs",
+  "eng/report-ui-web-*",
+]
+platforms = ["web"]
+capabilities = ["wasm-vm", "wasm-aot", "browser", "ui"]
+timeout_minutes = 25
+budget_minutes = 15
+evidence_kind = "web-test"
+results = [
+  "target/ci/results/ui/volang-studio-bootstrap-browser.json",
+  "target/ci/results/ui/volang-studio-canary-browser.json",
+  "target/ci/results/wasm-web-smoke.json",
+  "target/ci/results/ui/volang-ui-browser-conformance.json",
+  "target/ci/results/ui/volang-ui-aot-component-browser.json",
+]
+
+[[task]]
+id = "wasm-web-full"
+commands = ["browser-harness-tests", "browser-tooling", "web-hello-aot", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "web-component-build", "web-gallery-build", "web-data-build", "web-content-build", "web-media-build", "web-workbench-build", "web-studio-build", "web-artifact-budgets", "web-native-tooling", "web-native-interactions", "web-aot-semantic-probes", "web-language-full", "web-no-std-closure", "web-vfs", "web-ui", "web-runner", "web-ui-browser", "web-ui-component-browser", "web-uikit-gallery-browser", "web-data-application-browser", "web-content-site-browser", "web-media-application-browser", "web-studio-workbench-browser", "web-studio-aot-browser", "web-runtime-aot", "web-studio-bootstrap", "web-studio-canary", "web-studio-lifecycle"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/site"]
+tier = "certification"
+workflow_job = "wasm_web"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["language", "ui", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["wasm-vm", "wasm-aot", "browser", "ui", "no-std", "studio", "pages", "offline", "recovery", "resource-cleanup"]
+timeout_minutes = 45
+budget_minutes = 30
+evidence_kind = "web-test"
+results = [
+  "target/ci/results/ui-size/component-gallery.json",
+  "target/ci/results/ui-size/data-application.json",
+  "target/ci/results/ui-size/content-site.json",
+  "target/ci/results/ui-size/media-application.json",
+  "target/ci/results/ui-size/studio-workbench.json",
+  "target/ci/results/ui-size/studio.json",
+  "target/ci/results/ui-size/studio-precache.json",
+  "target/ci/results/ui/volang-studio-bootstrap-browser.json",
+  "target/ci/results/ui/volang-studio-canary-browser.json",
+  "target/ci/results/wasm-web-full.json",
+  "target/ci/results/ui/volang-ui-browser-conformance.json",
+  "target/ci/results/ui/volang-ui-aot-component-browser.json",
+  "target/ci/results/ui/volang-uikit-gallery-browser.json",
+  "target/ci/results/ui/volang-data-application-browser.json",
+  "target/ci/results/ui/volang-content-site-browser.json",
+  "target/ci/results/ui/volang-media-application-browser.json",
+  "target/ci/results/ui/volang-studio-workbench-browser.json",
+  "target/ci/results/ui/volang-studio-aot-browser.json",
+  "target/ci/results/ui/volang-studio-lifecycle-browser.json",
+]
+
+[[task]]
+id = "ui-platform-linux-smoke"
+commands = ["ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-nested-link-linux", "ui-window-nested-aot-linux", "ui-window-settings-vm-linux"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/native"]
+tier = "feedback"
+workflow_job = "ui_platform"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = [
+  "Cargo.*",
+  "cmd/vo/*",
+  "lang/crates/vo-engine/*",
+  "lang/crates/vo-ui-*",
+  "ui/*",
+  "apps/studio/*",
+  "eng/run-*-contracts.sh",
+]
+platforms = ["linux"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot"]
+timeout_minutes = 30
+budget_minutes = 18
+evidence_kind = "platform-test"
+
+[[task]]
+id = "ui-platform-linux-full"
+commands = ["ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-performance", "ui-native-cli", "ui-studio-host", "ui-nested-link-linux", "ui-native-package-linux", "ui-window-nested-aot-linux", "ui-window-settings-vm-linux", "ui-window-studio-jit-linux", "ui-window-studio-aot-linux", "ui-window-gallery-aot-linux", "ui-window-data-aot-linux", "ui-window-media-aot-linux", "ui-window-workbench-aot-linux"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/native"]
+tier = "certification"
+workflow_job = "ui_platform"
+runner = "ubuntu-24.04"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 60
+budget_minutes = 35
+evidence_kind = "platform-test"
+results = ["target/ci/results/ui-performance.json"]
+
+[[task]]
+id = "ui-platform-macos-full"
+commands = ["ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-studio-host", "ui-nested-link-macos", "ui-native-package-macos", "ui-window-nested-aot-macos", "ui-window-settings-vm-macos", "ui-window-studio-jit-macos", "ui-window-studio-aot-macos", "ui-window-gallery-aot-macos", "ui-window-data-aot-macos", "ui-window-media-aot-macos", "ui-window-workbench-aot-macos"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/native"]
+tier = "certification"
+workflow_job = "ui_platform"
+runner = "macos-15"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = ["*"]
+platforms = ["macos"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 60
+budget_minutes = 35
+evidence_kind = "platform-test"
+
+[[task]]
+id = "ui-platform-windows-full"
+commands = ["ui-desktop-check", "ui-platform-contracts", "ui-desktop-contracts", "ui-vm-jit-contracts", "ui-native-cli", "ui-studio-host", "ui-nested-link-windows", "ui-native-package-windows", "ui-window-nested-aot-windows", "ui-window-settings-vm-windows", "ui-window-studio-jit-windows", "ui-window-studio-aot-windows", "ui-window-gallery-aot-windows", "ui-window-data-aot-windows", "ui-window-media-aot-windows", "ui-window-workbench-aot-windows"]
+inputs = ["*"]
+resource_group = "cargo"
+artifacts = ["target/ci/artifacts/native"]
+tier = "certification"
+workflow_job = "ui_platform"
+runner = "windows-2025"
+depends_on = ["contracts"]
+owners = ["ui"]
+impact = ["*"]
+platforms = ["windows"]
+capabilities = ["headless", "desktop-vm", "desktop-jit", "desktop-native-aot", "real-window"]
+timeout_minutes = 60
+budget_minutes = 40
+evidence_kind = "platform-test"
+
+[[task]]
+id = "nightly-language-native"
+artifacts = ["target/ci/test-runs"]
+commands = ["nightly-native-aot-tools", "nightly-language-native-run", "nightly-native-aot-host-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "language_release_native"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["native-aot", "compiler-host", "release", "language", "native"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "nightly-test"
+results = ["target/ci/results/nightly-language-native.json", "target/ci/results/nightly-native-aot-host.json"]
+
+[[task]]
+id = "nightly-language-wasm"
+commands = ["browser-node-dependencies", "nightly-language-wasm-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "browser"
+runner = "ubuntu-24.04"
+owners = ["language", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["release", "wasm-vm", "wasm-aot"]
+timeout_minutes = 90
+budget_minutes = 50
+evidence_kind = "nightly-test"
+results = ["target/ci/results/nightly-language-wasm.json"]
+
+[[task]]
+id = "nightly-stress-gc"
+commands = ["nightly-stress-gc-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "gc"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-gc.json"]
+
+[[task]]
+id = "nightly-stress-jit-osr"
+commands = ["nightly-stress-jit-osr-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "jit", "osr"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-jit-osr.json"]
+
+[[task]]
+id = "nightly-stress-gc-osr"
+commands = ["nightly-stress-gc-osr-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "gc", "osr"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-gc-osr.json"]
+
+[[task]]
+id = "nightly-stress-scheduler"
+commands = ["nightly-stress-scheduler-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "stress"
+runner = "ubuntu-24.04"
+owners = ["language"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["stress", "scheduler"]
+timeout_minutes = 90
+budget_minutes = 45
+evidence_kind = "stress-test"
+results = ["target/ci/results/nightly-stress-scheduler.json"]
+
+[[task]]
+id = "nightly-platform-macos"
+commands = ["nightly-process-contracts", "nightly-native-aot-tools", "nightly-platform-macos-run", "nightly-appkit-lifecycle", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+inputs = ["*"]
+artifacts = ["target/ci/test-runs"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "platform"
+runner = "macos-15"
+owners = ["language", "ui"]
+impact = ["*"]
+platforms = ["macos"]
+capabilities = ["native-aot", "compiler-host", "release", "platform"]
+timeout_minutes = 60
+budget_minutes = 40
+evidence_kind = "nightly-platform"
+results = ["target/ci/results/appkit-lifecycle.json", "target/ci/results/nightly-platform-macos.json", "target/ci/results/nightly-native-aot-host.json"]
+
+[[task]]
+id = "nightly-platform-windows"
+commands = ["nightly-process-contracts", "nightly-stdlib-compile", "nightly-native-aot-tools", "nightly-platform-windows-run", "nightly-workspace-tests", "nightly-native-aot-host-run"]
+inputs = ["*"]
+artifacts = ["target/ci/test-runs"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "platform"
+runner = "windows-2025"
+owners = ["language", "ui"]
+impact = ["*"]
+platforms = ["windows"]
+capabilities = ["native-aot", "compiler-host", "release", "platform"]
+timeout_minutes = 60
+budget_minutes = 40
+evidence_kind = "nightly-platform"
+results = ["target/ci/results/nightly-platform-windows.json", "target/ci/results/nightly-native-aot-host.json"]
+
+[[task]]
+id = "nightly-fuzz-app-protocol"
+commands = ["nightly-fuzz-app-protocol-prepare", "nightly-fuzz-app-protocol-metadata", "nightly-fuzz-app-protocol-build", "nightly-fuzz-app-protocol-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "bounded_fuzz"
+runner = "ubuntu-24.04"
+owners = ["runtime"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["fuzz", "app-protocol"]
+timeout_minutes = 45
+budget_minutes = 30
+evidence_kind = "fuzz-test"
+
+[[task]]
+id = "nightly-fuzz-ui-artifact"
+commands = ["nightly-fuzz-ui-artifact-prepare", "nightly-fuzz-ui-artifact-metadata", "nightly-fuzz-ui-artifact-build", "nightly-fuzz-ui-artifact-run"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "bounded_fuzz"
+runner = "ubuntu-24.04"
+owners = ["ui"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["fuzz", "ui-artifact"]
+timeout_minutes = 45
+budget_minutes = 30
+evidence_kind = "fuzz-test"
+
+[[task]]
+id = "nightly-audits"
+commands = ["dependency-audit"]
+inputs = ["*"]
+resource_group = "dependency-audit"
+tier = "exhaustive"
+workflow_job = "audits"
+runner = "ubuntu-24.04"
+owners = ["security"]
+impact = ["*"]
+platforms = ["linux"]
+capabilities = ["advisory", "dependency"]
+timeout_minutes = 30
+budget_minutes = 15
+evidence_kind = "security-audit"
+results = ["target/ci/results/dependencies.json"]
+
+[[command]]
+id = "contract-lint"
+argv = ["target/debug/vo-dev", "lint", "all"]
+timeout_seconds = 600
+failure_kind = "infrastructure"
+
+[[command]]
+id = "ui-catalog"
+argv = ["target/debug/vo-dev", "ui-certify", "--check"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "language-manifest"
+argv = ["target/debug/vo-dev", "test", "lint", "--suite", "lang", "--strict"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "language-format"
+argv = ["target/debug/vo-dev", "test", "fmt", "--suite", "lang"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "dependency-policy-unit"
+argv = ["node", "--test", "eng/check-dependency-policy.test.mjs"]
+timeout_seconds = 120
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "workflow-lint"
+argv = ["bash", "-euo", "pipefail", "-c", "command -v shellcheck >/dev/null || { echo 'workflow checks require ShellCheck; see eng/toolchains.toml' >&2; exit 1; }; actionlint -ignore 'unexpected key \"queue\"'"]
+timeout_seconds = 120
+failure_kind = "infrastructure"
+
+[[command]]
+id = "rust-format"
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "rust-clippy"
+argv = ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--timings", "--", "-D", "warnings"]
+timeout_seconds = 1500
+failure_kind = "product"
+
+[[command]]
+id = "rust-tests"
+argv = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--no-fail-fast", "--timings"]
+timeout_seconds = 1500
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "dependency-audit"
+argv = ["node", "eng/run-dependency-audit.mjs"]
+timeout_seconds = 1500
+failure_kind = "dependency-policy"
+
+[[command]]
+id = "nightly-language-native-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,jit,osr,native-aot,gc-vm,gc-jit,gc-osr,nostd,compile", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-language-native.json"
+
+[[command]]
+id = "nightly-language-wasm-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-language-wasm.json"
+
+[[command]]
+id = "nightly-stress-gc-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "gc-vm,gc-jit", "--tags", "gc", "--repeat", "20", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-gc.json"
+
+[[command]]
+id = "nightly-stress-jit-osr-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "jit,osr", "--tags", "jit", "--repeat", "5", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-jit-osr.json"
+
+[[command]]
+id = "nightly-stress-gc-osr-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,gc-vm,gc-osr", "--tags", "jit,osr,contract", "--repeat", "5", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-gc-osr.json"
+
+[[command]]
+id = "nightly-stress-scheduler-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,jit", "--tags", "scheduler", "--repeat", "10", "--release", "--format", "json"]
+timeout_seconds = 5100
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-stress-scheduler.json"
+
+[[command]]
+id = "nightly-platform-macos-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,native-aot,gc-vm,gc-osr", "--release", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-platform-macos.json"
+
+[[command]]
+id = "nightly-platform-windows-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--tags", "smoke", "--targets", "native,native-aot,gc-vm,gc-osr", "--release", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-platform-windows.json"
+
+[[command]]
+id = "nightly-workspace-tests"
+argv = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--no-fail-fast", "--timings"]
+timeout_seconds = 3000
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "nightly-stdlib-compile"
+argv = ["cargo", "check", "--locked", "-p", "vo-stdlib", "--features", "std", "--all-targets"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-process-contracts"
+argv = ["cargo", "test", "--locked", "-p", "vo-dev", "process"]
+timeout_seconds = 180
+failure_kind = "infrastructure"
+report = "cargo-test"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-prepare"
+argv = ["mkdir", "-p", "target/ci/fuzz/nightly-fuzz-app-protocol/corpus", "target/ci/fuzz/nightly-fuzz-app-protocol/artifacts"]
+timeout_seconds = 30
+failure_kind = "infrastructure"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-metadata"
+argv = ["cargo", "+nightly-2026-08-20", "metadata", "--locked", "--format-version", "1"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+cwd = "fuzz/app-protocol"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-build"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "build", "--fuzz-dir", ".", "decoders"]
+timeout_seconds = 1800
+failure_kind = "product"
+cwd = "fuzz/app-protocol"
+
+[[command]]
+id = "nightly-fuzz-app-protocol-run"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "run", "--fuzz-dir", ".", "decoders", "../../target/ci/fuzz/nightly-fuzz-app-protocol/corpus", "corpus/decoders", "--", "-artifact_prefix=../../target/ci/fuzz/nightly-fuzz-app-protocol/artifacts/", "-runs=100000", "-max_len=4096", "-timeout=10", "-seed=424242"]
+timeout_seconds = 600
+failure_kind = "product"
+cwd = "fuzz/app-protocol"
+report = "libfuzzer"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-prepare"
+argv = ["mkdir", "-p", "target/ci/fuzz/nightly-fuzz-ui-artifact/corpus", "target/ci/fuzz/nightly-fuzz-ui-artifact/artifacts"]
+timeout_seconds = 30
+failure_kind = "infrastructure"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-metadata"
+argv = ["cargo", "+nightly-2026-08-20", "metadata", "--locked", "--format-version", "1"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+cwd = "fuzz/ui-artifact"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-build"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "build", "--fuzz-dir", ".", "ui_artifact_decoders"]
+timeout_seconds = 1800
+failure_kind = "product"
+cwd = "fuzz/ui-artifact"
+
+[[command]]
+id = "nightly-fuzz-ui-artifact-run"
+argv = ["cargo", "+nightly-2026-08-20", "fuzz", "run", "--fuzz-dir", ".", "ui_artifact_decoders", "../../target/ci/fuzz/nightly-fuzz-ui-artifact/corpus", "corpus/ui_artifact_decoders", "--", "-artifact_prefix=../../target/ci/fuzz/nightly-fuzz-ui-artifact/artifacts/", "-runs=100000", "-max_len=65536", "-timeout=10", "-seed=424242"]
+timeout_seconds = 600
+failure_kind = "product"
+cwd = "fuzz/ui-artifact"
+report = "libfuzzer"
+
+[[task]]
+id = "nightly-browser"
+commands = ["browser-harness-tests", "browser-tooling", "browser-node-dependencies", "browser-aot-support", "browser-wasm-compiler", "browser-javascript", "nightly-studio-build", "nightly-gallery-build", "nightly-studio-journey", "nightly-gallery-journey", "nightly-studio-lifecycle"]
+inputs = ["*"]
+resource_group = "cargo"
+tier = "exhaustive"
+workflow_job = "browser"
+runner = "ubuntu-24.04"
+owners = ["ui", "studio", "web"]
+impact = ["*"]
+platforms = ["web"]
+capabilities = ["browser", "studio", "offline", "recovery", "resource-cleanup"]
+timeout_minutes = 60
+budget_minutes = 35
+evidence_kind = "web-test"
+results = ["target/ci/results/nightly-studio-journey.json", "target/ci/results/nightly-gallery-journey.json", "target/ci/results/nightly-studio-lifecycle.json"]
+artifacts = ["target/ci/artifacts/nightly-studio", "target/ci/artifacts/nightly-gallery"]
+
+[[command]]
+id = "browser-harness-tests"
+argv = ["node", "--test", "eng/browser/editor-timing.test.mjs", "eng/browser/deployed-artifact.test.mjs"]
+timeout_seconds = 120
+failure_kind = "infrastructure"
+
+[[command]]
+id = "browser-tooling"
+argv = ["cargo", "build", "--locked", "-p", "vo", "--no-default-features", "--timings"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "browser-node-dependencies"
+argv = ["npm", "ci"]
+timeout_seconds = 300
+failure_kind = "dependency-policy"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "browser-aot-support"
+argv = ["npm", "run", "build:aot-support"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "browser-wasm-compiler"
+argv = ["npm", "run", "build:wasm:release"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "browser-javascript"
+argv = ["npm", "run", "build:js"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "nightly-studio-build"
+argv = ["target/debug/vo", "ui", "build", "apps/studio", "-o", "target/ci/artifacts/nightly-studio", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+repo_env = {"VOWORK" = "vo.work"}
+
+[[command]]
+id = "nightly-gallery-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/component-gallery", "-o", "target/ci/artifacts/nightly-gallery", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-studio-journey"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-aot-smoke", "--timeout-ms", "120000", "--output", "target/ci/results/nightly-studio-journey.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-gallery-journey"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-gallery", "--uikit-gallery-smoke", "--timeout-ms", "120000", "--output", "target/ci/results/nightly-gallery-journey.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "nightly-studio-lifecycle"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/nightly-studio", "--studio-lifecycle-smoke", "--timeout-ms", "30000", "--output", "target/ci/results/nightly-studio-lifecycle.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "language-native-smoke-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,native-aot,gc-vm,gc-osr,compile", "--tags", "smoke", "--format", "json"]
+timeout_seconds = 1100
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-smoke.json"
+
+[[command]]
+id = "language-native-1-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,gc,gc-osr,embed,compile", "--shard", "1/2", "--format", "json"]
+timeout_seconds = 1800
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-1.json"
+
+[[command]]
+id = "language-native-2-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "native,gc,gc-osr,embed,compile", "--shard", "2/2", "--format", "json"]
+timeout_seconds = 1800
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-2.json"
+
+[[command]]
+id = "language-native-aot-smoke-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,native-aot", "--tags", "smoke", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/language-native-aot-smoke.json"
+
+[[command]]
+id = "nightly-native-aot-host-run"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "vm,native-aot-host", "--tags", "compiler-host", "--release", "--jobs", "2", "--format", "json"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/nightly-native-aot-host.json"
+
+[[command]]
+id = "nightly-native-aot-tools"
+argv = ["cargo", "build", "--locked", "--timings", "--release", "--no-default-features", "-p", "vo", "-p", "vo-aot-runtime", "-p", "vo-test"]
+timeout_seconds = 1800
+failure_kind = "product"
+
+[[command]]
+id = "web-hello-aot"
+argv = ["target/debug/vo", "build", "examples/basics/hello.vo", "--kind=wasm", "--no-cache", "-o", "target/hello-aot.wasm"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-component-build"
+argv = ["target/debug/vo", "ui", "build", "ui/tests/nested-component-list", "-o", "target/ui-nested-component-aot", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-gallery-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/component-gallery", "-o", "target/ui-component-gallery-aot", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-data-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/data-application", "-o", "target/data-application-aot", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-content-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/content-site", "-o", "target/content-site-aot", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-media-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/media-application", "-o", "target/media-application-aot", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-workbench-build"
+argv = ["target/debug/vo", "ui", "build", "ui/showcases/studio-workbench", "-o", "target/studio-workbench-aot", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-studio-build"
+argv = ["target/debug/vo", "ui", "build", "apps/studio", "-o", "target/ci/artifacts/site", "--runtime-dir=lang/crates/vo-web"]
+timeout_seconds = 900
+failure_kind = "product"
+repo_env = {"VOWORK" = "vo.work"}
+
+[[command]]
+id = "web-artifact-budgets"
+argv = [
+  "bash",
+  "-euo",
+  "pipefail",
+  "-c",
+  '''
+mkdir -p target/ci/results/ui-size
+node eng/report-ui-web-artifact-size.mjs --label component-gallery --artifact target/ui-component-gallery-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/component-gallery.json
+node eng/report-ui-web-artifact-size.mjs --label data-application --artifact target/data-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/data-application.json
+node eng/report-ui-web-artifact-size.mjs --label content-site --artifact target/content-site-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/content-site.json
+node eng/report-ui-web-artifact-size.mjs --label media-application --artifact target/media-application-aot/app.wasm --brotli-limit 614400 --output target/ci/results/ui-size/media-application.json
+node eng/report-ui-web-artifact-size.mjs --label studio-workbench --artifact target/studio-workbench-aot/app.wasm --brotli-limit 655360 --output target/ci/results/ui-size/studio-workbench.json
+node eng/report-ui-web-artifact-size.mjs --label studio --artifact target/ci/artifacts/site/app.wasm --raw-limit 34000000 --brotli-limit 972800 --gzip-limit 2500000 --output target/ci/results/ui-size/studio.json
+node eng/report-ui-web-precache-size.mjs --label studio --root target/ci/artifacts/site --gzip-limit 3670016 --output target/ci/results/ui-size/studio-precache.json
+''',
+]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-native-tooling"
+argv = ["cargo", "build", "--locked", "--timings", "-p", "vo", "--no-default-features", "--features", "jit"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-native-interactions"
+argv = [
+  "bash",
+  "-euo",
+  "pipefail",
+  "-c",
+  '''
+./eng/run-uikit-gallery-contracts.sh
+./eng/run-data-application-contracts.sh
+./eng/run-content-site-contracts.sh
+./eng/run-media-application-contracts.sh
+./eng/run-studio-workbench-contracts.sh
+''',
+]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-aot-semantic-probes"
+argv = [
+  "bash",
+  "-euo",
+  "pipefail",
+  "-c",
+  '''
+set -euo pipefail
+cases=(
+  tests/lang/cases/runtime/defer/defer_repanic_chain.vo
+  tests/lang/cases/runtime/defer/nested_unwind_state_stack.vo
+  tests/lang/cases/runtime/defer/bug_defer_recover_mixed_named_return.vo
+  tests/lang/cases/runtime/defer/closure_defer_interact.vo
+  tests/lang/cases/runtime/defer/bug_defer_closure_iface_arg.vo
+  tests/lang/cases/runtime/panic/nil_pointer_method_panic.vo
+  tests/lang/cases/runtime/panic/closure_panic_recover.vo
+  tests/lang/cases/jit/runtime_traps.vo
+  tests/lang/cases/runtime/numeric/integer_div_mod_edge.vo
+  tests/lang/cases/bugs/2026_05_28_jit_slice_addr_nil_panic.vo
+  tests/lang/cases/bugs/2026_05_28_jit_slice_addr_oob_panic.vo
+  tests/lang/cases/bugs/2026_05_28_jit_array_addr_oob_panic.vo
+  tests/lang/cases/runtime/interface/iface_to_iface_assign.vo
+  tests/lang/cases/runtime/map/array_as_map_key.vo
+  tests/lang/cases/runtime/slice/slice_append_semantics.vo
+  tests/lang/cases/runtime/slice/slice_func_elem_call.vo
+  tests/lang/cases/runtime/scheduler/select_multi_ready.vo
+  tests/lang/cases/runtime/scheduler/closure_goroutine_immediate.vo
+  tests/lang/cases/runtime/scheduler/direct_method_value_cross_island_multi_slot.vo
+  tests/lang/cases/runtime/scheduler/island_deep_graph_transfer.vo
+  tests/lang/cases/runtime/scheduler/island_transfer_source_isolation.vo
+  tests/lang/cases/gc/gc_deep_pointer_graph.vo
+  tests/lang/cases/gc/gc_spread_append_layout.vo
+  tests/lang/cases/gc/wasm_aot_shadow_root_stack.vo
+  tests/lang/cases/stdlib/fmt_scan.vo
+  tests/lang/cases/stdlib/filepath_basic.vo
+  tests/lang/cases/stdlib/log_semantics.vo
+  tests/lang/cases/stdlib/regexp.vo
+  tests/lang/cases/net/net_basic.vo
+  benchmarks/binary-trees/trees.vo
+  benchmarks/channel-block-wake/block_wake.vo
+)
+for source in "${cases[@]}"; do
+  image="target/aot-$(basename "${source%.vo}").wasm"
+  ./target/debug/vo build "$source" --kind=wasm --no-cache -o "$image"
+  node cmd/vo-dev/src/bench_wasm_aot_runner.mjs "$image"
+done
+''',
+]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-no-std-closure"
+argv = [
+  "bash",
+  "-euo",
+  "pipefail",
+  "-c",
+  '''
+stdlib_closure="$(cargo tree --locked -p vo-stdlib --target wasm32-unknown-unknown \
+  --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
+vm_closure="$(cargo tree --locked -p vo-vm --target wasm32-unknown-unknown \
+  --no-default-features --edges normal,no-proc-macro --format '{p}|{f}')"
+ext_closure="$(cargo tree --locked -p vo-ext --target wasm32-unknown-unknown \
+  --no-default-features --features wasm --edges normal,no-proc-macro --format '{p}|{f}')"
+closure="${stdlib_closure}
+${vm_closure}
+${ext_closure}"
+printf '%s\n' "$closure"
+if printf '%s\n' "$closure" | grep -Eq '\|([^,]*,)*std(,|$)|(libloading|rust-embed|termcolor|ureq|vo-analysis|vo-common|vo-module|vo-stdlib-source|vo-syntax|zip) v[0-9]'; then
+  echo "no-std target closure contains std or a host/compiler package" >&2
+  exit 1
+fi
+cargo check --locked -p vo-stdlib -p vo-vm --no-default-features
+cargo check --locked -p vo-vm --target wasm32-unknown-unknown --no-default-features
+cargo check --locked -p vo-ext --target wasm32-unknown-unknown \
+  --no-default-features --features wasm --tests
+cargo check --locked --target wasm32-unknown-unknown \
+  -p vo-ui-core -p vo-ui-protocol -p vo-ui-reactive -p vo-ui-plan \
+  -p vo-ui-system -p vo-ui-web --no-default-features
+''',
+]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-language-smoke"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--format", "json", "--tags", "smoke"]
+timeout_seconds = 1500
+failure_kind = "product"
+stdout_result = "target/ci/results/wasm-web-smoke.json"
+
+[[command]]
+id = "web-language-full"
+argv = ["target/debug/vo-dev", "test", "run", "--suite", "lang", "--targets", "wasm,wasm-aot", "--format", "json"]
+timeout_seconds = 1500
+failure_kind = "product"
+stdout_result = "target/ci/results/wasm-web-full.json"
+
+[[command]]
+id = "web-vfs"
+argv = ["npm", "run", "test:vfs"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-ui"
+argv = ["npm", "run", "test:ui"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-runner"
+argv = ["npm", "run", "test:runner"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-ui-browser"
+argv = ["npm", "run", "test:ui-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-ui-component-browser"
+argv = ["npm", "run", "test:ui-component-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-uikit-gallery-browser"
+argv = ["npm", "run", "test:uikit-gallery-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-data-application-browser"
+argv = ["npm", "run", "test:data-application-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-content-site-browser"
+argv = ["npm", "run", "test:content-site-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-media-application-browser"
+argv = ["npm", "run", "test:media-application-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-studio-workbench-browser"
+argv = ["npm", "run", "test:studio-workbench-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-studio-aot-browser"
+argv = ["npm", "run", "test:studio-aot-browser"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+
+[[command]]
+id = "web-runtime-aot"
+argv = ["npm", "run", "test:aot"]
+timeout_seconds = 900
+failure_kind = "product"
+cwd = "lang/crates/vo-web"
+repo_env = {"VO_AOT_IMAGE" = "target/hello-aot.wasm"}
+
+[[command]]
+id = "web-studio-bootstrap"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/site", "--studio-bootstrap-smoke", "--output", "target/ci/results/ui/volang-studio-bootstrap-browser.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-studio-canary"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/site", "--studio-canary-smoke", "--output", "target/ci/results/ui/volang-studio-canary-browser.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "web-studio-lifecycle"
+argv = ["node", "eng/run-browser-smoke.mjs", "--static-root", "target/ci/artifacts/site", "--studio-lifecycle-smoke", "--timeout-ms", "30000", "--output", "target/ci/results/ui/volang-studio-lifecycle-browser.json"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-desktop-check"
+argv = ["cargo", "check", "--locked", "-p", "vo-ui-shell-native", "--features", "desktop-window"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-platform-contracts"
+argv = ["cargo", "test", "--locked", "-p", "vo-ui-host-native", "-p", "vo-ui-system-native", "-p", "vo-ui-accesskit", "-p", "vo-ui-present-wgpu"]
+timeout_seconds = 900
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "ui-desktop-contracts"
+argv = ["cargo", "test", "--locked", "-p", "vo-ui-shell-native", "--features", "desktop-window"]
+timeout_seconds = 900
+failure_kind = "product"
+report = "cargo-test"
+
+[[command]]
+id = "ui-vm-jit-contracts"
+argv = ["cargo", "test", "--locked", "-p", "vo-engine", "official_ui_native_vm_jit"]
+timeout_seconds = 900
+failure_kind = "product"
+report = "cargo-test"
+repo_env = {"VOWORK" = "vo.work"}
+
+[[command]]
+id = "ui-performance"
+argv = ["cargo", "run", "--locked", "--profile", "release-native", "-p", "vo-ui-benchmark"]
+timeout_seconds = 900
+failure_kind = "product"
+stdout_result = "target/ci/results/ui-performance.json"
+
+[[command]]
+id = "ui-native-cli"
+argv = ["cargo", "build", "--locked", "-p", "vo"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-studio-host"
+argv = ["cargo", "build", "--locked", "-p", "vo-studio-native"]
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-nested-link-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+cargo build --locked --timings -p vo-ui-aot-runtime-native
+mkdir -p target/ci/artifacts/native
+VOWORK=off ./target/debug/vo build ui/tests/nested-component-list --runtime=target/debug/libvo_ui_aot_runtime_native.a --no-cache -o target/ci/artifacts/native/nested-component
+''']
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-native-package-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+cargo build --locked --timings --release --no-default-features \
+  -p vo -p vo-studio-aot-runtime-native -p vo-ui-aot-runtime-native
+studio_runtime=target/release/libvo_studio_aot_runtime_native.a
+ui_runtime=target/release/libvo_ui_aot_runtime_native.a
+VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/release/vo ui package apps/studio \
+  -o target/ci/artifacts/native/studio \
+  --runtime="$studio_runtime"
+./target/release/vo ui package ui/showcases/component-gallery \
+  -o target/ci/artifacts/native/gallery \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/data-application \
+  -o target/ci/artifacts/native/data \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/media-application \
+  -o target/ci/artifacts/native/media \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/studio-workbench \
+  -o target/ci/artifacts/native/workbench \
+  --runtime="$ui_runtime"
+''']
+timeout_seconds = 2700
+failure_kind = "product"
+env = {"CARGO_PROFILE_RELEASE_OPT_LEVEL" = "3", "CARGO_PROFILE_RELEASE_LTO" = "thin", "VO_UI_PACKAGE_TIMINGS" = "1"}
+repo_env = {"VO_CI_STUDIO_WORKSPACE" = "vo.work"}
+
+[[command]]
+id = "ui-window-nested-aot-linux"
+argv = ["bash", "-euo", "pipefail", "-c", "xvfb-run --auto-servernum ./target/ci/artifacts/native/nested-component"]
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Alpha 0|Reorder|Remove Beta|Insert Beta|Replace Alpha", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Complete|Alpha 0|Beta 0"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-settings-vm-linux"
+argv = ["bash", "-euo", "pipefail", "-c", "xvfb-run --auto-servernum ./target/debug/vo ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame"]
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-studio-jit-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+studio_workspace="$(mktemp -d)"
+trap 'rm -rf "$studio_workspace"' EXIT
+VOLANG_STUDIO_WORKSPACE="$studio_workspace" xvfb-run --auto-servernum ./target/debug/vo-studio-native
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Open UIKit starter", "VO_UI_AUTOMATION_EXPECT_TEXT" = "EXAMPLE-COUNTER|main.vo"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-studio-aot-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+studio_workspace="$(mktemp -d)"
+trap 'rm -rf "$studio_workspace"' EXIT
+studio_executable="$(find target/ci/artifacts/native/studio -type f -path '*/usr/bin/volang-studio' -print -quit)"
+test -n "$studio_executable"
+VOLANG_STUDIO_WORKSPACE="$studio_workspace" xvfb-run --auto-servernum "$studio_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Open UIKit starter", "VO_UI_AUTOMATION_EXPECT_TEXT" = "EXAMPLE-COUNTER|main.vo"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-gallery-aot-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+gallery_executable="$(find target/ci/artifacts/native/gallery -type f -path '*/usr/bin/volang-app' -print -quit)"
+test -n "$gallery_executable"
+xvfb-run --auto-servernum "$gallery_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Primary|Open drawer|Close|Show toast", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Primary activated|Release ready"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-data-aot-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+data_executable="$(find target/ci/artifacts/native/data -type f -path '*/usr/bin/volang-data' -print -quit)"
+test -n "$data_executable"
+xvfb-run --auto-servernum "$data_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Archived member-0|Operations dashboard"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-media-aot-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+media_executable="$(find target/ci/artifacts/native/media -type f -path '*/usr/bin/volang-media' -print -quit)"
+test -n "$media_executable"
+xvfb-run --auto-servernum "$media_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Camera session recovered; permission is ready to request"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-workbench-aot-linux"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+workbench_executable="$(find target/ci/artifacts/native/workbench -type f -path '*/usr/bin/volang-studio' -print -quit)"
+test -n "$workbench_executable"
+xvfb-run --auto-servernum "$workbench_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"WGPU_BACKEND" = "vulkan", "VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
+report = "native-window"
+
+[[command]]
+id = "ui-nested-link-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+cargo build --locked --timings -p vo-ui-aot-runtime-native
+mkdir -p target/ci/artifacts/native
+VOWORK=off ./target/debug/vo build ui/tests/nested-component-list --runtime=target/debug/libvo_ui_aot_runtime_native.a --no-cache -o target/ci/artifacts/native/nested-component
+''']
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-native-package-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+cargo build --locked --timings --release --no-default-features \
+  -p vo -p vo-studio-aot-runtime-native -p vo-ui-aot-runtime-native
+studio_runtime=target/release/libvo_studio_aot_runtime_native.a
+ui_runtime=target/release/libvo_ui_aot_runtime_native.a
+VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/release/vo ui package apps/studio \
+  -o target/ci/artifacts/native/studio \
+  --runtime="$studio_runtime"
+./target/release/vo ui package ui/showcases/component-gallery \
+  -o target/ci/artifacts/native/gallery \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/data-application \
+  -o target/ci/artifacts/native/data \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/media-application \
+  -o target/ci/artifacts/native/media \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/studio-workbench \
+  -o target/ci/artifacts/native/workbench \
+  --runtime="$ui_runtime"
+''']
+timeout_seconds = 2700
+failure_kind = "product"
+env = {"CARGO_PROFILE_RELEASE_OPT_LEVEL" = "3", "CARGO_PROFILE_RELEASE_LTO" = "thin", "VO_UI_PACKAGE_TIMINGS" = "1"}
+repo_env = {"VO_CI_STUDIO_WORKSPACE" = "vo.work"}
+
+[[command]]
+id = "ui-window-nested-aot-macos"
+argv = ["bash", "-euo", "pipefail", "-c", "./target/ci/artifacts/native/nested-component"]
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Alpha 0|Reorder|Remove Beta|Insert Beta|Replace Alpha", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Complete|Alpha 0|Beta 0"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-settings-vm-macos"
+argv = ["bash", "-euo", "pipefail", "-c", "./target/debug/vo ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame"]
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-studio-jit-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+studio_workspace="$(mktemp -d)"
+trap 'rm -rf "$studio_workspace"' EXIT
+VOLANG_STUDIO_WORKSPACE="$studio_workspace" ./target/debug/vo-studio-native
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Open UIKit starter", "VO_UI_AUTOMATION_EXPECT_TEXT" = "EXAMPLE-COUNTER|main.vo"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-studio-aot-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+studio_workspace="$(mktemp -d)"
+trap 'rm -rf "$studio_workspace"' EXIT
+studio_executable="$(find target/ci/artifacts/native/studio -type f -path '*/Contents/MacOS/volang-studio' -print -quit)"
+test -n "$studio_executable"
+VOLANG_STUDIO_WORKSPACE="$studio_workspace" "$studio_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Open UIKit starter", "VO_UI_AUTOMATION_EXPECT_TEXT" = "EXAMPLE-COUNTER|main.vo"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-gallery-aot-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+gallery_executable="$(find target/ci/artifacts/native/gallery -type f -path '*/Contents/MacOS/volang-app' -print -quit)"
+test -n "$gallery_executable"
+"$gallery_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Primary|Open drawer|Close|Show toast", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Primary activated|Release ready"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-data-aot-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+data_executable="$(find target/ci/artifacts/native/data -type f -path '*/Contents/MacOS/volang-data' -print -quit)"
+test -n "$data_executable"
+"$data_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Archived member-0|Operations dashboard"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-media-aot-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+media_executable="$(find target/ci/artifacts/native/media -type f -path '*/Contents/MacOS/volang-media' -print -quit)"
+test -n "$media_executable"
+"$media_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Camera session recovered; permission is ready to request"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-workbench-aot-macos"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+workbench_executable="$(find target/ci/artifacts/native/workbench -type f -path '*/Contents/MacOS/volang-studio' -print -quit)"
+test -n "$workbench_executable"
+"$workbench_executable"
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
+report = "native-window"
+
+[[command]]
+id = "ui-nested-link-windows"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+cargo build --locked --timings -p vo-ui-aot-runtime-native
+mkdir -p target/ci/artifacts/native
+VOWORK=off ./target/debug/vo build ui/tests/nested-component-list --runtime=target/debug/vo_ui_aot_runtime_native.lib --no-cache -o target/ci/artifacts/native/nested-component.exe
+''']
+timeout_seconds = 900
+failure_kind = "product"
+
+[[command]]
+id = "ui-native-package-windows"
+argv = ["bash", "-euo", "pipefail", "-c", '''
+cargo build --locked --timings --release --no-default-features \
+  -p vo -p vo-studio-aot-runtime-native -p vo-ui-aot-runtime-native
+studio_runtime=target/release/vo_studio_aot_runtime_native.lib
+ui_runtime=target/release/vo_ui_aot_runtime_native.lib
+VOWORK="$VO_CI_STUDIO_WORKSPACE" ./target/release/vo ui package apps/studio \
+  -o target/ci/artifacts/native/studio \
+  --runtime="$studio_runtime"
+./target/release/vo ui package ui/showcases/component-gallery \
+  -o target/ci/artifacts/native/gallery \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/data-application \
+  -o target/ci/artifacts/native/data \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/media-application \
+  -o target/ci/artifacts/native/media \
+  --runtime="$ui_runtime"
+./target/release/vo ui package ui/showcases/studio-workbench \
+  -o target/ci/artifacts/native/workbench \
+  --runtime="$ui_runtime"
+''']
+timeout_seconds = 2700
+failure_kind = "product"
+env = {"CARGO_PROFILE_RELEASE_OPT_LEVEL" = "3", "CARGO_PROFILE_RELEASE_LTO" = "thin", "VO_UI_PACKAGE_TIMINGS" = "1"}
+repo_env = {"VO_CI_STUDIO_WORKSPACE" = "vo.work"}
+
+[[command]]
+id = "ui-window-nested-aot-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+./target/ci/artifacts/native/nested-component.exe''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Alpha 0|Reorder|Remove Beta|Insert Beta|Replace Alpha", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Complete|Alpha 0|Beta 0"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-settings-vm-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+./target/debug/vo.exe ui run ui/examples/settings --mode=vm --no-watch --exit-after-frame''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-studio-jit-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$studioWorkspace = Join-Path $env:VO_CI_ATTEMPT_DIR "volang-studio-window"
+New-Item -ItemType Directory -Force -Path $studioWorkspace | Out-Null
+$env:VOLANG_STUDIO_WORKSPACE = $studioWorkspace
+./target/debug/vo-studio-native.exe
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Open UIKit starter", "VO_UI_AUTOMATION_EXPECT_TEXT" = "EXAMPLE-COUNTER|main.vo"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-studio-aot-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$studioWorkspace = Join-Path $env:VO_CI_ATTEMPT_DIR "volang-studio-aot-window"
+New-Item -ItemType Directory -Force -Path $studioWorkspace | Out-Null
+$studioExecutable = Get-ChildItem target/ci/artifacts/native/studio -Recurse -Filter volang-studio.exe | Select-Object -First 1
+if ($null -eq $studioExecutable) { throw "Studio Native AOT executable is missing" }
+$env:VOLANG_STUDIO_WORKSPACE = $studioWorkspace
+& $studioExecutable.FullName
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Open UIKit starter", "VO_UI_AUTOMATION_EXPECT_TEXT" = "EXAMPLE-COUNTER|main.vo"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-gallery-aot-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$galleryExecutable = Get-ChildItem target/ci/artifacts/native/gallery -Recurse -Filter volang-app.exe | Select-Object -First 1
+if ($null -eq $galleryExecutable) { throw "UIKit Gallery Native AOT executable is missing" }
+$galleryProcess = Start-Process -FilePath $galleryExecutable.FullName -NoNewWindow -PassThru -Wait
+Write-Host ("UIKit Gallery Native AOT exit code: {0} (0x{0:X8})" -f $galleryProcess.ExitCode)
+if ($galleryProcess.ExitCode -ne 0) {
+  throw "UIKit Gallery Native AOT window certification failed"
+}
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Primary|Open drawer|Close|Show toast", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Primary activated|Release ready"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-data-aot-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$dataExecutable = Get-ChildItem target/ci/artifacts/native/data -Recurse -Filter volang-data.exe | Select-Object -First 1
+if ($null -eq $dataExecutable) { throw "Data Application Native AOT executable is missing" }
+& $dataExecutable.FullName
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Member 0|Archive selected|Commit optimistic change|Settings|Back to dashboard", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Archived member-0|Operations dashboard"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-media-aot-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$mediaExecutable = Get-ChildItem target/ci/artifacts/native/media -Recurse -Filter volang-media.exe | Select-Object -First 1
+if ($null -eq $mediaExecutable) { throw "Media Application Native AOT executable is missing" }
+& $mediaExecutable.FullName
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "Play media|Set volume to 50 percent|Capture|Request camera permission|Start camera capture|Stop camera capture|Test denied permission|Recover camera session", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Camera session recovered; permission is ready to request"}
+report = "native-window"
+
+[[command]]
+id = "ui-window-workbench-aot-windows"
+argv = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", '''
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$workbenchExecutable = Get-ChildItem target/ci/artifacts/native/workbench -Recurse -Filter volang-studio.exe | Select-Object -First 1
+if ($null -eq $workbenchExecutable) { throw "Studio Workbench Native AOT executable is missing" }
+& $workbenchExecutable.FullName
+''']
+timeout_seconds = 180
+failure_kind = "product"
+env = {"VO_UI_AUTOMATION_EXIT_AFTER_FRAMES" = "1", "VO_UI_AUTOMATION_CLICKS" = "vo.mod|main.vo|Wasm AOT release|Run project|Show Console|Show Documentation", "VO_UI_AUTOMATION_EXPECT_TEXT" = "Build once, run everywhere|Structured concurrency"}
+report = "native-window"
+
+[[command]]
+id = "nightly-appkit-lifecycle"
+argv = ["cargo", "run", "--locked", "-p", "vo-app-host-native", "--example", "macos_window_lifecycle_smoke", "--features", "macos-gpu"]
+timeout_seconds = 600
+failure_kind = "product"
+stdout_result = "target/ci/results/appkit-lifecycle.json"

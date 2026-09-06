@@ -1628,6 +1628,15 @@ impl Vm {
         self.module.as_deref().map(LoadedModule::runtime_metadata)
     }
 
+    /// Install deterministic host time before the first guest instruction.
+    #[cfg(feature = "std")]
+    pub fn set_manual_clock(&mut self, clock: vo_runtime::io::ManualClock) -> std::io::Result<()> {
+        if self.execution_started {
+            return Err(std::io::Error::other("install clock before VM execution"));
+        }
+        self.state.io.set_manual_clock(clock)
+    }
+
     /// Exit status requested by `os.Exit`, retained for every later host poll.
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code.or(self.pending_exit_code)

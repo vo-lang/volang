@@ -6,9 +6,13 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::process::{self, Command};
+
+mod host;
+mod native_aot;
+mod resources;
+mod subprocess;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_WORKERS: usize = 8;
@@ -135,6 +139,7 @@ fn parse_jobs(raw: &str) -> Result<usize, Box<dyn std::error::Error>> {
 struct TestPlan {
     schema: String,
     suite: String,
+    host_platform: String,
     jobs: Vec<TestJob>,
 }
 
@@ -154,6 +159,8 @@ struct TestJob {
     owner: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
     timeout_sec: u64,
     expect: Expect,
 }
@@ -183,18 +190,24 @@ struct PlanResult {
     tags: Vec<String>,
     owner: Option<String>,
     passed: bool,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
+    host_capabilities: BTreeMap<String, host::Probe>,
+    failure_kind: Option<String>,
     elapsed_ms: u128,
     stdout: String,
     stderr: String,
     error: String,
     expect: Expect,
     baseline: Option<String>,
+    artifacts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct JsonRunOutput {
     schema: &'static str,
     suite: String,
+    host_platform: String,
     passed: usize,
     failed: usize,
     skipped: usize,
@@ -214,6 +227,10 @@ struct JsonJobResult {
     owner: Option<String>,
     expect: Expect,
     status: String,
+    requires_host: Vec<String>,
+    resource_group: Option<String>,
+    host_capabilities: BTreeMap<String, host::Probe>,
+    failure_kind: Option<String>,
     elapsed_ms: u128,
     stdout: String,
     stderr: String,
@@ -227,8 +244,19 @@ struct JsonJobResult {
 fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let plan: TestPlan = serde_json::from_str(&text)?;
-    if plan.schema != "volang.test-plan.v1" {
+    if plan.schema != "volang.test-plan.v2" {
         return Err(format!("unsupported plan schema: {}", plan.schema).into());
+    }
+    if plan.host_platform != std::env::consts::OS {
+        return Err(format!(
+            "test host {} differs from current {}",
+            plan.host_platform,
+            std::env::consts::OS
+        )
+        .into());
+    }
+    for job in &plan.jobs {
+        host::validate_job(job)?;
     }
     if plan.jobs.is_empty() {
         return Err("test plan contains no jobs".into());
@@ -249,8 +277,9 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
 
     if opts.format == "json" {
         let output = JsonRunOutput {
-            schema: "volang.test-result.v1",
+            schema: "volang.test-result.v2",
             suite: plan.suite,
+            host_platform: plan.host_platform,
             passed,
             failed,
             skipped: 0,
@@ -272,6 +301,10 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                     } else {
                         "failed".to_string()
                     },
+                    requires_host: result.requires_host.clone(),
+                    resource_group: result.resource_group.clone(),
+                    host_capabilities: result.host_capabilities.clone(),
+                    failure_kind: result.failure_kind.clone(),
                     elapsed_ms: result.elapsed_ms,
                     stdout: result.stdout.clone(),
                     stderr: result.stderr.clone(),
@@ -283,7 +316,7 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                         Some(result.error.clone())
                     },
                     baseline: result.baseline.clone(),
-                    artifacts: Vec::new(),
+                    artifacts: result.artifacts.clone(),
                 })
                 .collect(),
         };
@@ -341,7 +374,9 @@ fn validate_differential_results(results: &mut [PlanResult]) {
     let mut failures = Vec::new();
     for case_results in by_case.values() {
         for &target_index in case_results.values() {
-            if results[target_index].backend != "jit" {
+            if !matches!(results[target_index].backend.as_str(), "jit" | "native-aot")
+                || results[target_index].expect.kind == "fail"
+            {
                 continue;
             }
             let baseline_index = case_results
@@ -386,6 +421,7 @@ fn validate_differential_results(results: &mut [PlanResult]) {
     for (index, detail) in failures {
         let result = &mut results[index];
         result.passed = false;
+        result.failure_kind.get_or_insert_with(|| "product".into());
         if result.error.trim().is_empty() {
             result.error = detail;
         } else {
@@ -417,6 +453,13 @@ fn differential_mismatch(baseline: &PlanResult, candidate: &PlanResult) -> Optio
             "stdout expected {:?}, got {:?}",
             summarize_text(&baseline.stdout),
             summarize_text(&candidate.stdout)
+        ));
+    }
+    if candidate.backend == "native-aot" && baseline.stderr != candidate.stderr {
+        parts.push(format!(
+            "stderr expected {:?}, got {:?}",
+            summarize_text(&baseline.stderr),
+            summarize_text(&candidate.stderr)
         ));
     }
     let baseline_error = baseline.error.trim();
@@ -454,49 +497,126 @@ fn summarize_text(text: &str) -> String {
     }
 }
 
+// Linking debug runtimes has a much larger working set than interpreting a
+// case. Keep its concurrency bounded independently of the language worker count.
+struct LinkSlots {
+    active: Mutex<usize>,
+    available: Condvar,
+}
+
+struct LinkPermit<'a>(&'a LinkSlots);
+
+impl LinkSlots {
+    fn acquire(&self) -> LinkPermit<'_> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *active >= 2 {
+            active = self
+                .available
+                .wait(active)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        *active += 1;
+        LinkPermit(self)
+    }
+}
+
+impl Drop for LinkPermit<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) -= 1;
+        self.0.available.notify_one();
+    }
+}
+
 fn run_jobs_parallel(
     jobs: Vec<TestJob>,
     workers: usize,
     show_progress: bool,
 ) -> Result<Vec<PlanResult>, Box<dyn std::error::Error>> {
+    let run_dir = env::current_dir()?
+        .join("target/ci/test-runs")
+        .join(format!(
+            "{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
+        ));
+    fs::create_dir_all(&run_dir)?;
+    if jobs.iter().any(|job| job.backend == "native-aot") {
+        native_aot::prepare(&run_dir)?;
+    }
+    let probes = Arc::new(host::probe_all(&jobs));
     let jobs = Arc::new(jobs);
     let groups = Arc::new(case_job_groups(&jobs));
     let total = jobs.len();
-    let next = Arc::new(AtomicUsize::new(0));
+    let resources = Arc::new(resources::Resources::new(
+        groups
+            .iter()
+            .map(|group| jobs[group[0]].resource_group.clone())
+            .collect(),
+    ));
     let (tx, rx) = mpsc::channel();
+    let link_slots = Arc::new(LinkSlots {
+        active: Mutex::new(0),
+        available: Condvar::new(),
+    });
     let worker_count = workers.min(groups.len().max(1));
 
     for _ in 0..worker_count {
         let jobs = Arc::clone(&jobs);
         let groups = Arc::clone(&groups);
-        let next = Arc::clone(&next);
+        let resources = Arc::clone(&resources);
+        let probes = Arc::clone(&probes);
         let tx = tx.clone();
+        let run_dir = run_dir.clone();
+        let link_slots = Arc::clone(&link_slots);
         std::thread::spawn(move || loop {
-            let group_index = next.fetch_add(1, Ordering::SeqCst);
-            let Some(group) = groups.get(group_index) else {
+            let Some(permit) = resources.next() else {
                 break;
             };
+            let group = &groups[permit.index];
             for &index in group {
                 let job = &jobs[index];
-                let result = run_job_subprocess(job).unwrap_or_else(|err| PlanResult {
-                    id: job.id.clone(),
-                    case_id: job.case_id.clone(),
-                    kind: job.kind.clone(),
-                    path: job.path.clone(),
-                    target: job.target.clone(),
-                    backend: job.backend.clone(),
-                    env: job.env.clone(),
-                    matrix: job.matrix.clone(),
-                    tags: job.tags.clone(),
-                    owner: job.owner.clone(),
-                    passed: false,
-                    elapsed_ms: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    error: err.to_string(),
-                    expect: job.expect.clone(),
-                    baseline: None,
-                });
+                let _link_permit = (job.backend == "native-aot").then(|| link_slots.acquire());
+                let result =
+                    run_job_subprocess(job, &run_dir, &probes).unwrap_or_else(|err| PlanResult {
+                        id: job.id.clone(),
+                        case_id: job.case_id.clone(),
+                        kind: job.kind.clone(),
+                        path: job.path.clone(),
+                        target: job.target.clone(),
+                        backend: job.backend.clone(),
+                        env: job.env.clone(),
+                        matrix: job.matrix.clone(),
+                        tags: job.tags.clone(),
+                        owner: job.owner.clone(),
+                        passed: false,
+                        requires_host: job.requires_host.clone(),
+                        resource_group: job.resource_group.clone(),
+                        host_capabilities: host::observed(job)
+                            .into_iter()
+                            .filter_map(|name| {
+                                probes
+                                    .get(name)
+                                    .map(|probe| (name.to_string(), probe.clone()))
+                            })
+                            .collect(),
+                        failure_kind: Some("infrastructure".into()),
+                        elapsed_ms: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        error: err.to_string(),
+                        expect: job.expect.clone(),
+                        baseline: None,
+                        artifacts: Vec::new(),
+                    });
                 if tx.send((index, result)).is_err() {
                     return;
                 }
@@ -547,12 +667,24 @@ fn run_jobs_parallel(
                     tags: job.tags.clone(),
                     owner: job.owner.clone(),
                     passed: false,
+                    requires_host: job.requires_host.clone(),
+                    resource_group: job.resource_group.clone(),
+                    host_capabilities: host::observed(job)
+                        .into_iter()
+                        .filter_map(|name| {
+                            probes
+                                .get(name)
+                                .map(|probe| (name.to_string(), probe.clone()))
+                        })
+                        .collect(),
+                    failure_kind: Some("infrastructure".into()),
                     elapsed_ms: 0,
                     stdout: String::new(),
                     stderr: String::new(),
                     error: "worker exited without reporting a result".to_string(),
                     expect: job.expect.clone(),
                     baseline: None,
+                    artifacts: Vec::new(),
                 }
             })
         })
@@ -569,9 +701,10 @@ fn case_job_groups(jobs: &[TestJob]) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (index, job) in jobs.iter().enumerate() {
         let continues_current = groups.last().is_some_and(|group| {
-            group
-                .first()
-                .is_some_and(|first| jobs[*first].case_id == job.case_id)
+            group.first().is_some_and(|first| {
+                jobs[*first].case_id == job.case_id
+                    && jobs[*first].resource_group == job.resource_group
+            })
         });
         if continues_current {
             groups.last_mut().expect("group exists").push(index);
@@ -582,59 +715,103 @@ fn case_job_groups(jobs: &[TestJob]) -> Vec<Vec<usize>> {
     groups
 }
 
-fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let path = env::temp_dir().join(format!(
-        "volang-test-job-{}-{}.json",
-        process::id(),
-        stable_id(&job.id)
-    ));
+fn run_job_subprocess(
+    job: &TestJob,
+    run_dir: &std::path::Path,
+    probes: &BTreeMap<String, host::Probe>,
+) -> Result<PlanResult, Box<dyn std::error::Error>> {
+    use sha2::{Digest, Sha256};
+    let host_capabilities = host::observed(job)
+        .into_iter()
+        .filter_map(|name| {
+            probes
+                .get(name)
+                .map(|probe| (name.to_string(), probe.clone()))
+        })
+        .collect();
+    if let Some((kind, detail)) = host::failure(job, probes) {
+        return Ok(PlanResult {
+            id: job.id.clone(),
+            case_id: job.case_id.clone(),
+            kind: job.kind.clone(),
+            path: job.path.clone(),
+            target: job.target.clone(),
+            backend: job.backend.clone(),
+            env: job.env.clone(),
+            matrix: job.matrix.clone(),
+            tags: job.tags.clone(),
+            owner: job.owner.clone(),
+            requires_host: job.requires_host.clone(),
+            resource_group: job.resource_group.clone(),
+            host_capabilities,
+            failure_kind: Some(kind.into()),
+            passed: false,
+            elapsed_ms: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: detail,
+            expect: job.expect.clone(),
+            baseline: None,
+            artifacts: Vec::new(),
+        });
+    }
+    let dir = run_dir.join(format!("{:x}", Sha256::digest(job.id.as_bytes())));
+    fs::create_dir(&dir)?;
+    let path = dir.join("job.json");
     fs::write(&path, serde_json::to_vec(job)?)?;
-    let child = Command::new(env::current_exe()?)
+    let mut command = Command::new(env::current_exe()?);
+    command
         .arg("run-plan-job")
         .arg(&path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(err) => {
-            let _ = fs::remove_file(path);
-            return Err(err.into());
-        }
-    };
-    let timeout = Duration::from_secs(job.timeout_sec.max(1));
-    let timed_out;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                timed_out = false;
-                break;
-            }
-            Ok(None) => {}
-            Err(err) => {
-                let _ = fs::remove_file(path);
-                return Err(err.into());
-            }
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            timed_out = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+        .env("VO_TEST_ARTIFACT_DIR", &dir);
+    command.env_remove("VO_TEST_HOST_SYMLINK");
+    if host::observed(job).contains("symlink") {
+        command.env(
+            "VO_TEST_HOST_SYMLINK",
+            if probes["symlink"].status == host::Status::Supported {
+                "supported"
+            } else {
+                "unavailable"
+            },
+        );
     }
-    let output = child.wait_with_output();
-    let _ = fs::remove_file(path);
-    let output = output?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let error = if timed_out {
-        format!("timed out after {}s", job.timeout_sec)
-    } else if output.status.success() {
-        String::new()
+    let output = subprocess::run(
+        command,
+        &dir,
+        "run",
+        Duration::from_secs(job.timeout_sec.max(1)),
+        true,
+    )?;
+    let receipt_error =
+        if job.backend == "native-aot" && output.status.success() && output.error.is_none() {
+            native_aot::finish_job(&dir, job)
+                .err()
+                .map(|error| error.to_string())
+        } else {
+            None
+        };
+    let passed = output.status.success() && output.error.is_none() && receipt_error.is_none();
+    let failure_kind = if passed {
+        None
+    } else if output.error.is_some() || receipt_error.is_some() {
+        Some("infrastructure".into())
     } else {
-        stderr.trim().to_string()
+        Some("product".into())
+    };
+    let error = output.error.or(receipt_error).unwrap_or_else(|| {
+        if output.status.success() {
+            String::new()
+        } else if output.stderr.trim().is_empty() {
+            format!("worker exited with {}", output.status)
+        } else {
+            output.stderr.trim().to_string()
+        }
+    });
+    let artifacts = if job.backend == "native-aot" || !passed {
+        vec![dir.to_string_lossy().into_owned()]
+    } else {
+        fs::remove_dir_all(&dir)?;
+        Vec::new()
     };
     Ok(PlanResult {
         id: job.id.clone(),
@@ -647,26 +824,25 @@ fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::E
         matrix: job.matrix.clone(),
         tags: job.tags.clone(),
         owner: job.owner.clone(),
-        passed: output.status.success() && !timed_out,
-        elapsed_ms: start.elapsed().as_millis(),
-        stdout,
-        stderr,
+        passed,
+        requires_host: job.requires_host.clone(),
+        resource_group: job.resource_group.clone(),
+        host_capabilities,
+        failure_kind,
+        elapsed_ms: output.elapsed_ms,
+        stdout: output.stdout,
+        stderr: output.stderr,
         error,
         expect: job.expect.clone(),
         baseline: None,
+        artifacts,
     })
-}
-
-fn stable_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect()
 }
 
 fn run_plan_job(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let job: TestJob = serde_json::from_str(&text)?;
+    host::validate_job(&job)?;
     let result = run_job(&job);
     // `main` terminates workers with `process::exit`, which skips stdio
     // destructor flushing. Each worker is piped by the plan coordinator, so
@@ -708,14 +884,14 @@ fn restore_job_env(saved_env: Vec<(String, Option<String>)>) {
 
 fn job_env_restore_keys(job: &TestJob) -> Vec<String> {
     let mut keys: Vec<String> = job.env.keys().cloned().collect();
-    if job.backend == "jit" {
+    if matches!(job.backend.as_str(), "jit" | "native-aot") {
         keys.extend(
             RUNNER_OWNED_JIT_ENV_KEYS
                 .iter()
                 .map(|key| (*key).to_string()),
         );
     }
-    if matches!(job.backend.as_str(), "vm" | "jit") {
+    if matches!(job.backend.as_str(), "vm" | "jit" | "native-aot") {
         keys.extend(
             RUNNER_OWNED_GC_ENV_KEYS
                 .iter()
@@ -728,6 +904,9 @@ fn job_env_restore_keys(job: &TestJob) -> Vec<String> {
 }
 
 fn run_job_inner(job: &TestJob) -> Result<(), String> {
+    if job.backend == "native-aot" {
+        return native_aot::run(job).map_err(|error| error.to_string());
+    }
     let compiled = match vo_engine::compile(&job.path) {
         Ok(compiled) => compiled,
         Err(err) => {
@@ -930,6 +1109,10 @@ mod tests {
             tags: Vec::new(),
             owner: None,
             passed,
+            requires_host: Vec::new(),
+            resource_group: None,
+            host_capabilities: BTreeMap::new(),
+            failure_kind: (!passed).then(|| "product".into()),
             elapsed_ms: 1,
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -942,10 +1125,11 @@ mod tests {
                 jit_loop_entries_min: None,
             },
             baseline: None,
+            artifacts: Vec::new(),
         }
     }
 
-    fn test_job(target: &str, backend: &str, env: &[(&str, &str)]) -> TestJob {
+    pub(crate) fn test_job(target: &str, backend: &str, env: &[(&str, &str)]) -> TestJob {
         TestJob {
             id: format!("case::{target}"),
             case_id: "case".to_string(),
@@ -960,6 +1144,8 @@ mod tests {
                 .iter()
                 .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
                 .collect(),
+            requires_host: Vec::new(),
+            resource_group: None,
             timeout_sec: 1,
             expect: Expect {
                 kind: "pass".to_string(),
@@ -1169,6 +1355,10 @@ mod tests {
         let mut repeated_first = test_job("osr", "jit", &[]);
         repeated_first.case_id = "first".to_string();
 
+        let mut different_resource = first_jit.clone();
+        different_resource.resource_group = Some("shared-socket".into());
+        let separate = case_job_groups(&[first_vm.clone(), different_resource]);
+        assert_eq!(separate, vec![vec![0], vec![1]]);
         let groups = case_job_groups(&[first_vm, first_jit, second_vm, repeated_first]);
 
         assert_eq!(groups, vec![vec![0, 1], vec![2], vec![3]]);
@@ -1240,7 +1430,35 @@ mod tests {
     }
 
     #[test]
-    fn json_result_job_includes_v1_schema_fields() {
+    fn native_aot_requires_vm_observable_equivalence() {
+        let mut results = vec![
+            result("case", "vm", "vm", true, "expected\n", ""),
+            result("case", "native-aot", "native-aot", true, "expected\n", ""),
+        ];
+        validate_differential_results(&mut results);
+        assert!(results[1].passed);
+        assert_eq!(results[1].baseline.as_deref(), Some("vm"));
+        results[1].stderr = "unexpected diagnostic".into();
+        validate_differential_results(&mut results);
+        assert!(!results[1].passed);
+        assert!(results[1].error.contains("stderr expected"));
+    }
+
+    #[test]
+    fn an_expected_build_rejection_does_not_claim_vm_execution_equivalence() {
+        let mut results = vec![
+            result("case", "vm", "vm", true, "executed\n", ""),
+            result("case", "native-aot", "native-aot", true, "", ""),
+        ];
+        results[1].expect.kind = "fail".into();
+        results[1].expect.patterns = vec!["missing host".into()];
+        validate_differential_results(&mut results);
+        assert!(results[1].passed);
+        assert!(results[1].baseline.is_none());
+    }
+
+    #[test]
+    fn json_result_job_includes_v2_host_contract_fields() {
         let result = result("case", "candidate", "jit", false, "", "boom");
         let job = JsonJobResult {
             id: result.id.clone(),
@@ -1254,6 +1472,10 @@ mod tests {
             owner: result.owner.clone(),
             expect: result.expect.clone(),
             status: "failed".to_string(),
+            requires_host: result.requires_host.clone(),
+            resource_group: result.resource_group.clone(),
+            host_capabilities: result.host_capabilities.clone(),
+            failure_kind: result.failure_kind.clone(),
             elapsed_ms: result.elapsed_ms,
             stdout: result.stdout.clone(),
             stderr: result.stderr.clone(),

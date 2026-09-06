@@ -428,6 +428,35 @@ impl FunctionIr {
             });
         }
 
+        // Dynamic inline-array accesses observe canonical frame cells without
+        // an SSA use of each cell. Definitions of those cells are real stores,
+        // including scalar copies and wide CopyN instructions. Preserve them
+        // through DCE/GVN while leaving unrelated scalar definitions pure.
+        let mut aliased_cells = vec![false; usize::from(func.local_slots)];
+        for instruction in &raw {
+            if let MemorySyncEffect::AliasedRange { start, count } = instruction.memory_sync {
+                let end = usize::from(start) + usize::from(count);
+                let cells = aliased_cells
+                    .get_mut(usize::from(start)..end)
+                    .ok_or_else(|| {
+                        JitError::Internal(format!(
+                            "verified aliased memory range {start}..{end} exceeds frame width {}",
+                            func.local_slots
+                        ))
+                    })?;
+                cells.fill(true);
+            }
+        }
+        for instruction in &mut raw {
+            if instruction
+                .writes
+                .iter()
+                .any(|slot| aliased_cells[usize::from(*slot)])
+            {
+                instruction.effects.0 |= EffectSet::WRITES_OBSERVABLE_STATE;
+            }
+        }
+
         let (mut blocks, pc_to_block) = build_cfg(&raw)?;
         compute_block_liveness(&mut blocks, &raw)?;
         let (liveness_at_frame_state, live_slots, root_slots) =

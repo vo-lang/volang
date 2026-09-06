@@ -2,16 +2,19 @@ use crate::test_config::load_test_config;
 use crate::test_plan::{build_plan, effective_test_targets, TestArgs, TestPlan};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct JsonRunOutput {
     schema: String,
     suite: String,
+    host_platform: String,
     passed: usize,
     failed: usize,
     skipped: usize,
@@ -19,6 +22,13 @@ struct JsonRunOutput {
 }
 
 pub(crate) fn run_tests(root: &Path, opts: &TestArgs) -> Result<()> {
+    if opts.host_platform != std::env::consts::OS {
+        bail!(
+            "cannot execute a {} test plan on {}; use test plan for cross-platform inspection",
+            opts.host_platform,
+            std::env::consts::OS
+        );
+    }
     let config = load_test_config(root)?;
     let effective_targets = effective_test_targets(root, opts)?;
     let mut wasm_targets = Vec::new();
@@ -84,6 +94,7 @@ fn run_native_tests_text(root: &Path, opts: &TestArgs, run_plan_targets: &[Strin
 
     let native_opts = TestArgs {
         suite: opts.suite.clone(),
+        host_platform: opts.host_platform.clone(),
         targets: run_plan_targets.to_vec(),
         targets_explicit: true,
         matrices: opts.matrices.clone(),
@@ -99,17 +110,11 @@ fn run_native_tests_text(root: &Path, opts: &TestArgs, run_plan_targets: &[Strin
         shard: opts.shard,
     };
     let plan = build_plan(root, &native_opts)?;
-    if plan_needs_loopback_preflight(&plan) {
-        check_localhost_loopback().context(
-            "localhost loopback preflight failed before running selected net/http tests; \
-             local sandboxing can block 127.0.0.1 sockets, so rerun outside the sandbox or allow \
-             local networking for this test command",
-        )?;
-    }
     let plan_path =
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
     let mut command = vo_test_command(root, opts.release);
+    prepare_native_aot_command(root, opts.release, &plan, &mut command)?;
     command.arg("run-plan");
     command.arg(&plan_path);
     if let Some(jobs) = opts.jobs {
@@ -145,6 +150,7 @@ fn run_native_tests_json(
 
     let native_opts = TestArgs {
         suite: opts.suite.clone(),
+        host_platform: opts.host_platform.clone(),
         targets: run_plan_targets.to_vec(),
         targets_explicit: true,
         matrices: opts.matrices.clone(),
@@ -160,17 +166,11 @@ fn run_native_tests_json(
         shard: opts.shard,
     };
     let plan = build_plan(root, &native_opts)?;
-    if plan_needs_loopback_preflight(&plan) {
-        check_localhost_loopback().context(
-            "localhost loopback preflight failed before running selected net/http tests; \
-             local sandboxing can block 127.0.0.1 sockets, so rerun outside the sandbox or allow \
-             local networking for this test command",
-        )?;
-    }
     let plan_path =
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
     let mut command = vo_test_command(root, opts.release);
+    prepare_native_aot_command(root, opts.release, &plan, &mut command)?;
     command.arg("run-plan");
     command.arg(&plan_path);
     if let Some(jobs) = opts.jobs {
@@ -185,7 +185,7 @@ fn run_native_tests_json(
         .output()
         .context("could not run vo-test run-plan")?;
     let _ = fs::remove_file(&plan_path);
-    parse_json_run_output(&output.stdout, &output.stderr, "vo-test run-plan")
+    checked_json_run_output(&output, &plan, "vo-test run-plan")
 }
 
 fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Result<()> {
@@ -199,6 +199,7 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
     }
     let wasm_opts = TestArgs {
         suite: opts.suite.clone(),
+        host_platform: opts.host_platform.clone(),
         targets: vec![wasm_target_name.to_string()],
         targets_explicit: true,
         matrices: opts.matrices.clone(),
@@ -224,10 +225,7 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
     if plan.jobs.is_empty() {
         bail!("no WASM tests selected");
     }
-    let mut build = command_from_args(&wasm_target.build_command, "WASM build command")?;
-    if opts.release {
-        build.args(&wasm_target.release_build_args);
-    }
+    let mut build = wasm_build_command(wasm_target, opts.release)?;
     let status = build.current_dir(root).status()?;
     if !status.success() {
         bail!(
@@ -278,6 +276,7 @@ fn run_wasm_tests_json(
     }
     let wasm_opts = TestArgs {
         suite: opts.suite.clone(),
+        host_platform: opts.host_platform.clone(),
         targets: vec![wasm_target_name.to_string()],
         targets_explicit: true,
         matrices: opts.matrices.clone(),
@@ -303,19 +302,7 @@ fn run_wasm_tests_json(
     if plan.jobs.is_empty() {
         bail!("no WASM tests selected");
     }
-    let mut build = command_from_args(&wasm_target.build_command, "WASM build command")?;
-    if opts.release {
-        build.args(&wasm_target.release_build_args);
-    }
-    let output = build.current_dir(root).output()?;
-    if !output.status.success() {
-        bail!(
-            "test command failed: {}\nstdout:\n{}\nstderr:\n{}",
-            command_description(&wasm_target.build_command),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    run_json_preparation(root, wasm_build_command(wasm_target, opts.release)?)?;
     run_wasm_prepare_commands(root, wasm_target)?;
     let plan_path =
         std::env::temp_dir().join(format!("volang-wasm-test-plan-{}.json", std::process::id()));
@@ -335,43 +322,61 @@ fn run_wasm_tests_json(
     let output = command.output();
     let _ = fs::remove_file(&plan_path);
     let output = output?;
-    parse_json_run_output(
-        &output.stdout,
-        &output.stderr,
+    checked_json_run_output(
+        &output,
+        &plan,
         &command_description(&wasm_target.runner_command),
     )
 }
 
 fn run_wasm_prepare_commands(root: &Path, target: &crate::test_config::TestTarget) -> Result<()> {
     for args in &target.prepare_commands {
-        let mut command = command_from_args(args, "WASM prepare command")?;
-        let output = command.current_dir(root).output()?;
-        if !output.status.success() {
-            bail!(
-                "test command failed: {}\nstdout:\n{}\nstderr:\n{}",
-                command_description(args),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        run_json_preparation(root, command_from_args(args, "WASM prepare command")?)?;
+    }
+    Ok(())
+}
+
+fn run_json_preparation(root: &Path, mut command: Command) -> Result<()> {
+    let description = format!("{command:?}");
+    eprintln!("Wasm preparation started: {description}");
+    let started = Instant::now();
+    // Preserve stdout for the final domain result. Stream compiler diagnostics
+    // to stderr so a deadline retains progress even before the build completes.
+    let output = command
+        .current_dir(root)
+        .stderr(Stdio::inherit())
+        .output()?;
+    if !output.stdout.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    eprintln!(
+        "Wasm preparation finished: {} after {:.3}s: {description}",
+        output.status,
+        started.elapsed().as_secs_f64()
+    );
+    if !output.status.success() {
+        bail!("Wasm preparation failed: {description} ({})", output.status);
     }
     Ok(())
 }
 
 fn aggregate_json_outputs(outputs: Vec<JsonRunOutput>) -> Result<JsonRunOutput> {
     let mut aggregate = JsonRunOutput {
-        schema: "volang.test-result.v1".to_string(),
+        schema: "volang.test-result.v2".to_string(),
         suite: "lang".to_string(),
+        host_platform: std::env::consts::OS.into(),
         passed: 0,
         failed: 0,
         skipped: 0,
         jobs: Vec::new(),
     };
     for output in outputs {
-        if output.schema != "volang.test-result.v1" {
+        if output.schema != "volang.test-result.v2" {
             bail!("unsupported test result schema: {}", output.schema);
         }
-        aggregate.suite = output.suite;
+        if output.suite != aggregate.suite || output.host_platform != aggregate.host_platform {
+            bail!("cannot aggregate different test suites or host platforms");
+        }
         aggregate.passed += output.passed;
         aggregate.failed += output.failed;
         aggregate.skipped += output.skipped;
@@ -380,26 +385,166 @@ fn aggregate_json_outputs(outputs: Vec<JsonRunOutput>) -> Result<JsonRunOutput> 
     Ok(aggregate)
 }
 
+fn checked_json_run_output(
+    output: &std::process::Output,
+    plan: &TestPlan,
+    command: &str,
+) -> Result<JsonRunOutput> {
+    let result = parse_json_run_output(&output.stdout, &output.stderr, command)?;
+    validate_json_run_output(&result, plan)?;
+    if output.status.success() != (result.failed == 0) {
+        bail!(
+            "{command} exit status {} contradicts its result ({} failed)\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            result.failed,
+            summarize_process_output(&output.stdout),
+            summarize_process_output(&output.stderr)
+        );
+    }
+    Ok(result)
+}
+
+fn validate_json_run_output(result: &JsonRunOutput, plan: &TestPlan) -> Result<()> {
+    if result.schema != "volang.test-result.v2"
+        || result.suite != plan.suite
+        || result.host_platform != plan.host_platform
+    {
+        bail!("test result schema or suite differs from the selected plan");
+    }
+    let expected = plan
+        .jobs
+        .iter()
+        .map(|job| (job.id.as_str(), job))
+        .collect::<BTreeMap<_, _>>();
+    if expected.is_empty()
+        || expected.len() != plan.jobs.len()
+        || result.jobs.len() != expected.len()
+    {
+        bail!("test result job count differs from the nonempty selected plan");
+    }
+    let mut seen = BTreeSet::new();
+    let (mut passed, mut failed) = (0, 0);
+    for job in &result.jobs {
+        let id = job["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("test result lacks job id"))?;
+        let planned = expected
+            .get(id)
+            .ok_or_else(|| anyhow!("unexpected test result job {id}"))?;
+        if !seen.insert(id) {
+            bail!("duplicate test result job {id}");
+        }
+        for (field, value) in [
+            ("case_id", &planned.case_id),
+            ("target", &planned.target),
+            ("backend", &planned.backend),
+            ("kind", &planned.kind),
+            ("path", &planned.path),
+        ] {
+            if job[field].as_str() != Some(value.as_str()) {
+                bail!("test result {id} differs from plan field {field}");
+            }
+        }
+        if job["requires_host"] != serde_json::to_value(&planned.requires_host)?
+            || job["resource_group"] != serde_json::to_value(&planned.resource_group)?
+        {
+            bail!("test result {id} differs from declared host/resource requirements");
+        }
+        let planned_metadata = serde_json::to_value(planned)?;
+        for field in ["tags", "matrix", "owner"] {
+            if job[field] != planned_metadata[field] {
+                bail!("test result {id} differs from declared {field}");
+            }
+        }
+        for (field, expected) in planned_metadata["expect"]
+            .as_object()
+            .ok_or_else(|| anyhow!("planned expectation is not an object"))?
+        {
+            if job["expect"].get(field) != Some(expected) {
+                bail!("test result {id} differs from declared expectation {field}");
+            }
+        }
+        validate_host_job_result(job)?;
+        match job["status"].as_str() {
+            Some("passed") => passed += 1,
+            Some("failed") => failed += 1,
+            _ => bail!("test result {id} was not executed; skips must be resolved by the planner"),
+        }
+    }
+    if (result.passed, result.failed, result.skipped) != (passed, failed, 0) {
+        bail!("test result counters contradict individual job outcomes");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_host_job_result(job: &serde_json::Value) -> Result<()> {
+    let required: Vec<String> = serde_json::from_value(job["requires_host"].clone())?;
+    let mut observed = required.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if observed.len() != required.len()
+        || observed
+            .iter()
+            .any(|name| !matches!(*name, "symlink" | "loopback"))
+    {
+        bail!("invalid language host requirements");
+    }
+    if job["tags"]
+        .as_array()
+        .is_some_and(|tags| tags.iter().any(|tag| tag == "symlink"))
+    {
+        observed.insert("symlink");
+    }
+    let capabilities = job["host_capabilities"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing host capability observations"))?;
+    if capabilities
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != observed
+    {
+        bail!("host capability observations differ from requested probes");
+    }
+    for (name, probe) in capabilities {
+        if !matches!(
+            probe["status"].as_str(),
+            Some("supported" | "unavailable" | "error")
+        ) || probe["detail"]
+            .as_str()
+            .is_none_or(|text| text.is_empty() || text.len() > 4096)
+        {
+            bail!("invalid host capability observation {name}");
+        }
+        if job["status"] == "passed"
+            && (probe["status"] == "error"
+                || required.contains(name) && probe["status"] != "supported")
+        {
+            bail!("successful test lacks its required host capability {name}");
+        }
+    }
+    match job["status"].as_str() {
+        Some("passed")
+            if job
+                .get("failure_kind")
+                .is_some_and(serde_json::Value::is_null) => {}
+        Some("failed")
+            if matches!(
+                job["failure_kind"].as_str(),
+                Some("product" | "infrastructure" | "portability" | "dependency-policy")
+            ) => {}
+        _ => bail!("language result lacks a consistent typed failure classification"),
+    }
+    Ok(())
+}
+
 fn parse_json_run_output(stdout: &[u8], stderr: &[u8], command: &str) -> Result<JsonRunOutput> {
-    let text = String::from_utf8_lossy(stdout);
-    let start = match text.find('{') {
-        Some(start) => start,
-        None => bail!(
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        bail!(
             "{command} did not emit JSON result on stdout\nstdout:\n{}\nstderr:\n{}",
             summarize_process_output(stdout),
             summarize_process_output(stderr)
-        ),
-    };
-    let end = match text.rfind('}') {
-        Some(end) => end,
-        None => bail!(
-            "{command} emitted truncated JSON result\nstdout:\n{}\nstderr:\n{}",
-            summarize_process_output(stdout),
-            summarize_process_output(stderr)
-        ),
-    };
-    let json = &text[start..=end];
-    serde_json::from_str(json).with_context(|| {
+        );
+    }
+    serde_json::from_slice(stdout).with_context(|| {
         format!(
             "could not parse {command} JSON result\nstdout:\n{}\nstderr:\n{}",
             summarize_process_output(stdout),
@@ -424,33 +569,120 @@ fn summarize_process_output(output: &[u8]) -> String {
     summary
 }
 
-fn plan_needs_loopback_preflight(plan: &TestPlan) -> bool {
-    plan.jobs.iter().any(|job| {
-        let path = job.path.replace('\\', "/").to_ascii_lowercase();
-        let id = job.id.to_ascii_lowercase();
-        path.contains("/net/")
-            || path.contains("http")
-            || path.contains("socket")
-            || id.contains("http")
-            || id.contains("socket")
-            || id.contains("net_")
-    })
+fn prepare_native_aot_command(
+    root: &Path,
+    release: bool,
+    plan: &TestPlan,
+    runner: &mut Command,
+) -> Result<()> {
+    if !plan.jobs.iter().any(|job| job.backend == "native-aot") {
+        return Ok(());
+    }
+    let features = native_aot_runtime_features(root, plan)?;
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(root)
+        .args([
+            "build",
+            "--locked",
+            "--timings",
+            "--message-format=json",
+            "--no-default-features",
+            "-p",
+            "vo",
+            "-p",
+            "vo-aot-runtime",
+            "-p",
+            "vo-test",
+        ])
+        .stderr(std::process::Stdio::inherit());
+    if release {
+        command.arg("--release");
+    }
+    if !features.is_empty() {
+        command.arg("--features").arg(
+            features
+                .iter()
+                .map(|feature| format!("vo-aot-runtime/{feature}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    let output = command
+        .output()
+        .context("could not build shared Native AOT tools")?;
+    if !output.status.success() {
+        bail!("shared Native AOT tools build failed");
+    }
+    let mut compiler = None;
+    let mut runtime = None;
+    let mut test_runner = None;
+    for line in output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let artifact: serde_json::Value = serde_json::from_slice(line)?;
+        if artifact["reason"] != "compiler-artifact" {
+            continue;
+        }
+        match artifact["target"]["name"].as_str() {
+            Some("vo") => compiler = artifact["executable"].as_str().map(PathBuf::from),
+            Some("vo-test") => test_runner = artifact["executable"].as_str().map(PathBuf::from),
+            Some("vo_aot_runtime") => {
+                runtime = artifact["filenames"]
+                    .as_array()
+                    .and_then(|files| {
+                        files
+                            .iter()
+                            .filter_map(|file| file.as_str())
+                            .find(|file| file.ends_with(".a") || file.ends_with(".lib"))
+                    })
+                    .map(PathBuf::from);
+            }
+            _ => {}
+        }
+    }
+    // The compiler, runtime and runner share one Cargo feature resolution.
+    // Use the actual artifact instead of a timestamp-based sibling guess or
+    // another cargo run that would re-resolve the engine's JIT features.
+    *runner = Command::new(
+        test_runner
+            .context("Cargo did not report the native test runner")?
+            .canonicalize()?,
+    );
+    runner
+        .env(
+            "VO_TEST_NATIVE_AOT_COMPILER",
+            compiler
+                .context("Cargo did not report the Native AOT compiler")?
+                .canonicalize()?,
+        )
+        .env(
+            "VO_TEST_NATIVE_AOT_RUNTIME",
+            runtime
+                .context("Cargo did not report the Native AOT runtime")?
+                .canonicalize()?,
+        );
+    Ok(())
 }
 
-fn check_localhost_loopback() -> Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).context("could not bind 127.0.0.1:0")?;
-    let addr = listener
-        .local_addr()
-        .context("could not inspect loopback listener address")?;
-    let accept = std::thread::spawn(move || listener.accept());
-    let client = TcpStream::connect_timeout(&addr, Duration::from_secs(1))
-        .with_context(|| format!("could not connect to loopback listener at {addr}"))?;
-    let (_server, _) = accept
-        .join()
-        .map_err(|_| anyhow!("loopback accept thread panicked"))?
-        .with_context(|| format!("could not accept loopback connection at {addr}"))?;
-    drop(client);
-    Ok(())
+fn native_aot_runtime_features(root: &Path, plan: &TestPlan) -> Result<Vec<String>> {
+    let config = load_test_config(root)?;
+    let variants: BTreeSet<_> = plan
+        .jobs
+        .iter()
+        .filter(|job| job.backend == "native-aot")
+        .map(|job| {
+            config.targets[&job.target]
+                .native_aot_runtime_features
+                .clone()
+        })
+        .collect();
+    if variants.len() > 1 {
+        bail!("Native AOT runtime variants require separate test runs to preserve capability contracts");
+    }
+    Ok(variants.into_iter().next().unwrap_or_default())
 }
 
 fn vo_test_command(root: &Path, release: bool) -> Command {
@@ -459,7 +691,7 @@ fn vo_test_command(root: &Path, release: bool) -> Command {
     }
 
     let mut command = Command::new("cargo");
-    command.args(["run", "-q"]);
+    command.args(["run", "--locked", "-q"]);
     if release {
         command.arg("--release");
     }
@@ -540,13 +772,32 @@ fn command_from_args(args: &[String], description: &str) -> Result<Command> {
     Ok(command)
 }
 
+fn wasm_build_command(target: &crate::test_config::TestTarget, release: bool) -> Result<Command> {
+    let args = &target.build_command;
+    if args.len() < 2 {
+        bail!("WASM build command requires a program and subcommand");
+    }
+    let profile_args = if release {
+        &target.release_build_args
+    } else {
+        &target.debug_build_args
+    };
+    let mut command = Command::new(&args[0]);
+    command.arg(&args[1]);
+    // Build-tool options must precede trailing Cargo arguments (wasm-pack).
+    // Comparing tokens cannot distinguish options consumed at different levels.
+    command.args(profile_args);
+    command.args(&args[2..]);
+    Ok(command)
+}
+
 fn command_description(args: &[String]) -> String {
     args.join(" ")
 }
 
 fn build_vo_embed(root: &Path, release: bool) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.args(["build", "-p", "vo-embed"]);
+    command.args(["build", "--locked", "-p", "vo-embed"]);
     if release {
         command.arg("--release");
     }
@@ -560,6 +811,123 @@ fn build_vo_embed(root: &Path, release: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_aot_core_and_compiler_host_cannot_share_a_runtime() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (targets, expected) in [
+            ("vm,native-aot", Some(Vec::<String>::new())),
+            ("vm,native-aot-host", Some(vec!["toolchain-host".into()])),
+            ("native-aot,native-aot-host", None),
+        ] {
+            let opts = TestArgs::parse(
+                &root,
+                vec![
+                    "--targets".into(),
+                    targets.into(),
+                    "--tags".into(),
+                    "compiler-host".into(),
+                ],
+            )
+            .unwrap();
+            let plan = build_plan(&root, &opts).unwrap();
+            let result = native_aot_runtime_features(&root, &plan);
+            match expected {
+                Some(features) => assert_eq!(result.unwrap(), features),
+                None => assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("separate test runs")),
+            }
+        }
+    }
+
+    #[test]
+    fn wasm_profiles_precede_forwarded_cargo_options() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let config = load_test_config(&root).unwrap();
+        for (release, flag) in [(false, "--dev"), (true, "--release")] {
+            let command = wasm_build_command(&config.targets["wasm"], release).unwrap();
+            let args = command
+                .get_args()
+                .map(|s| s.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(args[1], flag);
+            assert_eq!(args.iter().filter(|s| **s == flag).count(), 1);
+            assert!(args.iter().position(|s| *s == "--").unwrap() > 1);
+        }
+    }
+
+    #[test]
+    fn result_must_cover_exactly_the_plan_and_match_exit_status() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let opts = TestArgs::parse(
+            &root,
+            vec![
+                "--targets".into(),
+                "vm".into(),
+                "--path".into(),
+                "tests/lang/cases/runtime/array_len_cap_runtime.vo".into(),
+            ],
+        )
+        .unwrap();
+        let plan = build_plan(&root, &opts).unwrap();
+        let mut payload = serde_json::json!({
+            "schema": "volang.test-result.v2", "suite": plan.suite, "host_platform": plan.host_platform,
+            "passed": plan.jobs.len(), "failed": 0, "skipped": 0,
+            "jobs": plan.jobs.iter().map(|job| {
+                let mut value = serde_json::to_value(job).unwrap();
+                value["status"] = "passed".into();
+                value["host_capabilities"] = serde_json::json!({});
+                value["failure_kind"] = serde_json::Value::Null;
+                value
+            }).collect::<Vec<_>>()
+        });
+        let decode =
+            |v: &serde_json::Value| serde_json::from_value::<JsonRunOutput>(v.clone()).unwrap();
+        validate_json_run_output(&decode(&payload), &plan).unwrap();
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(7 << 8)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(7)
+        };
+        let output = std::process::Output {
+            status,
+            stdout: serde_json::to_vec(&payload).unwrap(),
+            stderr: b"injected failure".to_vec(),
+        };
+        assert!(checked_json_run_output(&output, &plan, "fixture")
+            .unwrap_err()
+            .to_string()
+            .contains("exit status"));
+        for (field, bad) in [
+            ("schema", serde_json::json!("wrong")),
+            ("passed", serde_json::json!(42)),
+            ("jobs", serde_json::json!([])),
+        ] {
+            let mut invalid = payload.clone();
+            invalid[field] = bad;
+            assert!(validate_json_run_output(&decode(&invalid), &plan).is_err());
+        }
+        for (field, bad) in [("target", "jit"), ("id", "extra"), ("status", "skipped")] {
+            let mut invalid = payload.clone();
+            invalid["jobs"][0][field] = bad.into();
+            assert!(validate_json_run_output(&decode(&invalid), &plan).is_err());
+        }
+        let mut changed_expectation = payload.clone();
+        changed_expectation["jobs"][0]["expect"]["jit_loop_entries_min"] = 99.into();
+        assert!(validate_json_run_output(&decode(&changed_expectation), &plan).is_err());
+        payload["jobs"][0]["status"] = "failed".into();
+        payload["jobs"][0]["failure_kind"] = "product".into();
+        payload["passed"] = 0.into();
+        payload["failed"] = 1.into();
+        validate_json_run_output(&decode(&payload), &plan).unwrap();
+    }
 
     #[test]
     fn parse_json_run_output_reports_stderr_when_json_is_missing() {
@@ -577,17 +945,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_json_run_output_allows_wrapped_json_payload() {
-        let output = parse_json_run_output(
-            br#"prefix {"schema":"volang.test-result.v1","suite":"lang","passed":1,"failed":0,"skipped":0,"jobs":[]} suffix"#,
-            b"",
-            "vo-test run-plan",
-        )
-        .unwrap();
-
-        assert_eq!(output.schema, "volang.test-result.v1");
-        assert_eq!(output.passed, 1);
-        assert_eq!(output.failed, 0);
+    fn parse_json_run_output_rejects_wrapped_or_truncated_payloads() {
+        for invalid in [
+            &br#"prefix {"schema":"volang.test-result.v2","suite":"lang","passed":1,"failed":0,"skipped":0,"jobs":[]} suffix"#[..],
+            &br#"{"schema":"volang.test-result.v2","suite":"lang","passed":1"#[..],
+        ] {
+            assert!(parse_json_run_output(invalid, b"diagnostic", "runner").is_err());
+        }
     }
 
     #[test]
@@ -713,5 +1077,29 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn successful_language_evidence_requires_independent_capability_proofs() {
+        let valid = serde_json::json!({
+            "requires_host": ["loopback"], "status": "passed", "failure_kind": null,
+            "host_capabilities": {"loopback": {"status": "supported", "detail": "fixture probe"}}
+        });
+        validate_host_job_result(&valid).unwrap();
+        for state in ["unavailable", "error", "invented"] {
+            let mut invalid = valid.clone();
+            invalid["host_capabilities"]["loopback"]["status"] = state.into();
+            assert!(validate_host_job_result(&invalid).is_err());
+        }
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove("failure_kind");
+        assert!(validate_host_job_result(&missing).is_err());
+        let mut failed = valid.clone();
+        failed["status"] = "failed".into();
+        failed["failure_kind"] = "portability".into();
+        failed["host_capabilities"]["loopback"]["status"] = "unavailable".into();
+        validate_host_job_result(&failed).unwrap();
+        failed["failure_kind"] = "invented".into();
+        assert!(validate_host_job_result(&failed).is_err());
     }
 }

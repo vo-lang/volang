@@ -12,7 +12,9 @@ mod scan;
 mod toolchain;
 mod ui_native_session;
 
-pub use aot::{compile_native_aot_object, compile_wasm_aot_image};
+pub use aot::{
+    compile_native_aot_object, compile_wasm_aot_image, native_aot_requires_toolchain_host,
+};
 pub use aot_cache::{AotArtifactCache, AotCacheArtifactKind, AotCacheKey};
 pub use compile::{
     check, check_path, check_path_with_auto_install, check_path_with_auto_install_with_options,

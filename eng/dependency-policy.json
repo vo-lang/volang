@@ -1,0 +1,261 @@
+{
+  "schema": "volang.dependency-policy.v1",
+  "rust_lockfiles": [
+    "Cargo.lock",
+    "fuzz/app-protocol/Cargo.lock",
+    "fuzz/ui-artifact/Cargo.lock"
+  ],
+  "npm_workspaces": [
+    "lang/crates/vo-web",
+    "eng/browser"
+  ],
+  "warning_exceptions": [
+    {
+      "advisory": "RUSTSEC-2024-0413",
+      "package": "atk",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gtk",
+        "atk"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0416",
+      "package": "atk-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gtk",
+        "atk",
+        "atk-sys"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0412",
+      "package": "gdk",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gdk"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0418",
+      "package": "gdk-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gdk",
+        "gdk-sys"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0417",
+      "package": "gdkx11",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gdkx11"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0414",
+      "package": "gdkx11-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gdkx11",
+        "gdkx11-sys"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0415",
+      "package": "gtk",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gtk"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0420",
+      "package": "gtk-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gtk",
+        "gtk-sys"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0419",
+      "package": "gtk3-macros",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gtk",
+        "gtk3-macros"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0436",
+      "package": "paste",
+      "version": "1.0.15",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-app-host-native",
+        "wgpu",
+        "wgpu-hal",
+        "metal",
+        "paste"
+      ],
+      "reason": "Transitive Metal backend dependency. Track the upstream wgpu/metal replacement while retaining the supported macOS renderer."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0370",
+      "package": "proc-macro-error",
+      "version": "1.0.4",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gtk",
+        "gtk3-macros",
+        "proc-macro-error"
+      ],
+      "reason": "GTK3 bindings are unmaintained and required by current native drag/menu integration. Migrate the upstream platform dependency chain with real-window and accessibility validation."
+    },
+    {
+      "advisory": "RUSTSEC-2026-0192",
+      "package": "ttf-parser",
+      "version": "0.25.1",
+      "kind": "unmaintained",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-12-04",
+      "dependency_chain": [
+        "vo-ui-text-native",
+        "cosmic-text",
+        "fontdb",
+        "ttf-parser"
+      ],
+      "reason": "Transitive fontdb dependency from cosmic-text. Update the text stack with font shaping and native layout regressions."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0429",
+      "package": "glib",
+      "version": "0.18.5",
+      "kind": "unsound",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "owner": "ui",
+      "reviewed": "2026-09-05",
+      "expires": "2026-10-05",
+      "dependency_chain": [
+        "vo-ui-shell-native",
+        "drag",
+        "gdk",
+        "glib"
+      ],
+      "reason": "GTK3-compatible glib remains required by native drag/menu dependencies. VariantStrIter is unsound; replacing the GTK3 dependency chain is required. No direct VariantStrIter use was found in repository or drag/muda sources; transitive reachability remains a recorded risk."
+    }
+  ]
+}
