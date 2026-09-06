@@ -44,4 +44,4 @@ vo-ui-web.workspace = true
 vo-vm = { path = "../../lang/crates/vo-vm", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-find-msvc-tools = "=0.1.9"
+find-msvc-tools = "=0.1.11"
