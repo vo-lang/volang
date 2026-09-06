@@ -55,6 +55,7 @@ benchmarks/**/luac.out
 lang/crates/vo-web/node_modules/
 lang/crates/vo-web/pkg/
 lang/crates/vo-web/dist/
+lang/crates/vo-web/aot-support/
 
 
 .tmp/
