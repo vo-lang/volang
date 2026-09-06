@@ -19,7 +19,7 @@ cranelift-frontend = "0.134.3"
 cranelift-jit = "0.134.3"
 cranelift-module = "0.134.3"
 cranelift-native = "0.134.3"
-cranelift-object = "0.134.3"
+cranelift-object = "0.135.1"
 region = "3.0"
 target-lexicon = "=0.13.5"
 
