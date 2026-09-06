@@ -674,7 +674,7 @@ fn acquire_project_file_lock(
             overlapped,
         };
         guard.validate_binding()?;
-        return Ok(Some(guard));
+        Ok(Some(guard))
     }
 
     #[cfg(not(any(unix, windows)))]

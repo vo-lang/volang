@@ -1979,6 +1979,14 @@ fn open_cache_owner_marker(
     root: &AnchoredDirectory,
     create: bool,
 ) -> Result<Arc<LockedFile>, Error> {
+    open_cache_owner_marker_with_post_missing(root, create, || Ok(()))
+}
+
+fn open_cache_owner_marker_with_post_missing(
+    root: &AnchoredDirectory,
+    create: bool,
+    mut post_missing: impl FnMut() -> Result<(), Error>,
+) -> Result<Arc<LockedFile>, Error> {
     let name = OsStr::new(CACHE_OWNER_MARKER);
     let mut observed_incomplete = false;
     for _ in 0..OWNER_MARKER_ACQUISITION_ATTEMPTS {
@@ -1990,7 +1998,16 @@ fn open_cache_owner_marker(
                         root.display_path.display(),
                     )));
                 }
-                if !root.entries()?.is_empty() {
+                post_missing()?;
+                let entries = root.entries()?;
+                if entries.iter().any(|entry| entry == name) {
+                    // A first acquirer published the exact marker after our
+                    // missing observation. Reopen it through the normal lease
+                    // and identity/content checks, including an in-flight writer.
+                    observed_incomplete = true;
+                    continue;
+                }
+                if !entries.is_empty() {
                     return Err(invalid_cache_state(format!(
                         "module cache root {} is non-empty but missing required owner marker {CACHE_OWNER_MARKER}; move or remove it and retry",
                         root.display_path.display(),
@@ -3246,6 +3263,96 @@ mod tests {
             std::fs::read(cache.join(CACHE_OWNER_MARKER)).unwrap(),
             CACHE_OWNER_MARKER_CONTENT,
         );
+    }
+
+    #[test]
+    fn owner_marker_published_after_missing_observation_is_reopened() {
+        let temporary = crate::test_tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        let root = open_cache_root(&normalize_cache_root_path(&cache).unwrap(), true).unwrap();
+        let mut winner = None;
+        let mut missing_observations = 0;
+
+        let marker = open_cache_owner_marker_with_post_missing(&root, true, || {
+            missing_observations += 1;
+            assert_eq!(missing_observations, 1);
+            // Complete another real acquisition between the first missing
+            // observation and the directory enumeration, without timing races.
+            winner = Some(CacheMutationLock::shared(&cache)?);
+            Ok(())
+        })
+        .unwrap();
+
+        let winner = winner.unwrap();
+        winner.validate_cache_ownership().unwrap();
+        validate_cache_owner_marker_file(marker.file(), &root).unwrap();
+        let winner_information =
+            crate::windows_file::file_information(winner.owner_marker.as_ref().unwrap().file())
+                .unwrap();
+        let observer_information = crate::windows_file::file_information(marker.file()).unwrap();
+        assert_eq!(
+            FileIdentity::from_information(&observer_information),
+            FileIdentity::from_information(&winner_information),
+        );
+        CacheMutationLock::shared_existing(&cache)
+            .unwrap()
+            .validate_cache_ownership()
+            .unwrap();
+    }
+
+    #[test]
+    fn foreign_entry_after_missing_owner_marker_is_not_adopted() {
+        let temporary = crate::test_tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        let root = open_cache_root(&normalize_cache_root_path(&cache).unwrap(), true).unwrap();
+        let sentinel = cache.join("foreign-source");
+
+        let error = open_cache_owner_marker_with_post_missing(&root, true, || {
+            std::fs::write(&sentinel, b"preserve")?;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("non-empty but missing"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve");
+        assert!(!cache.join(CACHE_OWNER_MARKER).exists());
+        assert!(!cache.join(STAGING_DIR).exists());
+    }
+
+    #[test]
+    fn invalid_owner_marker_published_after_missing_observation_is_rejected() {
+        for invalid in ["content", "directory", "alias"] {
+            let temporary = crate::test_tempdir().unwrap();
+            let cache = temporary.path().join("cache");
+            let root = open_cache_root(&normalize_cache_root_path(&cache).unwrap(), true).unwrap();
+            let name = if invalid == "alias" {
+                CACHE_OWNER_MARKER.to_ascii_uppercase()
+            } else {
+                CACHE_OWNER_MARKER.to_string()
+            };
+            let marker = cache.join(name);
+
+            let error = open_cache_owner_marker_with_post_missing(&root, true, || {
+                if invalid == "directory" {
+                    std::fs::create_dir(&marker)?;
+                } else {
+                    std::fs::write(&marker, b"wrong-owner\n")?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+
+            assert!(matches!(error, Error::Io(_)), "{invalid}: {error}");
+            assert!(!cache.join(STAGING_DIR).exists(), "{invalid}");
+            if invalid == "directory" {
+                assert!(marker.is_dir());
+            } else {
+                assert_eq!(std::fs::read(marker).unwrap(), b"wrong-owner\n");
+            }
+        }
     }
 
     #[test]
