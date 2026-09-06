@@ -155,6 +155,10 @@ the executable's retained bytes against the receipt and removes it to bound disk
 use. Verification or cleanup errors are infrastructure failures and preserve the
 file for diagnosis; cleanup has no retries. Build or execution failures also
 retain any executable produced.
+The debug profile optimizes the SHA-256 helper with debug assertions and overflow
+checks enabled. Debug executable receipts can cover hundreds of megabytes, so
+verification must remain practical on CPUs without SHA instruction acceleration;
+the compiler, runtime and test runner retain their debug profiles.
 Differential failures retain the logs and executable digest. The case deadline includes
 both build and execution, and process-group cleanup also terminates descendants.
 Successful program output is compared with the matching VM case when present.

@@ -85,6 +85,14 @@ vo-ui-shell-native = { path = "lang/crates/vo-ui-shell-native", version = "=0.1.
 vo-ui-vm = { path = "lang/crates/vo-ui-vm", version = "=0.1.4" }
 vo-ui-web = { path = "ui/crates/vo-ui-web", version = "=0.1.4", default-features = false }
 
+# Receipts hash large debug executables twice, before execution and before
+# coordinator cleanup. Keep the software SHA-256 path fast on every CI CPU
+# while preserving debug checks throughout the compiler, runtime and runner.
+[profile.dev.package.sha2]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
 # WASM-optimized release (size)
 [profile.release]
 opt-level = "s"
