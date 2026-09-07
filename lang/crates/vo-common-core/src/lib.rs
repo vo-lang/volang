@@ -20,6 +20,7 @@ pub mod dynamic_layout;
 pub mod exact_bases;
 pub mod execution_effects;
 pub mod execution_layouts;
+pub mod extern_contracts;
 pub mod extern_key;
 pub mod frame_roots;
 pub mod identifier;
@@ -77,5 +78,5 @@ pub use struct_tag::lookup_struct_tag_value;
 pub use symbol::Symbol;
 #[cfg(feature = "std")]
 pub use symbol::SymbolInterner;
-pub use types::{MetaId, SlotType, ValueKind, ValueMeta};
+pub use types::{MetaId, SlotType, ValueKind, ValueMeta, ValueRttid, INVALID_META_ID};
 pub use verifier::{ModuleVerificationError, ModuleVerifier, VerifiedModule};

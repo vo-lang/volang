@@ -4,17 +4,22 @@
 //! It is used by both the Vo CLI launcher and the vox library.
 
 mod aot;
+#[cfg(any(feature = "aot-native", feature = "aot-wasm"))]
 mod aot_cache;
 mod compile;
+mod engine;
 mod format;
 mod run;
 mod scan;
 mod toolchain;
-mod ui_native_session;
+pub use engine::{Engine, EngineExtension};
 
-pub use aot::{
-    compile_native_aot_object, compile_wasm_aot_image, native_aot_requires_toolchain_host,
-};
+#[cfg(feature = "aot-native")]
+pub use aot::compile_native_aot_object;
+#[cfg(feature = "aot-wasm")]
+pub use aot::compile_wasm_aot_image;
+pub use aot::native_aot_requires_toolchain_host;
+#[cfg(any(feature = "aot-native", feature = "aot-wasm"))]
 pub use aot_cache::{AotArtifactCache, AotCacheArtifactKind, AotCacheKey};
 pub use compile::{
     check, check_path, check_path_with_auto_install, check_path_with_auto_install_with_options,
@@ -33,20 +38,15 @@ pub use compile::{
 };
 pub use format::format_text;
 pub use run::{
-    build_gui_vm, build_gui_vm_with_memory, build_native_gui_vm, build_native_gui_vm_for_mode,
-    build_native_gui_vm_with_memory, prepare_native_gui_reload_for_mode,
-    render_initial_ui_document, render_initial_ui_document_at, render_run_observation_json, run,
-    run_with_byte_args, run_with_byte_args_and_memory, run_with_byte_args_and_memory_observed,
-    run_with_output, run_with_output_interruptible, run_with_output_interruptible_observed,
-    run_with_output_observed, PreparedNativeUiReload, RunError, RunMode, RunObservation,
-    RuntimeError, RuntimeErrorKind,
+    load_extensions, new_vm_for_mode, render_run_observation_json, run, run_with_byte_args,
+    run_with_byte_args_and_memory, run_with_byte_args_and_memory_observed, run_with_output,
+    run_with_output_interruptible, run_with_output_interruptible_observed,
+    run_with_output_observed, RunError, RunMode, RunObservation, RuntimeError, RuntimeErrorKind,
 };
 pub use scan::scan_external_imports;
 pub use toolchain::ensure_toolchain_host_installed;
-pub use ui_native_session::{
-    NativeUiSessionConfig, NativeUiSessionError, NativeUiSessionReport, NativeUiSystemRequest,
-    NativeUiVmSession,
-};
+
+#[cfg(feature = "aot-native")]
 pub use vo_jit::{NativeAotFunction, NativeAotObject, NativeAotOptions};
 pub use vo_runtime::output::CaptureSink;
 pub use vo_target::{
@@ -55,6 +55,7 @@ pub use vo_target::{
 };
 pub use vo_vm::bytecode::Module;
 pub use vo_vm::{GcMode, JitExecutionStats, JitSideExitReason, OomPolicy, VmMemoryConfig};
+#[cfg(feature = "aot-wasm")]
 pub use vo_wasm_aot::{
     decode_wasm_aot_manifest, WasmAotArtifact, WasmAotKind, WasmAotManifest, WASM_AOT_ABI_VERSION,
     WASM_AOT_ENTRY_EXPORT, WASM_AOT_MANIFEST_SECTION, WASM_AOT_MEMORY_EXPORT,

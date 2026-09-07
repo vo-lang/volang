@@ -272,14 +272,6 @@ pub fn compile_output_packages(output: &CompileOutput) -> Result<Vec<String>, Co
     Ok(packages)
 }
 
-fn module_links_package(module: &vo_common_core::Module, package: &str) -> bool {
-    module
-        .artifact(COMPILE_PACKAGES_ARTIFACT_NAME)
-        .filter(|artifact| artifact.version == COMPILE_PACKAGES_ARTIFACT_VERSION)
-        .and_then(|artifact| std::str::from_utf8(&artifact.payload).ok())
-        .is_some_and(|packages| packages.lines().any(|candidate| candidate == package))
-}
-
 /// Apply target-dependent invariants to a commonly verified semantic module.
 /// Bytecode generation stays portable; every executable backend calls this
 /// boundary before lowering, linking, or execution.
@@ -287,28 +279,7 @@ pub fn verify_compile_output_for_target(
     output: &CompileOutput,
     target: &vo_target::TargetSpec,
 ) -> Result<(), CompileError> {
-    let module = output.module.module();
-    vo_target::verify_module_for_target(module, target)
-        .map_err(|error| CompileError::Target(error.to_string()))?;
-    if target.host_surface() == vo_target::HostSurface::BareWasm {
-        if module_links_package(module, "github.com/vo-lang/ui/web/server") {
-            return Err(CompileError::Target(
-                "browser AOT cannot include github.com/vo-lang/ui/web/server authority".to_string(),
-            ));
-        }
-        for external in &module.externs {
-            let Ok(key) = vo_common_core::extern_key::decode_extern_name(&external.name) else {
-                continue;
-            };
-            if key.package() == "github.com/vo-lang/ui/web/server" {
-                return Err(CompileError::Target(
-                    "browser AOT cannot include github.com/vo-lang/ui/web/server authority"
-                        .to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
+    crate::Engine::default().verify_compile_output_for_target(output, target)
 }
 
 /// A compiled module together with the authority needed to verify that live
@@ -961,11 +932,11 @@ pub fn check_path_with_options(
 }
 
 pub fn compile(path: &str) -> Result<CompileOutput, CompileError> {
-    compile_with_options(path, &ProjectContextOptions::from_environment())
+    crate::Engine::default().compile(path)
 }
 
 pub fn compile_path(path: &Path) -> Result<CompileOutput, CompileError> {
-    compile_path_with_options(path, &ProjectContextOptions::from_environment())
+    crate::Engine::default().compile_path(path)
 }
 
 pub fn is_bytecode_artifact(path: &Path) -> bool {
@@ -982,41 +953,8 @@ pub fn is_bytecode_artifact(path: &Path) -> bool {
         )
 }
 
-fn compile_path_with_options(
-    path: &Path,
-    options: &ProjectContextOptions,
-) -> Result<CompileOutput, CompileError> {
-    if let Some(text) = path.to_str() {
-        return compile_with_options(text, options);
-    }
-    if is_bytecode_artifact(path) {
-        return pipeline::load_bytecode(path);
-    }
-    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
-        return pipeline::compile_zip(path, None);
-    }
-
-    compile_real_path_without_cache(path, options)
-}
-
 pub fn compile_path_with_auto_install(path: &Path) -> Result<CompileOutput, CompileError> {
-    if let Some(text) = path.to_str() {
-        return compile_with_auto_install(text);
-    }
-    if is_bytecode_artifact(path) {
-        return pipeline::load_bytecode(path);
-    }
-    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
-        return pipeline::compile_zip(path, None);
-    }
-
-    use vo_module::github_registry::GitHubRegistry;
-
-    let options = ProjectContextOptions::from_environment();
-    let registry = GitHubRegistry::new();
-    let mod_cache = default_mod_cache_root()?;
-    auto_install_dependencies(path, &mod_cache, &registry, &options)?;
-    compile_path_with_cache_prepared_with_options(path, &options)?.into_validated_output()
+    crate::Engine::default().compile_path_with_auto_install(path)
 }
 
 /// Materialize the exact locked dependency graph required by a real project.
@@ -1037,24 +975,8 @@ pub fn compile_path_with_generated_sources_and_auto_install(
     path: &Path,
     generated_sources: Vec<GeneratedSource>,
 ) -> Result<CompileOutput, CompileError> {
-    if is_bytecode_artifact(path) {
-        return pipeline::load_bytecode(path);
-    }
-    if generated_sources.is_empty() {
-        return compile_path_with_auto_install(path);
-    }
-    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
-        return Err(CompileError::Codegen(
-            "generated source injection is unavailable for archive inputs".to_string(),
-        ));
-    }
-    use vo_module::github_registry::GitHubRegistry;
-
-    let options = ProjectContextOptions::from_environment();
-    let registry = GitHubRegistry::new();
-    let mod_cache = default_mod_cache_root()?;
-    auto_install_dependencies(path, &mod_cache, &registry, &options)?;
-    compile_real_path_with_generated_sources(path, &options, generated_sources)
+    crate::Engine::default()
+        .compile_path_with_generated_sources_and_auto_install(path, generated_sources)
 }
 
 /// Check one package using unsaved editor buffers without mutating project
@@ -1086,21 +1008,7 @@ pub fn compile_path_with_source_overlays_and_auto_install(
     path: &Path,
     overlays: Vec<SourceOverlay>,
 ) -> Result<CompileOutput, CompileError> {
-    if overlays.is_empty() {
-        return compile_path_with_auto_install(path);
-    }
-    if path.extension() == Some(std::ffi::OsStr::new("zip")) {
-        return Err(CompileError::Codegen(
-            "source overlays are unavailable for archive inputs".to_string(),
-        ));
-    }
-    use vo_module::github_registry::GitHubRegistry;
-
-    let options = ProjectContextOptions::from_environment();
-    let registry = GitHubRegistry::new();
-    let mod_cache = default_mod_cache_root()?;
-    auto_install_dependencies(path, &mod_cache, &registry, &options)?;
-    compile_real_path_with_source_overlays(path, &options, overlays)
+    crate::Engine::default().compile_path_with_source_overlays_and_auto_install(path, overlays)
 }
 
 fn check_real_path_with_source_overlays(
@@ -1143,281 +1051,22 @@ fn check_real_path_with_source_overlays(
     )
 }
 
-fn compile_real_path_with_source_overlays(
-    path: &Path,
-    options: &ProjectContextOptions,
-    overlays: Vec<SourceOverlay>,
-) -> Result<CompileOutput, CompileError> {
-    let mut context = load_real_path_compile_context_with_options(path, options)?;
-    context.mod_cache = context
-        .mod_cache
-        .canonicalize()
-        .unwrap_or_else(|_| context.mod_cache.clone());
-    canonicalize_workspace_sources(&mut context.workspace_sources);
-    let cache_lease = context.acquire_module_cache_read_lease()?;
-    let mod_cache = context.mod_cache.clone();
-    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
-    let mut captured =
-        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
-    let live_fingerprint = captured.fingerprint().to_string();
-    for overlay in overlays {
-        captured.apply_source_overlay(
-            context.project_root.join(overlay.relative_path),
-            overlay.bytes,
-        )?;
-    }
-    let post_compile_context = context.clone();
-    let mut output = pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib_snapshot.unwrap_or_default(),
-        captured.into_snapshot(),
-    )?;
-    native::check_materialized_dependency_readiness(
-        post_compile_context.project_plan.locked_modules(),
-        &post_compile_context.mod_cache,
-    )
-    .map_err(CompileError::ModuleSystem)?;
-    validate_live_compile_input_generation(
-        &post_compile_context,
-        &stdlib_source_fingerprint,
-        &live_fingerprint,
-    )?;
-    retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
-    Ok(output)
-}
-
-fn compile_real_path_with_generated_sources(
-    path: &Path,
-    options: &ProjectContextOptions,
-    generated_sources: Vec<GeneratedSource>,
-) -> Result<CompileOutput, CompileError> {
-    let mut context = load_real_path_compile_context_with_options(path, options)?;
-    context.mod_cache = context
-        .mod_cache
-        .canonicalize()
-        .unwrap_or_else(|_| context.mod_cache.clone());
-    canonicalize_workspace_sources(&mut context.workspace_sources);
-    let cache_lease = context.acquire_module_cache_read_lease()?;
-    let mod_cache = context.mod_cache.clone();
-    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
-    let mut captured =
-        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
-    let live_fingerprint = captured.fingerprint().to_string();
-    let mut generated_inputs = std::collections::BTreeSet::new();
-    for generated in generated_sources {
-        let generated_path = context.project_root.join(generated.relative_path);
-        captured.insert_generated(generated_path.clone(), generated.bytes)?;
-        generated_inputs.insert(generated_path);
-    }
-    let post_compile_context = context.clone();
-    let mut output = pipeline::compile_with_project_snapshot_and_generated_inputs(
-        context.into_pipeline_context(),
-        stdlib_snapshot.unwrap_or_default(),
-        captured.into_snapshot(),
-        &generated_inputs,
-    )?;
-    native::check_materialized_dependency_readiness(
-        post_compile_context.project_plan.locked_modules(),
-        &post_compile_context.mod_cache,
-    )
-    .map_err(CompileError::ModuleSystem)?;
-    validate_live_compile_input_generation(
-        &post_compile_context,
-        &stdlib_source_fingerprint,
-        &live_fingerprint,
-    )?;
-    retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
-    Ok(output)
-}
-
 pub fn compile_with_options(
     path: &str,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
-    let p = Path::new(path);
-
-    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
-        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref());
-    }
-    if is_bytecode_artifact(p) {
-        return pipeline::load_bytecode(p);
-    }
-
-    compile_real_path_without_cache(p, options)
-}
-
-fn compile_real_path_without_cache(
-    path: &Path,
-    options: &ProjectContextOptions,
-) -> Result<CompileOutput, CompileError> {
-    let mut context = load_real_path_compile_context_with_options(path, options)?;
-    context.mod_cache = context
-        .mod_cache
-        .canonicalize()
-        .unwrap_or_else(|_| context.mod_cache.clone());
-    canonicalize_workspace_sources(&mut context.workspace_sources);
-    let cache_lease = context.acquire_module_cache_read_lease()?;
-    let mod_cache = context.mod_cache.clone();
-    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
-    let captured =
-        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
-    let fingerprint = captured.fingerprint().to_string();
-    let post_compile_context = context.clone();
-    let mut output = pipeline::compile_with_project_snapshot(
-        context.into_pipeline_context(),
-        stdlib_snapshot.unwrap_or_default(),
-        captured.into_snapshot(),
-    )?;
-
-    native::check_materialized_dependency_readiness(
-        post_compile_context.project_plan.locked_modules(),
-        &post_compile_context.mod_cache,
-    )
-    .map_err(CompileError::ModuleSystem)?;
-    validate_live_compile_input_generation(
-        &post_compile_context,
-        &stdlib_source_fingerprint,
-        &fingerprint,
-    )?;
-    retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
-    Ok(output)
+    crate::Engine::default().compile_with_options(path, options)
 }
 
 pub fn compile_with_cache(path: &str) -> Result<CompileOutput, CompileError> {
-    compile_with_cache_with_options(path, &ProjectContextOptions::from_environment())
+    crate::Engine::default().compile_with_cache(path)
 }
 
 pub fn compile_with_cache_with_options(
     path: &str,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
-    compile_with_cache_prepared_with_options(path, options)?.into_validated_output()
-}
-
-fn compile_with_cache_prepared_with_options(
-    path: &str,
-    options: &ProjectContextOptions,
-) -> Result<PreparedCompileOutput, CompileError> {
-    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
-        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref())
-            .map(PreparedCompileOutput::unguarded);
-    }
-    compile_path_with_cache_prepared_with_options(Path::new(path), options)
-}
-
-fn compile_path_with_cache_prepared_with_options(
-    entry_path: &Path,
-    options: &ProjectContextOptions,
-) -> Result<PreparedCompileOutput, CompileError> {
-    if is_bytecode_artifact(entry_path) {
-        return pipeline::load_bytecode(entry_path).map(PreparedCompileOutput::unguarded);
-    }
-    if entry_path.extension() == Some(std::ffi::OsStr::new("zip")) {
-        return pipeline::compile_zip(entry_path, None).map(PreparedCompileOutput::unguarded);
-    }
-    let mut context = load_real_path_compile_context_with_options(entry_path, options)?;
-    context.mod_cache = context
-        .mod_cache
-        .canonicalize()
-        .unwrap_or_else(|_| context.mod_cache.clone());
-    for workspace_source_root in context.workspace_sources.values_mut() {
-        *workspace_source_root = workspace_source_root
-            .canonicalize()
-            .unwrap_or_else(|_| workspace_source_root.clone());
-    }
-    let cache_lease = context.acquire_module_cache_read_lease()?;
-    let cache_slot = cache::compile_cache_slot(
-        &context.source_root,
-        context.single_file.as_deref().and_then(Path::file_name),
-    );
-    let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
-    let captured_inputs =
-        cache::capture_compile_inputs(context.compile_input_capture(&stdlib_source_fingerprint))?;
-    let prepared_snapshot = pipeline::prepare_project_snapshot(
-        context.project_snapshot_inputs(),
-        captured_inputs.snapshot(),
-    )?;
-    let captured_context_fs = prepared_snapshot.context_fs();
-    let fingerprint = captured_inputs.fingerprint().to_string();
-
-    if let Some(mut output) = cache::try_load_cache_with_options(
-        &cache_slot,
-        &context.source_root,
-        &fingerprint,
-        &context.workspace.options,
-    ) {
-        if native::cached_native_extension_specs_match_frozen_inputs(
-            &mut output.extensions,
-            &captured_context_fs,
-            prepared_snapshot.ready_modules(),
-            &context.mod_cache,
-            &context.workspace.options.workspace,
-        ) {
-            // The cache may persist a structurally older or independently damaged
-            // copy of lock metadata. The current project context has already
-            // parsed and validated the authoritative root lock and participates in
-            // the cache fingerprint, so expose that exact value to callers.
-            output.locked_modules = context.project_plan.locked_modules().to_vec();
-            retain_module_cache_lease(
-                &mut output,
-                &context.mod_cache,
-                cache_lease.as_ref().map(Arc::clone),
-            );
-            context.module_cache_read_lease = cache_lease;
-            emit_compile_log(
-                CompileLogRecord::new("vo-engine", "compile_cache_hit")
-                    .path(compile_log_path(entry_path)),
-            );
-            return Ok(PreparedCompileOutput::guarded(
-                output,
-                context,
-                stdlib_source_fingerprint,
-                fingerprint,
-            ));
-        }
-        cache::discard_compile_cache_entry(&cache_slot, &fingerprint);
-    }
-
-    let stdlib = stdlib_snapshot.unwrap_or_default();
-    let pipeline_context = context.prepared_pipeline_context();
-    let mut output = pipeline::compile_with_prepared_project_snapshot(
-        pipeline_context,
-        stdlib,
-        prepared_snapshot,
-    )?;
-
-    // Dependency artifacts are returned as immutable cache paths. Validate
-    // the live paths once more before exposing them to the VM so a concurrent
-    // module-cache mutation cannot bypass the captured readiness check.
-    native::check_materialized_dependency_readiness(
-        context.project_plan.locked_modules(),
-        &context.mod_cache,
-    )
-    .map_err(CompileError::ModuleSystem)?;
-
-    // Local native extensions prepare immutable load copies from their own
-    // stable, pre/post-validated Cargo input generation. The project snapshot
-    // below independently protects every source and metadata byte consumed by
-    // analysis; cache-hit extension validation rechecks only the extensions
-    // retained in the compiled output.
-    retain_module_cache_lease(
-        &mut output,
-        &context.mod_cache,
-        cache_lease.as_ref().map(Arc::clone),
-    );
-    cache::save_compile_cache(&cache_slot, &fingerprint, &output);
-    context.module_cache_read_lease = cache_lease;
-    emit_compile_log(
-        CompileLogRecord::new("vo-engine", "compile_cache_store")
-            .path(compile_log_path(entry_path)),
-    );
-
-    Ok(PreparedCompileOutput::guarded(
-        output,
-        context,
-        stdlib_source_fingerprint,
-        fingerprint,
-    ))
+    crate::Engine::default().compile_with_cache_with_options(path, options)
 }
 
 fn validate_live_compile_input_generation(
@@ -1483,40 +1132,33 @@ fn compile_log_path(path: &Path) -> String {
 }
 
 pub fn compile_from_memory(fs: MemoryFs, root: &Path) -> Result<CompileOutput, CompileError> {
-    pipeline::compile_prepared_project(fs, root, None)
+    crate::Engine::default().compile_from_memory(fs, root)
 }
 
 pub fn compile_source_at(source: &str, root: &Path) -> Result<CompileOutput, CompileError> {
-    let mut mem = MemoryFs::new();
-    mem.add_file("main.vo", source);
-    pipeline::compile_prepared_project(mem, root, Some(std::ffi::OsStr::new("main.vo")))
+    crate::Engine::default().compile_source_at(source, root)
 }
 
 pub fn compile_string(code: &str) -> Result<CompileOutput, CompileError> {
-    let temp_dir = std::env::temp_dir().join("vo_compile");
-    fs::create_dir_all(&temp_dir)?;
-    compile_source_at(code, &temp_dir)
+    crate::Engine::default().compile_string(code)
 }
 
 pub fn compile_with_auto_install(path: &str) -> Result<CompileOutput, CompileError> {
-    compile_with_auto_install_with_options(path, &ProjectContextOptions::from_environment())
+    crate::Engine::default().compile_with_auto_install(path)
 }
 
 pub fn compile_with_auto_install_with_options(
     path: &str,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
-    compile_with_auto_install_prepared_with_options(path, options)?.into_validated_output()
+    crate::Engine::default().compile_with_auto_install_with_options(path, options)
 }
 
 pub fn compile_with_auto_install_prepared_with_options(
     path: &str,
     options: &ProjectContextOptions,
 ) -> Result<PreparedCompileOutput, CompileError> {
-    use vo_module::github_registry::GitHubRegistry;
-
-    let registry = GitHubRegistry::new();
-    compile_with_auto_install_prepared_using_registry(path, &registry, options)
+    crate::Engine::default().compile_with_auto_install_prepared_with_options(path, options)
 }
 
 pub fn check_with_auto_install(path: &str) -> Result<(), CompileError> {
@@ -1550,26 +1192,7 @@ fn compile_with_auto_install_using_registry(
     registry: &dyn Registry,
     options: &ProjectContextOptions,
 ) -> Result<CompileOutput, CompileError> {
-    compile_with_auto_install_prepared_using_registry(path, registry, options)?
-        .into_validated_output()
-}
-
-fn compile_with_auto_install_prepared_using_registry(
-    path: &str,
-    registry: &dyn Registry,
-    options: &ProjectContextOptions,
-) -> Result<PreparedCompileOutput, CompileError> {
-    if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
-        return pipeline::compile_zip(Path::new(&zip_path), internal_root.as_deref())
-            .map(PreparedCompileOutput::unguarded);
-    }
-    let p = Path::new(path);
-    if is_bytecode_artifact(p) {
-        return pipeline::load_bytecode(p).map(PreparedCompileOutput::unguarded);
-    }
-    let mod_cache = default_mod_cache_root()?;
-    auto_install_dependencies(p, &mod_cache, registry, options)?;
-    compile_with_cache_prepared_with_options(path, options)
+    crate::Engine::default().compile_with_auto_install_using_registry(path, registry, options)
 }
 
 fn check_path_with_auto_install_using_registry(
@@ -1857,6 +1480,501 @@ fn retain_native_extension_cache_lease(
         if native_path.starts_with(&cache_root) {
             extension.retain_lifetime_resource(Arc::clone(&cache_lease));
         }
+    }
+}
+
+impl crate::Engine {
+    /// Apply target-dependent invariants to a commonly verified semantic module.
+    /// Bytecode generation stays portable; every executable backend calls this
+    /// boundary before lowering, linking, or execution.
+    pub fn verify_compile_output_for_target(
+        &self,
+        output: &CompileOutput,
+        target: &vo_target::TargetSpec,
+    ) -> Result<(), CompileError> {
+        let module = output.module.module();
+        vo_target::verify_module_for_target(module, target)
+            .map_err(|error| CompileError::Target(error.to_string()))?;
+        self.verify_extension_target(output, target)?;
+        Ok(())
+    }
+
+    pub fn compile(&self, path: &str) -> Result<CompileOutput, CompileError> {
+        self.compile_with_options(path, &ProjectContextOptions::from_environment())
+    }
+
+    pub fn compile_path(&self, path: &Path) -> Result<CompileOutput, CompileError> {
+        self.compile_path_with_options(path, &ProjectContextOptions::from_environment())
+    }
+
+    fn compile_path_with_options(
+        &self,
+        path: &Path,
+        options: &ProjectContextOptions,
+    ) -> Result<CompileOutput, CompileError> {
+        if let Some(text) = path.to_str() {
+            return self.compile_with_options(text, options);
+        }
+        if is_bytecode_artifact(path) {
+            return pipeline::load_bytecode(path);
+        }
+        if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+            return pipeline::compile_zip(self, path, None);
+        }
+
+        self.compile_real_path_without_cache(path, options)
+    }
+
+    pub fn compile_path_with_auto_install(
+        &self,
+        path: &Path,
+    ) -> Result<CompileOutput, CompileError> {
+        if let Some(text) = path.to_str() {
+            return self.compile_with_auto_install(text);
+        }
+        if is_bytecode_artifact(path) {
+            return pipeline::load_bytecode(path);
+        }
+        if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+            return pipeline::compile_zip(self, path, None);
+        }
+
+        use vo_module::github_registry::GitHubRegistry;
+
+        let options = ProjectContextOptions::from_environment();
+        let registry = GitHubRegistry::new();
+        let mod_cache = default_mod_cache_root()?;
+        auto_install_dependencies(path, &mod_cache, &registry, &options)?;
+        self.compile_path_with_cache_prepared_with_options(path, &options)?
+            .into_validated_output()
+    }
+
+    /// Compile a real project after injecting governed generator outputs into the
+    /// immutable build snapshot. The generated files never need to exist in the
+    /// project worktree.
+    pub fn compile_path_with_generated_sources_and_auto_install(
+        &self,
+        path: &Path,
+        generated_sources: Vec<GeneratedSource>,
+    ) -> Result<CompileOutput, CompileError> {
+        if is_bytecode_artifact(path) {
+            return pipeline::load_bytecode(path);
+        }
+        if generated_sources.is_empty() {
+            return self.compile_path_with_auto_install(path);
+        }
+        if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+            return Err(CompileError::Codegen(
+                "generated source injection is unavailable for archive inputs".to_string(),
+            ));
+        }
+        use vo_module::github_registry::GitHubRegistry;
+
+        let options = ProjectContextOptions::from_environment();
+        let registry = GitHubRegistry::new();
+        let mod_cache = default_mod_cache_root()?;
+        auto_install_dependencies(path, &mod_cache, &registry, &options)?;
+        self.compile_real_path_with_generated_sources(path, &options, generated_sources)
+    }
+
+    /// Compile a project using unsaved editor buffers without treating those
+    /// buffers as governed generated sources.
+    pub fn compile_path_with_source_overlays_and_auto_install(
+        &self,
+        path: &Path,
+        overlays: Vec<SourceOverlay>,
+    ) -> Result<CompileOutput, CompileError> {
+        if overlays.is_empty() {
+            return self.compile_path_with_auto_install(path);
+        }
+        if path.extension() == Some(std::ffi::OsStr::new("zip")) {
+            return Err(CompileError::Codegen(
+                "source overlays are unavailable for archive inputs".to_string(),
+            ));
+        }
+        use vo_module::github_registry::GitHubRegistry;
+
+        let options = ProjectContextOptions::from_environment();
+        let registry = GitHubRegistry::new();
+        let mod_cache = default_mod_cache_root()?;
+        auto_install_dependencies(path, &mod_cache, &registry, &options)?;
+        self.compile_real_path_with_source_overlays(path, &options, overlays)
+    }
+
+    fn compile_real_path_with_source_overlays(
+        &self,
+        path: &Path,
+        options: &ProjectContextOptions,
+        overlays: Vec<SourceOverlay>,
+    ) -> Result<CompileOutput, CompileError> {
+        let mut context = load_real_path_compile_context_with_options(path, options)?;
+        context.mod_cache = context
+            .mod_cache
+            .canonicalize()
+            .unwrap_or_else(|_| context.mod_cache.clone());
+        canonicalize_workspace_sources(&mut context.workspace_sources);
+        let cache_lease = context.acquire_module_cache_read_lease()?;
+        let mod_cache = context.mod_cache.clone();
+        let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+        let mut captured = cache::capture_compile_inputs(
+            context.compile_input_capture(&stdlib_source_fingerprint),
+        )?;
+        let live_fingerprint = captured.fingerprint().to_string();
+        for overlay in overlays {
+            captured.apply_source_overlay(
+                context.project_root.join(overlay.relative_path),
+                overlay.bytes,
+            )?;
+        }
+        let post_compile_context = context.clone();
+        let mut output = pipeline::compile_with_project_snapshot(
+            self,
+            context.into_pipeline_context(),
+            stdlib_snapshot.unwrap_or_default(),
+            captured.into_snapshot(),
+        )?;
+        native::check_materialized_dependency_readiness(
+            post_compile_context.project_plan.locked_modules(),
+            &post_compile_context.mod_cache,
+        )
+        .map_err(CompileError::ModuleSystem)?;
+        validate_live_compile_input_generation(
+            &post_compile_context,
+            &stdlib_source_fingerprint,
+            &live_fingerprint,
+        )?;
+        retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
+        Ok(output)
+    }
+
+    fn compile_real_path_with_generated_sources(
+        &self,
+        path: &Path,
+        options: &ProjectContextOptions,
+        generated_sources: Vec<GeneratedSource>,
+    ) -> Result<CompileOutput, CompileError> {
+        let mut context = load_real_path_compile_context_with_options(path, options)?;
+        context.mod_cache = context
+            .mod_cache
+            .canonicalize()
+            .unwrap_or_else(|_| context.mod_cache.clone());
+        canonicalize_workspace_sources(&mut context.workspace_sources);
+        let cache_lease = context.acquire_module_cache_read_lease()?;
+        let mod_cache = context.mod_cache.clone();
+        let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+        let mut captured = cache::capture_compile_inputs(
+            context.compile_input_capture(&stdlib_source_fingerprint),
+        )?;
+        let live_fingerprint = captured.fingerprint().to_string();
+        let mut generated_inputs = std::collections::BTreeSet::new();
+        for generated in generated_sources {
+            let generated_path = context.project_root.join(generated.relative_path);
+            captured.insert_generated(generated_path.clone(), generated.bytes)?;
+            generated_inputs.insert(generated_path);
+        }
+        let post_compile_context = context.clone();
+        let mut output = pipeline::compile_with_project_snapshot_and_generated_inputs(
+            self,
+            context.into_pipeline_context(),
+            stdlib_snapshot.unwrap_or_default(),
+            captured.into_snapshot(),
+            &generated_inputs,
+        )?;
+        native::check_materialized_dependency_readiness(
+            post_compile_context.project_plan.locked_modules(),
+            &post_compile_context.mod_cache,
+        )
+        .map_err(CompileError::ModuleSystem)?;
+        validate_live_compile_input_generation(
+            &post_compile_context,
+            &stdlib_source_fingerprint,
+            &live_fingerprint,
+        )?;
+        retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
+        Ok(output)
+    }
+
+    pub fn compile_with_options(
+        &self,
+        path: &str,
+        options: &ProjectContextOptions,
+    ) -> Result<CompileOutput, CompileError> {
+        let p = Path::new(path);
+
+        if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+            return pipeline::compile_zip(self, Path::new(&zip_path), internal_root.as_deref());
+        }
+        if is_bytecode_artifact(p) {
+            return pipeline::load_bytecode(p);
+        }
+
+        self.compile_real_path_without_cache(p, options)
+    }
+
+    fn compile_real_path_without_cache(
+        &self,
+        path: &Path,
+        options: &ProjectContextOptions,
+    ) -> Result<CompileOutput, CompileError> {
+        let mut context = load_real_path_compile_context_with_options(path, options)?;
+        context.mod_cache = context
+            .mod_cache
+            .canonicalize()
+            .unwrap_or_else(|_| context.mod_cache.clone());
+        canonicalize_workspace_sources(&mut context.workspace_sources);
+        let cache_lease = context.acquire_module_cache_read_lease()?;
+        let mod_cache = context.mod_cache.clone();
+        let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+        let captured = cache::capture_compile_inputs(
+            context.compile_input_capture(&stdlib_source_fingerprint),
+        )?;
+        let fingerprint = captured.fingerprint().to_string();
+        let post_compile_context = context.clone();
+        let mut output = pipeline::compile_with_project_snapshot(
+            self,
+            context.into_pipeline_context(),
+            stdlib_snapshot.unwrap_or_default(),
+            captured.into_snapshot(),
+        )?;
+
+        native::check_materialized_dependency_readiness(
+            post_compile_context.project_plan.locked_modules(),
+            &post_compile_context.mod_cache,
+        )
+        .map_err(CompileError::ModuleSystem)?;
+        validate_live_compile_input_generation(
+            &post_compile_context,
+            &stdlib_source_fingerprint,
+            &fingerprint,
+        )?;
+        retain_module_cache_lease(&mut output, &mod_cache, cache_lease);
+        Ok(output)
+    }
+
+    pub fn compile_with_cache(&self, path: &str) -> Result<CompileOutput, CompileError> {
+        self.compile_with_cache_with_options(path, &ProjectContextOptions::from_environment())
+    }
+
+    pub fn compile_with_cache_with_options(
+        &self,
+        path: &str,
+        options: &ProjectContextOptions,
+    ) -> Result<CompileOutput, CompileError> {
+        self.compile_with_cache_prepared_with_options(path, options)?
+            .into_validated_output()
+    }
+
+    fn compile_with_cache_prepared_with_options(
+        &self,
+        path: &str,
+        options: &ProjectContextOptions,
+    ) -> Result<PreparedCompileOutput, CompileError> {
+        if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+            return pipeline::compile_zip(self, Path::new(&zip_path), internal_root.as_deref())
+                .map(PreparedCompileOutput::unguarded);
+        }
+        self.compile_path_with_cache_prepared_with_options(Path::new(path), options)
+    }
+
+    fn compile_path_with_cache_prepared_with_options(
+        &self,
+        entry_path: &Path,
+        options: &ProjectContextOptions,
+    ) -> Result<PreparedCompileOutput, CompileError> {
+        if is_bytecode_artifact(entry_path) {
+            return pipeline::load_bytecode(entry_path).map(PreparedCompileOutput::unguarded);
+        }
+        if entry_path.extension() == Some(std::ffi::OsStr::new("zip")) {
+            return pipeline::compile_zip(self, entry_path, None)
+                .map(PreparedCompileOutput::unguarded);
+        }
+        let mut context = load_real_path_compile_context_with_options(entry_path, options)?;
+        context.mod_cache = context
+            .mod_cache
+            .canonicalize()
+            .unwrap_or_else(|_| context.mod_cache.clone());
+        for workspace_source_root in context.workspace_sources.values_mut() {
+            *workspace_source_root = workspace_source_root
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_source_root.clone());
+        }
+        let cache_lease = context.acquire_module_cache_read_lease()?;
+        let cache_slot = cache::compile_cache_slot(
+            &context.source_root,
+            context.single_file.as_deref().and_then(Path::file_name),
+        );
+        let (stdlib_snapshot, stdlib_source_fingerprint) = stdlib_compile_cache_input();
+        let captured_inputs = cache::capture_compile_inputs(
+            context.compile_input_capture(&stdlib_source_fingerprint),
+        )?;
+        let prepared_snapshot = pipeline::prepare_project_snapshot(
+            context.project_snapshot_inputs(),
+            captured_inputs.snapshot(),
+        )?;
+        let captured_context_fs = prepared_snapshot.context_fs();
+        let fingerprint = captured_inputs.fingerprint().to_string();
+        let cache_fingerprint = self.cache_fingerprint(&fingerprint);
+
+        if let Some(mut output) = cache::try_load_cache_with_options(
+            &cache_slot,
+            &context.source_root,
+            &cache_fingerprint,
+            &context.workspace.options,
+        ) {
+            if native::cached_native_extension_specs_match_frozen_inputs(
+                &mut output.extensions,
+                &captured_context_fs,
+                prepared_snapshot.ready_modules(),
+                &context.mod_cache,
+                &context.workspace.options.workspace,
+            ) {
+                // The cache may persist a structurally older or independently damaged
+                // copy of lock metadata. The current project context has already
+                // parsed and validated the authoritative root lock and participates in
+                // the cache fingerprint, so expose that exact value to callers.
+                output.locked_modules = context.project_plan.locked_modules().to_vec();
+                retain_module_cache_lease(
+                    &mut output,
+                    &context.mod_cache,
+                    cache_lease.as_ref().map(Arc::clone),
+                );
+                context.module_cache_read_lease = cache_lease;
+                emit_compile_log(
+                    CompileLogRecord::new("vo-engine", "compile_cache_hit")
+                        .path(compile_log_path(entry_path)),
+                );
+                return Ok(PreparedCompileOutput::guarded(
+                    output,
+                    context,
+                    stdlib_source_fingerprint,
+                    fingerprint,
+                ));
+            }
+            cache::discard_compile_cache_entry(&cache_slot, &cache_fingerprint);
+        }
+
+        let stdlib = stdlib_snapshot.unwrap_or_default();
+        let pipeline_context = context.prepared_pipeline_context();
+        let mut output = pipeline::compile_with_prepared_project_snapshot(
+            self,
+            pipeline_context,
+            stdlib,
+            prepared_snapshot,
+        )?;
+
+        // Dependency artifacts are returned as immutable cache paths. Validate
+        // the live paths once more before exposing them to the VM so a concurrent
+        // module-cache mutation cannot bypass the captured readiness check.
+        native::check_materialized_dependency_readiness(
+            context.project_plan.locked_modules(),
+            &context.mod_cache,
+        )
+        .map_err(CompileError::ModuleSystem)?;
+
+        // Local native extensions prepare immutable load copies from their own
+        // stable, pre/post-validated Cargo input generation. The project snapshot
+        // below independently protects every source and metadata byte consumed by
+        // analysis; cache-hit extension validation rechecks only the extensions
+        // retained in the compiled output.
+        retain_module_cache_lease(
+            &mut output,
+            &context.mod_cache,
+            cache_lease.as_ref().map(Arc::clone),
+        );
+        cache::save_compile_cache(&cache_slot, &cache_fingerprint, &output);
+        context.module_cache_read_lease = cache_lease;
+        emit_compile_log(
+            CompileLogRecord::new("vo-engine", "compile_cache_store")
+                .path(compile_log_path(entry_path)),
+        );
+
+        Ok(PreparedCompileOutput::guarded(
+            output,
+            context,
+            stdlib_source_fingerprint,
+            fingerprint,
+        ))
+    }
+
+    pub fn compile_from_memory(
+        &self,
+        fs: MemoryFs,
+        root: &Path,
+    ) -> Result<CompileOutput, CompileError> {
+        pipeline::compile_prepared_project(self, fs, root, None)
+    }
+
+    pub fn compile_source_at(
+        &self,
+        source: &str,
+        root: &Path,
+    ) -> Result<CompileOutput, CompileError> {
+        let mut mem = MemoryFs::new();
+        mem.add_file("main.vo", source);
+        pipeline::compile_prepared_project(self, mem, root, Some(std::ffi::OsStr::new("main.vo")))
+    }
+
+    pub fn compile_string(&self, code: &str) -> Result<CompileOutput, CompileError> {
+        let temp_dir = std::env::temp_dir().join("vo_compile");
+        fs::create_dir_all(&temp_dir)?;
+        self.compile_source_at(code, &temp_dir)
+    }
+
+    pub fn compile_with_auto_install(&self, path: &str) -> Result<CompileOutput, CompileError> {
+        self.compile_with_auto_install_with_options(
+            path,
+            &ProjectContextOptions::from_environment(),
+        )
+    }
+
+    pub fn compile_with_auto_install_with_options(
+        &self,
+        path: &str,
+        options: &ProjectContextOptions,
+    ) -> Result<CompileOutput, CompileError> {
+        self.compile_with_auto_install_prepared_with_options(path, options)?
+            .into_validated_output()
+    }
+
+    pub fn compile_with_auto_install_prepared_with_options(
+        &self,
+        path: &str,
+        options: &ProjectContextOptions,
+    ) -> Result<PreparedCompileOutput, CompileError> {
+        use vo_module::github_registry::GitHubRegistry;
+
+        let registry = GitHubRegistry::new();
+        self.compile_with_auto_install_prepared_using_registry(path, &registry, options)
+    }
+
+    #[cfg(test)]
+    fn compile_with_auto_install_using_registry(
+        &self,
+        path: &str,
+        registry: &dyn Registry,
+        options: &ProjectContextOptions,
+    ) -> Result<CompileOutput, CompileError> {
+        self.compile_with_auto_install_prepared_using_registry(path, registry, options)?
+            .into_validated_output()
+    }
+
+    fn compile_with_auto_install_prepared_using_registry(
+        &self,
+        path: &str,
+        registry: &dyn Registry,
+        options: &ProjectContextOptions,
+    ) -> Result<PreparedCompileOutput, CompileError> {
+        if let Some((zip_path, internal_root)) = pipeline::parse_zip_path(path) {
+            return pipeline::compile_zip(self, Path::new(&zip_path), internal_root.as_deref())
+                .map(PreparedCompileOutput::unguarded);
+        }
+        let p = Path::new(path);
+        if is_bytecode_artifact(p) {
+            return pipeline::load_bytecode(p).map(PreparedCompileOutput::unguarded);
+        }
+        let mod_cache = default_mod_cache_root()?;
+        auto_install_dependencies(p, &mod_cache, registry, options)?;
+        self.compile_with_cache_prepared_with_options(path, options)
     }
 }
 

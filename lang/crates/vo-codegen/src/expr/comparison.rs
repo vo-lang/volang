@@ -1,8 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 //! Composite type comparison (struct/array equality).
 
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr};
 
 use crate::context::CodegenContext;
@@ -54,7 +54,7 @@ pub fn compile_slot_comparison(
     left_reg: u16,
     right_reg: u16,
     slot_types: &[SlotType],
-    slot_vks: &[vo_runtime::ValueKind],
+    slot_vks: &[vo_common_core::ValueKind],
     dst: u16,
     func: &mut FuncBuilder,
 ) -> Result<(), CodegenError> {
@@ -75,7 +75,7 @@ pub fn compile_slot_comparison(
 
     let tmp_cmp = func.alloc_slots(&[SlotType::Value]);
     let float32_operands = slot_vks
-        .contains(&vo_runtime::ValueKind::Float32)
+        .contains(&vo_common_core::ValueKind::Float32)
         .then(|| func.alloc_slots(&[SlotType::Float, SlotType::Float]));
     let mut mismatch_jumps = Vec::new();
 
@@ -95,8 +95,8 @@ pub fn compile_slot_comparison(
                 let vk = slot_vks
                     .get(i as usize)
                     .copied()
-                    .unwrap_or(vo_runtime::ValueKind::Void);
-                let cmp_op = if vk == vo_runtime::ValueKind::String {
+                    .unwrap_or(vo_common_core::ValueKind::Void);
+                let cmp_op = if vk == vo_common_core::ValueKind::String {
                     Opcode::StrEq
                 } else {
                     Opcode::EqI
@@ -116,7 +116,7 @@ pub fn compile_slot_comparison(
                 i += 1;
             }
             SlotType::Float => {
-                if slot_vks.get(i as usize) == Some(&vo_runtime::ValueKind::Float32) {
+                if slot_vks.get(i as usize) == Some(&vo_common_core::ValueKind::Float32) {
                     let operands = float32_operands.expect("float32 operands must be allocated");
                     func.emit_op(Opcode::ConvF32F64, operands, left_reg + i, 0);
                     func.emit_op(Opcode::ConvF32F64, operands + 1, right_reg + i, 0);
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn composite_comparison_rejects_layout_beyond_u16_domain() {
         let slots = vec![SlotType::Value; u16::MAX as usize + 1];
-        let kinds = vec![vo_runtime::ValueKind::Int64; slots.len()];
+        let kinds = vec![vo_common_core::ValueKind::Int64; slots.len()];
         let mut func = FuncBuilder::new("wide_comparison");
         let error =
             compile_slot_comparison(&BinaryOp::Eq, 0, 0, &slots, &kinds, 0, &mut func).unwrap_err();

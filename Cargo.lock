@@ -4620,6 +4620,7 @@ dependencies = [
  "vo-ui-accessibility",
  "vo-ui-artifact",
  "vo-ui-core",
+ "vo-ui-integration",
  "vo-ui-layout",
  "vo-ui-paint",
  "vo-ui-plan",
@@ -4649,7 +4650,7 @@ name = "vo-aot-runtime"
 version = "0.1.4"
 dependencies = [
  "vo-aot-runtime-core",
- "vo-engine",
+ "vo-ui-integration",
  "vo-vm",
 ]
 
@@ -4709,8 +4710,8 @@ dependencies = [
  "vo-analysis",
  "vo-common",
  "vo-common-core",
+ "vo-ffi-macro",
  "vo-runtime",
- "vo-stdlib",
  "vo-syntax",
  "vo-vm",
 ]
@@ -4777,9 +4778,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "toml",
  "vo-analysis",
- "vo-app-host-native",
- "vo-app-protocol",
  "vo-codegen",
  "vo-common",
  "vo-common-core",
@@ -4789,21 +4789,6 @@ dependencies = [
  "vo-stdlib",
  "vo-syntax",
  "vo-target",
- "vo-ui-accessibility",
- "vo-ui-artifact",
- "vo-ui-compiler",
- "vo-ui-core",
- "vo-ui-desktop",
- "vo-ui-golden",
- "vo-ui-host-native",
- "vo-ui-layout",
- "vo-ui-paint",
- "vo-ui-plan",
- "vo-ui-protocol",
- "vo-ui-system",
- "vo-ui-text-native",
- "vo-ui-vm",
- "vo-ui-web",
  "vo-vm",
  "vo-wasm-aot",
  "windows-sys 0.61.2",
@@ -4968,6 +4953,7 @@ dependencies = [
  "vo-module",
  "vo-runtime",
  "vo-ui-core",
+ "vo-ui-integration",
  "vo-ui-protocol",
  "vo-ui-shell-native",
  "vo-ui-system",
@@ -4999,6 +4985,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "vo-engine",
+ "vo-ui-integration",
 ]
 
 [[package]]
@@ -5142,6 +5129,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "vo-ui-integration"
+version = "0.1.4"
+dependencies = [
+ "toml",
+ "vo-analysis",
+ "vo-app-host-native",
+ "vo-app-protocol",
+ "vo-codegen",
+ "vo-common",
+ "vo-common-core",
+ "vo-engine",
+ "vo-module",
+ "vo-runtime",
+ "vo-stdlib",
+ "vo-syntax",
+ "vo-ui-accessibility",
+ "vo-ui-artifact",
+ "vo-ui-compiler",
+ "vo-ui-core",
+ "vo-ui-desktop",
+ "vo-ui-golden",
+ "vo-ui-host-native",
+ "vo-ui-layout",
+ "vo-ui-paint",
+ "vo-ui-plan",
+ "vo-ui-protocol",
+ "vo-ui-system",
+ "vo-ui-vm",
+ "vo-ui-web",
+ "vo-vm",
+ "vo-wasm-aot",
+]
+
+[[package]]
 name = "vo-ui-kit"
 version = "0.1.4"
 dependencies = [
@@ -5241,10 +5262,10 @@ dependencies = [
  "vo-app-host-native",
  "vo-app-protocol",
  "vo-app-runtime",
- "vo-engine",
  "vo-ui-accesskit",
  "vo-ui-core",
  "vo-ui-host-native",
+ "vo-ui-integration",
  "vo-ui-layout",
  "vo-ui-paint",
  "vo-ui-present-wgpu",

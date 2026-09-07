@@ -24,10 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 
 use vo_engine::{
-    compile_native_aot_object, compile_path_with_auto_install,
-    compile_path_with_generated_sources_and_auto_install, compile_wasm_aot_image, format_text,
-    render_run_observation_json, run, run_with_byte_args_and_memory,
-    run_with_byte_args_and_memory_observed, AotArtifactCache, AotCacheArtifactKind, AotCacheKey,
+    format_text, render_run_observation_json, AotArtifactCache, AotCacheArtifactKind, AotCacheKey,
     ArtifactKind, CompileOutput, GcMode, HostSurface, Module, ObjectFormat, OomPolicy, RunError,
     RunMode, TargetFamily, TargetSpec, VmMemoryConfig, WASM32_UNKNOWN_UNKNOWN,
 };
@@ -360,11 +357,12 @@ fn default_emit_output_path(input: &Path, module_name: &str) -> PathBuf {
 
 fn compile_cli_path(path: &Path) -> Result<CompileOutput, String> {
     match generate::generate_for_build(path)? {
-        Some(generated_sources) => {
-            compile_path_with_generated_sources_and_auto_install(path, generated_sources)
-                .map_err(|error| error.to_string())
-        }
-        None => compile_path_with_auto_install(path).map_err(|error| error.to_string()),
+        Some(generated_sources) => vo_ui_integration::engine()
+            .compile_path_with_generated_sources_and_auto_install(path, generated_sources)
+            .map_err(|error| error.to_string()),
+        None => vo_ui_integration::engine()
+            .compile_path_with_auto_install(path)
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -533,9 +531,13 @@ fn cmd_run_os(args: &[OsString]) -> i32 {
     }
 
     let run_result = if jit_stats_json.is_some() {
-        run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config).map(Some)
+        vo_ui_integration::engine()
+            .run_with_byte_args_and_memory_observed(output, mode, program_args, memory_config)
+            .map(Some)
     } else {
-        run_with_byte_args_and_memory(output, mode, program_args, memory_config).map(|()| None)
+        vo_ui_integration::engine()
+            .run_with_byte_args_and_memory(output, mode, program_args, memory_config)
+            .map(|()| None)
     };
     match run_result {
         Ok(Some(observation)) => {
@@ -1110,14 +1112,15 @@ fn cmd_build(args: &[OsString]) -> i32 {
             return 1;
         }
     } else if matches!(kind, BuildKind::Binary | BuildKind::Object) {
-        let cache_key = AotCacheKey::new(
+        let cache_key = vo_ui_integration::engine().aot_cache_key(
             &module_bytes,
             &target,
             AotCacheArtifactKind::NativeObject,
             debug_ir,
         );
         let object_bytes = match build_cached_aot_artifact(aot_cache.as_ref(), &cache_key, || {
-            compile_native_aot_object(&output, &target, debug_ir)
+            vo_ui_integration::engine()
+                .compile_native_aot_object(&output, &target, debug_ir)
                 .map(|object| object.bytes)
                 .map_err(|error| error.to_string())
         }) {
@@ -1146,14 +1149,15 @@ fn cmd_build(args: &[OsString]) -> i32 {
             return 1;
         }
     } else {
-        let cache_key = AotCacheKey::new(
+        let cache_key = vo_ui_integration::engine().aot_cache_key(
             &module_bytes,
             &target,
             cache_artifact_kind(kind).expect("WebAssembly AOT has a cache kind"),
             false,
         );
         let artifact_bytes = match build_cached_aot_artifact(aot_cache.as_ref(), &cache_key, || {
-            compile_wasm_aot_image(&output, &target)
+            vo_ui_integration::engine()
+                .compile_wasm_aot_image(&output, &target)
                 .map(|artifact| artifact.bytes)
                 .map_err(|error| error.to_string())
         }) {
@@ -1266,7 +1270,7 @@ fn cmd_test(args: &[OsString]) -> i32 {
         }
     };
 
-    match run(output, mode, Vec::new()) {
+    match vo_ui_integration::engine().run(output, mode, Vec::new()) {
         Ok(()) => 0,
         Err(RunError::Exited(code)) => code,
         Err(error) => {
@@ -2819,8 +2823,9 @@ mod tests {
         let temporary = unique_temp_dir("bytecode-skip-generation");
         fs::create_dir_all(&temporary).unwrap();
         let root = temporary.canonicalize().unwrap();
-        let expected =
-            vo_engine::compile_source_at("package main\nfunc main() {}\n", &root).unwrap();
+        let expected = vo_ui_integration::engine()
+            .compile_source_at("package main\nfunc main() {}\n", &root)
+            .unwrap();
         let artifact = root.join("program.vob");
         fs::write(&artifact, expected.module.serialize().unwrap()).unwrap();
         fs::write(root.join("vo.generate.toml"), "invalid generator config").unwrap();
@@ -3349,7 +3354,7 @@ mod tests {
         let root = unique_temp_dir("aot-cache");
         let cache = AotArtifactCache::new(root.clone()).unwrap();
         let target = TargetSpec::parse(WASM32_UNKNOWN_UNKNOWN).unwrap();
-        let key = AotCacheKey::new(
+        let key = vo_ui_integration::engine().aot_cache_key(
             b"verified-module",
             &target,
             AotCacheArtifactKind::CoreWasm,

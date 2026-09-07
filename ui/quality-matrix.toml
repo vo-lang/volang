@@ -4,8 +4,8 @@ product = "Volang UI"
 [[suite]]
 id = "portable-contracts"
 targets = ["headless", "web-vm", "desktop-vm", "desktop-jit"]
-commands = ["cargo test --locked -p vo-engine --features jit official_ui_", "cargo test --locked -p vo-ui-vm", "./eng/run-uikit-gallery-contracts.sh", "./eng/run-data-application-contracts.sh", "./eng/run-content-site-contracts.sh", "./eng/run-media-application-contracts.sh", "./eng/run-studio-workbench-contracts.sh"]
-evidence = ["lang/crates/vo-engine/src/run.rs", "ui/tests", "eng/run-uikit-gallery-contracts.sh", "eng/run-data-application-contracts.sh", "eng/run-content-site-contracts.sh", "eng/run-media-application-contracts.sh", "eng/run-studio-workbench-contracts.sh"]
+commands = ["cargo test --locked -p vo-ui-integration official_ui_", "cargo test --locked -p vo-ui-vm", "./eng/run-uikit-gallery-contracts.sh", "./eng/run-data-application-contracts.sh", "./eng/run-content-site-contracts.sh", "./eng/run-media-application-contracts.sh", "./eng/run-studio-workbench-contracts.sh"]
+evidence = ["lang/crates/vo-ui-integration/src/tests.rs", "ui/tests", "eng/run-uikit-gallery-contracts.sh", "eng/run-data-application-contracts.sh", "eng/run-content-site-contracts.sh", "eng/run-media-application-contracts.sh", "eng/run-studio-workbench-contracts.sh"]
 
 [[suite]]
 id = "web-real-browser"
@@ -16,19 +16,19 @@ evidence = [".github/workflows/ci.yml#wasm_web", "lang/crates/vo-web/js/browser_
 [[suite]]
 id = "native-real-platform"
 targets = ["linux", "macos", "windows", "desktop-vm", "desktop-jit", "desktop-native-aot"]
-commands = ["cargo test --locked -p vo-ui-shell-native --features desktop-window", "cargo test --locked -p vo-ui-host-native -p vo-ui-system-native -p vo-ui-accesskit -p vo-ui-present-wgpu", "cargo test --locked -p vo-engine official_ui_native_vm_jit"]
+commands = ["cargo test --locked -p vo-ui-shell-native --features desktop-window", "cargo test --locked -p vo-ui-host-native -p vo-ui-system-native -p vo-ui-accesskit -p vo-ui-present-wgpu", "cargo test --locked -p vo-ui-integration official_ui_native_vm_jit"]
 evidence = [".github/workflows/ci.yml#ui_platform", "apps/studio/host-native/src/main.rs", "ui/showcases/component-gallery/main.vo", "ui/showcases/data-application/main.vo", "ui/showcases/media-application/main.vo", "ui/showcases/studio-workbench/main.vo", "ui/docs/platform-capabilities.md"]
 
 [[suite]]
 id = "advanced-packs"
 targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
-commands = ["cargo test --locked -p vo-engine --features jit official_advanced_packs_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-engine --features jit official_multi_window_editor_preserves_shared_document_and_native_aot", "cargo test --locked -p vo-ui-paint"]
+commands = ["cargo test --locked -p vo-ui-integration official_advanced_packs_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-integration official_multi_window_editor_preserves_shared_document_and_native_aot", "cargo test --locked -p vo-ui-paint"]
 evidence = ["ui/tests/advanced-packs/main.vo", "ui/tests/multi-window-editor/main.vo", "ui/docs/advanced-capability-packs.md"]
 
 [[suite]]
 id = "resilience-security"
 targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-native-aot"]
-commands = ["cargo test --locked -p vo-engine --features jit official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-protocol -p vo-app-protocol -p vo-ui-system", "cargo test --locked -p vo-module"]
+commands = ["cargo test --locked -p vo-ui-integration official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-protocol -p vo-app-protocol -p vo-ui-system", "cargo test --locked -p vo-module"]
 evidence = ["ui/testing/testing.vo", "ui/observability/observability.vo", "lang/crates/vo-engine/src/compile/mod.rs", ".github/workflows/nightly.yml", "fuzz/ui-artifact/fuzz_targets/ui_artifact_decoders.rs", "fuzz/app-protocol/fuzz_targets/decoders.rs"]
 
 [[suite]]

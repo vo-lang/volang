@@ -421,7 +421,7 @@ variants = ["materialized", "virtual-provider", "overflow-scroll"]
 states = ["loading", "selected", "hovered", "disabled", "focused", "pressed", "ascending", "descending", "compact-overflow"]
 keyboard = ["sortable headers and row headers use normal activation"]
 semantics = ["grid, row, columnheader, rowheader, gridcell"]
-evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-engine/src/run.rs"]
+evidence = ["ui/kit/data/data.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-ui-integration/src/tests.rs"]
 
 [[component]]
 id = "tree"

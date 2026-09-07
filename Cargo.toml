@@ -43,6 +43,7 @@ winit = { version = "=0.30.13", default-features = true }
 vo-common-core = { path = "lang/crates/vo-common-core", version = "=0.1.4", default-features = false }
 vo-common = { path = "lang/crates/vo-common", version = "=0.1.4", default-features = false }
 vo-engine = { path = "lang/crates/vo-engine", version = "=0.1.4" }
+vo-ui-integration = { path = "lang/crates/vo-ui-integration", version = "=0.1.4" }
 vo-syntax = { path = "lang/crates/vo-syntax", version = "=0.1.4", default-features = false }
 vo-module = { path = "lang/crates/vo-module", version = "=0.1.4", default-features = false }
 vo-analysis = { path = "lang/crates/vo-analysis", version = "=0.1.4" }

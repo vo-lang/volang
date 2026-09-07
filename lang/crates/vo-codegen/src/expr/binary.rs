@@ -1,7 +1,7 @@
 //! Binary operation compilation.
 
-use vo_runtime::instruction::{Opcode, SHIFT_FLAG_RHS_UNSIGNED};
-use vo_runtime::SlotType;
+use vo_common_core::instruction::{Opcode, SHIFT_FLAG_RHS_UNSIGNED};
+use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind};
 
 use crate::context::CodegenContext;

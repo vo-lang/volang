@@ -147,93 +147,103 @@ impl std::fmt::Display for VoType {
     }
 }
 
-impl VoType {
-    /// Get the number of stack slots this type occupies.
-    pub fn slot_count(&self, type_aliases: &HashMap<String, VoType>) -> Result<u16, String> {
-        self.slot_count_inner(type_aliases, &mut Vec::new())
+// Identity-based keys avoid recursively hashing aggregate syntax trees.
+#[derive(Clone, Copy)]
+struct LayoutType<'a>(&'a VoType);
+
+impl PartialEq for LayoutType<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
     }
+}
+impl Eq for LayoutType<'_> {}
+impl std::hash::Hash for LayoutType<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0, state);
+    }
+}
 
-    fn slot_count_inner(
-        &self,
-        type_aliases: &HashMap<String, VoType>,
-        alias_stack: &mut Vec<String>,
-    ) -> Result<u16, String> {
-        match self {
-            // Primitive types: 1 slot each
-            VoType::Int
-            | VoType::Int8
-            | VoType::Int16
-            | VoType::Int32
-            | VoType::Int64
-            | VoType::Uint
-            | VoType::Uint8
-            | VoType::Uint16
-            | VoType::Uint32
-            | VoType::Uint64
-            | VoType::Float32
-            | VoType::Float64
-            | VoType::Bool
-            | VoType::String => Ok(1),
-
-            // Interfaces use two slots (metadata, data).
-            VoType::Any | VoType::Error => Ok(2),
-
-            // Reference types: 1 slot (GcRef)
-            VoType::Pointer(_)
-            | VoType::Slice(_)
-            | VoType::Map(_, _)
-            | VoType::Chan(_, _)
-            | VoType::Port(_, _)
-            | VoType::Island
-            | VoType::Func(_, _) => Ok(1),
-
-            // Array: elem_slots * length
-            VoType::Array(len, elem) => {
-                let elem_slots = elem.slot_count_inner(type_aliases, alias_stack)?;
-                let len = u16::try_from(*len).map_err(|_| {
-                    format!("array length {len} exceeds the FFI u16 slot address space")
-                })?;
-                elem_slots.checked_mul(len).ok_or_else(|| {
-                    format!(
-                        "array layout requires {} × {} slots, exceeding the FFI u16 slot address space",
-                        elem_slots, len
-                    )
-                })
-            }
-
-            // Named type: resolve alias
-            VoType::Named(name) => {
-                if let Some(underlying) = type_aliases.get(name) {
-                    if let Some(cycle_start) = alias_stack.iter().position(|entry| entry == name) {
-                        let mut cycle = alias_stack[cycle_start..].to_vec();
-                        cycle.push(name.clone());
-                        return Err(format!(
-                            "cyclic type layout while resolving `{name}`: {}",
-                            cycle.join(" -> ")
-                        ));
+impl VoType {
+    /// Resolve the FFI syntax graph through the compiler's shared slot evaluator.
+    pub fn slot_count(&self, type_aliases: &HashMap<String, VoType>) -> Result<u16, String> {
+        use vo_common::slot_layout::{slot_counts, SlotLayout, SlotLayoutError};
+        let root = LayoutType(self);
+        let counts = slot_counts(
+            [root],
+            |LayoutType(ty)| {
+                Ok(match ty {
+                    VoType::Any | VoType::Error => SlotLayout::Interface,
+                    VoType::Named(name) => {
+                        SlotLayout::Alias(LayoutType(type_aliases.get(name).ok_or_else(|| {
+                            format!(
+                                "cannot determine FFI layout for unresolved named type `{name}`"
+                            )
+                        })?))
                     }
-                    alias_stack.push(name.clone());
-                    let result = underlying.slot_count_inner(type_aliases, alias_stack);
-                    alias_stack.pop();
-                    result
-                } else {
-                    Err(format!(
-                        "cannot determine FFI layout for unresolved named type `{name}`"
-                    ))
-                }
-            }
-
-            // Variadic: treated as slice (1 slot)
-            VoType::Variadic(_) => Ok(1),
-
-            // Struct: sum of all field slots
-            VoType::Struct(fields) => fields.iter().try_fold(0u16, |total, field| {
-                let field_slots = field.slot_count_inner(type_aliases, alias_stack)?;
-                total.checked_add(field_slots).ok_or_else(|| {
-                    "struct layout exceeds the FFI u16 slot address space".to_string()
+                    VoType::Struct(fields) => {
+                        SlotLayout::Struct(fields.iter().map(LayoutType).collect())
+                    }
+                    VoType::Array(len, element) => SlotLayout::Array {
+                        element: LayoutType(element),
+                        len: u64::try_from(*len)
+                            .map_err(|_| "FFI array length exceeds u64".to_string())?,
+                    },
+                    // Referenced metadata contributes no by-value children.
+                    VoType::Int
+                    | VoType::Int8
+                    | VoType::Int16
+                    | VoType::Int32
+                    | VoType::Int64
+                    | VoType::Uint
+                    | VoType::Uint8
+                    | VoType::Uint16
+                    | VoType::Uint32
+                    | VoType::Uint64
+                    | VoType::Float32
+                    | VoType::Float64
+                    | VoType::Bool
+                    | VoType::String
+                    | VoType::Pointer(_)
+                    | VoType::Slice(_)
+                    | VoType::Map(_, _)
+                    | VoType::Chan(_, _)
+                    | VoType::Port(_, _)
+                    | VoType::Island
+                    | VoType::Func(_, _)
+                    | VoType::Variadic(_) => SlotLayout::Scalar,
                 })
-            }),
-        }
+            },
+            Some(u16::MAX as usize + 1),
+        )
+        .map_err(|error| match error {
+            SlotLayoutError::Invalid(error) => error,
+            SlotLayoutError::Overflow(_) => "FFI type layout width overflow".to_string(),
+            SlotLayoutError::Cycle(path) => {
+                let mut names: Vec<_> = path
+                    .iter()
+                    .filter_map(|LayoutType(ty)| match ty {
+                        VoType::Named(name) => Some(name.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if let VoType::Named(root_name) = self {
+                    if let Some(start) = names[..names.len().saturating_sub(1)]
+                        .iter()
+                        .position(|name| *name == root_name)
+                    {
+                        names.pop();
+                        names.rotate_left(start);
+                        names.push(names[0]);
+                    }
+                }
+                format!(
+                    "cyclic type layout while resolving aliases: {}",
+                    names.join(" -> ")
+                )
+            }
+        })?;
+        u16::try_from(counts[&root])
+            .map_err(|_| "type layout exceeds the FFI u16 slot address space".to_string())
     }
 }
 
@@ -1280,6 +1290,38 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn ffi_slots_match_compiler_empty_aggregate_and_zero_array_rules() {
+        use vo_analysis::check::type_info::try_type_slot_count;
+        use vo_analysis::objects::TCObjects;
+        use vo_analysis::typ::BasicType;
+        let mut objects = TCObjects::new();
+        let int = objects.universe().lookup_type(BasicType::Int).unwrap();
+        let empty = objects.new_t_struct(vec![], None);
+        let zero = objects.new_t_array(int, Some(0));
+        let giant_zero = objects.new_t_array(zero, Some(65_536));
+        for (syntax, checked) in [
+            (VoType::Struct(vec![]), empty),
+            (
+                VoType::Array(65_536, Box::new(VoType::Array(0, Box::new(VoType::Int)))),
+                giant_zero,
+            ),
+        ] {
+            assert_eq!(
+                syntax.slot_count(&HashMap::new()).unwrap(),
+                try_type_slot_count(checked, &objects).unwrap()
+            );
+        }
+        let fields = VoType::Struct(vec![VoType::Struct(vec![]), VoType::Int]);
+        assert_eq!(fields.slot_count(&HashMap::new()), Ok(2));
+        // A zero-length outer array must not narrow its over-wide child early.
+        assert_eq!(
+            VoType::Array(0, Box::new(VoType::Array(65_536, Box::new(VoType::Int))))
+                .slot_count(&HashMap::new()),
+            Ok(0)
+        );
     }
 
     #[test]

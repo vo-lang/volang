@@ -1,8 +1,8 @@
 //! Builtin function compilation (len, cap, make, append, etc.).
 
+use vo_common_core::instruction::Opcode;
 use vo_common_core::types::ValueKind;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::SlotType;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

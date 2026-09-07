@@ -3,6 +3,16 @@ suite = "lang"
 root = "tests/lang"
 
 [[case]]
+id = "scalar-storage-semantics"
+kind = "file"
+path = "cases/runtime/numeric/scalar_storage_semantics.vo"
+matrix = "default"
+tags = ["runtime", "numeric", "regression", "wasm-aot", "panic"]
+owner = "runtime"
+reason = "Scalar storage tiers preserve arithmetic, saturating conversions, and named results across runtime traps"
+expect = "pass"
+
+[[case]]
 id = "alias-method-receiver"
 kind = "file"
 path = "cases/typechecker/alias_method_receiver.vo"

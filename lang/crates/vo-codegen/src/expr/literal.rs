@@ -1,8 +1,8 @@
 //! Composite literal and constant value compilation.
 
-use vo_runtime::bytecode::MAX_CLOSURE_CAPTURE_SLOTS;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::bytecode::MAX_CLOSURE_CAPTURE_SLOTS;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;

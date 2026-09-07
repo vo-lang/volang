@@ -1,0 +1,50 @@
+[package]
+name = "vo-ui-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Compiler and execution assembly for Volang UI above the language engine"
+publish = false
+
+[features]
+default = ["jit", "aot-native", "aot-wasm"]
+jit = ["vo-engine/jit"]
+aot-native = ["vo-engine/aot-native"]
+aot-wasm = ["vo-engine/aot-wasm"]
+
+[dependencies]
+vo-engine = { path = "../vo-engine", default-features = false }
+vo-analysis.workspace = true
+vo-common-core.workspace = true
+vo-syntax.workspace = true
+vo-codegen = { path = "../vo-codegen" }
+vo-runtime.workspace = true
+vo-vm = { path = "../vo-vm" }
+vo-app-protocol.workspace = true
+vo-app-host-native.workspace = true
+vo-ui-artifact.workspace = true
+vo-ui-compiler.workspace = true
+vo-ui-core.workspace = true
+vo-ui-desktop.workspace = true
+vo-ui-host-native.workspace = true
+vo-ui-plan.workspace = true
+vo-ui-protocol.workspace = true
+vo-ui-system.workspace = true
+vo-ui-vm.workspace = true
+vo-ui-web.workspace = true
+
+[dev-dependencies]
+vo-wasm-aot = { path = "../vo-wasm-aot" }
+vo-common.workspace = true
+vo-module.workspace = true
+vo-stdlib = { path = "../vo-stdlib" }
+vo-ui-accessibility.workspace = true
+vo-ui-golden.workspace = true
+vo-ui-layout.workspace = true
+vo-ui-paint.workspace = true
+
+[build-dependencies]
+toml = "0.8"

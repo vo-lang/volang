@@ -17,7 +17,9 @@ use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
-use crate::{RuntimeType, ValueKind, ValueRttid};
+#[cfg(test)]
+use crate::RuntimeType;
+use crate::{ValueKind, ValueRttid};
 use vo_common_core::bytecode::{InterfaceMeta, Itab, Module, NamedTypeMeta};
 
 #[inline]
@@ -284,88 +286,8 @@ pub fn check_interface_satisfaction(
     named_type_implements_interface(named_type, iface_meta, src_vk == ValueKind::Pointer)
 }
 
-fn interface_method_set_includes(source: &InterfaceMeta, target: &InterfaceMeta) -> bool {
-    target.methods.iter().all(|target_method| {
-        source.methods.iter().any(|source_method| {
-            source_method.name == target_method.name
-                && source_method.signature_rttid == target_method.signature_rttid
-        })
-    })
-}
-
-/// Apply the typed ordinary-assignment rules available from runtime metadata.
-///
-/// This is shared by dynamic calls and FFI signature checks so concrete-to-
-/// interface assignments, interface method-set inclusion, and named/unnamed
-/// identity all use one fail-closed implementation.
-pub fn runtime_value_is_assignable(
-    source: ValueRttid,
-    target: ValueRttid,
-    module: &Module,
-) -> bool {
-    let resolver = module.runtime_type_resolver();
-    let Some((source_underlying, source_runtime_type)) = resolver.resolve_value_rttid(source)
-    else {
-        return false;
-    };
-    let Some((target_underlying, target_runtime_type)) = resolver.resolve_value_rttid(target)
-    else {
-        return false;
-    };
-
-    if let RuntimeType::Interface {
-        meta_id: target_meta_id,
-        ..
-    } = target_runtime_type
-    {
-        let Some(target_interface) = module.interface_metas.get(*target_meta_id as usize) else {
-            return false;
-        };
-        if source == target {
-            return true;
-        }
-        if target_interface.methods.is_empty() {
-            return true;
-        }
-
-        if let RuntimeType::Interface {
-            meta_id: source_meta_id,
-            ..
-        } = source_runtime_type
-        {
-            let Some(source_interface) = module.interface_metas.get(*source_meta_id as usize)
-            else {
-                return false;
-            };
-            return interface_method_set_includes(source_interface, target_interface);
-        }
-
-        return check_interface_satisfaction(
-            source.rttid(),
-            source.value_kind(),
-            *target_meta_id,
-            module,
-        );
-    }
-
-    if source == target {
-        return true;
-    }
-
-    let Some(source_top_level) = module.runtime_types.get(source.rttid() as usize) else {
-        return false;
-    };
-    let Some(target_top_level) = module.runtime_types.get(target.rttid() as usize) else {
-        return false;
-    };
-    if matches!(source_top_level, RuntimeType::Named { .. })
-        && matches!(target_top_level, RuntimeType::Named { .. })
-    {
-        return false;
-    }
-
-    source_underlying == target_underlying
-}
+/// Shared ordinary-assignment semantics for dynamic calls and FFI checks.
+pub use vo_common_core::dynamic_layout::runtime_value_is_assignable;
 
 #[cfg(test)]
 mod tests {

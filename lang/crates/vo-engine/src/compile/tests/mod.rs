@@ -1,11 +1,10 @@
 #[cfg(debug_assertions)]
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use vo_common::vfs::FileSystem;
@@ -28,241 +27,6 @@ use super::native::{
     validate_locked_modules_installed, write_native_extension_test_abi_marker,
 };
 use super::CompileError;
-
-#[test]
-fn analyzed_ui_project_embeds_a_decodable_component_artifact() {
-    use vo_analysis::project::PackageIdentity;
-    use vo_analysis::vfs::{
-        analyze_file_set_with_package_identity, ModSource, PackageResolver, StdSource,
-    };
-    use vo_common::vfs::{FileSet, MemoryFs};
-    use vo_ui_artifact::{
-        decode_component_artifact, decode_component_bundle, ArtifactLimits, BundleLimits,
-        ExecutionMode, COMPONENT_ARTIFACT_NAME, COMPONENT_ARTIFACT_VERSION,
-        COMPONENT_BUNDLE_ARTIFACT_NAME, COMPONENT_BUNDLE_ARTIFACT_VERSION,
-    };
-    use vo_ui_plan::PlanLimits;
-
-    let module_fs = MemoryFs::new()
-        .with_file(
-            "github.com/vo-lang/ui/vo.mod",
-            include_str!("../../../../../../ui/vo.mod"),
-        )
-        .with_file(
-            "github.com/vo-lang/ui/ui.vo",
-            include_str!("../../../../../../ui/ui.vo"),
-        );
-    let resolver = PackageResolver {
-        std: StdSource::with_fs(MemoryFs::new().with_file("errors/errors.vo", "package errors\n")),
-        r#mod: ModSource::with_fs(module_fs),
-    };
-    let mut files = FileSet::new(PathBuf::from("."));
-    files.files.insert(
-        PathBuf::from("main.vo"),
-        r#"package main
-import "github.com/vo-lang/ui"
-func App() ui.View {
-	count := 1
-	return ui.Button("Count", func(event ui.Event) { count++ })
-}
-func main() {
-	if err := ui.Mount(App); err != nil { panic(err.Error()) }
-}
-"#
-        .to_string(),
-    );
-    let project = analyze_file_set_with_package_identity(
-        files,
-        resolver,
-        MemoryFs::new(),
-        PathBuf::from("."),
-        Some("github.com/acme/app".to_string()),
-        Some(PackageIdentity::new("github.com/acme/app").unwrap()),
-    )
-    .expect("analyze UI fixture");
-
-    let module = super::pipeline::compile_analyzed_project(&project).expect("compile UI fixture");
-    let artifact = module
-        .artifact(COMPONENT_ARTIFACT_NAME)
-        .expect("embedded UI component artifact");
-    assert_eq!(artifact.version, COMPONENT_ARTIFACT_VERSION);
-    let component = decode_component_artifact(
-        &artifact.payload,
-        ArtifactLimits::default(),
-        PlanLimits::default(),
-    )
-    .expect("decode UI component artifact");
-    assert_eq!(component.identity, "github.com/acme/app::App");
-    assert_eq!(component.mode, ExecutionMode::Direct);
-    assert_eq!(component.states.len(), 1);
-    assert_eq!(component.handlers.len(), 1);
-    assert!(component.handlers[0].evaluator_func.is_some());
-    let expected_payload = artifact.payload.clone();
-    let bundle_artifact = module
-        .artifact(COMPONENT_BUNDLE_ARTIFACT_NAME)
-        .expect("embedded UI component bundle");
-    assert_eq!(bundle_artifact.version, COMPONENT_BUNDLE_ARTIFACT_VERSION);
-    let bundle = decode_component_bundle(
-        &bundle_artifact.payload,
-        BundleLimits::default(),
-        PlanLimits::default(),
-    )
-    .expect("decode UI component bundle");
-    assert_eq!(bundle.root.object(), "App");
-    assert_eq!(bundle.definitions.len(), 1);
-    assert_eq!(bundle.definitions[0].mode, ExecutionMode::Direct);
-    let expected_bundle_payload = bundle_artifact.payload.clone();
-
-    let bytes = module.serialize().expect("serialize UI module");
-    let decoded_module =
-        vo_common_core::Module::deserialize(&bytes).expect("deserialize UI module");
-    assert_eq!(
-        decoded_module
-            .artifact(COMPONENT_ARTIFACT_NAME)
-            .map(|artifact| artifact.payload.as_slice()),
-        Some(expected_payload.as_slice())
-    );
-    assert_eq!(
-        decoded_module
-            .artifact(COMPONENT_BUNDLE_ARTIFACT_NAME)
-            .map(|artifact| artifact.payload.as_slice()),
-        Some(expected_bundle_payload.as_slice())
-    );
-
-    let cache_root = temp_dir("vo_ui_component_artifact_cache");
-    fs::create_dir_all(&cache_root).expect("create UI artifact cache root");
-    let output = vo_stdlib::toolchain::ToolchainModule {
-        module: Arc::new(
-            vo_common_core::verifier::verify_loaded_module(module)
-                .expect("verify UI module before caching"),
-        ),
-        source_root: cache_root.clone(),
-        extensions: Vec::new(),
-        locked_modules: Vec::new(),
-    };
-    let slot = super::cache::compile_cache_slot(&cache_root, None);
-    super::cache::save_compile_cache(&slot, "ui-artifact-fingerprint", &output);
-    let cached = super::cache::try_load_cache(&slot, &cache_root, "ui-artifact-fingerprint")
-        .expect("load cached UI artifact");
-    assert_eq!(
-        cached
-            .module
-            .artifact(COMPONENT_ARTIFACT_NAME)
-            .map(|artifact| artifact.payload.as_slice()),
-        Some(expected_payload.as_slice())
-    );
-    assert_eq!(
-        cached
-            .module
-            .artifact(COMPONENT_BUNDLE_ARTIFACT_NAME)
-            .map(|artifact| artifact.payload.as_slice()),
-        Some(expected_bundle_payload.as_slice())
-    );
-    fs::remove_dir_all(cache_root).expect("remove UI artifact cache root");
-}
-
-#[test]
-fn nested_ui_project_emits_bundle_without_publishing_a_partial_vua1_root() {
-    use vo_analysis::project::PackageIdentity;
-    use vo_analysis::vfs::{
-        analyze_file_set_with_package_identity, ModSource, PackageResolver, StdSource,
-    };
-    use vo_common::vfs::{FileSet, MemoryFs};
-    use vo_ui_artifact::{
-        decode_component_bundle, BundleLimits, COMPONENT_ARTIFACT_NAME,
-        COMPONENT_BUNDLE_ARTIFACT_NAME,
-    };
-    use vo_ui_plan::PlanLimits;
-
-    let module_fs = MemoryFs::new()
-        .with_file(
-            "github.com/vo-lang/ui/vo.mod",
-            include_str!("../../../../../../ui/vo.mod"),
-        )
-        .with_file(
-            "github.com/vo-lang/ui/ui.vo",
-            include_str!("../../../../../../ui/ui.vo"),
-        )
-        .with_file(
-            "github.com/acme/components/vo.mod",
-            r#"format = 1
-module = "github.com/acme/components"
-version = "0.1.0"
-vo = "0.1.0"
-"#,
-        )
-        .with_file(
-            "github.com/acme/components/components.vo",
-            r#"package components
-import "github.com/vo-lang/ui"
-func Child(label string) ui.View { return ui.Text(label) }
-"#,
-        );
-    let resolver = PackageResolver {
-        std: StdSource::with_fs(MemoryFs::new().with_file("errors/errors.vo", "package errors\n")),
-        r#mod: ModSource::with_fs(module_fs),
-    };
-    let mut files = FileSet::new(PathBuf::from("."));
-    files.files.insert(
-        PathBuf::from("main.vo"),
-        r#"package main
-import "github.com/vo-lang/ui"
-import components "github.com/acme/components"
-func App() ui.View {
-	label := "child"
-	return ui.Column(components.Child(label), components.Child("fixed"))
-}
-func main() {
-	if err := ui.Mount(App); err != nil { panic(err.Error()) }
-}
-"#
-        .to_string(),
-    );
-    let project = analyze_file_set_with_package_identity(
-        files,
-        resolver,
-        MemoryFs::new(),
-        PathBuf::from("."),
-        Some("github.com/acme/app".to_string()),
-        Some(PackageIdentity::new("github.com/acme/app").unwrap()),
-    )
-    .expect("analyze nested UI fixture");
-
-    let module = super::pipeline::compile_analyzed_project(&project)
-        .expect("compile nested UI component graph");
-    assert!(module.artifact(COMPONENT_ARTIFACT_NAME).is_none());
-    let artifact = module
-        .artifact(COMPONENT_BUNDLE_ARTIFACT_NAME)
-        .expect("nested component bundle");
-    let bundle = decode_component_bundle(
-        &artifact.payload,
-        BundleLimits::default(),
-        PlanLimits::default(),
-    )
-    .expect("decode nested component bundle");
-    assert_eq!(bundle.definitions.len(), 2);
-    assert_eq!(bundle.root.object(), "App");
-    assert_eq!(
-        bundle.linked_modules,
-        vec!["github.com/acme/components".to_string()]
-    );
-    assert_eq!(bundle.definitions[0].call_sites.len(), 2);
-    assert_eq!(bundle.definitions[1].interface.props_arity, 1);
-    assert!(bundle.definitions[1].call_sites.is_empty());
-    let root_evaluators = bundle.definitions[0]
-        .bindings
-        .iter()
-        .filter_map(|binding| binding.evaluator_func)
-        .collect::<BTreeSet<_>>();
-    let imported_evaluators = bundle.definitions[1]
-        .bindings
-        .iter()
-        .filter_map(|binding| binding.evaluator_func)
-        .collect::<BTreeSet<_>>();
-    assert!(!root_evaluators.is_empty());
-    assert!(!imported_evaluators.is_empty());
-    assert!(root_evaluators.is_disjoint(&imported_evaluators));
-}
 
 mod cases;
 
@@ -454,6 +218,7 @@ fn cache_miss_compiles_the_captured_project_snapshot_after_a_live_edit() {
     assert_ne!(captured_fingerprint, live.fingerprint());
 
     let output = super::pipeline::compile_with_project_snapshot(
+        &crate::Engine::default(),
         context.into_pipeline_context(),
         stdlib,
         captured.into_snapshot(),
@@ -618,12 +383,13 @@ fn generated_sources_extend_only_the_captured_compile_snapshot_authority() {
     )
     .expect("construct governed generated source");
 
-    let output = super::compile_real_path_with_generated_sources(
-        &root,
-        &vo_module::project::ProjectContextOptions::default(),
-        vec![generated],
-    )
-    .expect("compile with generated source in the immutable snapshot");
+    let output = crate::Engine::default()
+        .compile_real_path_with_generated_sources(
+            &root,
+            &vo_module::project::ProjectContextOptions::default(),
+            vec![generated],
+        )
+        .expect("compile with generated source in the immutable snapshot");
 
     assert!(output
         .module
@@ -708,12 +474,13 @@ fn generated_source_may_match_but_never_replace_a_tracked_source() {
 
     let matching = super::GeneratedSource::new(tracked_path.clone(), tracked_bytes)
         .expect("construct matching generated source");
-    let output = super::compile_real_path_with_generated_sources(
-        &root,
-        &vo_module::project::ProjectContextOptions::default(),
-        vec![matching],
-    )
-    .expect("identical tracked and generated source must be accepted");
+    let output = crate::Engine::default()
+        .compile_real_path_with_generated_sources(
+            &root,
+            &vo_module::project::ProjectContextOptions::default(),
+            vec![matching],
+        )
+        .expect("identical tracked and generated source must be accepted");
     assert!(output
         .module
         .named_type_metas
@@ -725,12 +492,13 @@ fn generated_source_may_match_but_never_replace_a_tracked_source() {
         b"package main\ntype ReplacedMarker struct{}\n".to_vec(),
     )
     .expect("construct conflicting generated source");
-    let error = super::compile_real_path_with_generated_sources(
-        &root,
-        &vo_module::project::ProjectContextOptions::default(),
-        vec![conflicting],
-    )
-    .expect_err("generated source must never replace different tracked bytes");
+    let error = crate::Engine::default()
+        .compile_real_path_with_generated_sources(
+            &root,
+            &vo_module::project::ProjectContextOptions::default(),
+            vec![conflicting],
+        )
+        .expect_err("generated source must never replace different tracked bytes");
     assert!(
         error
             .to_string()
@@ -781,6 +549,7 @@ fn cache_miss_uses_captured_main_module_metadata_after_a_live_edit() {
     fs::write(root.join("vo.mod"), "live vo.mod is malformed\n")
         .expect("edit live vo.mod after capture");
     let output = super::pipeline::compile_with_project_snapshot(
+        &crate::Engine::default(),
         context.into_pipeline_context(),
         stdlib,
         captured.into_snapshot(),
@@ -869,6 +638,7 @@ fn cache_miss_uses_captured_workspace_source_metadata_after_a_live_edit() {
     )
     .expect("edit workspace source vo.mod after capture");
     let output = super::pipeline::compile_with_project_snapshot(
+        &crate::Engine::default(),
         context.into_pipeline_context(),
         stdlib,
         captured.into_snapshot(),
@@ -1287,6 +1057,7 @@ fn snapshot_capture_honors_explicit_workspace_selection() {
         super::cache::capture_compile_inputs(context.compile_input_capture(&stdlib_fingerprint))
             .expect("capture explicit workspace");
     super::pipeline::compile_with_project_snapshot(
+        &crate::Engine::default(),
         context.into_pipeline_context(),
         stdlib,
         captured.into_snapshot(),

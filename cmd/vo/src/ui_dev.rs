@@ -35,11 +35,9 @@ impl UiCompilerSession {
         // until the engine exposes a prepared generation containing those
         // injected bytes too.
         if let Some(generated_sources) = super::generate::generate_for_build(project)? {
-            return vo_engine::compile_path_with_generated_sources_and_auto_install(
-                project,
-                generated_sources,
-            )
-            .map_err(|error| error.to_string());
+            return vo_ui_integration::engine()
+                .compile_path_with_generated_sources_and_auto_install(project, generated_sources)
+                .map_err(|error| error.to_string());
         }
 
         if !vo_engine::is_bytecode_artifact(project) {
@@ -57,11 +55,12 @@ impl UiCompilerSession {
         let Some(path) = project.to_str() else {
             return super::compile_cli_path(project);
         };
-        let prepared = vo_engine::compile_with_auto_install_prepared_with_options(
-            path,
-            &vo_module::project::ProjectContextOptions::from_environment(),
-        )
-        .map_err(|error| error.to_string())?;
+        let prepared = vo_ui_integration::engine()
+            .compile_with_auto_install_prepared_with_options(
+                path,
+                &vo_module::project::ProjectContextOptions::from_environment(),
+            )
+            .map_err(|error| error.to_string())?;
         prepared
             .validate_generation()
             .map_err(|error| error.to_string())?;
@@ -1207,7 +1206,7 @@ fn release_ssr_document(
     config: &WebReleaseConfig,
 ) -> Result<String, String> {
     let metadata = document_metadata(config, route);
-    let rendered = vo_engine::render_initial_ui_document_at(
+    let rendered = vo_ui_integration::render_initial_ui_document_at(
         compiled,
         vo_engine::RunMode::Vm,
         route,
@@ -1954,7 +1953,7 @@ fn cmd_run(args: &[OsString]) -> i32 {
         if !has_ui_mount(output.module.module()) {
             return Err("the project does not call github.com/vo-lang/ui.Mount".to_string());
         }
-        let vm = vo_engine::build_native_gui_vm_for_mode(output, mode)?;
+        let vm = vo_ui_integration::build_native_gui_vm_for_mode(output, mode)?;
         if watch {
             let reload = native_reload_poll(project.clone(), mode, compiler)?;
             vo_ui_shell_native::run_desktop_with_reload(vm, config, reload)
@@ -2006,12 +2005,12 @@ fn compile_native_reload(
     compiler: &mut UiCompilerSession,
     project: &Path,
     mode: vo_engine::RunMode,
-) -> Result<vo_engine::PreparedNativeUiReload, String> {
+) -> Result<vo_ui_integration::PreparedNativeUiReload, String> {
     let output = compiler.compile(project)?;
     if !has_ui_mount(output.module.module()) {
         return Err("the project does not call github.com/vo-lang/ui.Mount".to_string());
     }
-    vo_engine::prepare_native_gui_reload_for_mode(output, mode)
+    vo_ui_integration::prepare_native_gui_reload_for_mode(output, mode)
 }
 
 #[cfg(not(feature = "desktop-ui"))]
@@ -2169,7 +2168,8 @@ fn cmd_package(args: &[OsString]) -> i32 {
             return Err("the project does not call github.com/vo-lang/ui.Mount".to_string());
         }
         let object = package_phase(&mut timings, "native-aot-lowering", || {
-            vo_engine::compile_native_aot_object(&compiled, &target, false)
+            vo_ui_integration::engine()
+                .compile_native_aot_object(&compiled, &target, false)
                 .map_err(|error| error.to_string())
         })?;
         fs::create_dir_all(&output).map_err(|error| {
@@ -2270,8 +2270,9 @@ fn build_web_release(project: &Path, output: &Path, runtime_dir: &Path) -> Resul
     }
     let target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN)
         .map_err(|error| error.to_string())?;
-    let artifact =
-        vo_engine::compile_wasm_aot_image(&compiled, &target).map_err(|error| error.to_string())?;
+    let artifact = vo_ui_integration::engine()
+        .compile_wasm_aot_image(&compiled, &target)
+        .map_err(|error| error.to_string())?;
     fs::create_dir_all(output).map_err(|error| {
         format!(
             "cannot create output directory {}: {error}",
@@ -2884,7 +2885,7 @@ fn test_ui_with_output(
     if !has_ui_mount(output.module.module()) {
         return Err("the project does not call github.com/vo-lang/ui.Mount".to_string());
     }
-    let mut vm = vo_engine::build_native_gui_vm_for_mode(output, mode)?;
+    let mut vm = vo_ui_integration::build_native_gui_vm_for_mode(output, mode)?;
     let settle_started = Instant::now();
     let layout_viewport = viewport
         .map(|(width, height, _)| vo_ui_layout::Size::new(width, height))
@@ -3910,7 +3911,8 @@ fn inspect_project(
         InspectionTarget::Web => {
             let target = vo_target::TargetSpec::parse(vo_target::WASM32_UNKNOWN_UNKNOWN)
                 .map_err(|error| error.to_string())?;
-            let artifact = vo_engine::compile_wasm_aot_image(&output, &target)
+            let artifact = vo_ui_integration::engine()
+                .compile_wasm_aot_image(&output, &target)
                 .map_err(|error| error.to_string())?;
             (
                 target.triple().to_string(),
@@ -3920,7 +3922,8 @@ fn inspect_project(
         }
         InspectionTarget::Native => {
             let target = vo_target::TargetSpec::host().map_err(|error| error.to_string())?;
-            let artifact = vo_engine::compile_native_aot_object(&output, &target, false)
+            let artifact = vo_ui_integration::engine()
+                .compile_native_aot_object(&output, &target, false)
                 .map_err(|error| error.to_string())?;
             (
                 target.triple().to_string(),
@@ -4989,11 +4992,12 @@ mod tests {
         let options = vo_module::project::ProjectContextOptions::new(
             vo_module::workspace::WorkspaceDiscovery::Explicit(workfile),
         );
-        let output = vo_engine::compile_with_auto_install_with_options(
-            project.to_str().expect("repository paths are UTF-8"),
-            &options,
-        )
-        .expect("Studio starter should compile in the repository workspace");
+        let output = vo_ui_integration::engine()
+            .compile_with_auto_install_with_options(
+                project.to_str().expect("repository paths are UTF-8"),
+                &options,
+            )
+            .expect("Studio starter should compile in the repository workspace");
         let result = test_ui_with_output(output, vo_engine::RunMode::Vm, None, &steps)
             .expect("Studio starter workflow should remain executable");
         assert!(

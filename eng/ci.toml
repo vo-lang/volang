@@ -137,7 +137,7 @@ evidence_kind = "contract"
 
 [[task]]
 id = "rust-quality"
-commands = ["rust-format", "rust-clippy", "rust-tests"]
+commands = ["rust-format", "rust-feature-boundaries", "rust-clippy", "rust-tests"]
 inputs = ["*"]
 resource_group = "cargo"
 tier = "feedback"
@@ -613,6 +613,36 @@ failure_kind = "infrastructure"
 id = "rust-format"
 argv = ["cargo", "fmt", "--all", "--", "--check"]
 timeout_seconds = 120
+failure_kind = "product"
+
+[[command]]
+id = "rust-feature-boundaries"
+argv = [
+  "bash", "-euo", "pipefail", "-c",
+  '''
+codegen_closure="$(cargo tree --locked -p vo-codegen --edges normal,no-proc-macro --prefix none)"
+engine_closure="$(cargo tree --locked -p vo-engine --no-default-features --edges normal,no-proc-macro --prefix none)"
+if printf '%s\n' "$codegen_closure" | grep -Eq '^vo-(runtime|stdlib|vm|jit|ui-[^ ]+) v'; then
+  echo "portable codegen depends on a runtime or UI implementation" >&2
+  exit 1
+fi
+if printf '%s\n' "$engine_closure" | grep -Eq '^vo-(jit|wasm-aot|ui-[^ ]+) v'; then
+  echo "core engine depends on an optional backend or UI adapter" >&2
+  exit 1
+fi
+engine_all_closure="$(cargo tree --locked -p vo-engine --all-features --edges normal,build,dev --prefix none)"
+if printf '%s\n' "$engine_all_closure" | grep -Eq '^vo-ui-[^ ]+ v'; then
+  echo "language engine depends on UI through production, build, or test dependencies" >&2
+  exit 1
+fi
+cargo check --locked -p vo-ui-integration --no-default-features
+cargo check --locked -p vo-engine --no-default-features
+for feature in jit aot-native aot-wasm; do
+  cargo check --locked -p vo-engine --no-default-features --features "$feature"
+done
+''',
+]
+timeout_seconds = 900
 failure_kind = "product"
 
 [[command]]
@@ -1215,7 +1245,7 @@ report = "cargo-test"
 
 [[command]]
 id = "ui-vm-jit-contracts"
-argv = ["cargo", "test", "--locked", "-p", "vo-engine", "official_ui_native_vm_jit"]
+argv = ["cargo", "test", "--locked", "-p", "vo-ui-integration", "official_ui_native_vm_jit"]
 timeout_seconds = 900
 failure_kind = "product"
 report = "cargo-test"

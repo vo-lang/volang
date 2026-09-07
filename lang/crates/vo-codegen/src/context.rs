@@ -172,7 +172,7 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
 
 fn builtin_extern_return_shape(name: &str) -> ReturnShape {
     if let Some(slot_types) =
-        vo_runtime::bytecode::known_builtin_extern_fixed_return_slot_types(name)
+        vo_common_core::bytecode::known_builtin_extern_fixed_return_slot_types(name)
     {
         return ReturnShape::try_with_slot_types(slot_types.to_vec()).unwrap_or_else(|error| {
             panic!("builtin_extern_return_shape: invalid layout for '{name}': {error}")
@@ -189,7 +189,8 @@ fn known_builtin_extern_param_shape(name: &str) -> Option<ParamShape> {
     if let Some(external) = DynSourceExtern::decode(name) {
         return Some(external.param_shape());
     }
-    if let Some(slot_types) = vo_runtime::bytecode::known_builtin_extern_param_slot_types(name) {
+    if let Some(slot_types) = vo_common_core::bytecode::known_builtin_extern_param_slot_types(name)
+    {
         return Some(ParamShape::Exact {
             slots: u16::try_from(slot_types.len())
                 .expect("builtin extern parameter layout must fit u16"),
@@ -206,7 +207,7 @@ fn known_builtin_extern_param_shape(name: &str) -> Option<ParamShape> {
 }
 
 fn param_shape_from_kinds(
-    param_kinds: &[vo_runtime::bytecode::ExtSlotKind],
+    param_kinds: &[vo_common_core::bytecode::ExtSlotKind],
 ) -> Result<ParamShape, String> {
     if param_kinds.is_empty() {
         Ok(ParamShape::CallSiteVariadic)
@@ -216,7 +217,7 @@ fn param_shape_from_kinds(
 }
 
 fn exact_param_shape_from_kinds(
-    param_kinds: &[vo_runtime::bytecode::ExtSlotKind],
+    param_kinds: &[vo_common_core::bytecode::ExtSlotKind],
 ) -> Result<ParamShape, String> {
     let slots = u16::try_from(param_kinds.len()).map_err(|_| {
         format!(
@@ -229,8 +230,8 @@ fn exact_param_shape_from_kinds(
 
 fn extern_param_shape_for_callsite(
     name: &str,
-    param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
-) -> Result<(ParamShape, Vec<vo_runtime::bytecode::ExtSlotKind>), String> {
+    param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
+) -> Result<(ParamShape, Vec<vo_common_core::bytecode::ExtSlotKind>), String> {
     match known_builtin_extern_param_shape(name) {
         Some(ParamShape::CallSiteVariadic) => Ok((ParamShape::CallSiteVariadic, Vec::new())),
         Some(shape @ ParamShape::Exact { .. }) => Ok((shape, param_kinds)),
@@ -240,8 +241,9 @@ fn extern_param_shape_for_callsite(
 
 fn builtin_extern_param_contract(
     name: &str,
-) -> (ParamShape, Vec<vo_runtime::bytecode::ExtSlotKind>) {
-    if let Some(slot_types) = vo_runtime::bytecode::known_builtin_extern_param_slot_types(name) {
+) -> (ParamShape, Vec<vo_common_core::bytecode::ExtSlotKind>) {
+    if let Some(slot_types) = vo_common_core::bytecode::known_builtin_extern_param_slot_types(name)
+    {
         return (
             ParamShape::Exact {
                 slots: u16::try_from(slot_types.len())
@@ -259,8 +261,8 @@ fn builtin_extern_param_contract(
 
 fn variable_ret_extern_param_contract(
     name: &str,
-    param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
-) -> Result<(ParamShape, Vec<vo_runtime::bytecode::ExtSlotKind>), String> {
+    param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
+) -> Result<(ParamShape, Vec<vo_common_core::bytecode::ExtSlotKind>), String> {
     match name {
         "dyn_call" | "dyn_method" if !param_kinds.is_empty() => {
             Ok((exact_param_shape_from_kinds(&param_kinds)?, param_kinds))
@@ -271,9 +273,9 @@ fn variable_ret_extern_param_contract(
 }
 
 pub(crate) fn ext_slot_kinds_for_slot_types(
-    slot_types: &[vo_runtime::SlotType],
-) -> Vec<vo_runtime::bytecode::ExtSlotKind> {
-    vo_runtime::bytecode::ext_slot_kinds_for_slot_types(slot_types)
+    slot_types: &[vo_common_core::SlotType],
+) -> Vec<vo_common_core::bytecode::ExtSlotKind> {
+    vo_common_core::bytecode::ext_slot_kinds_for_slot_types(slot_types)
 }
 
 use crate::type_interner::{
@@ -283,7 +285,7 @@ use vo_analysis::objects::{ObjKey, PackageKey, TypeKey};
 use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common::SourceMap;
-use vo_runtime::bytecode::{
+use vo_common_core::bytecode::{
     validate_ext_param_kinds_with_label, Constant, ExtSlotKind, ExternEffects, FunctionDef,
     GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, ParamShape, ReturnShape,
     StructMeta, TransferType, IFACE_ASSIGN_NO_ITAB,
@@ -391,8 +393,7 @@ fn declared_extern_allowed_effects(name: &str) -> ExternEffects {
     if let Some(external) = DynSourceExtern::decode(name) {
         return external.allowed_effects();
     }
-    vo_runtime::builtins::known_extern_allowed_effects(name)
-        .or_else(|| vo_stdlib::extern_manifest::known_extern_allowed_effects(name))
+    vo_common_core::extern_contracts::known_extern_allowed_effects(name)
         .unwrap_or(ExternEffects::UNKNOWN_CONTROL)
 }
 
@@ -498,7 +499,7 @@ impl CodegenContext {
         // Index 0 is reserved for empty interface{}.
         module
             .interface_metas
-            .push(vo_runtime::bytecode::InterfaceMeta {
+            .push(vo_common_core::bytecode::InterfaceMeta {
                 name: String::new(),
                 method_names: Vec::new(),
                 methods: Vec::new(),
@@ -585,7 +586,7 @@ impl CodegenContext {
 
     pub(crate) fn opaque_handle_transfer_type(&self) -> TransferType {
         TransferType {
-            meta_raw: vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Uint64).to_raw(),
+            meta_raw: vo_common_core::ValueMeta::new(0, vo_common_core::ValueKind::Uint64).to_raw(),
             rttid_raw: 0,
             slots: 1,
         }
@@ -593,7 +594,7 @@ impl CodegenContext {
 
     pub(crate) fn opaque_handle_meta(&mut self) -> u16 {
         self.add_const(Constant::Int(i64::from(
-            vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Uint64).to_raw(),
+            vo_common_core::ValueMeta::new(0, vo_common_core::ValueKind::Uint64).to_raw(),
         )))
     }
 
@@ -631,8 +632,8 @@ impl CodegenContext {
 
     fn extern_param_contract_or_record(
         &mut self,
-        contract: Result<(ParamShape, Vec<vo_runtime::bytecode::ExtSlotKind>), String>,
-    ) -> (ParamShape, Vec<vo_runtime::bytecode::ExtSlotKind>) {
+        contract: Result<(ParamShape, Vec<vo_common_core::bytecode::ExtSlotKind>), String>,
+    ) -> (ParamShape, Vec<vo_common_core::bytecode::ExtSlotKind>) {
         contract.unwrap_or_else(|error| {
             self.record_layout_error(error);
             (ParamShape::CallSiteVariadic, Vec::new())
@@ -799,15 +800,15 @@ impl CodegenContext {
     /// Get or create rttid for a type using RuntimeType for structural equality.
     /// This ensures structurally identical types (e.g., two *Dog from different contexts)
     /// get the same rttid.
-    pub fn intern_rttid(&mut self, rt: vo_runtime::RuntimeType) -> u32 {
+    pub fn intern_rttid(&mut self, rt: vo_common_core::RuntimeType) -> u32 {
         if !self.layout_errors.is_empty() {
-            return vo_runtime::ValueKind::Void as u32;
+            return vo_common_core::ValueKind::Void as u32;
         }
         match self.type_interner.intern(rt) {
             Ok(id) => id,
             Err(error) => {
                 self.record_layout_error(error);
-                vo_runtime::ValueKind::Void as u32
+                vo_common_core::ValueKind::Void as u32
             }
         }
     }
@@ -844,7 +845,7 @@ impl CodegenContext {
     /// Should be called after all type declarations are processed.
     /// This enables O(1) dynamic field access via `~>` operator.
     pub fn finalize_runtime_types(&mut self) {
-        use vo_runtime::RuntimeType;
+        use vo_common_core::RuntimeType;
 
         // Collect updates to avoid borrow issues
         let mut updates: Vec<(usize, Option<u32>, Option<u32>)> = Vec::new(); // (idx, struct_meta_id, iface_meta_id)
@@ -857,7 +858,9 @@ impl CodegenContext {
                         .module
                         .named_type_metas
                         .get(*id as usize)
-                        .filter(|m| m.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
+                        .filter(|m| {
+                            m.underlying_meta.value_kind() == vo_common_core::ValueKind::Struct
+                        })
                         .map(|m| m.underlying_meta.meta_id());
                     if struct_meta_id.is_some() {
                         updates.push((idx, struct_meta_id, None));
@@ -901,14 +904,16 @@ impl CodegenContext {
             }
         }
         for runtime_type in self.type_interner.types_mut() {
-            let vo_runtime::RuntimeType::Named { id, struct_meta_id } = runtime_type else {
+            let vo_common_core::RuntimeType::Named { id, struct_meta_id } = runtime_type else {
                 continue;
             };
             *struct_meta_id = self
                 .module
                 .named_type_metas
                 .get(*id as usize)
-                .filter(|meta| meta.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
+                .filter(|meta| {
+                    meta.underlying_meta.value_kind() == vo_common_core::ValueKind::Struct
+                })
                 .map(|meta| meta.underlying_meta.meta_id());
         }
         self.module.runtime_types = self.type_interner.types().to_vec();
@@ -921,7 +926,7 @@ impl CodegenContext {
     ) -> Result<TransferType, String> {
         let rttid_raw = self.compute_value_rttid_raw(type_key, info);
         self.module.runtime_types = self.type_interner.types().to_vec();
-        let value_rttid = vo_runtime::ValueRttid::from_raw(rttid_raw);
+        let value_rttid = vo_common_core::ValueRttid::from_raw(rttid_raw);
         self.canonical_transfer_type_for_rttid(value_rttid, "type")
     }
 
@@ -957,7 +962,7 @@ impl CodegenContext {
             .iter()
             .enumerate()
             .map(|(idx, transfer_type)| {
-                let value_rttid = vo_runtime::ValueRttid::from_raw(transfer_type.rttid_raw);
+                let value_rttid = vo_common_core::ValueRttid::from_raw(transfer_type.rttid_raw);
                 self.canonical_transfer_type_for_rttid(value_rttid, &format!("{label}[{idx}]"))
             })
             .collect()
@@ -965,7 +970,7 @@ impl CodegenContext {
 
     fn canonical_transfer_type_for_rttid(
         &self,
-        value_rttid: vo_runtime::ValueRttid,
+        value_rttid: vo_common_core::ValueRttid,
         label: &str,
     ) -> Result<TransferType, String> {
         let value_meta = self
@@ -1002,7 +1007,7 @@ impl CodegenContext {
     /// Fill WellKnownTypes with pre-computed IDs for errors.Error.
     /// Should be called after all types are registered.
     pub fn fill_well_known_types(&mut self) -> Result<(), String> {
-        use vo_runtime::RuntimeType;
+        use vo_common_core::RuntimeType;
 
         // Find errors.Error named_type_id
         let error_named_type_id = self
@@ -1033,7 +1038,7 @@ impl CodegenContext {
                 .module
                 .named_type_metas
                 .get(named_id as usize)
-                .filter(|m| m.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
+                .filter(|m| m.underlying_meta.value_kind() == vo_common_core::ValueKind::Struct)
                 .map(|m| m.underlying_meta.meta_id());
             (rttid, struct_meta_id)
         } else {
@@ -1047,7 +1052,7 @@ impl CodegenContext {
                 .position(|rt| match rt {
                     RuntimeType::Pointer(elem) => {
                         elem.rttid() == named_rttid
-                            && elem.value_kind() == vo_runtime::ValueKind::Struct
+                            && elem.value_kind() == vo_common_core::ValueKind::Struct
                     }
                     _ => false,
                 })
@@ -1107,7 +1112,7 @@ impl CodegenContext {
             None => (None, None, None, None, None),
         };
 
-        self.module.well_known = vo_runtime::bytecode::WellKnownTypes {
+        self.module.well_known = vo_common_core::bytecode::WellKnownTypes {
             error_named_type_id,
             error_iface_meta_id,
             error_ptr_rttid,
@@ -1124,11 +1129,11 @@ impl CodegenContext {
     }
 
     /// Get the interned RuntimeTypes (in rttid order)
-    pub fn runtime_types(&self) -> Vec<vo_runtime::RuntimeType> {
+    pub fn runtime_types(&self) -> Vec<vo_common_core::RuntimeType> {
         self.type_interner.types().to_vec()
     }
 
-    pub fn runtime_type(&self, rttid: u32) -> &vo_runtime::RuntimeType {
+    pub fn runtime_type(&self, rttid: u32) -> &vo_common_core::RuntimeType {
         &self.type_interner.types()[rttid as usize]
     }
 
@@ -1300,7 +1305,7 @@ impl CodegenContext {
                     .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                     .collect();
 
-                let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
+                let metas: Vec<vo_common_core::bytecode::InterfaceMethodMeta> = method_objs
                     .iter()
                     .map(|&m| {
                         let obj = &tc_objs.lobjs[m];
@@ -1325,7 +1330,7 @@ impl CodegenContext {
                             &mut ctx,
                         )
                         .rttid();
-                        vo_runtime::bytecode::InterfaceMethodMeta {
+                        vo_common_core::bytecode::InterfaceMethodMeta {
                             name,
                             signature_rttid,
                         }
@@ -1683,7 +1688,7 @@ impl CodegenContext {
     pub fn get_or_register_extern_with_return_layout(
         &mut self,
         name: &str,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
     ) -> u32 {
         self.get_or_register_extern_with_return_layout_and_effects(
             name,
@@ -1695,7 +1700,7 @@ impl CodegenContext {
     pub fn get_or_register_extern_with_return_layout_and_effects(
         &mut self,
         name: &str,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
         effects: ExternEffects,
     ) -> u32 {
         let returns = ReturnShape::try_with_slot_types(ret_slot_types).unwrap_or_else(|error| {
@@ -1792,20 +1797,22 @@ impl CodegenContext {
         let Some(id) = self.next_u32_table_id_or_record("extern", len) else {
             return 0;
         };
-        self.module.externs.push(vo_runtime::bytecode::ExternDef {
-            name: name.to_string(),
-            params: ParamShape::CallSiteVariadic,
-            returns: ReturnShape::slots(ret_slots),
-            allowed_effects: effects,
-            param_kinds: Vec::new(),
-        });
+        self.module
+            .externs
+            .push(vo_common_core::bytecode::ExternDef {
+                name: name.to_string(),
+                params: ParamShape::CallSiteVariadic,
+                returns: ReturnShape::slots(ret_slots),
+                allowed_effects: effects,
+                param_kinds: Vec::new(),
+            });
         id
     }
 
     pub fn get_or_register_variable_ret_extern_with_return_layout_and_effects(
         &mut self,
         name: &str,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
         effects: ExternEffects,
     ) -> u32 {
         self.get_or_register_variable_ret_extern_with_return_layout_params_and_effects(
@@ -1819,8 +1826,8 @@ impl CodegenContext {
     pub fn get_or_register_variable_ret_extern_with_return_layout_params_and_effects(
         &mut self,
         name: &str,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
         effects: ExternEffects,
     ) -> u32 {
         let returns = ReturnShape::try_with_slot_types(ret_slot_types).unwrap_or_else(|error| {
@@ -1839,7 +1846,7 @@ impl CodegenContext {
         &mut self,
         name: &str,
         returns: ReturnShape,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
         effects: ExternEffects,
     ) -> u32 {
         if !self.validate_variable_ret_extern_identity_or_record(name) {
@@ -1885,13 +1892,15 @@ impl CodegenContext {
         let Some(id) = self.next_u32_table_id_or_record("extern", len) else {
             return 0;
         };
-        self.module.externs.push(vo_runtime::bytecode::ExternDef {
-            name: name.to_string(),
-            params,
-            returns,
-            allowed_effects: effects,
-            param_kinds,
-        });
+        self.module
+            .externs
+            .push(vo_common_core::bytecode::ExternDef {
+                name: name.to_string(),
+                params,
+                returns,
+                allowed_effects: effects,
+                param_kinds,
+            });
         id
     }
 
@@ -1901,7 +1910,7 @@ impl CodegenContext {
         &mut self,
         name: &str,
         ret_slots: u16,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
     ) -> u32 {
         let param_shape = match param_shape_from_kinds(&param_kinds) {
             Ok(shape) => shape,
@@ -1930,7 +1939,7 @@ impl CodegenContext {
         name: &str,
         returns: ReturnShape,
         param_shape: ParamShape,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
         effects: ExternEffects,
     ) -> u32 {
         if !self.validate_extern_identity_or_record(name) {
@@ -1959,13 +1968,15 @@ impl CodegenContext {
         let Some(id) = self.next_u32_table_id_or_record("extern", len) else {
             return 0;
         };
-        self.module.externs.push(vo_runtime::bytecode::ExternDef {
-            name: name.to_string(),
-            params: param_shape,
-            returns,
-            allowed_effects: effects,
-            param_kinds,
-        });
+        self.module
+            .externs
+            .push(vo_common_core::bytecode::ExternDef {
+                name: name.to_string(),
+                params: param_shape,
+                returns,
+                allowed_effects: effects,
+                param_kinds,
+            });
         self.extern_names.insert(name.to_string(), id);
         id
     }
@@ -1974,7 +1985,7 @@ impl CodegenContext {
         &mut self,
         name: &str,
         ret_slots: u16,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
     ) -> u32 {
         let param_shape = match exact_param_shape_from_kinds(&param_kinds) {
             Ok(shape) => shape,
@@ -2001,8 +2012,8 @@ impl CodegenContext {
     pub fn get_or_register_declared_extern_with_return_layout(
         &mut self,
         name: &str,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
     ) -> u32 {
         let returns = ReturnShape::try_with_slot_types(ret_slot_types).unwrap_or_else(|error| {
             self.record_layout_error(error);
@@ -2023,7 +2034,7 @@ impl CodegenContext {
         &mut self,
         name: &str,
         returns: ReturnShape,
-        param_kinds: Vec<vo_runtime::bytecode::ExtSlotKind>,
+        param_kinds: Vec<vo_common_core::bytecode::ExtSlotKind>,
     ) -> u32 {
         let contract = extern_param_shape_for_callsite(name, param_kinds);
         let (param_shape, param_kinds) = self.extern_param_contract_or_record(contract);
@@ -2159,7 +2170,7 @@ impl CodegenContext {
         type_key: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u32 {
-        use vo_runtime::ValueKind;
+        use vo_common_core::ValueKind;
 
         let vk = info.type_value_kind(type_key);
         let meta_id: u32 = match vk {
@@ -2172,13 +2183,13 @@ impl CodegenContext {
             ValueKind::Array => self.intern_type_key(type_key, info),
             _ => 0,
         };
-        vo_runtime::ValueMeta::try_new(meta_id, vk)
+        vo_common_core::ValueMeta::try_new(meta_id, vk)
             .unwrap_or_else(|| {
                 self.record_layout_error(format!(
                     "ValueMeta id {meta_id} exceeds the packed 24-bit ID domain or uses reserved id 0x{:06x}",
-                    vo_runtime::INVALID_META_ID
+                    vo_common_core::INVALID_META_ID
                 ));
-                vo_runtime::ValueMeta::VOID
+                vo_common_core::ValueMeta::VOID
             })
             .to_raw()
     }
@@ -2190,15 +2201,15 @@ impl CodegenContext {
     ) -> u32 {
         let vk = info.type_value_kind(type_key);
         let rttid = self.intern_type_key(type_key, info);
-        vo_runtime::ValueRttid::try_new(rttid, vk)
+        vo_common_core::ValueRttid::try_new(rttid, vk)
             .unwrap_or_else(|| {
                 self.record_layout_error(format!(
                     "ValueRttid id {rttid} exceeds the packed 24-bit ID domain or uses reserved id 0x{:06x}",
-                    vo_runtime::INVALID_META_ID
+                    vo_common_core::INVALID_META_ID
                 ));
-                vo_runtime::ValueRttid::new(
-                    vo_runtime::ValueKind::Void as u32,
-                    vo_runtime::ValueKind::Void,
+                vo_common_core::ValueRttid::new(
+                    vo_common_core::ValueKind::Void as u32,
+                    vo_common_core::ValueKind::Void,
                 )
             })
             .to_raw()
@@ -2266,7 +2277,7 @@ impl CodegenContext {
 
         let key_meta_idx = self.add_const(Constant::Int(key_transfer.meta_raw as i64));
         let val_meta_idx = self.add_const(Constant::Int(val_transfer.meta_raw as i64));
-        let key_rttid = vo_runtime::ValueRttid::from_raw(key_transfer.rttid_raw).rttid();
+        let key_rttid = vo_common_core::ValueRttid::from_raw(key_transfer.rttid_raw).rttid();
 
         Ok((key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid))
     }
@@ -2301,7 +2312,7 @@ impl CodegenContext {
     fn define_wrapper_params(
         ctx: &mut CodegenContext,
         builder: &mut crate::func::FuncBuilder,
-        param_layouts: &[Vec<vo_runtime::SlotType>],
+        param_layouts: &[Vec<vo_common_core::SlotType>],
     ) -> Option<u16> {
         let mut first_param = None;
         for layout in param_layouts {
@@ -2320,8 +2331,8 @@ impl CodegenContext {
     }
 
     fn flatten_param_layouts(
-        param_layouts: &[Vec<vo_runtime::SlotType>],
-    ) -> Vec<vo_runtime::SlotType> {
+        param_layouts: &[Vec<vo_common_core::SlotType>],
+    ) -> Vec<vo_common_core::SlotType> {
         let mut slot_types = Vec::new();
         for layout in param_layouts {
             slot_types.extend_from_slice(layout);
@@ -2349,11 +2360,11 @@ impl CodegenContext {
         recv_type: TypeKey,
         method_func_id: u32,
         is_pointer_recv: bool,
-        recv_slot_types: Vec<vo_runtime::SlotType>,
-        param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
-        param_types: Vec<vo_runtime::bytecode::TransferType>,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
-        capture_type: vo_runtime::bytecode::TransferType,
+        recv_slot_types: Vec<vo_common_core::SlotType>,
+        param_slot_types: Vec<Vec<vo_common_core::SlotType>>,
+        param_types: Vec<vo_common_core::bytecode::TransferType>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
+        capture_type: vo_common_core::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
         let cache_key = if is_pointer_recv {
             MethodValueWrapperKey::Pointer {
@@ -2389,11 +2400,11 @@ impl CodegenContext {
             capture_type.rttid_raw,
             capture_type.slots,
         );
-        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcBase]);
+        builder.add_capture_slot_types(&[vo_common_core::SlotType::GcBase]);
 
-        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
+        let capture_box = builder.alloc_slots(&[vo_common_core::SlotType::GcBase]);
         builder.emit_op(
-            vo_runtime::instruction::Opcode::ClosureGet,
+            vo_common_core::instruction::Opcode::ClosureGet,
             capture_box,
             0,
             0,
@@ -2413,7 +2424,7 @@ impl CodegenContext {
         builder.emit_static_call(method_func_id, args_start);
         builder.set_ret_slot_types(ret_slot_types);
         builder.emit_op(
-            vo_runtime::instruction::Opcode::Return,
+            vo_common_core::instruction::Opcode::Return,
             args_start + total_arg_slots,
             ret_slots,
             0,
@@ -2429,11 +2440,11 @@ impl CodegenContext {
         iface_type: TypeKey,
         iface_meta_id: u32,
         method_idx: u32,
-        param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
+        param_slot_types: Vec<Vec<vo_common_core::SlotType>>,
+        ret_slot_types: Vec<vo_common_core::SlotType>,
         method_name: &str,
-        param_types: Vec<vo_runtime::bytecode::TransferType>,
-        capture_type: vo_runtime::bytecode::TransferType,
+        param_types: Vec<vo_common_core::bytecode::TransferType>,
+        capture_type: vo_common_core::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
         let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
         let param_slots = self.slot_count_u16_or_record(forwarded_slot_types.len());
@@ -2462,24 +2473,24 @@ impl CodegenContext {
             capture_type.rttid_raw,
             capture_type.slots,
         );
-        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcBase]);
+        builder.add_capture_slot_types(&[vo_common_core::SlotType::GcBase]);
 
-        let capture_box = builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
+        let capture_box = builder.alloc_slots(&[vo_common_core::SlotType::GcBase]);
         builder.emit_op(
-            vo_runtime::instruction::Opcode::ClosureGet,
+            vo_common_core::instruction::Opcode::ClosureGet,
             capture_box,
             0,
             0,
         );
 
         let iface_slot = builder.alloc_slots(&[
-            vo_runtime::SlotType::Interface0,
-            vo_runtime::SlotType::Interface1,
+            vo_common_core::SlotType::Interface0,
+            vo_common_core::SlotType::Interface1,
         ]);
         builder.emit_ptr_get(iface_slot, capture_box, 0, 2);
 
         let args_start = builder.alloc_dynamic_call_buffer(
-            &[vo_runtime::SlotType::Value],
+            &[vo_common_core::SlotType::Value],
             &forwarded_slot_types,
             &ret_slot_types,
         );
@@ -2498,7 +2509,7 @@ impl CodegenContext {
         );
         builder.set_ret_slot_types(ret_slot_types);
         builder.emit_op(
-            vo_runtime::instruction::Opcode::Return,
+            vo_common_core::instruction::Opcode::Return,
             args_start + param_slots,
             ret_slots,
             0,
@@ -2548,7 +2559,7 @@ impl CodegenContext {
         self.module.island_init_func = func_id;
     }
 
-    pub fn set_runtime_types(&mut self, runtime_types: Vec<vo_runtime::RuntimeType>) {
+    pub fn set_runtime_types(&mut self, runtime_types: Vec<vo_common_core::RuntimeType>) {
         self.module.runtime_types = runtime_types;
     }
 
@@ -2566,10 +2577,11 @@ impl CodegenContext {
             ));
         }
         let dynamic_callsites = self.module.dynamic_callsite_count();
-        if dynamic_callsites > vo_runtime::instruction::MAX_DYNAMIC_CALLSITE_INDEX as usize + 1 {
+        if dynamic_callsites > vo_common_core::instruction::MAX_DYNAMIC_CALLSITE_INDEX as usize + 1
+        {
             return Err(format!(
                 "module has {dynamic_callsites} dynamic callsites, exceeding the 24-bit inline-cache identity limit of {}",
-                vo_runtime::instruction::MAX_DYNAMIC_CALLSITE_INDEX as usize + 1
+                vo_common_core::instruction::MAX_DYNAMIC_CALLSITE_INDEX as usize + 1
             ));
         }
         if self.module.externs.len() > u32::MAX as usize {
@@ -2671,8 +2683,8 @@ impl CodegenContext {
             for instruction in &mut function.code {
                 if !matches!(
                     instruction.opcode(),
-                    vo_runtime::instruction::Opcode::CallClosure
-                        | vo_runtime::instruction::Opcode::CallIface
+                    vo_common_core::instruction::Opcode::CallClosure
+                        | vo_common_core::instruction::Opcode::CallIface
                 ) {
                     continue;
                 }

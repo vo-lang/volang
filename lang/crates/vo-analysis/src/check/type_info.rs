@@ -320,214 +320,65 @@ impl TypeLayoutFacts {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VisitState {
-    Visiting,
-    Complete,
-}
-
-enum CountTask {
-    Enter(TypeKey),
-    Exit(TypeKey),
-}
-
-/// Compute all by-value subtree widths reachable from `root`.
-///
-/// Reference-bearing type constructors intentionally have no children here:
-/// their pointed-to/element metadata has an independent layout and does not
-/// contribute slots to the reference value itself.
+/// Describe the by-value graph; the common layout evaluator owns physical widths.
 fn compute_slot_counts_for_roots(
     roots: impl IntoIterator<Item = TypeKey>,
     tc_objs: &TCObjects,
     saturation: Option<usize>,
 ) -> Result<HashMap<TypeKey, usize>, TypeLayoutError> {
-    let mut states = HashMap::<TypeKey, VisitState>::new();
-    let mut counts = HashMap::<TypeKey, usize>::new();
-    let mut tasks: Vec<_> = roots.into_iter().map(CountTask::Enter).collect();
-
-    while let Some(task) = tasks.pop() {
-        match task {
-            CountTask::Enter(key) => {
-                if counts.contains_key(&key) {
-                    continue;
-                }
-                match states.get(&key) {
-                    Some(VisitState::Visiting) => {
-                        return Err(TypeLayoutError::ByValueCycle(key));
-                    }
-                    Some(VisitState::Complete) => continue,
-                    None => {}
-                }
-
-                let typ = tc_objs
-                    .types
-                    .get(key)
-                    .ok_or(TypeLayoutError::InvalidTypeKey(key))?;
-                states.insert(key, VisitState::Visiting);
-                tasks.push(CountTask::Exit(key));
-
-                match typ {
-                    Type::Named(named) => {
-                        let underlying = named
-                            .try_underlying()
-                            .ok_or(TypeLayoutError::MissingNamedUnderlying(key))?;
-                        tasks.push(CountTask::Enter(underlying));
-                    }
-                    Type::Struct(detail) => {
-                        for &field in detail.fields().iter().rev() {
-                            let object = tc_objs
-                                .lobjs
-                                .get(field)
-                                .ok_or(TypeLayoutError::InvalidObjectKey(field))?;
-                            let field_type = object
-                                .typ()
-                                .ok_or(TypeLayoutError::MissingObjectType(field))?;
-                            tasks.push(CountTask::Enter(field_type));
-                        }
-                    }
-                    Type::Array(detail) => {
-                        if detail.len().is_none() {
-                            return Err(TypeLayoutError::MissingArrayLength(key));
-                        }
-                        tasks.push(CountTask::Enter(detail.elem()));
-                    }
-                    Type::Tuple(detail) => {
-                        for &variable in detail.vars().iter().rev() {
-                            let object = tc_objs
-                                .lobjs
-                                .get(variable)
-                                .ok_or(TypeLayoutError::InvalidObjectKey(variable))?;
-                            let variable_type = object
-                                .typ()
-                                .ok_or(TypeLayoutError::MissingObjectType(variable))?;
-                            tasks.push(CountTask::Enter(variable_type));
-                        }
-                    }
-                    Type::Basic(_)
-                    | Type::Pointer(_)
-                    | Type::Slice(_)
-                    | Type::Map(_)
-                    | Type::Chan(_)
-                    | Type::Port(_)
-                    | Type::Signature(_)
-                    | Type::Interface(_)
-                    | Type::Island => {}
-                }
-            }
-            CountTask::Exit(key) => {
-                let typ = tc_objs
-                    .types
-                    .get(key)
-                    .ok_or(TypeLayoutError::InvalidTypeKey(key))?;
-                let count = match typ {
-                    Type::Basic(_)
-                    | Type::Pointer(_)
-                    | Type::Slice(_)
-                    | Type::Map(_)
-                    | Type::Chan(_)
-                    | Type::Port(_)
-                    | Type::Signature(_)
-                    | Type::Island => 1,
-                    Type::Interface(_) => 2,
-                    Type::Named(named) => {
-                        let underlying = named
-                            .try_underlying()
-                            .ok_or(TypeLayoutError::MissingNamedUnderlying(key))?;
-                        *counts
-                            .get(&underlying)
-                            .ok_or(TypeLayoutError::ByValueCycle(key))?
-                    }
-                    Type::Struct(detail) => {
-                        let mut total = 0usize;
-                        for &field in detail.fields() {
-                            let object = tc_objs
-                                .lobjs
-                                .get(field)
-                                .ok_or(TypeLayoutError::InvalidObjectKey(field))?;
-                            let field_type = object
-                                .typ()
-                                .ok_or(TypeLayoutError::MissingObjectType(field))?;
-                            let field_slots = *counts
-                                .get(&field_type)
-                                .ok_or(TypeLayoutError::ByValueCycle(key))?;
-                            total = if let Some(limit) = saturation {
-                                total.saturating_add(field_slots).min(limit)
-                            } else {
-                                total
-                                    .checked_add(field_slots)
-                                    .ok_or(TypeLayoutError::SlotCountOverflow(key))?
-                            };
-                        }
-                        total.max(1)
-                    }
-                    Type::Array(detail) => {
-                        let elem_slots = *counts
-                            .get(&detail.elem())
-                            .ok_or(TypeLayoutError::ByValueCycle(key))?;
-                        // Do not convert or multiply a logical giant length
-                        // when each element contributes no physical slots.
-                        if elem_slots == 0 {
-                            0
-                        } else if let Some(limit) = saturation {
-                            // `limit` is the first unencodable VM width. Once
-                            // reached, exact host-sized arithmetic is neither
-                            // useful nor portable (notably for wasm32).
-                            let len = detail
-                                .len()
-                                .ok_or(TypeLayoutError::MissingArrayLength(key))?;
-                            if len == 0 {
-                                0
-                            } else if elem_slots >= limit
-                                || len > u64::try_from(limit / elem_slots).unwrap_or(u64::MAX)
-                            {
-                                limit
-                            } else {
-                                elem_slots
-                                    * usize::try_from(len)
-                                        .map_err(|_| TypeLayoutError::SlotCountOverflow(key))?
-                            }
-                        } else {
-                            let len = detail
-                                .len()
-                                .ok_or(TypeLayoutError::MissingArrayLength(key))?;
-                            let len = usize::try_from(len)
-                                .map_err(|_| TypeLayoutError::SlotCountOverflow(key))?;
-                            elem_slots
-                                .checked_mul(len)
-                                .ok_or(TypeLayoutError::SlotCountOverflow(key))?
-                        }
-                    }
-                    Type::Tuple(detail) => {
-                        let mut total = 0usize;
-                        for &variable in detail.vars() {
-                            let object = tc_objs
-                                .lobjs
-                                .get(variable)
-                                .ok_or(TypeLayoutError::InvalidObjectKey(variable))?;
-                            let variable_type = object
-                                .typ()
-                                .ok_or(TypeLayoutError::MissingObjectType(variable))?;
-                            let variable_slots = *counts
-                                .get(&variable_type)
-                                .ok_or(TypeLayoutError::ByValueCycle(key))?;
-                            total = if let Some(limit) = saturation {
-                                total.saturating_add(variable_slots).min(limit)
-                            } else {
-                                total
-                                    .checked_add(variable_slots)
-                                    .ok_or(TypeLayoutError::SlotCountOverflow(key))?
-                            };
-                        }
-                        total
-                    }
-                };
-                counts.insert(key, count);
-                states.insert(key, VisitState::Complete);
-            }
-        }
-    }
-
-    Ok(counts)
+    use vo_common::slot_layout::{slot_counts, SlotLayout, SlotLayoutError};
+    slot_counts(
+        roots,
+        |key| {
+            let typ = tc_objs
+                .types
+                .get(key)
+                .ok_or(TypeLayoutError::InvalidTypeKey(key))?;
+            let fields = |objects: &[ObjKey]| {
+                objects
+                    .iter()
+                    .map(|&field| {
+                        tc_objs
+                            .lobjs
+                            .get(field)
+                            .ok_or(TypeLayoutError::InvalidObjectKey(field))?
+                            .typ()
+                            .ok_or(TypeLayoutError::MissingObjectType(field))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            };
+            Ok(match typ {
+                Type::Basic(_)
+                | Type::Pointer(_)
+                | Type::Slice(_)
+                | Type::Map(_)
+                | Type::Chan(_)
+                | Type::Port(_)
+                | Type::Signature(_)
+                | Type::Island => SlotLayout::Scalar,
+                Type::Interface(_) => SlotLayout::Interface,
+                Type::Named(named) => SlotLayout::Alias(
+                    named
+                        .try_underlying()
+                        .ok_or(TypeLayoutError::MissingNamedUnderlying(key))?,
+                ),
+                Type::Struct(detail) => SlotLayout::Struct(fields(detail.fields())?),
+                Type::Tuple(detail) => SlotLayout::Tuple(fields(detail.vars())?),
+                Type::Array(detail) => SlotLayout::Array {
+                    element: detail.elem(),
+                    len: detail
+                        .len()
+                        .ok_or(TypeLayoutError::MissingArrayLength(key))?,
+                },
+            })
+        },
+        saturation,
+    )
+    .map_err(|error| match error {
+        SlotLayoutError::Invalid(error) => error,
+        SlotLayoutError::Overflow(key) => TypeLayoutError::SlotCountOverflow(key),
+        SlotLayoutError::Cycle(path) => TypeLayoutError::ByValueCycle(path[0]),
+    })
 }
 
 fn compute_slot_counts(

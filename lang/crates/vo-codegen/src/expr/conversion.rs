@@ -1,7 +1,9 @@
 //! Type conversion compilation.
 
-use vo_runtime::instruction::{conv_f2i_width_flag, Opcode, CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED};
-use vo_runtime::SlotType;
+use vo_common_core::instruction::{
+    conv_f2i_width_flag, Opcode, CONV_FLAG_FLOAT32, CONV_FLAG_UNSIGNED,
+};
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;
@@ -147,7 +149,7 @@ fn emit_numeric_conversion(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) {
-    use vo_runtime::ValueKind;
+    use vo_common_core::ValueKind;
 
     let src_is_int = info.is_int(src_type);
     let src_is_float = info.is_float(src_type);

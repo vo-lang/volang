@@ -360,103 +360,24 @@ struct BuiltinExternEntry {
     effects: crate::bytecode::ExternEffects,
 }
 
-const REGISTERED_EXTERNS: &[BuiltinExternEntry] = &[
-    BuiltinExternEntry {
-        name: "vo_print",
-        func: builtin_print,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_println",
-        func: builtin_println,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_assert",
-        func: builtin_assert,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_copy",
-        func: builtin_copy,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_copy_string",
-        func: builtin_copy,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_slice_append_slice",
-        func: builtin_slice_append_slice,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_slice_append_string",
-        func: builtin_slice_append_slice,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_iface_eq",
-        func: builtin_iface_eq,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_conv_int_str",
-        func: conv_int_str,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_conv_bytes_str",
-        func: conv_bytes_str,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_conv_str_bytes",
-        func: conv_str_bytes,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_conv_runes_str",
-        func: conv_runes_str,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "vo_conv_str_runes",
-        func: conv_str_runes,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: "panic_with_error",
-        func: panic_with_error,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: crate::ffi::MATH_SQRT_EXTERN_NAME,
-        func: math_sqrt,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: crate::ffi::MATH_FLOOR_EXTERN_NAME,
-        func: math_floor,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: crate::ffi::MATH_CEIL_EXTERN_NAME,
-        func: math_ceil,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: crate::ffi::MATH_TRUNC_EXTERN_NAME,
-        func: math_trunc,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-    BuiltinExternEntry {
-        name: crate::ffi::MATH_FMA_EXTERN_NAME,
-        func: math_fma,
-        effects: crate::bytecode::ExternEffects::NONE,
-    },
-];
+macro_rules! extern_name {
+    (canonical($package:literal, $function:literal)) => {
+        crate::vo_extern_name!($package, $function)
+    };
+    (internal($name:literal)) => {
+        $name
+    };
+}
+macro_rules! registered_externs {
+    ($(($kind:ident($($name:literal),+), $function:ident, $effects:expr)),* $(,)?) => {
+        const REGISTERED_EXTERNS: &[BuiltinExternEntry] = &[$(BuiltinExternEntry {
+            name: extern_name!($kind($($name),+)),
+            func: $function,
+            effects: $effects,
+        }),*];
+    };
+}
+vo_common_core::vo_builtin_extern_contracts!(registered_externs);
 
 pub fn known_extern_allowed_effects(name: &str) -> Option<crate::bytecode::ExternEffects> {
     REGISTERED_EXTERNS

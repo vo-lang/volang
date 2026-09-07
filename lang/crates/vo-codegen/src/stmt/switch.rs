@@ -1,8 +1,8 @@
 //! Switch and type switch statement compilation.
 
 use vo_analysis::objects::TypeKey;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, StmtKind};
 
 use crate::context::CodegenContext;

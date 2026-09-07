@@ -907,7 +907,7 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
     if job.backend == "native-aot" {
         return native_aot::run(job).map_err(|error| error.to_string());
     }
-    let compiled = match vo_engine::compile(&job.path) {
+    let compiled = match vo_ui_integration::engine().compile(&job.path) {
         Ok(compiled) => compiled,
         Err(err) => {
             let msg = err.to_string();
@@ -930,7 +930,12 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         other => return Err(format!("unsupported backend in run-plan: {other}")),
     };
     let sink = vo_engine::CaptureSink::new();
-    let result = vo_engine::run_with_output_observed(compiled, mode, Vec::new(), sink.clone());
+    let result = vo_ui_integration::engine().run_with_output_observed(
+        compiled,
+        mode,
+        Vec::new(),
+        sink.clone(),
+    );
     let output = sink.take();
     if !output.is_empty() {
         print!("{output}");

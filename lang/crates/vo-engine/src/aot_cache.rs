@@ -37,6 +37,16 @@ impl AotCacheKey {
         kind: AotCacheArtifactKind,
         debug_ir: bool,
     ) -> Self {
+        crate::Engine::default().aot_cache_key(module_bytes, target, kind, debug_ir)
+    }
+
+    pub(crate) fn for_engine(
+        engine: &crate::Engine,
+        module_bytes: &[u8],
+        target: &TargetSpec,
+        kind: AotCacheArtifactKind,
+        debug_ir: bool,
+    ) -> Self {
         let mut hasher = Sha256::new();
         hash_field(&mut hasher, b"domain", b"volang-aot-cache-key-v1");
         hash_field(
@@ -59,9 +69,16 @@ impl AotCacheKey {
         hash_field(&mut hasher, b"debug-ir", &[u8::from(debug_ir)]);
         hash_field(
             &mut hasher,
+            b"engine-extension",
+            engine.cache_identity().as_bytes(),
+        );
+        #[cfg(feature = "aot-native")]
+        hash_field(
+            &mut hasher,
             b"native-aot-abi",
             &vo_jit::NATIVE_AOT_ABI_VERSION.to_le_bytes(),
         );
+        #[cfg(feature = "aot-wasm")]
         hash_field(
             &mut hasher,
             b"wasm-aot-abi",

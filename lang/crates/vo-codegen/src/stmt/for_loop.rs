@@ -5,8 +5,8 @@
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, Stmt, StmtKind};
 
 use crate::context::CodegenContext;

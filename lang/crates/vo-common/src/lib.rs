@@ -10,6 +10,7 @@
 
 pub mod abi;
 pub mod diagnostics;
+pub mod slot_layout;
 pub mod source;
 pub mod span;
 pub mod stable_hash;

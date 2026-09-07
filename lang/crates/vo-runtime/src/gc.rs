@@ -658,6 +658,7 @@ impl ValueSlotAllocationRegionField {
         i32::try_from(region.checked_add(field)?).ok()
     }
 
+    #[cfg(not(feature = "gc-debug"))]
     #[inline]
     pub(crate) fn class_index_for_size(size: usize) -> Option<u8> {
         u8::try_from(heap::allocation_class(size)?.0).ok()

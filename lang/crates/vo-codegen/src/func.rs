@@ -3,14 +3,14 @@
 use std::collections::HashMap;
 use vo_common::span::Span;
 use vo_common::symbol::Symbol;
+use vo_common_core::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
 use vo_common_core::instruction::{
     pack_u8_slot_count, HINT_LOOP, IFACE_ASSERT_HAS_OK_FLAG, QUEUE_KIND_PORT_FLAG,
     QUEUE_RECV_HAS_OK_FLAG,
 };
+use vo_common_core::instruction::{Instruction, Opcode};
+use vo_common_core::SlotType;
 use vo_common_core::{InstructionMetadata, SelectCaseLayout, TransferType};
-use vo_runtime::bytecode::{FunctionDef, MAX_CLOSURE_CAPTURE_SLOTS};
-use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::SlotType;
 
 use crate::error::CodegenError;
 
@@ -517,7 +517,7 @@ impl FuncBuilder {
             },
         );
         // Emit PtrNew + PtrSet
-        use vo_runtime::instruction::Opcode;
+        use vo_common_core::instruction::Opcode;
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         assert_eq!(value_slots as usize, slot_types.len());
@@ -1525,7 +1525,7 @@ impl FuncBuilder {
         ptr: u16,
         offset: u16,
         src: u16,
-        slot_types: &[vo_runtime::SlotType],
+        slot_types: &[vo_common_core::SlotType],
     ) {
         let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrSet value layout");
 
@@ -1645,7 +1645,7 @@ impl FuncBuilder {
         &mut self,
         storage: StorageKind,
         src: u16,
-        slot_types: &[vo_runtime::SlotType],
+        slot_types: &[vo_common_core::SlotType],
     ) {
         match storage {
             StorageKind::StackValue { slot, slots } => {
@@ -2431,7 +2431,10 @@ impl FuncBuilder {
         self.add_param_type(meta_raw, rttid_raw, slots);
     }
 
-    pub fn add_param_transfer_types(&mut self, param_types: &[vo_runtime::bytecode::TransferType]) {
+    pub fn add_param_transfer_types(
+        &mut self,
+        param_types: &[vo_common_core::bytecode::TransferType],
+    ) {
         for transfer_type in param_types {
             self.add_param_type(
                 transfer_type.meta_raw,

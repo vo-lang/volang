@@ -155,7 +155,7 @@ name = "Official UIKit gallery and interaction laboratory"
 status = "complete"
 starts_in = "E3"
 acceptance = ["Every official component, state, theme, locale, density, input mode, and accessibility mode runs as Web AOT and packaged Native AOT."]
-commands = ["cargo test --locked -p vo-engine --features jit official_uikit_", "./eng/run-uikit-gallery-contracts.sh", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser"]
+commands = ["cargo test --locked -p vo-ui-integration official_uikit_", "./eng/run-uikit-gallery-contracts.sh", "npm --prefix lang/crates/vo-web run test:uikit-gallery-browser"]
 evidence = ["ui/showcases/component-gallery/main.vo", "ui/kit/catalog.toml", "ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/uikit.paint.txt", "ui/testdata/goldens/uikit.web.txt", "generated:target/ci/results/ui/volang-uikit-gallery-browser.json"]
 
 [[showcase]]
@@ -164,7 +164,7 @@ name = "Content, documentation, and forms Web application"
 status = "complete"
 starts_in = "E5"
 acceptance = ["SSG, SSR, streaming, metadata, search, forms, assets, offline policy, activation, and WCAG 2.2 AA ship useful HTML before Wasm."]
-commands = ["cargo test --locked -p vo-engine --features jit official_content_site_renders_distinct_useful_routes_and_web_aot", "./eng/run-content-site-contracts.sh", "npm --prefix lang/crates/vo-web run test:content-site-browser"]
+commands = ["cargo test --locked -p vo-ui-integration official_content_site_renders_distinct_useful_routes_and_web_aot", "./eng/run-content-site-contracts.sh", "npm --prefix lang/crates/vo-web run test:content-site-browser"]
 evidence = ["ui/showcases/content-site/main.vo", "ui/showcases/content-site/ui.web.toml", "ui/web/server/server.vo", "eng/run-content-site-contracts.sh", "generated:target/ci/results/ui/volang-content-site-browser.json", "ui/docs/web-desktop-products.md"]
 
 [[showcase]]
@@ -173,7 +173,7 @@ name = "Data-dense dashboard and administration application"
 status = "complete"
 starts_in = "E4"
 acceptance = ["Tables, trees, virtual grids, filtering, sorting, pagination, charts, forms, commands, optimistic data, responsive Web, and desktop workspaces share one domain model."]
-commands = ["cargo test --locked -p vo-engine --features jit official_data_application_compiles_and_bounds_vm_jit_materialization", "./eng/run-data-application-contracts.sh", "npm --prefix lang/crates/vo-web run test:data-application-browser", "cargo run --locked --profile release-native -p vo-ui-benchmark"]
+commands = ["cargo test --locked -p vo-ui-integration official_data_application_compiles_and_bounds_vm_jit_materialization", "./eng/run-data-application-contracts.sh", "npm --prefix lang/crates/vo-web run test:data-application-browser", "cargo run --locked --profile release-native -p vo-ui-benchmark"]
 evidence = ["ui/showcases/data-application/main.vo", "ui/tests/application-platform/main.vo", "ui/resource/resource.vo", "ui/kit/data/data.vo", "eng/run-data-application-contracts.sh", "generated:target/ci/results/ui/volang-data-application-browser.json", ".github/workflows/ci.yml#ui_platform"]
 
 [[showcase]]
@@ -182,7 +182,7 @@ name = "Graphics and media application"
 status = "complete"
 starts_in = "E6"
 acceptance = ["Images, SVG, canvas, animation, audio, video, capture, permissions, recovery, and capability results cover Web, macOS, Windows, and Linux."]
-commands = ["cargo test --locked -p vo-engine --features jit official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-engine --features jit official_advanced_packs_are_vm_jit_and_aot_equivalent", "./eng/run-media-application-contracts.sh", "npm --prefix lang/crates/vo-web run test:media-application-browser"]
+commands = ["cargo test --locked -p vo-ui-integration official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-ui-integration official_advanced_packs_are_vm_jit_and_aot_equivalent", "./eng/run-media-application-contracts.sh", "npm --prefix lang/crates/vo-web run test:media-application-browser"]
 evidence = ["ui/showcases/media-application/main.vo", "ui/media/media.vo", "lang/crates/vo-web/js/ui_dom.ts", "eng/run-media-application-contracts.sh", "generated:target/ci/results/ui/volang-media-application-browser.json", ".github/workflows/ci.yml#ui_platform", "ui/docs/advanced-capability-packs.md"]
 
 [[showcase]]
@@ -191,28 +191,28 @@ name = "Pure-Volang Studio workbench"
 status = "complete"
 starts_in = "E6"
 acceptance = ["Project management, file tree, official editor, console, docs, commands, windows, and embedded previews use public APIs across VM/JIT development and Wasm/Native AOT release."]
-commands = ["cargo test --locked -p vo-engine --features jit official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-engine --features jit official_multi_window_editor_preserves_shared_document_and_native_aot", "./eng/run-studio-workbench-contracts.sh", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "cargo test --locked -p vo pure_volang_studio_starter_opens_edits_saves_and_runs", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
+commands = ["cargo test --locked -p vo-ui-integration official_media_and_studio_showcases_use_public_advanced_packs", "cargo test --locked -p vo-ui-integration official_multi_window_editor_preserves_shared_document_and_native_aot", "./eng/run-studio-workbench-contracts.sh", "npm --prefix lang/crates/vo-web run test:studio-workbench-browser", "cargo test --locked -p vo pure_volang_studio_starter_opens_edits_saves_and_runs", "npm --prefix lang/crates/vo-web run test:studio-aot-browser"]
 evidence = ["ui/showcases/studio-workbench/main.vo", "ui/showcases/studio-workbench/ui.web.toml", "ui/showcases/studio-workbench/ui.desktop.toml", "ui/templates/studio/main.vo", "ui/editor/editor.vo", "ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "apps/studio/app/app.vo", "apps/studio/examples/examples.vo", "apps/studio/product-parity.toml", "eng/run-studio-workbench-contracts.sh", "generated:target/ci/results/ui/volang-studio-workbench-browser.json", ".github/workflows/ci.yml#ui_platform"]
 
 [[gate]]
 id = "public-api-usability"
 status = "complete"
 acceptance = ["Executable authoring probes pass API ceremony, diagnostics, documentation, migration, target, and stability review."]
-commands = ["cargo test --locked -p vo ui_", "cargo test --locked -p vo-engine --features jit official_ui_"]
+commands = ["cargo test --locked -p vo ui_", "cargo test --locked -p vo-ui-integration official_ui_"]
 evidence = ["ui/templates", "ui/docs/getting-started.md", "ui/docs/authoring-guide.md", "ui/docs/compatibility-migration.md", "cmd/vo/src/ui_dev.rs"]
 
 [[gate]]
 id = "component-and-pattern-coverage"
 status = "complete"
 acceptance = ["The governed UIKit, behavior, command, form, data, navigation, and application-pattern matrices contain no required incomplete row."]
-commands = ["cargo test --locked -p vo-engine --features jit official_uikit_", "cargo run -q -p vo-dev --locked -- ui-certify --check"]
+commands = ["cargo test --locked -p vo-ui-integration official_uikit_", "cargo run -q -p vo-dev --locked -- ui-certify --check"]
 evidence = ["ui/kit/catalog.toml", "ui/kit/components/components.vo", "ui/kit/data/data.vo", "ui/tests/application-platform/main.vo", "ui/showcases/component-gallery/main.vo"]
 
 [[gate]]
 id = "layout-graphics-text"
 status = "complete"
 acceptance = ["Layout, scrolling, graphics, assets, animation, rich text, documents, editing, charting, and media pass declared cross-renderer conformance."]
-commands = ["cargo test --locked -p vo-ui-layout -p vo-ui-paint -p vo-ui-golden", "cargo test --locked -p vo-engine --features jit official_advanced_packs_are_vm_jit_and_aot_equivalent"]
+commands = ["cargo test --locked -p vo-ui-layout -p vo-ui-paint -p vo-ui-golden", "cargo test --locked -p vo-ui-integration official_advanced_packs_are_vm_jit_and_aot_equivalent"]
 evidence = ["ui/crates/vo-ui-layout", "ui/crates/vo-ui-paint", "ui/graphics/graphics.vo", "ui/document/document.vo", "ui/editor/editor.vo", "ui/media/media.vo"]
 
 [[gate]]
@@ -226,7 +226,7 @@ evidence = ["ui/testdata/goldens/uikit.accessibility.txt", "ui/gesture/gesture.v
 id = "web-product"
 status = "complete"
 acceptance = ["Client, server authority, SSG, streaming SSR, activation, actions, caching, metadata, PWA, security, and deployment adapters pass real-browser suites."]
-commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "./eng/run-content-site-contracts.sh", "cargo test --locked -p vo-engine --features jit official_content_site_renders_distinct_useful_routes_and_web_aot"]
+commands = ["npm --prefix lang/crates/vo-web run test:ui", "npm --prefix lang/crates/vo-web run test:ui-browser", "npm --prefix lang/crates/vo-web run test:ui-component-browser", "npm --prefix lang/crates/vo-web run test:content-site-browser", "./eng/run-content-site-contracts.sh", "cargo test --locked -p vo-ui-integration official_content_site_renders_distinct_useful_routes_and_web_aot"]
 evidence = ["lang/crates/vo-web", "ui/web", "ui/showcases/content-site", "ui/docs/web-desktop-products.md", ".github/workflows/ci.yml#wasm_web"]
 
 [[gate]]
@@ -240,14 +240,14 @@ evidence = ["lang/crates/vo-ui-shell-native", "lang/crates/vo-ui-host-native", "
 id = "platform-and-media-services"
 status = "complete"
 acceptance = ["Capability, permission, system, storage, network, process, plugin, graphics, media, and capture contracts pass support and failure matrices."]
-commands = ["cargo test --locked -p vo-engine --features jit official_advanced_packs_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-system -p vo-ui-system-native -p vo-ui-protocol"]
+commands = ["cargo test --locked -p vo-ui-integration official_advanced_packs_are_vm_jit_and_aot_equivalent", "cargo test --locked -p vo-ui-system -p vo-ui-system-native -p vo-ui-protocol"]
 evidence = ["ui/platform/platform.vo", "ui/system/system.vo", "ui/media/media.vo", "ui/testing/testing.vo", "ui/tests/advanced-packs/main.vo"]
 
 [[gate]]
 id = "developer-tools"
 status = "complete"
 acceptance = ["CLI, language tooling, diagnostics, reload, preview, inspector, profiler, size analyzer, package, and publish workflows pass."]
-commands = ["cargo test --locked -p vo ui_", "cargo test --locked -p vo-engine --features jit official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent", "cargo run -q -p vo-dev --locked -- ui-certify --check"]
+commands = ["cargo test --locked -p vo ui_", "cargo test --locked -p vo-ui-integration official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent", "cargo run -q -p vo-dev --locked -- ui-certify --check"]
 evidence = ["cmd/vo/src/ui_dev.rs", "ui/language/language.vo", "ui/editor/editor.vo", "ui/editors/vscode", "ui/docs/tooling-resilience-ecosystem.md"]
 
 [[gate]]
@@ -261,14 +261,14 @@ evidence = ["ui/quality-matrix.toml", "ui/testing/testing.vo", "fuzz", ".github/
 id = "performance-and-resilience"
 status = "complete"
 acceptance = ["Startup, compressed download, binary size, memory, allocation, frame, latency, jank, power, backpressure, recovery, observability, and security budgets pass."]
-commands = ["cargo run --locked --profile release-native -p vo-ui-benchmark", "cargo test --locked -p vo-engine --features jit official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent"]
+commands = ["cargo run --locked --profile release-native -p vo-ui-benchmark", "cargo test --locked -p vo-ui-integration official_ui_testing_and_observability_are_vm_jit_and_aot_equivalent"]
 evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", "ui/docs/quality-budgets.md", "ui/observability/observability.vo", "ui/docs/security.md", ".github/workflows/ci.yml#ui_platform"]
 
 [[gate]]
 id = "showcase-dogfood"
 status = "complete"
 acceptance = ["Every required showcase is complete and ships from the same candidate release artifacts."]
-commands = ["cargo test --locked -p vo-engine --features jit official_uikit_", "cargo test --locked -p vo-engine --features jit official_data_application_compiles_and_bounds_vm_jit_materialization", "cargo test --locked -p vo-engine --features jit official_content_site_renders_distinct_useful_routes_and_web_aot", "cargo test --locked -p vo-engine --features jit official_media_and_studio_showcases_use_public_advanced_packs"]
+commands = ["cargo test --locked -p vo-ui-integration official_uikit_", "cargo test --locked -p vo-ui-integration official_data_application_compiles_and_bounds_vm_jit_materialization", "cargo test --locked -p vo-ui-integration official_content_site_renders_distinct_useful_routes_and_web_aot", "cargo test --locked -p vo-ui-integration official_media_and_studio_showcases_use_public_advanced_packs"]
 evidence = ["ui/showcases", "ui/product-certification.toml", ".github/workflows/release.yml"]
 
 [[gate]]

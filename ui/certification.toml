@@ -33,8 +33,8 @@ evidence = ["ui/testdata/goldens/uikit.accessibility.txt", "ui/testdata/goldens/
 [[gate]]
 id = "vm-jit-aot-differential"
 summary = "Official UI behavior and lowering agree across VM, JIT, Native AOT, and Core Wasm AOT."
-commands = ["cargo test --locked -p vo-engine official_ui_", "cargo test --locked -p vo-engine component_bundle_", "cargo test --locked -p vo-ui-vm"]
-evidence = ["lang/crates/vo-engine/src/run.rs", "ui/tests/nested-component-list/main.vo", ".github/workflows/ci.yml#language_native", ".github/workflows/ci.yml#wasm_web", ".github/workflows/ci.yml#ui_platform"]
+commands = ["cargo test --locked -p vo-ui-integration official_ui_", "cargo test --locked -p vo-ui-integration component_bundle_", "cargo test --locked -p vo-ui-vm"]
+evidence = ["lang/crates/vo-ui-integration/src/tests.rs", "ui/tests/nested-component-list/main.vo", ".github/workflows/ci.yml#language_native", ".github/workflows/ci.yml#wasm_web", ".github/workflows/ci.yml#ui_platform"]
 
 [[gate]]
 id = "web-browser-suite"

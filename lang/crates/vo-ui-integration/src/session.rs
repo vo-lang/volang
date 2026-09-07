@@ -11,7 +11,7 @@ use vo_ui_protocol::{decode_batch, encode_event, EventEnvelope, ProtocolLimits, 
 use vo_vm::scheduler::{HostWaitKey, HostWaitSource, PendingHostEvent};
 use vo_vm::vm::{SchedulingOutcome, Vm};
 
-use crate::run::PreparedNativeUiReload;
+use crate::runtime::PreparedNativeUiReload;
 
 const ROOT_NODE: NodeId = NodeId::new(0, 1);
 

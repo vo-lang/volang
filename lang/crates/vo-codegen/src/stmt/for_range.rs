@@ -5,8 +5,8 @@
 
 use vo_analysis::objects::TypeKey;
 use vo_common_core::bytecode::MAP_ITER_SLOT_TYPES;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;

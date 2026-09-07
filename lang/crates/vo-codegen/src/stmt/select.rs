@@ -1,9 +1,9 @@
 //! Select statement compilation.
 
 use vo_analysis::objects::TypeKey;
+use vo_common_core::instruction::Opcode;
 use vo_common_core::SelectCaseLayout;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::SlotType;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

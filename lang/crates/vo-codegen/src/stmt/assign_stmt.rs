@@ -3,7 +3,7 @@
 //! Handles short variable declarations, regular assignments, multi-value assignments,
 //! parallel assignments, and compound assignments.
 
-use vo_runtime::instruction::Opcode;
+use vo_common_core::instruction::Opcode;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;
@@ -440,7 +440,7 @@ fn compile_compound_assign(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use crate::lvalue::{emit_lvalue_load, resolve_lvalue_for_read, snapshot_lvalue_operands};
-    use vo_runtime::instruction::SHIFT_FLAG_RHS_UNSIGNED;
+    use vo_common_core::instruction::SHIFT_FLAG_RHS_UNSIGNED;
     use vo_syntax::ast::AssignOp;
 
     // Get the operation opcode based on AssignOp and type
@@ -507,8 +507,8 @@ fn compile_compound_assign(
         // Float32 values are stored as 32-bit IEEE bits in one VM slot. The
         // arithmetic opcodes consume f64 bits, so widen both operands and
         // round the result back to the declared storage type.
-        let lhs_wide = func.alloc_slots(&[vo_runtime::SlotType::Float]);
-        let rhs_wide = func.alloc_slots(&[vo_runtime::SlotType::Float]);
+        let lhs_wide = func.alloc_slots(&[vo_common_core::SlotType::Float]);
+        let rhs_wide = func.alloc_slots(&[vo_common_core::SlotType::Float]);
         func.emit_op(Opcode::ConvF32F64, lhs_wide, tmp, 0);
         func.emit_op(Opcode::ConvF32F64, rhs_wide, rhs_reg, 0);
         func.emit_op(opcode, lhs_wide, lhs_wide, rhs_wide);

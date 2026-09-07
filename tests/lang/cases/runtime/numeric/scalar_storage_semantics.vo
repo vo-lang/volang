@@ -1,0 +1,67 @@
+// Arithmetic and panic state must agree in direct functions, cached scalar
+// frames, and wide frames whose scalar promotion is deliberately bounded.
+package main
+
+func directArithmetic(a, b int) int {
+	x := a * 5
+	x += b
+	x ^= 7
+	x <<= 2
+	x >>= 1
+	x = x / 3 - x % 3
+	return x
+}
+
+func cachedArithmetic(a, b int) (result int) {
+	defer func() {
+		result += 1
+	}()
+	x := a * 5
+	x += b
+	x ^= 7
+	x <<= 2
+	x >>= 1
+	result = x / 3 - x % 3
+	return
+}
+
+func wideArithmetic(a, b int, f float64) int {
+	var padding [520]int
+	defer func() {}()
+	x := a * 5
+	x += b
+	x ^= 7
+	x <<= 2
+	x >>= 1
+	padding[519] = x / 3 - x % 3
+	return padding[519] + int(int8(f)) + int(uint8(f)) + int(float32(f)) + int(^uint8(0))
+}
+
+func wideTrap(negativeShift bool) (result int) {
+	var padding [520]int
+	padding[519] = 77
+	defer func() {
+		recover()
+	}()
+	result = padding[519]
+	if negativeShift {
+		shift := -1
+		_ = 8 << shift
+	} else {
+		zero := result - 77
+		_ = 1 / zero
+	}
+	result = -1
+	return
+}
+
+func main() {
+	for i := 0; i < 8; i++ {
+		assert(directArithmetic(2, 3) == 4)
+		assert(cachedArithmetic(2, 3) == 5)
+		assert(wideArithmetic(2, 3, 300.25) == 941)
+		assert(wideTrap(false) == 77)
+		assert(wideTrap(true) == 77)
+	}
+	println("scalar storage semantics: ok")
+}

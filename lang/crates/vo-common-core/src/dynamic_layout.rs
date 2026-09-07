@@ -324,12 +324,12 @@ pub fn runtime_value_is_assignable(
         ..
     } = target_runtime_type
     {
-        if source == target {
-            return true;
-        }
         let Some(target_interface) = module.interface_metas.get(*target_meta_id as usize) else {
             return false;
         };
+        if source == target {
+            return true;
+        }
         if target_interface.methods.is_empty() {
             return true;
         }

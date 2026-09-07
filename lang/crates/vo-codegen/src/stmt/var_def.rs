@@ -5,9 +5,9 @@
 
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::symbol::Symbol;
-use vo_runtime::bytecode::ReturnShape;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::bytecode::ReturnShape;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
@@ -724,7 +724,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         &mut self,
         storage: StorageKind,
         src_slot: u16,
-        slot_types: &[vo_runtime::SlotType],
+        slot_types: &[vo_common_core::SlotType],
     ) {
         match storage {
             // HeapArray needs special handling: copy elements, not GcRef

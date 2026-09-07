@@ -7,8 +7,8 @@
 //! - Container indexing (arr[i], slice[i], map[k])
 //! - Pointer dereference (*p)
 
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 
 use crate::context::CodegenContext;
@@ -1353,8 +1353,10 @@ pub fn emit_lvalue_load(
             let argument = externalized_handle_value(handle, func);
             let extern_id = ctx.get_or_register_declared_extern_with_return_shape(
                 read_extern,
-                vo_runtime::bytecode::ReturnShape::try_with_slot_types(value_slot_types.clone())
-                    .map_err(CodegenError::Internal)?,
+                vo_common_core::bytecode::ReturnShape::try_with_slot_types(
+                    value_slot_types.clone(),
+                )
+                .map_err(CodegenError::Internal)?,
                 crate::context::ext_slot_kinds_for_slot_types(&[SlotType::Value]),
             );
             func.emit_call_extern(dst, extern_id, argument, 1, value_slot_types);
@@ -1395,7 +1397,7 @@ pub fn emit_lvalue_store(
     src: u16,
     ctx: &mut crate::context::CodegenContext,
     func: &mut FuncBuilder,
-    slot_types: &[vo_runtime::SlotType],
+    slot_types: &[vo_common_core::SlotType],
 ) -> Result<(), CodegenError> {
     match lv {
         LValue::Variable(storage) => {
@@ -1422,7 +1424,7 @@ pub fn emit_lvalue_store(
             func.emit_copy(arguments + 1, src, value_slot_types.len() as u16);
             let extern_id = ctx.get_or_register_declared_extern_with_return_shape(
                 write_extern,
-                vo_runtime::bytecode::ReturnShape::slots(0),
+                vo_common_core::bytecode::ReturnShape::slots(0),
                 crate::context::ext_slot_kinds_for_slot_types(&arguments_layout),
             );
             func.emit_call_extern(arguments, extern_id, arguments, arguments_layout.len(), &[]);
@@ -1752,7 +1754,7 @@ fn emit_flattened_store(
     flat: &FlattenedBase,
     src: u16,
     slots: u16,
-    slot_types: &[vo_runtime::SlotType],
+    slot_types: &[vo_common_core::SlotType],
     func: &mut FuncBuilder,
 ) {
     match flat {

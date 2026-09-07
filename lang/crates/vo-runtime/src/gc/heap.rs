@@ -1445,6 +1445,7 @@ pub(super) fn allocation_class(size: usize) -> Option<(usize, usize)> {
     Some((shift - MIN_CLASS_SHIFT, class_size))
 }
 
+#[cfg(any(test, not(feature = "gc-debug")))]
 #[inline]
 pub(super) fn allocation_bit(cursor: *mut u8, class_size: usize) -> u64 {
     debug_assert!(class_size.is_power_of_two());

@@ -38,7 +38,7 @@ acceptance = ["Nested keyed component calls own independent state, handler, effe
 evidence = [
   "ui/crates/vo-ui-runtime/src/component.rs",
   "lang/crates/vo-ui-vm/src/lib.rs",
-  "lang/crates/vo-engine/src/run.rs",
+  "lang/crates/vo-ui-integration/src/tests.rs",
   "lang/crates/vo-web/tests/ui_protocol.test.mjs",
   "ui/tests/nested-component-list/main.vo",
 ]
@@ -52,7 +52,7 @@ status = "stable"
 api_stability = "internal"
 tier = "core"
 required_for_1_0 = true
-owners = ["vo-ui-artifact", "vo-ui-compiler", "vo-engine"]
+owners = ["vo-ui-artifact", "vo-ui-compiler", "vo-ui-integration", "vo-engine"]
 required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 optional_targets = ["server-native-aot"]
 depends_on = ["component-instance-graph"]
@@ -64,7 +64,7 @@ evidence = [
   "lang/crates/vo-jit/src/aot.rs",
   "lang/crates/vo-wasm-aot/src/lib.rs",
   "lang/crates/vo-ui-compiler/src/lib.rs",
-  "lang/crates/vo-engine/src/run.rs",
+  "lang/crates/vo-ui-integration/src/tests.rs",
   "fuzz/ui-artifact/fuzz_targets/ui_artifact_decoders.rs",
 ]
 
@@ -245,7 +245,7 @@ owners = ["ui/kit", "vo-ui-layout", "vo-ui-runtime"]
 required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 depends_on = ["component-instance-graph", "layout-engine-baseline"]
 acceptance = ["Large variable-size collections materialize bounded content and preserve stable keyed component state."]
-evidence = ["ui/kit/kit.vo", "ui/kit/data/data.vo", "ui/examples/virtual-list/main.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-engine/src/run.rs"]
+evidence = ["ui/kit/kit.vo", "ui/kit/data/data.vo", "ui/examples/virtual-list/main.vo", "ui/showcases/data-application/main.vo", "lang/crates/vo-ui-integration/src/tests.rs"]
 
 [[capability]]
 id = "workspace-layout"
@@ -260,7 +260,7 @@ owners = ["ui/kit", "ui/desktop"]
 required_targets = ["headless", "web-vm", "web-wasm-aot", "desktop-vm", "desktop-jit", "desktop-native-aot"]
 depends_on = ["adaptive-layout-measurement", "virtual-collections"]
 acceptance = ["Workspace layouts restore geometry and preserve focus, semantics, and component identity across adaptation."]
-evidence = ["ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "ui/showcases/studio-workbench/main.vo", "lang/crates/vo-engine/src/run.rs"]
+evidence = ["ui/workspace/workspace.vo", "ui/tests/multi-window-editor/main.vo", "ui/showcases/studio-workbench/main.vo", "lang/crates/vo-ui-integration/src/tests.rs"]
 
 [[capability]]
 id = "paint-baseline"
@@ -338,7 +338,7 @@ required_targets = ["headless", "web-wasm-aot", "desktop-native-aot", "server-na
 optional_targets = ["web-vm", "desktop-vm", "desktop-jit"]
 depends_on = ["native-text-baseline", "structured-state", "virtual-collections"]
 acceptance = ["Rich text, Markdown, selection, undo, redo, find, replace, line indexing, and large-document editing share one bounded model."]
-evidence = ["ui/document/document.vo", "ui/tests/advanced-packs/main.vo", "ui/tests/multi-window-editor/main.vo", "lang/crates/vo-engine/src/run.rs"]
+evidence = ["ui/document/document.vo", "ui/tests/advanced-packs/main.vo", "ui/tests/multi-window-editor/main.vo", "lang/crates/vo-ui-integration/src/tests.rs"]
 
 [[capability]]
 id = "official-code-editor"
@@ -619,12 +619,12 @@ status = "stable"
 api_stability = "internal"
 tier = "platform"
 required_for_1_0 = true
-owners = ["ui/web", "vo-ui-compiler", "vo-engine"]
+owners = ["ui/web", "vo-ui-compiler", "vo-ui-integration"]
 required_targets = ["server-native-aot", "web-wasm-aot"]
 optional_targets = ["web-vm"]
 depends_on = ["package-component-linking", "component-lifecycle"]
 acceptance = ["Build-time dependency analysis prevents server-only capabilities and secrets from entering client artifacts."]
-evidence = ["ui/web/web.vo", "ui/web/server/server.vo", "lang/crates/vo-engine/src/compile/mod.rs", "lang/crates/vo-engine/src/compile/pipeline.rs", "lang/crates/vo-engine/src/run.rs"]
+evidence = ["ui/web/web.vo", "ui/web/server/server.vo", "lang/crates/vo-ui-integration/src/extension.rs", "lang/crates/vo-ui-integration/src/compile.rs", "lang/crates/vo-ui-integration/src/tests.rs"]
 
 [[capability]]
 id = "web-fullstack-production"
@@ -635,7 +635,7 @@ status = "stable"
 api_stability = "stable"
 tier = "platform"
 required_for_1_0 = true
-owners = ["ui/web", "vo-ui-web", "vo-ui-compiler", "vo-engine", "vo-ui-cli"]
+owners = ["ui/web", "vo-ui-web", "vo-ui-compiler", "vo-ui-integration", "vo-engine", "vo-ui-cli"]
 required_targets = ["server-native-aot", "web-wasm-aot"]
 optional_targets = ["web-vm"]
 depends_on = ["web-server-authority", "typed-navigation", "forms-commands-patterns"]
@@ -901,7 +901,7 @@ required_targets = ["web-wasm-aot", "desktop-native-aot", "server-native-aot"]
 optional_targets = ["headless", "web-vm", "desktop-vm", "desktop-jit"]
 depends_on = ["direct-update-budget", "executable-contract-probes"]
 acceptance = ["Reference and low-end profiles define p50, p95, p99, startup, download, binary, memory, allocation, frame, jank, latency, and power budgets."]
-evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", "ui/docs/quality-budgets.md", "lang/crates/vo-engine/src/run.rs"]
+evidence = ["ui/crates/vo-ui-benchmark/src/main.rs", "ui/docs/quality-budgets.md", "lang/crates/vo-ui-integration/src/tests.rs"]
 
 [[capability]]
 id = "recovery-observability-security"

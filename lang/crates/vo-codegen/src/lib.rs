@@ -23,7 +23,7 @@ pub use type_interner::{intern_type_key, TypeInterner};
 
 use vo_analysis::objects::{ObjKey, PackageKey};
 use vo_analysis::Project;
-use vo_runtime::bytecode::Module;
+use vo_common_core::bytecode::Module;
 use vo_syntax::ast::{Decl, Expr, ExprId, Visitor};
 
 /// One compiler-owned expression entrypoint requested by a typed adapter.
@@ -329,7 +329,7 @@ fn compile_package_expression_evaluators(
             })?;
             if ctx.externalized_local(*parameter).is_some() {
                 builder
-                    .try_define_param(Some(symbol), 1, &[vo_runtime::SlotType::Value])
+                    .try_define_param(Some(symbol), 1, &[vo_common_core::SlotType::Value])
                     .map_err(CodegenError::Internal)?;
                 if info.closure_captures(expression.id).contains(parameter) {
                     escaped_externalized_params.push(symbol);
@@ -359,7 +359,7 @@ fn compile_package_expression_evaluators(
                 1,
                 false,
                 ctx.opaque_handle_meta(),
-                &[vo_runtime::SlotType::Value],
+                &[vo_common_core::SlotType::Value],
             );
         }
         for (symbol, type_key, slots, slot_types) in escaped_source_params {
@@ -396,7 +396,7 @@ fn compile_package_expression_evaluators(
         builder.set_return_types(vec![result_type]);
         let result = expr::compile_expr(expression, ctx, &mut builder, info)?;
         builder.emit_op(
-            vo_runtime::instruction::Opcode::Return,
+            vo_common_core::instruction::Opcode::Return,
             result,
             result_slots,
             0,
@@ -470,8 +470,8 @@ fn register_types(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use std::collections::BTreeMap;
-    use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta};
-    use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
+    use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta};
+    use vo_common_core::{ValueKind, ValueMeta, ValueRttid};
 
     fn register_pkg_types(
         pkg_path: &str,
@@ -481,8 +481,8 @@ fn register_types(
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
         use std::collections::BTreeMap;
-        use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
-        use vo_runtime::ValueMeta;
+        use vo_common_core::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
+        use vo_common_core::ValueMeta;
         use vo_syntax::ast::TypeExprKind;
 
         fn checked_struct_offset(offset: u16, slot_count: u16) -> Result<u16, CodegenError> {
@@ -612,11 +612,11 @@ fn register_types(
                             // Embedded field: name comes from the type
                             let field_name = info.get_type_name(field_type);
                             slot_types.extend(slot_type_list);
-                            fields.push(vo_runtime::bytecode::FieldMeta {
+                            fields.push(vo_common_core::bytecode::FieldMeta {
                                 name: field_name,
                                 offset,
                                 slot_count,
-                                type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
+                                type_info: vo_common_core::ValueRttid::new(field_rttid, field_vk),
                                 embedded: true,
                                 tag,
                             });
@@ -632,11 +632,14 @@ fn register_types(
                                     .unwrap_or("?")
                                     .to_string();
                                 slot_types.extend(slot_type_list.clone());
-                                fields.push(vo_runtime::bytecode::FieldMeta {
+                                fields.push(vo_common_core::bytecode::FieldMeta {
                                     name: field_name,
                                     offset,
                                     slot_count,
-                                    type_info: vo_runtime::ValueRttid::new(field_rttid, field_vk),
+                                    type_info: vo_common_core::ValueRttid::new(
+                                        field_rttid,
+                                        field_vk,
+                                    ),
                                     embedded: false,
                                     tag: if i == names_count - 1 {
                                         tag.take()
@@ -651,7 +654,7 @@ fn register_types(
 
                     // Empty struct still needs 1 slot for zero-size type workaround
                     if slot_types.is_empty() {
-                        slot_types.push(vo_runtime::SlotType::Value);
+                        slot_types.push(vo_common_core::SlotType::Value);
                     }
                     let field_index: std::collections::HashMap<String, usize> = fields
                         .iter()
@@ -669,7 +672,7 @@ fn register_types(
                         .map_err(CodegenError::Internal)?;
                     ctx.alias_struct_meta_id(named_key, struct_meta_id)
                         .map_err(CodegenError::Internal)?;
-                    ValueMeta::new(struct_meta_id, vo_runtime::ValueKind::Struct)
+                    ValueMeta::new(struct_meta_id, vo_common_core::ValueKind::Struct)
                 }
                 TypeExprKind::Interface(_) => {
                     // Build InterfaceMeta
@@ -690,7 +693,7 @@ fn register_types(
                             .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                             .collect();
 
-                        let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
+                        let metas: Vec<vo_common_core::bytecode::InterfaceMethodMeta> = method_objs
                             .iter()
                             .map(|&m| {
                                 let obj = &tc_objs.lobjs[m];
@@ -701,7 +704,7 @@ fn register_types(
                                 let sig =
                                     signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                                 let signature_rttid = ctx.intern_rttid(sig);
-                                vo_runtime::bytecode::InterfaceMethodMeta {
+                                vo_common_core::bytecode::InterfaceMethodMeta {
                                     name,
                                     signature_rttid,
                                 }
@@ -721,7 +724,7 @@ fn register_types(
                     let iface_meta_id = ctx
                         .register_interface_meta(underlying_key, meta)
                         .map_err(CodegenError::Internal)?;
-                    ValueMeta::new(iface_meta_id, vo_runtime::ValueKind::Interface)
+                    ValueMeta::new(iface_meta_id, vo_common_core::ValueKind::Interface)
                 }
                 _ => {
                     // Other types (Map, Slice, Chan, etc.): intern underlying type to get rttid
@@ -731,7 +734,7 @@ fn register_types(
                     ValueMeta::new(underlying_rttid, underlying_vk)
                 }
             };
-            let underlying_rttid = vo_runtime::ValueRttid::new(
+            let underlying_rttid = vo_common_core::ValueRttid::new(
                 ctx.intern_type_key(underlying_key, info),
                 info.type_value_kind(underlying_key),
             );
@@ -776,7 +779,7 @@ fn register_types(
                         .map(|m| tc_objs.lobjs[*m].id(tc_objs).into_owned())
                         .collect();
 
-                    let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
+                    let metas: Vec<vo_common_core::bytecode::InterfaceMethodMeta> = method_objs
                         .iter()
                         .map(|&m| {
                             let obj = &tc_objs.lobjs[m];
@@ -786,7 +789,7 @@ fn register_types(
                             });
                             let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                             let signature_rttid = ctx.intern_rttid(sig);
-                            vo_runtime::bytecode::InterfaceMethodMeta {
+                            vo_common_core::bytecode::InterfaceMethodMeta {
                                 name,
                                 signature_rttid,
                             }
@@ -862,8 +865,8 @@ fn register_builtin_protocols(
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use vo_runtime::bytecode::{InterfaceMeta, InterfaceMethodMeta};
-    use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
+    use vo_common_core::bytecode::{InterfaceMeta, InterfaceMethodMeta};
+    use vo_common_core::{RuntimeType, ValueKind, ValueRttid};
 
     let tc_objs = &project.tc_objs;
 
@@ -1096,7 +1099,7 @@ fn collect_file_declarations(
                         // structs use an ordinary typed Ptr allocation.
                         let (slots, slot_types) =
                             if info.is_array(type_key) || info.is_struct(type_key) {
-                                (1, vec![vo_runtime::SlotType::GcBase])
+                                (1, vec![vo_common_core::SlotType::GcBase])
                             } else {
                                 (
                                     info.type_slot_count(type_key),
@@ -1107,7 +1110,7 @@ fn collect_file_declarations(
                         let meta_id = ctx.compute_value_meta_raw(type_key, info) >> 8;
                         ctx.register_global(
                             obj_key,
-                            vo_runtime::bytecode::GlobalDef {
+                            vo_common_core::bytecode::GlobalDef {
                                 name: global_name.to_string(),
                                 slots,
                                 value_kind,
@@ -1493,8 +1496,8 @@ fn generate_method_signature(
     func_decl: &vo_syntax::ast::FuncDecl,
     info: &TypeInfoWrapper,
     ctx: &mut CodegenContext,
-) -> vo_runtime::RuntimeType {
-    use vo_runtime::{RuntimeType, ValueRttid};
+) -> vo_common_core::RuntimeType {
+    use vo_common_core::{RuntimeType, ValueRttid};
 
     // Collect param ValueRttids from Var objects (not TypeExpr)
     // Type checker already changed variadic param type from T to []T
@@ -1530,9 +1533,9 @@ fn tuple_to_value_rttids(
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
     ctx: &mut CodegenContext,
-) -> Vec<vo_runtime::ValueRttid> {
+) -> Vec<vo_common_core::ValueRttid> {
     use vo_analysis::typ::Type;
-    use vo_runtime::ValueRttid;
+    use vo_common_core::ValueRttid;
     let Type::Tuple(tuple) = &tc_objs.types[tuple_key] else {
         panic!("runtime_value_rttids_from_tuple requires tuple type metadata");
     };
@@ -1556,9 +1559,9 @@ fn signature_type_to_runtime_type(
     tc_objs: &vo_analysis::objects::TCObjects,
     info: &TypeInfoWrapper,
     ctx: &mut CodegenContext,
-) -> vo_runtime::RuntimeType {
+) -> vo_common_core::RuntimeType {
     use vo_analysis::typ::Type;
-    use vo_runtime::RuntimeType;
+    use vo_common_core::RuntimeType;
 
     if let Type::Signature(sig) = &tc_objs.types[sig_type] {
         RuntimeType::Func {
@@ -1603,7 +1606,7 @@ fn compile_func_body(
     info: &TypeInfoWrapper,
 ) -> Result<
     (
-        vo_runtime::bytecode::FunctionDef,
+        vo_common_core::bytecode::FunctionDef,
         Vec<(u32, vo_common::span::Span)>,
     ),
     CodegenError,
@@ -1624,7 +1627,7 @@ fn compile_func_body(
     // Define receiver as first parameter (if method)
     if let Some(recv) = &func_decl.receiver {
         let (slots, slot_types) = if recv.is_pointer {
-            (1, vec![vo_runtime::SlotType::GcRef])
+            (1, vec![vo_common_core::SlotType::GcRef])
         } else {
             let type_key = info.obj_type(info.get_use(&recv.ty), "method receiver must have type");
             (
@@ -1769,7 +1772,7 @@ fn compile_func_body(
         gcref_slot: u16,
         slots: u16,
         result_type: vo_analysis::objects::TypeKey,
-        slot_types: Vec<vo_runtime::SlotType>,
+        slot_types: Vec<vo_common_core::SlotType>,
         is_array: bool,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
@@ -1825,7 +1828,7 @@ fn compile_func_body(
                 // Zero-initialize non-escaped named return (Go zero-value semantics)
                 // VM no longer does write_bytes, so codegen must handle this
                 for i in 0..slots {
-                    builder.emit_op(vo_runtime::instruction::Opcode::LoadInt, slot + i, 0, 0);
+                    builder.emit_op(vo_common_core::instruction::Opcode::LoadInt, slot + i, 0, 0);
                 }
                 slot
             };
@@ -1846,9 +1849,9 @@ fn compile_func_body(
             continue;
         }
         let meta_idx = ctx.get_or_create_value_slots_meta(er.result_type, info);
-        let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
+        let meta_reg = builder.alloc_slots(&[vo_common_core::SlotType::Value]);
         builder.emit_op(
-            vo_runtime::instruction::Opcode::LoadConst,
+            vo_common_core::instruction::Opcode::LoadConst,
             meta_reg,
             meta_idx,
             0,
@@ -1909,11 +1912,11 @@ pub(crate) fn allocate_global_struct(
         ));
     }
     let slot_types = info.type_slot_types(struct_type);
-    let object = func.alloc_slots(&[vo_runtime::SlotType::GcBase]);
-    let meta = func.alloc_slots(&[vo_runtime::SlotType::Value]);
+    let object = func.alloc_slots(&[vo_common_core::SlotType::GcBase]);
+    let meta = func.alloc_slots(&[vo_common_core::SlotType::Value]);
     let meta_idx = ctx.get_or_create_value_slots_meta(struct_type, info);
     func.emit_op(
-        vo_runtime::instruction::Opcode::LoadConst,
+        vo_common_core::instruction::Opcode::LoadConst,
         meta,
         meta_idx,
         0,
@@ -1935,7 +1938,7 @@ pub(crate) fn compile_global_struct_from_slots(
             "global boxed commit requires a struct type".to_string(),
         ));
     }
-    let object = func.alloc_slots(&[vo_runtime::SlotType::GcBase]);
+    let object = func.alloc_slots(&[vo_common_core::SlotType::GcBase]);
     func.emit_global_get(object, global_idx, 1);
     func.emit_ptr_set_with_slot_types(object, 0, src, &info.type_slot_types(struct_type));
     Ok(())
@@ -2024,7 +2027,7 @@ fn compile_package_globals(
                         continue;
                     };
                     init_builder.emit_op(
-                        vo_runtime::instruction::Opcode::GlobalSet,
+                        vo_common_core::instruction::Opcode::GlobalSet,
                         global_idx,
                         object,
                         0,
@@ -2185,7 +2188,7 @@ fn compile_package_globals(
             })?;
             match prepared {
                 PreparedGlobalInitializer::Array { value, .. } => {
-                    let dst_ref = init_builder.alloc_slots(&[vo_runtime::SlotType::GcBase]);
+                    let dst_ref = init_builder.alloc_slots(&[vo_common_core::SlotType::GcBase]);
                     init_builder.emit_global_get(dst_ref, global_idx, 1);
                     value.copy_into_ref(dst_ref, dst_type, ctx, init_builder, info)?;
                 }
@@ -2243,7 +2246,7 @@ fn compile_init_and_entry(
     }
 
     // Add return
-    init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
+    init_builder.emit_op(vo_common_core::instruction::Opcode::Return, 0, 0, 0);
     let init_func_id =
         ctx.add_function_from_builder_with_debug_locs(init_builder, &project.source_map);
     // Note: __init__ is NOT registered as a user init function - it's handled separately
@@ -2259,7 +2262,7 @@ fn compile_init_and_entry(
     // 3. Generate __island_init__ function (init only, no main - for island VMs)
     let mut island_init_builder = FuncBuilder::new("__island_init__");
     emit_entry_static_call(&mut island_init_builder, ctx, init_func_id)?;
-    island_init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
+    island_init_builder.emit_op(vo_common_core::instruction::Opcode::Return, 0, 0, 0);
     let island_init_func_id =
         ctx.add_function_from_builder_with_debug_locs(island_init_builder, &project.source_map);
     ctx.set_island_init_func(island_init_func_id);
@@ -2276,7 +2279,7 @@ fn compile_init_and_entry(
     }
 
     // Return
-    entry_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
+    entry_builder.emit_op(vo_common_core::instruction::Opcode::Return, 0, 0, 0);
 
     let entry_func_id =
         ctx.add_function_from_builder_with_debug_locs(entry_builder, &project.source_map);

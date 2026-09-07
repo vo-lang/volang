@@ -241,6 +241,49 @@ impl SmallFunctionInline {
             && self.ret_slots == ret_slots
     }
 
+    /// Shared dynamic-call ABI admission for full-function and OSR compilation.
+    pub(crate) fn try_emit_dynamic_call<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        inst: &Instruction,
+    ) -> Result<bool, crate::JitError> {
+        use vo_runtime::bytecode::InstructionMetadata;
+        let metadata = emitter
+            .function_def()
+            .instruction_metadata
+            .get(emitter.current_pc());
+        let (arg_slots, ret_slots) = match (inst.opcode(), metadata) {
+            (
+                Opcode::CallClosure,
+                Some(InstructionMetadata::CallLayout {
+                    arg_layout,
+                    ret_layout,
+                }),
+            )
+            | (
+                Opcode::CallIface,
+                Some(InstructionMetadata::CallIfaceLayout {
+                    arg_layout,
+                    ret_layout,
+                    ..
+                }),
+            ) => (arg_layout.len(), ret_layout.len()),
+            _ => return Ok(false),
+        };
+        if !self.supports_dynamic_layout(arg_slots, ret_slots) {
+            return Ok(false);
+        }
+        let receiver = match inst.opcode() {
+            Opcode::CallClosure => inst.a,
+            Opcode::CallIface => inst.a + 1,
+            _ => unreachable!("dynamic call admitted above"),
+        };
+        let slot0 = emitter.read_var(receiver);
+        let arg_start = usize::from(inst.b);
+        self.emit_dynamic(emitter, slot0, arg_start, arg_start + arg_slots)?;
+        Ok(true)
+    }
+
     pub(crate) fn emit_dynamic<'a, E: IrEmitter<'a>>(
         &self,
         emitter: &mut E,

@@ -11,7 +11,8 @@ use vo_vm::vm::SchedulingOutcome;
 #[cfg(all(not(test), feature = "toolchain-host"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn vo_aot_initialize_toolchain_host_v1() -> i32 {
-    match std::panic::catch_unwind(vo_engine::ensure_toolchain_host_installed) {
+    match std::panic::catch_unwind(|| vo_ui_integration::engine().ensure_toolchain_host_installed())
+    {
         Ok(()) => 0,
         Err(_) => 101,
     }

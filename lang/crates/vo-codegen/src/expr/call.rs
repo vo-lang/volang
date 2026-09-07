@@ -5,9 +5,9 @@ use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::selection::{Selection, SelectionKind};
 use vo_common::abi::try_abi_lookup_name;
 use vo_common::symbol::Symbol;
-use vo_runtime::bytecode::ReturnShape;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::bytecode::ReturnShape;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 
 use crate::context::CodegenContext;

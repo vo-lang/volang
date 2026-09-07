@@ -1,7 +1,7 @@
 //! Index and slice expression compilation.
 
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::Expr;
 
 use crate::context::CodegenContext;
@@ -211,9 +211,9 @@ pub fn compile_slice_expr(
         );
     } else if info.is_array(container_type) {
         // Array slicing creates a slice - the array MUST be escaped
-        let mut flags = vo_runtime::instruction::SLICE_SLICE_FLAG_ARRAY | flags_has_max;
+        let mut flags = vo_common_core::instruction::SLICE_SLICE_FLAG_ARRAY | flags_has_max;
         if inline_array_view {
-            flags |= vo_runtime::instruction::SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW;
+            flags |= vo_common_core::instruction::SLICE_SLICE_FLAG_INLINE_ARRAY_VIEW;
         }
         func.emit_with_flags(Opcode::SliceSlice, flags, dst, container_reg, params_start);
     } else {

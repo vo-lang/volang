@@ -99,6 +99,11 @@ pub fn install_toolchain_host(host: Arc<dyn ToolchainHost>) {
     *lock_recover(host_cell()) = Some(host);
 }
 
+/// Install the application default atomically, preserving an existing host.
+pub fn install_toolchain_host_if_absent(host: Arc<dyn ToolchainHost>) {
+    lock_recover(host_cell()).get_or_insert(host);
+}
+
 pub fn is_toolchain_host_installed() -> bool {
     lock_recover(host_cell()).is_some()
 }

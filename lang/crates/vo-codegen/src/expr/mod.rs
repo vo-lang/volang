@@ -12,8 +12,8 @@ pub mod method_value;
 pub mod pointer;
 pub mod selector;
 
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
 
 use crate::context::CodegenContext;
@@ -757,7 +757,7 @@ pub fn emit_int_trunc(
     if !info.is_int(type_key) {
         return;
     }
-    use vo_runtime::ValueKind;
+    use vo_common_core::ValueKind;
     let vk = info.type_value_kind(type_key);
     // flags: high bit (0x80) = signed, low bits = byte width
     match vk {

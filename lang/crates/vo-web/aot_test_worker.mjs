@@ -22,7 +22,8 @@ function readRequest() {
 function compilerPath() {
   const profile = process.env.VO_TEST_PROFILE === 'release' ? 'release' : 'debug';
   const executable = process.platform === 'win32' ? 'vo.exe' : 'vo';
-  return join(repositoryRoot, 'target', profile, executable);
+  const targetDirectory = resolve(repositoryRoot, process.env.CARGO_TARGET_DIR || 'target');
+  return join(targetDirectory, profile, executable);
 }
 
 async function main() {

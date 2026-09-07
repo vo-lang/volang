@@ -10,7 +10,7 @@ use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
 use crate::translator::{HelperKind, HelperRefs, RuntimeContext as _, SlotAccess, TranslateResult};
 use crate::{analysis::FunctionAnalysis, JitCompileEnv, JitError};
-use vo_runtime::bytecode::{FunctionDef, InstructionMetadata, Module as VoModule};
+use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::{JitContext, JitContextField, JitResult};
 
@@ -330,43 +330,7 @@ impl<'a> LoopCompiler<'a> {
         else {
             return Ok(false);
         };
-        let Some(metadata) = self
-            .core
-            .func_def
-            .instruction_metadata
-            .get(self.core.current_pc)
-        else {
-            return Ok(false);
-        };
-        let (arg_slots, ret_slots) = match (inst.opcode(), metadata) {
-            (
-                Opcode::CallClosure,
-                InstructionMetadata::CallLayout {
-                    arg_layout,
-                    ret_layout,
-                },
-            )
-            | (
-                Opcode::CallIface,
-                InstructionMetadata::CallIfaceLayout {
-                    arg_layout,
-                    ret_layout,
-                    ..
-                },
-            ) => (arg_layout.len(), ret_layout.len()),
-            _ => return Ok(false),
-        };
-        if !inline.supports_dynamic_layout(arg_slots, ret_slots) {
-            return Ok(false);
-        }
-        let slot0 = match inst.opcode() {
-            Opcode::CallClosure => self.read_var(inst.a),
-            Opcode::CallIface => self.read_var(inst.a + 1),
-            _ => unreachable!("dynamic inline was filtered by opcode"),
-        };
-        let arg_start = usize::from(inst.b);
-        inline.emit_dynamic(self, slot0, arg_start, arg_start + arg_slots)?;
-        Ok(true)
+        inline.try_emit_dynamic_call(self, inst)
     }
 
     fn jump(&mut self, inst: &Instruction) -> Result<(), JitError> {

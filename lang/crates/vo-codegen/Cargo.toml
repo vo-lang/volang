@@ -12,10 +12,10 @@ publish = false
 [dependencies]
 vo-common = { path = "../vo-common", default-features = false }
 vo-common-core = { path = "../vo-common-core" }
-vo-runtime = { path = "../vo-runtime", default-features = false }
-vo-stdlib = { path = "../vo-stdlib", default-features = false }
 vo-syntax = { path = "../vo-syntax" }
 vo-analysis = { path = "../vo-analysis" }
 
 [dev-dependencies]
+vo-ffi-macro.workspace = true
+vo-runtime = { path = "../vo-runtime" }
 vo-vm = { path = "../vo-vm" }

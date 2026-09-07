@@ -5,15 +5,15 @@ use super::{
 use std::collections::{BTreeMap, HashMap};
 use vo_analysis::arena::ArenaKey;
 use vo_common::{SourceMap, Span};
-use vo_common_core::InstructionMetadata;
-use vo_runtime::bytecode::{
+use vo_common_core::bytecode::{
     ExtSlotKind, FunctionDef, GlobalDef, InterfaceMeta, NamedTypeMeta, ParamShape, ReturnShape,
     StructMeta,
 };
-use vo_runtime::instruction::{Instruction, Opcode};
-use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
+use vo_common_core::instruction::{Instruction, Opcode};
+use vo_common_core::InstructionMetadata;
+use vo_common_core::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 
-const TEST_EXTERN_NAME: &str = vo_runtime::vo_extern_name!("codegen_tests", "F");
+const TEST_EXTERN_NAME: &str = vo_ffi_macro::vo_extern_name!("codegen_tests", "F");
 
 fn minimal_function(code_len: usize) -> FunctionDef {
     let code = (0..code_len)
@@ -112,7 +112,7 @@ fn imported_plain_main_function_cannot_replace_entry_package_main() {
 fn variable_ret_externs_are_keyed_by_ret_slots() {
     let mut ctx = CodegenContext::new("extern-ret-slots");
 
-    let effects = vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
+    let effects = vo_common_core::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
     let typed_call = ctx.get_or_register_variable_ret_extern_with_effects("dyn_call", 4, effects);
     let any_call = ctx.get_or_register_variable_ret_extern_with_effects("dyn_call", 6, effects);
     let typed_call_again =
@@ -128,7 +128,7 @@ fn variable_ret_externs_are_keyed_by_ret_slots() {
 
 #[test]
 fn variable_ret_registration_is_reserved_for_vm_internal_externs() {
-    let effects = vo_runtime::bytecode::ExternEffects::NONE;
+    let effects = vo_common_core::bytecode::ExternEffects::NONE;
 
     let mut slot_ctx = CodegenContext::new("canonical-variable-ret-slots");
     let id =
@@ -163,7 +163,7 @@ fn variable_ret_registration_is_reserved_for_vm_internal_externs() {
 
 #[test]
 fn canonical_dyn_source_externs_keep_declared_shapes_and_effects() {
-    use vo_runtime::bytecode::ExternEffects;
+    use vo_common_core::bytecode::ExternEffects;
 
     let cases = [
         ("getDynErrors", 16, Vec::new(), ExternEffects::NONE),
@@ -251,16 +251,16 @@ fn constant_pool_overflow_is_reported_before_operand_wraparound() {
 fn variable_ret_externs_are_keyed_by_precise_return_layout_058() {
     let mut ctx = CodegenContext::new("extern-ret-layout");
 
-    let effects = vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
+    let effects = vo_common_core::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
     let value_layout = vec![
-        vo_runtime::SlotType::Value,
-        vo_runtime::SlotType::Interface0,
-        vo_runtime::SlotType::Interface1,
+        vo_common_core::SlotType::Value,
+        vo_common_core::SlotType::Interface0,
+        vo_common_core::SlotType::Interface1,
     ];
     let gc_layout = vec![
-        vo_runtime::SlotType::GcRef,
-        vo_runtime::SlotType::Interface0,
-        vo_runtime::SlotType::Interface1,
+        vo_common_core::SlotType::GcRef,
+        vo_common_core::SlotType::Interface0,
+        vo_common_core::SlotType::Interface1,
     ];
     let value_returns = ReturnShape::try_with_slot_types_and_interface_metas(
         value_layout.clone(),
@@ -308,7 +308,7 @@ fn variable_ret_externs_are_keyed_by_precise_return_layout_058() {
 fn variable_ret_dynamic_externs_preserve_exact_parameter_abi_058() {
     let mut ctx = CodegenContext::new("dynamic-extern-param-abi");
 
-    let effects = vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
+    let effects = vo_common_core::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
     let dynamic_returns = ReturnShape::try_with_slot_types_and_interface_metas(
         vec![
             SlotType::Value,
@@ -365,7 +365,7 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
         ReturnShape::slots(2),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_runtime::bytecode::ExternEffects::NONE,
+        vo_common_core::bytecode::ExternEffects::NONE,
     );
     assert_eq!(ctx.module().externs[id as usize].returns.slots, 2);
     assert!(ctx.module().externs[id as usize]
@@ -378,7 +378,7 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
         ReturnShape::with_slot_types(vec![SlotType::GcRef]),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_runtime::bytecode::ExternEffects::NONE,
+        vo_common_core::bytecode::ExternEffects::NONE,
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
@@ -395,7 +395,7 @@ fn codegen_rejects_noncanonical_extern_identity_before_module_insertion() {
             ReturnShape::slots(0),
             ParamShape::Exact { slots: 0 },
             Vec::new(),
-            vo_runtime::bytecode::ExternEffects::NONE,
+            vo_common_core::bytecode::ExternEffects::NONE,
         );
 
         assert_eq!(id, 0);
@@ -469,14 +469,14 @@ fn declared_extern_rejects_same_name_different_parameter_kinds_048() {
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Bytes],
-        vo_runtime::bytecode::ExternEffects::NONE,
+        vo_common_core::bytecode::ExternEffects::NONE,
     );
     ctx.get_or_register_extern_with_slots_and_effects(
         TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Value],
-        vo_runtime::bytecode::ExternEffects::NONE,
+        vo_common_core::bytecode::ExternEffects::NONE,
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
@@ -493,14 +493,14 @@ fn declared_extern_rejects_same_name_different_exact_parameter_slots_048() {
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Value],
-        vo_runtime::bytecode::ExternEffects::NONE,
+        vo_common_core::bytecode::ExternEffects::NONE,
     );
     ctx.get_or_register_extern_with_slots_and_effects(
         TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 2 },
         vec![ExtSlotKind::Value, ExtSlotKind::Value],
-        vo_runtime::bytecode::ExternEffects::NONE,
+        vo_common_core::bytecode::ExternEffects::NONE,
     );
     assert_eq!(
         ctx.check_layout_errors().unwrap_err(),
@@ -513,7 +513,7 @@ fn declared_zero_arg_extern_preserves_exact_param_shape_051() {
     let mut ctx = CodegenContext::new("extern-zero-arg-param-shape");
 
     let id = ctx.get_or_register_declared_extern_with_return_layout(
-        vo_runtime::vo_extern_name!("time", "nowUnixNano"),
+        vo_ffi_macro::vo_extern_name!("time", "nowUnixNano"),
         vec![SlotType::Value],
         Vec::new(),
     );
@@ -591,20 +591,20 @@ fn extern_allowed_effects_merge_unknown_without_invalid_bit_mix() {
         ReturnShape::slots(0),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_runtime::bytecode::ExternEffects::MAY_HOST_REPLAY,
+        vo_common_core::bytecode::ExternEffects::MAY_HOST_REPLAY,
     );
     let same = ctx.get_or_register_extern_with_slots_and_effects(
         TEST_EXTERN_NAME,
         ReturnShape::slots(0),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL,
+        vo_common_core::bytecode::ExternEffects::UNKNOWN_CONTROL,
     );
 
     assert_eq!(id, same);
     assert_eq!(
         ctx.module().externs[id as usize].allowed_effects,
-        vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL
+        vo_common_core::bytecode::ExternEffects::UNKNOWN_CONTROL
     );
 }
 
@@ -613,32 +613,32 @@ fn declared_extern_effects_use_manifest_for_known_names_only() {
     let mut ctx = CodegenContext::new("declared-extern-effects");
 
     let file_read = ctx.get_or_register_declared_extern_with_slots(
-        vo_runtime::vo_extern_name!("os", "blocking_fileRead"),
+        vo_ffi_macro::vo_extern_name!("os", "blocking_fileRead"),
         3,
         Vec::new(),
     );
     let exit = ctx.get_or_register_declared_extern_with_slots(
-        vo_runtime::vo_extern_name!("os", "nativeExit"),
+        vo_ffi_macro::vo_extern_name!("os", "nativeExit"),
         0,
         Vec::new(),
     );
     let unknown = ctx.get_or_register_declared_extern_with_slots(
-        vo_runtime::vo_extern_name!("codegen_tests", "DoThing"),
+        vo_ffi_macro::vo_extern_name!("codegen_tests", "DoThing"),
         0,
         Vec::new(),
     );
 
     assert_eq!(
         ctx.module().externs[file_read as usize].allowed_effects,
-        vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
+        vo_common_core::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
     );
     assert_eq!(
         ctx.module().externs[exit as usize].allowed_effects,
-        vo_runtime::bytecode::ExternEffects::MAY_EXIT
+        vo_common_core::bytecode::ExternEffects::MAY_EXIT
     );
     assert_eq!(
         ctx.module().externs[unknown as usize].allowed_effects,
-        vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL
+        vo_common_core::bytecode::ExternEffects::UNKNOWN_CONTROL
     );
 }
 

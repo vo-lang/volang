@@ -7,8 +7,8 @@
 //! being copied as the first logical array element.
 
 use vo_analysis::objects::TypeKey;
-use vo_runtime::instruction::Opcode;
-use vo_runtime::SlotType;
+use vo_common_core::instruction::Opcode;
+use vo_common_core::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
 
 use crate::context::CodegenContext;
